@@ -1,0 +1,4 @@
+[submodule "fixtures"]
+	path = fixtures
+	url = file:///w/git-bare/capybase-fixtures.git
+	branch = base

@@ -45,6 +45,57 @@ Every session writes a journal and artifacts under `.rebase-agent/sessions/`.
 On any escalation capybase writes `final/review-bundle.md` explaining why it
 stopped and how to resume.
 
+## Test rebases (`fixtures/` submodule)
+
+The `fixtures/` submodule is a small sample repo with branches that stop on a
+genuine **UU** (both-modified, content) conflict during `git rebase`. It's how
+you exercise capybase end to end without crafting conflicts by hand.
+
+| Replayed branch   | Rebase onto         | Conflicts in | Notes                   |
+|-------------------|---------------------|--------------|-------------------------|
+| `text-uu-simple`  | `text-uu-upstream`  | `story.txt`  | plain text, single line |
+| `python-uu`       | `python-uu-upstream`| `app.py`     | Python, indent-sensitive |
+
+```bash
+# 0. one-time checkout (and after a fresh clone)
+git submodule update --init
+
+cd fixtures/
+# 1. create the local tracking branches (clone only checks out `base`)
+git branch text-uu-upstream origin/text-uu-upstream
+git branch python-uu      origin/python-uu
+git branch python-uu-upstream origin/python-uu-upstream
+
+# 2. land on a conflict
+git checkout python-uu
+git rebase python-uu-upstream      # -> CONFLICT (content) in app.py
+
+# 3. resolve it with capybase (from the repo root)
+cd ..
+capybase --repo fixtures run
+```
+
+To reset a fixture after a run:
+
+```bash
+cd fixtures/
+git rebase --abort     # if a rebase is still in progress
+git checkout base
+```
+
+> **Submodule URL.** `fixtures/` points at a local bare repo
+> (`file:///w/git-bare/capybase-fixtures.git`). Because it uses the `file://`
+> transport, operations that fetch it need `protocol.file.allow` enabled:
+>
+> ```bash
+> git -c protocol.file.allow=always submodule update --init
+> git -c protocol.file.allow=always clone --recurse-submodules <capybase-url>
+> ```
+>
+> To relocate the submodule (e.g. to a GitHub URL later), edit `.gitmodules`
+> and the `[submodule "fixtures"]` URL, then `git submodule sync`.
+
+
 ## Layout
 
 ```
