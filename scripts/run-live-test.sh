@@ -75,13 +75,24 @@ echo "==> model: $CB_MODEL @ $CB_BASE_URL"
 echo "==> logs:   $LOGDIR"
 
 # --------------------------------------------------------------------------
-# Write the runtime config (gitignored capybase.local.toml inside fixtures).
+# Write the runtime config to the log dir and pass it explicitly via --config.
+# We do NOT rely on CWD-based discovery (capybase.toml / capybase.local.toml
+# in the current directory) because `capybase --repo fixtures` runs from the
+# repo root and would pick up the placeholder capybase.toml instead.
+#
+# TOML-escape string values (handles model names with backslashes, e.g.
+# "..\VibeThinker-3B.Q5_K_M.gguf").
 # --------------------------------------------------------------------------
-cat > "$FIXTURES/capybase.local.toml" <<EOF
+toml_str() { printf '%s' "$1" | sed 's/\\/\\\\/g'; }
+M_ESC="$(toml_str "$CB_MODEL")"
+U_ESC="$(toml_str "$CB_BASE_URL")"
+K_ESC="$(toml_str "$CB_API_KEY")"
+
+cat > "$CFG_FILE" <<EOF
 [model]
-base_url = "$CB_BASE_URL"
-api_key = "$CB_API_KEY"
-model = "$CB_MODEL"
+base_url = "$U_ESC"
+api_key = "$K_ESC"
+model = "$M_ESC"
 temperature = 0.2
 max_tokens = $CB_MAX_TOKENS
 request_timeout_seconds = $CB_REQUEST_TIMEOUT
@@ -96,7 +107,7 @@ pre_continue = "true"
 final = "true"
 required = true
 EOF
-cp "$FIXTURES/capybase.local.toml" "$CFG_FILE"
+echo "==> config written to $CFG_FILE"
 
 # --------------------------------------------------------------------------
 # Reachability check (informational; does not abort — capybase retries).
@@ -141,9 +152,9 @@ echo "==> setting up fixture '$FIXTURE' (rebase onto $UPSTREAM)..."
 # --------------------------------------------------------------------------
 # Run capybase. All output to both the terminal and run.log.
 # --------------------------------------------------------------------------
-echo "==> running: capybase --repo fixtures $MODE"
+echo "==> running: capybase --config <logdir>/config.toml --repo fixtures $MODE"
 set +e
-"$CAPYBASE" --repo "$FIXTURES" "$MODE" 2>&1 | tee "$RUN_LOG"
+"$CAPYBASE" --config "$CFG_FILE" --repo "$FIXTURES" "$MODE" 2>&1 | tee "$RUN_LOG"
 RC=${PIPESTATUS[0]}
 set -e
 echo "==> capybase exit code: $RC" | tee -a "$RUN_LOG"
