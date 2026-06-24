@@ -43,8 +43,14 @@ CAPYBASE="${CAPYBASE:-$VENV/bin/capybase}"
 # Fixture selection: arg1 = fixture (replayed branch base name), arg2 = mode.
 FIXTURE="${1:-python-uu}"
 MODE="${2:-run}"
-# Derive the upstream branch the fixture rebases onto.
-UPSTREAM="${FIXTURE}-upstream"
+# Map each fixture to its upstream branch. Fixture and upstream names don't
+# always share a prefix (e.g. text-uu-simple -> text-uu-upstream), so derive
+# from a lookup rather than string interpolation.
+case "$FIXTURE" in
+  python-uu)       UPSTREAM="python-uu-upstream" ;;
+  text-uu-simple)  UPSTREAM="text-uu-upstream" ;;
+  *) UPSTREAM="${FIXTURE}-upstream" ;;  # fallback for future fixtures
+esac
 
 # --------------------------------------------------------------------------
 # Preflight
@@ -126,20 +132,27 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# Set up the fixture: reset, create local tracking branches, drive a conflict.
+# Set up the fixture: reset, restore branches from origin, drive a conflict.
+# A successful capybase run ADVANCES the fixture branch (the resolved rebase
+# commits), so we must hard-reset it from origin/* on every run to restore
+# the conflict. origin/* is immutable (bare repo), so this is idempotent.
 # --------------------------------------------------------------------------
 echo "==> setting up fixture '$FIXTURE' (rebase onto $UPSTREAM)..."
 (
   cd "$FIXTURES"
-  # Abort any in-progress rebase and return to base.
+  # Abort any in-progress rebase and detach HEAD so we can force-update
+  # the fixture branches (can't reset the branch we're standing on).
   git rebase --abort 2>/dev/null || true
-  git checkout -q base 2>/dev/null || true
-  # Ensure local tracking branches exist (a fresh checkout only has 'base').
-  for b in "$FIXTURE" "$UPSTREAM"; do
-    if ! git rev-parse --verify --quiet "$b" >/dev/null; then
-      git branch "$b" "origin/$b" 2>/dev/null || true
+  git checkout -q --detach 2>/dev/null || true
+  # Force-create/restore local branches from origin so a previous successful
+  # run (which advanced the fixture branch) doesn't leave it conflict-free.
+  # origin/* is immutable (bare repo), so this is idempotent.
+  for b in "$FIXTURE" "$UPSTREAM" base; do
+    if git rev-parse --verify --quiet "origin/$b" >/dev/null; then
+      git branch -f "$b" "origin/$b"
     fi
   done
+  git checkout -q base 2>/dev/null || true
   # Drive into the conflict.
   git checkout -q "$FIXTURE"
   if git rebase "$UPSTREAM" >/dev/null 2>&1; then
