@@ -105,13 +105,18 @@ class OpenAICompatibleClient:
     def _read_stream(self, req: urllib.request.Request, url: str) -> LLMResponse:
         """Consume an SSE stream, accumulate content, and capture finish_reason.
 
-        Two timeout layers guard against a stalled generation:
+        Behaviour:
 
-        - a per-read socket timeout (``request_timeout_seconds``), raised when
-          no data arrives within the window;
-        - a hard wall-clock deadline (``request_timeout_seconds`` from the
-          start of the request), so a connection that trickles data forever
-          still aborts and becomes a retryable failure instead of hanging.
+        - **Early termination.** As soon as the accumulated text contains a
+          complete, parseable ```json fenced block, we stop reading and close
+          the connection. Reasoning models often babble on *after* emitting
+          their answer; reading to the end wastes time and, over a flaky link,
+          pushes the connection past a middlebox idle/duration limit. Closing
+          early shortens the request from ~80s to the moment the answer lands.
+        - **Timeouts.** A per-read socket timeout (``request_timeout_seconds``)
+          and a hard wall-clock deadline (``generation_timeout_seconds``) guard
+          against stalls. The deadline runs in the worker thread that wraps
+          this method.
 
         Falls back to non-streaming if the server returns a non-SSE JSON body.
         """
@@ -128,6 +133,7 @@ class OpenAICompatibleClient:
                 content_parts: list[str] = []
                 finish_reason: str | None = None
                 raw_meta: dict[str, Any] = {}
+                early_stop = False
                 for line in resp:
                     if time.monotonic() > deadline:
                         raise RuntimeError(
@@ -152,14 +158,35 @@ class OpenAICompatibleClient:
                         if choices[0].get("finish_reason"):
                             finish_reason = choices[0]["finish_reason"]
                     raw_meta = chunk
+                    # Early termination: as soon as a complete fenced JSON
+                    # answer is present, stop reading. Closing the response
+                    # context manager aborts the underlying connection.
+                    if _has_complete_answer("".join(content_parts)):
+                        early_stop = True
+                        break
         except socket.timeout as exc:
             raise RuntimeError(
                 f"LLM request failed: socket read timed out after "
                 f"{self.config.request_timeout_seconds}s"
             ) from exc
         text = "".join(content_parts)
-        raw_meta.setdefault("_accumulated", {"finish_reason": finish_reason})
+        meta = {"finish_reason": finish_reason, "early_terminated": early_stop}
+        raw_meta.setdefault("_accumulated", meta)
         return LLMResponse(text=text, raw=raw_meta)
+
+
+def _has_complete_answer(accumulated: str) -> bool:
+    """True once ``accumulated`` contains a complete, parseable answer.
+
+    Accepts either a fenced ```json block or bare JSON, as long as it parses
+    to a dict with a ``resolved_text`` key. Partial JSON (still streaming)
+    fails to parse and returns False, so this is safe to call on every chunk.
+    The signal means the model has emitted its final answer and any further
+    output is babble we can discard — letting the adapter close the
+    connection immediately rather than reading trailing prose.
+    """
+    data, _ = parse_resolution_json(accumulated)
+    return bool(data) and "resolved_text" in data
 
 
 def _from_non_stream(raw: dict[str, Any]) -> LLMResponse:

@@ -123,3 +123,39 @@ def test_urlopen_error_becomes_runtime_error(monkeypatch):
             [{"role": "user", "content": "hi"}],
             model="m", temperature=0.2, max_tokens=8192, json_mode=True,
         )
+
+
+def test_early_termination_on_complete_answer(monkeypatch):
+    """Once a complete ```json block arrives, stop reading even if more would come."""
+    payload = '{"resolved_text": "    return 1", "needs_human": false}'
+    babble = "This is trailing prose the model emits after answering. " * 50
+    # Build SSE chunks: the JSON block (with closing fence), then babble.
+    from tests.test_llm_adapter import _sse_chunks
+    json_lines = _sse_chunks(payload)
+    babble_lines = _sse_chunks(babble, finish="stop")
+    resp = FakeResp(json_lines + babble_lines)
+    _patch_urlopen(monkeypatch, resp)
+    client = OpenAICompatibleClient(_cfg())
+    out = client.complete(
+        [{"role": "user", "content": "hi"}],
+        model="m", temperature=0.2, max_tokens=8192, json_mode=True,
+    )
+    # The answer is present...
+    assert json.loads(out.text)["resolved_text"] == "    return 1"
+    # ...and early termination fired (no babble read, finish_reason absent).
+    assert out.raw["_accumulated"]["early_terminated"] is True
+    assert babble not in out.text
+
+
+def test_no_early_termination_without_complete_answer(monkeypatch):
+    """No fenced JSON -> keep reading until [DONE]."""
+    lines = _sse_chunks("just thinking, no json yet", finish="stop")
+    resp = FakeResp(lines)
+    _patch_urlopen(monkeypatch, resp)
+    client = OpenAICompatibleClient(_cfg())
+    out = client.complete(
+        [{"role": "user", "content": "hi"}],
+        model="m", temperature=0.2, max_tokens=8192, json_mode=True,
+    )
+    assert out.raw["_accumulated"]["early_terminated"] is False
+    assert out.raw["_accumulated"]["finish_reason"] == "stop"
