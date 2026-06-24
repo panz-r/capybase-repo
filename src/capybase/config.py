@@ -26,6 +26,12 @@ class ModelConfig(BaseModel):
     # them. 8192 leaves headroom for reasoning + the final JSON answer.
     max_tokens: int = 8192
     request_timeout_seconds: int = 600
+    # Hard wall-clock deadline for ONE generation attempt (across all streamed
+    # tokens). Distinct from request_timeout_seconds (per-read socket timeout):
+    # a generation that trickles data forever without finishing must still abort
+    # and become a retryable failure. Real completions on a 3B reasoning model
+    # take ~30-90s; this gives headroom without hanging for minutes on a stall.
+    generation_timeout_seconds: int = 180
 
 
 class PolicyConfig(BaseModel):

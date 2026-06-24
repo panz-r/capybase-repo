@@ -16,6 +16,9 @@ samples = 1
 # (finish_reason=length) and never emits its JSON answer -> empty resolution.
 max_tokens = 8192
 request_timeout_seconds = 600
+# Hard wall-clock cap on one generation attempt. A stalled stream aborts and
+# becomes a retryable failure rather than hanging indefinitely.
+generation_timeout_seconds = 180
 
 [policy]
 # Which conflict types (git unmerged modes) capybase will attempt.

@@ -194,3 +194,28 @@ def test_run_aborts_tests_when_required_and_failing(conflicted_repo):
     result = orch.run()
     assert result.escalated
     assert "tests failed" in (result.reason or "")
+
+
+def test_run_retries_after_transient_error(conflicted_repo):
+    """A request_failed candidate (timeout/network) should retry, then succeed."""
+    from tests.test_resolution_engine import MetaClient
+    from capybase.adapters.llm_openai import LLMResponse
+
+    repo = conflicted_repo["repo"]
+    # First call: a runtime error -> request_failed -> retry.
+    # Second call: a valid merged resolution -> accept.
+    seq = [
+        RuntimeError("connection timed out"),
+        LLMResponse(
+            text=_make_resolved_payload("    return 'hi' + 'howdy'"),
+            raw={"choices": [{"finish_reason": "stop"}]},
+        ),
+    ]
+    engine = ResolutionEngine(_config(repo).model, client=MetaClient(seq))
+    orch = Orchestrator(
+        _config(repo), repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert not result.escalated, result.reason
+    assert "<<<<<<<" not in (repo / "app.py").read_text()

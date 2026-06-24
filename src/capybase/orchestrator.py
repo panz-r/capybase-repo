@@ -427,7 +427,9 @@ class Orchestrator:
                 unit_id=unit.unit_id,
             )
 
-            decision = self.risk.decide(validation, retry_count=retry_count)
+            decision = self.risk.decide(
+                validation, retry_count=retry_count, failure_kind=cand.failure_kind
+            )
             outcome.decision = decision
             self.journal.emit(
                 "risk_decision",

@@ -19,19 +19,38 @@ class RiskEngine:
         result: VerificationResult,
         *,
         retry_count: int,
+        failure_kind: str = "",
     ) -> RiskDecision:
         """Apply MVP rules in priority order.
 
-        Escalation reasons are absolute (needs_human, scope violation). Other
-        failures are retryable up to ``max_retries_per_unit``, then escalate.
+        A candidate's ``failure_kind`` distinguishes genuine model refusals
+        (escalate immediately) from transient/technical failures — request
+        errors, parse failures, and token truncation — which are retried up to
+        ``max_retries_per_unit`` before escalating. Other hard failures
+        (markers, syntax, scope) are likewise retryable.
         """
         feats = result.features
-        reasons: list[str] = []
 
-        # --- absolute escalations ---
-        if feats.get("model_needs_human"):
+        # --- technical failures: retry, then escalate ---
+        if failure_kind in ("request_failed", "parse_failed", "truncated"):
+            reason = (
+                result.hard_failures[0].message
+                if result.hard_failures
+                else f"{failure_kind}: no usable resolution"
+            )
+            if retry_count < self.max_retries_per_unit:
+                return RiskDecision(
+                    action="retry",
+                    reasons=[reason],
+                    required_followups=[reason],
+                )
+            return _escalate(result, [reason, "max retries exhausted"])
+
+        # --- absolute escalation: genuine model refusal ---
+        if failure_kind == "model_refusal" or feats.get("model_needs_human"):
             return _escalate(result, ["model self-reported needs_human"])
 
+        # --- hard scope violations: escalate immediately ---
         if not result.passed:
             for hf in result.hard_failures:
                 if hf.validator == "exact_splice_scope":

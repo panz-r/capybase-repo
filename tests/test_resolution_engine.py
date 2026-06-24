@@ -85,3 +85,67 @@ def _cfg():
     from capybase.config import ModelConfig
 
     return ModelConfig(base_url="http://x/v1", model="m", samples=1)
+
+
+# --- failure_kind + truncation detection ---
+
+
+class MetaClient:
+    """Returns LLMResponses with controllable raw metadata (finish_reason)."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    def complete(self, messages, *, model, temperature, max_tokens, json_mode):
+        r = self.responses.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+
+def test_truncated_finish_length_marks_truncated():
+    from capybase.adapters.llm_openai import LLMResponse
+
+    # raw carries finish_reason=length in _accumulated (streaming shape)
+    resp = LLMResponse(text="<think>ramble...</think>", raw={"_accumulated": {"finish_reason": "length"}})
+    engine = ResolutionEngine(_cfg(), client=MetaClient([resp]))
+    cand = engine.propose(_unit(), ContextBuilder().build(_unit()))[0]
+    assert cand.failure_kind == "truncated"
+    assert cand.needs_human is True
+
+
+def test_request_error_marks_request_failed():
+    engine = ResolutionEngine(_cfg(), client=MetaClient([RuntimeError("timeout")]))
+    cand = engine.propose(_unit(), ContextBuilder().build(_unit()))[0]
+    assert cand.failure_kind == "request_failed"
+
+
+def test_parse_failure_marks_parse_failed():
+    from capybase.adapters.llm_openai import LLMResponse
+
+    resp = LLMResponse(text="not json at all", raw={"choices": [{"finish_reason": "stop"}]})
+    engine = ResolutionEngine(_cfg(), client=MetaClient([resp]))
+    cand = engine.propose(_unit(), ContextBuilder().build(_unit()))[0]
+    assert cand.failure_kind == "parse_failed"
+
+
+def test_model_says_needs_human_marks_model_refusal():
+    from capybase.adapters.llm_openai import LLMResponse
+
+    payload = '{"resolved_text": "x", "needs_human": true}'
+    resp = LLMResponse(text=payload, raw={"choices": [{"finish_reason": "stop"}]})
+    engine = ResolutionEngine(_cfg(), client=MetaClient([resp]))
+    cand = engine.propose(_unit(), ContextBuilder().build(_unit()))[0]
+    assert cand.failure_kind == "model_refusal"
+    assert cand.needs_human is True
+
+
+def test_well_formed_has_no_failure_kind():
+    from capybase.adapters.llm_openai import LLMResponse
+
+    payload = '{"resolved_text": "    return 1", "needs_human": false}'
+    resp = LLMResponse(text=payload, raw={"choices": [{"finish_reason": "stop"}]})
+    engine = ResolutionEngine(_cfg(), client=MetaClient([resp]))
+    cand = engine.propose(_unit(), ContextBuilder().build(_unit()))[0]
+    assert cand.failure_kind == ""
+    assert cand.needs_human is False

@@ -162,6 +162,11 @@ class CandidateResolution(BaseModel):
 
     raw_response: str = ""
     parse_warnings: list[str] = Field(default_factory=list)
+    # Distinguishes a genuine model refusal (``"model_refusal"``) from a
+    # transient/technical failure (``"request_failed"``, ``"parse_failed"``,
+    # ``"truncated"``). Risk policy retries technical failures but escalates
+    # genuine refusals. Empty when the candidate is well-formed.
+    failure_kind: Literal["", "model_refusal", "request_failed", "parse_failed", "truncated"] = ""
 
 
 # ---------------------------------------------------------------------------

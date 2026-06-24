@@ -54,3 +54,33 @@ def test_copied_one_side_retries():
         warnings=[VerificationWarning(validator="preservation_heuristic", message="copied")],
     )
     assert eng.decide(res, retry_count=0).action == "retry"
+
+
+# --- failure_kind: retry technical failures, escalate genuine refusals ---
+
+
+def test_request_failed_retries_then_escalates():
+    eng = RiskEngine(max_retries_per_unit=2)
+    res = _result(False, {})
+    assert eng.decide(res, retry_count=0, failure_kind="request_failed").action == "retry"
+    assert eng.decide(res, retry_count=1, failure_kind="request_failed").action == "retry"
+    assert eng.decide(res, retry_count=2, failure_kind="request_failed").action == "escalate"
+
+
+def test_parse_failed_retries():
+    eng = RiskEngine(max_retries_per_unit=2)
+    res = _result(False, {})
+    assert eng.decide(res, retry_count=0, failure_kind="parse_failed").action == "retry"
+
+
+def test_truncated_retries():
+    eng = RiskEngine(max_retries_per_unit=2)
+    res = _result(False, {})
+    assert eng.decide(res, retry_count=0, failure_kind="truncated").action == "retry"
+
+
+def test_model_refusal_escalates_immediately():
+    eng = RiskEngine(max_retries_per_unit=2)
+    res = _result(False, {"model_needs_human": True})
+    # genuine refusal: escalate even on retry 0
+    assert eng.decide(res, retry_count=0, failure_kind="model_refusal").action == "escalate"

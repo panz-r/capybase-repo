@@ -164,8 +164,30 @@ class ResolutionEngine:
                 max_tokens=self.config.max_tokens,
                 json_mode=True,
             )
-        except Exception as exc:  # noqa: BLE001 - degrade to escalation
-            return _failed_candidate(unit, self.config.model, prompt_version, str(exc), "")
+        except Exception as exc:  # noqa: BLE001 - degrade to retryable failure
+            return _failed_candidate(
+                unit, self.config.model, prompt_version, str(exc), "",
+                failure_kind="request_failed",
+            )
+
+        # Detect truncation: reasoning models can exhaust the token budget
+        # mid-thought (finish_reason=length), never emitting their answer.
+        meta = resp.raw or {}
+        finish = ""
+        if isinstance(meta, dict):
+            acc = meta.get("_accumulated")
+            if isinstance(acc, dict):
+                finish = acc.get("finish_reason") or ""
+            if not finish:
+                choices = meta.get("choices") or []
+                if choices:
+                    finish = choices[0].get("finish_reason") or ""
+        if finish == "length":
+            return _failed_candidate(
+                unit, self.config.model, prompt_version,
+                "model output truncated (finish_reason=length); increase max_tokens",
+                resp.text, failure_kind="truncated",
+            )
 
         data, warnings = coerce_candidate_dict(resp.text)
         if not data or "resolved_text" not in data:
@@ -173,7 +195,9 @@ class ResolutionEngine:
             return _failed_candidate(
                 unit, self.config.model, prompt_version,
                 "could not parse resolution", resp.text, warnings,
+                failure_kind="parse_failed",
             )
+        needs_human = bool(data.get("needs_human", False))
         return CandidateResolution(
             candidate_id=f"{unit.unit_id}:{uuid.uuid4().hex[:6]}",
             unit_id=unit.unit_id,
@@ -190,10 +214,12 @@ class ResolutionEngine:
             dropped_current_side_details=list(data.get("dropped_current_side_details", [])),
             dropped_replayed_commit_details=list(data.get("dropped_replayed_commit_details", [])),
             assumptions=list(data.get("assumptions", [])),
-            needs_human=bool(data.get("needs_human", False)),
+            needs_human=needs_human,
             self_reported_confidence=float(data.get("self_reported_confidence", 0.0)),
             raw_response=resp.text,
             parse_warnings=warnings,
+            # A genuine model refusal (it answered JSON but said needs_human).
+            failure_kind="model_refusal" if needs_human else "",
         )
 
 
@@ -204,6 +230,8 @@ def _failed_candidate(
     reason: str,
     raw: str,
     warnings: list[str] | None = None,
+    *,
+    failure_kind: str = "request_failed",
 ) -> CandidateResolution:
     return CandidateResolution(
         candidate_id=f"{unit.unit_id}:{uuid.uuid4().hex[:6]}",
@@ -215,4 +243,5 @@ def _failed_candidate(
         needs_human=True,
         raw_response=raw,
         parse_warnings=warnings or [reason],
+        failure_kind=failure_kind,
     )
