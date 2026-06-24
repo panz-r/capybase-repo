@@ -49,6 +49,7 @@ MODE="${2:-run}"
 case "$FIXTURE" in
   python-uu)       UPSTREAM="python-uu-upstream" ;;
   text-uu-simple)  UPSTREAM="text-uu-upstream" ;;
+  settings-uu)     UPSTREAM="settings-uu-upstream" ;;
   *) UPSTREAM="${FIXTURE}-upstream" ;;  # fallback for future fixtures
 esac
 
@@ -226,7 +227,8 @@ PY
     done
     echo
     echo "## files in fixture"
-    for cand in app.py story.txt; do
+    # Show whichever fixture content files actually exist on disk.
+    for cand in app.py story.txt settings.py; do
       if [ -f "$FIXTURES/$cand" ]; then
         echo "--- $cand ---"; cat "$FIXTURES/$cand"
       fi
