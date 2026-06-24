@@ -32,6 +32,35 @@ base_url = "http://192.168.1.123:8080/v1"
 model    = "vibethink"
 ```
 
+### Reasoning models & timeouts
+
+capybase streams responses and is built for reasoning models (e.g.
+VibeThinker / DeepSeek-R1 style) that emit long `<think>...</think>` chains
+before answering. Three knobs matter for these models:
+
+```toml
+[model]
+max_tokens = 8192               # headroom for reasoning + the JSON answer
+request_timeout_seconds = 600   # per-read socket timeout
+generation_timeout_seconds = 180  # HARD wall-clock cap on one attempt
+```
+
+- **`max_tokens`** must be large enough that the model finishes its chain of
+  thought *and* emits the JSON answer. Too low → `finish_reason=length` →
+  empty resolution → retried then escalated.
+- **`generation_timeout_seconds`** bounds a single attempt. A stalled
+  connection is abandoned (the orchestrator retries then escalates) rather
+  than hanging the run forever.
+
+> **Network note.** Reasoning-model generations can take 30–90s of sustained
+> streaming. If the network path between capybase and the model drops
+> long-lived connections (aggressive NAT/firewall idle timeouts), every
+> attempt may fail with `Connection timed out`. Short requests (`/v1/models`)
+> will still succeed, masking the problem. Run capybase on a host with a
+> stable path to the model (ideally the same machine or LAN without a
+> duration-limiting middlebox).
+
+
 ## Use
 
 ```bash
