@@ -90,5 +90,73 @@ def conflicted_repo(repo: Path) -> dict:
 
 
 @pytest.fixture
+def multi_unit_conflicted_repo(repo: Path) -> dict:
+    """A repo stopped at a UU rebase conflict with TWO hunks in one file.
+
+    Layout (mirrors the live ``settings-uu`` fixture): a single ``cfg.py``
+    with two well-separated conflict regions — a services list and a feature
+    flags dict — both modified on both sides such that git emits two distinct
+    ``<<<<<<< ... >>>>>>>`` blocks. Replaying ``feat`` onto ``main`` yields a
+    multi-unit-per-file conflict.
+
+    Returns paths + the expected merged texts for each hunk.
+    """
+    base = (
+        'ENABLED_SERVICES = ["core", "cli"]\n'
+        "\n\n"
+        'class ServiceConfig:\n    name = "capybase"\n'
+        "\n\n"
+        'FEATURE_FLAGS = {\n    "cache": "off",\n    "metrics": "off",\n}\n'
+    )
+    upstream = (
+        'ENABLED_SERVICES = ["core", "cli", "scheduler"]\n'
+        "\n\n"
+        'class ServiceConfig:\n    name = "capybase"\n'
+        "\n\n"
+        'FEATURE_FLAGS = {\n    "cache": "off",\n    "metrics": "on",\n}\n'
+    )
+    replayed = (
+        'ENABLED_SERVICES = ["core", "cli", "reloader"]\n'
+        "\n\n"
+        'class ServiceConfig:\n    name = "capybase"\n'
+        "\n\n"
+        'FEATURE_FLAGS = {\n    "cache": "on",\n    "metrics": "off",\n}\n'
+    )
+
+    (repo / "cfg.py").write_text(base)
+    git(repo, "add", "cfg.py")
+    git(repo, "commit", "-q", "-m", "base")
+
+    git(repo, "branch", "feat")
+    git(repo, "checkout", "-q", "feat")
+    (repo / "cfg.py").write_text(replayed)
+    git(repo, "add", "cfg.py")
+    git(repo, "commit", "-q", "-m", "replayed changes")
+
+    git(repo, "checkout", "-q", "main")
+    (repo / "cfg.py").write_text(upstream)
+    git(repo, "add", "cfg.py")
+    git(repo, "commit", "-q", "-m", "upstream changes")
+
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected a rebase conflict"
+    return {
+        "repo": repo,
+        "path": "cfg.py",
+        "base": base,
+        "current": upstream,
+        "replayed": replayed,
+        # Sensible merges the model/human would produce (combine both sides).
+        # These are the *block-interior* resolved texts — exactly what replaces
+        # the marker span. The services conflict covers only the assignment
+        # line; the flags conflict covers only the two dict-entry lines (the
+        # surrounding ``FEATURE_FLAGS = {`` and ``}``` are outside the span).
+        "services_merged": 'ENABLED_SERVICES = ["core", "cli", "scheduler", "reloader"]',
+        "flags_merged": '    "cache": "on",\n    "metrics": "on"',
+    }
+
+
+@pytest.fixture
 def git_backend(repo: Path) -> GitBackend:
     return GitBackend(repo)

@@ -153,20 +153,15 @@ class Orchestrator:
             return result
 
         for path, units in result.units_by_path.items():
-            buffer = units[0].original_worktree_text
-            # Re-read the *current* worktree text per file so multi-unit files
-            # accumulate splices correctly.
-            try:
-                buffer = self.git.read_worktree_file(path).decode("utf-8", errors="replace")
-            except Exception:  # noqa: BLE001
-                pass
-            resolved_units: list[ConflictUnit] = []
+            # Resolve all units, collecting accepted pairs; splice in one
+            # offset-correct batch at the end (same structure as run mode).
+            accepted: list[tuple[ConflictUnit, CandidateResolution]] = []
             for unit in units:
                 self.out(self._render_unit(unit))
                 pasted = self.stdin_reader(
                     "paste the resolved text for this block (Ctrl-D to finish):"
                 )
-                outcome = self._apply_manual_resolution(unit, pasted, buffer)
+                outcome = self._apply_manual_resolution(unit, pasted)
                 result.outcomes.append(outcome)
                 if outcome.accepted is None:
                     result.escalated = True
@@ -180,13 +175,14 @@ class Orchestrator:
                     )
                     self._summarize(result)
                     return result
-                resolved_units.append(unit)
-                # Splice accepted text into buffer for subsequent units.
-                from capybase.adapters.parsers import splice_resolution
+                accepted.append((unit, outcome.accepted))
+            from capybase.adapters.parsers import splice_all_resolutions
 
-                buffer = splice_resolution(
-                    unit.original_worktree_text, unit.marker_span, outcome.accepted.resolved_text
-                )
+            original = accepted[0][0].original_worktree_text
+            spans_and_texts = [
+                (unit.marker_span, cand.resolved_text) for unit, cand in accepted
+            ]
+            buffer = splice_all_resolutions(original, spans_and_texts)
             # Write + stage the file.
             self._write_and_stage(path, buffer, result)
         self._summarize(result)
@@ -197,7 +193,7 @@ class Orchestrator:
         return result
 
     def _apply_manual_resolution(
-        self, unit: ConflictUnit, pasted: str, buffer: str
+        self, unit: ConflictUnit, pasted: str
     ) -> UnitOutcome:
         cand = CandidateResolution(
             candidate_id=f"{unit.unit_id}:manual",
@@ -324,8 +320,12 @@ class Orchestrator:
             return result
 
         for path, units in result.units_by_path.items():
-            buffer = units[0].original_worktree_text
-            accepted_any = False
+            # Resolve ALL units in the file before splicing anything. We must
+            # not write a partially-resolved file: if a later unit escalates,
+            # the file (with some blocks still marker-laden) would be staged
+            # against an aborted rebase. Collect accepted (unit, candidate)
+            # pairs and splice them in one offset-correct batch at the end.
+            accepted: list[tuple[ConflictUnit, CandidateResolution]] = []
             escalated_unit: UnitOutcome | None = None
             for unit in units:
                 outcome = self._resolve_unit(unit)
@@ -333,12 +333,7 @@ class Orchestrator:
                 if outcome.accepted is None:
                     escalated_unit = outcome
                     break
-                accepted_any = True
-                from capybase.adapters.parsers import splice_resolution
-
-                buffer = splice_resolution(
-                    unit.original_worktree_text, unit.marker_span, outcome.accepted.resolved_text
-                )
+                accepted.append((unit, outcome.accepted))
             if escalated_unit is not None:
                 result.escalated = True
                 result.reason = f"could not resolve {escalated_unit.unit.unit_id}"
@@ -351,8 +346,54 @@ class Orchestrator:
                     validation=escalated_unit.validation,
                 )
                 return result
-            if accepted_any:
-                self._write_and_stage(path, buffer, result)
+            # Splice every accepted resolution in one offset-correct batch.
+            # ``splice_all_resolutions`` applies spans in reverse line order so
+            # that a resolution which changes the line count doesn't invalidate
+            # the spans of the other units (which are all relative to the
+            # original marker-laden file).
+            from capybase.adapters.parsers import splice_all_resolutions
+
+            original = accepted[0][0].original_worktree_text
+            spans_and_texts = [
+                (unit.marker_span, cand.resolved_text) for unit, cand in accepted
+            ]
+            buffer = splice_all_resolutions(original, spans_and_texts)
+            # Phase B: validate the fully-spliced file as a whole. This is the
+            # only place that can catch cross-unit errors (duplicate symbols,
+            # syntax errors arising only when resolutions are juxtaposed, leaked
+            # sibling markers). Per-unit Phase A validation already passed for
+            # each candidate in isolation; this is the file-level gate.
+            if self.config.validation.require_whole_file_validation and units:
+                language = units[0].language
+                file_validation = self.verification.verify_file(
+                    path, language, original, spans_and_texts
+                )
+                if self.config.journal.enabled and self.config.journal.store_validations:
+                    self.journal.store_validation(file_validation)
+                self.journal.emit(
+                    "file_validated",
+                    {
+                        "passed": file_validation.passed,
+                        "hard_failures": [
+                            f.message for f in file_validation.hard_failures
+                        ],
+                    },
+                    step_index=self.step,
+                    path=path,
+                )
+                if not file_validation.passed:
+                    result.escalated = True
+                    result.reason = (
+                        f"whole-file validation failed for {path}: "
+                        + "; ".join(f.message for f in file_validation.hard_failures)
+                    )
+                    write_review_bundle(
+                        self.paths,
+                        reason=result.reason,
+                        step_index=result.step_index,
+                    )
+                    return result
+            self._write_and_stage(path, buffer, result)
         # After staging: assert no unmerged paths remain for our files.
         if self.git.has_unmerged_paths():
             result.escalated = True

@@ -125,6 +125,55 @@ def splice_resolution(
     return "\n".join(new_lines)
 
 
+def splice_all_resolutions(
+    original: str,
+    spans_and_texts: list[tuple[tuple[int, int], str]],
+) -> str:
+    """Apply a batch of resolutions to one original file, offset-correctly.
+
+    Each entry is ``(marker_span, resolved_text)`` where ``marker_span`` is an
+    inclusive 0-based ``[start, end]`` line range into ``original`` (the full
+    marker-laden worktree text). All spans are interpreted against the same
+    ``original``; resolutions are applied in *reverse line order* (highest
+    ``start`` first) so that replacing a span never shifts the line numbers of
+    any not-yet-applied span. This is what makes multi-hunk splicing correct:
+    a naive accumulate-into-buffer loop would invalidate later spans' offsets
+    as soon as an earlier resolution changes the line count.
+
+    Spans must be non-overlapping and in range; otherwise ``ValueError`` is
+    raised so the caller escalates rather than silently writing a bad file.
+    An empty list returns ``original`` unchanged.
+    """
+    if not spans_and_texts:
+        return original
+    lines = original.split("\n")
+    n = len(lines)
+    # Validate ranges and non-overlap up front (fail loudly, not mid-splice).
+    spans: list[tuple[int, int, str]] = []
+    for (start, end), text in spans_and_texts:
+        if start < 0 or end >= n or start > end:
+            raise ValueError(
+                f"marker_span ({start}, {end}) out of range for {n} lines"
+            )
+        spans.append((start, end, text))
+    # Sort by start descending; detect overlap against the next-lower span.
+    spans.sort(key=lambda t: t[0], reverse=True)
+    prev_start: int | None = None
+    for start, end, _ in spans:
+        if prev_start is not None and end >= prev_start:
+            raise ValueError(
+                f"overlapping spans: ({start},{end}) overlaps a span starting at {prev_start}"
+            )
+        prev_start = start
+    # Apply bottom-to-top against the same accumulating buffer. Because we go
+    # from highest span down, each splice only touches lines at or below the
+    # spans we haven't processed yet, so their absolute indices stay valid.
+    buffer = original
+    for start, end, text in spans:
+        buffer = splice_resolution(buffer, (start, end), text)
+    return buffer
+
+
 # ---------------------------------------------------------------------------
 # LLM response parsing
 # ---------------------------------------------------------------------------

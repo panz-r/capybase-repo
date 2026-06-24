@@ -136,6 +136,22 @@ class ConflictExtractor:
                     risk_tags=[],
                 )
             )
+        # Record sibling units in each unit's structural_metadata so downstream
+        # (context builder, future RAG/structural views) knows there are other
+        # resolvable conflict blocks in the same file. This is the seam that
+        # lets the context window avoid bleeding across a sibling marker block
+        # — without it the model may see another block's raw ``<<<<<<<`` lines
+        # as ordinary context and be confused.
+        if len(units) > 1:
+            siblings = [
+                {"unit_id": u.unit_id, "marker_span": list(u.marker_span)}
+                if u.marker_span is not None
+                else {"unit_id": u.unit_id, "marker_span": None}
+                for u in units
+            ]
+            for u in units:
+                u.structural_metadata["sibling_units"] = siblings
+                u.structural_metadata["sibling_count"] = len(units)
         return units
 
     # Convenience: extract across every unmerged path, classifying along the

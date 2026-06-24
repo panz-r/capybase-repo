@@ -57,6 +57,13 @@ class ValidationConfig(BaseModel):
     require_syntax_if_supported: bool = True
     reject_if_copies_one_side: bool = True
     reject_if_model_needs_human: bool = True
+    # Phase B: validate the fully-spliced file (with *all* units resolved)
+    # after per-unit validation passes. This catches cross-unit errors that
+    # per-unit checks structurally cannot — leaked markers from sibling
+    # blocks, syntax errors that only arise when two resolutions are
+    # juxtaposed, duplicate symbols across hunks. Meaningful even for
+    # single-unit files; disable only for non-code where it's moot.
+    require_whole_file_validation: bool = True
 
 
 class JournalConfig(BaseModel):

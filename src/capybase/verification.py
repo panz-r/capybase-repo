@@ -19,7 +19,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from capybase.adapters.parsers import contains_markers, splice_resolution
+from capybase.adapters.parsers import (
+    contains_markers,
+    splice_all_resolutions,
+    splice_resolution,
+)
 from capybase.conflict_model import (
     CandidateResolution,
     ConflictUnit,
@@ -63,6 +67,7 @@ class ValidationConfig:
     require_syntax_if_supported: bool = True
     reject_if_copies_one_side: bool = True
     reject_if_model_needs_human: bool = True
+    require_whole_file_validation: bool = True
 
     @classmethod
     def from_dict(cls, d: dict) -> "ValidationConfig":
@@ -181,16 +186,24 @@ class NeedsHumanValidator:
 
 
 class SyntaxValidator:
-    """Compile-check the *whole file* after splice for supported languages.
+    """Deprecated per-unit syntax validator.
 
-    MVP supports Python via ``py_compile``. Other languages are skipped
-    (passed) with a feature flag so future tree-sitter validators can plug in.
+    Historically this spliced the candidate into ``unit.original_worktree_text``
+    and compiled the result. That was structurally broken for multi-unit files:
+    the original still holds sibling units' raw marker blocks, so the "whole
+    file" being compiled was never the real merged file, and it could never
+    catch cross-unit errors. Whole-file syntax checking now lives in
+    :meth:`VerificationEngine.verify_file` (Phase B), which splices *all*
+    resolutions together first.
+
+    This class is retained only for backward compatibility with any
+    externally-constructed validator lists; it is NOT part of the default
+    engine anymore.
     """
 
     name = "syntax"
 
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
-        lang = ctx.unit.language
         if ctx.unit.marker_span is None:
             return VerificationCheckResult(
                 name=self.name, passed=True, message="no marker span", features={"syntax_checked": False}
@@ -200,6 +213,7 @@ class SyntaxValidator:
             ctx.unit.marker_span,
             ctx.candidate.resolved_text,
         )
+        lang = ctx.unit.language
         if lang == "python":
             ok, msg = _compile_python(whole)
             return VerificationCheckResult(
@@ -218,7 +232,14 @@ class SyntaxValidator:
 
 
 class WholeFileMarkerValidator:
-    """After splicing this candidate, the whole file must have no markers."""
+    """Deprecated per-unit whole-file marker validator.
+
+    Like ``SyntaxValidator``, this spliced into ``unit.original_worktree_text``
+    and was therefore unsatisfiable for any non-last unit in a multi-unit file
+    (sibling blocks' markers remained). Whole-file marker checking now lives in
+    :meth:`VerificationEngine.verify_file` (Phase B). Retained only for
+    backward compatibility with externally-constructed validator lists.
+    """
 
     name = "whole_file_markers"
 
@@ -272,13 +293,18 @@ class VerificationEngine:
 
     @classmethod
     def default(cls, config: ValidationConfig) -> "VerificationEngine":
+        # Phase A: per-unit validators. Each validates the candidate in
+        # isolation against the unit's marker span. The whole-file checks
+        # (no_markers, syntax) used to live here too, but they spliced into
+        # ``unit.original_worktree_text`` — which still holds the *other*
+        # units' raw marker blocks — so they were unsatisfiable for any
+        # non-last unit and could never catch cross-unit errors. They now run
+        # in Phase B (``verify_file``) against the fully-spliced file.
         validators: list[Validator] = [
             NoConflictMarkersValidator(),
-            WholeFileMarkerValidator(),
             ExactSpliceScopeValidator(),
             PreservationHeuristicValidator(),
             NeedsHumanValidator(),
-            SyntaxValidator(),
         ]
         return cls(validators, config)
 
@@ -322,6 +348,88 @@ class VerificationEngine:
             passed=passed,
             hard_failures=hard,
             warnings=warnings,
+            features=features,
+        )
+
+    # ------------------------------------------------------------------
+    # Phase B: whole-file validation against the fully-spliced file.
+    # ------------------------------------------------------------------
+
+    def verify_file(
+        self,
+        path: str,
+        language: str | None,
+        original: str,
+        resolutions: list[tuple[tuple[int, int], str]],
+    ) -> VerificationResult:
+        """Validate the file after *all* units in it have been resolved.
+
+        Splices every resolution into ``original`` (offset-correctly, in
+        reverse line order) and runs the checks that only make sense on a
+        complete file: no leftover conflict markers anywhere, and — for
+        supported languages — a compile/syntax check on the real final text.
+
+        This is the only place that can catch cross-unit errors (e.g. two
+        hunks both defining the same symbol, or a syntax error that only
+        appears when two resolutions are adjacent). The per-unit Phase A
+        validators structurally cannot, because each only ever sees one
+        block spliced into a file whose other blocks are still raw markers.
+
+        Returns the same ``VerificationResult`` shape so ``RiskEngine.decide``
+        and the orchestrator consume it unchanged. ``unit_id``/``candidate_id``
+        are file-scoped (``<path>:file``) since this result is not tied to one
+        candidate.
+        """
+        file_id = f"{path}:file"
+        hard: list[VerificationFailure] = []
+        features: dict[str, float | int | str | bool] = {}
+
+        if not resolutions:
+            whole = original
+        else:
+            whole = splice_all_resolutions(original, resolutions)
+
+        # Whole-file marker check — now meaningful: no sibling blocks remain.
+        leaked = contains_markers(whole)
+        features["whole_file_markers_remaining"] = int(leaked)
+        if leaked and self.config.require_no_markers:
+            hard.append(
+                VerificationFailure(
+                    validator="whole_file_markers",
+                    severity="error",
+                    message="whole file still contains conflict markers after splice",
+                    detail={},
+                )
+            )
+
+        # Syntax check on the real, fully-spliced file.
+        syntax_checked = False
+        syntax_ok = True
+        if language == "python":
+            syntax_checked = True
+            ok, msg = _compile_python(whole)
+            syntax_ok = ok
+            if not ok and self.config.require_syntax_if_supported:
+                hard.append(
+                    VerificationFailure(
+                        validator="syntax",
+                        severity="error",
+                        message=msg,
+                        detail={},
+                    )
+                )
+        features["syntax_checked"] = syntax_checked
+        features["syntax_passed"] = syntax_ok
+
+        passed = len(hard) == 0
+        features["hard_failure_count"] = len(hard)
+        features["warning_count"] = 0
+        return VerificationResult(
+            candidate_id=file_id,
+            unit_id=file_id,
+            passed=passed,
+            hard_failures=hard,
+            warnings=[],
             features=features,
         )
 

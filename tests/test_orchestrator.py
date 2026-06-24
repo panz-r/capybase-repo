@@ -219,3 +219,74 @@ def test_run_retries_after_transient_error(conflicted_repo):
     result = orch.run()
     assert not result.escalated, result.reason
     assert "<<<<<<<" not in (repo / "app.py").read_text()
+
+
+# ---------------------------------------------------------------------------
+# Multi-unit-per-file (the regression class this whole fix targets)
+# ---------------------------------------------------------------------------
+
+
+def test_run_resolves_multi_unit_file(multi_unit_conflicted_repo):
+    """Two hunks in one file: both must be resolved and accumulated into the
+    final file. This is the direct regression test for the splice bug —
+    previously only the last unit's resolution survived."""
+    repo = multi_unit_conflicted_repo["repo"]
+    payload1 = _make_resolved_payload(multi_unit_conflicted_repo["services_merged"])
+    payload2 = _make_resolved_payload(multi_unit_conflicted_repo["flags_merged"])
+    # Sequential: unit 0 (services) then unit 1 (flags).
+    engine = ResolutionEngine(_config(repo).model, client=FakeClient([payload1, payload2]))
+    orch = Orchestrator(
+        _config(repo), repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert not result.escalated, result.reason
+    text = (repo / "cfg.py").read_text()
+    # No markers anywhere in the whole file.
+    assert "<<<<<<<" not in text
+    # BOTH resolutions present (the bug dropped the first one).
+    assert "scheduler" in text and "reloader" in text
+    assert '"cache": "on"' in text and '"metrics": "on"' in text
+
+
+def test_manual_mode_resolves_multi_unit(multi_unit_conflicted_repo):
+    """Manual mode must also accumulate both units' resolutions."""
+    repo = multi_unit_conflicted_repo["repo"]
+    inputs = [
+        multi_unit_conflicted_repo["services_merged"],
+        multi_unit_conflicted_repo["flags_merged"],
+    ]
+    orch = Orchestrator(
+        _config(repo), repo=str(repo),
+        stdin_reader=lambda _prompt: inputs.pop(0),
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.manual()
+    assert not result.escalated, result.reason
+    text = (repo / "cfg.py").read_text()
+    assert "<<<<<<<" not in text
+    assert "scheduler" in text and "reloader" in text
+    assert '"cache": "on"' in text and '"metrics": "on"' in text
+
+
+def test_run_escalates_when_whole_file_invalid(multi_unit_conflicted_repo):
+    """Two candidates that individually pass Phase A but produce invalid Python
+    when juxtaposed → Phase B (verify_file) fails → escalate.
+
+    We craft both resolutions to be syntactically fine in isolation but to
+    duplicate a definition across the file (a cross-unit error Phase A
+    structurally cannot detect)."""
+    repo = multi_unit_conflicted_repo["repo"]
+    # Both hunks resolve to a top-level ``x = 1`` — valid alone, but two
+    # module-level assignments aren't a syntax error per se. Instead make each
+    # resolution an incomplete statement fragment so the spliced file is a
+    # SyntaxError: bare ``return`` at module level.
+    bad = _make_resolved_payload("return 1")
+    engine = ResolutionEngine(_config(repo).model, client=FakeClient([bad, bad]))
+    orch = Orchestrator(
+        _config(repo), repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert result.escalated
+    assert "whole-file validation failed" in (result.reason or "")
