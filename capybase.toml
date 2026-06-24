@@ -1,0 +1,55 @@
+# capybase.toml — runtime configuration for the capybase rebase agent.
+#
+# Copy this file into your repo (or pass --config PATH) and adjust as needed.
+# Packaging metadata lives in pyproject.toml; this file is runtime only.
+
+[model]
+# OpenAI-compatible local endpoint (e.g. llama-server).
+provider = "openai_compatible"
+base_url = "http://192.168.1.123:8080/v1"
+api_key = "sk-local"
+model = "vibethink"
+temperature = 0.2
+samples = 1
+max_tokens = 2048
+request_timeout_seconds = 120
+
+[policy]
+# Which conflict types (git unmerged modes) capybase will attempt.
+supported_conflict_types = ["UU"]
+# Which file kinds are eligible for auto-resolution.
+supported_file_kinds = ["text"]
+max_retries_per_unit = 2
+allow_skip = false
+allow_delete_conflicted_file = false
+stage_only_validated_paths = true
+# Number of context lines on each side of a conflict marker block.
+context_lines = 15
+
+[tests]
+pre_continue = "pytest"
+final = "pytest"
+timeout_seconds = 300
+required = true
+
+[validation]
+require_no_markers = true
+require_exact_splice_scope = true
+require_syntax_if_supported = true
+reject_if_copies_one_side = true
+reject_if_model_needs_human = true
+
+[journal]
+enabled = true
+store_prompts = true
+store_raw_responses = true
+store_snapshots = true
+store_candidates = true
+
+# [future] documents planned seams. It does nothing in the MVP.
+[future]
+enable_self_consistency = false
+enable_rag = false
+enable_structural_context = false
+enable_verifier_model = false
+enable_mutation_testing = false
