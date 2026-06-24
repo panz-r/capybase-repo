@@ -11,8 +11,11 @@ api_key = "sk-local"
 model = "vibethink"
 temperature = 0.2
 samples = 1
-max_tokens = 2048
-request_timeout_seconds = 120
+# Reasoning models (e.g. VibeThinker/DeepSeek-R1 style) emit long <think> chains
+# before answering. If this is too low, the model runs out of tokens mid-thought
+# (finish_reason=length) and never emits its JSON answer -> empty resolution.
+max_tokens = 8192
+request_timeout_seconds = 600
 
 [policy]
 # Which conflict types (git unmerged modes) capybase will attempt.

@@ -22,8 +22,10 @@ class ModelConfig(BaseModel):
     model: str = "vibethink"
     temperature: float = 0.2
     samples: int = 1
-    max_tokens: int = 2048
-    request_timeout_seconds: int = 120
+    # Reasoning models emit long <think> chains before answering; 2048 starves
+    # them. 8192 leaves headroom for reasoning + the final JSON answer.
+    max_tokens: int = 8192
+    request_timeout_seconds: int = 600
 
 
 class PolicyConfig(BaseModel):

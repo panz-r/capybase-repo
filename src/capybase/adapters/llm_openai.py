@@ -49,6 +49,11 @@ class OpenAICompatibleClient:
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
+            # Stream so a long generation keeps the socket active. Reasoning
+            # models can take 60s+ to answer; a single blocking read on a flaky
+            # link hits the kernel TCP timeout (ETIMEDOUT) mid-generation,
+            # whereas streaming keeps the connection alive token-by-token.
+            "stream": True,
         }
         if json_mode:
             body["response_format"] = {"type": "json_object"}
@@ -64,19 +69,60 @@ class OpenAICompatibleClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(
-                req, timeout=self.config.request_timeout_seconds
-            ) as resp:
-                raw = json.loads(resp.read().decode("utf-8"))
+            return self._read_stream(req, url)
         except urllib.error.URLError as exc:
             raise RuntimeError(f"LLM request failed: {exc}") from exc
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(f"LLM request failed: {exc}") from exc
-        try:
-            text = raw["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise RuntimeError(f"unexpected LLM response shape: {exc}") from exc
-        return LLMResponse(text=text, raw=raw)
+
+    def _read_stream(self, req: urllib.request.Request, url: str) -> LLMResponse:
+        """Consume an SSE stream, accumulate content, and capture finish_reason.
+
+        We set the socket read timeout generously but rely on streaming to keep
+        the connection live: each token chunk resets the idle window. Falls
+        back to non-streaming if the server returns a non-SSE JSON body.
+        """
+        with urllib.request.urlopen(
+            req, timeout=self.config.request_timeout_seconds
+        ) as resp:
+            ctype = resp.headers.get("Content-Type", "")
+            if "text/event-stream" not in ctype and "application/x-ndjson" not in ctype:
+                # Server ignored stream=true and returned a single JSON object.
+                raw = json.loads(resp.read().decode("utf-8"))
+                return _from_non_stream(raw)
+            content_parts: list[str] = []
+            finish_reason: str | None = None
+            raw_meta: dict[str, Any] = {}
+            for line in resp:
+                line = line.decode("utf-8", errors="replace").strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[len("data:") :].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or []
+                if choices:
+                    delta = choices[0].get("delta") or {}
+                    if "content" in delta and delta["content"]:
+                        content_parts.append(delta["content"])
+                    if choices[0].get("finish_reason"):
+                        finish_reason = choices[0]["finish_reason"]
+                raw_meta = chunk
+        text = "".join(content_parts)
+        raw_meta.setdefault("_accumulated", {"finish_reason": finish_reason})
+        return LLMResponse(text=text, raw=raw_meta)
+
+
+def _from_non_stream(raw: dict[str, Any]) -> LLMResponse:
+    try:
+        text = raw["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"unexpected LLM response shape: {exc}") from exc
+    return LLMResponse(text=text, raw=raw)
 
 
 def coerce_candidate_dict(raw_text: str) -> tuple[dict, list[str]]:

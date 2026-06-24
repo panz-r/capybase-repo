@@ -30,38 +30,41 @@ from capybase.conflict_model import (
 )
 from capybase.config import ModelConfig
 
-PROMPT_RESOLVE = "resolve_text_block.v3"
-PROMPT_RETRY = "cegis_retry.v3"
+PROMPT_RESOLVE = "resolve_text_block.v4"
+PROMPT_RETRY = "cegis_retry.v4"
 
 
 def build_resolve_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
-    return f"""You resolve ONE git merge conflict by merging BOTH sides into one coherent
-result that preserves each side's intent. Do NOT simply pick one side.
+    # Show a visible marker so the model can see the exact indentation it must
+    # reproduce (leading spaces are invisible in normal prose).
+    cur_lines = unit.current.text
+    rep_lines = unit.replayed.text
+    return f"""Resolve ONE git merge conflict by merging BOTH sides into one coherent
+result preserving each side's intent. Be CONCISE: reason in a few sentences,
+then answer. Do not over-explain.
 
 file: {unit.path}
 language: {unit.language or 'unknown'}
 
-The conflict block's CURRENT_UPSTREAM_SIDE body is exactly:
-{unit.current.text}
+CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):
+{cur_lines}
 
-The conflict block's REPLAYED_COMMIT_SIDE body is exactly:
-{unit.replayed.text}
+REPLAYED_COMMIT_SIDE body (exact, including leading spaces):
+{rep_lines}
 
-The BASE (common ancestor) body, for context, was:
+BASE (common ancestor) body, for context:
 {unit.base.text}
 
-The surrounding file context (the conflict markers are in here):
+Surrounding file context:
 {context.primary_text}
 
-Your resolved_text REPLACES the entire conflict marker block (the lines from
-``<<<<<<<`` through ``>>>>>>>``, inclusive). It will be spliced in verbatim.
-
-Think briefly if you must, then output your final answer as ONE JSON object
-inside a fenced ```json block with EXACTLY these keys:
+Your resolved_text REPLACES the whole conflict marker block (``<<<<<<<``
+through ``>>>>>>>``) and is spliced in verbatim. End with ONE ```json fenced
+object having EXACTLY these keys:
 
 ```json
 {{
-  "resolved_text": "<the merged replacement text>",
+  "resolved_text": "<merged replacement text>",
   "current_side_intent": ["..."],
   "replayed_commit_intent": ["..."],
   "preserved_current_side": true,
@@ -75,14 +78,14 @@ inside a fenced ```json block with EXACTLY these keys:
 }}
 ```
 
-Rules:
-- resolved_text must be valid {unit.language or 'code'} in context. PRESERVE the
-  exact leading indentation of the lines you are merging (e.g. if the bodies
-  are indented 4 spaces, every line of resolved_text must start with 4 spaces).
-- Do NOT include conflict markers (``<<<<<<<``, ``=======``, ``>>>>>>>``).
-- Do NOT add or change the enclosing function/class definition line.
-- Escape newlines in resolved_text as \\n and double quotes as \\".
-- Output the ```json fence and nothing after it.
+CRITICAL rules:
+- PRESERVE leading indentation. If the bodies start with 4 spaces, EVERY line
+  of resolved_text must start with 4 spaces. Getting this wrong causes a syntax
+  error and rejection.
+- No conflict markers (``<<<<<<<`` / ``=======`` / ``>>>>>>>``).
+- Do not add or change the enclosing def/class line.
+- Escape newlines as \\n and double quotes as \\" inside resolved_text.
+- Output the ```json block last; nothing after it.
 - If you cannot merge safely, set needs_human=true and explain.
 """
 
