@@ -38,6 +38,9 @@ PROMPT_RETRY = "cegis_retry.v5"
 # Two-pass prompting (Step 2): intent extraction then code generation.
 PROMPT_INTENT = "intent.v1"
 PROMPT_CODE = "code_from_intent.v1"
+# PlanSearch (survey §1): multi-plan sampling. Each candidate is tagged
+# code_from_intent.v1#plan{i} so offline eval can attribute outcomes per plan.
+PROMPT_PLAN = "plan_search.v1"
 # Targeted repair (Step 4): send back the broken candidate for surgical fixing.
 PROMPT_REPAIR = "cegis_repair.v1"
 
@@ -326,6 +329,7 @@ def build_code_prompt(
     unit: ConflictUnit,
     context: ContextBundle,
     intents: dict[str, list[str]],
+    plan: dict | None = None,
 ) -> str:
     """Pass 2: generate code conditioned on the extracted intent map.
 
@@ -333,6 +337,11 @@ def build_code_prompt(
     BOTH sides into one coherent result guided by that understanding. This is
     the same output schema as the single-pass resolve prompt, but the intent
     context primes the model toward a correct synthesis.
+
+    ``plan`` (PlanSearch, survey §1): when given, a hard-constraint block is
+    prepended telling the model to implement THAT plan exactly — turning Pass 2
+    into "one code candidate per plan" instead of "N candidates from one plan".
+    With no plan, the prompt is byte-identical to the original.
     """
     cur_intents = intents.get("current_side_intent", [])
     rep_intents = intents.get("replayed_commit_intent", [])
@@ -342,7 +351,18 @@ def build_code_prompt(
     structural_anchor = ""
     if enc_sig:
         structural_anchor = f"Merging inside: {enc_sig}\n\n"
-    return f"""Resolve ONE git merge conflict by merging BOTH sides into one
+    plan_block = ""
+    if plan:
+        steps = plan.get("steps", [])
+        strategy = plan.get("strategy", "")
+        step_text = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(steps))
+        plan_block = (
+            "Implement THIS plan exactly, producing a merge that satisfies each "
+            "step and no additional changes:\n"
+            f"Strategy: {strategy}\n"
+            f"Steps:\n{step_text}\n\n"
+        )
+    return f"""{plan_block}Resolve ONE git merge conflict by merging BOTH sides into one
 coherent result. Be CONCISE. A prior analysis identified these intents:
 
 Upstream/current side changed:
@@ -366,6 +386,69 @@ Output a ```json fenced object:
   "preserved_replayed_commit_side": true
 }}
 """
+
+
+def build_plan_search_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
+    """Pass 1 for PlanSearch (survey §1): ask for MULTIPLE distinct plans.
+
+    Combines the survey's "observation" and "plan generation" steps: the model
+    lists the key constraints a correct merge must respect, then proposes K
+    distinct resolution strategies as a JSON list. Pass 2 then generates one
+    code candidate per plan (``build_code_prompt(plan=...)``), so solution
+    diversity comes from the *planning* axis, not just temperature — orthogonal
+    to prompt-variant and temperature-diverse sampling.
+    """
+    cur_lines, _base_lines, rep_lines = _prompt_sides(unit)
+    sv = context.structural_view
+    enc_sig = sv.get("enclosing_node_signature") if sv else None
+    structural_anchor = ""
+    if enc_sig:
+        structural_anchor = f"Merging inside: {enc_sig}\n\n"
+    return f"""Analyze ONE git merge conflict and propose DISTINCT resolution plans.
+
+{structural_anchor}CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):
+{cur_lines}
+
+REPLAYED_COMMIT_SIDE body (exact, including leading spaces):
+{rep_lines}
+
+First, list 3-5 key constraints a correct merge must respect (edge cases,
+invariants, behaviors both sides rely on). Then propose 3 DISTINCT high-level
+plans for resolving this conflict. Each plan must take a genuinely different
+strategy (e.g. merge both behaviors; prefer one side with a guard for the
+other; restructure to unify). Do NOT write the merged code — only the plan.
+
+Output a ```json fenced object:
+{{
+  "constraints": ["...", "..."],
+  "plans": [
+    {{"strategy": "<one phrase>", "steps": ["step 1", "step 2"]}},
+    {{"strategy": "<one phrase>", "steps": ["step 1", "step 2"]}},
+    {{"strategy": "<one phrase>", "steps": ["step 1", "step 2"]}}
+  ]
+}}
+"""
+
+
+def parse_plans(text: str) -> list[dict] | None:
+    """Parse a PlanSearch plan-search response into a list of plan dicts.
+
+    Tolerant: reuses ``coerce_candidate_dict`` (handles fenced/prose-prefixed
+    JSON). Returns the ``plans`` list, or ``None`` on any parse failure or if
+    fewer than 2 distinct plans were produced (PlanSearch needs >=2 to add
+    planning-axis diversity; otherwise it falls back to single-intent mode).
+    """
+    data, _warnings = coerce_candidate_dict(text)
+    if not isinstance(data, dict):
+        return None
+    plans = data.get("plans")
+    if not isinstance(plans, list) or len(plans) < 2:
+        return None
+    # Keep only well-formed plan dicts with at least a strategy or steps.
+    cleaned = [p for p in plans if isinstance(p, dict) and (p.get("strategy") or p.get("steps"))]
+    if len(cleaned) < 2:
+        return None
+    return cleaned
 
 
 def build_verifier_prompt(
@@ -698,10 +781,20 @@ class ResolutionEngine:
         if intents is None:
             # Intent pass failed — degrade to single-pass.
             return self.propose(unit, context)
-        # --- Pass 2: generate code conditioned on intents ---
-        code_prompt = build_code_prompt(unit, context, intents)
         n = max(1, n_samples)
         temp = temperature if temperature is not None else self.config.sampling_temperature
+        # --- PlanSearch (survey §1): sample N distinct plans → one code per plan.
+        # Falls back to the standard one-plan→N-code path if disabled, if the
+        # plan-search call fails, or if it yields <2 plans (parse_plans guards).
+        if (
+            getattr(self.config, "plan_search", False)
+            and n > 1
+        ):
+            plans = self._call_plan_search(unit, context)
+            if plans:
+                return self._sample_plans(unit, context, intents, plans, n, temp)
+        # --- Pass 2 (standard): N code samples conditioned on the single intent map ---
+        code_prompt = build_code_prompt(unit, context, intents)
         if n == 1:
             return [self._one(unit, context, code_prompt, PROMPT_CODE, temp)]
         if not self.config.parallel_samples:
@@ -710,6 +803,66 @@ class ResolutionEngine:
             unit, context, code_prompt, PROMPT_CODE, n,
             temperature_override=temp,
         )
+
+    def _call_plan_search(
+        self, unit: ConflictUnit, context: ContextBundle
+    ) -> list[dict] | None:
+        """PlanSearch Pass 1: ask the model for multiple distinct plans.
+
+        Returns a list of plan dicts (``{strategy, steps}``), or ``None`` on any
+        failure — callers fall back to the single-intent path so a flaky
+        plan-search call never blocks resolution.
+        """
+        plan_prompt = build_plan_search_prompt(unit, context)
+        messages = [
+            {"role": "system", "content": "You are a careful merge-planning assistant."},
+            {"role": "user", "content": plan_prompt},
+        ]
+        try:
+            resp = self.client.complete(
+                messages,
+                model=self.config.model,
+                temperature=self.config.temperature,
+                max_tokens=min(self.config.max_tokens, 2048),
+                json_mode=True,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        return parse_plans(resp.text or "")
+
+    def _sample_plans(
+        self,
+        unit: ConflictUnit,
+        context: ContextBundle,
+        intents: dict[str, list[str]],
+        plans: list[dict],
+        n: int,
+        temp: float,
+    ) -> list[CandidateResolution]:
+        """PlanSearch Pass 2: generate one code candidate per plan.
+
+        Each plan gets its own plan-conditioned prompt and one sample; the plan
+        index is tagged on ``prompt_version`` (``code_from_intent.v1#plan{i}``)
+        so offline eval can attribute outcomes per plan. ``n`` caps the number
+        of plans used (min of plans length and n). The thread pool draws them
+        concurrently, like the standard parallel path.
+        """
+        k = min(len(plans), n)
+        chosen = plans[:k]
+        # Each candidate's prompt carries its plan; the version tags the index.
+        prompts = [
+            (build_code_prompt(unit, context, intents, plan=p),
+             f"{PROMPT_CODE}#plan{i}")
+            for i, p in enumerate(chosen)
+        ]
+        if not self.config.parallel_samples or k == 1:
+            return [self._one(unit, context, p, v, temp) for p, v in prompts]
+        with ThreadPoolExecutor(max_workers=min(k, 8)) as pool:
+            futures = [
+                pool.submit(self._one, unit, context, p, v, temp)
+                for p, v in prompts
+            ]
+            return [f.result() for f in futures]
 
     def _call_intent(
         self, unit: ConflictUnit, context: ContextBundle
