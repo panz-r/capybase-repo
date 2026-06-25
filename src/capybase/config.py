@@ -56,6 +56,14 @@ class ModelConfig(BaseModel):
     # and become a retryable failure. Real completions on a 3B reasoning model
     # take ~30-90s; this gives headroom without hanging for minutes on a stall.
     generation_timeout_seconds: int = 180
+    # TECP token-entropy capture (survey §4.1): when on, requests per-token
+    # logprobs from the API and reduces them to a scalar mean token-entropy
+    # (mean negative log-probability) carried on each candidate. This is the
+    # logit-free, black-box uncertainty signal the conformal "flywheel" learns
+    # from — never the model weights. Defaults off so deployments that don't
+    # need it pay no request-shape cost and see no behavior change; the API
+    # simply omits ``logprobs`` from the request body when off.
+    capture_token_entropy: bool = False
 
 
 class PolicyConfig(BaseModel):

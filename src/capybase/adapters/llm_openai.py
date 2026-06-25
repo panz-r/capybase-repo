@@ -21,11 +21,24 @@ from capybase.config import ModelConfig
 
 
 class LLMResponse:
-    """Normalized model response."""
+    """Normalized model response.
 
-    def __init__(self, text: str, raw: dict[str, Any] | None = None) -> None:
+    ``mean_token_entropy`` is the logit-free, black-box uncertainty signal
+    (survey §4.1 TECP): the mean negative log-probability over the generated
+    content tokens, reduced from per-token logprobs the API emits in each SSE
+    delta. It is ``None`` when the API returned no logprobs (the default when
+    ``capture_token_entropy`` is off, or the server doesn't support them).
+    """
+
+    def __init__(
+        self,
+        text: str,
+        raw: dict[str, Any] | None = None,
+        mean_token_entropy: float | None = None,
+    ) -> None:
         self.text = text
         self.raw = raw
+        self.mean_token_entropy = mean_token_entropy
 
 
 class LLMClient(Protocol):
@@ -62,6 +75,7 @@ class OpenAICompatibleClient:
         }
         if json_mode:
             body["response_format"] = {"type": "json_object"}
+        _maybe_request_logprobs(body, self.config)
         data = json.dumps(body).encode("utf-8")
         url = self.config.base_url.rstrip("/") + "/chat/completions"
         req = urllib.request.Request(
@@ -141,6 +155,7 @@ class OpenAICompatibleClient:
         }
         if json_mode:
             body["response_format"] = {"type": "json_object"}
+        _maybe_request_logprobs(body, self.config)
         data = json.dumps(body).encode("utf-8")
         url = self.config.base_url.rstrip("/") + "/chat/completions"
         req = urllib.request.Request(
@@ -195,7 +210,12 @@ class OpenAICompatibleClient:
                 text = ch["message"]["content"]
             except (KeyError, TypeError):
                 continue
-            out.append(LLMResponse(text=text or "", raw=raw))
+            # Non-streaming logprobs: choices[i].logprobs.content[] (OpenAI shape).
+            mte: float | None = None
+            ch_lp = (ch.get("logprobs") or {})
+            if isinstance(ch_lp, dict):
+                mte = _mean_token_entropy_from_logprobs(ch_lp.get("content") or [])
+            out.append(LLMResponse(text=text or "", raw=raw, mean_token_entropy=mte))
         return out
 
     def _read_stream(self, req: urllib.request.Request, url: str) -> LLMResponse:
@@ -230,6 +250,7 @@ class OpenAICompatibleClient:
                 finish_reason: str | None = None
                 raw_meta: dict[str, Any] = {}
                 early_stop = False
+                token_nlls: list[float] = []
                 for line in resp:
                     if time.monotonic() > deadline:
                         raise RuntimeError(
@@ -251,6 +272,15 @@ class OpenAICompatibleClient:
                         delta = choices[0].get("delta") or {}
                         if "content" in delta and delta["content"]:
                             content_parts.append(delta["content"])
+                        # Streaming per-token logprobs: delta.logprobs.content[].
+                        if self.config.capture_token_entropy:
+                            dlp = delta.get("logprobs")
+                            if isinstance(dlp, dict):
+                                mte = _mean_token_entropy_from_logprobs(
+                                    dlp.get("content") or []
+                                )
+                                if mte is not None:
+                                    token_nlls.append(mte)
                         if choices[0].get("finish_reason"):
                             finish_reason = choices[0]["finish_reason"]
                     raw_meta = chunk
@@ -268,7 +298,53 @@ class OpenAICompatibleClient:
         text = "".join(content_parts)
         meta = {"finish_reason": finish_reason, "early_terminated": early_stop}
         raw_meta.setdefault("_accumulated", meta)
-        return LLMResponse(text=text, raw=raw_meta)
+        mean_token_entropy = (
+            sum(token_nlls) / len(token_nlls) if token_nlls else None
+        )
+        return LLMResponse(
+            text=text, raw=raw_meta, mean_token_entropy=mean_token_entropy
+        )
+
+
+def _maybe_request_logprobs(body: dict[str, Any], config: ModelConfig) -> None:
+    """When ``capture_token_entropy`` is on, ask the API for per-token logprobs.
+
+    Mutates ``body`` in place. With ``top_logprobs=1`` each delta's logprobs
+    entry carries the realized token's own logprob, whose negation is the
+    per-token negative log-likelihood — the standard TECP "token-entropy"
+    surrogate. No weights are read; this is purely the black-box API output.
+    Omitted entirely from the body when the flag is off, so deployments that
+    don't use entropy capture see an unchanged request shape.
+    """
+    if getattr(config, "capture_token_entropy", False):
+        body["logprobs"] = True
+        body["top_logprobs"] = 1
+
+
+def _mean_token_entropy_from_logprobs(entries: list[Any]) -> float | None:
+    """Reduce a sequence of per-token logprob entries to mean NLL.
+
+    Each entry follows the OpenAI shape::
+
+        {"token": "...", "logprob": -0.8, "bytes": [...], "top_logprobs": [...]}
+
+    Returns the mean of ``-logprob`` over all entries, or ``None`` when the
+    list is empty / malformed (e.g. the server didn't actually emit logprobs).
+    """
+    nlls: list[float] = []
+    for ent in entries:
+        if not isinstance(ent, dict):
+            continue
+        lp = ent.get("logprob")
+        if lp is None:
+            continue
+        try:
+            nlls.append(-float(lp))
+        except (TypeError, ValueError):
+            continue
+    if not nlls:
+        return None
+    return sum(nlls) / len(nlls)
 
 
 def _has_complete_answer(accumulated: str) -> bool:
