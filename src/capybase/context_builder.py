@@ -9,12 +9,27 @@ resolver signature.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from capybase.conflict_model import ContextBundle, ConflictUnit, TokenBudget
+
+if TYPE_CHECKING:
+    from capybase.memory.retriever import Retriever
 
 
 class ContextBuilder:
-    def __init__(self, context_lines: int = 15) -> None:
+    def __init__(
+        self,
+        context_lines: int = 15,
+        *,
+        retriever: "Retriever | None" = None,
+        retriever_k: int = 3,
+        min_examples: int = 3,
+    ) -> None:
         self.context_lines = context_lines
+        self.retriever = retriever
+        self.retriever_k = retriever_k
+        self.min_examples = min_examples
 
     def build(self, unit: ConflictUnit, budget: TokenBudget | None = None) -> ContextBundle:
         budget = budget or TokenBudget()
@@ -66,9 +81,25 @@ class ContextBuilder:
             if meta.get("enclosing_node_text"):
                 structural_view["enclosing_node_text"] = meta["enclosing_node_text"]
             structural_view["unit_kind"] = unit.unit_kind
+        # RAG few-shot: retrieve similar past merges from the experience store
+        # and inject them as dynamic demonstrations. The query is the conflict
+        # "signature" (the three sides concatenated). Skipped when the retriever
+        # is absent or the corpus is too small to be meaningful.
+        retrieved: list = []
+        if self.retriever is not None:
+            query = " ".join([unit.base.text, unit.current.text, unit.replayed.text])
+            try:
+                candidates = self.retriever.retrieve(
+                    query, k=self.retriever_k, language=unit.language
+                )
+                if len(candidates) >= self.min_examples or candidates:
+                    retrieved = candidates
+            except Exception:  # noqa: BLE001 - retrieval is best-effort
+                pass
         return ContextBundle(
             primary_text=primary,
             side_summaries=side_summaries,
+            retrieved_examples=retrieved,
             token_estimate=est,
             structural_view=structural_view,
         )

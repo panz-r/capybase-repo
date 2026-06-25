@@ -53,6 +53,21 @@ def build_resolve_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
 {enc_text}
 
 """
+    # RAG few-shot: when past similar merges were retrieved from the experience
+    # store, show them as demonstrations so the model learns this codebase's
+    # merge conventions dynamically. Each example shows the three sides and the
+    # accepted resolution.
+    few_shot = ""
+    if context.retrieved_examples:
+        blocks = []
+        for i, ex in enumerate(context.retrieved_examples, 1):
+            blocks.append(
+                f"Example {i}:\n"
+                f"  CURRENT: {ex.current}\n"
+                f"  REPLAYED: {ex.replayed}\n"
+                f"  RESOLVED: {ex.resolved}"
+            )
+        few_shot = "Similar past merges (for reference — match this style):\n" + "\n".join(blocks) + "\n\n"
     return f"""Resolve ONE git merge conflict by merging BOTH sides into one coherent
 result preserving each side's intent. Be CONCISE: reason in a few sentences,
 then answer. Do not over-explain.
@@ -60,7 +75,7 @@ then answer. Do not over-explain.
 file: {unit.path}
 language: {unit.language or 'unknown'}
 
-{structural_anchor}CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):
+{structural_anchor}{few_shot}CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):
 {cur_lines}
 
 REPLAYED_COMMIT_SIDE body (exact, including leading spaces):

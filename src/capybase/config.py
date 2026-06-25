@@ -129,6 +129,43 @@ class StructuralConfig(BaseModel):
     )
 
 
+class MemoryConfig(BaseModel):
+    """RAG experience replay: retrieve past successful merges as few-shot.
+
+    The journal already stores every prompt/response/candidate/validation
+    triple. The memory layer distills accepted resolutions into a labeled
+    corpus of ``HistoricalExample`` records, retrieves the most similar past
+    merges for a new conflict, and injects them into the prompt as dynamic
+    few-shot demonstrations. Disabled by default; activates
+    ``future.enable_rag``.
+    """
+
+    enabled: bool = False
+    store_path: str = ".rebase-agent/memory/experiences.jsonl"
+    retriever: str = "lexical"  # "lexical" (BM25) or "embedding" (future)
+    retriever_k: int = 3
+    # Minimum experiences before retrieval is attempted (avoid noisy few-shot
+    # from a near-empty corpus).
+    min_examples_for_retrieval: int = 3
+
+
+class CalibrationConfig(BaseModel):
+    """Calibrated risk routing: replace the rules threshold with a learned one.
+
+    Once the experience store accumulates enough labeled outcomes, a lightweight
+    classifier (logistic regression / isotonic) is fitted offline over
+    ``VerificationResult.features`` and predicts the probability a merge will
+    fail. The calibrated engine produces the same ``RiskDecision`` shape but
+    overrides the accept/escalate boundary using the fitted threshold. Disabled
+    by default until enough data is collected.
+    """
+
+    enabled: bool = False
+    model_path: str = ".rebase-agent/memory/calibration.json"
+    escalate_threshold: float = 0.7
+    min_examples_for_calibration: int = 50
+
+
 class Config(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
@@ -136,6 +173,8 @@ class Config(BaseModel):
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
     journal: JournalConfig = Field(default_factory=JournalConfig)
     structural: StructuralConfig = Field(default_factory=StructuralConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
     future: FutureConfig = Field(default_factory=FutureConfig)
     source_path: str | None = None
 

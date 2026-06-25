@@ -20,6 +20,7 @@ Three modes share the same inspection core:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Iterable
 
 from capybase.conflict_extractor import ConflictExtractor, SkippedPath
@@ -84,12 +85,45 @@ class Orchestrator:
         self.extractor = ConflictExtractor(
             self.git, structural_config=config.structural
         )
-        self.context_builder = ContextBuilder(config.policy.context_lines)
+        # Memory: experience store + retriever for RAG few-shot. Built lazily
+        # from config; both are None when [memory] is disabled, so the context
+        # builder gets no retriever and retrieved_examples stays empty.
+        self.memory_store = None
+        retriever = None
+        if config.memory.enabled and config.future.enable_rag:
+            from capybase.memory.retriever import LexicalRetriever
+            from capybase.memory.store import ExperienceStore
+
+            self.memory_store = ExperienceStore.for_repo(
+                str(self.git.repo), config.memory.store_path
+            )
+            retriever = LexicalRetriever(self.memory_store)
+        self.context_builder = ContextBuilder(
+            config.policy.context_lines,
+            retriever=retriever,
+            retriever_k=config.memory.retriever_k,
+            min_examples=config.memory.min_examples_for_retrieval,
+        )
         self.resolution_engine = resolution_engine or ResolutionEngine(config.model)
         self.verification = VerificationEngine.default(
             ValidationConfig.from_dict(config.validation.model_dump())
         )
-        self.risk = RiskEngine(max_retries_per_unit=config.policy.max_retries_per_unit)
+        # Risk engine: the calibrated variant overrides accept/escalate with
+        # a learned threshold when a fitted model is present; otherwise it
+        # transparently delegates to the rules engine. Both produce the same
+        # RiskDecision shape so the orchestrator consumes only ``action``.
+        if config.calibration.enabled:
+            from capybase.calibration import CalibratedRiskEngine
+
+            self.risk = CalibratedRiskEngine.from_config(
+                max_retries_per_unit=config.policy.max_retries_per_unit,
+                model_path=str(self.git.repo / config.calibration.model_path)
+                if not Path(config.calibration.model_path).is_absolute()
+                else config.calibration.model_path,
+                escalate_threshold=config.calibration.escalate_threshold,
+            )
+        else:
+            self.risk = RiskEngine(max_retries_per_unit=config.policy.max_retries_per_unit)
         self.policy = Policy(
             self.git,
             supported_conflict_types=set(config.policy.supported_conflict_types),
@@ -339,6 +373,7 @@ class Orchestrator:
             if escalated_unit is not None:
                 result.escalated = True
                 result.reason = f"could not resolve {escalated_unit.unit.unit_id}"
+                self._record_outcomes_to_memory(result)
                 write_review_bundle(
                     self.paths,
                     reason=result.reason,
@@ -390,6 +425,7 @@ class Orchestrator:
                         f"whole-file validation failed for {path}: "
                         + "; ".join(f.message for f in file_validation.hard_failures)
                     )
+                    self._record_outcomes_to_memory(result)
                     write_review_bundle(
                         self.paths,
                         reason=result.reason,
@@ -401,9 +437,12 @@ class Orchestrator:
         if self.git.has_unmerged_paths():
             result.escalated = True
             result.reason = "unmerged paths remain after staging"
+            self._record_outcomes_to_memory(result)
             write_review_bundle(
                 self.paths, reason=result.reason, step_index=result.step_index
             )
+        else:
+            self._record_outcomes_to_memory(result)
         return result
 
     def _resolve_unit(self, unit: ConflictUnit) -> UnitOutcome:
@@ -584,6 +623,58 @@ class Orchestrator:
             result.escalated = True
             result.reason = "all conflicted paths are unsupported"
         return result
+
+    def _record_outcomes_to_memory(self, result: StepResult) -> None:
+        """Append labeled outcomes to the experience store for RAG/calibration.
+
+        Called once per step after resolution settles (accepted or escalated).
+        Each unit's outcome becomes an Experience record: accepted merges are
+        positive examples (few-shot + LoRA data), escalated ones are negative
+        labels for calibration. No-op when the memory store is not configured.
+        """
+        if self.memory_store is None:
+            return
+        from capybase.conflict_model import HistoricalExample
+        from capybase.memory.store import Experience
+
+        for outcome in result.outcomes:
+            unit = outcome.unit
+            accepted = outcome.accepted
+            if accepted is not None:
+                resolved = accepted.resolved_text
+                outcome_label = "accepted"
+            else:
+                # Escalated: use the last attempt's text if any, else empty.
+                resolved = outcome.attempts[-1].resolved_text if outcome.attempts else ""
+                outcome_label = "escalated"
+            features = {}
+            risk_score = None
+            if outcome.validation is not None:
+                features = dict(outcome.validation.features)
+            if outcome.decision is not None:
+                risk_score = outcome.decision.risk_score
+            try:
+                self.memory_store.append(
+                    Experience(
+                        example=HistoricalExample(
+                            summary=f"{unit.path}:{unit.unit_id}",
+                            base=unit.base.text,
+                            current=unit.current.text,
+                            replayed=unit.replayed.text,
+                            resolved=resolved,
+                            source=self.session_id,
+                        ),
+                        outcome=outcome_label,
+                        language=unit.language,
+                        path=unit.path,
+                        session_id=self.session_id,
+                        unit_id=unit.unit_id,
+                        validator_features=features,
+                        risk_score=risk_score,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - memory is best-effort
+                pass
 
     def _write_and_stage(self, path: str, buffer: str, result: StepResult) -> None:
         if self.config.journal.enabled and self.config.journal.store_snapshots:

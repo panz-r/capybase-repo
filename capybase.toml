@@ -83,10 +83,29 @@ max_enclosing_node_lines = 60
 cross_file_slice = true
 slice_search_globs = ["**/*.py", "**/*.rs"]
 
+# RAG experience replay: store labeled outcomes, retrieve similar past merges
+# as dynamic few-shot. Requires [future] enable_rag = true to activate.
+# The store accumulates from every capybase run; no manual labeling needed.
+[memory]
+enabled = false
+store_path = ".rebase-agent/memory/experiences.jsonl"
+retriever = "lexical"        # "lexical" (BM25, no deps) or "embedding" (future)
+retriever_k = 3
+min_examples_for_retrieval = 3
+
+# Calibrated risk routing: replace the rules accept/escalate threshold with a
+# learned one. Fit offline with scripts/fit_calibration.py once enough data
+# accumulates; the fitted model is pure-Python inference (no sklearn at runtime).
+[calibration]
+enabled = false
+model_path = ".rebase-agent/memory/calibration.json"
+escalate_threshold = 0.7
+min_examples_for_calibration = 50
+
 # [future] documents planned seams. It does nothing in the MVP.
 [future]
 enable_self_consistency = false   # raise [model] samples + set true for majority voting
-enable_rag = false
+enable_rag = false                # set true + [memory] enabled = true for RAG few-shot
 enable_structural_context = false  # set true + [structural] enabled = true for AST context
 enable_verifier_model = false
 enable_mutation_testing = false
