@@ -197,6 +197,26 @@ class CalibrationConfig(BaseModel):
     conformal_alpha: float = 0.1
 
 
+class RoutingConfig(BaseModel):
+    """Difficulty-aware routing (survey §6.1, ICoT/RoutingGen pattern).
+
+    Classifies a conflict as ``simple`` or ``complex`` *before* any LLM call
+    using structural signals already on the ConflictUnit. Simple conflicts (a
+    single isolated hunk) take a fast path (one low-temp sample, no two-pass,
+    no consensus); complex ones (multi-hunk, large nodes) get the full
+    test-time pipeline. Concentrates compute where a 3B model struggles and
+    cuts ~half the tokens on easy cases. Disabled by default (opt-in).
+    """
+
+    enabled: bool = False
+    # A file with more than one conflict hunk → complex.
+    complex_if_sibling_count_gt: int = 0
+    # Enclosing AST node larger than this (lines) → complex.
+    max_simple_node_lines: int = 40
+    # Combined base+current+replayed side text longer than this (chars) → complex.
+    max_simple_side_chars: int = 1200
+
+
 class Config(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
@@ -206,6 +226,7 @@ class Config(BaseModel):
     structural: StructuralConfig = Field(default_factory=StructuralConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
+    routing: RoutingConfig = Field(default_factory=RoutingConfig)
     future: FutureConfig = Field(default_factory=FutureConfig)
     source_path: str | None = None
 

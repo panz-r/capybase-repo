@@ -521,7 +521,41 @@ class Orchestrator:
             )
 
             consensus_report = None
-            if failures is None and self.config.model.two_pass and self.config.model.samples > 1:
+            # Difficulty-aware routing (survey §6.1): classify the conflict
+            # before any LLM call. Simple conflicts take a fast path (one
+            # low-temp sample, no two-pass, no consensus); complex ones get the
+            # full test-time pipeline. Disabled (complex=full path for all)
+            # until config.routing.enabled is set.
+            difficulty = "complex"
+            if self.config.routing.enabled:
+                from capybase.routing import RoutingConfig as _RC, classify_difficulty
+
+                difficulty = classify_difficulty(
+                    unit,
+                    _RC(
+                        enabled=True,
+                        complex_if_sibling_count_gt=(
+                            self.config.routing.complex_if_sibling_count_gt
+                        ),
+                        max_simple_node_lines=self.config.routing.max_simple_node_lines,
+                        max_simple_side_chars=self.config.routing.max_simple_side_chars,
+                    ),
+                )
+                self.journal.emit(
+                    "difficulty_classified",
+                    {"difficulty": difficulty},
+                    step_index=self.step,
+                    path=unit.path,
+                    unit_id=unit.unit_id,
+                )
+
+            if difficulty == "simple":
+                # Fast path: one low-temperature sample, no intent pass, no
+                # consensus. Simple isolated hunks resolve trivially.
+                candidates = self.resolution_engine.propose(
+                    unit, context, failures=failures, prev_candidate=prev_candidate
+                )
+            elif failures is None and self.config.model.two_pass and self.config.model.samples > 1:
                 # Two-pass prompting + consensus: extract intents, then sample
                 # N code candidates conditioned on them, then majority-vote.
                 candidates = self.resolution_engine.propose_two_pass(
