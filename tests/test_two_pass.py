@@ -547,4 +547,166 @@ def test_propose_with_consensus_forwards_n_samples():
     assert len(client.calls) == 4
 
 
+# ---------------------------------------------------------------------------
+# PlanSearch-style multi-plan sampling (survey §1): sample N distinct plans →
+# one code candidate per plan, tagged code_from_intent.v1#plan{i}.
+# ---------------------------------------------------------------------------
+
+
+def test_plan_search_prompt_asks_for_distinct_plans():
+    from capybase.resolution_engine import build_plan_search_prompt
+
+    prompt = build_plan_search_prompt(_unit(), _ctx())
+    assert "DISTINCT" in prompt
+    assert "constraints" in prompt
+    assert "plans" in prompt
+    # It must NOT ask for the merged code itself (that's Pass 2).
+    assert "Do NOT write the merged code" in prompt
+
+
+def test_parse_plans_valid_multi():
+    from capybase.resolution_engine import parse_plans
+
+    text = '{"constraints": ["a"], "plans": [' \
+           '{"strategy": "merge both", "steps": ["x", "y"]}, ' \
+           '{"strategy": "guard current", "steps": ["z"]}]}'
+    plans = parse_plans(text)
+    assert plans is not None
+    assert len(plans) == 2
+    assert plans[0]["strategy"] == "merge both"
+
+
+def test_parse_plans_returns_none_for_single_plan():
+    """PlanSearch needs >=2 plans to add planning-axis diversity."""
+    from capybase.resolution_engine import parse_plans
+
+    text = '{"plans": [{"strategy": "only one", "steps": ["x"]}]}'
+    assert parse_plans(text) is None
+
+
+def test_parse_plans_returns_none_for_malformed():
+    from capybase.resolution_engine import parse_plans
+
+    assert parse_plans("not json at all") is None
+    assert parse_plans('{"plans": "not a list"}') is None
+
+
+def test_code_prompt_with_plan_prepends_constraint():
+    """With a plan, the 'Implement THIS plan exactly' block appears and carries
+    the plan's steps. Without, byte-identical to the original."""
+    unit = _unit()
+    ctx = _ctx()
+    intents = {"current_side_intent": ["a"], "replayed_commit_intent": ["b"]}
+    plan = {"strategy": "guard both", "steps": ["add check", "return"]}
+    with_prompt = build_code_prompt(unit, ctx, intents, plan=plan)
+    without = build_code_prompt(unit, ctx, intents)
+    assert "Implement THIS plan exactly" in with_prompt
+    assert "guard both" in with_prompt
+    assert "add check" in with_prompt
+    # Without plan: no plan block.
+    assert "Implement THIS plan exactly" not in without
+
+
+def _plans_json():
+    import json
+
+    return json.dumps({
+        "constraints": ["c"],
+        "plans": [
+            {"strategy": "merge both", "steps": ["s1"]},
+            {"strategy": "guard current", "steps": ["s2"]},
+            {"strategy": "restructure", "steps": ["s3"]},
+        ],
+    })
+
+
+def test_plan_search_draws_one_candidate_per_plan():
+    """plan_search on + samples>1 → one code candidate per plan, each tagged
+    #plan{i}. Call sequence: intent(1) → plan-search(1) → code(N)."""
+    import json
+
+    cfg = ModelConfig(
+        samples=3, two_pass=True, plan_search=True, parallel_samples=True,
+    )
+    # Sequence: intent resp, plan-search resp, then 3 code resps.
+    client = ScriptedClient([
+        json.dumps({"current_side_intent": ["a"], "replayed_commit_intent": ["b"]}),
+        _plans_json(),
+        '{"resolved_text": "    return 1"}',
+        '{"resolved_text": "    return 2"}',
+        '{"resolved_text": "    return 3"}',
+    ])
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose_two_pass(_unit(), _ctx(), n_samples=3)
+    assert len(cands) == 3
+    versions = sorted(c.prompt_version for c in cands if c.prompt_version)
+    assert versions == [
+        "code_from_intent.v1#plan0",
+        "code_from_intent.v1#plan1",
+        "code_from_intent.v1#plan2",
+    ]
+
+
+def test_plan_search_uses_distinct_prompts_per_plan():
+    """Each plan conditions its own code prompt — the 3 code calls carry
+    distinct user messages (the plans differ). Order is nondeterministic
+    (thread pool), so assert on the SET of strategies present, not indices."""
+    import json
+
+    cfg = ModelConfig(samples=3, two_pass=True, plan_search=True, parallel_samples=True)
+    client = MessageRecordingClient([
+        json.dumps({"current_side_intent": ["a"], "replayed_commit_intent": ["b"]}),
+        _plans_json(),
+        '{"resolved_text": "1"}', '{"resolved_text": "2"}', '{"resolved_text": "3"}',
+    ])
+    engine = ResolutionEngine(cfg, client=client)
+    engine.propose_two_pass(_unit(), _ctx(), n_samples=3)
+    # Calls 3,4,5 are the code calls (indices 2,3,4); each has distinct messages.
+    code_calls = client.calls[2:5]
+    prompts = [c["messages"][-1]["content"] for c in code_calls]
+    assert len(set(prompts)) == 3  # all distinct
+    # Each of the three plan strategies appears in exactly one code prompt
+    # (completion order is nondeterministic, so check membership not index).
+    joined = "\n".join(prompts)
+    assert "merge both" in joined
+    assert "guard current" in joined
+    assert "restructure" in joined
+
+
+def test_plan_search_falls_back_when_plan_parse_fails():
+    """A flaky plan-search response (no valid plans) → falls back to the
+    standard single-intent → N-code path (no crash, candidates still produced)."""
+    import json
+
+    cfg = ModelConfig(samples=3, two_pass=True, plan_search=True, parallel_samples=True)
+    client = ScriptedClient([
+        json.dumps({"current_side_intent": ["a"], "replayed_commit_intent": ["b"]}),
+        "garbage, not json",  # plan-search fails to parse
+        '{"resolved_text": "1"}', '{"resolved_text": "2"}', '{"resolved_text": "3"}',
+    ])
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose_two_pass(_unit(), _ctx(), n_samples=3)
+    assert len(cands) == 3
+    # Fallback path: standard code_from_intent.v1, no #plan tags.
+    assert all(c.prompt_version == "code_from_intent.v1" for c in cands)
+
+
+def test_plan_search_off_uses_standard_two_pass():
+    """plan_search off (default) → the standard one-plan → N-code path, no
+    plan-search call made."""
+    import json
+
+    cfg = ModelConfig(samples=3, two_pass=True, plan_search=False, parallel_samples=True)
+    client = ScriptedClient([
+        json.dumps({"current_side_intent": ["a"], "replayed_commit_intent": ["b"]}),
+        '{"resolved_text": "1"}', '{"resolved_text": "2"}', '{"resolved_text": "3"}',
+    ])
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose_two_pass(_unit(), _ctx(), n_samples=3)
+    assert len(cands) == 3
+    assert all(c.prompt_version == "code_from_intent.v1" for c in cands)
+    # Only 4 calls: 1 intent + 3 code (no plan-search call).
+    assert len(client.calls) == 4
+
+
 

@@ -41,6 +41,13 @@ class ModelConfig(BaseModel):
     # intents. Only activates when samples > 1 (the multi-candidate path) to
     # avoid doubling requests for the single-sample case.
     two_pass: bool = False
+    # PlanSearch (survey §1): in the two-pass path, sample MULTIPLE distinct
+    # NL resolution plans (Pass 1) and generate one code candidate per plan
+    # (Pass 2), instead of one plan → N code samples. Adds diversity on the
+    # planning axis — orthogonal to temperature and prompt-variant sampling.
+    # Only engages when two_pass AND samples > 1. Defaults off; falls back to
+    # the single-intent path if the plan-search call fails or yields <2 plans.
+    plan_search: bool = False
     # Raised temperature for the diverse multi-sampling pass (distinct from
     # the low `temperature` used for focused retries). Higher temp → more
     # diverse candidates → better consensus signal.
