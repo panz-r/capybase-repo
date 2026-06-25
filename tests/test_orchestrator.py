@@ -520,3 +520,82 @@ def test_verifier_registered_when_flag_on(conflicted_repo):
     names = [type(v).__name__ for v in orch.verification.validators]
     assert "VerifierModelValidator" in names
 
+
+# ---------------------------------------------------------------------------
+# VeriGuard policy gate integration (survey §4): the deterministic safety gate
+# blocks an unsafe patch end-to-end when enable_policy_gate + a rule are set.
+# ---------------------------------------------------------------------------
+
+
+def _policy_config(repo):
+    from capybase.config import PolicyRule
+
+    cfg = _config(repo)
+    cfg.validation.enable_policy_gate = True
+    cfg.validation.policy_rules = [
+        PolicyRule(name="no_eval", kind="forbid_call", pattern="eval",
+                   severity="error", reason="eval is forbidden"),
+    ]
+    return cfg
+
+
+def test_policy_gate_registered_when_enabled(conflicted_repo):
+    """enable_policy_gate on + a rule → the gate is auto-registered by the
+    engine factory (no orchestrator register() call needed)."""
+    repo = conflicted_repo["repo"]
+    orch = Orchestrator(_policy_config(repo), repo=str(repo))
+    names = [type(v).__name__ for v in orch.verification.validators]
+    assert "PolicyGateValidator" in names
+
+
+def test_policy_gate_not_registered_when_disabled(conflicted_repo):
+    """Flag off → the gate is absent from the chain (zero-cost default)."""
+    repo = conflicted_repo["repo"]
+    cfg = _config(repo)  # enable_policy_gate defaults False
+    orch = Orchestrator(cfg, repo=str(repo))
+    names = [type(v).__name__ for v in orch.verification.validators]
+    assert "PolicyGateValidator" not in names
+
+
+def test_policy_gate_not_registered_when_no_rules(conflicted_repo):
+    """Flag on but no rules → still absent (the gate ships no built-in rules)."""
+    repo = conflicted_repo["repo"]
+    cfg = _config(repo)
+    cfg.validation.enable_policy_gate = True
+    cfg.validation.policy_rules = []  # no rules → no-op
+    orch = Orchestrator(cfg, repo=str(repo))
+    names = [type(v).__name__ for v in orch.verification.validators]
+    assert "PolicyGateValidator" not in names
+
+
+def test_policy_gate_blocks_unsafe_patch(conflicted_repo):
+    """Gate on + a forbid_call eval rule → a patch that uses eval is blocked
+    from auto-apply (escalated). The patch is structurally a valid merge, so
+    only the policy gate catches the unsafe call."""
+    repo = conflicted_repo["repo"]
+    # A candidate that resolves the merge but smuggles in an eval() call.
+    client = SequenceClient([
+        _make_resolved_payload("    return eval('1') + 'howdy'"),
+    ])
+    cfg = _policy_config(repo)
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    assert result.escalated
+
+
+def test_policy_gate_allows_safe_patch(conflicted_repo):
+    """Gate on + a forbid_call eval rule → a patch without eval is accepted
+    (rebase completes). Proves the gate doesn't over-reject clean merges."""
+    repo = conflicted_repo["repo"]
+    client = SequenceClient([
+        _make_resolved_payload("    return 'hi' + 'howdy'"),  # no forbidden call
+    ])
+    cfg = _policy_config(repo)
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    assert not result.escalated, result.reason
+

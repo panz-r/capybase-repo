@@ -206,6 +206,13 @@ class Orchestrator:
                     model_name=config.model.model,
                 )
             )
+        # VeriGuard-style deterministic policy gate (survey §4): auto-registered
+        # by VerificationEngine.default() when enable_policy_gate is on AND rules
+        # are configured. It inspects WHAT a patch introduces (the only such
+        # check — all others are syntactic/structural), deterministically via
+        # stdlib ast (no LLM, no execution). Tags violations onto the unit's
+        # risk_tags and blocks error-severity violations from auto-apply.
+        # Inert + zero work when off or no rules (the engine factory skips it).
         # Risk engine: the calibrated variant overrides accept/escalate with
         # a learned threshold when a fitted model is present; otherwise it
         # transparently delegates to the rules engine. Both produce the same

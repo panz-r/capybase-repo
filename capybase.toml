@@ -84,6 +84,30 @@ enable_verifier_model = false
 # Critic disagreement severity: "warning" (bias toward retry/escalate) or
 # "error" (hard-reject a dropped-intent resolution).
 verifier_severity = "warning"
+# VeriGuard-style deterministic policy gate (survey §4): statically extract
+# import/call facts from each candidate's resolved text (stdlib ast, Python
+# only) and evaluate them against [[validation.policy_rules]]. The ONLY check
+# that inspects WHAT a patch introduces — catches a clean-but-unsafe merge
+# (e.g. adds subprocess to api/). Deterministic at runtime: no LLM, no
+# execution. Inert when false OR no rules configured.
+enable_policy_gate = false
+# Each rule is [[validation.policy_rules]]. kind = "forbid_import" (matches when
+# `pattern` is a prefix of any imported module) or "forbid_call" (matches when
+# `pattern` is a prefix of any call target). severity "error" hard-blocks,
+# "warning" flags. Uncomment and edit for your deployment, e.g.:
+# [[validation.policy_rules]]
+# name = "no_subprocess"
+# kind = "forbid_import"
+# pattern = "subprocess"
+# severity = "error"
+# reason = "subprocess is forbidden in auto-merged code"
+#
+# [[validation.policy_rules]]
+# name = "no_eval"
+# kind = "forbid_call"
+# pattern = "eval"
+# severity = "error"
+# reason = "eval/exec are forbidden"
 
 [journal]
 enabled = true
