@@ -497,4 +497,54 @@ def test_prompt_variants_skipped_when_samples_one():
     assert cands[0].prompt_version == "resolve_text_block.v5"  # no suffix
 
 
+# ---------------------------------------------------------------------------
+# Difficulty-aware sample allocation (survey §4 UAB-lite): the n_samples
+# override lets a caller draw more samples than config.samples — used by the
+# orchestrator to concentrate compute on "complex" units.
+# ---------------------------------------------------------------------------
+
+
+def test_propose_n_samples_override_draws_that_many():
+    """propose(n_samples=K) draws exactly K samples even when config.samples
+    differs — the override is the source of truth for the count."""
+    client = ScriptedClient(["a", "b", "c", "d"])
+    cfg = ModelConfig(samples=1, parallel_samples=True)  # base count = 1
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose(_unit(), _ctx(), n_samples=4)
+    assert len(cands) == 4
+    assert len(client.calls) == 4
+
+
+def test_propose_n_samples_none_uses_config():
+    """No override (default None) → config.samples is used, unchanged."""
+    client = ScriptedClient(["a", "b", "c"])
+    cfg = ModelConfig(samples=3, parallel_samples=True)
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose(_unit(), _ctx())
+    assert len(cands) == 3
+    assert len(client.calls) == 3
+
+
+def test_propose_n_samples_override_beats_config():
+    """The override wins over config.samples when both are set."""
+    client = ScriptedClient(["a", "b"])
+    cfg = ModelConfig(samples=5, parallel_samples=True)  # would draw 5
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose(_unit(), _ctx(), n_samples=2)  # override → 2
+    assert len(cands) == 2
+    assert len(client.calls) == 2
+
+
+def test_propose_with_consensus_forwards_n_samples():
+    """propose_with_consensus(n_samples=K) forwards the override to propose."""
+    from capybase.config import ModelConfig as _MC
+
+    client = ScriptedClient(["a", "b", "c", "d"])
+    cfg = _MC(samples=1, parallel_samples=True)
+    engine = ResolutionEngine(cfg, client=client)
+    cands, _rep = engine.propose_with_consensus(_unit(), _ctx(), n_samples=4)
+    assert len(cands) == 4
+    assert len(client.calls) == 4
+
+
 

@@ -22,6 +22,15 @@ class ModelConfig(BaseModel):
     model: str = "vibethink"
     temperature: float = 0.2
     samples: int = 1
+    # Difficulty-aware sample allocation (survey §4 UAB-lite): when routing is
+    # enabled and a unit classifies as "complex", draw this many samples instead
+    # of the base ``samples``. Concentrates test-time compute where a 3B model
+    # genuinely struggles (multi-hunk files, large enclosing AST nodes) without a
+    # cross-unit scheduler. 0 (default) = disabled: complex units use ``samples``
+    # as today, so behavior is unchanged. Difficulty is the viable signal here
+    # because it is computed BEFORE any LLM call (unlike mean_token_entropy, which
+    # is post-generation and can't drive the first sample count).
+    samples_complex: int = 0
     # Self-consistency: when samples > 1 and future.enable_self_consistency is
     # on, candidates are clustered by normalized text and the majority wins.
     # Below this agreement fraction the merge is flagged low-confidence (the

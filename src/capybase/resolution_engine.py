@@ -439,6 +439,7 @@ class ResolutionEngine:
         *,
         failures: list[VerificationFailure] | None = None,
         prev_candidate: CandidateResolution | None = None,
+        n_samples: int | None = None,
     ) -> list[CandidateResolution]:
         """Generate one or more candidates for ``unit``.
 
@@ -448,6 +449,10 @@ class ResolutionEngine:
         code so the model fixes locally rather than regenerating from scratch.
         The number of samples comes from config so self-consistency is enabled
         by raising ``samples``.
+
+        ``n_samples`` overrides the config sample count when given (used by the
+        orchestrator to allocate more samples to "complex" units, survey §4
+        UAB-lite). ``None`` (default) uses ``self.config.samples`` unchanged.
         """
         if failures and prev_candidate and prev_candidate.resolved_text:
             prompt_version = PROMPT_REPAIR
@@ -459,7 +464,7 @@ class ResolutionEngine:
             prompt_version = PROMPT_RESOLVE
             prompt = build_resolve_prompt(unit, context)
         candidates: list[CandidateResolution] = []
-        n = max(1, self.config.samples)
+        n = max(1, self.config.samples if n_samples is None else n_samples)
         # Prompt-variant sampling (survey §4): on a FRESH resolve only (retries/
         # repair must stay single-template for reproducible counterexample
         # feedback), spread samples across semantically-equivalent phrasings.
@@ -648,6 +653,7 @@ class ResolutionEngine:
         context: ContextBundle,
         *,
         failures: list[VerificationFailure] | None = None,
+        n_samples: int | None = None,
     ) -> tuple[list[CandidateResolution], ConsensusReport | None]:
         """Generate N samples and reorder so the majority winner is first.
 
@@ -658,8 +664,11 @@ class ResolutionEngine:
         winner. The report (agreement score, cluster count) is returned for
         journaling and as a risk signal — low agreement flags an uncertain
         merge.
+
+        ``n_samples`` overrides the config sample count (forwarded to
+        ``propose``); used by the orchestrator for difficulty-aware allocation.
         """
-        candidates = self.propose(unit, context, failures=failures)
+        candidates = self.propose(unit, context, failures=failures, n_samples=n_samples)
         if len(candidates) <= 1:
             return candidates, None
         ordered, report = rank_by_consensus(candidates, unit.language)
