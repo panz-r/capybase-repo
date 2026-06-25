@@ -103,6 +103,8 @@ class Orchestrator:
             retriever=retriever,
             retriever_k=config.memory.retriever_k,
             min_examples=config.memory.min_examples_for_retrieval,
+            use_enclosing_as_primary=config.structural.use_enclosing_as_primary,
+            canonicalize_context=config.structural.canonicalize_context,
         )
         self.resolution_engine = resolution_engine or ResolutionEngine(config.model)
         self.verification = VerificationEngine.default(

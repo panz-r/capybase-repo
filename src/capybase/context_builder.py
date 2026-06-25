@@ -25,11 +25,15 @@ class ContextBuilder:
         retriever: "Retriever | None" = None,
         retriever_k: int = 3,
         min_examples: int = 3,
+        use_enclosing_as_primary: bool = False,
+        canonicalize_context: bool = False,
     ) -> None:
         self.context_lines = context_lines
         self.retriever = retriever
         self.retriever_k = retriever_k
         self.min_examples = min_examples
+        self.use_enclosing_as_primary = use_enclosing_as_primary
+        self.canonicalize_context = canonicalize_context
 
     def build(self, unit: ConflictUnit, budget: TokenBudget | None = None) -> ContextBundle:
         budget = budget or TokenBudget()
@@ -53,9 +57,6 @@ class ContextBuilder:
         else:
             primary_lines = lines
         primary = "\n".join(primary_lines)
-        # Rough token estimate (~4 chars/token). Good enough for budgeting;
-        # a real tokenizer can be swapped in later without interface change.
-        est = max(1, len(primary) // 4)
         side_summaries = {
             "base": _head(unit.base.text),
             "current": _head(unit.current.text),
@@ -65,12 +66,12 @@ class ContextBuilder:
         if siblings:
             structural_view["sibling_conflict_count"] = len(siblings)
             structural_view["sibling_spans"] = [list(s) for s in siblings]
-        # Surface the tree-sitter enclosing node (if the extractor populated
-        # one) as a semantic anchor in the structural view. This gives the
-        # prompt builder a way to tell the model "you are merging inside def
-        # greet()" — far sharper context than the raw line window alone. The
-        # enclosing node text is NOT substituted for primary_text (the model
-        # still needs the exact marker lines), but is provided alongside.
+        # Structural deconstruction: when tree-sitter resolved the enclosing
+        # definition node and it fits the size budget, use it as primary_text
+        # instead of the line window. The model sees the full logical block
+        # (def/impl) it is merging inside — sharper than an arbitrary text
+        # slice that may truncate mid-function. The line window remains the
+        # fallback when the node is absent or too large.
         meta = unit.structural_metadata
         if meta.get("enclosing_node_type"):
             structural_view["enclosing_node_type"] = meta["enclosing_node_type"]
@@ -80,7 +81,19 @@ class ContextBuilder:
                 ]
             if meta.get("enclosing_node_text"):
                 structural_view["enclosing_node_text"] = meta["enclosing_node_text"]
+                if self.use_enclosing_as_primary:
+                    primary = meta["enclosing_node_text"]
             structural_view["unit_kind"] = unit.unit_kind
+        # Token canonicalization: strip comment lines, docstrings, and blank
+        # runs from the context shown to the model. This reduces noise for a
+        # 3B model prone to "lost in the middle" — the model focuses on the
+        # functional code. Does NOT alter resolved_text (the model still emits
+        # exact indentation); only the context window is cleaned.
+        if self.canonicalize_context:
+            primary = canonicalize_context(primary, unit.language)
+        # Rough token estimate (~4 chars/token). Good enough for budgeting;
+        # a real tokenizer can be swapped in later without interface change.
+        est = max(1, len(primary) // 4)
         # RAG few-shot: retrieve similar past merges from the experience store
         # and inject them as dynamic demonstrations. The query is the conflict
         # "signature" (the three sides concatenated). Skipped when the retriever
@@ -142,3 +155,44 @@ def _clamp_high(
 def _head(text: str, n: int = 200) -> str:
     text = text.strip()
     return text if len(text) <= n else text[:n] + " …"
+
+
+def canonicalize_context(text: str, language: str | None = None) -> str:
+    """Strip noise from the context window shown to the model.
+
+    Removes standalone comment lines, collapses blank-line runs, and trims
+    trailing whitespace — keeping the model focused on functional code rather
+    than docstrings, license headers, or decorative comments. Indentation is
+    PRESERVED (it is structurally significant). The conflict-marker lines
+    (``<<<<<<<``, ``=======``, ``>>>>>>>``) are always kept — the model needs
+    to see the exact block boundaries.
+    """
+    if not text:
+        return text
+    lines: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        # Never strip conflict-marker lines — the model needs exact boundaries.
+        if stripped.startswith(("<<<<<<<", "=======", ">>>>>>>", "|||||||")):
+            lines.append(line.rstrip())
+            continue
+        # Drop full comment lines.
+        if _is_context_comment(stripped, language):
+            continue
+        lines.append(line.rstrip())
+    out = "\n".join(lines)
+    # Collapse runs of blank lines to a single blank.
+    while "\n\n\n" in out:
+        out = out.replace("\n\n\n", "\n\n")
+    return out
+
+
+def _is_context_comment(stripped: str, language: str | None) -> bool:
+    """True if a stripped line is entirely a comment (not code)."""
+    if not stripped:
+        return False
+    if language == "python":
+        return stripped.startswith("#")
+    if language == "rust":
+        return stripped.startswith(("//", "/*", "*", "*/"))
+    return stripped.startswith(("#", "//"))

@@ -82,6 +82,13 @@ languages = ["python", "rust"]
 max_enclosing_node_lines = 60
 cross_file_slice = true
 slice_search_globs = ["**/*.py", "**/*.rs"]
+# Use the enclosing AST node as primary context instead of the line window.
+use_enclosing_as_primary = true
+# Strip comment lines, docstrings, and blank runs from the context window.
+canonicalize_context = true
+# Refine conflict boundaries with `git merge-file --diff3` for the tightest
+# possible marker span.
+refine_with_diff3 = true
 
 # RAG experience replay: store labeled outcomes, retrieve similar past merges
 # as dynamic few-shot. Requires [future] enable_rag = true to activate.

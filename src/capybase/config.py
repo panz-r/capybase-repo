@@ -127,6 +127,17 @@ class StructuralConfig(BaseModel):
     slice_search_globs: list[str] = Field(
         default_factory=lambda: ["**/*.py", "**/*.rs"]
     )
+    # Use the enclosing AST node as primary_text instead of the line window.
+    # When the node fits within max_enclosing_node_lines, the model sees the
+    # full logical block (def/impl) rather than an arbitrary text slice.
+    use_enclosing_as_primary: bool = True
+    # Strip comment lines, docstrings, and blank runs from the context shown
+    # to the model. Reduces noise for a 3B model prone to "lost in the middle."
+    # Does NOT alter resolved_text — the model still emits exact indentation.
+    canonicalize_context: bool = True
+    # Refine conflict boundaries with `git merge-file --diff3` to get the
+    # tightest possible marker span (git may auto-resolve adjacent lines).
+    refine_with_diff3: bool = True
 
 
 class MemoryConfig(BaseModel):
