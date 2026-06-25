@@ -272,3 +272,159 @@ def test_consensus_clusters_candidates_across_prompt_variants():
     assert rep is not None
     assert rep.cluster_count == 2  # {"return 1"} majority + {"return 9"} outlier
     assert rep.agreement_score == 2 / 3
+
+
+# ---------------------------------------------------------------------------
+# FactSelfCheck rationale-consistency (survey §2): agreement over the
+# candidates' OWN intent claims — orthogonal to text-consensus.
+# ---------------------------------------------------------------------------
+
+
+def _ifact(
+    rid,
+    text,
+    *,
+    cur_intent=None,
+    rep_intent=None,
+    preserve_cur=True,
+    preserve_rep=True,
+    conf=0.0,
+):
+    """A candidate carrying rationale fields (the FactSelfCheck inputs)."""
+    return CandidateResolution(
+        candidate_id=rid, unit_id="u", model_name="m", prompt_version="v",
+        resolved_text=text, self_reported_confidence=conf,
+        current_side_intent=cur_intent or [],
+        replayed_commit_intent=rep_intent or [],
+        preserved_current_side=preserve_cur,
+        preserved_replayed_commit_side=preserve_rep,
+    )
+
+
+def test_extract_facts_canonicalizes_intent_and_booleans():
+    from capybase.consensus import _extract_facts
+
+    c = _ifact(
+        "c1", "x",
+        cur_intent=["Add null check for x.", "  Log  the  change "],
+        rep_intent=["Return 0"],
+        preserve_cur=True, preserve_rep=False,
+    )
+    facts = _extract_facts(c)
+    # Booleans stringified.
+    assert facts["preserve:current"] == "true"
+    assert facts["preserve:replayed"] == "false"
+    # Intent items canonicalized (lowercased, ws-collapsed, trailing punct stripped).
+    assert facts["intent:current:0"] == "add null check for x"
+    assert facts["intent:current:1"] == "log the change"
+    assert facts["intent:replayed:0"] == "return 0"
+
+
+def test_extract_facts_empty_for_no_rationale():
+    """A candidate with no intent lists still carries the boolean facts; an
+    all-default candidate yields just the two preserve:* facts."""
+    from capybase.consensus import _extract_facts
+
+    c = _cand("c1", "x")  # no intent lists, defaults preserved=True
+    facts = _extract_facts(c)
+    assert facts["preserve:current"] == "true"
+    assert facts["preserve:replayed"] == "true"
+    # No intent:* keys.
+    assert not any(k.startswith("intent:") for k in facts)
+
+
+def test_fact_consistency_unanimous_claims_is_one():
+    from capybase.consensus import fact_consistency
+
+    cands = [
+        _ifact("a", "code", cur_intent=["add guard"], rep_intent=["return 0"]),
+        _ifact("b", "code2", cur_intent=["Add guard."], rep_intent=["return 0"]),
+        _ifact("c", "code3", cur_intent=["ADD GUARD"], rep_intent=["Return 0"]),
+    ]
+    fc = fact_consistency(cands)
+    # Every canonicalized claim matches across all three → aggregate 1.0.
+    assert fc.aggregate == 1.0
+    assert fc.low_consistency_count == 0
+    # Every candidate's own claims are unanimous → per-candidate 1.0.
+    assert all(v == 1.0 for v in fc.per_candidate.values())
+
+
+def test_fact_consistency_flags_contradictory_booleans():
+    """Candidates split on whether the replayed side was preserved → that fact
+    scores low and is counted as a low-consistency fact."""
+    from capybase.consensus import fact_consistency
+
+    cands = [
+        _ifact("a", "x", preserve_rep=True),
+        _ifact("b", "x", preserve_rep=True),
+        _ifact("c", "x", preserve_rep=False),  # minority claim
+    ]
+    fc = fact_consistency(cands)
+    # preserve:replayed: 2 of 3 say true → consistency 2/3.
+    assert abs(fc.per_fact["preserve:replayed"] - 2 / 3) < 1e-9
+    # preserve:current is unanimous (default true) → 1.0, so not low-consistency.
+    assert fc.per_fact["preserve:current"] == 1.0
+    # The outlier candidate (c) relies on the minority boolean → lower score.
+    assert fc.per_candidate["c"] < fc.per_candidate["a"]
+
+
+def test_fact_consistency_isolates_outlier_claim():
+    """One candidate asserts a claim no peer makes → that fact is low-
+    consistency and the outlier's per-candidate score drops below its peers."""
+    from capybase.consensus import fact_consistency
+
+    cands = [
+        _ifact("a", "x", cur_intent=["add guard"]),
+        _ifact("b", "x", cur_intent=["add guard"]),
+        _ifact("c", "x", cur_intent=["remove function"]),  # hallucinated claim
+    ]
+    fc = fact_consistency(cands)
+    assert fc.per_fact["intent:current:0"] == 2 / 3  # "add guard" majority
+    assert fc.low_consistency_count == 1
+    # The outlier's minority claim drags its per-candidate score below the
+    # majority claimants (it also asserts the unanimous preserve:* facts, so its
+    # score is the mean of {1.0, 1.0, 1/3} = 0.778 — lower than the peers' 0.889).
+    assert fc.per_candidate["c"] < fc.per_candidate["a"]
+    assert fc.per_candidate["c"] < fc.per_candidate["b"]
+
+
+def test_report_surfaces_intent_agreement_on_contradiction():
+    """The key FactSelfCheck win: candidates with IDENTICAL code but
+    CONTRADICTORY intent claims still report low intent_agreement — the signal
+    text-consensus (agreement_score) is blind to."""
+    cands = [
+        _ifact("a", "    return 1", cur_intent=["add null guard"]),
+        _ifact("b", "    return 1", cur_intent=["remove logging"]),
+        _ifact("c", "    return 1", cur_intent=["add null guard"]),
+    ]
+    rep = select(cands, "python")
+    # Text-consensus sees unanimous code → agreement_score 1.0.
+    assert rep.agreement_score == 1.0
+    # But the intent claims disagree → intent_agreement < 1.0.
+    assert rep.intent_agreement < 1.0
+    assert rep.low_consistency_fact_count >= 1
+
+
+def test_report_intent_agreement_one_when_unanimous():
+    cands = [_ifact(f"c{i}", "    return 1", cur_intent=["add guard"]) for i in range(3)]
+    rep = select(cands, "python")
+    assert rep.intent_agreement == 1.0
+    assert rep.low_consistency_fact_count == 0
+
+
+def test_tie_break_prefers_higher_consistency_candidate():
+    """Among equal-size clusters, the candidate whose rationale is more
+    consistent with the cohort wins the tie-break (survey §2: down-weight
+    candidates that depend on low-consistency facts)."""
+    # Three singleton clusters (distinct code) → all tied on size.
+    # a and b share the claim "add guard"; c asserts a unique minority claim.
+    cands = [
+        _ifact("a", "    return 2", cur_intent=["add guard"], conf=0.5),
+        _ifact("b", "    return 9", cur_intent=["add guard"], conf=0.9),
+        _ifact("c", "DIFFERENT", cur_intent=["something else entirely"], conf=0.9),
+    ]
+    rep = select(cands, "python")
+    # "add guard" is 2/3-consistent; c's claim is 1/3 → c has the lowest
+    # fact-consistency and loses the tie-break regardless of its confidence.
+    assert rep.winner.candidate_id != "c"
+    assert rep.winner.candidate_id in ("a", "b")
