@@ -33,6 +33,11 @@ CB_REQUEST_TIMEOUT="${CB_REQUEST_TIMEOUT:-600}"
 CB_GENERATION_TIMEOUT="${CB_GENERATION_TIMEOUT:-180}"
 CB_MAX_RETRIES="${CB_MAX_RETRIES:-3}"
 CB_CONTEXT_LINES="${CB_CONTEXT_LINES:-20}"
+# Enable tree-sitter structural context + AST preservation (requires the
+# `structural` extra: pip install -e ".[structural]"). Disabled by default so
+# the script works on a minimal install; set CB_STRUCTURAL_ENABLED=true to test
+# the AST layer live.
+CB_STRUCTURAL_ENABLED="${CB_STRUCTURAL_ENABLED:-false}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURES="$REPO_ROOT/fixtures"
@@ -50,6 +55,7 @@ case "$FIXTURE" in
   python-uu)       UPSTREAM="python-uu-upstream" ;;
   text-uu-simple)  UPSTREAM="text-uu-upstream" ;;
   settings-uu)     UPSTREAM="settings-uu-upstream" ;;
+  rust-uu)         UPSTREAM="rust-uu-upstream" ;;
   *) UPSTREAM="${FIXTURE}-upstream" ;;  # fallback for future fixtures
 esac
 
@@ -108,6 +114,10 @@ generation_timeout_seconds = $CB_GENERATION_TIMEOUT
 [policy]
 max_retries_per_unit = $CB_MAX_RETRIES
 context_lines = $CB_CONTEXT_LINES
+
+[structural]
+enabled = $CB_STRUCTURAL_ENABLED
+languages = ["python", "rust"]
 
 [tests]
 pre_continue = "true"
@@ -228,7 +238,7 @@ PY
     echo
     echo "## files in fixture"
     # Show whichever fixture content files actually exist on disk.
-    for cand in app.py story.txt settings.py; do
+    for cand in app.py story.txt settings.py src/config.rs; do
       if [ -f "$FIXTURES/$cand" ]; then
         echo "--- $cand ---"; cat "$FIXTURES/$cand"
       fi

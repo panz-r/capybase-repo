@@ -50,6 +50,22 @@ class ContextBuilder:
         if siblings:
             structural_view["sibling_conflict_count"] = len(siblings)
             structural_view["sibling_spans"] = [list(s) for s in siblings]
+        # Surface the tree-sitter enclosing node (if the extractor populated
+        # one) as a semantic anchor in the structural view. This gives the
+        # prompt builder a way to tell the model "you are merging inside def
+        # greet()" — far sharper context than the raw line window alone. The
+        # enclosing node text is NOT substituted for primary_text (the model
+        # still needs the exact marker lines), but is provided alongside.
+        meta = unit.structural_metadata
+        if meta.get("enclosing_node_type"):
+            structural_view["enclosing_node_type"] = meta["enclosing_node_type"]
+            if meta.get("enclosing_node_signature"):
+                structural_view["enclosing_node_signature"] = meta[
+                    "enclosing_node_signature"
+                ]
+            if meta.get("enclosing_node_text"):
+                structural_view["enclosing_node_text"] = meta["enclosing_node_text"]
+            structural_view["unit_kind"] = unit.unit_kind
         return ContextBundle(
             primary_text=primary,
             side_summaries=side_summaries,

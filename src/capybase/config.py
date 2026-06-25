@@ -64,6 +64,12 @@ class ValidationConfig(BaseModel):
     # juxtaposed, duplicate symbols across hunks. Meaningful even for
     # single-unit files; disable only for non-code where it's moot.
     require_whole_file_validation: bool = True
+    # AST preservation (requires tree-sitter): prove that nodes OUTSIDE the
+    # conflict span are structurally unchanged after splicing. Catches a model
+    # silently rewriting or deleting unchanged code that the line-level
+    # ExactSpliceScope check misses (it only guards line boundaries). When the
+    # grammar is absent this validator is inert.
+    require_ast_preservation: bool = True
 
 
 class JournalConfig(BaseModel):
@@ -86,12 +92,33 @@ class FutureConfig(BaseModel):
     enable_mutation_testing: bool = False
 
 
+class StructuralConfig(BaseModel):
+    """Tree-sitter AST parsing for structural context + preservation checks.
+
+    When enabled and the ``structural`` optional deps are installed, the
+    conflict extractor populates ``ConflictUnit.structural_metadata`` with the
+    lowest enclosing AST node (e.g. the specific ``def``/``impl``) so the
+    resolver and validators see a logical block rather than an arbitrary line
+    window. All tree-sitter imports are lazy; when the lib is absent or parsing
+    fails, capybase silently degrades to the line-window behavior.
+    """
+
+    enabled: bool = False
+    languages: list[str] = Field(default_factory=lambda: ["python", "rust"])
+    max_enclosing_node_lines: int = 60
+    cross_file_slice: bool = True
+    slice_search_globs: list[str] = Field(
+        default_factory=lambda: ["**/*.py", "**/*.rs"]
+    )
+
+
 class Config(BaseModel):
     model: ModelConfig = Field(default_factory=ModelConfig)
     policy: PolicyConfig = Field(default_factory=PolicyConfig)
     tests: TestsConfig = Field(default_factory=TestsConfig)
     validation: ValidationConfig = Field(default_factory=ValidationConfig)
     journal: JournalConfig = Field(default_factory=JournalConfig)
+    structural: StructuralConfig = Field(default_factory=StructuralConfig)
     future: FutureConfig = Field(default_factory=FutureConfig)
     source_path: str | None = None
 

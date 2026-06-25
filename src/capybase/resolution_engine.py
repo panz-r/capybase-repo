@@ -39,6 +39,19 @@ def build_resolve_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
     # reproduce (leading spaces are invisible in normal prose).
     cur_lines = unit.current.text
     rep_lines = unit.replayed.text
+    sv = context.structural_view
+    enc_sig = sv.get("enclosing_node_signature") if sv else None
+    enc_text = sv.get("enclosing_node_text") if sv else None
+    # Structural anchor: when tree-sitter resolved the enclosing definition,
+    # show it so the model knows the logical block it is merging inside (e.g.
+    # "def greet()") — sharper than inferring from indentation alone.
+    structural_anchor = ""
+    if enc_sig and enc_text:
+        structural_anchor = f"""Logical block you are merging inside (tree-sitter AST):
+{enc_sig}
+{enc_text}
+
+"""
     return f"""Resolve ONE git merge conflict by merging BOTH sides into one coherent
 result preserving each side's intent. Be CONCISE: reason in a few sentences,
 then answer. Do not over-explain.
@@ -46,7 +59,7 @@ then answer. Do not over-explain.
 file: {unit.path}
 language: {unit.language or 'unknown'}
 
-CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):
+{structural_anchor}CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):
 {cur_lines}
 
 REPLAYED_COMMIT_SIDE body (exact, including leading spaces):

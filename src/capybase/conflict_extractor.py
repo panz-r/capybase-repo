@@ -9,6 +9,8 @@ resolution into the file precisely.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from capybase.adapters.parsers import MarkerBlock, parse_marker_blocks
 from capybase.conflict_model import ConflictSide, ConflictUnit
 from capybase.git_backend import (
@@ -18,6 +20,9 @@ from capybase.git_backend import (
     GitBackend,
     UnmergedPath,
 )
+
+if TYPE_CHECKING:
+    from capybase.config import StructuralConfig
 
 # Naive but dependency-free language inference from the file extension. Good
 # enough for the MVP's syntax-validation gating; structural merge (later) will
@@ -69,8 +74,14 @@ def looks_like_text(data: bytes) -> bool:
 
 
 class ConflictExtractor:
-    def __init__(self, git: GitBackend) -> None:
+    def __init__(
+        self,
+        git: GitBackend,
+        *,
+        structural_config: "StructuralConfig | None" = None,
+    ) -> None:
         self.git = git
+        self.structural_config = structural_config
 
     def extract_file_units(
         self,
@@ -152,6 +163,17 @@ class ConflictExtractor:
             for u in units:
                 u.structural_metadata["sibling_units"] = siblings
                 u.structural_metadata["sibling_count"] = len(units)
+        # Enrich units with tree-sitter structural data when configured and the
+        # grammar is available. For each unit we resolve the lowest enclosing
+        # AST node (the specific def/impl/struct) and record its text, type,
+        # signature, and a base fingerprint of the original file. This lets the
+        # context builder show a logical block instead of a blind line window,
+        # and the AST-preservation validator prove unchanged nodes stay
+        # structurally identical after splicing. Silently skipped when the lib
+        # is absent or the language has no grammar — units keep unit_kind
+        # "text_marker_block" and downstream code falls back to line windows.
+        if self.structural_config and self.structural_config.enabled:
+            _enrich_structural(units, worktree_text, base_text, self.structural_config)
         return units
 
     # Convenience: extract across every unmerged path, classifying along the
@@ -240,3 +262,61 @@ def _leading_indent(lines: list[str]) -> int | None:
             continue
         return len(line) - len(line.lstrip(" "))
     return None
+
+
+def _enrich_structural(
+    units: list[ConflictUnit],
+    worktree_text: str,
+    base_text: str,
+    cfg: "StructuralConfig",
+) -> None:
+    """Populate ``structural_metadata`` with tree-sitter AST data per unit.
+
+    Lazy-imports the structural adapter so capybase works without the
+    ``structural`` extra. For each unit whose language has an available grammar
+    we resolve the lowest enclosing node and a base fingerprint. The enclosing
+    node is resolved against the BASE blob (clean and parseable) rather than
+    the marker-laden worktree: the worktree's raw ``<<<<<<<`` lines produce
+    ERROR nodes and a useless enclosing ``module``, while BASE has the same
+    line layout outside the conflict and valid structure inside it. The
+    fingerprint is likewise computed on BASE so it reflects real structure.
+
+    For the AstPreservationValidator, the base fingerprint is of nodes OUTSIDE
+    the conflict span — so after splicing a candidate into the worktree and
+    re-fingerprinting, unchanged nodes match. All failures are silent no-ops.
+    """
+    try:
+        from capybase.adapters import structural
+    except Exception:  # noqa: BLE001
+        return
+    for unit in units:
+        lang = unit.language
+        if lang is None or lang not in cfg.languages:
+            continue
+        if not structural.is_available(lang):
+            continue
+        if unit.marker_span is None:
+            continue
+        # Resolve the lowest enclosing AST node from the BASE blob.
+        node = structural.enclosing_node(base_text, unit.marker_span, lang)
+        if node is not None:
+            lines = node.span[1] - node.span[0] + 1
+            # If the enclosing node is huge, the whole-module text is not a
+            # useful "isolated block" — keep the line window instead.
+            if lines <= cfg.max_enclosing_node_lines:
+                unit.structural_metadata["enclosing_node_type"] = node.node_type
+                unit.structural_metadata["enclosing_node_span"] = list(node.span)
+                unit.structural_metadata["enclosing_node_text"] = node.text
+                if node.signature:
+                    unit.structural_metadata["enclosing_node_signature"] = node.signature
+                    # AST signature is sharper than the indent heuristic.
+                    unit.enclosing_symbol = node.signature
+                unit.unit_kind = "ast_region"
+        # Base fingerprint of the original file's nodes OUTSIDE the conflict
+        # span, computed on BASE (clean structure) so the preservation
+        # validator can compare against the spliced worktree.
+        fp_outside, _ = structural.fingerprint_region(
+            base_text, lang, unit.marker_span
+        )
+        if fp_outside is not None:
+            unit.structural_metadata["ast_fingerprint_base_outside"] = fp_outside

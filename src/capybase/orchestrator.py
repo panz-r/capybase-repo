@@ -81,7 +81,9 @@ class Orchestrator:
         self.paths = SessionPaths(self.session_id, repo)
         self.paths.mkdirs()
         self.journal = Journal(self.paths)
-        self.extractor = ConflictExtractor(self.git)
+        self.extractor = ConflictExtractor(
+            self.git, structural_config=config.structural
+        )
         self.context_builder = ContextBuilder(config.policy.context_lines)
         self.resolution_engine = resolution_engine or ResolutionEngine(config.model)
         self.verification = VerificationEngine.default(

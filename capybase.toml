@@ -52,6 +52,20 @@ store_raw_responses = true
 store_snapshots = true
 store_candidates = true
 
+# Tree-sitter AST context (requires the `structural` extra: pip install -e ".[structural]").
+# When enabled and the grammars are installed, the resolver sees the enclosing
+# logical block (def/impl/struct) instead of a blind line window, and an
+# AST-preservation validator guards against silent deletion of unchanged code.
+# Silently degrades to the line-window behavior if tree-sitter is absent.
+[structural]
+enabled = false
+languages = ["python", "rust"]
+# If the lowest enclosing node is larger than this (lines), fall back to the
+# line window — a whole 500-line module is not a useful "isolated block".
+max_enclosing_node_lines = 60
+cross_file_slice = true
+slice_search_globs = ["**/*.py", "**/*.rs"]
+
 # [future] documents planned seams. It does nothing in the MVP.
 [future]
 enable_self_consistency = false

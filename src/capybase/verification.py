@@ -68,6 +68,7 @@ class ValidationConfig:
     reject_if_copies_one_side: bool = True
     reject_if_model_needs_human: bool = True
     require_whole_file_validation: bool = True
+    require_ast_preservation: bool = True
 
     @classmethod
     def from_dict(cls, d: dict) -> "ValidationConfig":
@@ -262,6 +263,92 @@ class WholeFileMarkerValidator:
         )
 
 
+class AstPreservationValidator:
+    """Prove that AST nodes OUTSIDE the conflict span survive the splice.
+
+    The line-level ``ExactSpliceScopeValidator`` only guards that splicing
+    doesn't touch lines beyond the marker block. But a model can still rewrite
+    unchanged code *within* the visible window (e.g. collapse two statements,
+    delete a comment) as long as the line count matches — a regression
+    invisible to line checks. This validator parses the original and the
+    spliced-resolved file with tree-sitter, computes the node-type fingerprint
+    of every node OUTSIDE the conflict span, and rejects the candidate if they
+    differ.
+
+    Inert when tree-sitter or the language grammar is unavailable, or when the
+    extractor did not record a base fingerprint (structural context disabled).
+    """
+
+    name = "ast_preservation"
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        unit = ctx.unit
+        lang = unit.language
+        if lang is None or unit.marker_span is None:
+            return VerificationCheckResult(
+                name=self.name,
+                passed=True,
+                message="ast preservation skipped (no language or span)",
+                features={"ast_checked": False, "ast_preserved": True},
+            )
+        base_outside = unit.structural_metadata.get("ast_fingerprint_base_outside")
+        if not base_outside:
+            # Structural context was off or the grammar was unavailable when the
+            # unit was extracted. Nothing to compare against — pass silently.
+            return VerificationCheckResult(
+                name=self.name,
+                passed=True,
+                message="ast preservation skipped (no base fingerprint)",
+                features={"ast_checked": False, "ast_preserved": True},
+            )
+        try:
+            from capybase.adapters import structural
+        except Exception:  # noqa: BLE001
+            return VerificationCheckResult(
+                name=self.name,
+                passed=True,
+                message="ast preservation skipped (tree-sitter unavailable)",
+                features={"ast_checked": False, "ast_preserved": True},
+            )
+        if not structural.is_available(lang):
+            return VerificationCheckResult(
+                name=self.name,
+                passed=True,
+                message=f"ast preservation skipped (no {lang} grammar)",
+                features={"ast_checked": False, "ast_preserved": True},
+            )
+        # Splice the candidate into the original and re-fingerprint the outside.
+        spliced = splice_resolution(
+            unit.original_worktree_text, unit.marker_span, ctx.candidate.resolved_text
+        )
+        after_outside, _ = structural.fingerprint_region(
+            spliced, lang, unit.marker_span
+        )
+        if after_outside is None:
+            return VerificationCheckResult(
+                name=self.name,
+                passed=True,
+                message="ast preservation skipped (post-splice parse failed)",
+                features={"ast_checked": False, "ast_preserved": True},
+            )
+        preserved = after_outside == base_outside
+        return VerificationCheckResult(
+            name=self.name,
+            passed=preserved,
+            severity="error",
+            message=(
+                "AST structure outside the conflict block changed after splice"
+                if not preserved
+                else "AST structure outside the conflict block preserved"
+            ),
+            detail={"base_outside": base_outside, "after_outside": after_outside},
+            features={
+                "ast_checked": True,
+                "ast_preserved": preserved,
+            },
+        )
+
+
 def _compile_python(source: str) -> tuple[bool, str]:
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", delete=False, encoding="utf-8"
@@ -303,6 +390,7 @@ class VerificationEngine:
         validators: list[Validator] = [
             NoConflictMarkersValidator(),
             ExactSpliceScopeValidator(),
+            AstPreservationValidator(),
             PreservationHeuristicValidator(),
             NeedsHumanValidator(),
         ]
@@ -439,6 +527,7 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
         "no_conflict_markers": cfg.require_no_markers,
         "whole_file_markers": cfg.require_no_markers,
         "exact_splice_scope": cfg.require_exact_splice_scope,
+        "ast_preservation": cfg.require_ast_preservation,
         "preservation_heuristic": cfg.reject_if_copies_one_side,
         "needs_human": cfg.reject_if_model_needs_human,
         "syntax": cfg.require_syntax_if_supported,
