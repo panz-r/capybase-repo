@@ -101,6 +101,26 @@ class TestsConfig(BaseModel):
     required: bool = True
 
 
+class PolicyRule(BaseModel):
+    """One deterministic safety rule for the VeriGuard-style policy gate.
+
+    The gate statically extracts import/call facts from a candidate patch's
+    resolved text (stdlib ``ast``, Python only) and evaluates each rule. A rule
+    ``forbid_import`` matches when ``pattern`` is a prefix of any imported
+    module path (so ``"subprocess"`` catches ``subprocess.run`` usage too, since
+    importing ``subprocess`` is the precondition); ``forbid_call`` matches when
+    ``pattern`` is a prefix of any call target (so ``"eval"`` catches the
+    builtin and ``"os.system"`` catches the dotted call). All deterministic at
+    runtime — no LLM, no execution (survey §4 VeriGuard).
+    """
+
+    name: str
+    kind: Literal["forbid_import", "forbid_call"]
+    pattern: str
+    severity: Literal["error", "warning"] = "error"
+    reason: str = ""
+
+
 class ValidationConfig(BaseModel):
     require_no_markers: bool = True
     require_exact_splice_scope: bool = True
@@ -144,6 +164,15 @@ class ValidationConfig(BaseModel):
     # retry/escalate but don't hard-reject a syntactically-valid merge) or
     # "error" (strict — treat a dropped-intent verdict as a hard failure).
     verifier_severity: str = "warning"
+    # VeriGuard-style deterministic policy gate (survey §4): statically extract
+    # import/call facts from each candidate's resolved text and evaluate them
+    # against ``policy_rules``. The ONLY check that inspects WHAT a patch
+    # introduces (every other validator is syntactic/structural) — catches a
+    # clean-but-unsafe merge (e.g. adds subprocess to api/). Fully deterministic
+    # at runtime (stdlib ast, no LLM, no execution), Python-only, graceful no-op
+    # for other languages. When off OR no rules configured, the gate is inert.
+    enable_policy_gate: bool = False
+    policy_rules: list[PolicyRule] = Field(default_factory=list)
 
 
 class JournalConfig(BaseModel):

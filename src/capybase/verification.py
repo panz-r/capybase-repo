@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+import ast
 from typing import Protocol, runtime_checkable
 
 from capybase.adapters.parsers import (
@@ -78,11 +79,28 @@ class ValidationConfig:
     # Verifier-model critic (mirrors config.ValidationConfig; the live flags).
     enable_verifier_model: bool = False
     verifier_severity: str = "warning"
+    # VeriGuard policy gate (mirrors config.ValidationConfig).
+    enable_policy_gate: bool = False
+    policy_rules: tuple = ()  # tuple of config.PolicyRule; default empty = no-op
 
     @classmethod
     def from_dict(cls, d: dict) -> "ValidationConfig":
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in d.items() if k in known})
+        kwargs = {k: v for k, v in d.items() if k in known}
+        # policy_rules cross the config boundary as plain dicts (config.PolicyRule
+        # is pydantic; this dataclass is not). Reconstruct PolicyRule objects so
+        # the gate's attribute access (rule.kind, rule.pattern, ...) works.
+        if "policy_rules" in kwargs and kwargs["policy_rules"]:
+            from capybase.config import PolicyRule
+
+            rebuilt = []
+            for r in kwargs["policy_rules"]:
+                if isinstance(r, PolicyRule):
+                    rebuilt.append(r)
+                elif isinstance(r, dict):
+                    rebuilt.append(PolicyRule(**r))
+            kwargs["policy_rules"] = tuple(rebuilt)
+        return cls(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +339,200 @@ def _default_model(ctx: VerificationContext) -> str:
     return str(name) if name else "default"
 
 
+# ---------------------------------------------------------------------------
+# VeriGuard-style deterministic policy gate (survey §4)
+#
+# The only validator that inspects WHAT a patch introduces (every other
+# validator is syntactic/structural). Statically extracts import/call facts
+# from the candidate's resolved text via stdlib ast (Python only) and evaluates
+# them against a configurable ruleset. Fully deterministic at runtime — no LLM,
+# no execution. Tags violations onto ConflictUnit.risk_tags (the vestigial seam
+# this fills) and returns a VerificationCheckResult like any validator.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PolicyFacts:
+    """Static facts extracted from a candidate's resolved text."""
+
+    imports: set[str] = field(default_factory=set)
+    calls: set[str] = field(default_factory=set)
+
+
+class _PolicyFactExtractor(ast.NodeVisitor):
+    """ast visitor collecting imported modules and call targets (Python)."""
+
+    def __init__(self) -> None:
+        self.imports: set[str] = set()
+        self.calls: set[str] = set()
+
+    def visit_Import(self, node) -> None:  # noqa: N802 - ast convention
+        for alias in node.names:
+            if alias.name:
+                self.imports.add(alias.name)
+
+    def visit_ImportFrom(self, node) -> None:  # noqa: N802 - ast convention
+        if node.module:
+            self.imports.add(node.module)
+
+    def visit_Call(self, node) -> None:  # noqa: N802 - ast convention
+        name = _dotted_name(node.func)
+        if name:
+            self.calls.add(name)
+        self.generic_visit(node)
+
+
+def _dotted_name(node) -> str:
+    """Render an ast function-reference node as a dotted name (eval, os.system)."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _dotted_name(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    return ""
+
+
+def _extract_policy_facts(text: str, language: str | None) -> PolicyFacts:
+    """Extract import/call facts from Python source. Empty for other languages
+    or unparseable text (the syntax validator catches syntax errors separately;
+    a parse failure here must never crash the gate).
+
+    The resolved_text is a splice FRAGMENT (the merged code replacing a conflict
+    marker block), not a whole module — so it may contain a bare ``return`` or
+    leading-indent statements that aren't valid at module scope. We parse it as
+    a module first; on SyntaxError we retry wrapped in a dummy function body, so
+    the fragment's imports and calls become extractable regardless of scope.
+    """
+    if language != "python" or not text:
+        return PolicyFacts()
+
+    tree = _safe_parse_fragment(text)
+    if tree is None:
+        return PolicyFacts()
+    extractor = _PolicyFactExtractor()
+    extractor.visit(tree)
+    return PolicyFacts(imports=extractor.imports, calls=extractor.calls)
+
+
+def _safe_parse_fragment(text: str):
+    """Parse ``text`` as a Python module, tolerating splice-fragment scope.
+
+    Tries (1) the text as-is, then (2) wrapped in a dummy function body (so
+    bare ``return``/indented fragments parse). Returns the ast.Module, or None
+    if neither parse succeeds (genuinely malformed — the gate degrades to empty
+    facts rather than crashing).
+    """
+    try:
+        return ast.parse(text)
+    except (SyntaxError, ValueError):
+        pass
+    # Wrap in a function body: dedent first so the fragment's indentation aligns
+    # to one level under `def _f():`. This makes a bare `return` or
+    # leading-space fragment a valid function body.
+    import textwrap
+
+    dedented = textwrap.dedent(text)
+    wrapped = "def __bcf_policy_fragment__():\n" + textwrap.indent(dedented, "    ")
+    try:
+        return ast.parse(wrapped)
+    except (SyntaxError, ValueError):
+        return None
+
+
+class PolicyGateValidator:
+    """Deterministic safety gate over candidate import/call facts (survey §4).
+
+    Evaluates a configured ruleset (``PolicyRule``) against statically-extracted
+    facts. A ``forbid_import`` rule matches when its pattern is a prefix of any
+    imported module; ``forbid_call`` when its pattern is a prefix of any call
+    target. Violations tag ``ConflictUnit.risk_tags`` and (at error severity)
+    become hard failures that block auto-apply.
+
+    Cost & safety contract:
+
+    - **Opt-in + needs rules.** Inert unless ``enable_policy_gate`` is on AND
+      ``policy_rules`` is non-empty. No rules → no-op even when enabled (the
+      code ships none; deployments define their own).
+    - **Deterministic.** No LLM call, no execution — stdlib ast only.
+    - **Graceful.** Non-Python language and unparseable text yield empty facts
+      (the gate passes; syntax errors are the syntax validator's job).
+    """
+
+    name = "policy_gate"
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        cfg = ctx.config
+        rules = list(getattr(cfg, "policy_rules", ()) or ())
+        if not getattr(cfg, "enable_policy_gate", False) or not rules:
+            return VerificationCheckResult(
+                name=self.name,
+                passed=True,
+                severity="error",
+                message="policy gate disabled or no rules configured",
+                features={"policy_checked": False},
+            )
+
+        facts = _extract_policy_facts(
+            ctx.candidate.resolved_text, ctx.unit.language
+        )
+        features: dict[str, float | int | str | bool] = {"policy_checked": True}
+        violations: list[tuple[str, str, str]] = []  # (name, severity, reason)
+        max_sev = "warning"  # escalate only on an error-severity violation
+
+        def _rule_field(rule, name, default=""):
+            """Read a rule field whether the rule is a PolicyRule object or a
+            plain dict (rules can cross the pydantic/dataclass boundary as dicts)."""
+            if isinstance(rule, dict):
+                return rule.get(name, default)
+            return getattr(rule, name, default)
+
+        for rule in rules:
+            kind = _rule_field(rule, "kind", "")
+            pattern = _rule_field(rule, "pattern", "")
+            severity = _rule_field(rule, "severity", "error")
+            hit = False
+            if kind == "forbid_import":
+                hit = any(m == pattern or m.startswith(pattern + ".") or m == pattern
+                          for m in facts.imports)
+            elif kind == "forbid_call":
+                hit = any(m == pattern or m.startswith(pattern + ".")
+                          for m in facts.calls)
+            if hit:
+                rname = _rule_field(rule, "name", pattern)
+                violations.append((
+                    rname,
+                    severity,
+                    _rule_field(rule, "reason", "") or f"{kind} {pattern}",
+                ))
+                features[f"policy_{rname}_violated"] = True
+
+        features["policy_violation_count"] = len(violations)
+        if any(sev == "error" for _, sev, _ in violations):
+            max_sev = "error"
+
+        # Tag the unit's vestigial risk_tags with the violation names.
+        if violations:
+            existing = set(ctx.unit.risk_tags)
+            for vname, _, _ in violations:
+                existing.add(f"policy:{vname}")
+            ctx.unit.risk_tags = sorted(existing)
+
+        passed = not violations or max_sev != "error"
+        msg = (
+            "policy gate: " + "; ".join(reason for _, _, reason in violations)
+            if violations else "policy gate: no violations"
+        )
+        return VerificationCheckResult(
+            name=self.name,
+            passed=passed,
+            severity=max_sev,
+            message=msg,
+            detail={"violations": [{"name": n, "severity": s, "reason": r}
+                                   for n, s, r in violations]},
+            features=features,
+        )
+
+
 class SyntaxValidator:
     """Deprecated per-unit syntax validator.
 
@@ -544,6 +756,13 @@ class VerificationEngine:
         # and only pays the LLM critic call for candidates worth judging.
         if extra_validators:
             validators.extend(extra_validators)
+        # The VeriGuard policy gate is deterministic and dependency-free (stdlib
+        # ast, no client), so the engine's own factory wires it when the config
+        # enables it — unlike the VerifierModelValidator, which needs an LLM
+        # client and is therefore registered by the orchestrator. No rules → the
+        # gate is a no-op even when enabled, so registering it is harmless.
+        if getattr(config, "enable_policy_gate", False) and getattr(config, "policy_rules", ()):
+            validators.append(PolicyGateValidator())
         return cls(validators, config)
 
     def register(self, validator: Validator) -> None:
@@ -823,6 +1042,7 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
         "needs_human": cfg.reject_if_model_needs_human,
         "syntax": cfg.require_syntax_if_supported,
         "verifier_model": cfg.enable_verifier_model,
+        "policy_gate": cfg.enable_policy_gate,
     }
     return table.get(name, True)
 

@@ -285,3 +285,185 @@ def test_verifier_prompt_contains_all_sides_and_candidate():
     assert "return 1 + 2" in prompt  # the candidate
     assert "preserves_current" in prompt  # the JSON verdict contract
     assert "preserves_replayed" in prompt
+
+
+# ---------------------------------------------------------------------------
+# VeriGuard-style deterministic policy gate (survey §4): the only check that
+# inspects WHAT a patch introduces (imports/calls), not just its structure.
+# ---------------------------------------------------------------------------
+
+
+def _rule(name, kind, pattern, severity="error", reason=""):
+    from capybase.config import PolicyRule
+
+    return PolicyRule(name=name, kind=kind, pattern=pattern, severity=severity, reason=reason)
+
+
+def _gate_engine(rules):
+    """A VerificationEngine with the policy gate enabled and the given rules."""
+    cfg = ValidationConfig(enable_policy_gate=True, policy_rules=tuple(rules))
+    return VerificationEngine.default(cfg)
+
+
+def _py_unit():
+    return _unit(
+        "def f():\n    pass", "    return 1", "    return 2",
+        "def f():\n<<<<<<< H\n    return 1\n=======\n    return 2\n>>>>>>> b\n",
+    )
+
+
+def test_extract_policy_facts_imports_and_calls():
+    """The ast extractor collects plain/dotted imports and plain/dotted calls."""
+    from capybase.verification import _extract_policy_facts
+
+    facts = _extract_policy_facts(
+        "import os\n"
+        "from subprocess import run, Popen\n"
+        "import urllib.request\n"
+        "\n"
+        "def f():\n"
+        "    eval('1')\n"
+        "    os.system('ls')\n"
+        "    subprocess.run(['x'])\n",
+        "python",
+    )
+    assert "os" in facts.imports
+    assert "subprocess" in facts.imports          # from-import module
+    assert "urllib.request" in facts.imports       # dotted import
+    assert "eval" in facts.calls
+    assert "os.system" in facts.calls
+    assert "subprocess.run" in facts.calls
+
+
+def test_extract_policy_facts_empty_for_unparseable():
+    """Unparseable text yields empty facts (no crash); the syntax validator
+    catches the syntax error separately."""
+    from capybase.verification import _extract_policy_facts
+
+    facts = _extract_policy_facts("def f(:\n  broken", "python")
+    assert facts.imports == set()
+    assert facts.calls == set()
+
+
+def test_extract_policy_facts_handles_splice_fragment():
+    """The resolved_text is a splice FRAGMENT, not a whole module — it may
+    contain a bare return or leading-indent that isn't valid at module scope.
+    The extractor must still find the calls/imports inside it (wrapping in a
+    dummy function body). This is the real production path: candidates carry
+    fragments, and without this the gate would see every fragment as empty."""
+    from capybase.verification import _extract_policy_facts
+
+    # Bare return with an eval call — invalid as a module, valid as a fragment.
+    facts = _extract_policy_facts("    return eval('1') + 'howdy'", "python")
+    assert "eval" in facts.calls
+    # Import inside a fragment still detected.
+    facts2 = _extract_policy_facts("    import subprocess\n    x = 1", "python")
+    assert "subprocess" in facts2.imports
+
+
+def test_extract_policy_facts_empty_for_non_python():
+    """The gate is Python-only; other languages yield empty facts (no-op)."""
+    from capybase.verification import _extract_policy_facts
+
+    facts = _extract_policy_facts("fn main() { let x = 1; }", "rust")
+    assert facts.imports == set()
+    assert facts.calls == set()
+
+
+def test_policy_gate_inert_when_disabled():
+    """enable_policy_gate off → the gate is a no-op: passed, policy_checked
+    False, and risk_tags untouched. This is the zero-cost default."""
+    cfg = ValidationConfig(enable_policy_gate=False)
+    engine = VerificationEngine.default(
+        cfg,
+        extra_validators=[PolicyGateValidator()],
+    )
+    unit = _py_unit()
+    res = engine.verify(unit, _candidate("import subprocess\nx = 1"))
+    assert res.passed
+    assert res.features["policy_checked"] is False
+    assert unit.risk_tags == []  # not tagged
+
+
+def test_policy_gate_inert_when_no_rules():
+    """Enabled but no rules → still a no-op (the code ships no rules)."""
+    cfg = ValidationConfig(enable_policy_gate=True, policy_rules=())
+    engine = VerificationEngine.default(
+        cfg,
+        extra_validators=[PolicyGateValidator()],
+    )
+    res = engine.verify(_py_unit(), _candidate("import subprocess\nx = 1"))
+    assert res.passed
+    assert res.features["policy_checked"] is False
+
+
+def test_policy_gate_flags_forbidden_import():
+    """A patch that imports a forbidden module is flagged + tagged."""
+    engine = _gate_engine([_rule("no_subprocess", "forbid_import", "subprocess")])
+    unit = _py_unit()
+    res = engine.verify(unit, _candidate("import subprocess\nsubprocess.run(['x'])\n"))
+    assert not res.passed
+    assert res.features["policy_checked"] is True
+    assert res.features["policy_violation_count"] == 1
+    assert res.features["policy_no_subprocess_violated"] is True
+    assert "policy:no_subprocess" in unit.risk_tags
+
+
+def test_policy_gate_prefix_matches_dotted_call():
+    """A forbid_call rule with pattern "subprocess" catches subprocess.run —
+    prefix matching is what makes a single rule cover a whole module's calls."""
+    engine = _gate_engine([_rule("no_subprocess_call", "forbid_call", "subprocess")])
+    res = engine.verify(_py_unit(), _candidate("import subprocess\nsubprocess.run(['x'])\n"))
+    assert not res.passed
+    assert res.features["policy_no_subprocess_call_violated"] is True
+
+
+def test_policy_gate_flags_builtin_eval():
+    engine = _gate_engine([_rule("no_eval", "forbid_call", "eval")])
+    unit = _py_unit()
+    res = engine.verify(unit, _candidate("x = eval('1+1')\n"))
+    assert not res.passed
+    assert "policy:no_eval" in unit.risk_tags
+
+
+def test_policy_gate_clean_patch_passes():
+    """A patch with no forbidden imports/calls passes; risk_tags stay empty."""
+    engine = _gate_engine([
+        _rule("no_subprocess", "forbid_import", "subprocess"),
+        _rule("no_eval", "forbid_call", "eval"),
+    ])
+    unit = _py_unit()
+    res = engine.verify(
+        unit, _candidate("import json\nx = json.dumps({'a': 1})\n")
+    )
+    assert res.passed
+    assert res.features["policy_checked"] is True
+    assert res.features["policy_violation_count"] == 0
+    assert unit.risk_tags == []
+
+
+def test_policy_gate_warning_does_not_hard_fail():
+    """A warning-severity rule flags the patch but does not hard-fail it (the
+    result stays passed; it surfaces as a warning for retry/escalate bias)."""
+    engine = _gate_engine([_rule("warn_subprocess", "forbid_import", "subprocess", severity="warning")])
+    res = engine.verify(_py_unit(), _candidate("import subprocess\nx = 1\n"))
+    assert res.passed  # warning → not a hard failure
+    assert res.features["policy_violation_count"] == 1
+
+
+def test_policy_gate_error_dominates_warning():
+    """When one rule is error and another is warning, the max severity wins and
+    the result hard-fails."""
+    engine = _gate_engine([
+        _rule("warn_eval", "forbid_call", "eval", severity="warning"),
+        _rule("err_subprocess", "forbid_import", "subprocess", severity="error"),
+    ])
+    res = engine.verify(
+        _py_unit(), _candidate("import subprocess\nx = eval('1')\n")
+    )
+    assert not res.passed  # error-severity violation present
+    assert res.features["policy_violation_count"] == 2
+
+
+# Import the validator used by the helpers above.
+from capybase.verification import PolicyGateValidator  # noqa: E402
