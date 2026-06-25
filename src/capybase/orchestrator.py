@@ -693,18 +693,31 @@ class Orchestrator:
                 )
             outcome.difficulty = difficulty
 
+            # Difficulty-aware sample allocation (survey §4 UAB-lite): complex
+            # units draw samples_complex (falling back to the base samples when
+            # unset/0). Difficulty is known before any LLM call, so this is the
+            # viable pre-generation allocation lever. Only affects fresh
+            # resolution (failures is None) — retries stay single-sample for
+            # reproducible CEGIS counterexample feedback.
+            if failures is None:
+                n_complex = (
+                    self.config.model.samples_complex or self.config.model.samples
+                )
+            else:
+                n_complex = self.config.model.samples
+
             if difficulty == "simple":
                 # Fast path: one low-temperature sample, no intent pass, no
                 # consensus. Simple isolated hunks resolve trivially.
                 candidates = self.resolution_engine.propose(
                     unit, context, failures=failures, prev_candidate=prev_candidate
                 )
-            elif failures is None and self.config.model.two_pass and self.config.model.samples > 1:
+            elif failures is None and self.config.model.two_pass and n_complex > 1:
                 # Two-pass prompting + consensus: extract intents, then sample
                 # N code candidates conditioned on them, then majority-vote.
                 candidates = self.resolution_engine.propose_two_pass(
                     unit, context,
-                    n_samples=self.config.model.samples,
+                    n_samples=n_complex,
                     temperature=self.config.model.sampling_temperature,
                 )
                 if self.config.future.enable_self_consistency and len(candidates) > 1:
@@ -714,12 +727,13 @@ class Orchestrator:
             elif self.config.future.enable_self_consistency:
                 candidates, consensus_report = (
                     self.resolution_engine.propose_with_consensus(
-                        unit, context, failures=failures
+                        unit, context, failures=failures, n_samples=n_complex
                     )
                 )
             else:
                 candidates = self.resolution_engine.propose(
-                    unit, context, failures=failures, prev_candidate=prev_candidate
+                    unit, context, failures=failures, prev_candidate=prev_candidate,
+                    n_samples=n_complex,
                 )
             outcome.consensus = consensus_report
             # Journal the generation round. With self-consistency this is the

@@ -226,7 +226,7 @@ class FakeConsensusEngine:
             entropy=0.0,
         )
 
-    def propose_with_consensus(self, unit, context, *, failures=None):
+    def propose_with_consensus(self, unit, context, *, failures=None, n_samples=None):
         return list(self._candidates), self._report
 
 

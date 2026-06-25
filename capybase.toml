@@ -11,6 +11,12 @@ api_key = "sk-local"
 model = "vibethink"
 temperature = 0.2
 samples = 1
+# Difficulty-aware sample allocation (survey §4 UAB-lite): when [routing] is
+# enabled and a unit classifies as "complex", draw this many samples instead of
+# the base `samples`. Concentrates test-time compute on multi-hunk files and
+# large enclosing nodes where a small model struggles. 0 = disabled (complex
+# units use `samples`); only consulted on fresh resolves, not CEGIS retries.
+samples_complex = 0
 # Self-consistency: raise samples (e.g. 5) and set [future] enable_self_consistency
 # = true to enable majority voting over N samples. Below this agreement fraction
 # the merge is flagged low-confidence.

@@ -191,3 +191,104 @@ def test_orchestrator_routing_disabled_unchanged(conflicted_repo):
     )
     result = orch.run()
     assert not result.escalated, result.reason
+
+
+# ---------------------------------------------------------------------------
+# Difficulty-aware sample allocation (survey §4 UAB-lite): samples_complex
+# makes complex units draw more samples than the base count.
+# ---------------------------------------------------------------------------
+
+
+def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
+    """With routing on + samples_complex=K, a complex (multi-hunk) unit draws
+    K samples per unit instead of the base samples. The multi-unit fixture has
+    two units, both complex, so the total call count is 2*K."""
+    import json
+
+    from capybase.adapters.llm_openai import LLMResponse
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator
+    from capybase.resolution_engine import ResolutionEngine
+
+    repo = multi_unit_conflicted_repo["repo"]
+
+    class CountingClient:
+        def __init__(self, payload):
+            self.calls = 0
+            self._payload = payload
+
+        def complete(self, messages, **kw):
+            self.calls += 1
+            return LLMResponse(text=self._payload)
+
+    payload = json.dumps(
+        {"resolved_text": '    "merged"', "explanation": "m"}
+    )
+    client = CountingClient(payload)
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.tests.required = False
+    cfg.tests.pre_continue = "true"
+    cfg.tests.final = "true"
+    cfg.routing.enabled = True
+    cfg.model.samples = 1            # base count
+    cfg.model.samples_complex = 3    # complex units draw 3
+    # The multi-unit file has two DISTINCT hunks needing different resolutions;
+    # a single canned payload can't satisfy both. This test measures the SAMPLE
+    # COUNT (the allocation lever), not merge validity, so skip whole-file
+    # syntax validation.
+    cfg.validation.require_whole_file_validation = False
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert not result.escalated, result.reason
+    # Two complex units × 3 samples each = 6 calls. (Without samples_complex it
+    # would be 2 × 1 = 2.)
+    assert client.calls == 6, client.calls
+
+
+def test_samples_complex_zero_falls_back_to_base(conflicted_repo):
+    """samples_complex = 0 (default) → complex units use the base samples, i.e.
+    behavior is unchanged when the feature is off. A simple unit draws 1."""
+    import json
+
+    from capybase.adapters.llm_openai import LLMResponse
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator
+    from capybase.resolution_engine import ResolutionEngine
+
+    repo = conflicted_repo["repo"]  # single hunk → simple
+
+    class CountingClient:
+        def __init__(self, payload):
+            self.calls = 0
+            self._payload = payload
+
+        def complete(self, messages, **kw):
+            self.calls += 1
+            return LLMResponse(text=self._payload)
+
+    payload = json.dumps(
+        {"resolved_text": "    return 'hi' + 'howdy'", "explanation": "m"}
+    )
+    client = CountingClient(payload)
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.tests.required = False
+    cfg.tests.pre_continue = "true"
+    cfg.tests.final = "true"
+    cfg.routing.enabled = True
+    cfg.model.samples = 1
+    cfg.model.samples_complex = 0  # disabled
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert not result.escalated, result.reason
+    # Simple unit fast path → exactly 1 call (samples_complex doesn't apply).
+    assert client.calls == 1
