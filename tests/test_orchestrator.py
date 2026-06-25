@@ -196,6 +196,108 @@ def test_run_aborts_tests_when_required_and_failing(conflicted_repo):
     assert "tests failed" in (result.reason or "")
 
 
+# ---------------------------------------------------------------------------
+# Step 3: rank-order candidate validation (try the next sample if the
+# consensus winner fails validation, before falling back to CEGIS repair)
+# ---------------------------------------------------------------------------
+
+
+class FakeConsensusEngine:
+    """Returns a fixed candidate list + trivial consensus report.
+
+    Mimics ResolutionEngine.propose_with_consensus so the orchestrator's
+    self-consistency path can be driven with controlled candidates without a
+    live model. The candidates are returned in the order given (index 0 is the
+    consensus "winner").
+    """
+
+    def __init__(self, candidates):
+        from capybase.consensus import ConsensusReport
+
+        self._candidates = list(candidates)
+        # A unanimous report so the risk engine doesn't escalate on entropy/
+        # agreement — we want to isolate the rank-order validation behavior.
+        self._report = ConsensusReport(
+            winner=candidates[0] if candidates else None,
+            clusters=[],
+            n_samples=len(candidates),
+            agreement_score=1.0,
+            cluster_count=1,
+            entropy=0.0,
+        )
+
+    def propose_with_consensus(self, unit, context, *, failures=None):
+        return list(self._candidates), self._report
+
+
+def _self_consistency_config(repo):
+    """Enable self-consistency so the orchestrator takes the multi-candidate path."""
+    cfg = _config(repo)
+    cfg.future.enable_self_consistency = True
+    return cfg
+
+
+def _cand(text, *, cid="c"):
+    from capybase.conflict_model import CandidateResolution
+
+    return CandidateResolution(
+        candidate_id=cid, unit_id="u", model_name="fake",
+        prompt_version="v", resolved_text=text,
+    )
+
+
+def test_run_accepts_second_candidate_when_winner_fails(conflicted_repo):
+    """The consensus winner has a syntax error; the 2nd sample is valid.
+
+    Step 3 says "discard that candidate immediately" — the orchestrator should
+    validate the 2nd/3rd samples (already in memory) and accept the first that
+    passes, rather than discarding all N and jumping to CEGIS regeneration.
+    """
+    repo = conflicted_repo["repo"]
+    # Winner: leaks a conflict marker -> per-unit validation fails
+    # (no_conflict_markers is a hard check the per-unit validator enforces).
+    # 2nd: a valid merge of both sides -> per-unit AND whole-file pass.
+    # 3rd: also valid (untouched, the loop stops at the 2nd).
+    engine = FakeConsensusEngine([
+        _cand("    x\n<<<<<<< leaked\n", cid="winner-broken"),
+        _cand("    return 'hi' + 'howdy'", cid="second-valid"),
+        _cand("    return 'hi' + 'howdy'", cid="third-valid"),
+    ])
+    orch = Orchestrator(
+        _self_consistency_config(repo), repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert not result.escalated, result.reason
+    # The accepted candidate is the second (valid) one, not the broken winner.
+    assert result.outcomes
+    accepted = result.outcomes[0].accepted
+    assert accepted is not None
+    assert accepted.candidate_id == "second-valid"
+    # No markers leaked into the file.
+    assert "<<<<<<<" not in (repo / "app.py").read_text()
+
+
+def test_run_escalates_when_all_candidates_fail(conflicted_repo):
+    """When every surviving candidate fails validation, fall back to the normal
+    retry/escalate path (the winner's failures feed CEGIS repair)."""
+    repo = conflicted_repo["repo"]
+    engine = FakeConsensusEngine([
+        _cand("    return 'hi'(", cid="a-broken"),
+        _cand("    return 'howdy'(", cid="b-broken"),
+        _cand("    x\n<<<<<<< leaked\n", cid="c-marker"),
+    ])
+    orch = Orchestrator(
+        _self_consistency_config(repo), repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    # All candidates fail across retries -> escalation (CEGIS repair is itself a
+    # fresh generation via the same FakeConsensusEngine, which keeps failing).
+    assert result.escalated
+
+
+
 def test_run_retries_after_transient_error(conflicted_repo):
     """A request_failed candidate (timeout/network) should retry, then succeed."""
     from tests.test_resolution_engine import MetaClient

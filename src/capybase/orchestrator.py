@@ -544,19 +544,15 @@ class Orchestrator:
                     unit, context, failures=failures, prev_candidate=prev_candidate
                 )
             outcome.consensus = consensus_report
-            # Take the first candidate: with self-consistency this is the
-            # majority winner (reordered by rank_by_consensus); otherwise the
-            # sole sample.
-            cand = candidates[0]
-            outcome.attempts.append(cand)
-            if self.config.journal.enabled and self.config.journal.store_candidates:
-                self.journal.store_candidate(cand)
-            if self.config.journal.enabled and self.config.journal.store_raw_responses:
-                self.journal.store_response(unit.unit_id, retry_count, cand.raw_response)
+            # Journal the generation round. With self-consistency this is the
+            # full sample set; the consensus stats attach here so the audit
+            # shows how split the samples were before validation.
+            winner = candidates[0]
             emit_payload = {
-                "candidate_id": cand.candidate_id,
-                "needs_human": cand.needs_human,
-                "confidence": cand.self_reported_confidence,
+                "candidate_id": winner.candidate_id,
+                "n_candidates": len(candidates),
+                "needs_human": winner.needs_human,
+                "confidence": winner.self_reported_confidence,
             }
             if consensus_report is not None:
                 emit_payload["consensus_agreement"] = consensus_report.agreement_score
@@ -570,21 +566,31 @@ class Orchestrator:
                 unit_id=unit.unit_id,
             )
 
+            # Step 3 (syntactic/structural guardrails): validate candidates in
+            # rank order and accept the FIRST that passes hard validation. The
+            # consensus winner is first, but on a 3B model the winner frequently
+            # carries a syntax error while the 2nd/3rd sample is valid — trying
+            # them before regenerating is free reliability (the tokens were
+            # already spent). These are local tree-sitter/splice checks, not
+            # LLM calls, so validating all N is cheap. If none pass, the winner
+            # (and its failures) feeds the CEGIS repair loop below.
+            cand = winner
             validation = self.verification.verify(unit, cand)
+            self._journal_validation(unit, cand, validation)
+            if not validation.passed and len(candidates) > 1:
+                for trial in candidates[1:]:
+                    trial_val = self.verification.verify(unit, trial)
+                    self._journal_validation(unit, trial, trial_val)
+                    if trial_val.passed:
+                        cand = trial
+                        validation = trial_val
+                        break
             outcome.validation = validation
-            if self.config.journal.enabled and self.config.journal.store_validations:
-                self.journal.store_validation(validation)
-            self.journal.emit(
-                "candidate_validated",
-                {
-                    "candidate_id": cand.candidate_id,
-                    "passed": validation.passed,
-                    "hard_failures": [f.message for f in validation.hard_failures],
-                },
-                step_index=self.step,
-                path=unit.path,
-                unit_id=unit.unit_id,
-            )
+            outcome.attempts.append(cand)
+            if self.config.journal.enabled and self.config.journal.store_candidates:
+                self.journal.store_candidate(cand)
+            if self.config.journal.enabled and self.config.journal.store_raw_responses:
+                self.journal.store_response(unit.unit_id, retry_count, cand.raw_response)
 
             decision = self.risk.decide(
                 validation,
@@ -637,6 +643,29 @@ class Orchestrator:
             retry_count += 1
 
     # ------------------------------------------------------------------ helpers
+
+    def _journal_validation(
+        self, unit: ConflictUnit, cand: CandidateResolution, validation: VerificationResult
+    ) -> None:
+        """Emit/store a candidate's validation result for the audit trail.
+
+        Used for every validated candidate (including the consensus-losers tried
+        before the winner in the rank-order loop), so the journal shows which
+        samples were skipped and why — not just the one that was accepted.
+        """
+        if self.config.journal.enabled and self.config.journal.store_validations:
+            self.journal.store_validation(validation)
+        self.journal.emit(
+            "candidate_validated",
+            {
+                "candidate_id": cand.candidate_id,
+                "passed": validation.passed,
+                "hard_failures": [f.message for f in validation.hard_failures],
+            },
+            step_index=self.step,
+            path=unit.path,
+            unit_id=unit.unit_id,
+        )
 
     def _gather_step(self) -> StepResult:
         result = StepResult(step_index=self.step)
