@@ -69,6 +69,47 @@ class StepResult:
     continued: bool = False
 
 
+def _attribute_whole_file_failure(
+    failures: list, units: list[ConflictUnit]
+) -> int:
+    """Pick the index of the unit most likely at fault for a whole-file failure.
+
+    Whole-file failures (cross-unit syntax errors, juxtaposition errors) are
+    file-scoped, but repair is unit-scoped. Attribution parses the error line
+    from a failure message (Python SyntaxErrors carry "(file, line N)") and
+    returns the unit whose ``marker_span`` contains that line. When the line
+    can't be parsed or no span contains it, the LAST unit is chosen — a
+    heuristic that juxtaposition errors tend to surface where splices meet,
+    and re-resolving the last unit is a sound default. Falls back to 0 for an
+    empty unit list (caller guards against this).
+    """
+    if not units:
+        return 0
+    import re
+
+    for f in failures:
+        msg = getattr(f, "message", "") or ""
+        # Match "line N" anywhere (Python: "line 12", "file, line 12").
+        m = re.search(r"line\s+(\d+)", msg)
+        if not m:
+            continue
+        try:
+            line = int(m.group(1))
+        except ValueError:
+            continue
+        # Units are 1-indexed in the original marker-laden worktree; marker_span
+        # is 0-based [start, end] line indices. Check containment (1-based line
+        # falls within the 0-based span converted to 1-based).
+        for i, u in enumerate(units):
+            if u.marker_span is None:
+                continue
+            start, end = u.marker_span
+            if start + 1 <= line <= end + 1:
+                return i
+    # No line attribution possible → default to the last unit.
+    return len(units) - 1
+
+
 def _extract_alternates(
     outcome: UnitOutcome,
 ) -> tuple[list[CandidateResolution], dict | None]:
@@ -428,48 +469,87 @@ class Orchestrator:
                     consensus=_consensus,
                 )
                 return result
-            # Splice every accepted resolution in one offset-correct batch.
-            # ``splice_all_resolutions`` applies spans in reverse line order so
-            # that a resolution which changes the line count doesn't invalidate
-            # the spans of the other units (which are all relative to the
-            # original marker-laden file).
-            from capybase.adapters.parsers import splice_all_resolutions
-
-            original = accepted[0][0].original_worktree_text
-            spans_and_texts = [
-                (unit.marker_span, cand.resolved_text) for unit, cand in accepted
-            ]
-            buffer = splice_all_resolutions(original, spans_and_texts)
-            # Phase B: validate the fully-spliced file as a whole. This is the
+            # Splice every accepted resolution in one offset-correct batch and
+            # validate the whole file. Phase B (whole-file validation) is the
             # only place that can catch cross-unit errors (duplicate symbols,
             # syntax errors arising only when resolutions are juxtaposed, leaked
             # sibling markers). Per-unit Phase A validation already passed for
-            # each candidate in isolation; this is the file-level gate.
+            # each candidate in isolation.
+            #
+            # Execution-driven whole-file CEGIS (survey §4): when the
+            # combination fails, we do NOT escalate immediately — we feed the
+            # concrete file-level failures back to the unit most likely at
+            # fault and re-resolve it via the repair prompt, then re-splice and
+            # re-validate. Bounded by the policy retry ceiling so it can't loop
+            # forever; escalate only when the budget is exhausted.
+            from capybase.adapters.parsers import splice_all_resolutions
+
+            buffer = ""
             if self.config.validation.require_whole_file_validation and units:
                 language = units[0].language
-                file_validation = self.verification.verify_file(
-                    path, language, original, spans_and_texts,
-                    repo_root=str(self.git.repo),
-                )
-                if self.config.journal.enabled and self.config.journal.store_validations:
-                    self.journal.store_validation(file_validation)
-                self.journal.emit(
-                    "file_validated",
-                    {
-                        "passed": file_validation.passed,
-                        "hard_failures": [
-                            f.message for f in file_validation.hard_failures
-                        ],
-                    },
-                    step_index=self.step,
-                    path=path,
-                )
-                if not file_validation.passed:
-                    result.escalated = True
-                    result.reason = (
-                        f"whole-file validation failed for {path}: "
-                        + "; ".join(f.message for f in file_validation.hard_failures)
+                original = accepted[0][0].original_worktree_text
+                wf_retries = 0
+                wf_budget = self.config.policy.max_retries_per_unit
+                while True:
+                    spans_and_texts = [
+                        (unit.marker_span, cand.resolved_text) for unit, cand in accepted
+                    ]
+                    buffer = splice_all_resolutions(original, spans_and_texts)
+                    file_validation = self.verification.verify_file(
+                        path, language, original, spans_and_texts,
+                        repo_root=str(self.git.repo),
                     )
+                    if self.config.journal.enabled and self.config.journal.store_validations:
+                        self.journal.store_validation(file_validation)
+                    self.journal.emit(
+                        "file_validated",
+                        {
+                            "passed": file_validation.passed,
+                            "hard_failures": [
+                                f.message for f in file_validation.hard_failures
+                            ],
+                            "wf_retry": wf_retries,
+                        },
+                        step_index=self.step,
+                        path=path,
+                    )
+                    if file_validation.passed or wf_retries >= wf_budget:
+                        break
+                    # Attribute the failure to a unit and re-resolve it with the
+                    # file-level failures as concrete repair feedback.
+                    wf_retries += 1
+                    self.journal.emit(
+                        "whole_file_repair",
+                        {
+                            "retry": wf_retries,
+                            "failures": [
+                                f.message for f in file_validation.hard_failures
+                            ],
+                        },
+                        step_index=self.step,
+                        path=path,
+                    )
+                    accepted_opt: list[tuple[ConflictUnit, CandidateResolution]] | None = (
+                        self._whole_file_repair(
+                            path, accepted, original, file_validation.hard_failures
+                        )
+                    )
+                    if accepted_opt is None:
+                        # A unit could not be re-resolved (escalated) → bail.
+                        file_validation = None  # type: ignore[assignment]
+                        break
+                    accepted = accepted_opt
+                if file_validation is None or not file_validation.passed:
+                    result.escalated = True
+                    if file_validation is None:
+                        result.reason = (
+                            f"whole-file repair could not re-resolve a unit in {path}"
+                        )
+                    else:
+                        result.reason = (
+                            f"whole-file validation failed for {path}: "
+                            + "; ".join(f.message for f in file_validation.hard_failures)
+                        )
                     self._record_outcomes_to_memory(result)
                     write_review_bundle(
                         self.paths,
@@ -490,10 +570,52 @@ class Orchestrator:
             self._record_outcomes_to_memory(result)
         return result
 
-    def _resolve_unit(self, unit: ConflictUnit) -> UnitOutcome:
+    def _whole_file_repair(
+        self,
+        path: str,
+        accepted: list[tuple[ConflictUnit, CandidateResolution]],
+        original: str,
+        failures: list,
+    ) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+        """Re-resolve the unit most likely at fault for a whole-file failure.
+
+        Execution-driven whole-file CEGIS (survey §4): the file-level failures
+        (cross-unit syntax errors, etc.) are fed back to the unit whose
+        resolution most plausibly caused them. Attribution is by error-line
+        containment in the unit's marker_span (parsed from the failure message
+        when possible); if no unit's span contains the line, the LAST unit is
+        re-resolved (a heuristic — juxtaposition errors tend to surface where
+        the splices meet). Returns the updated accepted list, or None if the
+        attributed unit could not be re-resolved (it escalated).
+        """
+        fault_idx = _attribute_whole_file_failure(failures, [u for u, _ in accepted])
+        unit, _old_cand = accepted[fault_idx]
+        outcome = self._resolve_unit(unit, seed_failures=failures)
+        self.journal.emit(
+            "candidate_validated",
+            {
+                "candidate_id": (outcome.accepted.candidate_id if outcome.accepted else "none"),
+                "passed": outcome.accepted is not None,
+                "whole_file_repair_for": unit.unit_id,
+            },
+            step_index=self.step,
+            path=path,
+            unit_id=unit.unit_id,
+        )
+        if outcome.accepted is None:
+            return None
+        accepted[fault_idx] = (unit, outcome.accepted)
+        return accepted
+
+    def _resolve_unit(
+        self, unit: ConflictUnit, *, seed_failures: list | None = None
+    ) -> UnitOutcome:
         outcome = UnitOutcome(unit=unit)
         retry_count = 0
-        failures = None
+        # seed_failures: when set (whole-file CEGIS), the unit is re-resolved
+        # starting from the repair path with the file-level failures pre-seeded,
+        # so the model gets the concrete cross-unit error on its first attempt.
+        failures = list(seed_failures) if seed_failures else None
         prev_candidate = None
         while True:
             context = self.context_builder.build(unit)

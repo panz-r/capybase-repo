@@ -373,16 +373,16 @@ def test_manual_mode_resolves_multi_unit(multi_unit_conflicted_repo):
 
 def test_run_escalates_when_whole_file_invalid(multi_unit_conflicted_repo):
     """Two candidates that individually pass Phase A but produce invalid Python
-    when juxtaposed → Phase B (verify_file) fails → escalate.
+    when juxtaposed → Phase B (verify_file) fails. With execution-driven
+    whole-file CEGIS, the system now attempts to REPAIR (feed the cross-unit
+    failure back to the unit), escalating only when the repair also fails.
 
-    We craft both resolutions to be syntactically fine in isolation but to
-    duplicate a definition across the file (a cross-unit error Phase A
-    structurally cannot detect)."""
+    Here the FakeClient has no responses left for the repair attempt, so the
+    re-resolution fails and the file escalates with a whole-file repair
+    message (not the old immediate "whole-file validation failed")."""
     repo = multi_unit_conflicted_repo["repo"]
-    # Both hunks resolve to a top-level ``x = 1`` — valid alone, but two
-    # module-level assignments aren't a syntax error per se. Instead make each
-    # resolution an incomplete statement fragment so the spliced file is a
-    # SyntaxError: bare ``return`` at module level.
+    # Both hunks resolve to a bare ``return`` at module level: valid alone in
+    # the per-unit context but a SyntaxError when juxtaposed at module scope.
     bad = _make_resolved_payload("return 1")
     engine = ResolutionEngine(_config(repo).model, client=FakeClient([bad, bad]))
     orch = Orchestrator(
@@ -391,4 +391,43 @@ def test_run_escalates_when_whole_file_invalid(multi_unit_conflicted_repo):
     )
     result = orch.run()
     assert result.escalated
-    assert "whole-file validation failed" in (result.reason or "")
+    # New behavior: repair was attempted, then failed → escalate.
+    assert "whole-file" in (result.reason or "")
+
+
+def test_whole_file_repair_recovers_and_accepts(multi_unit_conflicted_repo):
+    """Execution-driven whole-file CEGIS: both units pass per-unit validation
+    in isolation, but unit 1's first resolution breaks the file when juxtaposed
+    (an unclosed bracket). The whole-file validator catches it, feeds the
+    concrete SyntaxError back to unit 1, which re-resolves to the valid merge
+    on the repair attempt. The file is then ACCEPTED (not escalated).
+
+    This is the survey §4 principle: ground the model's correction in concrete
+    execution feedback instead of escalating the cross-unit error."""
+    repo = multi_unit_conflicted_repo["repo"]
+    services = multi_unit_conflicted_repo["services_merged"]   # unit 0, valid
+    # Per-unit-valid-but-whole-file-invalid: an unclosed paren survives the
+    # per-unit splice (where the sibling block is blanked) but breaks the full
+    # file when both resolutions are juxtaposed.
+    flags_broken = '    "cache": "on", "metrics": "on"\n    extra_stale_line('
+    flags_good = multi_unit_conflicted_repo["flags_merged"]
+    # Sequence: unit0(services), unit1(flags broken) → whole-file fails →
+    # repair re-resolves unit1 → flags_good. CyclingClient repeats the last.
+    client = CyclingClient([
+        _make_resolved_payload(services),
+        _make_resolved_payload(flags_broken),
+        _make_resolved_payload(flags_good),
+    ])
+    engine = ResolutionEngine(_config(repo).model, client=client)
+    orch = Orchestrator(
+        _config(repo), repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert not result.escalated, result.reason
+    text = (repo / "cfg.py").read_text()
+    assert "<<<<<<<" not in text
+    # Both merges present after repair.
+    assert "scheduler" in text and "reloader" in text
+    assert '"cache": "on"' in text and '"metrics": "on"' in text
+
