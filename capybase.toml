@@ -15,6 +15,14 @@ samples = 1
 # = true to enable majority voting over N samples. Below this agreement fraction
 # the merge is flagged low-confidence.
 consensus_min_agreement = 0.4
+# Two-pass prompting: extract intents first, then generate code conditioned on
+# them. Only activates when samples > 1.
+two_pass = false
+# Raised temperature for the diverse multi-sampling pass (distinct from the low
+# `temperature` used for focused retries).
+sampling_temperature = 0.7
+# Draw samples concurrently in a thread pool (safe: adapter is stateless/call).
+parallel_samples = true
 # Reasoning models (e.g. VibeThinker/DeepSeek-R1 style) emit long <think> chains
 # before answering. If this is too low, the model runs out of tokens mid-thought
 # (finish_reason=length) and never emits its JSON answer -> empty resolution.

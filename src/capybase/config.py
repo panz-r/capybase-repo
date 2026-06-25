@@ -27,6 +27,18 @@ class ModelConfig(BaseModel):
     # Below this agreement fraction the merge is flagged low-confidence (the
     # risk engine can treat it as a retry/escalate signal).
     consensus_min_agreement: float = 0.4
+    # Two-pass prompting (Step 2): first request extracts semantic intents
+    # only (small, fast), second request generates code conditioned on those
+    # intents. Only activates when samples > 1 (the multi-candidate path) to
+    # avoid doubling requests for the single-sample case.
+    two_pass: bool = False
+    # Raised temperature for the diverse multi-sampling pass (distinct from
+    # the low `temperature` used for focused retries). Higher temp → more
+    # diverse candidates → better consensus signal.
+    sampling_temperature: float = 0.7
+    # Draw samples concurrently in a thread pool (each is a blocking HTTP call).
+    # Safe because the LLM adapter is stateless per-call.
+    parallel_samples: bool = True
     # Reasoning models emit long <think> chains before answering; 2048 starves
     # them. 8192 leaves headroom for reasoning + the final JSON answer.
     max_tokens: int = 8192

@@ -41,6 +41,7 @@ from capybase.session import SessionPaths, new_session_id
 from capybase.verification import ValidationConfig, VerificationEngine
 from capybase.adapters.tests import TestRunner
 from capybase.config import Config
+from capybase.consensus import rank_by_consensus
 
 
 # A unit is "resolved" once a candidate is accepted.
@@ -477,7 +478,19 @@ class Orchestrator:
             )
 
             consensus_report = None
-            if self.config.future.enable_self_consistency:
+            if failures is None and self.config.model.two_pass and self.config.model.samples > 1:
+                # Two-pass prompting + consensus: extract intents, then sample
+                # N code candidates conditioned on them, then majority-vote.
+                candidates = self.resolution_engine.propose_two_pass(
+                    unit, context,
+                    n_samples=self.config.model.samples,
+                    temperature=self.config.model.sampling_temperature,
+                )
+                if self.config.future.enable_self_consistency and len(candidates) > 1:
+                    candidates, consensus_report = (
+                        rank_by_consensus(candidates, unit.language)
+                    )
+            elif self.config.future.enable_self_consistency:
                 candidates, consensus_report = (
                     self.resolution_engine.propose_with_consensus(
                         unit, context, failures=failures

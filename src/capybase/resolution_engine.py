@@ -13,7 +13,9 @@ Prompt versions::
 
 from __future__ import annotations
 
+import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Iterable
 
 from capybase.adapters.llm_openai import (
@@ -33,6 +35,9 @@ from capybase.consensus import ConsensusReport, rank_by_consensus
 
 PROMPT_RESOLVE = "resolve_text_block.v5"
 PROMPT_RETRY = "cegis_retry.v5"
+# Two-pass prompting (Step 2): intent extraction then code generation.
+PROMPT_INTENT = "intent.v1"
+PROMPT_CODE = "code_from_intent.v1"
 
 
 def build_resolve_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
@@ -158,6 +163,90 @@ def _render_failure(f: VerificationFailure) -> str:
     return "\n".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# Two-pass prompting (Step 2): intent extraction → code generation
+# ---------------------------------------------------------------------------
+
+
+def build_intent_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
+    """Pass 1: extract semantic intents only. No code generation.
+
+    A 3B model reasons better when asked to *understand* the conflict before
+    *fixing* it. This request is small and fast — it asks only for a JSON list
+    of what each side changed. The result becomes a "reasoning map" that guides
+    the code-generation pass.
+    """
+    return f"""Analyze this git merge conflict and state what EACH side changed
+relative to the base. Output ONLY a JSON object with two string-list fields.
+Do NOT write code.
+
+file: {unit.path}
+language: {unit.language or 'unknown'}
+
+CURRENT_UPSTREAM_SIDE (stage 2):
+{unit.current.text}
+
+REPLAYED_COMMIT_SIDE (stage 3):
+{unit.replayed.text}
+
+BASE (common ancestor):
+{unit.base.text}
+
+Output this JSON (```json fenced):
+{{
+  "current_side_intent": ["what the upstream/current side changed", ...],
+  "replayed_commit_intent": ["what the local/replayed side changed", ...]
+}}
+"""
+
+
+def build_code_prompt(
+    unit: ConflictUnit,
+    context: ContextBundle,
+    intents: dict[str, list[str]],
+) -> str:
+    """Pass 2: generate code conditioned on the extracted intent map.
+
+    The model sees its own prior reasoning (the intents) and is asked to merge
+    BOTH sides into one coherent result guided by that understanding. This is
+    the same output schema as the single-pass resolve prompt, but the intent
+    context primes the model toward a correct synthesis.
+    """
+    cur_intents = intents.get("current_side_intent", [])
+    rep_intents = intents.get("replayed_commit_intent", [])
+    cur_lines = unit.current.text
+    rep_lines = unit.replayed.text
+    sv = context.structural_view
+    enc_sig = sv.get("enclosing_node_signature") if sv else None
+    structural_anchor = ""
+    if enc_sig:
+        structural_anchor = f"Merging inside: {enc_sig}\n\n"
+    return f"""Resolve ONE git merge conflict by merging BOTH sides into one
+coherent result. Be CONCISE. A prior analysis identified these intents:
+
+Upstream/current side changed:
+{json.dumps(cur_intents, indent=2)}
+
+Replayed/local side changed:
+{json.dumps(rep_intents, indent=2)}
+
+{structural_anchor}CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):
+{cur_lines}
+
+REPLAYED_COMMIT_SIDE body (exact, including leading spaces):
+{rep_lines}
+
+Output a ```json fenced object:
+{{
+  "resolved_text": "<the merged replacement text, exact indentation>",
+  "explanation": "<one sentence>",
+  "self_reported_confidence": 0.0,
+  "preserved_current_side": true,
+  "preserved_replayed_commit_side": true
+}}
+"""
+
+
 class ResolutionEngine:
     def __init__(
         self,
@@ -188,10 +277,39 @@ class ResolutionEngine:
             else build_resolve_prompt(unit, context)
         )
         candidates: list[CandidateResolution] = []
-        for _ in range(max(1, self.config.samples)):
-            cand = self._one(unit, context, prompt, prompt_version)
-            candidates.append(cand)
+        n = max(1, self.config.samples)
+        # Single sample or no parallelism: sequential (fast path, no overhead).
+        if n == 1 or not self.config.parallel_samples:
+            for _ in range(n):
+                cand = self._one(unit, context, prompt, prompt_version)
+                candidates.append(cand)
+        else:
+            # Draw samples concurrently in a thread pool. Each _one() call is a
+            # blocking HTTP request; running them in parallel turns N×latency
+            # into ~1×latency. Safe because the adapter is stateless per-call.
+            candidates = self._sample_parallel(
+                unit, context, prompt, prompt_version, n,
+                temperature_override=self.config.sampling_temperature,
+            )
         return candidates
+
+    def _sample_parallel(
+        self,
+        unit: ConflictUnit,
+        context: ContextBundle,
+        prompt: str,
+        prompt_version: str,
+        n: int,
+        *,
+        temperature_override: float | None = None,
+    ) -> list[CandidateResolution]:
+        """Draw N samples concurrently via a thread pool."""
+        with ThreadPoolExecutor(max_workers=min(n, 8)) as pool:
+            futures = [
+                pool.submit(self._one, unit, context, prompt, prompt_version, temperature_override)
+                for _ in range(n)
+            ]
+            return [f.result() for f in futures]
 
     def propose_with_consensus(
         self,
@@ -216,22 +334,104 @@ class ResolutionEngine:
         ordered, report = rank_by_consensus(candidates, unit.language)
         return ordered, report
 
+    def propose_two_pass(
+        self,
+        unit: ConflictUnit,
+        context: ContextBundle,
+        *,
+        n_samples: int = 1,
+        temperature: float | None = None,
+    ) -> list[CandidateResolution]:
+        """Two-pass generation: extract intents, then generate code.
+
+        Pass 1 (intent): one cheap request asking only for semantic intents.
+        Pass 2 (code): N samples at raised temperature, each conditioned on the
+        same intent map. The model generates code guided by its own prior
+        reasoning — a 3B model reasons better when it understands the conflict
+        before trying to fix it.
+
+        If the intent pass fails, falls back to single-pass ``propose`` so the
+        pipeline degrades gracefully.
+        """
+        # --- Pass 1: extract intents ---
+        intents = self._call_intent(unit, context)
+        if intents is None:
+            # Intent pass failed — degrade to single-pass.
+            return self.propose(unit, context)
+        # --- Pass 2: generate code conditioned on intents ---
+        code_prompt = build_code_prompt(unit, context, intents)
+        n = max(1, n_samples)
+        temp = temperature if temperature is not None else self.config.sampling_temperature
+        if n == 1:
+            return [self._one(unit, context, code_prompt, PROMPT_CODE, temp)]
+        if not self.config.parallel_samples:
+            return [self._one(unit, context, code_prompt, PROMPT_CODE, temp) for _ in range(n)]
+        return self._sample_parallel(
+            unit, context, code_prompt, PROMPT_CODE, n,
+            temperature_override=temp,
+        )
+
+    def _call_intent(
+        self, unit: ConflictUnit, context: ContextBundle
+    ) -> dict[str, list[str]] | None:
+        """Pass 1: extract semantic intents via a dedicated lightweight call.
+
+        Unlike ``_one`` (which expects ``resolved_text``), this call parses the
+        intent JSON directly — the response has ``current_side_intent`` and
+        ``replayed_commit_intent`` fields, not code. Returns None on any failure.
+        """
+        intent_prompt = build_intent_prompt(unit, context)
+        messages = [
+            {"role": "system", "content": "You are a careful merge-analysis assistant."},
+            {"role": "user", "content": intent_prompt},
+        ]
+        try:
+            resp = self.client.complete(
+                messages,
+                model=self.config.model,
+                temperature=self.config.temperature,
+                max_tokens=min(self.config.max_tokens, 2048),
+                json_mode=True,
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        try:
+            parsed, _warnings = coerce_candidate_dict(resp.text)
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        cur = parsed.get("current_side_intent", [])
+        rep = parsed.get("replayed_commit_intent", [])
+        if not cur and not rep:
+            return None
+        return {
+            "current_side_intent": list(cur) if isinstance(cur, list) else [str(cur)],
+            "replayed_commit_intent": list(rep) if isinstance(rep, list) else [str(rep)],
+        }
+
     def _one(
         self,
         unit: ConflictUnit,
         context: ContextBundle,
         prompt: str,
         prompt_version: str,
+        temperature_override: float | None = None,
     ) -> CandidateResolution:
         messages = [
             {"role": "system", "content": "You are a careful merge-resolution assistant."},
             {"role": "user", "content": prompt},
         ]
+        temperature = (
+            temperature_override
+            if temperature_override is not None
+            else self.config.temperature
+        )
         try:
             resp: LLMResponse = self.client.complete(
                 messages,
                 model=self.config.model,
-                temperature=self.config.temperature,
+                temperature=temperature,
                 max_tokens=self.config.max_tokens,
                 json_mode=True,
             )
