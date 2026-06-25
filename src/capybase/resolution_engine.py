@@ -57,19 +57,19 @@ def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
     return unit.current.text, unit.base.text, unit.replayed.text
 
 
-def build_resolve_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
-    # Show a visible marker so the model can see the exact indentation it must
-    # reproduce (leading spaces are invisible in normal prose).
-    # Prefer the diff3-minimized sides when available (Step 1: shrink the
-    # conflict window so the model isn't distracted by adjacent non-conflicting
-    # lines). Falls back to the raw marker sides.
+def _resolve_prompt_parts(unit: ConflictUnit, context: ContextBundle):
+    """Build the reusable building blocks of the resolve prompt.
+
+    The resolve prompt is composed of stable parts (intro, sides, contract,
+    rules) so that prompt *variants* (``build_resolve_prompt_variants``) can
+    re-order or re-frame them without re-deriving the data — guaranteeing the
+    spliced-resolved_text contract is invariant across variants. Returns a dict
+    of named string fragments plus the already-rendered baseline sections.
+    """
     cur_lines, base_lines, rep_lines = _prompt_sides(unit)
     sv = context.structural_view
     enc_sig = sv.get("enclosing_node_signature") if sv else None
     enc_text = sv.get("enclosing_node_text") if sv else None
-    # Structural anchor: when tree-sitter resolved the enclosing definition,
-    # show it so the model knows the logical block it is merging inside (e.g.
-    # "def greet()") — sharper than inferring from indentation alone.
     structural_anchor = ""
     if enc_sig and enc_text:
         structural_anchor = f"""Logical block you are merging inside (tree-sitter AST):
@@ -77,10 +77,6 @@ def build_resolve_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
 {enc_text}
 
 """
-    # RAG few-shot: when past similar merges were retrieved from the experience
-    # store, show them as demonstrations so the model learns this codebase's
-    # merge conventions dynamically. Each example shows the three sides and the
-    # accepted resolution.
     few_shot = ""
     if context.retrieved_examples:
         blocks = []
@@ -92,55 +88,117 @@ def build_resolve_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
                 f"  RESOLVED: {ex.resolved}"
             )
         few_shot = "Similar past merges (for reference — match this style):\n" + "\n".join(blocks) + "\n\n"
-    return f"""Resolve ONE git merge conflict by merging BOTH sides into one coherent
-result preserving each side's intent. Be CONCISE: reason in a few sentences,
-then answer. Do not over-explain.
+    intro = (
+        "Resolve ONE git merge conflict by merging BOTH sides into one coherent\n"
+        "result preserving each side's intent. Be CONCISE: reason in a few sentences,\n"
+        "then answer. Do not over-explain.\n\n"
+        f"file: {unit.path}\n"
+        f"language: {unit.language or 'unknown'}\n\n"
+    )
+    # The non-instruction sections (anchor, few-shot, three sides, context) form
+    # one contiguous block that variants keep together — re-ordering *within* it
+    # would risk disturbing the anchor/few-shot coupling to the sides.
+    data_block = (
+        f"{structural_anchor}{few_shot}"
+        f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
+        f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
+        f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
+        f"Surrounding file context:\n{context.primary_text}\n\n"
+    )
+    contract = (
+        "Your resolved_text REPLACES the whole conflict marker block (``<<<<<<<``\n"
+        "through ``>>>>>>>``) and is spliced in verbatim. End with ONE ```json fenced\n"
+        "object having EXACTLY these keys:\n\n"
+        "```json\n"
+        "{\n"
+        '  "resolved_text": "<merged replacement text>",\n'
+        '  "current_side_intent": ["..."],\n'
+        '  "replayed_commit_intent": ["..."],\n'
+        '  "preserved_current_side": true,\n'
+        '  "preserved_replayed_commit_side": true,\n'
+        '  "dropped_current_side_details": [],\n'
+        '  "dropped_replayed_commit_side_details": [],\n'
+        '  "assumptions": [],\n'
+        '  "needs_human": false,\n'
+        '  "self_reported_confidence": 0.0,\n'
+        '  "explanation": "one short sentence"\n'
+        "}\n"
+        "```\n\n"
+    )
+    rules = (
+        "CRITICAL rules:\n"
+        "- PRESERVE leading indentation. If the bodies start with 4 spaces, EVERY line\n"
+        "  of resolved_text must start with 4 spaces. Getting this wrong causes a syntax\n"
+        "  error and rejection.\n"
+        "- No conflict markers (``<<<<<<<`` / ``=======`` / ``>>>>>>>``).\n"
+        "- Do not add or change the enclosing def/class line.\n"
+        "- Escape newlines as \\n and double quotes as \\\" inside resolved_text.\n"
+        "- Output the ```json block last; nothing after it.\n"
+        "- If you cannot merge safely, set needs_human=true and explain.\n"
+    )
+    return {"intro": intro, "data": data_block, "contract": contract, "rules": rules}
 
-file: {unit.path}
-language: {unit.language or 'unknown'}
 
-{structural_anchor}{few_shot}CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):
-{cur_lines}
+def build_resolve_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
+    """The baseline resolve prompt.
 
-REPLAYED_COMMIT_SIDE body (exact, including leading spaces):
-{rep_lines}
+    Composes the canonical part ordering (intro → data → contract → rules) from
+    ``_resolve_prompt_parts``. Prompt variants (``build_resolve_prompt_variants``)
+    re-use these exact parts so the spliced-output contract is identical across
+    phrasings.
+    """
+    p = _resolve_prompt_parts(unit, context)
+    return p["intro"] + p["data"] + p["contract"] + p["rules"]
 
-BASE (common ancestor) body, for context:
-{base_lines}
 
-Surrounding file context:
-{context.primary_text}
+# Variant tags are appended to the base prompt_version (e.g. "resolve_text_block.v5#v1")
+# so offline eval can attribute outcomes to the phrasing — the seed data for any
+# future prompt-optimization (survey §2 AOZPT) work. "" = baseline (no suffix).
+PROMPT_VARIANT_TAGS: tuple[str, ...] = ("", "#v1", "#v2")
 
-Your resolved_text REPLACES the whole conflict marker block (``<<<<<<<``
-through ``>>>>>>>``) and is spliced in verbatim. End with ONE ```json fenced
-object having EXACTLY these keys:
 
-```json
-{{
-  "resolved_text": "<merged replacement text>",
-  "current_side_intent": ["..."],
-  "replayed_commit_intent": ["..."],
-  "preserved_current_side": true,
-  "preserved_replayed_commit_side": true,
-  "dropped_current_side_details": [],
-  "dropped_replayed_commit_details": [],
-  "assumptions": [],
-  "needs_human": false,
-  "self_reported_confidence": 0.0,
-  "explanation": "one short sentence"
-}}
-```
+def build_resolve_prompt_variants(
+    unit: ConflictUnit, context: ContextBundle, k: int = 3
+) -> list[tuple[str, str]]:
+    """Return up to ``k`` semantically-equivalent resolve prompts (survey §4).
 
-CRITICAL rules:
-- PRESERVE leading indentation. If the bodies start with 4 spaces, EVERY line
-  of resolved_text must start with 4 spaces. Getting this wrong causes a syntax
-  error and rejection.
-- No conflict markers (``<<<<<<<`` / ``=======`` / ``>>>>>>>``).
-- Do not add or change the enclosing def/class line.
-- Escape newlines as \\n and double quotes as \\" inside resolved_text.
-- Output the ```json block last; nothing after it.
-- If you cannot merge safely, set needs_human=true and explain.
-"""
+    Each entry is ``(prompt_text, variant_suffix)`` where ``variant_suffix`` is
+    one of ``PROMPT_VARIANT_TAGS`` (``""`` for the baseline). The variants are
+    *deterministic transforms* of the baseline's parts (``_resolve_prompt_parts``),
+    NOT hand-rewritten templates — so every variant carries the identical three
+    sides, structural anchor, JSON contract block, and CRITICAL rules. Only the
+    *ordering and framing* of those parts differ:
+
+    - ``""``  (v0): the baseline ordering (intro → data → contract → rules).
+    - ``#v1`` (constraint-first): contract + rules BEFORE the data, so the model
+      reads the output contract before the sides. Tests whether stating the
+      constraint first improves faithfulness to the JSON/splice contract.
+    - ``#v2`` (minimal-diff priming): the baseline ordering with a one-line
+      steer prepended — "Prefer the smallest change that merges both intents;
+      do not reformat surrounding lines." The minimal-diff coder persona as a
+      sentence, not a separate template.
+
+    ``k`` clamps to the number of available variants. This is the Code-Roulette
+    robustness lever: correct merges tend to be stable across these phrasings,
+    while incorrect logic is brittle, so the consensus cluster that survives
+    multiple variants is a stronger correctness signal than any single sample.
+    """
+    p = _resolve_prompt_parts(unit, context)
+    intro, data, contract, rules = p["intro"], p["data"], p["contract"], p["rules"]
+    variants: list[tuple[str, str]] = [
+        (intro + data + contract + rules, ""),                      # v0 baseline
+        (intro + contract + rules + data, "#v1"),                   # constraint-first
+        (_MINIMAL_DIFF_STEER + intro + data + contract + rules, "#v2"),  # minimal-diff
+    ]
+    if k < len(variants):
+        variants = variants[: max(1, k)]
+    return variants
+
+
+_MINIMAL_DIFF_STEER = (
+    "Prefer the smallest change that merges both intents; do not reformat "
+    "surrounding lines.\n\n"
+)
 
 
 def build_retry_prompt(
@@ -348,6 +406,19 @@ class ResolutionEngine:
             prompt = build_resolve_prompt(unit, context)
         candidates: list[CandidateResolution] = []
         n = max(1, self.config.samples)
+        # Prompt-variant sampling (survey §4): on a FRESH resolve only (retries/
+        # repair must stay single-template for reproducible counterexample
+        # feedback), spread samples across semantically-equivalent phrasings.
+        # The temperature portfolio still applies across the variants. Off by
+        # default; engages only with samples > 1 + parallel sampling.
+        if (
+            not failures
+            and n > 1
+            and self.config.parallel_samples
+            and getattr(self.config, "prompt_variants", False)
+        ):
+            variants = build_resolve_prompt_variants(unit, context, k=n)
+            return self._sample_variants(unit, context, prompt_version, variants)
         # Single sample or no parallelism: sequential (fast path, no overhead).
         if n == 1 or not self.config.parallel_samples:
             for _ in range(n):
@@ -362,6 +433,37 @@ class ResolutionEngine:
                 temperature_override=self.config.sampling_temperature,
             )
         return candidates
+
+    def _sample_variants(
+        self,
+        unit: ConflictUnit,
+        context: ContextBundle,
+        base_version: str,
+        variants: list[tuple[str, str]],
+    ) -> list[CandidateResolution]:
+        """Draw one sample per prompt variant in a thread pool (survey §4).
+
+        ``variants`` is a list of ``(prompt_text, variant_suffix)`` pairs from
+        ``build_resolve_prompt_variants``. Each suffix is appended to
+        ``base_version`` so the candidate's ``prompt_version`` records which
+        phrasing produced it (e.g. ``resolve_text_block.v5#v1``). The
+        temperature portfolio (``_sample_temperatures``) is applied across the
+        variants in order, so a high-temperature exploratory sample and a
+        low-temperature conservative sample still get drawn. Returns one
+        candidate per variant.
+        """
+        temps = self._sample_temperatures(len(variants), self.config.sampling_temperature)
+        with ThreadPoolExecutor(max_workers=min(len(variants), 8)) as pool:
+            futures = [
+                pool.submit(
+                    self._one,
+                    unit, context, prompt_text,
+                    f"{base_version}{suffix}",
+                    temps[i] if i < len(temps) else temps[-1],
+                )
+                for i, (prompt_text, suffix) in enumerate(variants)
+            ]
+            return [f.result() for f in futures]
 
     def _sample_parallel(
         self,

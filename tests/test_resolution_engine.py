@@ -5,6 +5,7 @@ from capybase.resolution_engine import (
     PROMPT_RESOLVE,
     ResolutionEngine,
     build_resolve_prompt,
+    build_resolve_prompt_variants,
 )
 
 
@@ -79,6 +80,66 @@ def test_resolve_prompt_contains_sides():
     assert "CURRENT_UPSTREAM_SIDE" in prompt
     assert "REPLAYED_COMMIT_SIDE" in prompt
     assert "BASE" in prompt
+
+
+# --- prompt-variant generation (survey §4 Code Roulette robustness) ---
+
+
+def test_variants_baseline_equals_resolve_prompt_byte_for_byte():
+    """Variant 0 (the baseline suffix) must be byte-identical to
+    build_resolve_prompt — the refactor to parts must not change the canonical
+    prompt at all."""
+    u = _unit()
+    ctx = ContextBuilder().build(u)
+    baseline = build_resolve_prompt(u, ctx)
+    variants = build_resolve_prompt_variants(u, ctx, k=3)
+    v0_text, v0_suffix = variants[0]
+    assert v0_suffix == ""
+    assert v0_text == baseline
+
+
+def test_variants_count_and_clamp():
+    """Returns up to k variants; k clamps to at least 1."""
+    u = _unit()
+    ctx = ContextBuilder().build(u)
+    assert len(build_resolve_prompt_variants(u, ctx, k=3)) == 3
+    assert len(build_resolve_prompt_variants(u, ctx, k=2)) == 2
+    assert len(build_resolve_prompt_variants(u, ctx, k=1)) == 1
+    # k=0 still yields the baseline (clamped to >= 1).
+    assert len(build_resolve_prompt_variants(u, ctx, k=0)) == 1
+
+
+def test_variants_carry_identical_contract_and_sides():
+    """Every variant must contain the exact same three sides and the full JSON
+    contract block + CRITICAL rules — only ordering/framing differs, so the
+    spliced-output semantics are invariant across phrasings."""
+    u = _unit()
+    ctx = ContextBuilder().build(u)
+    variants = build_resolve_prompt_variants(u, ctx, k=3)
+    texts = [t for t, _ in variants]
+    # The conflict sides appear verbatim in every variant.
+    for t in texts:
+        assert "    return 2" in t  # current side
+        assert "    return 3" in t  # replayed side
+        assert "def f():\n    return 1" in t  # base side
+        # The JSON contract keys + CRITICAL rules are present in every variant.
+        assert '"resolved_text": "<merged replacement text>"' in t
+        assert "CRITICAL rules:" in t
+        assert "PRESERVE leading indentation" in t
+
+
+def test_variants_are_mutually_distinct():
+    """The phrasings must differ from one another (else there is no diversity
+    to exploit)."""
+    u = _unit()
+    ctx = ContextBuilder().build(u)
+    variants = build_resolve_prompt_variants(u, ctx, k=3)
+    texts = [t for t, _ in variants]
+    assert len(set(texts)) == 3
+    # v1 puts the contract before the data; v2 prepends the minimal-diff steer.
+    assert texts[1].index('"resolved_text"') < texts[1].index("CURRENT_UPSTREAM_SIDE body")
+    assert "smallest change that merges both intents" in texts[2]
+    assert "smallest change that merges both intents" not in texts[0]
 
 
 # --- diff3-refined sides (Step 1 wiring): prefer the minimized window ---
