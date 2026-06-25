@@ -452,6 +452,7 @@ class Orchestrator:
         outcome = UnitOutcome(unit=unit)
         retry_count = 0
         failures = None
+        prev_candidate = None
         while True:
             context = self.context_builder.build(unit)
             if self.config.journal.enabled and self.config.journal.store_prompts:
@@ -498,7 +499,7 @@ class Orchestrator:
                 )
             else:
                 candidates = self.resolution_engine.propose(
-                    unit, context, failures=failures
+                    unit, context, failures=failures, prev_candidate=prev_candidate
                 )
             # Take the first candidate: with self-consistency this is the
             # majority winner (reordered by rank_by_consensus); otherwise the
@@ -581,6 +582,7 @@ class Orchestrator:
                 unit_id=unit.unit_id,
             )
             failures = validation.hard_failures or None
+            prev_candidate = cand  # for targeted repair on next attempt
             retry_count += 1
 
     # ------------------------------------------------------------------ helpers

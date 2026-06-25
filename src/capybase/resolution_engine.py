@@ -38,6 +38,8 @@ PROMPT_RETRY = "cegis_retry.v5"
 # Two-pass prompting (Step 2): intent extraction then code generation.
 PROMPT_INTENT = "intent.v1"
 PROMPT_CODE = "code_from_intent.v1"
+# Targeted repair (Step 4): send back the broken candidate for surgical fixing.
+PROMPT_REPAIR = "cegis_repair.v1"
 
 
 def build_resolve_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
@@ -139,6 +141,49 @@ def build_retry_prompt(
 
 Address every failure above; do not repeat the mistake. End with the ```json
 fenced answer as instructed.
+"""
+
+
+def build_repair_prompt(
+    unit: ConflictUnit,
+    context: ContextBundle,
+    candidate: CandidateResolution,
+    failures: Iterable[VerificationFailure],
+) -> str:
+    """Targeted repair: send the broken candidate back for surgical fixing.
+
+    Unlike ``build_retry_prompt`` (full regeneration from scratch), this
+    includes the previous attempt's ``resolved_text`` verbatim so the model can
+    fix the specific error locally rather than re-deriving the whole merge. A
+    3B model is highly capable of fixing its own minor errors (missing bracket,
+    wrong indentation) when shown the exact code + the exact error.
+    """
+    feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
+    return f"""Your previous merge attempt had errors. Fix the SPECIFIC errors in
+your code below — do not rewrite from scratch unless necessary. Keep all parts
+that were correct; change only what the validator flagged.
+
+file: {unit.path}
+language: {unit.language or 'unknown'}
+
+CURRENT_UPSTREAM_SIDE body:
+{unit.current.text}
+
+REPLAYED_COMMIT_SIDE body:
+{unit.replayed.text}
+
+YOUR PREVIOUS ATTEMPT (needs fixing):
+{candidate.resolved_text}
+
+### validator feedback (fix these specific issues)
+{feedback}
+
+Output the corrected resolved_text as a ```json fenced object:
+{{
+  "resolved_text": "<the fixed replacement text, exact indentation>",
+  "explanation": "<what you changed and why>",
+  "self_reported_confidence": 0.0
+}}
 """
 
 
@@ -263,19 +308,26 @@ class ResolutionEngine:
         context: ContextBundle,
         *,
         failures: list[VerificationFailure] | None = None,
+        prev_candidate: CandidateResolution | None = None,
     ) -> list[CandidateResolution]:
         """Generate one or more candidates for ``unit``.
 
         ``failures`` is non-empty on retry; the retry prompt feeds them back
-        (CEGIS-style). The number of samples comes from config so
-        self-consistency is enabled by raising ``samples``.
+        (CEGIS-style). When ``prev_candidate`` is also given (the failed
+        attempt), the targeted *repair* prompt is used — it includes the broken
+        code so the model fixes locally rather than regenerating from scratch.
+        The number of samples comes from config so self-consistency is enabled
+        by raising ``samples``.
         """
-        prompt_version = PROMPT_RETRY if failures else PROMPT_RESOLVE
-        prompt = (
-            build_retry_prompt(unit, context, failures)
-            if failures
-            else build_resolve_prompt(unit, context)
-        )
+        if failures and prev_candidate and prev_candidate.resolved_text:
+            prompt_version = PROMPT_REPAIR
+            prompt = build_repair_prompt(unit, context, prev_candidate, failures)
+        elif failures:
+            prompt_version = PROMPT_RETRY
+            prompt = build_retry_prompt(unit, context, failures)
+        else:
+            prompt_version = PROMPT_RESOLVE
+            prompt = build_resolve_prompt(unit, context)
         candidates: list[CandidateResolution] = []
         n = max(1, self.config.samples)
         # Single sample or no parallelism: sequential (fast path, no overhead).
