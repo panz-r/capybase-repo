@@ -218,6 +218,161 @@ def test_conformal_model_load_returns_none_for_non_conformal(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# TECP token-entropy threshold (survey §4.1): the entropy-only conformal gate
+# that fires when a candidate's mean token-entropy exceeds the (1-alpha)
+# quantile fit on accepted calibration outcomes.
+# ---------------------------------------------------------------------------
+
+
+def test_feature_keys_include_mean_token_entropy():
+    """The model-side uncertainty signal is part of the canonical vector."""
+    from capybase.calibration import _FEATURE_KEYS
+
+    assert "mean_token_entropy" in _FEATURE_KEYS
+
+
+def test_conformal_tecp_threshold_roundtrips(tmp_path):
+    from capybase.calibration import ConformalRiskModel
+
+    m = ConformalRiskModel(
+        coefficients=[1.0], intercept=0.0, alpha=0.1,
+        calibration_scores=[0.5], tecp_entropy_threshold=1.2,
+    )
+    path = tmp_path / "model.json"
+    path.write_text(json.dumps(m.to_dict()), encoding="utf-8")
+    loaded = ConformalRiskModel.load(path)
+    assert loaded is not None
+    assert loaded.tecp_entropy_threshold == 1.2
+
+
+def test_conformal_tecp_threshold_defaults_none():
+    """Without a fitted threshold, the TECP gate is absent (ignored)."""
+    from capybase.calibration import ConformalRiskModel, _FEATURE_KEYS
+
+    m = ConformalRiskModel(
+        coefficients=[0.0] * len(_FEATURE_KEYS), intercept=-5.0, alpha=0.1,
+        calibration_scores=[0.5, 0.6, 0.7, 0.8],
+    )
+    assert m.tecp_entropy_threshold is None
+
+
+def test_conformal_tecp_escalates_high_entropy():
+    """A candidate whose mean token-entropy exceeds the fitted threshold is
+    escalated even when the logistic p-value alone would accept it."""
+    from capybase.calibration import ConformalRiskModel, _FEATURE_KEYS
+
+    # Strong negative intercept → the logistic path predicts success (low
+    # nonconformity) so it would normally accept; the entropy gate overrides.
+    m = ConformalRiskModel(
+        coefficients=[0.0] * len(_FEATURE_KEYS), intercept=-5.0, alpha=0.1,
+        calibration_scores=[0.5, 0.6, 0.7, 0.8],
+        tecp_entropy_threshold=0.9,
+    )
+    # Sanity: low entropy alone is accepted.
+    assert not m.should_escalate({"mean_token_entropy": 0.1})
+    # High entropy crosses the TECP gate → escalate.
+    assert m.should_escalate({"mean_token_entropy": 1.5})
+
+
+def test_conformal_tecp_ignores_missing_entropy():
+    """When the candidate has no entropy value (capture off), the TECP gate is
+    skipped — never escalates on a missing signal."""
+    from capybase.calibration import ConformalRiskModel, _FEATURE_KEYS
+
+    m = ConformalRiskModel(
+        coefficients=[0.0] * len(_FEATURE_KEYS), intercept=-5.0, alpha=0.1,
+        calibration_scores=[0.5, 0.6, 0.7, 0.8],
+        tecp_entropy_threshold=0.9,
+    )
+    assert not m.should_escalate({})  # no mean_token_entropy key
+    assert not m.should_escalate({"mean_token_entropy": None})
+
+
+def test_conformal_tecp_threshold_boundary_is_strict():
+    """Entropy equal to the threshold does NOT escalate (strict >). This pins
+    the boundary so the (1-alpha) coverage quantile is itself accepted."""
+    from capybase.calibration import ConformalRiskModel, _FEATURE_KEYS
+
+    m = ConformalRiskModel(
+        coefficients=[0.0] * len(_FEATURE_KEYS), intercept=-5.0, alpha=0.1,
+        calibration_scores=[0.5, 0.6, 0.7, 0.8],
+        tecp_entropy_threshold=0.9,
+    )
+    assert not m.should_escalate({"mean_token_entropy": 0.9})  # equal → accept
+    assert m.should_escalate({"mean_token_entropy": 0.9001})   # just over → escalate
+
+
+# ---------------------------------------------------------------------------
+# Runtime wiring: the conformal model (with TECP) actually gates the
+# CalibratedRiskEngine.decide accept→escalate path. Closes the loop so the
+# entropy signal reaches routing, not just capture + calibration.
+# ---------------------------------------------------------------------------
+
+
+def _passed_result(features):
+    return VerificationResult(
+        candidate_id="c", unit_id="u", passed=True, hard_failures=[],
+        features=features,
+    )
+
+
+def test_engine_escalates_via_conformal_tecp_at_runtime():
+    """A passing candidate whose mean_token_entropy crosses the TECP threshold
+    is escalated by CalibratedRiskEngine.decide — the end-to-end path."""
+    from capybase.calibration import CalibratedRiskEngine, ConformalRiskModel, _FEATURE_KEYS
+
+    m = ConformalRiskModel(
+        coefficients=[0.0] * len(_FEATURE_KEYS), intercept=-5.0, alpha=0.1,
+        # p-value path accepts (strong negative intercept).
+        calibration_scores=[0.5, 0.6, 0.7, 0.8],
+        tecp_entropy_threshold=0.9,
+    )
+    engine = CalibratedRiskEngine(max_retries_per_unit=2, model=m)
+    decision = engine.decide(
+        _passed_result({"syntax_passed": True, "mean_token_entropy": 1.5}),
+        retry_count=0,
+    )
+    assert decision.action == "escalate"
+    assert decision.risk_score is not None
+
+
+def test_engine_accepts_conformal_low_entropy_at_runtime():
+    """The same model accepts a candidate with low entropy — TECP gate opens
+    only for the nonconforming tail."""
+    from capybase.calibration import CalibratedRiskEngine, ConformalRiskModel, _FEATURE_KEYS
+
+    m = ConformalRiskModel(
+        coefficients=[0.0] * len(_FEATURE_KEYS), intercept=-5.0, alpha=0.1,
+        calibration_scores=[0.5, 0.6, 0.7, 0.8],
+        tecp_entropy_threshold=0.9,
+    )
+    engine = CalibratedRiskEngine(max_retries_per_unit=2, model=m)
+    decision = engine.decide(
+        _passed_result({"syntax_passed": True, "mean_token_entropy": 0.1}),
+        retry_count=0,
+    )
+    assert decision.action == "accept"
+
+
+def test_engine_conformal_ignores_tecp_when_threshold_absent():
+    """No fitted threshold → the TECP gate is absent and a confident candidate
+    is accepted (the flag-off / no-entropy-data default behavior)."""
+    from capybase.calibration import CalibratedRiskEngine, ConformalRiskModel, _FEATURE_KEYS
+
+    m = ConformalRiskModel(
+        coefficients=[0.0] * len(_FEATURE_KEYS), intercept=-5.0, alpha=0.1,
+        calibration_scores=[0.5, 0.6, 0.7, 0.8],
+        tecp_entropy_threshold=None,
+    )
+    engine = CalibratedRiskEngine(max_retries_per_unit=2, model=m)
+    decision = engine.decide(
+        _passed_result({"syntax_passed": True, "mean_token_entropy": 1.5}),
+        retry_count=0,
+    )
+    assert decision.action == "accept"
+
+
+# ---------------------------------------------------------------------------
 # Side-by-side review bundle
 # ---------------------------------------------------------------------------
 

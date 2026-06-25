@@ -222,3 +222,32 @@ def test_well_formed_has_no_failure_kind():
     cand = engine.propose(_unit(), ContextBuilder().build(_unit()))[0]
     assert cand.failure_kind == ""
     assert cand.needs_human is False
+
+
+def test_candidate_carries_token_entropy_from_response():
+    """TECP (survey §4.1): the model-side uncertainty signal on the LLMResponse
+    is surfaced onto the candidate so the calibration seam can learn from it."""
+    from capybase.adapters.llm_openai import LLMResponse
+
+    payload = '{"resolved_text": "    return 1", "needs_human": false}'
+    resp = LLMResponse(
+        text=payload,
+        raw={"choices": [{"finish_reason": "stop"}]},
+        mean_token_entropy=0.73,
+    )
+    engine = ResolutionEngine(_cfg(), client=MetaClient([resp]))
+    cand = engine.propose(_unit(), ContextBuilder().build(_unit()))[0]
+    assert cand.failure_kind == ""
+    assert cand.mean_token_entropy == 0.73
+
+
+def test_candidate_entropy_none_when_response_had_none():
+    """A response with no entropy (capture off, or server omitted logprobs)
+    yields a candidate with mean_token_entropy=None, not 0.0."""
+    from capybase.adapters.llm_openai import LLMResponse
+
+    payload = '{"resolved_text": "    return 1", "needs_human": false}'
+    resp = LLMResponse(text=payload, raw={"choices": [{"finish_reason": "stop"}]})
+    engine = ResolutionEngine(_cfg(), client=MetaClient([resp]))
+    cand = engine.propose(_unit(), ContextBuilder().build(_unit()))[0]
+    assert cand.mean_token_entropy is None

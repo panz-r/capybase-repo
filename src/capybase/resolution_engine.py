@@ -670,6 +670,9 @@ class ResolutionEngine:
             assumptions=list(data.get("assumptions", [])),
             needs_human=needs_human,
             self_reported_confidence=float(data.get("self_reported_confidence", 0.0)),
+            # TECP: surface the API's per-token logprob signal onto the candidate
+            # so the calibration seam can learn from model-side uncertainty.
+            mean_token_entropy=resp.mean_token_entropy,
             raw_response=resp.text,
             parse_warnings=warnings,
             # A genuine model refusal (it answered JSON but said needs_human).

@@ -106,9 +106,9 @@ def main() -> int:
     from capybase.calibration import _FEATURE_KEYS as feature_keys
 
     if args.conformal:
-        out = _fit_conformal(X, y, feature_keys, dataset, args.alpha)
+        out = _fit_conformal(X, y, feature_keys, dataset, store, args.alpha)
     else:
-        out = _fit_logistic(X, y, feature_keys, dataset, args.threshold)
+        out = _fit_logistic(X, y, feature_keys, dataset, store, args.threshold)
 
     out_path = Path(args.out)
     if not out_path.is_absolute():
@@ -119,7 +119,7 @@ def main() -> int:
     return 0
 
 
-def _fit_logistic(X, y, feature_keys, dataset, threshold_override):
+def _fit_logistic(X, y, feature_keys, dataset, store, threshold_override):
     """Fit a logistic regression with F1-tuned threshold."""
     from sklearn.linear_model import LogisticRegression
 
@@ -141,7 +141,7 @@ def _fit_logistic(X, y, feature_keys, dataset, threshold_override):
                 best_f1, best_t = f1, t
         threshold = best_t
         print(f"Auto-tuned threshold: {threshold:.2f} (F1={best_f1:.3f})")
-    return {
+    out = {
         "coefficients": model.coef_[0].tolist(),
         "intercept": float(model.intercept_[0]),
         "threshold": float(threshold),
@@ -149,9 +149,60 @@ def _fit_logistic(X, y, feature_keys, dataset, threshold_override):
         "n_samples": dataset.n,
         "n_positive": dataset.n_positive,
     }
+    # TECP entropy threshold is computed from raw experience features, not the
+    # feature matrix, so it needs the store. Emitted on both model kinds.
+    out["tecp_entropy_threshold"] = _tecp_entropy_threshold(store, 0.1)
+    return out
 
 
-def _fit_conformal(X, y, feature_keys, dataset, alpha):
+def _tecp_entropy_threshold(store, alpha):
+    """Survey §4.1 (TECP): the (1-alpha) quantile of mean token-entropy over
+    CORRECT (accepted) calibration candidates.
+
+    A candidate whose ``mean_token_entropy`` exceeds this is treated as
+    nonconforming with the confident majority → escalate. The runtime model
+    stores this as ``tecp_entropy_threshold``; absent (or None) it is ignored.
+
+    Only candidates that actually captured logprobs contribute; rows without an
+    entropy value are skipped, so this stays safe even when entropy capture has
+    only been enabled partway through a corpus.
+
+    The quantile is computed in pure Python (the "higher" rounding convention
+    matching ``numpy.quantile(..., method="higher")``): index
+    ``ceil((1-alpha) * (n-1))`` on the sorted entropies. This keeps the TECP
+    helper free of the numpy/sklearn dependency the rest of the fitter carries,
+    so it can be unit-tested and reused without the offline stack installed.
+    """
+    import math
+
+    entropies = []
+    for exp in store:
+        # Accepted = correct; rejected/escalated = failure (the label convention
+        # used everywhere else in this file and in calibration.py).
+        if exp.outcome != "accepted":
+            continue
+        feats = exp.validator_features or {}
+        val = feats.get("mean_token_entropy")
+        try:
+            if val is not None:
+                entropies.append(float(val))
+        except (TypeError, ValueError):
+            continue
+    if not entropies:
+        print("TECP: no entropy observations on accepted outcomes; skipping threshold.")
+        return None
+    entropies.sort()
+    n = len(entropies)
+    pos = math.ceil((1.0 - alpha) * (n - 1))
+    q = float(entropies[max(0, min(pos, n - 1))])
+    print(
+        f"TECP entropy threshold (alpha={alpha}): {q:.4f} "
+        f"over {n} accepted outcomes."
+    )
+    return q
+
+
+def _fit_conformal(X, y, feature_keys, dataset, store, alpha):
     """Fit a split-conformal predictor with a coverage guarantee (1-alpha)."""
     from sklearn.linear_model import LogisticRegression
 
@@ -185,6 +236,11 @@ def _fit_conformal(X, y, feature_keys, dataset, alpha):
         "feature_keys": feature_keys,
         "n_samples": dataset.n,
         "n_positive": dataset.n_positive,
+        # TECP entropy threshold (survey §4.1): the (1-alpha) quantile of mean
+        # token-entropy over accepted outcomes. Runtime ConformalRiskModel
+        # escalates any candidate whose entropy exceeds this. None when no
+        # entropy observations exist (e.g. entropy capture still off).
+        "tecp_entropy_threshold": _tecp_entropy_threshold(store, alpha),
     }
 
 

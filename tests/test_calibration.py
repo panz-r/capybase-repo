@@ -356,8 +356,9 @@ def test_new_model_roundtrips_extended_keys(tmp_path):
 def test_merge_resolution_features_captures_all_signals():
     """The merge helper is the seam between the resolution process and the
     recorded feature dict. It must surface consensus, difficulty, conflict
-    size, node lines, confidence, and retry count — the signals that were
-    previously dropped before reaching the experience store."""
+    size, node lines, confidence, retry count, and the TECP token-entropy
+    signal — the signals that were previously dropped before reaching the
+    experience store."""
     from capybase.consensus import ConsensusReport
     from capybase.conflict_model import ConflictSide, ConflictUnit
     from capybase.orchestrator import Orchestrator, UnitOutcome
@@ -400,5 +401,74 @@ def test_merge_resolution_features_captures_all_signals():
         len(unit.base.text) + len(unit.current.text) + len(unit.replayed.text)
     )
     assert merged["enclosing_node_lines"] == 12.0
+
+
+def test_merge_resolution_features_surfaces_token_entropy():
+    """TECP (survey §4.1): the accepted candidate's mean_token_entropy reaches
+    the recorded features — proving the model-side uncertainty signal threads
+    from the adapter, through the candidate, into the calibration corpus."""
+    from capybase.consensus import ConsensusReport
+    from capybase.conflict_model import (
+        CandidateResolution,
+        ConflictSide,
+        ConflictUnit,
+    )
+    from capybase.orchestrator import Orchestrator, UnitOutcome
+    from capybase.config import Config
+
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="b"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="c"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="r"),
+        original_worktree_text="x",
+    )
+    outcome = UnitOutcome(unit=unit)
+    outcome.difficulty = "simple"
+    outcome.retry_count = 0
+    outcome.consensus = ConsensusReport(
+        winner=None, clusters=[], n_samples=1,
+        agreement_score=1.0, cluster_count=1, entropy=0.0,
+    )
+    accepted = CandidateResolution(
+        candidate_id="c", unit_id="u", model_name="m", prompt_version="v",
+        resolved_text="r", mean_token_entropy=0.88,
+    )
+
+    orch = Orchestrator(Config(), repo=".")
+    merged = orch._merge_resolution_features({}, outcome, accepted=accepted)
+    assert merged["mean_token_entropy"] == 0.88
+
+
+def test_merge_resolution_features_entropy_none_passthrough():
+    """When no entropy was captured (flag off / failed candidate), the recorded
+    feature is None — features_to_vector later maps it to 0.0 (missing)."""
+    from capybase.consensus import ConsensusReport
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+    from capybase.orchestrator import Orchestrator, UnitOutcome
+    from capybase.config import Config
+
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", conflict_type="UU",
+        unit_id="u", base=ConflictSide(label="BASE", text="b"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="c"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="r"),
+        original_worktree_text="x",
+    )
+    outcome = UnitOutcome(unit=unit)
+    outcome.consensus = ConsensusReport(
+        winner=None, clusters=[], n_samples=1, agreement_score=1.0,
+        cluster_count=1, entropy=0.0,
+    )
+
+    orch = Orchestrator(Config(), repo=".")
+    merged = orch._merge_resolution_features({}, outcome, accepted=None)
+    assert merged["mean_token_entropy"] is None
+    # And it vectorizes to 0.0 (treated as "confident / not atypical").
+    from capybase.calibration import features_to_vector, _FEATURE_KEYS
+
+    vec = features_to_vector(merged)
+    assert vec[_FEATURE_KEYS.index("mean_token_entropy")] == 0.0
 
 

@@ -187,6 +187,13 @@ class CandidateResolution(BaseModel):
     needs_human: bool = False
     self_reported_confidence: float = 0.0
 
+    # TECP token-entropy (survey §4.1): the mean negative log-probability of the
+    # generated content tokens, reduced from the API's per-token logprobs. This
+    # is the logit-free, black-box uncertainty signal the conformal "flywheel"
+    # consumes. ``None`` when logprobs weren't captured (default config) or the
+    # server didn't emit them.
+    mean_token_entropy: float | None = None
+
     raw_response: str = ""
     parse_warnings: list[str] = Field(default_factory=list)
     # Distinguishes a genuine model refusal (``"model_refusal"``) from a

@@ -930,6 +930,11 @@ class Orchestrator:
         out["self_reported_confidence"] = float(
             getattr(cand, "self_reported_confidence", 0.0) or 0.0
         )
+        # TECP token-entropy (model-side uncertainty): None when the candidate
+        # didn't capture logprobs (e.g. a failed/technical candidate, or entropy
+        # capture is off). features_to_vector maps None → 0.0 (treated as
+        # "confident / not atypical"), which is the safe default.
+        out["mean_token_entropy"] = getattr(cand, "mean_token_entropy", None)
         return out
 
     def _record_outcomes_to_memory(self, result: StepResult) -> None:

@@ -67,6 +67,12 @@ _FEATURE_KEYS: tuple[str, ...] = (
     "conflict_side_chars",
     "enclosing_node_lines",
     "self_reported_confidence",
+    # TECP token-entropy (survey §4.1): the model-side uncertainty signal,
+    # reduced from the API's per-token logprobs at the adapter seam and carried
+    # onto each candidate. Unlike the process-side signals above, this is a
+    # direct read of how confident the LLM was token-by-token — the logit-free
+    # input the conformal "flywheel" is designed around.
+    "mean_token_entropy",
 )
 
 
@@ -172,6 +178,12 @@ class ConformalRiskModel:
     alpha: float  # coverage = 1 - alpha
     calibration_scores: list[float] = field(default_factory=list)
     feature_keys: tuple[str, ...] = _FEATURE_KEYS
+    # TECP entropy threshold (survey §4.1): the (1-alpha) quantile of mean
+    # token-entropy over accepted calibration outcomes. When set, a candidate
+    # whose ``mean_token_entropy`` feature exceeds it is escalated regardless
+    # of the logistic p-value (high token-level uncertainty = nonconforming).
+    # None (no data, or entropy capture never enabled) → this check is skipped.
+    tecp_entropy_threshold: float | None = None
 
     def predict_proba(self, features: dict[str, Any]) -> float:
         """Return the conformal p-value under the success hypothesis.
@@ -218,8 +230,20 @@ class ConformalRiskModel:
         return self.alpha
 
     def should_escalate(self, features: dict[str, Any]) -> bool:
-        """True if the conformal p-value is below alpha (outlier)."""
-        return self.predict_proba(features) < self.alpha
+        """True if the candidate is nonconforming: either the conformal p-value
+        falls below alpha (logistic outlier), or — when a TECP entropy threshold
+        was fit — the candidate's ``mean_token_entropy`` exceeds it (token-level
+        uncertainty outlier). Either signal alone is sufficient to escalate."""
+        if self.predict_proba(features) < self.alpha:
+            return True
+        if self.tecp_entropy_threshold is not None:
+            mte = features.get("mean_token_entropy")
+            try:
+                if mte is not None and float(mte) > self.tecp_entropy_threshold:
+                    return True
+            except (TypeError, ValueError):
+                pass
+        return False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -229,17 +253,22 @@ class ConformalRiskModel:
             "alpha": self.alpha,
             "calibration_scores": self.calibration_scores,
             "feature_keys": list(self.feature_keys),
+            "tecp_entropy_threshold": self.tecp_entropy_threshold,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ConformalRiskModel":
         keys = tuple(d.get("feature_keys", _FEATURE_KEYS))
+        threshold = d.get("tecp_entropy_threshold")
         return cls(
             coefficients=list(d.get("coefficients", [])),
             intercept=float(d.get("intercept", 0.0)),
             alpha=float(d.get("alpha", 0.1)),
             calibration_scores=list(d.get("calibration_scores", [])),
             feature_keys=keys,
+            tecp_entropy_threshold=(
+                float(threshold) if threshold is not None else None
+            ),
         )
 
     @classmethod
@@ -369,6 +398,32 @@ class CalibratedRiskEngine:
         # all hard checks but is predicted likely to fail gets escalated.
         if decision.action == "accept" and self.model is not None:
             proba = self.model.predict_proba(result.features)
+            # Conformal model: escalate via its canonical nonconformity check
+            # (p-value < alpha, OR — when a TECP entropy threshold was fit — the
+            # candidate's mean_token_entropy exceeds it). predict_proba returns a
+            # p-value here (HIGH = safe), so the logistic ``proba >= threshold``
+            # comparison below does NOT apply to it.
+            if isinstance(self.model, ConformalRiskModel):
+                if self.model.should_escalate(result.features):
+                    return RiskDecision(
+                        action="escalate",
+                        reasons=decision.reasons + [
+                            f"conformal p-value {proba:.2f} < alpha "
+                            f"{self.model.alpha:.2f} or TECP entropy nonconforming"
+                        ],
+                        risk_score=proba,
+                        required_followups=[
+                            "calibrated escalation: nonconforming with accepted outcomes"
+                        ],
+                    )
+                return RiskDecision(
+                    action=decision.action,
+                    reasons=decision.reasons,
+                    risk_score=proba,
+                    required_followups=decision.required_followups,
+                )
+            # Logistic model: escalate when predicted failure proba crosses the
+            # tuned threshold.
             if proba >= self.model.threshold:
                 return RiskDecision(
                     action="escalate",
