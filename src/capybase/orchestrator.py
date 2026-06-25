@@ -192,6 +192,20 @@ class Orchestrator:
         self.verification = VerificationEngine.default(
             ValidationConfig.from_dict(config.validation.model_dump())
         )
+        # Verifier-model critic (surveys §1/§5): when enabled, register an LLM
+        # judge that checks the resolution preserves both sides' semantic intent
+        # — the failure mode the syntactic validators are blind to. It runs last
+        # in the validator chain (after the cheap structural checks) and uses the
+        # same black-box API client as the resolver. Inert + zero calls when off.
+        if config.validation.enable_verifier_model:
+            from capybase.verification import VerifierModelValidator
+
+            self.verification.register(
+                VerifierModelValidator(
+                    self.resolution_engine.client,
+                    model_name=config.model.model,
+                )
+            )
         # Risk engine: the calibrated variant overrides accept/escalate with
         # a learned threshold when a fitted model is present; otherwise it
         # transparently delegates to the rules engine. Both produce the same

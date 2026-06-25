@@ -431,3 +431,92 @@ def test_whole_file_repair_recovers_and_accepts(multi_unit_conflicted_repo):
     assert "scheduler" in text and "reloader" in text
     assert '"cache": "on"' in text and '"metrics": "on"' in text
 
+
+# ---------------------------------------------------------------------------
+# Verifier-model critic integration (surveys §1/§5): the LLM judge gates the
+# orchestrator's accept path end-to-end when enable_verifier_model is on.
+# ---------------------------------------------------------------------------
+
+
+class SequenceClient:
+    """Serves canned responses in strict order; raises if exhausted.
+
+    Unlike CyclingClient, this lets a test script an exact call sequence —
+    resolution payloads followed by critic verdicts — so we can assert the
+    critic's effect on accept vs escalate.
+    """
+
+    def __init__(self, responses: list[str]):
+        self.responses = list(responses)
+
+    def complete(self, messages, *, model, temperature, max_tokens, json_mode):
+        if not self.responses:
+            raise RuntimeError("no more fake responses")
+        return LLMResponse(text=self.responses.pop(0))
+
+
+def _verifier_config(repo):
+    cfg = _config(repo)
+    cfg.validation.enable_verifier_model = True
+    return cfg
+
+
+def test_verifier_blocks_accept_when_it_flags_dropped_intent(conflicted_repo):
+    """Flag on + critic says the resolution drops a side → NOT accepted. The
+    candidate is structurally clean (no markers, valid merge) so the syntactic
+    validators pass; only the semantic critic catches the dropped intent, and at
+    error severity it blocks the accept path (escalation)."""
+    repo = conflicted_repo["repo"]
+    # 1st call: a structurally-clean resolution. 2nd call: the critic verdict
+    # saying the replayed side's intent was dropped.
+    client = SequenceClient([
+        _make_resolved_payload("    return 'hi'"),  # structurally clean, but one-sided
+        json.dumps({"preserves_current": True, "preserves_replayed": False,
+                    "reason": "dropped howdy", "confidence": 0.9}),
+    ])
+    cfg = _verifier_config(repo)
+    cfg.validation.verifier_severity = "error"
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    # The critic caught the semantic drop the structural checks could not.
+    assert result.escalated
+
+
+def test_verifier_allows_accept_when_it_confirms_both_sides(conflicted_repo):
+    """Flag on + critic confirms both sides preserved → accepted (rebase
+    completes), proving the critic does not over-reject clean merges."""
+    repo = conflicted_repo["repo"]
+    client = SequenceClient([
+        _make_resolved_payload("    return 'hi' + 'howdy'"),  # real merge of both
+        json.dumps({"preserves_current": True, "preserves_replayed": True,
+                    "reason": "both preserved", "confidence": 0.9}),
+    ])
+    cfg = _verifier_config(repo)
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    assert not result.escalated, result.reason
+    assert "<<<<<<<" not in (repo / "app.py").read_text()
+
+
+def test_verifier_not_registered_when_flag_off(conflicted_repo):
+    """Flag off → the verifier validator is not in the engine's chain at all,
+    so no critic call is ever made (zero-cost default)."""
+    repo = conflicted_repo["repo"]
+    cfg = _config(repo)  # enable_verifier_model defaults False
+    cfg.validation.enable_verifier_model = False
+    orch = Orchestrator(cfg, repo=str(repo))
+    names = [type(v).__name__ for v in orch.verification.validators]
+    assert "VerifierModelValidator" not in names
+
+
+def test_verifier_registered_when_flag_on(conflicted_repo):
+    """Flag on → the verifier validator is registered in the chain."""
+    repo = conflicted_repo["repo"]
+    orch = Orchestrator(_verifier_config(repo), repo=str(repo))
+    names = [type(v).__name__ for v in orch.verification.validators]
+    assert "VerifierModelValidator" in names
+

@@ -69,6 +69,15 @@ lsp_baseline_strict = true
 # Shadow tests (Phase B): run tests/test_<module>.py for a modified module
 # before declaring success (warning severity, best-effort).
 enable_shadow_tests = false
+# Verifier-model critic (surveys §1/§5): an LLM judge that checks the
+# resolution preserves BOTH sides' semantic intent — the one failure the
+# syntactic validators are blind to (a merge that parses cleanly but drops a
+# side's intent). Uses the same black-box API as the resolver; no model is
+# trained or hosted. Inert + zero calls when false.
+enable_verifier_model = false
+# Critic disagreement severity: "warning" (bias toward retry/escalate) or
+# "error" (hard-reject a dropped-intent resolution).
+verifier_severity = "warning"
 
 [journal]
 enabled = true
