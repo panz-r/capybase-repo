@@ -190,3 +190,121 @@ def test_parallel_disabled_uses_sequential():
     assert len(cands) == 2
     assert cands[0].resolved_text == "a"
     assert cands[1].resolved_text == "b"
+
+
+# ---------------------------------------------------------------------------
+# Server-side N sampling (Step 2): one request with n=N instead of N requests
+# ---------------------------------------------------------------------------
+
+
+class BatchClient:
+    """A client that serves server-side ``n`` sampling via ``complete_many``.
+
+    Returns all N samples from a single call, recording that one batched
+    request was made (not N). Used to verify the optimization that collapses
+    N concurrent HTTP requests into one round-trip on a single-GPU server.
+    """
+
+    def __init__(self, responses: list[str]):
+        self._responses = list(responses)
+        self.batch_calls = 0
+        self.complete_calls = 0
+
+    def complete(self, messages, **kw):
+        self.complete_calls += 1
+        return LLMResponse(text=self._responses[0], raw={"_accumulated": {"finish_reason": "stop"}})
+
+    def complete_many(self, messages, *, n, **kw):
+        self.batch_calls += 1
+        return [
+            LLMResponse(text=t, raw={"_accumulated": {"finish_reason": "stop"}})
+            for t in self._responses[:n]
+        ]
+
+
+def test_server_side_n_sampling_one_request():
+    """When complete_many is available, N samples come from ONE request."""
+    client = BatchClient([
+        '{"resolved_text": "    return 1"}',
+        '{"resolved_text": "    return 2"}',
+        '{"resolved_text": "    return 3"}',
+    ])
+    cfg = ModelConfig(samples=3, parallel_samples=True)
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose(_unit(), _ctx())
+    assert len(cands) == 3
+    texts = [c.resolved_text for c in cands]
+    assert "    return 1" in texts and "    return 2" in texts
+    # Exactly one batched request — not three concurrent complete() calls.
+    assert client.batch_calls == 1
+    assert client.complete_calls == 0
+
+
+def test_server_side_n_uses_sampling_temperature():
+    client = BatchClient(['{"resolved_text": "x"}'] * 3)
+    cfg = ModelConfig(
+        samples=3, parallel_samples=True,
+        temperature=0.2, sampling_temperature=0.8,
+    )
+    engine = ResolutionEngine(cfg, client=client)
+    engine.propose(_unit(), _ctx())
+    assert client.batch_calls == 1
+
+
+def test_server_side_n_falls_back_when_request_fails():
+    """If complete_many raises, fall back to the thread-pool path."""
+    class FlakyBatch(BatchClient):
+        def complete_many(self, messages, *, n, **kw):
+            self.batch_calls += 1
+            raise RuntimeError("server does not support n")
+
+    client = FlakyBatch([
+        '{"resolved_text": "    return 1"}',
+        '{"resolved_text": "    return 2"}',
+        '{"resolved_text": "    return 3"}',
+    ])
+    cfg = ModelConfig(samples=3, parallel_samples=True)
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose(_unit(), _ctx())
+    # Fell back: still got 3 candidates via complete() calls, not the failed batch.
+    assert len(cands) == 3
+    assert client.batch_calls == 1
+    assert client.complete_calls == 3
+
+
+def test_server_side_n_falls_back_when_too_few_choices():
+    """If the server ignores n and returns fewer choices, fall back."""
+    class ShortBatch(BatchClient):
+        def complete_many(self, messages, *, n, **kw):
+            self.batch_calls += 1
+            # Returns only 1 choice regardless of n -> server ignored n.
+            return [LLMResponse(text=self._responses[0], raw={"_accumulated": {"finish_reason": "stop"}})]
+
+    client = ShortBatch([
+        '{"resolved_text": "    return 1"}',
+        '{"resolved_text": "    return 2"}',
+        '{"resolved_text": "    return 3"}',
+    ])
+    cfg = ModelConfig(samples=3, parallel_samples=True)
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose(_unit(), _ctx())
+    assert len(cands) == 3
+    # Batch was attempted but short; fell back to 3 complete() calls.
+    assert client.batch_calls == 1
+    assert client.complete_calls == 3
+
+
+def test_server_side_n_client_without_complete_many():
+    """A client with no complete_many uses the thread-pool path unchanged."""
+    client = ScriptedClient([
+        '{"resolved_text": "    return 1"}',
+        '{"resolved_text": "    return 2"}',
+        '{"resolved_text": "    return 3"}',
+    ])
+    cfg = ModelConfig(samples=3, parallel_samples=True)
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose(_unit(), _ctx())
+    assert len(cands) == 3
+    # ScriptedClient.complete called once per sample (thread-pool fallback).
+    assert len(client.calls) == 3
+

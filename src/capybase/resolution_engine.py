@@ -373,13 +373,78 @@ class ResolutionEngine:
         *,
         temperature_override: float | None = None,
     ) -> list[CandidateResolution]:
-        """Draw N samples concurrently via a thread pool."""
+        """Draw N samples: prefer one server-side ``n`` request, fall back to a
+        thread pool.
+
+        Step 2 (parallel sampling): a single request with ``n=N`` lets the
+        server batch all samples in one round-trip — critical on a single-GPU
+        llama-server where N concurrent requests serialize to one batch slot
+        and pay N× scheduling overhead. When the client supports
+        ``complete_many`` AND returns all N choices, we use them; otherwise we
+        fall back to N concurrent ``complete`` calls (the original behavior).
+        """
+        candidates = self._sample_n(
+            unit, prompt, prompt_version, n, temperature_override=temperature_override
+        )
+        if candidates is not None:
+            return candidates
+        # Fallback: thread pool of independent requests.
         with ThreadPoolExecutor(max_workers=min(n, 8)) as pool:
             futures = [
                 pool.submit(self._one, unit, context, prompt, prompt_version, temperature_override)
                 for _ in range(n)
             ]
             return [f.result() for f in futures]
+
+    def _sample_n(
+        self,
+        unit: ConflictUnit,
+        prompt: str,
+        prompt_version: str,
+        n: int,
+        *,
+        temperature_override: float | None = None,
+    ) -> list[CandidateResolution] | None:
+        """Server-side N sampling via ``complete_many``.
+
+        Returns None when the client lacks ``complete_many`` or the server
+        ignored ``n`` (returned fewer than ``n`` choices) — the caller then
+        falls back to the thread pool. This keeps the optimization transparent
+        and safe: any server that doesn't support ``n`` simply yields the
+        original behavior.
+        """
+        complete_many = getattr(self.client, "complete_many", None)
+        if not callable(complete_many):
+            return None
+        messages = [
+            {"role": "system", "content": "You are a careful merge-resolution assistant."},
+            {"role": "user", "content": prompt},
+        ]
+        temperature = (
+            temperature_override
+            if temperature_override is not None
+            else self.config.temperature
+        )
+        try:
+            responses = complete_many(
+                messages,
+                model=self.config.model,
+                temperature=temperature,
+                max_tokens=self.config.max_tokens,
+                json_mode=True,
+                n=n,
+            )
+        except Exception as exc:  # noqa: BLE001 - fall back to thread pool
+            return None
+        # complete_many is duck-typed (getattr above); coerce defensively.
+        responses = list(responses) if responses is not None else []
+        if len(responses) < n:
+            # Server ignored/doesn't support n — not enough samples returned.
+            return None
+        return [
+            self._candidate_from_response(unit, prompt_version, resp)
+            for resp in responses
+        ]
 
     def propose_with_consensus(
         self,
@@ -510,9 +575,18 @@ class ResolutionEngine:
                 unit, self.config.model, prompt_version, str(exc), "",
                 failure_kind="request_failed",
             )
+        return self._candidate_from_response(unit, prompt_version, resp)
 
-        # Detect truncation: reasoning models can exhaust the token budget
-        # mid-thought (finish_reason=length), never emitting their answer.
+    def _candidate_from_response(
+        self, unit: ConflictUnit, prompt_version: str, resp: LLMResponse
+    ) -> CandidateResolution:
+        """Build a CandidateResolution from a single LLMResponse.
+
+        Shared by ``_one`` (thread-pool path) and ``_sample_n`` (server-side
+        N sampling) so every sample is validated identically regardless of how
+        it was drawn. Detects truncation (finish_reason=length) and parse
+        failures, mapping them to retryable failure_kinds.
+        """
         meta = resp.raw or {}
         finish = ""
         if isinstance(meta, dict):
@@ -529,7 +603,6 @@ class ResolutionEngine:
                 "model output truncated (finish_reason=length); increase max_tokens",
                 resp.text, failure_kind="truncated",
             )
-
         data, warnings = coerce_candidate_dict(resp.text)
         if not data or "resolved_text" not in data:
             warnings = warnings or ["response missing resolved_text"]
@@ -562,6 +635,7 @@ class ResolutionEngine:
             # A genuine model refusal (it answered JSON but said needs_human).
             failure_kind="model_refusal" if needs_human else "",
         )
+
 
 
 def _failed_candidate(

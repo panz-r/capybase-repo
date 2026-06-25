@@ -32,6 +32,9 @@ class LLMClient(Protocol):
     def complete(self, messages: list[dict[str, str]], *, model: str, temperature: float,
                  max_tokens: int, json_mode: bool) -> LLMResponse: ...
 
+    def complete_many(self, messages: list[dict[str, str]], *, model: str, temperature: float,
+                      max_tokens: int, json_mode: bool, n: int) -> list[LLMResponse]: ...
+
 
 class OpenAICompatibleClient:
     def __init__(self, config: ModelConfig) -> None:
@@ -101,6 +104,99 @@ class OpenAICompatibleClient:
                 raise RuntimeError(f"LLM request failed: {got}") from got
             raise RuntimeError(f"LLM request failed: {got}") from got
         return got
+
+    def complete_many(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool,
+        n: int,
+    ) -> list[LLMResponse]:
+        """Draw ``n`` samples in a SINGLE request via the server's ``n`` param.
+
+        Step 2 (parallel sampling): instead of firing ``n`` concurrent HTTP
+        requests (which serialize to one batch slot on a single-GPU
+        llama-server and pay ``n``× scheduling overhead), this issues one
+        non-streaming request with ``"n": n``. The server draws all ``n``
+        samples internally and returns them in one ``choices`` list — one
+        network round-trip, server-side batch scheduling.
+
+        Non-streaming is used deliberately: the early-termination optimization
+        in ``_read_stream`` is per-completion, and interleaving ``n`` SSE
+        choice streams adds complexity for little gain when the goal is simply
+        to batch. The whole response is awaited once.
+
+        Raises ``RuntimeError`` on HTTP/parse failure (same contract as
+        ``complete``); callers fall back to the thread-pool path on error.
+        """
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "n": n,
+        }
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
+        data = json.dumps(body).encode("utf-8")
+        url = self.config.base_url.rstrip("/") + "/chat/completions"
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.config.api_key}",
+            },
+            method="POST",
+        )
+        import queue
+        import threading
+
+        result_q: queue.Queue = queue.Queue()
+
+        def _worker():
+            try:
+                result_q.put(self._read_many(req))
+            except Exception as exc:  # noqa: BLE001
+                result_q.put(exc)
+
+        worker = threading.Thread(target=_worker, daemon=True)
+        worker.start()
+        try:
+            got = result_q.get(timeout=self.config.generation_timeout_seconds)
+        except queue.Empty:
+            raise RuntimeError(
+                f"LLM request exceeded hard deadline "
+                f"({self.config.generation_timeout_seconds}s); aborting stalled connection"
+            )
+        if isinstance(got, Exception):
+            raise RuntimeError(f"LLM request failed: {got}") from got
+        return got
+
+    def _read_many(self, req: urllib.request.Request) -> list[LLMResponse]:
+        """Non-streaming read returning one ``LLMResponse`` per choice."""
+        try:
+            with urllib.request.urlopen(
+                req, timeout=self.config.generation_timeout_seconds
+            ) as resp:
+                raw = json.loads(resp.read().decode("utf-8"))
+        except socket.timeout as exc:
+            raise RuntimeError(
+                f"LLM request failed: socket read timed out after "
+                f"{self.config.generation_timeout_seconds}s"
+            ) from exc
+        choices = raw.get("choices") or []
+        out: list[LLMResponse] = []
+        for ch in choices:
+            try:
+                text = ch["message"]["content"]
+            except (KeyError, TypeError):
+                continue
+            out.append(LLMResponse(text=text or "", raw=raw))
+        return out
 
     def _read_stream(self, req: urllib.request.Request, url: str) -> LLMResponse:
         """Consume an SSE stream, accumulate content, and capture finish_reason.
