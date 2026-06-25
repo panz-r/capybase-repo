@@ -38,6 +38,13 @@ CB_CONTEXT_LINES="${CB_CONTEXT_LINES:-20}"
 # the script works on a minimal install; set CB_STRUCTURAL_ENABLED=true to test
 # the AST layer live.
 CB_STRUCTURAL_ENABLED="${CB_STRUCTURAL_ENABLED:-false}"
+# Multi-request pipeline (Steps 2-5). These default to off so the script works
+# with the simple single-sample path; set them to test the full pipeline.
+CB_SAMPLES="${CB_SAMPLES:-1}"
+CB_SAMPLING_TEMP="${CB_SAMPLING_TEMP:-0.7}"
+CB_TWO_PASS="${CB_TWO_PASS:-false}"
+CB_PARALLEL_SAMPLES="${CB_PARALLEL_SAMPLES:-true}"
+CB_ENABLE_SELF_CONSISTENCY="${CB_ENABLE_SELF_CONSISTENCY:-false}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURES="$REPO_ROOT/fixtures"
@@ -110,6 +117,10 @@ temperature = 0.2
 max_tokens = $CB_MAX_TOKENS
 request_timeout_seconds = $CB_REQUEST_TIMEOUT
 generation_timeout_seconds = $CB_GENERATION_TIMEOUT
+samples = $CB_SAMPLES
+sampling_temperature = $CB_SAMPLING_TEMP
+two_pass = $CB_TWO_PASS
+parallel_samples = $CB_PARALLEL_SAMPLES
 
 [policy]
 max_retries_per_unit = $CB_MAX_RETRIES
@@ -118,6 +129,10 @@ context_lines = $CB_CONTEXT_LINES
 [structural]
 enabled = $CB_STRUCTURAL_ENABLED
 languages = ["python", "rust"]
+
+[future]
+enable_structural_context = $CB_STRUCTURAL_ENABLED
+enable_self_consistency = $CB_ENABLE_SELF_CONSISTENCY
 
 [tests]
 pre_continue = "true"

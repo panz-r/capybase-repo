@@ -304,6 +304,17 @@ def _refine_with_diff3(
             }
 
 
+def _blank_markers(text: str) -> str:
+    """Replace conflict-marker lines with comments so tree-sitter can parse."""
+    out = []
+    for line in text.split("\n"):
+        if line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
+            out.append("# conflict-marker")
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 def _enrich_structural(
     units: list[ConflictUnit],
     worktree_text: str,
@@ -352,11 +363,17 @@ def _enrich_structural(
                     # AST signature is sharper than the indent heuristic.
                     unit.enclosing_symbol = node.signature
                 unit.unit_kind = "ast_region"
-        # Base fingerprint of the original file's nodes OUTSIDE the conflict
-        # span, computed on BASE (clean structure) so the preservation
-        # validator can compare against the spliced worktree.
+        # Base fingerprint of the file's structure OUTSIDE the conflict span.
+        # Computed on the marker-blanked WORKTREE (not the clean BASE): the
+        # worktree has the same non-conflict code as BASE, but with conflict
+        # markers at each block. Blanking those markers to comments gives a
+        # structural skeleton that the spliced result (with sibling markers
+        # also blanked) should match. Using BASE directly would never match
+        # because BASE has no markers at all, so its node structure differs
+        # from the marker-blanked worktree at every conflict position.
+        blanked_worktree = _blank_markers(worktree_text)
         fp_outside, _ = structural.fingerprint_region(
-            base_text, lang, unit.marker_span
+            blanked_worktree, lang, unit.marker_span
         )
         if fp_outside is not None:
             unit.structural_metadata["ast_fingerprint_base_outside"] = fp_outside

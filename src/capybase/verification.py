@@ -324,9 +324,14 @@ class AstPreservationValidator:
                 features={"ast_checked": False, "ast_preserved": True},
             )
         # Splice the candidate into the original and re-fingerprint the outside.
+        # CRITICAL: for multi-hunk files, the worktree still has sibling conflict
+        # marker blocks. Those raw markers corrupt the tree-sitter parse and
+        # produce a false AST-preservation failure. Blank them to comments first
+        # (same approach as the LSP baseline) so the parse reflects real structure.
         spliced = splice_resolution(
             unit.original_worktree_text, unit.marker_span, ctx.candidate.resolved_text
         )
+        spliced = _blank_markers(spliced)
         after_outside, _ = structural.fingerprint_region(
             spliced, lang, unit.marker_span
         )

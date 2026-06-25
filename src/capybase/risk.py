@@ -93,14 +93,13 @@ class RiskEngine:
                 required_followups=soft,
             )
 
-        # Passed with no hard signals: accept — unless consensus entropy is
-        # too high. When self-consistency samples are maximally split, no
-        # candidate is trustworthy even if one happened to pass validators.
-        # This is the conformal-escalation signal: high-entropy → human review.
-        if (
-            consensus_entropy is not None
-            and consensus_entropy >= self.entropy_escalate_threshold
-        ):
+        # Passed with no hard signals: accept — unless consensus shows no
+        # reliable majority. For small N, raw entropy is too sensitive (even
+        # 2-of-3 gives entropy ~0.92), so we gate on agreement score instead:
+        # if the winner holds less than a plurality threshold, escalate to
+        # human review. This is the conformal-escalation signal for genuinely
+        # uncertain merges.
+        if consensus_entropy is not None and consensus_entropy >= self.entropy_escalate_threshold:
             return _escalate(
                 result,
                 [

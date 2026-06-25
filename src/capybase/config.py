@@ -188,8 +188,10 @@ class CalibrationConfig(BaseModel):
     escalate_threshold: float = 0.7
     min_examples_for_calibration: int = 50
     # Consensus entropy above this → escalate (high-entropy splits mean no
-    # candidate is trustworthy). 0=unanimous, 1=maximally split.
-    entropy_escalate_threshold: float = 0.6
+    # candidate is trustworthy). 0=unanimous, 1=maximally split. Set high
+    # (0.8) because even a 2-of-3 majority produces non-trivial entropy; we
+    # only want to escalate when samples are *maximally* split.
+    entropy_escalate_threshold: float = 0.8
     # Conformal prediction coverage (1-alpha). When a conformal model is fitted,
     # the p-value threshold guarantees this coverage of accepted merges.
     conformal_alpha: float = 0.1
