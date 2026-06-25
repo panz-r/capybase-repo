@@ -97,6 +97,33 @@ class ConflictUnit(BaseModel):
     structural_metadata: dict[str, Any] = Field(default_factory=dict)
     risk_tags: list[str] = Field(default_factory=list)
 
+    @property
+    def refined_sides(self) -> tuple[str, str, str] | None:
+        """The diff3-minimized conflict sides, if available.
+
+        ``_refine_with_diff3`` (conflict_extractor) runs ``git merge-file
+        --diff3`` on the stage blobs to find the tightest possible conflict
+        boundaries — adjacent non-conflicting lines that the worktree markers
+        still include are stripped. When that tighter view exists, prompt
+        builders should prefer it over the raw marker sides so a small model
+        sees a minimal conflict window. Returns ``(current, base, replayed)``
+        or None when no refinement is recorded (the raw sides are the truth).
+
+        Advisory only: splicing uses ``marker_span`` /
+        ``original_worktree_text`` and is unaffected.
+        """
+        refined = self.structural_metadata.get("diff3_refined")
+        if not refined:
+            return None
+        try:
+            return (
+                refined.get("current", ""),
+                refined.get("base", ""),
+                refined.get("replayed", ""),
+            )
+        except (AttributeError, TypeError):
+            return None
+
 
 # ---------------------------------------------------------------------------
 # Context

@@ -81,6 +81,79 @@ def test_resolve_prompt_contains_sides():
     assert "BASE" in prompt
 
 
+# --- diff3-refined sides (Step 1 wiring): prefer the minimized window ---
+
+
+def _unit_with_refined():
+    """A unit whose worktree markers are wider than the diff3-minimized sides."""
+    u = _unit()
+    # Simulate diff3 finding tighter boundaries than the raw marker sides.
+    u.structural_metadata["diff3_refined"] = {
+        "current": "    return 2  # refined-current",
+        "base": "def f():\n    return 1  # refined-base",
+        "replayed": "    return 3  # refined-replayed",
+    }
+    return u
+
+
+def test_resolve_prompt_uses_refined_sides_when_present():
+    u = _unit_with_refined()
+    prompt = build_resolve_prompt(u, ContextBuilder().build(u))
+    # The refined (minimal) side texts appear in the conflict-side sections,
+    # NOT the raw marker sides. (The surrounding-context window still shows the
+    # original worktree text — that is correct and separate from the sides.)
+    assert "refined-current" in prompt
+    assert "refined-base" in prompt
+    assert "refined-replayed" in prompt
+    # The refined sides replace the raw sides in the dedicated side sections:
+    # the BASE section must carry the refined-base marker, not just raw base.
+    assert prompt.count("refined-base") >= 1
+
+
+def test_intent_prompt_uses_refined_sides():
+    from capybase.resolution_engine import build_intent_prompt
+
+    u = _unit_with_refined()
+    prompt = build_intent_prompt(u, ContextBuilder().build(u))
+    assert "refined-current" in prompt
+    assert "refined-replayed" in prompt
+    assert "refined-base" in prompt
+
+
+def test_code_prompt_uses_refined_sides():
+    from capybase.resolution_engine import build_code_prompt
+
+    u = _unit_with_refined()
+    prompt = build_code_prompt(u, ContextBuilder().build(u), {"current_side_intent": [], "replayed_commit_intent": []})
+    assert "refined-current" in prompt
+    assert "refined-replayed" in prompt
+
+
+def test_resolve_prompt_falls_back_to_raw_sides_without_refinement():
+    # No diff3_refined in metadata → raw sides used (the common path).
+    u = _unit()
+    assert u.refined_sides is None
+    prompt = build_resolve_prompt(u, ContextBuilder().build(u))
+    assert "    return 2" in prompt
+    assert "    return 3" in prompt
+
+
+def test_refined_sides_property_reads_metadata():
+    u = _unit_with_refined()
+    sides = u.refined_sides
+    assert sides is not None
+    assert sides == (
+        "    return 2  # refined-current",
+        "def f():\n    return 1  # refined-base",
+        "    return 3  # refined-replayed",
+    )
+
+
+def test_refined_sides_property_none_when_absent():
+    u = _unit()
+    assert u.refined_sides is None
+
+
 def _cfg():
     from capybase.config import ModelConfig
 

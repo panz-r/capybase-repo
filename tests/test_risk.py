@@ -84,3 +84,51 @@ def test_model_refusal_escalates_immediately():
     res = _result(False, {"model_needs_human": True})
     # genuine refusal: escalate even on retry 0
     assert eng.decide(res, retry_count=0, failure_kind="model_refusal").action == "escalate"
+
+
+# --- consensus agreement (Step 5 wiring): min_agreement on the accept path ---
+
+
+def test_low_agreement_escalates_on_accept_path():
+    # A passing candidate whose consensus winner holds < min_agreement of
+    # samples is too uncertain to accept → escalate. min_agreement is more
+    # interpretable than entropy for small N.
+    eng = RiskEngine(max_retries_per_unit=2, min_agreement=0.5)
+    res = _result(True, {"syntax_passed": True})
+    d = eng.decide(res, retry_count=0, consensus_agreement=0.34)
+    assert d.action == "escalate"
+
+
+def test_high_agreement_accepts():
+    eng = RiskEngine(max_retries_per_unit=2, min_agreement=0.5)
+    res = _result(True, {"syntax_passed": True})
+    d = eng.decide(res, retry_count=0, consensus_agreement=0.67)
+    assert d.action == "accept"
+
+
+def test_min_agreement_zero_disables_check():
+    # Default: no agreement floor → agreement signal is ignored.
+    eng = RiskEngine(max_retries_per_unit=2, min_agreement=0.0)
+    res = _result(True, {"syntax_passed": True})
+    d = eng.decide(res, retry_count=0, consensus_agreement=0.1)
+    assert d.action == "accept"
+
+
+def test_agreement_escalate_reason_is_interpretable():
+    eng = RiskEngine(max_retries_per_unit=2, min_agreement=0.5)
+    res = _result(True, {"syntax_passed": True})
+    d = eng.decide(res, retry_count=0, consensus_agreement=0.33)
+    assert d.action == "escalate"
+    assert any("agreement" in r and "0.33" in r for r in d.reasons)
+
+
+def test_agreement_and_entropy_both_gate_accept():
+    # Both signals must clear. Low agreement escalates even with low entropy.
+    eng = RiskEngine(
+        max_retries_per_unit=2, min_agreement=0.6, entropy_escalate_threshold=0.95,
+    )
+    res = _result(True, {"syntax_passed": True})
+    assert eng.decide(
+        res, retry_count=0, consensus_agreement=0.4, consensus_entropy=0.5,
+    ).action == "escalate"
+

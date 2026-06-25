@@ -158,11 +158,13 @@ class Orchestrator:
                 else config.calibration.model_path,
                 escalate_threshold=config.calibration.escalate_threshold,
                 entropy_escalate_threshold=config.calibration.entropy_escalate_threshold,
+                min_agreement=config.model.consensus_min_agreement,
             )
         else:
             self.risk = RiskEngine(
                 max_retries_per_unit=config.policy.max_retries_per_unit,
                 entropy_escalate_threshold=config.calibration.entropy_escalate_threshold,
+                min_agreement=config.model.consensus_min_agreement,
             )
         self.policy = Policy(
             self.git,
@@ -590,6 +592,9 @@ class Orchestrator:
                 failure_kind=cand.failure_kind,
                 consensus_entropy=(
                     consensus_report.entropy if consensus_report else None
+                ),
+                consensus_agreement=(
+                    consensus_report.agreement_score if consensus_report else None
                 ),
             )
             outcome.decision = decision

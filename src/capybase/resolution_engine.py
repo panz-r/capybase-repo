@@ -42,11 +42,28 @@ PROMPT_CODE = "code_from_intent.v1"
 PROMPT_REPAIR = "cegis_repair.v1"
 
 
+def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
+    """Return the conflict sides to show in the prompt.
+
+    Prefers the diff3-minimized sides (``unit.refined_sides``) so the model
+    sees the smallest possible conflict window — adjacent non-conflicting lines
+    that the worktree markers still wrap are stripped. Falls back to the raw
+    marker sides when no refinement is recorded. Returns
+    ``(current, base, replayed)``.
+    """
+    refined = unit.refined_sides
+    if refined is not None:
+        return refined
+    return unit.current.text, unit.base.text, unit.replayed.text
+
+
 def build_resolve_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
     # Show a visible marker so the model can see the exact indentation it must
     # reproduce (leading spaces are invisible in normal prose).
-    cur_lines = unit.current.text
-    rep_lines = unit.replayed.text
+    # Prefer the diff3-minimized sides when available (Step 1: shrink the
+    # conflict window so the model isn't distracted by adjacent non-conflicting
+    # lines). Falls back to the raw marker sides.
+    cur_lines, base_lines, rep_lines = _prompt_sides(unit)
     sv = context.structural_view
     enc_sig = sv.get("enclosing_node_signature") if sv else None
     enc_text = sv.get("enclosing_node_text") if sv else None
@@ -89,7 +106,7 @@ REPLAYED_COMMIT_SIDE body (exact, including leading spaces):
 {rep_lines}
 
 BASE (common ancestor) body, for context:
-{unit.base.text}
+{base_lines}
 
 Surrounding file context:
 {context.primary_text}
@@ -159,6 +176,7 @@ def build_repair_prompt(
     wrong indentation) when shown the exact code + the exact error.
     """
     feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
+    cur_lines, _base_lines, rep_lines = _prompt_sides(unit)
     return f"""Your previous merge attempt had errors. Fix the SPECIFIC errors in
 your code below — do not rewrite from scratch unless necessary. Keep all parts
 that were correct; change only what the validator flagged.
@@ -167,10 +185,10 @@ file: {unit.path}
 language: {unit.language or 'unknown'}
 
 CURRENT_UPSTREAM_SIDE body:
-{unit.current.text}
+{cur_lines}
 
 REPLAYED_COMMIT_SIDE body:
-{unit.replayed.text}
+{rep_lines}
 
 YOUR PREVIOUS ATTEMPT (needs fixing):
 {candidate.resolved_text}
@@ -221,6 +239,7 @@ def build_intent_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
     of what each side changed. The result becomes a "reasoning map" that guides
     the code-generation pass.
     """
+    cur_lines, base_lines, rep_lines = _prompt_sides(unit)
     return f"""Analyze this git merge conflict and state what EACH side changed
 relative to the base. Output ONLY a JSON object with two string-list fields.
 Do NOT write code.
@@ -229,13 +248,13 @@ file: {unit.path}
 language: {unit.language or 'unknown'}
 
 CURRENT_UPSTREAM_SIDE (stage 2):
-{unit.current.text}
+{cur_lines}
 
 REPLAYED_COMMIT_SIDE (stage 3):
-{unit.replayed.text}
+{rep_lines}
 
 BASE (common ancestor):
-{unit.base.text}
+{base_lines}
 
 Output this JSON (```json fenced):
 {{
@@ -259,8 +278,7 @@ def build_code_prompt(
     """
     cur_intents = intents.get("current_side_intent", [])
     rep_intents = intents.get("replayed_commit_intent", [])
-    cur_lines = unit.current.text
-    rep_lines = unit.replayed.text
+    cur_lines, _base_lines, rep_lines = _prompt_sides(unit)
     sv = context.structural_view
     enc_sig = sv.get("enclosing_node_signature") if sv else None
     structural_anchor = ""

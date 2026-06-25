@@ -282,10 +282,12 @@ class CalibratedRiskEngine:
         model: CalibrationModel | None = None,
         fallback: RiskEngine | None = None,
         entropy_escalate_threshold: float = 0.6,
+        min_agreement: float = 0.0,
     ) -> None:
         self.fallback = fallback or RiskEngine(
             max_retries_per_unit=max_retries_per_unit,
             entropy_escalate_threshold=entropy_escalate_threshold,
+            min_agreement=min_agreement,
         )
         self.model = model
 
@@ -297,6 +299,7 @@ class CalibratedRiskEngine:
         model_path: str,
         escalate_threshold: float,
         entropy_escalate_threshold: float = 0.6,
+        min_agreement: float = 0.0,
     ) -> "CalibratedRiskEngine":
         """Build from config: load the conformal model if present, else the
         logistic calibration model, else passthrough."""
@@ -309,6 +312,7 @@ class CalibratedRiskEngine:
             max_retries_per_unit=max_retries_per_unit,
             model=model,
             entropy_escalate_threshold=entropy_escalate_threshold,
+            min_agreement=min_agreement,
         )
 
     def decide(
@@ -318,12 +322,14 @@ class CalibratedRiskEngine:
         retry_count: int,
         failure_kind: str = "",
         consensus_entropy: float | None = None,
+        consensus_agreement: float | None = None,
     ) -> RiskDecision:
         decision = self.fallback.decide(
             result,
             retry_count=retry_count,
             failure_kind=failure_kind,
             consensus_entropy=consensus_entropy,
+            consensus_agreement=consensus_agreement,
         )
         # Calibration only overrides the ACCEPT path: a candidate that passed
         # all hard checks but is predicted likely to fail gets escalated.

@@ -16,9 +16,16 @@ class RiskEngine:
         *,
         max_retries_per_unit: int = 2,
         entropy_escalate_threshold: float = 0.6,
+        min_agreement: float = 0.0,
     ) -> None:
         self.max_retries_per_unit = max_retries_per_unit
         self.entropy_escalate_threshold = entropy_escalate_threshold
+        # Plurality floor for self-consistency on the accept path: if the
+        # winner cluster holds less than this fraction of samples, the merge is
+        # too uncertain to accept and is escalated. More interpretable than
+        # entropy for small N (where even a 2-of-3 majority reads as ~0.92
+        # entropy). 0.0 disables the check.
+        self.min_agreement = min_agreement
 
     def decide(
         self,
@@ -27,6 +34,7 @@ class RiskEngine:
         retry_count: int,
         failure_kind: str = "",
         consensus_entropy: float | None = None,
+        consensus_agreement: float | None = None,
     ) -> RiskDecision:
         """Apply MVP rules in priority order.
 
@@ -36,9 +44,10 @@ class RiskEngine:
         ``max_retries_per_unit`` before escalating. Other hard failures
         (markers, syntax, scope) are likewise retryable.
 
-        When ``consensus_entropy`` is provided (from self-consistency voting),
+        When consensus signals are provided (from self-consistency voting),
         a passing candidate is escalated if the samples are too split — high
-        entropy means no candidate is trustworthy even if one passed validators.
+        entropy OR low agreement means no candidate is trustworthy even if one
+        passed validators. Both must clear for accept.
         """
         feats = result.features
 
@@ -94,17 +103,32 @@ class RiskEngine:
             )
 
         # Passed with no hard signals: accept — unless consensus shows no
-        # reliable majority. For small N, raw entropy is too sensitive (even
-        # 2-of-3 gives entropy ~0.92), so we gate on agreement score instead:
-        # if the winner holds less than a plurality threshold, escalate to
-        # human review. This is the conformal-escalation signal for genuinely
-        # uncertain merges.
+        # reliable majority. Two complementary signals for small N:
+        #   * entropy: escalate when samples are maximally split (≥ threshold);
+        #   * agreement: escalate when the winner holds < min_agreement of
+        #     samples (more interpretable than entropy for N=3, where even a
+        #     2-of-3 majority reads as ~0.92 entropy). Both must clear for
+        #     accept. This is the conformal-escalation signal for genuinely
+        #     uncertain merges.
         if consensus_entropy is not None and consensus_entropy >= self.entropy_escalate_threshold:
             return _escalate(
                 result,
                 [
                     f"consensus entropy {consensus_entropy:.2f} >= "
                     f"threshold {self.entropy_escalate_threshold:.2f}",
+                    *soft,
+                ],
+            )
+        if (
+            self.min_agreement > 0.0
+            and consensus_agreement is not None
+            and consensus_agreement < self.min_agreement
+        ):
+            return _escalate(
+                result,
+                [
+                    f"consensus agreement {consensus_agreement:.2f} < "
+                    f"min_agreement {self.min_agreement:.2f}",
                     *soft,
                 ],
             )
