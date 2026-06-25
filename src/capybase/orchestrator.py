@@ -921,6 +921,13 @@ class Orchestrator:
         out["consensus_entropy"] = float(getattr(rep, "entropy", 0.0) or 0.0)
         out["consensus_agreement"] = float(getattr(rep, "agreement_score", 0.0) or 0.0)
         out["consensus_cluster_count"] = float(getattr(rep, "cluster_count", 0) or 0)
+        # FactSelfCheck rationale-consistency (survey §2): agreement over the
+        # candidates' own intent claims, surfaced from the consensus report.
+        # Defaults (1.0 / 0) when no multi-sample consensus ran.
+        out["intent_agreement"] = float(getattr(rep, "intent_agreement", 1.0) or 1.0)
+        out["low_consistency_fact_count"] = float(
+            getattr(rep, "low_consistency_fact_count", 0) or 0
+        )
         out["difficulty_complex"] = 1.0 if outcome.difficulty == "complex" else 0.0
         out["retry_count"] = float(outcome.retry_count)
         unit = outcome.unit

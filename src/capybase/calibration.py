@@ -73,6 +73,15 @@ _FEATURE_KEYS: tuple[str, ...] = (
     # direct read of how confident the LLM was token-by-token — the logit-free
     # input the conformal "flywheel" is designed around.
     "mean_token_entropy",
+    # FactSelfCheck rationale-consistency (survey §2): agreement over the
+    # candidates' OWN intent claims (not their code text). Low intent_agreement
+    # = candidates disagree about what they did = a hallucination/unstable-claim
+    # signal orthogonal to text-consensus and validators. The count of
+    # minority-asserted facts is a complementary "how much did candidates
+    # disagree" signal. Both are computed post-hoc from rationales already
+    # generated — zero extra LLM calls.
+    "intent_agreement",
+    "low_consistency_fact_count",
 )
 
 

@@ -249,6 +249,9 @@ def test_feature_keys_include_resolution_signals():
         "conflict_side_chars",
         "enclosing_node_lines",
         "self_reported_confidence",
+        "mean_token_entropy",
+        "intent_agreement",
+        "low_consistency_fact_count",
     ):
         assert key in _FEATURE_KEYS, key
 
@@ -439,6 +442,64 @@ def test_merge_resolution_features_surfaces_token_entropy():
     orch = Orchestrator(Config(), repo=".")
     merged = orch._merge_resolution_features({}, outcome, accepted=accepted)
     assert merged["mean_token_entropy"] == 0.88
+
+
+def test_merge_resolution_features_surfaces_intent_agreement():
+    """FactSelfCheck (survey §2): the consensus report's intent_agreement and
+    low_consistency_fact_count reach the recorded feature vector — proving the
+    rationale-consistency signal threads into the calibration corpus."""
+    from capybase.consensus import ConsensusReport
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+    from capybase.orchestrator import Orchestrator, UnitOutcome
+    from capybase.config import Config
+
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="b"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="c"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="r"),
+        original_worktree_text="x",
+    )
+    outcome = UnitOutcome(unit=unit)
+    outcome.consensus = ConsensusReport(
+        winner=None, clusters=[], n_samples=3,
+        agreement_score=0.67, cluster_count=2, entropy=0.92,
+        intent_agreement=0.55, low_consistency_fact_count=2,
+    )
+    orch = Orchestrator(Config(), repo=".")
+    merged = orch._merge_resolution_features({}, outcome, accepted=None)
+    assert merged["intent_agreement"] == 0.55
+    assert merged["low_consistency_fact_count"] == 2.0
+    # And they vectorize cleanly into the feature vector.
+    from capybase.calibration import features_to_vector, _FEATURE_KEYS
+
+    vec = features_to_vector(merged)
+    assert vec[_FEATURE_KEYS.index("intent_agreement")] == 0.55
+    assert vec[_FEATURE_KEYS.index("low_consistency_fact_count")] == 2.0
+
+
+def test_merge_resolution_features_intent_defaults_when_absent():
+    """When no consensus report carries intent fields (e.g. single-sample
+    path), the merge yields the safe defaults (1.0 / 0) — no penalty."""
+    from capybase.consensus import ConsensusReport
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+    from capybase.orchestrator import Orchestrator, UnitOutcome
+    from capybase.config import Config
+
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", conflict_type="UU",
+        unit_id="u", base=ConflictSide(label="BASE", text="b"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="c"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="r"),
+        original_worktree_text="x",
+    )
+    outcome = UnitOutcome(unit=unit)
+    # No consensus set at all → getattr defaults kick in.
+    orch = Orchestrator(Config(), repo=".")
+    merged = orch._merge_resolution_features({}, outcome, accepted=None)
+    assert merged["intent_agreement"] == 1.0
+    assert merged["low_consistency_fact_count"] == 0.0
 
 
 def test_merge_resolution_features_entropy_none_passthrough():
