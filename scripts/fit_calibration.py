@@ -48,6 +48,17 @@ def main() -> int:
         default=50,
         help="minimum labeled outcomes required to fit (default 50)",
     )
+    ap.add_argument(
+        "--conformal",
+        action="store_true",
+        help="fit a split-conformal predictor with a coverage guarantee",
+    )
+    ap.add_argument(
+        "--alpha",
+        type=float,
+        default=0.1,
+        help="conformal miscoverage rate (coverage = 1-alpha, default 0.1)",
+    )
     args = ap.parse_args()
 
     try:
@@ -89,11 +100,35 @@ def main() -> int:
     X = np.array([row[0] for row in dataset.rows], dtype=float)
     y = np.array([row[1] for row in dataset.rows], dtype=float)
 
+    feature_keys = [
+        "markers_remaining", "whole_file_markers_remaining", "splice_scope_ok",
+        "copied_one_side", "copied_current_side", "copied_replayed_side",
+        "model_needs_human", "syntax_passed", "ast_preserved",
+        "lsp_error_count", "lsp_new_error_count",
+        "hard_failure_count", "warning_count",
+    ]
+
+    if args.conformal:
+        out = _fit_conformal(X, y, feature_keys, dataset, args.alpha)
+    else:
+        out = _fit_logistic(X, y, feature_keys, dataset, args.threshold)
+
+    out_path = Path(args.out)
+    if not out_path.is_absolute():
+        out_path = repo / out_path
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
+    print(f"Wrote calibration model to {out_path}")
+    return 0
+
+
+def _fit_logistic(X, y, feature_keys, dataset, threshold_override):
+    """Fit a logistic regression with F1-tuned threshold."""
+    from sklearn.linear_model import LogisticRegression
+
     model = LogisticRegression(max_iter=1000, class_weight="balanced")
     model.fit(X, y)
-
-    # Threshold tuning: if not specified, pick the threshold maximizing F1.
-    threshold = args.threshold
+    threshold = threshold_override
     if threshold is None:
         probas = model.predict_proba(X)[:, 1]
         best_f1, best_t = 0.0, 0.5
@@ -109,28 +144,51 @@ def main() -> int:
                 best_f1, best_t = f1, t
         threshold = best_t
         print(f"Auto-tuned threshold: {threshold:.2f} (F1={best_f1:.3f})")
-
-    out = {
+    return {
         "coefficients": model.coef_[0].tolist(),
         "intercept": float(model.intercept_[0]),
         "threshold": float(threshold),
-        "feature_keys": [
-            "markers_remaining", "whole_file_markers_remaining", "splice_scope_ok",
-            "copied_one_side", "copied_current_side", "copied_replayed_side",
-            "model_needs_human", "syntax_passed", "ast_preserved",
-            "lsp_error_count", "lsp_new_error_count",
-            "hard_failure_count", "warning_count",
-        ],
+        "feature_keys": feature_keys,
         "n_samples": dataset.n,
         "n_positive": dataset.n_positive,
     }
-    out_path = Path(args.out)
-    if not out_path.is_absolute():
-        out_path = repo / out_path
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
-    print(f"Wrote calibration model to {out_path}")
-    return 0
+
+
+def _fit_conformal(X, y, feature_keys, dataset, alpha):
+    """Fit a split-conformal predictor with a coverage guarantee (1-alpha)."""
+    from sklearn.linear_model import LogisticRegression
+
+    n = len(y)
+    # Split: first half for training, second half for calibration.
+    split = max(1, n // 2)
+    X_train, X_cal = X[:split], X[split:]
+    y_train, y_cal = y[:split], y[split:]
+    model = LogisticRegression(max_iter=1000, class_weight="balanced")
+    model.fit(X_train, y_train)
+    # Nonconformity score: 1 - P(correct label).
+    # For label=1 (failure): score = 1 - P(fail). For label=0 (success): score = 1 - P(success).
+    cal_probas = model.predict_proba(X_cal)[:, 1]  # P(fail)
+    scores = []
+    for proba, label in zip(cal_probas, y_cal):
+        p_correct = (1.0 - proba) if label < 0.5 else proba
+        scores.append(float(1.0 - p_correct))
+    scores.sort()
+    print(
+        f"Conformal fit: {len(y_train)} train, {len(y_cal)} calibration. "
+        f"Coverage target: {1-alpha:.0%}. "
+        f"Calibration score range: [{min(scores):.3f}, {max(scores):.3f}]"
+        if scores else "Conformal fit: no calibration data"
+    )
+    return {
+        "type": "conformal",
+        "coefficients": model.coef_[0].tolist(),
+        "intercept": float(model.intercept_[0]),
+        "alpha": float(alpha),
+        "calibration_scores": scores,
+        "feature_keys": feature_keys,
+        "n_samples": dataset.n,
+        "n_positive": dataset.n_positive,
+    }
 
 
 if __name__ == "__main__":

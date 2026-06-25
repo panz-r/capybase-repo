@@ -20,11 +20,19 @@ def write_review_bundle(
     step_index: int | None = None,
     unit: ConflictUnit | None = None,
     candidate: CandidateResolution | None = None,
+    alternates: list[CandidateResolution] | None = None,
     validation: VerificationResult | None = None,
     test_output: str | None = None,
     resume_hint: str | None = None,
+    consensus: dict | None = None,
 ) -> Path:
-    """Write ``final/review-bundle.md`` and return its path."""
+    """Write ``final/review-bundle.md`` and return its path.
+
+    ``alternates`` are other cluster representatives from the consensus vote;
+    when present they're rendered as a side-by-side comparison so the developer
+    can pick between the top-K variations. ``consensus`` carries the entropy/
+    agreement stats for display.
+    """
     paths.final.mkdir(parents=True, exist_ok=True)
     out = paths.final / "review-bundle.md"
     lines: list[str] = []
@@ -70,6 +78,31 @@ def write_review_bundle(
         if candidate.explanation:
             lines.append(f"\n> {candidate.explanation}")
         lines.append("")
+
+    # Side-by-side top-K comparison: when consensus produced multiple clusters,
+    # show the alternate variations so the developer can pick. This is the
+    # "safe escalation" view — the model was uncertain, so we present the top
+    # candidates for human judgment.
+    if alternates:
+        lines.append("## alternate candidates (consensus split)")
+        if consensus:
+            ent = consensus.get("entropy")
+            agr = consensus.get("agreement_score")
+            if ent is not None:
+                lines.append(f"- consensus entropy: {ent:.2f}")
+            if agr is not None:
+                lines.append(f"- agreement score: {agr:.2f}")
+            lines.append("")
+        for i, alt in enumerate(alternates, 1):
+            lines.append(f"### variation {i}")
+            lines.append(f"- confidence: {alt.self_reported_confidence}")
+            lines.append(f"- needs_human: {alt.needs_human}")
+            if alt.explanation:
+                lines.append(f"- explanation: {alt.explanation}")
+            lines.append("```")
+            lines.append(alt.resolved_text)
+            lines.append("```")
+            lines.append("")
 
     if validation is not None:
         lines.append("## verification")

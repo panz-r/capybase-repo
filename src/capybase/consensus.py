@@ -113,6 +113,7 @@ class ConsensusReport:
     n_samples: int
     agreement_score: float  # winner cluster's agreement fraction
     cluster_count: int
+    entropy: float = 0.0  # normalized Shannon entropy (0=unanimous, 1=max split)
 
     @property
     def has_majority(self) -> bool:
@@ -182,13 +183,36 @@ def select(
         )
     winner_cluster = tied[0]
     agreement = winner_cluster.size / n
+    # Normalized Shannon entropy over cluster sizes: 0 = all samples agree
+    # (one cluster), 1 = maximally split (every sample different). High entropy
+    # means no candidate is trustworthy — the risk engine escalates.
+    entropy = _entropy([c.size for c in clusters_], n)
     return ConsensusReport(
         winner=winner_cluster.representative,
         clusters=clusters_,
         n_samples=n,
         agreement_score=agreement,
         cluster_count=len(clusters_),
+        entropy=entropy,
     )
+
+
+def _entropy(sizes: list[int], n: int) -> float:
+    """Normalized Shannon entropy of a partition.
+
+    Returns 0..1 where 0 = unanimous (one cluster) and 1 = maximally split
+    (each sample in its own cluster). Computed as H/log2(n).
+    """
+    if n <= 1:
+        return 0.0
+    import math
+
+    h = 0.0
+    for s in sizes:
+        if s > 0:
+            p = s / n
+            h -= p * math.log2(p)
+    return h / math.log2(n)
 
 
 def rank_by_consensus(

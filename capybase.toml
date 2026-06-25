@@ -116,6 +116,12 @@ enabled = false
 model_path = ".rebase-agent/memory/calibration.json"
 escalate_threshold = 0.7
 min_examples_for_calibration = 50
+# Consensus entropy above this → escalate (high-entropy splits mean no candidate
+# is trustworthy even if one passed validators). 0=unanimous, 1=max split.
+entropy_escalate_threshold = 0.6
+# Conformal prediction coverage (1-alpha). Fit with scripts/fit_calibration.py
+# --conformal; the p-value threshold guarantees this coverage of accepted merges.
+conformal_alpha = 0.1
 
 # [future] documents planned seams. It does nothing in the MVP.
 [future]

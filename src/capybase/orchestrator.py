@@ -52,6 +52,9 @@ class UnitOutcome:
     decision: RiskDecision | None = None
     validation: VerificationResult | None = None
     attempts: list[CandidateResolution] = field(default_factory=list)
+    # Carries the consensus report (if self-consistency was used) so the
+    # step-level escalation can render alternate cluster representatives.
+    consensus: object | None = None
 
 
 @dataclass
@@ -64,6 +67,36 @@ class StepResult:
     reason: str | None = None
     tests_passed: bool | None = None
     continued: bool = False
+
+
+def _extract_alternates(
+    outcome: UnitOutcome,
+) -> tuple[list[CandidateResolution], dict | None]:
+    """Extract losing cluster representatives + consensus stats from an outcome.
+
+    When self-consistency was used and the unit escalated, the consensus
+    report carries multiple clusters. The winner is already shown as the best
+    candidate; the losers (other cluster representatives) are returned as
+    alternates for the side-by-side review bundle. Returns ([], None) when
+    no consensus was computed (single-sample or missing).
+    """
+    rep = outcome.consensus
+    if rep is None:
+        return [], None
+    alternates = []
+    clusters = getattr(rep, "clusters", [])
+    for i, cl in enumerate(clusters):
+        if i == 0:
+            continue  # winner is already the best candidate
+        rep_cand = getattr(cl, "representative", None)
+        if rep_cand is not None and rep_cand.resolved_text:
+            alternates.append(rep_cand)
+    consensus = {
+        "entropy": getattr(rep, "entropy", None),
+        "agreement_score": getattr(rep, "agreement_score", None),
+        "cluster_count": getattr(rep, "cluster_count", None),
+    }
+    return alternates, consensus
 
 
 class Orchestrator:
@@ -124,9 +157,13 @@ class Orchestrator:
                 if not Path(config.calibration.model_path).is_absolute()
                 else config.calibration.model_path,
                 escalate_threshold=config.calibration.escalate_threshold,
+                entropy_escalate_threshold=config.calibration.entropy_escalate_threshold,
             )
         else:
-            self.risk = RiskEngine(max_retries_per_unit=config.policy.max_retries_per_unit)
+            self.risk = RiskEngine(
+                max_retries_per_unit=config.policy.max_retries_per_unit,
+                entropy_escalate_threshold=config.calibration.entropy_escalate_threshold,
+            )
         self.policy = Policy(
             self.git,
             supported_conflict_types=set(config.policy.supported_conflict_types),
@@ -377,13 +414,16 @@ class Orchestrator:
                 result.escalated = True
                 result.reason = f"could not resolve {escalated_unit.unit.unit_id}"
                 self._record_outcomes_to_memory(result)
+                _alternates, _consensus = _extract_alternates(escalated_unit)
                 write_review_bundle(
                     self.paths,
                     reason=result.reason,
                     step_index=result.step_index,
                     unit=escalated_unit.unit,
                     candidate=escalated_unit.attempts[-1] if escalated_unit.attempts else None,
+                    alternates=_alternates,
                     validation=escalated_unit.validation,
+                    consensus=_consensus,
                 )
                 return result
             # Splice every accepted resolution in one offset-correct batch.
@@ -501,6 +541,7 @@ class Orchestrator:
                 candidates = self.resolution_engine.propose(
                     unit, context, failures=failures, prev_candidate=prev_candidate
                 )
+            outcome.consensus = consensus_report
             # Take the first candidate: with self-consistency this is the
             # majority winner (reordered by rank_by_consensus); otherwise the
             # sole sample.
@@ -544,7 +585,12 @@ class Orchestrator:
             )
 
             decision = self.risk.decide(
-                validation, retry_count=retry_count, failure_kind=cand.failure_kind
+                validation,
+                retry_count=retry_count,
+                failure_kind=cand.failure_kind,
+                consensus_entropy=(
+                    consensus_report.entropy if consensus_report else None
+                ),
             )
             outcome.decision = decision
             self.journal.emit(

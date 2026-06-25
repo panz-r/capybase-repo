@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -129,6 +129,100 @@ def _sigmoid(z: float) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Conformal risk model (split conformal prediction)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ConformalRiskModel:
+    """A split-conformal predictor with a coverage guarantee.
+
+    Unlike ``CalibrationModel`` (fixed threshold), this derives the escalation
+    threshold from a calibration set with a statistical coverage guarantee:
+    with probability ≥ 1−α, a merge the model accepts will indeed be correct.
+    The nonconformity score is 1−P(correct label). At runtime, ``predict_proba``
+    returns the conformal p-value — the fraction of calibration examples with
+    a higher nonconformity score. If p-value < α, the candidate is escalated.
+
+    All inference is pure-Python (dot-product + lookup); sklearn is only needed
+    offline for fitting. When the calibration scores are empty (no data yet),
+    this falls back to the logistic model's threshold.
+    """
+
+    coefficients: list[float]
+    intercept: float
+    alpha: float  # coverage = 1 - alpha
+    calibration_scores: list[float] = field(default_factory=list)
+    feature_keys: tuple[str, ...] = _FEATURE_KEYS
+
+    def predict_proba(self, features: dict[str, Any]) -> float:
+        """Return the conformal p-value (probability of being an outlier).
+
+        High p-value = this candidate looks like the calibration set's
+        successful merges; low p-value = it's an outlier (escalate).
+        """
+        vec = features_to_vector(features)
+        z = self.intercept
+        for w, x in zip(self.coefficients, vec):
+            z += w * x
+        proba_fail = _sigmoid(z)
+        # Nonconformity score: how much this looks like a failure.
+        score = 1.0 - proba_fail  # = P(success); high score = looks safe
+        # p-value = fraction of calibration examples with HIGHER nonconformity
+        # (= lower P(success)). If our score is safer than most calibration
+        # examples, p-value is high (accept). If it's riskier, p-value is low.
+        if not self.calibration_scores:
+            # No calibration data: fall back to the raw probability.
+            return proba_fail
+        n = len(self.calibration_scores)
+        count_below = sum(1 for s in self.calibration_scores if s < score)
+        return count_below / n
+
+    @property
+    def threshold(self) -> float:
+        """The effective escalate threshold (= alpha)."""
+        return self.alpha
+
+    def should_escalate(self, features: dict[str, Any]) -> bool:
+        """True if the conformal p-value is below alpha (outlier)."""
+        return self.predict_proba(features) < self.alpha
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": "conformal",
+            "coefficients": self.coefficients,
+            "intercept": self.intercept,
+            "alpha": self.alpha,
+            "calibration_scores": self.calibration_scores,
+            "feature_keys": list(self.feature_keys),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "ConformalRiskModel":
+        keys = tuple(d.get("feature_keys", _FEATURE_KEYS))
+        return cls(
+            coefficients=list(d.get("coefficients", [])),
+            intercept=float(d.get("intercept", 0.0)),
+            alpha=float(d.get("alpha", 0.1)),
+            calibration_scores=list(d.get("calibration_scores", [])),
+            feature_keys=keys,
+        )
+
+    @classmethod
+    def load(cls, path: str | Path) -> "ConformalRiskModel | None":
+        p = Path(path)
+        if not p.is_file():
+            return None
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            if d.get("type") != "conformal":
+                return None
+            return cls.from_dict(d)
+        except (json.JSONDecodeError, KeyError, ValueError):
+            return None
+
+
+# ---------------------------------------------------------------------------
 # Dataset (for offline fitting)
 # ---------------------------------------------------------------------------
 
@@ -187,8 +281,12 @@ class CalibratedRiskEngine:
         max_retries_per_unit: int = 2,
         model: CalibrationModel | None = None,
         fallback: RiskEngine | None = None,
+        entropy_escalate_threshold: float = 0.6,
     ) -> None:
-        self.fallback = fallback or RiskEngine(max_retries_per_unit=max_retries_per_unit)
+        self.fallback = fallback or RiskEngine(
+            max_retries_per_unit=max_retries_per_unit,
+            entropy_escalate_threshold=entropy_escalate_threshold,
+        )
         self.model = model
 
     @classmethod
@@ -198,12 +296,20 @@ class CalibratedRiskEngine:
         max_retries_per_unit: int,
         model_path: str,
         escalate_threshold: float,
+        entropy_escalate_threshold: float = 0.6,
     ) -> "CalibratedRiskEngine":
-        """Build from config: load the model if present, else passthrough."""
-        model = CalibrationModel.load(model_path)
-        if model is not None:
-            model.threshold = escalate_threshold
-        return cls(max_retries_per_unit=max_retries_per_unit, model=model)
+        """Build from config: load the conformal model if present, else the
+        logistic calibration model, else passthrough."""
+        model = ConformalRiskModel.load(model_path)
+        if model is None:
+            model = CalibrationModel.load(model_path)
+            if model is not None:
+                model.threshold = escalate_threshold
+        return cls(
+            max_retries_per_unit=max_retries_per_unit,
+            model=model,
+            entropy_escalate_threshold=entropy_escalate_threshold,
+        )
 
     def decide(
         self,
@@ -211,9 +317,13 @@ class CalibratedRiskEngine:
         *,
         retry_count: int,
         failure_kind: str = "",
+        consensus_entropy: float | None = None,
     ) -> RiskDecision:
         decision = self.fallback.decide(
-            result, retry_count=retry_count, failure_kind=failure_kind
+            result,
+            retry_count=retry_count,
+            failure_kind=failure_kind,
+            consensus_entropy=consensus_entropy,
         )
         # Calibration only overrides the ACCEPT path: a candidate that passed
         # all hard checks but is predicted likely to fail gets escalated.

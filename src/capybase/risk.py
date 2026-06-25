@@ -11,8 +11,14 @@ from capybase.conflict_model import RiskDecision, VerificationResult
 
 
 class RiskEngine:
-    def __init__(self, *, max_retries_per_unit: int = 2) -> None:
+    def __init__(
+        self,
+        *,
+        max_retries_per_unit: int = 2,
+        entropy_escalate_threshold: float = 0.6,
+    ) -> None:
         self.max_retries_per_unit = max_retries_per_unit
+        self.entropy_escalate_threshold = entropy_escalate_threshold
 
     def decide(
         self,
@@ -20,6 +26,7 @@ class RiskEngine:
         *,
         retry_count: int,
         failure_kind: str = "",
+        consensus_entropy: float | None = None,
     ) -> RiskDecision:
         """Apply MVP rules in priority order.
 
@@ -28,6 +35,10 @@ class RiskEngine:
         errors, parse failures, and token truncation — which are retried up to
         ``max_retries_per_unit`` before escalating. Other hard failures
         (markers, syntax, scope) are likewise retryable.
+
+        When ``consensus_entropy`` is provided (from self-consistency voting),
+        a passing candidate is escalated if the samples are too split — high
+        entropy means no candidate is trustworthy even if one passed validators.
         """
         feats = result.features
 
@@ -82,7 +93,22 @@ class RiskEngine:
                 required_followups=soft,
             )
 
-        # Passed with no hard signals: accept.
+        # Passed with no hard signals: accept — unless consensus entropy is
+        # too high. When self-consistency samples are maximally split, no
+        # candidate is trustworthy even if one happened to pass validators.
+        # This is the conformal-escalation signal: high-entropy → human review.
+        if (
+            consensus_entropy is not None
+            and consensus_entropy >= self.entropy_escalate_threshold
+        ):
+            return _escalate(
+                result,
+                [
+                    f"consensus entropy {consensus_entropy:.2f} >= "
+                    f"threshold {self.entropy_escalate_threshold:.2f}",
+                    *soft,
+                ],
+            )
         score = _risk_score(feats)
         return RiskDecision(
             action="accept",

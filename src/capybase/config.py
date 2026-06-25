@@ -187,6 +187,12 @@ class CalibrationConfig(BaseModel):
     model_path: str = ".rebase-agent/memory/calibration.json"
     escalate_threshold: float = 0.7
     min_examples_for_calibration: int = 50
+    # Consensus entropy above this → escalate (high-entropy splits mean no
+    # candidate is trustworthy). 0=unanimous, 1=maximally split.
+    entropy_escalate_threshold: float = 0.6
+    # Conformal prediction coverage (1-alpha). When a conformal model is fitted,
+    # the p-value threshold guarantees this coverage of accepted merges.
+    conformal_alpha: float = 0.1
 
 
 class Config(BaseModel):
