@@ -392,3 +392,109 @@ def test_diverse_sampling_uses_thread_pool_temperatures():
     assert used_temps == [0.2, 0.8, 0.8]
 
 
+# ---------------------------------------------------------------------------
+# Prompt-variant sampling (survey §4 Code Roulette robustness): when
+# prompt_variants is on, samples are drawn across distinct resolve-prompt
+# phrasings, each tagged on prompt_version, instead of one prompt at varied
+# temperatures.
+# ---------------------------------------------------------------------------
+
+
+class MessageRecordingClient:
+    """Like ScriptedClient but also records the user prompt per call so we can
+    assert which prompt variant each sample used."""
+
+    def __init__(self, responses: list[str]):
+        self._responses = list(responses)
+        self._i = 0
+        self.calls: list[dict] = []
+
+    def complete(self, messages, **kw):
+        self.calls.append({"messages": messages, **kw})
+        t = self._responses[self._i % len(self._responses)]
+        self._i += 1
+        return LLMResponse(text=t, raw={"_accumulated": {"finish_reason": "stop"}})
+
+
+def test_prompt_variants_draws_one_sample_per_variant():
+    """With prompt_variants on + samples>1 + fresh resolve, one sample is drawn
+    per prompt variant via N separate complete() calls, and each candidate's
+    prompt_version carries the variant suffix."""
+    client = MessageRecordingClient([
+        '{"resolved_text": "a"}',
+        '{"resolved_text": "b"}',
+        '{"resolved_text": "c"}',
+    ])
+    cfg = ModelConfig(
+        samples=3, prompt_variants=True, parallel_samples=True,
+        sampling_temperature=0.8, temperature=0.2,
+    )
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose(_unit(), _ctx())
+    assert len(cands) == 3
+    assert len(client.calls) == 3  # one call per variant
+    # Each candidate is tagged with its variant suffix on the base version.
+    versions = sorted(c.prompt_version for c in cands if c.prompt_version)
+    assert versions == ["resolve_text_block.v5", "resolve_text_block.v5#v1", "resolve_text_block.v5#v2"]
+    # The three calls used three distinct prompt texts (the variants).
+    prompts = [c["messages"][-1]["content"] for c in client.calls]
+    assert len(set(prompts)) == 3
+
+
+def test_prompt_variants_applies_temperature_portfolio():
+    """The diverse temperature portfolio still applies across the variants."""
+    client = MessageRecordingClient(["a", "b", "c"])
+    cfg = ModelConfig(
+        samples=3, prompt_variants=True, diverse_sampling=True,
+        sampling_temperature=0.8, temperature=0.2, parallel_samples=True,
+    )
+    engine = ResolutionEngine(cfg, client=client)
+    engine.propose(_unit(), _ctx())
+    used_temps = sorted(c.get("temperature", 0) for c in client.calls)
+    # ceil(3/2)=2 high + 1 low, same portfolio as the diverse path.
+    assert used_temps == [0.2, 0.8, 0.8]
+
+
+def test_prompt_variants_off_keeps_single_prompt():
+    """Default (flag off): one prompt reused across all N samples, no suffix on
+    prompt_version — identical behavior to before the feature."""
+    client = MessageRecordingClient(["a", "b", "c"])
+    cfg = ModelConfig(
+        samples=3, prompt_variants=False, parallel_samples=True,
+    )
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose(_unit(), _ctx())
+    prompts = [c["messages"][-1]["content"] for c in client.calls]
+    assert len(set(prompts)) == 1  # same prompt for all samples
+    assert all(c.prompt_version == "resolve_text_block.v5" for c in cands)
+
+
+def test_prompt_variants_skipped_on_retry():
+    """The variant path must NOT engage on a CEGIS retry — retries need a single
+    canonical prompt for reproducible counterexample feedback."""
+    from capybase.conflict_model import VerificationFailure
+
+    client = MessageRecordingClient(["a", "b"])
+    cfg = ModelConfig(
+        samples=3, prompt_variants=True, parallel_samples=True,
+    )
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose(
+        _unit(), _ctx(),
+        failures=[VerificationFailure(validator="x", message="leaked")],
+    )
+    # Retry path: single cegis_retry version, no variant suffixes.
+    assert all(c.prompt_version == "cegis_retry.v5" for c in cands)
+
+
+def test_prompt_variants_skipped_when_samples_one():
+    """samples == 1 never engages the variant path (it needs >1 to span)."""
+    client = MessageRecordingClient(["a"])
+    cfg = ModelConfig(samples=1, prompt_variants=True, parallel_samples=True)
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose(_unit(), _ctx())
+    assert len(cands) == 1
+    assert cands[0].prompt_version == "resolve_text_block.v5"  # no suffix
+
+
+

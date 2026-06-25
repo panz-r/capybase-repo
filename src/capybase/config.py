@@ -46,6 +46,15 @@ class ModelConfig(BaseModel):
     # n path (which forces one temperature) to use N separate requests. Off by
     # default; for N=1 it is a no-op.
     diverse_sampling: bool = False
+    # Prompt-variant sampling (survey §4 Code Roulette): when on AND samples > 1
+    # AND this is a fresh resolve (no CEGIS retry/repair), draw the samples across
+    # semantically-equivalent resolve-prompt phrasings instead of identical prompts
+    # at varied temperatures. A candidate stable across prompt variants is a
+    # stronger correctness signal, and the existing consensus + rank-order
+    # validation already selects the largest stable cluster. Defaults off so
+    # behavior is unchanged; retry/repair paths never use variants (they must stay
+    # single-template for reproducible counterexample feedback).
+    prompt_variants: bool = False
     # Reasoning models emit long <think> chains before answering; 2048 starves
     # them. 8192 leaves headroom for reasoning + the final JSON answer.
     max_tokens: int = 8192

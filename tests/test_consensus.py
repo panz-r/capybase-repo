@@ -218,3 +218,57 @@ def test_propose_with_consensus_reorders_majority_first():
     assert rep is not None
     assert rep.agreement_score == 2 / 3
     assert rep.cluster_count == 2
+
+
+def test_consensus_clusters_candidates_across_prompt_variants():
+    """Survey §4 (Code Roulette): candidates drawn from distinct prompt
+    variants that produce the same logical answer must cluster together. The
+    robustness signal — a merge stable across prompt phrasings — surfaces as a
+    large consensus cluster, which rank-order validation then prefers."""
+    from capybase.config import ModelConfig
+    from capybase.conflict_extractor import ConflictUnit
+    from capybase.conflict_model import ConflictSide
+    from capybase.context_builder import ContextBuilder
+    from capybase.resolution_engine import ResolutionEngine
+
+    class FakeClient:
+        def __init__(self, texts):
+            self._texts = list(texts)
+            self._i = 0
+
+        def complete(self, messages, **kw):
+            from capybase.adapters.llm_openai import LLMResponse
+
+            t = self._texts[self._i % len(self._texts)]
+            self._i += 1
+            return LLMResponse(text=t, raw={"_accumulated": {"finish_reason": "stop"}})
+
+    cfg = ModelConfig(
+        samples=3, prompt_variants=True, parallel_samples=True,
+    )
+    client = FakeClient([
+        '{"resolved_text": "    return 1"}',     # v0
+        '{"resolved_text": "    return 1"}',     # v1 — same answer, different phrasing
+        '{"resolved_text": "    return 9"}',     # v2 — outlier
+    ])
+    worktree = "def f():\n<<<<<<< H\n    return 0\n=======\n    return 9\n>>>>>>> b\n"
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="f.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="def f():\n    pass"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="    return 0"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="    return 9"),
+        original_worktree_text=worktree, marker_span=(1, 5),
+    )
+    engine = ResolutionEngine(cfg, client=client)
+    ordered, rep = engine.propose_with_consensus(unit, ContextBuilder().build(unit))
+
+    # The two variants that converged on "return 1" form the majority cluster
+    # (2/3), even though they came from different prompt phrasings. The
+    # variant-tagged prompt_versions confirm the samples spanned variants.
+    versions = sorted(c.prompt_version for c in ordered)
+    assert any(v.endswith("#v1") for v in versions), versions
+    assert "return 1" in ordered[0].resolved_text
+    assert rep is not None
+    assert rep.cluster_count == 2  # {"return 1"} majority + {"return 9"} outlier
+    assert rep.agreement_score == 2 / 3
