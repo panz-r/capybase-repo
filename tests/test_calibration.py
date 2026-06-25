@@ -227,3 +227,178 @@ def test_dataset_from_store_labels_outcomes(tmp_path):
     # accepted → label 0.0; escalated → label 1.0
     labels = [y for _, y in ds.rows]
     assert 0.0 in labels and 1.0 in labels
+
+
+# ---------------------------------------------------------------------------
+# Extended feature capture (Problem 2): the resolution-process signals that
+# now ride into validator_features and the extended _FEATURE_KEYS vector.
+# ---------------------------------------------------------------------------
+
+
+def test_feature_keys_include_resolution_signals():
+    """The canonical vector now carries the epistemic-uncertainty signals the
+    system computes during resolution, not just validator hard-checks."""
+    from capybase.calibration import _FEATURE_KEYS
+
+    for key in (
+        "consensus_entropy",
+        "consensus_agreement",
+        "consensus_cluster_count",
+        "difficulty_complex",
+        "retry_count",
+        "conflict_side_chars",
+        "enclosing_node_lines",
+        "self_reported_confidence",
+    ):
+        assert key in _FEATURE_KEYS, key
+
+
+def test_features_to_vector_carries_resolution_signals():
+    from capybase.calibration import _FEATURE_KEYS
+
+    feats = {
+        "consensus_entropy": 0.92,
+        "consensus_agreement": 0.34,
+        "difficulty_complex": True,
+        "retry_count": 2,
+        "conflict_side_chars": 500,
+        "self_reported_confidence": 0.4,
+    }
+    vec = features_to_vector(feats)
+    assert vec[_FEATURE_KEYS.index("consensus_entropy")] == 0.92
+    assert vec[_FEATURE_KEYS.index("consensus_agreement")] == 0.34
+    assert vec[_FEATURE_KEYS.index("difficulty_complex")] == 1.0  # bool → 1.0
+    assert vec[_FEATURE_KEYS.index("retry_count")] == 2.0
+    assert vec[_FEATURE_KEYS.index("conflict_side_chars")] == 500.0
+    assert vec[_FEATURE_KEYS.index("self_reported_confidence")] == 0.4
+    # Missing keys (e.g. enclosing_node_lines absent) → 0.0
+    assert vec[_FEATURE_KEYS.index("enclosing_node_lines")] == 0.0
+
+
+def test_dataset_includes_resolution_signals_in_vector(tmp_path):
+    """An Experience carrying resolution-process features yields a vector that
+    captures them — proving the capture seam reaches the model."""
+    from capybase.calibration import _FEATURE_KEYS
+
+    store = ExperienceStore(tmp_path / "exp.jsonl")
+    store.append(
+        Experience(
+            example=HistoricalExample(
+                summary="ok", base="b", current="c", replayed="r", resolved="s"
+            ),
+            outcome="escalated",
+            validator_features={
+                "syntax_passed": True,
+                "consensus_entropy": 0.95,
+                "difficulty_complex": True,
+                "retry_count": 2,
+            },
+            retry_count=2,
+        )
+    )
+    ds = CalibrationDataset.from_store(store)
+    assert ds.n == 1
+    vec, label = ds.rows[0]
+    assert label == 1.0  # escalated → failure
+    assert vec[_FEATURE_KEYS.index("consensus_entropy")] == 0.95
+    assert vec[_FEATURE_KEYS.index("difficulty_complex")] == 1.0
+    assert vec[_FEATURE_KEYS.index("retry_count")] == 2.0
+
+
+def test_old_model_with_shorter_feature_keys_loads_and_scores():
+    """Backward-compat: a model fit on the old 13 keys (serialized with its own
+    feature_keys) still loads and scores. The new keys are simply absent from
+    its vector — no crash, no shape mismatch."""
+    old_keys = [
+        "markers_remaining", "whole_file_markers_remaining", "splice_scope_ok",
+        "copied_one_side", "copied_current_side", "copied_replayed_side",
+        "model_needs_human", "syntax_passed", "ast_preserved",
+        "lsp_error_count", "lsp_new_error_count",
+        "hard_failure_count", "warning_count",
+    ]
+    # A model dict as written by the pre-extension fit_calibration.py.
+    model_dict = {
+        "coefficients": [0.5] * len(old_keys),
+        "intercept": -1.0,
+        "threshold": 0.7,
+        "feature_keys": old_keys,
+    }
+    m = CalibrationModel.from_dict(model_dict)
+    # Scoring uses the model's OWN (13-key) feature_keys, so the 8 new keys in
+    # the global _FEATURE_KEYS don't cause a length mismatch.
+    proba = m.predict_proba({"syntax_passed": True, "consensus_entropy": 0.9})
+    assert 0.0 <= proba <= 1.0
+    assert m.feature_keys == tuple(old_keys)
+
+
+def test_new_model_roundtrips_extended_keys(tmp_path):
+    """A model with the extended key set saves and loads faithfully."""
+    from capybase.calibration import _FEATURE_KEYS
+
+    m = CalibrationModel(
+        coefficients=[0.1] * len(_FEATURE_KEYS),
+        intercept=-2.0,
+        threshold=0.6,
+    )
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps(m.to_dict()), encoding="utf-8")
+    loaded = CalibrationModel.load(path)
+    assert loaded is not None
+    assert loaded.feature_keys == _FEATURE_KEYS
+    assert len(loaded.coefficients) == len(_FEATURE_KEYS)
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator capture seam: _merge_resolution_features
+# ---------------------------------------------------------------------------
+
+
+def test_merge_resolution_features_captures_all_signals():
+    """The merge helper is the seam between the resolution process and the
+    recorded feature dict. It must surface consensus, difficulty, conflict
+    size, node lines, confidence, and retry count — the signals that were
+    previously dropped before reaching the experience store."""
+    from capybase.consensus import ConsensusReport
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+    from capybase.orchestrator import Orchestrator, UnitOutcome
+    from capybase.config import Config
+
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="def f():\n    return 1"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="    return 2"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="    return 3"),
+        original_worktree_text="def f():\n<<<<<<<\n    return 2\n=======\n    return 3\n>>>>>>>\n",
+        marker_span=(1, 5),
+        structural_metadata={
+            "enclosing_node_span": [1, 12],  # 12-line node
+        },
+    )
+    outcome = UnitOutcome(unit=unit)
+    outcome.difficulty = "complex"
+    outcome.retry_count = 2
+    outcome.consensus = ConsensusReport(
+        winner=None, clusters=[], n_samples=3,
+        agreement_score=0.34, cluster_count=3, entropy=0.92,
+    )
+
+    orch = Orchestrator(Config(), repo=".")
+    merged = orch._merge_resolution_features(
+        {"syntax_passed": True}, outcome, accepted=None
+    )
+    # Validator features pass through.
+    assert merged["syntax_passed"] is True
+    # Resolution-process signals are now present.
+    assert merged["consensus_entropy"] == 0.92
+    assert merged["consensus_agreement"] == 0.34
+    assert merged["consensus_cluster_count"] == 3.0
+    assert merged["difficulty_complex"] == 1.0
+    assert merged["retry_count"] == 2.0
+    # Conflict size = sum of side char lengths.
+    assert merged["conflict_side_chars"] == float(
+        len(unit.base.text) + len(unit.current.text) + len(unit.replayed.text)
+    )
+    assert merged["enclosing_node_lines"] == 12.0
+
+

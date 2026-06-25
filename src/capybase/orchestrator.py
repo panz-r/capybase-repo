@@ -55,6 +55,13 @@ class UnitOutcome:
     # Carries the consensus report (if self-consistency was used) so the
     # step-level escalation can render alternate cluster representatives.
     consensus: object | None = None
+    # Difficulty class assigned by the router ("simple" | "complex"), recorded
+    # so the calibration model can learn that complex conflicts fail more often.
+    difficulty: str | None = None
+    # Number of attempts made (0 on first-pass accept). Recorded so calibration
+    # learns that retries correlate with risk. (= len(attempts) - 1 on accept,
+    # or the count at escalation.)
+    retry_count: int = 0
 
 
 @dataclass
@@ -670,6 +677,7 @@ class Orchestrator:
                     path=unit.path,
                     unit_id=unit.unit_id,
                 )
+            outcome.difficulty = difficulty
 
             if difficulty == "simple":
                 # Fast path: one low-temperature sample, no intent pass, no
@@ -769,6 +777,7 @@ class Orchestrator:
             )
             if decision.action == "accept":
                 outcome.accepted = cand
+                outcome.retry_count = retry_count
                 self.journal.emit(
                     "candidate_accepted",
                     {"candidate_id": cand.candidate_id},
@@ -778,6 +787,7 @@ class Orchestrator:
                 )
                 return outcome
             if decision.action == "escalate":
+                outcome.retry_count = retry_count
                 self.journal.emit(
                     "candidate_rejected",
                     {"candidate_id": cand.candidate_id, "action": "escalate"},
@@ -877,6 +887,51 @@ class Orchestrator:
             result.reason = "all conflicted paths are unsupported"
         return result
 
+    def _merge_resolution_features(
+        self,
+        features: dict,
+        outcome: "UnitOutcome",
+        accepted: CandidateResolution | None,
+    ) -> dict:
+        """Merge resolution-process signals into the feature dict for recording.
+
+        These are the cheap, deterministic "epistemic uncertainty" features the
+        system already computed during resolution (consensus stats, difficulty
+        class, conflict size, candidate confidence, retry count). They never
+        reach the validator's own features dict, so without this merge they'd
+        be dropped at the memory seam and the calibration model couldn't learn
+        from them. Keys match the extended ``_FEATURE_KEYS``.
+        """
+        out = dict(features)
+        rep = outcome.consensus
+        out["consensus_entropy"] = float(getattr(rep, "entropy", 0.0) or 0.0)
+        out["consensus_agreement"] = float(getattr(rep, "agreement_score", 0.0) or 0.0)
+        out["consensus_cluster_count"] = float(getattr(rep, "cluster_count", 0) or 0)
+        out["difficulty_complex"] = 1.0 if outcome.difficulty == "complex" else 0.0
+        out["retry_count"] = float(outcome.retry_count)
+        unit = outcome.unit
+        out["conflict_side_chars"] = float(
+            len(unit.base.text) + len(unit.current.text) + len(unit.replayed.text)
+        )
+        # Enclosing AST node line count, if structural metadata recorded it.
+        span = unit.structural_metadata.get("enclosing_node_span")
+        node_lines = 0.0
+        if isinstance(span, (list, tuple)) and len(span) == 2:
+            try:
+                node_lines = float(int(span[1]) - int(span[0]) + 1)
+            except (TypeError, ValueError):
+                node_lines = 0.0
+        out["enclosing_node_lines"] = node_lines
+        # Candidate self-reported confidence (model-side); use the accepted one
+        # or, for escalations, the last attempt.
+        cand = accepted if accepted is not None else (
+            outcome.attempts[-1] if outcome.attempts else None
+        )
+        out["self_reported_confidence"] = float(
+            getattr(cand, "self_reported_confidence", 0.0) or 0.0
+        )
+        return out
+
     def _record_outcomes_to_memory(self, result: StepResult) -> None:
         """Append labeled outcomes to the experience store for RAG/calibration.
 
@@ -906,6 +961,13 @@ class Orchestrator:
                 features = dict(outcome.validation.features)
             if outcome.decision is not None:
                 risk_score = outcome.decision.risk_score
+            # Merge the resolution-process signals into the recorded features so
+            # the calibration model can learn from consensus disagreement,
+            # difficulty, conflict complexity, and candidate confidence — not
+            # just the validator hard-checks. These are the "epistemic
+            # uncertainty" features the system already computed and journaled;
+            # this is the seam that lets the offline flywheel actually see them.
+            features = self._merge_resolution_features(features, outcome, accepted)
             try:
                 self.memory_store.append(
                     Experience(
@@ -924,6 +986,7 @@ class Orchestrator:
                         unit_id=unit.unit_id,
                         validator_features=features,
                         risk_score=risk_score,
+                        retry_count=outcome.retry_count,
                     )
                 )
             except Exception:  # noqa: BLE001 - memory is best-effort

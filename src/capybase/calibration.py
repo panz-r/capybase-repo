@@ -36,6 +36,7 @@ from capybase.risk import RiskEngine
 # VerificationResult.features; we extract a fixed-order vector so the model's
 # coefficients are stable. Missing features default to 0.
 _FEATURE_KEYS: tuple[str, ...] = (
+    # --- validator-derived (Phase A + Phase B) ---
     "markers_remaining",
     "whole_file_markers_remaining",
     "splice_scope_ok",
@@ -49,6 +50,23 @@ _FEATURE_KEYS: tuple[str, ...] = (
     "lsp_new_error_count",
     "hard_failure_count",
     "warning_count",
+    # --- resolution-process signals (captured at record time) ---
+    # These are the cheap, deterministic "epistemic uncertainty" features the
+    # system already computes (consensus disagreement, difficulty, conflict
+    # complexity, candidate confidence, retry cost). They are merged into the
+    # recorded features dict by the orchestrator before each Experience is
+    # stored, so the calibration model can learn that, e.g., a high-entropy
+    # consensus or a multi-hunk conflict predicts failure even when the
+    # validator hard-checks pass. Old stored models carry their own
+    # (shorter) feature_keys, so adding keys here never breaks a loaded model.
+    "consensus_entropy",
+    "consensus_agreement",
+    "consensus_cluster_count",
+    "difficulty_complex",
+    "retry_count",
+    "conflict_side_chars",
+    "enclosing_node_lines",
+    "self_reported_confidence",
 )
 
 

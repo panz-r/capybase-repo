@@ -100,13 +100,10 @@ def main() -> int:
     X = np.array([row[0] for row in dataset.rows], dtype=float)
     y = np.array([row[1] for row in dataset.rows], dtype=float)
 
-    feature_keys = [
-        "markers_remaining", "whole_file_markers_remaining", "splice_scope_ok",
-        "copied_one_side", "copied_current_side", "copied_replayed_side",
-        "model_needs_human", "syntax_passed", "ast_preserved",
-        "lsp_error_count", "lsp_new_error_count",
-        "hard_failure_count", "warning_count",
-    ]
+    # Single source of truth: import the canonical key list from the runtime
+    # module so a newly-fit model automatically picks up any key added there
+    # (avoids the drift of maintaining two parallel lists).
+    from capybase.calibration import _FEATURE_KEYS as feature_keys
 
     if args.conformal:
         out = _fit_conformal(X, y, feature_keys, dataset, args.alpha)
