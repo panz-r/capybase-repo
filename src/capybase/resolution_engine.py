@@ -382,19 +382,59 @@ class ResolutionEngine:
         and pay N× scheduling overhead. When the client supports
         ``complete_many`` AND returns all N choices, we use them; otherwise we
         fall back to N concurrent ``complete`` calls (the original behavior).
+
+        When ``diverse_sampling`` is enabled we bypass the batched path: the
+        server draws all N choices at ONE temperature, so per-sample
+        temperature diversity (survey §4.1) requires N separate requests.
+        Diversity beats batching efficiency for correctness, so the thread
+        pool is used with a per-sample temperature portfolio.
         """
-        candidates = self._sample_n(
-            unit, prompt, prompt_version, n, temperature_override=temperature_override
-        )
-        if candidates is not None:
-            return candidates
-        # Fallback: thread pool of independent requests.
+        temps = self._sample_temperatures(n, temperature_override)
+        # Only the thread-pool path supports per-sample temperatures; when all
+        # temps are equal (diverse_sampling off, or N==1) try the batched path.
+        if len(set(temps)) <= 1:
+            candidates = self._sample_n(
+                unit, prompt, prompt_version, n, temperature_override=temperature_override
+            )
+            if candidates is not None:
+                return candidates
+        # Fallback / diverse path: thread pool of independent requests.
         with ThreadPoolExecutor(max_workers=min(n, 8)) as pool:
             futures = [
-                pool.submit(self._one, unit, context, prompt, prompt_version, temperature_override)
-                for _ in range(n)
+                pool.submit(self._one, unit, context, prompt, prompt_version, t)
+                for t in temps
             ]
             return [f.result() for f in futures]
+
+    def _sample_temperatures(
+        self, n: int, temperature_override: float | None = None
+    ) -> list[float]:
+        """Build the per-sample temperature portfolio (survey §4.1).
+
+        When ``diverse_sampling`` is off (default), every sample uses the same
+        temperature (the override, or the base) — returned as a list so callers
+        can detect uniformity and try the batched ``n`` path.
+
+        When on, the portfolio splits N into exploratory samples at the higher
+        ``sampling_temperature`` and conservative samples at the lower base
+        ``temperature``, guaranteeing at least one of each for N >= 2. This
+        gives diversity (high-temp explores) AND a reliable fallback
+        (low-temp stays close to a safe answer) — on a 3B model it raises the
+        odds that at least one sample is both valid and distinct.
+        """
+        if n <= 1 or not getattr(self.config, "diverse_sampling", False):
+            t = temperature_override if temperature_override is not None else self.config.temperature
+            return [t] * n
+        high = self.config.sampling_temperature
+        low = self.config.temperature
+        if high <= low:
+            # No diversity to exploit (misconfigured); fall back to uniform.
+            return [temperature_override if temperature_override is not None else low] * n
+        # Split roughly in half: ceil(n/2) exploratory (high), rest conservative.
+        n_high = (n + 1) // 2
+        n_low = n - n_high
+        return [high] * n_high + [low] * n_low
+
 
     def _sample_n(
         self,

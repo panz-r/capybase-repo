@@ -39,6 +39,13 @@ class ModelConfig(BaseModel):
     # Draw samples concurrently in a thread pool (each is a blocking HTTP call).
     # Safe because the LLM adapter is stateless per-call.
     parallel_samples: bool = True
+    # Parameter-diversity portfolio (survey §4.1): when sampling N>1, split the
+    # samples across the high sampling_temperature (exploratory) and the low
+    # base temperature (conservative). Raises the odds that at least one sample
+    # is both valid and distinct on a 3B model. Bypasses the server-side batched
+    # n path (which forces one temperature) to use N separate requests. Off by
+    # default; for N=1 it is a no-op.
+    diverse_sampling: bool = False
     # Reasoning models emit long <think> chains before answering; 2048 starves
     # them. 8192 leaves headroom for reasoning + the final JSON answer.
     max_tokens: int = 8192

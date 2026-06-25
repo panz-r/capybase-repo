@@ -308,3 +308,87 @@ def test_server_side_n_client_without_complete_many():
     # ScriptedClient.complete called once per sample (thread-pool fallback).
     assert len(client.calls) == 3
 
+
+# ---------------------------------------------------------------------------
+# Diverse sampling (survey §4.1): per-sample temperature portfolio
+# ---------------------------------------------------------------------------
+
+
+def test_sample_temperatures_uniform_when_disabled():
+    """diverse_sampling off (default) → all samples at one temperature."""
+    cfg = ModelConfig(samples=5, sampling_temperature=0.9, temperature=0.2)
+    engine = ResolutionEngine(cfg, client=ScriptedClient([]))
+    temps = engine._sample_temperatures(5, temperature_override=0.9)
+    assert temps == [0.9] * 5
+
+
+def test_sample_temperatures_uniform_n1():
+    """N=1 is always a single temperature regardless of the flag."""
+    cfg = ModelConfig(samples=1, diverse_sampling=True, sampling_temperature=0.9)
+    engine = ResolutionEngine(cfg, client=ScriptedClient([]))
+    assert engine._sample_temperatures(1) == [cfg.temperature]
+
+
+def test_sample_temperatures_diverse_split():
+    """diverse_sampling on, N=3 → ceil(3/2)=2 high + 1 low."""
+    cfg = ModelConfig(
+        samples=3, diverse_sampling=True, sampling_temperature=0.9, temperature=0.2,
+    )
+    engine = ResolutionEngine(cfg, client=ScriptedClient([]))
+    temps = engine._sample_temperatures(3, temperature_override=0.9)
+    assert temps == [0.9, 0.9, 0.2]
+
+
+def test_sample_temperatures_diverse_even_n():
+    """N=4 → 2 high + 2 low."""
+    cfg = ModelConfig(
+        samples=4, diverse_sampling=True, sampling_temperature=0.8, temperature=0.2,
+    )
+    engine = ResolutionEngine(cfg, client=ScriptedClient([]))
+    temps = engine._sample_temperatures(4, temperature_override=0.8)
+    assert temps == [0.8, 0.8, 0.2, 0.2]
+
+
+def test_sample_temperatures_guarantees_both_for_n2():
+    """N=2 → 1 high + 1 low (at least one of each)."""
+    cfg = ModelConfig(
+        samples=2, diverse_sampling=True, sampling_temperature=0.8, temperature=0.3,
+    )
+    engine = ResolutionEngine(cfg, client=ScriptedClient([]))
+    temps = engine._sample_temperatures(2, temperature_override=0.8)
+    assert temps == [0.8, 0.3]
+
+
+def test_sample_temperatures_no_diversity_when_high_le_low():
+    """If sampling_temperature <= temperature, no diversity to exploit → uniform
+    at the override temperature (the caller's explicit request is honored)."""
+    cfg = ModelConfig(
+        samples=3, diverse_sampling=True, sampling_temperature=0.2, temperature=0.5,
+    )
+    engine = ResolutionEngine(cfg, client=ScriptedClient([]))
+    temps = engine._sample_temperatures(3, temperature_override=0.2)
+    assert temps == [0.2] * 3
+
+
+def test_diverse_sampling_uses_thread_pool_temperatures():
+    """When diverse_sampling is on, samples are drawn at both temperatures via
+    N separate complete() calls (the batched n path is bypassed because it
+    forces one temperature)."""
+    client = ScriptedClient([
+        '{"resolved_text": "a"}',
+        '{"resolved_text": "b"}',
+        '{"resolved_text": "c"}',
+    ])
+    cfg = ModelConfig(
+        samples=3, diverse_sampling=True,
+        sampling_temperature=0.8, temperature=0.2, parallel_samples=True,
+    )
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose(_unit(), _ctx())
+    assert len(cands) == 3
+    # Three separate calls, with the diverse temperature portfolio applied.
+    assert len(client.calls) == 3
+    used_temps = sorted(c.get("temperature", 0) for c in client.calls)
+    assert used_temps == [0.2, 0.8, 0.8]
+
+
