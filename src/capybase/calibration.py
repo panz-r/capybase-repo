@@ -156,27 +156,43 @@ class ConformalRiskModel:
     feature_keys: tuple[str, ...] = _FEATURE_KEYS
 
     def predict_proba(self, features: dict[str, Any]) -> float:
-        """Return the conformal p-value (probability of being an outlier).
+        """Return the conformal p-value under the success hypothesis.
 
-        High p-value = this candidate looks like the calibration set's
-        successful merges; low p-value = it's an outlier (escalate).
+        Convention (shared with ``scripts/fit_calibration.py::_fit_conformal``):
+        the nonconformity score is ``1 - P(true label)`` — *high = atypical*.
+
+        - For a calibration SUCCESS (label=0): ``s = 1 - P(success)`` (high when
+          the model wrongly predicted failure).
+        - For a calibration FAILURE (label=1): ``s = 1 - P(fail)`` (high when
+          the model wrongly predicted success).
+        - For a NEW candidate whose label is unknown but we are testing the
+          success hypothesis: ``s = 1 - P(success) = P(fail)`` (high when the
+          model thinks the candidate will fail = nonconforming with success).
+
+        p-value = fraction of calibration scores strictly greater than the
+        candidate's score, plus the ``(+1)/(n+1)`` smoothing term. A candidate
+        that is LESS atypical than most calibration examples (low nonconformity)
+        gets a HIGH p-value (looks like the successful majority → accept). A
+        candidate that is MORE atypical than the bulk gets a LOW p-value
+        (outlier → escalate via ``should_escalate`` when ``< alpha``).
         """
         vec = features_to_vector(features)
         z = self.intercept
         for w, x in zip(self.coefficients, vec):
             z += w * x
         proba_fail = _sigmoid(z)
-        # Nonconformity score: how much this looks like a failure.
-        score = 1.0 - proba_fail  # = P(success); high score = looks safe
-        # p-value = fraction of calibration examples with HIGHER nonconformity
-        # (= lower P(success)). If our score is safer than most calibration
-        # examples, p-value is high (accept). If it's riskier, p-value is low.
+        # Candidate nonconformity under the success hypothesis: high = the
+        # model thinks it will fail = atypical/nonconforming.
+        candidate_score = proba_fail  # = 1 - P(success)
         if not self.calibration_scores:
-            # No calibration data: fall back to the raw probability.
+            # No calibration data: fall back to the raw failure probability.
             return proba_fail
         n = len(self.calibration_scores)
-        count_below = sum(1 for s in self.calibration_scores if s < score)
-        return count_below / n
+        # p-value = share of calibration points MORE atypical than this
+        # candidate (strictly-greater nonconformity). Add the standard
+        # (n+1) smoothing so p-values are never exactly 0 or 1.
+        count_greater = sum(1 for s in self.calibration_scores if s > candidate_score)
+        return (count_greater + 1) / (n + 1)
 
     @property
     def threshold(self) -> float:

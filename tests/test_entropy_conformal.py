@@ -110,10 +110,10 @@ def test_risk_no_entropy_passthrough():
 
 
 def test_conformal_model_predict_proba_range():
-    from capybase.calibration import ConformalRiskModel
+    from capybase.calibration import ConformalRiskModel, _FEATURE_KEYS
 
     m = ConformalRiskModel(
-        coefficients=[0.0] * 13, intercept=0.0, alpha=0.1,
+        coefficients=[0.0] * len(_FEATURE_KEYS), intercept=0.0, alpha=0.1,
         calibration_scores=[0.5, 0.6, 0.7, 0.8],
     )
     p = m.predict_proba({})
@@ -123,29 +123,73 @@ def test_conformal_model_predict_proba_range():
 def test_conformal_model_should_escalate_low_pvalue():
     from capybase.calibration import ConformalRiskModel
 
-    # Calibration scores are P(success) for successful merges. A risky feature
-    # (model_needs_human=True with a strong positive coefficient) should produce
-    # a low p-value → escalate.
+    # Calibration scores are nonconformity (1 - P(true label)); high = atypical.
+    # A risky feature (model_needs_human=True with a strong positive coefficient)
+    # drives P(fail) high → high nonconformity → fewer calibration points are
+    # more atypical → low p-value → escalate.
     from capybase.calibration import _FEATURE_KEYS
 
     idx_nh = _FEATURE_KEYS.index("model_needs_human")
-    coeffs = [0.0] * 13
+    coeffs = [0.0] * len(_FEATURE_KEYS)
     coeffs[idx_nh] = 10.0  # very strong failure signal
     m = ConformalRiskModel(
         coefficients=coeffs, intercept=-2.0, alpha=0.1,
-        calibration_scores=[0.9, 0.85, 0.92, 0.88],  # safe examples
+        # A large calibration set so the smoothing floor 1/(n+1) < alpha.
+        calibration_scores=[i / 20 for i in range(1, 20)],
     )
     assert m.should_escalate({"model_needs_human": True})
 
 
 def test_conformal_model_accepts_safe_features():
-    from capybase.calibration import ConformalRiskModel
+    from capybase.calibration import ConformalRiskModel, _FEATURE_KEYS
 
     m = ConformalRiskModel(
-        coefficients=[0.0] * 13, intercept=-5.0, alpha=0.1,
+        coefficients=[0.0] * len(_FEATURE_KEYS), intercept=-5.0, alpha=0.1,
         calibration_scores=[0.5, 0.6, 0.7, 0.8],
     )
     assert not m.should_escalate({})
+
+
+def test_conformal_pvalue_ranks_success_above_failure():
+    """Coverage-guarantee direction: a candidate the model predicts will
+    SUCCEED (low P(fail), low nonconformity) must get a HIGHER p-value than one
+    it predicts will FAIL (high P(fail), high nonconformity), given the same
+    calibration set. This pins the conformal convention — it would fail against
+    the prior inverted scorer."""
+    from capybase.calibration import ConformalRiskModel
+    from capybase.calibration import _FEATURE_KEYS
+
+    # model_needs_human=True is a strong failure signal (positive coef → high
+    # z → high P(fail) → high nonconformity → low p-value).
+    idx_nh = _FEATURE_KEYS.index("model_needs_human")
+    coeffs = [0.0] * len(_FEATURE_KEYS)
+    coeffs[idx_nh] = 10.0
+    m = ConformalRiskModel(
+        coefficients=coeffs, intercept=-3.0, alpha=0.1,
+        # A large calibration set spanning safe→risky nonconformity. The
+        # smoothing floor is 1/(n+1); with n=19 that's ~0.05 < alpha=0.1, so a
+        # maximally-atypical candidate can actually fall below alpha.
+        calibration_scores=[i / 20 for i in range(1, 20)],
+    )
+    p_safe = m.predict_proba({})                       # model predicts success
+    p_risky = m.predict_proba({"model_needs_human": True})  # model predicts fail
+    assert p_safe > p_risky, (p_safe, p_risky)
+    # And the safe candidate is accepted, the risky one escalated.
+    assert not m.should_escalate({})
+    assert m.should_escalate({"model_needs_human": True})
+
+
+def test_conformal_pvalue_smoothing_bounds():
+    """p-values use the (count+1)/(n+1) smoothing: never exactly 0 or 1."""
+    from capybase.calibration import ConformalRiskModel, _FEATURE_KEYS
+
+    m = ConformalRiskModel(
+        coefficients=[0.0] * len(_FEATURE_KEYS), intercept=0.0, alpha=0.1,
+        calibration_scores=[0.5, 0.6, 0.7, 0.8],
+    )
+    # Even at the extremes of nonconformity, p stays in the open (0,1) range.
+    assert 0.0 < m.predict_proba({}) < 1.0
+
 
 
 def test_conformal_model_save_load_roundtrip(tmp_path):
