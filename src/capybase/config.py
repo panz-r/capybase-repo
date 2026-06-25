@@ -123,6 +123,18 @@ class ValidationConfig(BaseModel):
     # Shadow tests: if a tests/test_<module>.py exists for the modified file,
     # run it before declaring success (best-effort, Phase B).
     enable_shadow_tests: bool = False
+    # Verifier-model critic (surveys §1/§5 Proposer-Critic; the reserved
+    # `enable_verifier_model` seam): an LLM judge that checks the resolved text
+    # preserves BOTH sides' semantic intent — the one failure mode the syntactic
+    # validators (markers, splice scope, AST, LSP) are structurally blind to:
+    # a merge that parses cleanly but silently drops a side's intent. Uses the
+    # same black-box API client already in the orchestrator; no model is trained
+    # or hosted. When off (default) the validator is inert and makes no calls.
+    enable_verifier_model: bool = False
+    # Severity of a critic disagreement: "warning" (default — bias toward
+    # retry/escalate but don't hard-reject a syntactically-valid merge) or
+    # "error" (strict — treat a dropped-intent verdict as a hard failure).
+    verifier_severity: str = "warning"
 
 
 class JournalConfig(BaseModel):

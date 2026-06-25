@@ -368,6 +368,60 @@ Output a ```json fenced object:
 """
 
 
+def build_verifier_prompt(
+    unit: ConflictUnit,
+    candidate: CandidateResolution,
+    context: ContextBundle,
+) -> str:
+    """Build the critic prompt for the verifier-model validator (surveys §1/§5).
+
+    Asks the LLM to judge whether ``candidate.resolved_text`` preserves BOTH
+    sides' intent — the semantic check no syntactic validator can make. The
+    model sees BASE, CURRENT, REPLAYED, and the candidate RESOLVED, and must
+    return strict JSON verdict booleans. This is purely a judging call on the
+    same black-box API; it never edits code (the CEGIS loop does repairs).
+    """
+    cur_lines, base_lines, rep_lines = _prompt_sides(unit)
+    sv = context.structural_view
+    enc_sig = sv.get("enclosing_node_signature") if sv else None
+    enc_text = sv.get("enclosing_node_text") if sv else None
+    structural_anchor = ""
+    if enc_sig and enc_text:
+        structural_anchor = (
+            f"Logical block (tree-sitter AST):\n{enc_sig}\n{enc_text}\n\n"
+        )
+    return f"""You are a strict code reviewer judging a git merge resolution. A merge
+conflict has three sides and a proposed resolution. Judge ONLY whether the
+resolution preserves the INTENT of BOTH sides — it must not silently drop a
+behavior, guard, or value that either side added.
+
+{structural_anchor}CURRENT_UPSTREAM_SIDE (one branch's change):
+{cur_lines}
+
+REPLAYED_COMMIT_SIDE (the other branch's change):
+{rep_lines}
+
+BASE (common ancestor):
+{base_lines}
+
+PROPOSED RESOLUTION:
+{candidate.resolved_text}
+
+Does the resolution preserve each side's intent? A side is "not preserved"
+only if a meaningful change it introduced is absent from the resolution
+(ignore cosmetic reformatting and unchanged surrounding lines). Output ONE
+```json fenced object, nothing else:
+```json
+{{
+  "preserves_current": true,
+  "preserves_replayed": true,
+  "reason": "<one short sentence>",
+  "confidence": 0.0
+}}
+```
+"""
+
+
 class ResolutionEngine:
     def __init__(
         self,

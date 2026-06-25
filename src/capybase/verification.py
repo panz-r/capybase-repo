@@ -75,6 +75,9 @@ class ValidationConfig:
     cargo_path: str = "cargo"
     lsp_baseline_strict: bool = True
     enable_shadow_tests: bool = False
+    # Verifier-model critic (mirrors config.ValidationConfig; the live flags).
+    enable_verifier_model: bool = False
+    verifier_severity: str = "warning"
 
     @classmethod
     def from_dict(cls, d: dict) -> "ValidationConfig":
@@ -190,6 +193,132 @@ class NeedsHumanValidator:
             message="model self-reported needs_human=true" if nh else "model did not request human",
             features={"model_needs_human": nh},
         )
+
+
+class VerifierModelValidator:
+    """LLM critic that checks a resolution preserves BOTH sides' intent.
+
+    This is the verifier-model seam (surveys §1/§5 Proposer-Critic): every
+    other validator is syntactic/structural — conflict markers, splice scope,
+    AST preservation, syntax, LSP diagnostics, one-side-copy heuristic. None can
+    catch a merge that parses cleanly but *semantically drops a side's intent*
+    (e.g. it omits a guard one branch added). An LLM judge is the one check for
+    that, run on the same black-box API client already in the orchestrator.
+
+    Cost & safety contract:
+
+    - **Opt-in.** Inert (no LLM call) unless ``enable_verifier_model`` is on.
+      The gate is read from ``ctx.config`` so it mirrors the LSP/shadow wiring.
+    - **Graceful degrade.** Any failure to call the client or parse the verdict
+      yields ``verifier_checked=False`` and ``passed=True`` — a flaky or
+      malformed critic must never crash resolution or reject a valid merge.
+    - **Severity configurable.** Defaults to ``"warning"`` (bias toward
+      retry/escalate, not hard-reject); strict deployments set ``"error"``.
+
+    The client is injected at construction (the ``Validator.verify`` protocol
+    only receives a ``VerificationContext``, which carries no client).
+    """
+
+    name = "verifier_model"
+
+    def __init__(self, client: object, model_name: str = "") -> None:
+        # ``client`` is the same LLMClient the resolution engine uses. Typed as
+        # ``object`` to avoid an import cycle (adapters → ... → verification);
+        # it only needs a ``complete`` method.
+        self.client = client
+        self.model_name = model_name
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        cfg = ctx.config
+        if not getattr(cfg, "enable_verifier_model", False):
+            return VerificationCheckResult(
+                name=self.name,
+                passed=True,
+                severity=getattr(cfg, "verifier_severity", "warning"),
+                message="verifier model disabled",
+                features={"verifier_checked": False},
+            )
+        from capybase.resolution_engine import build_verifier_prompt
+        from capybase.adapters.parsers import parse_resolution_json
+
+        prompt = build_verifier_prompt(ctx.unit, ctx.candidate, _verifier_context(ctx))
+        messages = [
+            {"role": "system", "content": "You are a strict code reviewer."},
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            resp = self.client.complete(
+                messages,
+                model=self.model_name or _default_model(ctx),
+                temperature=0.0,
+                max_tokens=512,
+                json_mode=True,
+            )
+        except Exception:  # noqa: BLE001 - degrade, never crash resolution
+            return VerificationCheckResult(
+                name=self.name,
+                passed=True,
+                severity=getattr(cfg, "verifier_severity", "warning"),
+                message="verifier model call failed; skipped",
+                features={"verifier_checked": False},
+            )
+        data, _ = parse_resolution_json(resp.text or "")
+        if not data:
+            return VerificationCheckResult(
+                name=self.name,
+                passed=True,
+                severity=getattr(cfg, "verifier_severity", "warning"),
+                message="verifier model returned unparseable verdict; skipped",
+                features={"verifier_checked": False},
+            )
+        preserves_current = bool(data.get("preserves_current", True))
+        preserves_replayed = bool(data.get("preserves_replayed", True))
+        try:
+            confidence = float(data.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        preserves_both = preserves_current and preserves_replayed
+        dropped = []
+        if not preserves_current:
+            dropped.append("current")
+        if not preserves_replayed:
+            dropped.append("replayed")
+        return VerificationCheckResult(
+            name=self.name,
+            passed=preserves_both,
+            severity=getattr(cfg, "verifier_severity", "warning"),
+            message=(
+                "resolution preserves both sides' intent"
+                if preserves_both
+                else f"verifier: resolution may drop {', '.join(dropped)} side intent"
+            ),
+            detail={"reason": str(data.get("reason", ""))},
+            features={
+                "verifier_checked": True,
+                "verifier_preserves_current": preserves_current,
+                "verifier_preserves_replayed": preserves_replayed,
+                "verifier_confidence": confidence,
+            },
+        )
+
+
+def _verifier_context(ctx: VerificationContext) -> "ContextBundle":
+    """Rebuild a minimal ContextBundle for the critic prompt.
+
+    The critic prompt needs the structural anchor (enclosing node) and primary
+    context window. VerificationContext carries only the unit + candidate +
+    config, so we reconstruct the lightweight bundle the prompt builder reads.
+    """
+    from capybase.context_builder import ContextBuilder
+
+    return ContextBuilder().build(ctx.unit)
+
+
+def _default_model(ctx: VerificationContext) -> str:
+    """Best-effort model name when none was injected: read config if present."""
+    cfg = getattr(ctx, "config", None)
+    name = getattr(cfg, "model", None) or getattr(cfg, "model_name", None)
+    return str(name) if name else "default"
 
 
 class SyntaxValidator:
@@ -390,7 +519,11 @@ class VerificationEngine:
         self.config = config
 
     @classmethod
-    def default(cls, config: ValidationConfig) -> "VerificationEngine":
+    def default(
+        cls,
+        config: ValidationConfig,
+        extra_validators: list[Validator] | None = None,
+    ) -> "VerificationEngine":
         # Phase A: per-unit validators. Each validates the candidate in
         # isolation against the unit's marker span. The whole-file checks
         # (no_markers, syntax) used to live here too, but they spliced into
@@ -405,7 +538,17 @@ class VerificationEngine:
             PreservationHeuristicValidator(),
             NeedsHumanValidator(),
         ]
+        # Extra validators (e.g. the opt-in VerifierModelValidator) are appended
+        # so they run last — after the cheap structural checks. This keeps the
+        # rank-order validation loop cheap for structurally-invalid candidates
+        # and only pays the LLM critic call for candidates worth judging.
+        if extra_validators:
+            validators.extend(extra_validators)
         return cls(validators, config)
+
+    def register(self, validator: Validator) -> None:
+        """Append a validator at the end of the chain (runs last)."""
+        self.validators.append(validator)
 
     def verify(self, unit: ConflictUnit, candidate: CandidateResolution) -> VerificationResult:
         ctx = VerificationContext(unit=unit, candidate=candidate, config=self.config)
@@ -679,6 +822,7 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
         "preservation_heuristic": cfg.reject_if_copies_one_side,
         "needs_human": cfg.reject_if_model_needs_human,
         "syntax": cfg.require_syntax_if_supported,
+        "verifier_model": cfg.enable_verifier_model,
     }
     return table.get(name, True)
 
