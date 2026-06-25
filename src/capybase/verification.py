@@ -69,6 +69,12 @@ class ValidationConfig:
     reject_if_model_needs_human: bool = True
     require_whole_file_validation: bool = True
     require_ast_preservation: bool = True
+    enable_lsp_diagnostics: bool = False
+    pyright_path: str = "pyright"
+    rust_analyzer_path: str = "rust-analyzer"
+    cargo_path: str = "cargo"
+    lsp_baseline_strict: bool = True
+    enable_shadow_tests: bool = False
 
     @classmethod
     def from_dict(cls, d: dict) -> "ValidationConfig":
@@ -449,6 +455,8 @@ class VerificationEngine:
         language: str | None,
         original: str,
         resolutions: list[tuple[tuple[int, int], str]],
+        *,
+        repo_root: str = ".",
     ) -> VerificationResult:
         """Validate the file after *all* units in it have been resolved.
 
@@ -462,6 +470,12 @@ class VerificationEngine:
         appears when two resolutions are adjacent). The per-unit Phase A
         validators structurally cannot, because each only ever sees one
         block spliced into a file whose other blocks are still raw markers.
+
+        When LSP diagnostics are enabled, this also runs pyright/rust-analyzer
+        on the fully-spliced file and rejects candidates that introduce NEW
+        type/compile errors (errors absent from the pre-conflict baseline).
+        ``repo_root`` is the cwd for the tool (needed for cargo projects and
+        locating shadow test files).
 
         Returns the same ``VerificationResult`` shape so ``RiskEngine.decide``
         and the orchestrator consume it unchanged. ``unit_id``/``candidate_id``
@@ -509,6 +523,14 @@ class VerificationEngine:
         features["syntax_checked"] = syntax_checked
         features["syntax_passed"] = syntax_ok
 
+        # LSP / type-checker diagnostics (Phase B): reject NEW errors.
+        self._run_lsp_diagnostics(
+            path, language, original, whole, repo_root, hard, features
+        )
+
+        # Shadow tests (Phase B): best-effort run of tests for this module.
+        self._run_shadow_tests(path, repo_root, hard, features)
+
         passed = len(hard) == 0
         features["hard_failure_count"] = len(hard)
         features["warning_count"] = 0
@@ -520,6 +542,127 @@ class VerificationEngine:
             warnings=[],
             features=features,
         )
+
+    # ------------------------------------------------------------------
+    # Phase B helpers: LSP diagnostics and shadow tests.
+    # ------------------------------------------------------------------
+
+    def _run_lsp_diagnostics(
+        self,
+        path: str,
+        language: str | None,
+        original: str,
+        whole: str,
+        repo_root: str,
+        hard: list[VerificationFailure],
+        features: dict[str, float | int | str | bool],
+    ) -> None:
+        """Run an LSP and reject NEW errors introduced by the resolution.
+
+        Computes a baseline by checking the pre-conflict ``original`` (with
+        conflict markers — we strip them to a comment so the baseline parses),
+        then checks the resolved ``whole``. Only errors NOT in the baseline are
+        failures: pre-existing issues in the repo are the developer's problem,
+        not the merge's. All LSP work is skipped when disabled or the tool is
+        absent (``checked=False``).
+        """
+        if not self.config.enable_lsp_diagnostics:
+            features["lsp_checked"] = False
+            features["lsp_error_count"] = 0
+            features["lsp_new_error_count"] = 0
+            return
+        try:
+            from capybase.adapters import lsp as lsp_mod
+        except Exception:  # noqa: BLE001
+            features["lsp_checked"] = False
+            return
+        runner = lsp_mod.runner_for(
+            language,
+            config=lsp_mod.LspConfig(
+                pyright_path=self.config.pyright_path,
+                rust_analyzer_path=self.config.rust_analyzer_path,
+                cargo_path=self.config.cargo_path,
+            ),
+        )
+        if runner is None:
+            features["lsp_checked"] = False
+            return
+        # Baseline: the original file with conflict markers blanked to comments
+        # so it parses. We only care about errors OUTSIDE the conflict regions
+        # for the baseline (those pre-date the merge).
+        baseline_src = _blank_markers(original)
+        baseline = runner.check(baseline_src, path=path, repo_root=repo_root)
+        after = runner.check(whole, path=path, repo_root=repo_root)
+        if not after.checked:
+            features["lsp_checked"] = False
+            features["lsp_error_count"] = 0
+            features["lsp_new_error_count"] = 0
+            return
+        features["lsp_checked"] = True
+        features["lsp_error_count"] = after.error_count
+        # New errors = after errors not present in baseline (by message).
+        baseline_msgs = {d.message for d in baseline.errors}
+        new_errors = [d for d in after.errors if d.message not in baseline_msgs]
+        features["lsp_new_error_count"] = len(new_errors)
+        if new_errors:
+            msg = "; ".join(d.message[:80] for d in new_errors[:3])
+            hard.append(
+                VerificationFailure(
+                    validator="lsp_diagnostics",
+                    severity="error",
+                    message=f"LSP introduced {len(new_errors)} new error(s): {msg}",
+                    detail={
+                        "new_errors": [d.message for d in new_errors[:5]],
+                        "tool": after.tool,
+                    },
+                )
+            )
+
+    def _run_shadow_tests(
+        self,
+        path: str,
+        repo_root: str,
+        hard: list[VerificationFailure],
+        features: dict[str, float | int | str | bool],
+    ) -> None:
+        """Best-effort: run tests/test_<module>.py for the modified file.
+
+        Locates a test file by convention (``tests/test_<basename>.py``) and
+        runs it via pytest. A failure is a WARNING, not a hard error — the
+        merge may be correct even if pre-existing tests fail for unrelated
+        reasons. This records ``shadow_tests_passed`` as a calibration feature.
+        """
+        features.setdefault("shadow_tests_run", False)
+        features.setdefault("shadow_tests_passed", True)
+        if not self.config.enable_shadow_tests:
+            return
+        test_path = _locate_shadow_test(path, repo_root)
+        if test_path is None:
+            return
+        try:
+            proc = subprocess.run(
+                ["python3", "-m", "pytest", test_path, "-q"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=repo_root,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return
+        features["shadow_tests_run"] = True
+        ok = proc.returncode == 0
+        features["shadow_tests_passed"] = ok
+        if not ok:
+            tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            tail_str = tail[-1][:120] if tail else "tests failed"
+            hard.append(
+                VerificationFailure(
+                    validator="shadow_tests",
+                    severity="warning",
+                    message=f"shadow tests failed: {tail_str}",
+                    detail={"test_path": test_path, "returncode": proc.returncode},
+                )
+            )
 
 
 def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
@@ -533,3 +676,38 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
         "syntax": cfg.require_syntax_if_supported,
     }
     return table.get(name, True)
+
+
+def _blank_markers(text: str) -> str:
+    """Replace conflict-marker lines with comments so the baseline parses.
+
+    The pre-conflict ``original`` (the worktree with raw markers) isn't valid
+    Python/Rust. For the LSP baseline we only need it to parse so we can
+    collect pre-existing errors outside the conflict — blanking each marker
+    line to a comment preserves line numbers and lets the parser recover.
+    """
+    out = []
+    for line in text.split("\n"):
+        if line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
+            out.append("# conflict-marker")
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _locate_shadow_test(path: str, repo_root: str) -> str | None:
+    """Find a test file for ``path`` by convention: tests/test_<basename>.py.
+
+    ``src/config.rs`` → looks for ``tests/test_config.py`` (Rust has no pytest,
+    so this is a no-op for non-Python; the feature is Python-centric for now).
+    Returns the absolute path if it exists, else None.
+    """
+    from pathlib import Path
+
+    p = Path(path)
+    if p.suffix != ".py":
+        return None
+    candidate = Path(repo_root) / "tests" / f"test_{p.stem}.py"
+    if candidate.is_file():
+        return str(candidate)
+    return None

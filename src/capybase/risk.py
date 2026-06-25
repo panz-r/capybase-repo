@@ -32,7 +32,10 @@ class RiskEngine:
         feats = result.features
 
         # --- technical failures: retry, then escalate ---
-        if failure_kind in ("request_failed", "parse_failed", "truncated"):
+        # Includes LSP/type-check failures: a candidate that introduces new
+        # type errors is almost always a small localized mistake the model can
+        # fix on retry with the diagnostic feedback.
+        if failure_kind in ("request_failed", "parse_failed", "truncated", "lsp_failed"):
             reason = (
                 result.hard_failures[0].message
                 if result.hard_failures

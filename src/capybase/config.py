@@ -22,6 +22,11 @@ class ModelConfig(BaseModel):
     model: str = "vibethink"
     temperature: float = 0.2
     samples: int = 1
+    # Self-consistency: when samples > 1 and future.enable_self_consistency is
+    # on, candidates are clustered by normalized text and the majority wins.
+    # Below this agreement fraction the merge is flagged low-confidence (the
+    # risk engine can treat it as a retry/escalate signal).
+    consensus_min_agreement: float = 0.4
     # Reasoning models emit long <think> chains before answering; 2048 starves
     # them. 8192 leaves headroom for reasoning + the final JSON answer.
     max_tokens: int = 8192
@@ -70,6 +75,18 @@ class ValidationConfig(BaseModel):
     # ExactSpliceScope check misses (it only guards line boundaries). When the
     # grammar is absent this validator is inert.
     require_ast_preservation: bool = True
+    # LSP / type-checker diagnostics (requires pyright/rust-analyzer): reject a
+    # candidate that introduces NEW type or compilation errors not present in
+    # the pre-conflict baseline. Runs in Phase B on the fully-spliced file.
+    # Inert when the tool is absent.
+    enable_lsp_diagnostics: bool = False
+    pyright_path: str = "pyright"
+    rust_analyzer_path: str = "rust-analyzer"
+    cargo_path: str = "cargo"
+    lsp_baseline_strict: bool = True
+    # Shadow tests: if a tests/test_<module>.py exists for the modified file,
+    # run it before declaring success (best-effort, Phase B).
+    enable_shadow_tests: bool = False
 
 
 class JournalConfig(BaseModel):

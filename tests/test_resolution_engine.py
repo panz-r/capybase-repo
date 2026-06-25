@@ -70,7 +70,7 @@ def test_retry_prompt_uses_failures():
     cands = engine.propose(
         _unit(), ContextBuilder().build(_unit()), failures=failures
     )
-    assert cands[0].prompt_version == "cegis_retry.v4"
+    assert cands[0].prompt_version == "cegis_retry.v5"
 
 
 def test_resolve_prompt_contains_sides():

@@ -29,9 +29,10 @@ from capybase.conflict_model import (
     VerificationFailure,
 )
 from capybase.config import ModelConfig
+from capybase.consensus import ConsensusReport, rank_by_consensus
 
-PROMPT_RESOLVE = "resolve_text_block.v4"
-PROMPT_RETRY = "cegis_retry.v4"
+PROMPT_RESOLVE = "resolve_text_block.v5"
+PROMPT_RETRY = "cegis_retry.v5"
 
 
 def build_resolve_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
@@ -108,9 +109,7 @@ def build_retry_prompt(
     context: ContextBundle,
     failures: Iterable[VerificationFailure],
 ) -> str:
-    feedback = "\n".join(
-        f"- [{f.validator}] {f.message}" for f in failures
-    ) or "- (no specific failures reported)"
+    feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
     return f"""Your previous merge attempt was rejected. Fix it.
 
 {build_resolve_prompt(unit, context)}
@@ -121,6 +120,27 @@ def build_retry_prompt(
 Address every failure above; do not repeat the mistake. End with the ```json
 fenced answer as instructed.
 """
+
+
+def _render_failure(f: VerificationFailure) -> str:
+    """Render a failure richly, surfacing structured counterexample detail.
+
+    Validators populate ``VerificationFailure.detail`` with structured state
+    (e.g. the exact syntax-error line/column, the AST fingerprint diff, the
+    LSP diagnostic range). Rendering it here gives the model a concrete
+    counterexample to fix, rather than a bare message — this is the core of
+    CEGIS: the counterexample guides the next synthesis attempt.
+    """
+    parts = [f"- [{f.validator}] {f.message}"]
+    if f.detail:
+        for key, val in f.detail.items():
+            # Truncate long values (e.g. full AST fingerprints) to keep the
+            # prompt focused on the actionable signal.
+            sval = str(val)
+            if len(sval) > 200:
+                sval = sval[:200] + " …"
+            parts.append(f"    {key}: {sval}")
+    return "\n".join(parts)
 
 
 class ResolutionEngine:
@@ -157,6 +177,29 @@ class ResolutionEngine:
             cand = self._one(unit, context, prompt, prompt_version)
             candidates.append(cand)
         return candidates
+
+    def propose_with_consensus(
+        self,
+        unit: ConflictUnit,
+        context: ContextBundle,
+        *,
+        failures: list[VerificationFailure] | None = None,
+    ) -> tuple[list[CandidateResolution], ConsensusReport | None]:
+        """Generate N samples and reorder so the majority winner is first.
+
+        When ``samples <= 1`` there is no voting to do; this returns the single
+        candidate unchanged with a trivial report. Otherwise the candidates are
+        normalized and clustered; the largest cluster's representative is moved
+        to index 0 so the orchestrator's ``candidates[0]`` takes the consensus
+        winner. The report (agreement score, cluster count) is returned for
+        journaling and as a risk signal — low agreement flags an uncertain
+        merge.
+        """
+        candidates = self.propose(unit, context, failures=failures)
+        if len(candidates) <= 1:
+            return candidates, None
+        ordered, report = rank_by_consensus(candidates, unit.language)
+        return ordered, report
 
     def _one(
         self,

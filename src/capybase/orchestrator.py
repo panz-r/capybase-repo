@@ -368,7 +368,8 @@ class Orchestrator:
             if self.config.validation.require_whole_file_validation and units:
                 language = units[0].language
                 file_validation = self.verification.verify_file(
-                    path, language, original, spans_and_texts
+                    path, language, original, spans_and_texts,
+                    repo_root=str(self.git.repo),
                 )
                 if self.config.journal.enabled and self.config.journal.store_validations:
                     self.journal.store_validation(file_validation)
@@ -434,21 +435,38 @@ class Orchestrator:
                 unit_id=unit.unit_id,
             )
 
-            candidates = self.resolution_engine.propose(unit, context, failures=failures)
-            # MVP: take the first candidate (samples=1). Self-consistency later.
+            consensus_report = None
+            if self.config.future.enable_self_consistency:
+                candidates, consensus_report = (
+                    self.resolution_engine.propose_with_consensus(
+                        unit, context, failures=failures
+                    )
+                )
+            else:
+                candidates = self.resolution_engine.propose(
+                    unit, context, failures=failures
+                )
+            # Take the first candidate: with self-consistency this is the
+            # majority winner (reordered by rank_by_consensus); otherwise the
+            # sole sample.
             cand = candidates[0]
             outcome.attempts.append(cand)
             if self.config.journal.enabled and self.config.journal.store_candidates:
                 self.journal.store_candidate(cand)
             if self.config.journal.enabled and self.config.journal.store_raw_responses:
                 self.journal.store_response(unit.unit_id, retry_count, cand.raw_response)
+            emit_payload = {
+                "candidate_id": cand.candidate_id,
+                "needs_human": cand.needs_human,
+                "confidence": cand.self_reported_confidence,
+            }
+            if consensus_report is not None:
+                emit_payload["consensus_agreement"] = consensus_report.agreement_score
+                emit_payload["consensus_clusters"] = consensus_report.cluster_count
+                emit_payload["consensus_n_samples"] = consensus_report.n_samples
             self.journal.emit(
                 "candidate_generated",
-                {
-                    "candidate_id": cand.candidate_id,
-                    "needs_human": cand.needs_human,
-                    "confidence": cand.self_reported_confidence,
-                },
+                emit_payload,
                 step_index=self.step,
                 path=unit.path,
                 unit_id=unit.unit_id,

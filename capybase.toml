@@ -11,6 +11,10 @@ api_key = "sk-local"
 model = "vibethink"
 temperature = 0.2
 samples = 1
+# Self-consistency: raise samples (e.g. 5) and set [future] enable_self_consistency
+# = true to enable majority voting over N samples. Below this agreement fraction
+# the merge is flagged low-confidence.
+consensus_min_agreement = 0.4
 # Reasoning models (e.g. VibeThinker/DeepSeek-R1 style) emit long <think> chains
 # before answering. If this is too low, the model runs out of tokens mid-thought
 # (finish_reason=length) and never emits its JSON answer -> empty resolution.
@@ -44,6 +48,19 @@ require_exact_splice_scope = true
 require_syntax_if_supported = true
 reject_if_copies_one_side = true
 reject_if_model_needs_human = true
+require_whole_file_validation = true
+require_ast_preservation = true
+# LSP / type-checker (Phase B): reject candidates introducing NEW type/compile
+# errors. Requires pyright (pip install pyright) or rust-analyzer. Inert when
+# the tool is absent.
+enable_lsp_diagnostics = false
+pyright_path = "pyright"
+rust_analyzer_path = "rust-analyzer"
+cargo_path = "cargo"
+lsp_baseline_strict = true
+# Shadow tests (Phase B): run tests/test_<module>.py for a modified module
+# before declaring success (warning severity, best-effort).
+enable_shadow_tests = false
 
 [journal]
 enabled = true
@@ -68,8 +85,8 @@ slice_search_globs = ["**/*.py", "**/*.rs"]
 
 # [future] documents planned seams. It does nothing in the MVP.
 [future]
-enable_self_consistency = false
+enable_self_consistency = false   # raise [model] samples + set true for majority voting
 enable_rag = false
-enable_structural_context = false
+enable_structural_context = false  # set true + [structural] enabled = true for AST context
 enable_verifier_model = false
 enable_mutation_testing = false
