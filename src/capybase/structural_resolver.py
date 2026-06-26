@@ -41,7 +41,7 @@ from capybase.conflict_model import ConflictUnit
 
 Rule = Literal[
     "identical_sides", "one_sided_change", "disjoint_edits", "zealous_merge",
-    "entity_disjoint",
+    "entity_disjoint", "token_disjoint",
 ]
 
 
@@ -152,6 +152,20 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if merged is not None:
             return StructuralResolution(rule="entity_disjoint", text=merged)
 
+        # Rule 6: token-level disjoint resolution (survey §4.2 Summer, layer 3).
+        # Runs AFTER entity resolution so multi-entity conflicts (renames, adds)
+        # are handled at the coarser, identity-aware entity granularity first.
+        # Token-disjoint then catches the intra-line case the line/entity rules
+        # provably can't reach: two sides change DIFFERENT TOKENS on the SAME
+        # line (a value bump + a constant rename on one assignment; two signature
+        # edits at different positions). Token granularity recognizes these as
+        # disjoint and splices both edits in. Scoped to small conflicts (a line
+        # budget) so reconstruction stays local. Declines on any token overlap
+        # or ambiguous pure-insertion anchors.
+        merged = _try_token_disjoint(base, current, replayed)
+        if merged is not None:
+            return StructuralResolution(rule="token_disjoint", text=merged)
+
     return StructuralResolution(rule=None, text=None)
 
 
@@ -192,6 +206,133 @@ def _base_changed_lines(base: list[str], other: list[str]) -> set[int]:
         # i-indices are into base; mark the affected base range.
         changed.update(range(i1, i2))
     return changed
+
+
+# ---------------------------------------------------------------------------
+# Token-level disjoint resolution (survey §4.2 Summer, layer 3)
+# ---------------------------------------------------------------------------
+
+# Maximum total non-blank lines across the three sides for the token rule to
+# fire. Token reconstruction is provably local (it splices disjoint edits), but
+# keeping the budget small ensures the merge stays cheap and obviously-correct
+# — a 200-line conflict reassembled at token granularity is hard to audit. The
+# rule's value is the small, same-line case; large conflicts stay with the
+# line/entity/LLM rules.
+TOKEN_DISJOINT_MAX_LINES = 12
+
+# Summer-style 4-category tokenization (letters/digits/whitespace/symbols):
+# every character belongs to exactly one category, so the round-trip
+# (tokenize → detokenize) is lossless and the merged text reconstructs exactly.
+# This is what lets the rule reassemble a line from its edited tokens without
+# dropping punctuation or whitespace.
+_TOKEN_RE = __import__("re").compile(r"[A-Za-z_]+|[0-9]+|\s+|[^\sA-Za-z0-9]+")
+
+
+def _tokenize(text: str) -> list[str]:
+    """Split ``text`` into Summer's 4 token categories (lossless)."""
+    return _TOKEN_RE.findall(text or "")
+
+
+def _detokenize(tokens: list[str]) -> str:
+    """Rejoin tokens into the original text (inverse of :func:`_tokenize`)."""
+    return "".join(tokens)
+
+
+def _token_change_ops(base_toks: list[str], other_toks: list[str]) -> list[tuple[int, int, list[str]]]:
+    """Non-equal regions between two token sequences, as ``(base_start, base_end_excl, replacement_toks)``.
+
+    Mirrors :func:`_base_changed_lines` but returns the replacement content too,
+    so a disjoint merge can splice each side's replacement into base in one pass.
+    """
+    ops: list[tuple[int, int, list[str]]] = []
+    matcher = difflib.SequenceMatcher(a=base_toks, b=other_toks, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag != "equal":
+            ops.append((i1, i2, other_toks[j1:j2]))
+    return ops
+
+
+def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
+    """Merge two sides whose edits touch DISJOINT TOKENS on the same text.
+
+    Survey §4.2 (Summer, layer 3): the line-granular rules decline when two
+    sides change the same line, even if they changed different tokens on it
+    (a value bump + a rename on one assignment; two signature edits at different
+    positions). Token granularity recognizes these as disjoint: align each side
+    against base at the token level, and if the changed base-token spans don't
+    intersect, splice both edits in. This is the safe, disjoint subset of
+    Summer's token-rewrite idea — no move rules, no heuristics, just disjoint-
+    token splicing with the same safety contract as :func:`_try_disjoint_merge`
+    (one granularity finer).
+
+    Returns None (decline → LLM) when: the conflict is too large (exceeds
+    :data:`TOKEN_DISJOINT_MAX_LINES`), either side has no token changes, or the
+    changed token spans overlap (a genuine token-level conflict). Scoped to small
+    conflicts so the reconstruction stays local and auditable.
+    """
+    # Budget guard: only fire on small conflicts. Token reconstruction is
+    # provably local, but keeping it cheap and obviously-correct matters.
+    total_lines = sum(
+        1 for t in (base, current, replayed) for ln in t.splitlines() if ln.strip()
+    )
+    if total_lines > TOKEN_DISJOINT_MAX_LINES:
+        return None
+
+    bt = _tokenize(base)
+    ct = _tokenize(current)
+    rt = _tokenize(replayed)
+    cur_ops = _token_change_ops(bt, ct)
+    rep_ops = _token_change_ops(bt, rt)
+    if not cur_ops or not rep_ops:
+        return None  # a side made no token change → an earlier rule handles it
+
+    # Test for overlap on base-token indices. Two cases must count as conflict:
+    #  (a) replace/delete spans that intersect (both sides change the same token);
+    #  (b) pure insertions (i1 == i2) anchored at the same base position — their
+    #      relative order is ambiguous (like zealous_merge/disjoint_edits, which
+    #      deliberately refuse pure insertions for exactly this reason).
+    cur_spans: set[int] = set()
+    cur_insert_anchors: set[int] = set()
+    for i1, i2, _ in cur_ops:
+        if i1 == i2:
+            cur_insert_anchors.add(i1)
+        else:
+            cur_spans.update(range(i1, i2))
+    rep_spans: set[int] = set()
+    rep_insert_anchors: set[int] = set()
+    for i1, i2, _ in rep_ops:
+        if i1 == i2:
+            rep_insert_anchors.add(i1)
+        else:
+            rep_spans.update(range(i1, i2))
+    # (a) replace/delete overlap → conflict.
+    if cur_spans & rep_spans:
+        return None
+    # (b) a pure insertion landing INSIDE a replace/delete region, OR two pure
+    # insertions at the same anchor → ambiguous → decline. (An insertion inside
+    # a replaced region is also ambiguous: where in the replacement does it go?)
+    if cur_spans & rep_insert_anchors or rep_spans & cur_insert_anchors:
+        return None
+    if cur_insert_anchors & rep_insert_anchors:
+        return None
+
+    # Disjoint: walk base tokens, applying both sides' replacements at their
+    # spans. An edit at base index i replaces tokens [i, end) with `repl`.
+    merged_ops: dict[int, tuple[int, list[str]]] = {}
+    for i1, i2, repl in cur_ops + rep_ops:
+        merged_ops[i1] = (i2, repl)
+    out: list[str] = []
+    i = 0
+    n = len(bt)
+    while i < n:
+        if i in merged_ops:
+            end, repl = merged_ops[i]
+            out.extend(repl)
+            i = end
+        else:
+            out.append(bt[i])
+            i += 1
+    return _detokenize(out)
 
 
 def _try_zealous_merge(base: str, current: str, replayed: str) -> str | None:
