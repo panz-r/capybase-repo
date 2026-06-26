@@ -262,6 +262,65 @@ def test_hill_climbing_is_reproducible_with_seed():
     assert r1.fitness == r2.fitness
 
 
+# ---------------------------------------------------------------------------
+# Stagnation early-exit (survey §2.2 termination)
+# ---------------------------------------------------------------------------
+
+
+def test_stagnation_limit_still_finds_union_on_balanced_block():
+    """A reasonable stagnation limit must not hurt result quality on a balanced
+    large block — the search converges well before the limit. The full 16-line
+    union should still be found."""
+    ours = "\n".join(f"o{i}" for i in range(8))
+    theirs = "\n".join(f"t{i}" for i in range(8))
+    r = resolve_by_combination_search(
+        _unit(ours, theirs), seed=12345, stagnation_limit=64
+    )
+    assert r.resolved
+    assert len(r.text.splitlines()) == 16  # full union, no quality loss
+
+
+def test_stagnation_default_is_reproducible():
+    """The default stagnation limit is deterministic given a seed — same result
+    across runs (the early-exit is a function of fitness, which is deterministic,
+    and the seeded RNG)."""
+    ours = "\n".join(f"o{i}" for i in range(10))
+    theirs = "\n".join(f"t{i}" for i in range(10))
+    r1 = resolve_by_combination_search(_unit(ours, theirs), seed=99)
+    r2 = resolve_by_combination_search(_unit(ours, theirs), seed=99)
+    assert r1.text == r2.text
+    assert r1.fitness == r2.fitness
+
+
+def test_stagnation_bounded_by_max_iterations_too():
+    """Even with a generous stagnation limit, max_iterations is still a hard
+    ceiling. A tiny budget returns a result (or declines) without hanging."""
+    ours = "\n".join(f"o{i}" for i in range(8))
+    theirs = "\n".join(f"t{i}" for i in range(8))
+    # max_iterations=1 → at most one evaluation; must return promptly.
+    r = resolve_by_combination_search(
+        _unit(ours, theirs), seed=1, max_iterations=1, stagnation_limit=10000
+    )
+    # Resolved or not, the call must terminate and return a well-formed result.
+    assert isinstance(r.fitness, float)
+
+
+def test_stagnation_limit_is_tunable():
+    """The parameter threads through to the hill-climb search. A very tight
+    limit on a large block still yields a valid (non-crashing) result — the
+    early-exit never leaves the resolver in a bad state."""
+    ours = "\n".join(f"o{i}" for i in range(12))
+    theirs = "\n".join(f"t{i}" for i in range(12))
+    r = resolve_by_combination_search(
+        _unit(ours, theirs), seed=42, stagnation_limit=4
+    )
+    # With such a tight limit it may resolve or decline; either is acceptable as
+    # long as it terminates cleanly and reports an honest fitness.
+    assert isinstance(r.fitness, float)
+    if r.resolved:
+        assert r.text  # non-empty resolved text
+
+
 def test_exhaustive_threshold_is_sane():
     # The threshold should keep exhaustive cost bounded (~1k candidates) while
     # being large enough to cover typical conflict blocks without hill climbing.

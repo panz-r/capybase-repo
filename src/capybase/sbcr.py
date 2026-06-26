@@ -211,13 +211,23 @@ def _hill_climb_best(
     floor: float,
     max_iterations: int,
     rng: random.Random,
+    stagnation_limit: int = 64,
 ) -> tuple[list[str] | None, float]:
     """Random-restart hill climbing over the interleaving space (survey §4.1).
 
     Operators: ADD a not-yet-included line, REMOVE an included line, EXCHANGE
-    two positions. Restart from a random valid interleaving when stuck. Bounded
-    by ``max_iterations`` total evaluations so cost is predictable on large
-    blocks. Returns the best candidate found above ``floor``, else (None, score).
+    two positions. Restart from a random valid interleaving when stuck. Two
+    termination criteria from the survey §2.2:
+
+    - ``max_iterations``: a hard budget on total fitness evaluations (predictable
+      cost on large blocks).
+    - ``stagnation_limit``: stop the ENTIRE search after this many consecutive
+      non-improving evaluations. Once fitness has plateaued, further restarts
+      only re-find the same local optima, so continuing wastes the budget. This
+      bounds the pathological case where the iteration budget would otherwise be
+      spent churning an already-converged search.
+
+    Returns the best candidate found above ``floor``, else (None, score).
     """
     pool = ours + theirs  # the universe of lines; an interleaving draws from it
     if not pool:
@@ -257,28 +267,37 @@ def _hill_climb_best(
     best: list[str] | None = None
     best_fit = -1.0
     iters = 0
-    while iters < max_iterations:
+    # Consecutive non-improving evaluations since the last global best improved.
+    # When this exceeds stagnation_limit, the search has plateaued → stop.
+    stagnation = 0
+    while iters < max_iterations and stagnation < stagnation_limit:
         current = _random_interleaving()
         current_fit = fitness(current, ours, theirs)
         iters += 1
         if current_fit > best_fit:
             best_fit, best = current_fit, list(current)
-        # Climb until no neighbor improves.
+            stagnation = 0
+        else:
+            stagnation += 1
+        # Climb until no neighbor improves (first-improvement move).
         improved = True
-        while improved and iters < max_iterations:
+        while improved and iters < max_iterations and stagnation < stagnation_limit:
             improved = False
             for nb in _neighbors(current):
-                if iters >= max_iterations:
+                if iters >= max_iterations or stagnation >= stagnation_limit:
                     break
                 iters += 1
                 f = fitness(nb, ours, theirs)
+                if f > best_fit:
+                    best_fit, best = list(nb), f
+                    stagnation = 0
+                else:
+                    stagnation += 1
                 if f > current_fit:
                     current, current_fit = nb, f
                     improved = True
-                    if f > best_fit:
-                        best_fit, best = list(nb), f
-            # continue climbing from the best neighbor of this run
-        # random restart
+                    break  # first-improvement: re-scan neighbors from the new current
+        # random restart (stagnation carries across restarts, bounding churn)
     if best is None or best_fit < floor:
         return None, best_fit
     return best, best_fit
@@ -294,6 +313,7 @@ def resolve_by_combination_search(
     *,
     floor: float = 0.6,
     max_iterations: int = 2000,
+    stagnation_limit: int = 64,
     seed: int | None = None,
 ) -> CombinationResolution:
     """Attempt a search-based combination resolution of ``unit``.
@@ -311,7 +331,12 @@ def resolve_by_combination_search(
         essentially one-sided (it drops most of a side), which is not a genuine
         combination and is better left to the LLM.
     max_iterations : int
-        Bound on total fitness evaluations for hill climbing on large blocks.
+        Hard budget on total fitness evaluations for hill climbing on large
+        blocks (survey §2.2 termination).
+    stagnation_limit : int
+        Stop the hill-climb search after this many consecutive non-improving
+        evaluations (survey §2.2 stagnation). Once fitness plateaus, further
+        restarts re-find the same local optima, so continuing wastes budget.
     seed : int | None
         RNG seed for reproducible hill climbing (tests pass a fixed seed).
 
@@ -357,7 +382,7 @@ def resolve_by_combination_search(
     else:
         best, best_fit = _hill_climb_best(
             ours, theirs, floor=floor, max_iterations=max_iterations,
-            rng=random.Random(seed),
+            stagnation_limit=stagnation_limit, rng=random.Random(seed),
         )
 
     if best is None:
