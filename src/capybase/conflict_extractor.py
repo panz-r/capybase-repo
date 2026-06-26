@@ -459,6 +459,29 @@ def _leading_indent(lines: list[str]) -> int | None:
     return None
 
 
+def _entity_name_from_signature(signature: str | None) -> str | None:
+    """Bare name of the enclosing definition, to exclude it from siblings.
+
+    Turns a signature header (``def save(self, v):`` / ``fn load(&self) -> T`` /
+    ``class C:``) into just ``save`` / ``load`` / ``C`` so the sibling list
+    doesn't re-show the very entity being resolved.
+    """
+    if not signature:
+        return None
+    s = signature.strip()
+    for kw in ("async def", "def", "class", "fn", "struct", "enum", "trait", "mod"):
+        if s.startswith(kw + " "):
+            s = s[len(kw) + 1 :]
+            break
+    name = ""
+    for ch in s:
+        if ch.isalnum() or ch == "_":
+            name += ch
+        else:
+            break
+    return name or None
+
+
 def _refine_with_diff3(
     units: list[ConflictUnit],
     base_text: str,
@@ -651,6 +674,22 @@ def _enrich_structural(
                     # AST signature is sharper than the indent heuristic.
                     unit.enclosing_symbol = node.signature
                 unit.unit_kind = "ast_region"
+                # Sibling entities (survey §4.1/§5.4 Rover): the OTHER methods/
+                # fields co-located in the same container as this conflict. The
+                # model sees the entity neighborhood it must stay consistent with
+                # (shared conventions, callers/callees in-file) — the survey's
+                # finding that *some* structured context lifts LLM output, at
+                # near-zero cost. Enumerated from BASE (the clean, parseable
+                # blob), excluding the enclosing entity itself. Advisory.
+                try:
+                    own_name = _entity_name_from_signature(node.signature)
+                    siblings = structural.sibling_signatures(
+                        base_text, lang, node.span, exclude=own_name
+                    )
+                    if siblings:
+                        unit.structural_metadata["sibling_entities"] = siblings
+                except Exception:  # noqa: BLE001 - siblings are advisory
+                    pass
         # Base fingerprint of the file's structure OUTSIDE the conflict span.
         # Computed on the marker-blanked WORKTREE (not the clean BASE): the
         # worktree has the same non-conflict code as BASE, but with conflict

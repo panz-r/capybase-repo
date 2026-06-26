@@ -453,6 +453,39 @@ def _collect_entities(container, source: str, language: str) -> list[Entity] | N
     return entities
 
 
+def sibling_signatures(
+    source: str, language: str, container_span: tuple[int, int], *, exclude: str | None = None, limit: int = 8
+) -> list[str] | None:
+    """Signatures of the OTHER entities co-located in a conflict's container.
+
+    Survey §4.1/§5.4 (Rover): a small LLM merges better when it sees the entity
+    neighborhood it must stay consistent with — the sibling methods/fields of the
+    class/impl it's merging inside. This returns just their SIGNATURE lines (the
+    def/fn/struct header), capped by ``limit`` and excluding the enclosing entity
+    itself (``exclude`` = its name) so the model isn't shown the very block it's
+    resolving. Bodies are omitted to keep the prompt cheap — the survey's finding
+    that *some* structured context helps, distinct from the cross-file callee
+    definitions surfaced elsewhere.
+
+    Returns ``None`` when tree-sitter is unavailable; an empty list when the
+    container has no other entities.
+    """
+    ents = enumerate_entities(source, language, container_span=container_span)
+    if ents is None:
+        return None
+    out: list[str] = []
+    for e in ents:
+        if exclude is not None and e.name == exclude:
+            continue
+        # The signature is the first line of the body (the def/fn header).
+        sig = e.body.split("\n", 1)[0].strip() if e.body else None
+        if sig:
+            out.append(sig)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def ast_fingerprint(source: str, language: str) -> str | None:
     """A canonical structural digest of ``source``.
 

@@ -80,6 +80,15 @@ def _resolve_prompt_parts(unit: ConflictUnit, context: ContextBundle):
 {enc_text}
 
 """
+    # Sibling entities (survey §4.1/§5.4 Rover): the OTHER methods/fields in the
+    # same container — the entity neighborhood the merged result must stay
+    # consistent with (shared conventions, in-file callers/callees). Signatures
+    # only, to stay cheap; the survey's finding that *some* structured context
+    # lifts a small LLM's output. Empty when no siblings were resolved.
+    siblings_block = ""
+    if sv and sv.get("sibling_entities"):
+        joined = "\n".join(f"  - {sig}" for sig in sv["sibling_entities"])
+        siblings_block = f"Other entities in this container (stay consistent with these):\n{joined}\n\n"
     few_shot = ""
     if context.retrieved_examples:
         blocks = []
@@ -109,12 +118,12 @@ def _resolve_prompt_parts(unit: ConflictUnit, context: ContextBundle):
         f"file: {unit.path}\n"
         f"language: {unit.language or 'unknown'}\n\n"
     )
-    # The non-instruction sections (anchor, deps, few-shot, three sides,
-    # context) form one contiguous block that variants keep together —
+    # The non-instruction sections (anchor, siblings, deps, few-shot, three
+    # sides, context) form one contiguous block that variants keep together —
     # re-ordering *within* it would risk disturbing the anchor/few-shot coupling
     # to the sides.
     data_block = (
-        f"{structural_anchor}{deps}{few_shot}"
+        f"{structural_anchor}{siblings_block}{deps}{few_shot}"
         f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
         f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
         f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"

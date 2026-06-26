@@ -101,6 +101,12 @@ class ContextBuilder:
                 if self.use_enclosing_as_primary:
                     primary = meta["enclosing_node_text"]
             structural_view["unit_kind"] = unit.unit_kind
+        # Sibling entities (survey §4.1/§5.4): the signatures of the OTHER
+        # methods/fields in the same container, surfaced so the prompt can show
+        # the model the entity neighborhood it must stay consistent with.
+        # Populated by the structural enricher; advisory.
+        if meta.get("sibling_entities"):
+            structural_view["sibling_entities"] = meta["sibling_entities"]
         # Token canonicalization: strip comment lines, docstrings, and blank
         # runs from the context shown to the model. This reduces noise for a
         # 3B model prone to "lost in the middle" — the model focuses on the
