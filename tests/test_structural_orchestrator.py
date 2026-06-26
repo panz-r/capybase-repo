@@ -86,6 +86,36 @@ def _make_real_conflict(repo: Path) -> Path:
     return repo
 
 
+def _make_overlapping_one_sided_conflict(repo: Path) -> Path:
+    """A conflict git's coarse hunk flags as ONE block but the zealous rule can
+    split per-base-line. Three lines: current changes L1 and L3; replayed
+    changes L2 and L3. The L3 edit is AGREED (both → L3y), but because L3 is
+    touched by both sides, the edits overlap in base span and disjoint_edits
+    refuses. zealous_merge resolves it: L1 from current (one-sided), L2 from
+    replayed (one-sided), L3y agreed.
+
+    Verified empirically: git merge-file groups this into a single conflict
+    block (L3's agreement does NOT get auto-extracted), so the structural
+    resolver actually receives it. The sides are bare identifiers so the
+    merged result parses as valid Python for whole-file validation."""
+    base = "L1\nL2\nL3\n"
+    upstream = "L1x\nL2\nL3y\n"    # current: L1→L1x, L3→L3y
+    replayed = "L1\nL2x\nL3y\n"    # replayed: L2→L2x, L3→L3y
+    (repo / "app.py").write_text(base)
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
+    git(repo, "branch", "feat")
+    git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text(replayed)
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "replayed")
+    git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text(upstream)
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "upstream")
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected a rebase conflict"
+    return repo
+
+
 # ---------------------------------------------------------------------------
 # structurally-resolvable conflict → accepted with NO model call
 # ---------------------------------------------------------------------------
@@ -148,3 +178,35 @@ def test_real_conflict_falls_through_to_model(repo: Path):
     # No structurally_resolved event (it declined before journaling an accept).
     events = [e for e in orch.journal.read_events() if e.event_type == "structurally_resolved"]
     assert not events
+
+
+# ---------------------------------------------------------------------------
+# overlapping-but-resolvable conflict → zealous rule, NO model call (survey §1.4)
+# ---------------------------------------------------------------------------
+
+
+def test_overlapping_one_sided_resolves_via_zealous_without_llm(repo: Path):
+    """The case disjoint_edits can't handle: edits overlap in base span (both
+    sides touch L3), yet are safe — L3 is agreed (both → L3y), L1/L2 are
+    one-sided. Verified that git's coarse hunk flags this as a single conflict
+    block, so the structural resolver actually sees it — and zealous_merge
+    resolves it without invoking the model."""
+    _make_overlapping_one_sided_conflict(repo)
+    client = CallCountingClient()
+    engine = ResolutionEngine(_config(repo).model, client=client)
+    orch = Orchestrator(_config(repo), repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    assert not result.escalated, result.reason
+    # The model was NEVER called — zealous resolution handled it.
+    assert client.calls == 0, f"expected no LLM calls, got {client.calls}"
+    # All three edits applied: L1x from current, L2x from replayed, L3y agreed.
+    text = (repo / "app.py").read_text()
+    assert "L1x" in text
+    assert "L2x" in text
+    assert "L3y" in text
+    assert "<<<<<<<" not in text
+    # Journal records the zealous rule, and validation passed.
+    events = [e for e in orch.journal.read_events() if e.event_type == "structurally_resolved"]
+    assert events and events[0].payload["rule"] == "zealous_merge"
+    assert events[0].payload["passed"] is True

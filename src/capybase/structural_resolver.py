@@ -1,7 +1,7 @@
 """Deterministic structural conflict resolution (survey §2.1/§6.4, layer 1).
 
 A safe, LLM-free pre-resolver that runs BEFORE the model. It attempts to produce
-a correct merged text from base + current + replayed using three provably-safe
+a correct merged text from base + current + replayed using four provably-safe
 rules — no heuristics that could introduce a wrong merge:
 
 1. **identical_sides** — current and replayed normalized-equal → emit that side.
@@ -11,6 +11,14 @@ rules — no heuristics that could introduce a wrong merge:
 3. **disjoint_edits** — both sides changed, but on NON-overlapping line ranges
    within the hunk → merge both edits (survey §1.2 zealous/line-granular merge).
    No overlap means no semantic conflict at this granularity.
+4. **zealous_merge** — per-base-line 3-way merge (survey §1.4 zealous
+   refinement). Where git's coarse hunk groups adjacent edits into one conflict,
+   this aligns each side against base line-by-line and resolves every region
+   that is agreed (both made the same change) or one-sided (one side conceded a
+   sub-region the other touched). Returns None the moment it hits a genuine
+   two-sided disagreement or an ambiguous pure insertion. This is the rule that
+   catches the case ``disjoint_edits`` must refuse: two edits that *overlap*
+   in base-line span yet are still safe because one side matches base there.
 
 Safety contract: every resolution this produces is STILL run through the full
 validation pipeline (markers/splice/AST/syntax) by the orchestrator before being
@@ -31,7 +39,9 @@ from typing import Literal
 
 from capybase.conflict_model import ConflictUnit
 
-Rule = Literal["identical_sides", "one_sided_change", "disjoint_edits"]
+Rule = Literal[
+    "identical_sides", "one_sided_change", "disjoint_edits", "zealous_merge"
+]
 
 
 @dataclass(frozen=True)
@@ -118,6 +128,15 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if merged is not None:
             return StructuralResolution(rule="disjoint_edits", text=merged)
 
+        # Rule 4: zealous per-base-line 3-way merge (survey §1.4). Stronger than
+        # disjoint_edits — also resolves overlaps that are agreed (both made the
+        # same change) or one-sided (one side conceded a sub-region the other
+        # touched). Returns None on any genuine two-sided disagreement or
+        # ambiguous pure insertion, so the LLM handles it.
+        merged = _try_zealous_merge(base, current, replayed)
+        if merged is not None:
+            return StructuralResolution(rule="zealous_merge", text=merged)
+
     return StructuralResolution(rule=None, text=None)
 
 
@@ -158,6 +177,95 @@ def _base_changed_lines(base: list[str], other: list[str]) -> set[int]:
         # i-indices are into base; mark the affected base range.
         changed.update(range(i1, i2))
     return changed
+
+
+def _try_zealous_merge(base: str, current: str, replayed: str) -> str | None:
+    """Per-base-line 3-way merge (survey §1.4 zealous refinement).
+
+    Aligns each side against base line-by-line via ``difflib``. For every base
+    region, resolves it as:
+
+    - **agreed** — both sides made the same replacement → emit it.
+    - **one-sided** — exactly one side diverged from base there → take it.
+    - **conflict** — both diverged differently → give up (return None).
+
+    Returns None the moment any region is a genuine two-sided disagreement, OR
+    if either side contains a *pure insertion* (a change with no base anchor),
+    because the ordering of two independent insertions is ambiguous and merging
+    them could drop or reorder a side's intent. That conservatism is what keeps
+    the rule safe by construction — it only ever emits merges where, for every
+    base line touched, at most one side actually changed the content.
+    """
+    base_lines = base.splitlines()
+    cur_regions, cur_has_insert = _change_regions(base_lines, current.splitlines())
+    rep_regions, rep_has_insert = _change_regions(base_lines, replayed.splitlines())
+    if cur_has_insert or rep_has_insert:
+        return None  # pure insertion: ordering ambiguous → defer to LLM
+    if not cur_regions or not rep_regions:
+        # No replace/delete regions against base (only possible insertions,
+        # already excluded above) → nothing for zealous to merge here.
+        return None
+
+    out: list[str] = []
+    i = 0
+    n = len(base_lines)
+    while i < n:
+        in_cur = i in cur_regions
+        in_rep = i in rep_regions
+        if in_cur and in_rep:
+            cur_end, cur_rep = cur_regions[i]
+            rep_end, rep_rep = rep_regions[i]
+            # Overlapping regions must cover the exact same base span; a partial
+            # overlap is ambiguous (where does one edit's region end?) so bail.
+            if cur_end != rep_end:
+                return None
+            base_seg = base_lines[i:cur_end]
+            if cur_rep == rep_rep:
+                out.extend(cur_rep)            # agreed: both made the same change
+            elif cur_rep == base_seg:
+                out.extend(rep_rep)            # current conceded → take replayed
+            elif rep_rep == base_seg:
+                out.extend(cur_rep)            # replayed conceded → take current
+            else:
+                return None                    # genuine two-sided conflict
+            i = cur_end
+        elif in_cur:
+            end, rep = cur_regions[i]
+            out.extend(rep)
+            i = end
+        elif in_rep:
+            end, rep = rep_regions[i]
+            out.extend(rep)
+            i = end
+        else:
+            out.append(base_lines[i])
+            i += 1
+    return "\n".join(out)
+
+
+def _change_regions(
+    base: list[str], other: list[str]
+) -> tuple[dict[int, tuple[int, list[str]]], bool]:
+    """Map base-start index → (base_end_excl, replacement_lines) for each
+    replace/delete region ``other`` makes against base.
+
+    Returns ``(regions, has_pure_insertion)``. A pure insertion (a change with
+    ``i1 == i2``, i.e. no base anchor) sets ``has_pure_insertion=True`` so the
+    caller can refuse to merge — two independent insertions have ambiguous
+    ordering. This mirrors ``_regions_against_base`` but signals inserts instead
+    of silently dropping them.
+    """
+    regions: dict[int, tuple[int, list[str]]] = {}
+    has_insert = False
+    matcher = difflib.SequenceMatcher(a=base, b=other, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if i1 == i2:
+            has_insert = True
+            continue
+        regions[i1] = (i2, other[j1:j2])
+    return regions, has_insert
 
 
 def _merge_disjoint_regions(
