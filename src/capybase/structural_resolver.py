@@ -351,6 +351,102 @@ def _regions_against_base(base: list[str], other: list[str]) -> dict[int, tuple[
 # Entity-level disjoint resolution (survey §3.2/§5.2 Weave/Aura)
 # ---------------------------------------------------------------------------
 
+# Minimum name-similarity ratio for two entity names to be considered a rename
+# (s3m's Levenshtein rename handler, survey §2.2). 0.6 is conservative: it
+# catches loadData→fetchData, load→fetch, parse_thing→parse_item, but won't
+# conflate unrelated short names. A rename ALSO requires the body to match
+# (normalized), so a coincidentally-similar name with different content isn't
+# misread as a rename.
+RENAME_SIMILARITY_THRESHOLD = 0.6
+
+
+def _name_similarity(a: str, b: str) -> float:
+    """Levenshtein-style similarity ratio of two entity names in [0, 1].
+
+    Uses ``difflib.SequenceMatcher`` (no new dependency) — the same measure s3m
+    applies via Levenshtein string similarity for its rename handler. 1.0 = same
+    name; →0 = unrelated.
+    """
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(a=a, b=b, autojunk=False).ratio()
+
+
+def _body_content(body: str) -> str:
+    """The body with its signature/header line removed, normalized.
+
+    A rename changes the def/fn header (``def loadData`` → ``def fetchData``) but
+    leaves the body content identical. Rename detection must therefore compare
+    bodies with the HEADER STRIPPED — otherwise the renamed signature line makes
+    every rename look like a body change, and no base entity matches.
+    """
+    if not body:
+        return ""
+    lines = body.split("\n")
+    # Drop the first line (the def/fn/struct header); normalize the rest.
+    return _normalize("\n".join(lines[1:]))
+
+
+def _detect_renames(
+    side_ents: list, base_ents: list
+) -> tuple[dict, dict]:
+    """Detect renames of base entities on one side (s3m rename handler, §2.2).
+
+    A rename is: a base entity whose OLD name is GONE from ``side_ents``, but
+    whose body CONTENT (signature stripped) reappears under a NEW name on the
+    side. This is the false-merge source the survey flags: without it,
+    entity_disjoint treats a rename as "base keeps old + side added new" → a
+    duplicate method.
+
+    The body-content match is the strong signal (identical content under a new
+    name is near-certain evidence of a rename); the name-similarity check is a
+    secondary guard so two genuinely-different entities that happen to share a
+    body aren't conflated. Because the content match is exact, even a semantic
+    rename (loadData→fetchData, low string similarity) is recognized — the s3m
+    paper's finding that content-equality is the reliable rename signal.
+
+    Returns ``(renames, base_ids_removed)``:
+    - ``renames``: maps the side's NEW identity ``(kind, new_name)`` → the base
+      identity ``(kind, old_name)`` it replaced, so the merge can treat the
+      renamed entity as the same logical entity (no duplicate, old name dropped).
+    - ``base_ids_removed``: the base identities that disappeared because they
+      were renamed away (so the merge walk doesn't re-emit the old name).
+    """
+    # Index base entities by (kind, body-content) for exact-content matching.
+    base_by_content = {}
+    for e in base_ents:
+        key = (e.kind, _body_content(e.body))
+        # If two base entities share body content, keep the first; renames are
+        # ambiguous in that case and we decline to guess.
+        base_by_content.setdefault(key, e)
+    side_names_by_kind = {}
+    for e in side_ents:
+        side_names_by_kind.setdefault(e.kind, set()).add(e.name)
+
+    renames: dict = {}
+    removed: set = set()
+    for e in side_ents:
+        # Look for a base entity with the same (kind, body-content) whose name
+        # is NOT present on this side (it was renamed away).
+        key = (e.kind, _body_content(e.body))
+        base_match = base_by_content.get(key)
+        if base_match is None or base_match.identity == e.identity:
+            continue
+        # The base entity's old name must be GONE from this side (renamed, not
+        # duplicated). If the old name still exists, this is a copy, not a rename.
+        if base_match.name in side_names_by_kind.get(e.kind, set()):
+            continue
+        # Identical body content under a new, gone-old-name is a rename. The
+        # name-similarity guard prevents conflating two distinct entities that
+        # coincidentally share an empty/trivial body (e.g. ``pass``/``{}``).
+        if _body_content(e.body) and (
+            _name_similarity(base_match.name, e.name) >= RENAME_SIMILARITY_THRESHOLD
+            or len(_body_content(e.body)) >= 8
+        ):
+            renames[e.identity] = base_match.identity
+            removed.add(base_match.identity)
+    return renames, removed
+
 
 def _try_entity_disjoint(unit: ConflictUnit) -> str | None:
     """Resolve when both sides add/modify DISTINCT entities in one container.
@@ -410,57 +506,110 @@ def _try_entity_disjoint(unit: ConflictUnit) -> str | None:
 
     base_by_id = {e.identity: e for e in base_ents}
 
-    def _touched(ents):
-        """Identities a side ADDED or MODIFIED vs base."""
+    # Rename detection (s3m rename handler, survey §2.2): a base entity whose
+    # body reappears under a NEW similar name on a side, with the old name gone,
+    # is a RENAME — not a base-kept + side-added pair. Without this, entity_disjoint
+    # emits a duplicate (old name AND new name). Detect per side, mapping the new
+    # identity back to the base identity so touched sets and the merge walk reason
+    # about logical entities.
+    cur_renames, cur_removed = _detect_renames(cur_ents, base_ents)
+    rep_renames, rep_removed = _detect_renames(rep_ents, base_ents)
+    # Classify each renamed-away base entity:
+    # - renamed by BOTH sides to the SAME new name → AGREED (not a conflict).
+    # - renamed by BOTH sides to DIFFERENT new names → conflict → decline.
+    # - renamed by ONE side only → flows through as that side's change.
+    cur_new_by_base = {base_id: new for new, base_id in cur_renames.items()}
+    rep_new_by_base = {base_id: new for new, base_id in rep_renames.items()}
+    agreed_renames: set = set()  # base ids both sides renamed identically
+    for base_id, cur_new in cur_new_by_base.items():
+        if base_id in rep_new_by_base:
+            if rep_new_by_base[base_id] != cur_new:
+                return None  # both renamed the same entity differently → conflict
+            agreed_renames.add(base_id)  # both renamed it the same way → agreed
+    # Union of base identities renamed away by EITHER side — these must NOT be
+    # re-emitted under their old names during the merge walk.
+    all_removed = cur_removed | rep_removed
+
+    def _canon(ident, renames):
+        """Map a side entity identity to its canonical base identity (rename-aware)."""
+        return renames.get(ident, ident)
+
+    def _touched(ents, renames):
+        """Canonical base identities a side ADDED or MODIFIED (rename-aware)."""
         out = []
         for e in ents:
-            prev = base_by_id.get(e.identity)
+            ident = _canon(e.identity, renames)
+            if e.identity in renames:
+                # A rename: counts as touching the base entity it replaced.
+                out.append(ident)
+                continue
+            prev = base_by_id.get(ident)
             if prev is None:
-                out.append(e.identity)  # added
+                out.append(e.identity)  # genuinely added
             elif e.body != prev.body:
-                out.append(e.identity)  # modified
+                out.append(ident)  # modified
         return out
 
-    cur_touched = _touched(cur_ents)
-    rep_touched = _touched(rep_ents)
+    cur_touched = _touched(cur_ents, cur_renames)
+    rep_touched = _touched(rep_ents, rep_renames)
     # If either side touched nothing, an earlier rule (one_sided_change) would
     # have handled it. Decline to avoid duplicate logic — but guard anyway.
     if not cur_touched or not rep_touched:
         return None
-    # Overlap → genuine intra-entity conflict. Decline for the line/LLM path.
-    if set(cur_touched) & set(rep_touched):
+    # Overlap → genuine intra-entity conflict — UNLESS both sides made the SAME
+    # rename (agreed change), which is not a conflict. Decline for the line/LLM
+    # path otherwise.
+    overlap = set(cur_touched) & set(rep_touched)
+    if overlap - agreed_renames:
         return None
 
     # Disjoint: build the merged container. Start from base's entities, apply
-    # each side's modifications in place, then append each side's additions.
-    cur_by_id = {e.identity: e for e in cur_ents}
-    rep_by_id = {e.identity: e for e in rep_ents}
+    # each side's modifications/renames in place, then append additions.
+    cur_by_canon = {_canon(e.identity, cur_renames): e for e in cur_ents}
+    rep_by_canon = {_canon(e.identity, rep_renames): e for e in rep_ents}
     cur_touched_set = set(cur_touched)
     rep_touched_set = set(rep_touched)
     merged_ids: list = []
     seen: set = set()
     for e in base_ents:
         ident = e.identity
+        # Skip base entities renamed away — the renamed version is emitted below
+        # via the side's entity list, so we must NOT also keep the old name.
+        if ident in all_removed:
+            # Emit the renamed version (whichever side renamed it); mark seen so
+            # the side's copy isn't appended again as an "addition".
+            renamed = cur_by_canon.get(ident) or rep_by_canon.get(ident)
+            if renamed is not None:
+                merged_ids.append(renamed)
+                seen.add(ident)
+            continue
         # Touched sets are disjoint (checked above), so at most one side
         # MODIFIED this entity. Take the modified version when present; else
         # the unchanged base version (both sides kept it as-is).
         if ident in cur_touched_set:
-            merged_ids.append(cur_by_id[ident])
+            merged_ids.append(cur_by_canon[ident])
         elif ident in rep_touched_set:
-            merged_ids.append(rep_by_id[ident])
+            merged_ids.append(rep_by_canon[ident])
         else:
             merged_ids.append(e)  # unchanged by either side
         seen.add(ident)
     # Append additions: current's new entities first (preserving its order), then
-    # replayed's. Because the touched sets are disjoint there's no duplication.
+    # replayed's. Renamed entities were already emitted above (under their new
+    # name via the renamed= path), so skip them here to avoid duplication.
     for e in cur_ents:
-        if e.identity not in seen:
+        canon = _canon(e.identity, cur_renames)
+        if e.identity in cur_renames:
+            continue  # already emitted via the renamed-away path
+        if canon not in seen:
             merged_ids.append(e)
-            seen.add(e.identity)
+            seen.add(canon)
     for e in rep_ents:
-        if e.identity not in seen:
+        canon = _canon(e.identity, rep_renames)
+        if e.identity in rep_renames:
+            continue  # already emitted via the renamed-away path
+        if canon not in seen:
             merged_ids.append(e)
-            seen.add(e.identity)
+            seen.add(canon)
 
     # Reconstruct the container text. The enclosing node's text is the source of
     # truth for its non-entity framing (class header, impl braces, indentation).
