@@ -108,6 +108,15 @@ enable_policy_gate = false
 # pattern = "eval"
 # severity = "error"
 # reason = "eval/exec are forbidden"
+# LLM code-smell checks (survey §7): statically detect smells common in
+# LLM-generated code (NaN comparison x == np.nan, pandas chain indexing df[a][b],
+# uncontrolled randomness random.* with no seed) via stdlib ast. Deterministic
+# pre-test quality filter; Python-only; graceful no-op otherwise. When false
+# (default) the checker is inert.
+enable_code_smell_checks = false
+# Smell severity: "warning" (default — flag for review, don't hard-block) or
+# "error" (treat a smelly patch as a hard failure).
+code_smell_severity = "warning"
 
 [journal]
 enabled = true

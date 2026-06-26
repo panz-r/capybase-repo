@@ -599,3 +599,64 @@ def test_policy_gate_allows_safe_patch(conflicted_repo):
     result = orch.run()
     assert not result.escalated, result.reason
 
+
+# ---------------------------------------------------------------------------
+# LLM code-smell detection integration (survey §7): the ast-based checker is
+# auto-registered when enabled and flags smelly patches through the accept path.
+# ---------------------------------------------------------------------------
+
+
+def _smell_config(repo, severity="warning"):
+    cfg = _config(repo)
+    cfg.validation.enable_code_smell_checks = True
+    cfg.validation.code_smell_severity = severity
+    return cfg
+
+
+def test_code_smell_registered_when_enabled(conflicted_repo):
+    """enable_code_smell_checks on → the checker is auto-registered."""
+    repo = conflicted_repo["repo"]
+    orch = Orchestrator(_smell_config(repo), repo=str(repo))
+    names = [type(v).__name__ for v in orch.verification.validators]
+    assert "CodeSmellValidator" in names
+
+
+def test_code_smell_not_registered_when_disabled(conflicted_repo):
+    """Flag off (default) → checker absent from the chain."""
+    repo = conflicted_repo["repo"]
+    cfg = _config(repo)  # enable_code_smell_checks defaults False
+    orch = Orchestrator(cfg, repo=str(repo))
+    names = [type(v).__name__ for v in orch.verification.validators]
+    assert "CodeSmellValidator" not in names
+
+
+def test_code_smell_error_severity_blocks_smelly_patch(conflicted_repo):
+    """Gate on + error severity + a patch with a NaN comparison → blocked from
+    auto-apply (escalated). The patch is structurally a valid merge, so only
+    the smell checker catches it."""
+    repo = conflicted_repo["repo"]
+    client = SequenceClient([
+        _make_resolved_payload("    return a == np.nan"),  # NaN smell
+    ])
+    cfg = _smell_config(repo, severity="error")
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    assert result.escalated
+
+
+def test_code_smell_warning_does_not_block_clean_merge(conflicted_repo):
+    """Gate on + warning severity + a clean patch → accepted (rebase completes).
+    The checker doesn't over-reject clean merges."""
+    repo = conflicted_repo["repo"]
+    client = SequenceClient([
+        _make_resolved_payload("    return 'hi' + 'howdy'"),  # no smell
+    ])
+    cfg = _smell_config(repo, severity="warning")
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    assert not result.escalated, result.reason
+
