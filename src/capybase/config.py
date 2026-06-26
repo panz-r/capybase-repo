@@ -262,6 +262,12 @@ class StructuralConfig(BaseModel):
     # Refine conflict boundaries with `git merge-file --diff3` to get the
     # tightest possible marker span (git may auto-resolve adjacent lines).
     refine_with_diff3: bool = True
+    # xdiff backend for ``git merge-file`` alignment (survey §1.3). Histogram
+    # anchors on rare lines → tighter, more stable conflict regions than Myers
+    # on noisy code (conflict-size reduction in ~10% of conflicting merges).
+    # One of "histogram" (default), "patience", "minimal", "myers". Unknown
+    # values fall back to histogram silently; refinement is advisory only.
+    diff_algorithm: Literal["histogram", "patience", "minimal", "myers"] = "histogram"
 
 
 class MemoryConfig(BaseModel):

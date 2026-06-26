@@ -12,6 +12,13 @@ files, runs ``git merge-file --diff3 -p``, and parses the result into
 ``Diff3Block`` objects (each a minimal conflict with base/ours/theirs sections).
 Falls back to ``None`` on any error so the extractor keeps using the worktree
 markers.
+
+Diff algorithm (survey §1.3): ``git merge-file`` honors the ``diff.algorithm``
+config, which selects the xdiff backend used to align base↔ours and base↔theirs
+before the 3-way merge. **Histogram** is the default here — it anchors on rare
+(low-frequency) lines, producing more stable, tighter conflict regions than
+Myers on noisy code (the survey cites a conflict-size reduction in ~10% of
+merges that had conflicts). Patience/minimal/myers are selectable fallbacks.
 """
 
 from __future__ import annotations
@@ -20,6 +27,25 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+# The four xdiff backends git accepts for ``diff.algorithm``. Histogram is the
+# recommended default (survey §1.3); the others are selectable fallbacks for
+# pathological cases or minimal-edit-script diagnostics. Validated before use so
+# an unknown value from config never reaches the subprocess.
+DIFF_ALGORITHMS = ("myers", "patience", "histogram", "minimal")
+DEFAULT_DIFF_ALGORITHM = "histogram"
+
+
+def _validated_algorithm(algorithm: str | None) -> str:
+    """Return a git-accepted ``diff.algorithm`` value, else the default.
+
+    Rejects anything outside the allowlist (including the empty string) so a
+    malformed config value can't inject flags into the subprocess. Falls back to
+    the histogram default rather than erroring — marker refinement is advisory.
+    """
+    if algorithm in DIFF_ALGORITHMS:
+        return algorithm
+    return DEFAULT_DIFF_ALGORITHM
 
 
 @dataclass(frozen=True)
@@ -39,6 +65,8 @@ def merge_file_diff3(
     base_text: str,
     ours_text: str,
     theirs_text: str,
+    *,
+    diff_algorithm: str | None = None,
 ) -> list[Diff3Block] | None:
     """Run ``git merge-file --diff3`` and parse the conflict blocks.
 
@@ -46,7 +74,16 @@ def merge_file_diff3(
     unavailable or the command fails. An empty list means git successfully
     merged the blobs with no conflicts (the sides are compatible) — in that
     case the caller should use the merged result directly.
+
+    ``diff_algorithm`` selects the xdiff backend (survey §1.3): one of
+    ``DIFF_ALGORITHMS`` (default histogram). It is passed via ``-c
+    diff.algorithm=<alg>`` rather than a positional flag because
+    ``merge-file`` predates the ``--diff-algorithm`` plumbing option on older
+    gits; the ``-c`` form works on every version and is exactly how git's own
+    config-driven selection behaves. An unknown value silently falls back to
+    histogram — refinement is advisory and must never hard-fail the merge.
     """
+    algorithm = _validated_algorithm(diff_algorithm)
     try:
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)
@@ -58,10 +95,15 @@ def merge_file_diff3(
             theirs_p.write_text(theirs_text, encoding="utf-8")
             # -p prints to stdout; --diff3 includes the base section; -q suppresses
             # the "CONFLICT" stderr message. Exit 0 = no conflict, 1 = conflict,
-            # >1 = error.
+            # >1 = error. ``-c diff.algorithm=<alg>`` selects the xdiff backend
+            # used for the base↔ours/base↔theirs alignment. Note ``-c`` and its
+            # value are separate argv elements (no shell) — combining them into
+            # one arg makes git reject it as an "unknown option".
             proc = subprocess.run(
                 [
-                    "git", "merge-file", "--diff3", "-p", "-q",
+                    "git",
+                    "-c", f"diff.algorithm={algorithm}",
+                    "merge-file", "--diff3", "-p", "-q",
                     str(ours_p), str(base_p), str(theirs_p),
                 ],
                 capture_output=True,

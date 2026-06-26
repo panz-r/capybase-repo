@@ -186,7 +186,13 @@ class ConflictExtractor:
         # "text_marker_block" and downstream code falls back to line windows.
         if self.structural_config and self.structural_config.enabled:
             if self.structural_config.refine_with_diff3:
-                _refine_with_diff3(units, base_side.text, current_text, replayed_text)
+                _refine_with_diff3(
+                    units,
+                    base_side.text,
+                    current_text,
+                    replayed_text,
+                    self.structural_config.diff_algorithm,
+                )
             _enrich_structural(units, worktree_text, base_text, self.structural_config)
         # Grade each unit's severity from pre-LLM signals (survey §3.3). Done
         # AFTER structural enrichment so the definition-touching signal is known.
@@ -359,6 +365,7 @@ def _refine_with_diff3(
     base_text: str,
     current_text: str,
     replayed_text: str,
+    diff_algorithm: str = "histogram",
 ) -> None:
     """Refine conflict side texts with ``git merge-file --diff3``.
 
@@ -370,12 +377,17 @@ def _refine_with_diff3(
     can use them for a sharper prompt. This is advisory — the marker_span and
     original_worktree_text are unchanged (splicing still uses the worktree
     coordinates). All failures are silent no-ops.
+
+    ``diff_algorithm`` selects the xdiff backend (survey §1.3, default
+    histogram); passed through to :func:`merge_file_diff3`.
     """
     try:
         from capybase.adapters.git_diff3 import merge_file_diff3
     except Exception:  # noqa: BLE001
         return
-    blocks = merge_file_diff3(base_text, current_text, replayed_text)
+    blocks = merge_file_diff3(
+        base_text, current_text, replayed_text, diff_algorithm=diff_algorithm
+    )
     if not blocks or len(blocks) != len(units):
         # Only refine when diff3 produces exactly the same number of conflict
         # blocks as the worktree — otherwise the correspondence is ambiguous.
