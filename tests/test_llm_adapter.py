@@ -144,7 +144,6 @@ def test_early_termination_on_complete_answer(monkeypatch):
     payload = '{"resolved_text": "    return 1", "needs_human": false}'
     babble = "This is trailing prose the model emits after answering. " * 50
     # Build SSE chunks: the JSON block (with closing fence), then babble.
-    from tests.test_llm_adapter import _sse_chunks
     json_lines = _sse_chunks(payload)
     babble_lines = _sse_chunks(babble, finish="stop")
     resp = FakeResp(json_lines + babble_lines)
@@ -268,6 +267,25 @@ def test_request_body_includes_logprobs_when_flag_on(monkeypatch):
     )
     assert captured["body"]["logprobs"] is True
     assert captured["body"]["top_logprobs"] == 1
+
+
+def test_request_body_omits_response_format_when_json_mode_off(monkeypatch):
+    """``json_mode=False`` (set by ``capybase calibrate`` when a server rejects
+    ``response_format``) must drop the key from the body so resolution can fall
+    back to the fenced-JSON parser."""
+    captured = {}
+
+    def fake_urlopen(req, timeout=None):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        return FakeResp(_sse_chunks('{"resolved_text": "x", "needs_human": false}'))
+
+    monkeypatch.setattr("capybase.adapters.llm_openai.urllib.request.urlopen", fake_urlopen)
+    client = OpenAICompatibleClient(_cfg())
+    client.complete(
+        [{"role": "user", "content": "hi"}],
+        model="m", temperature=0.2, max_tokens=8192, json_mode=False,
+    )
+    assert "response_format" not in captured["body"]
 
 
 def test_non_stream_many_carries_per_choice_entropy(monkeypatch):

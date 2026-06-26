@@ -164,4 +164,9 @@ def _risk_score(feats: dict) -> float:
         score += 0.3
     if not feats.get("syntax_passed", True):
         score += 0.3
+    # Pre-resolution conflict severity (survey §3.3): high-severity conflicts
+    # (large + definition-touching) get a small risk bump. Encoded low=0/med=1/high=2.
+    severity = feats.get("conflict_severity", 1.0)
+    if isinstance(severity, (int, float)):
+        score += 0.1 * float(severity)  # up to +0.2 for high
     return min(1.0, score)

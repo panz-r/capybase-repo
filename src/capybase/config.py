@@ -71,6 +71,19 @@ class ModelConfig(BaseModel):
     # behavior is unchanged; retry/repair paths never use variants (they must stay
     # single-template for reproducible counterexample feedback).
     prompt_variants: bool = False
+    # Self-consistency mirror: when on AND samples > 1, candidates are clustered
+    # by normalized text and the majority cluster wins (see FutureConfig for the
+    # legacy location). Duplicated onto ModelConfig so ``capybase calibrate`` can
+    # store it in the model profile (which overlays ModelConfig only). The
+    # orchestrator reads this in preference to future.enable_self_consistency.
+    enable_self_consistency: bool = False
+    # ``response_format: {type: json_object}`` is sent on every completion so
+    # the model emits a single parseable JSON object. A few local servers reject
+    # this key (older llama.cpp builds, some vLLM configs). ``capybase calibrate``
+    # detects support and flips this to False, after which the adapter omits the
+    # key and resolution falls back to the fenced-JSON parser. Default True keeps
+    # current behavior; off only when a profile says the server can't handle it.
+    json_mode: bool = True
     # Reasoning models emit long <think> chains before answering; 2048 starves
     # them. 8192 leaves headroom for reasoning + the final JSON answer.
     max_tokens: int = 8192
@@ -210,6 +223,14 @@ class FutureConfig(BaseModel):
     enable_structural_context: bool = False
     enable_verifier_model: bool = False
     enable_mutation_testing: bool = False
+    # Deterministic structural pre-resolution (survey §6.4 layer 1): BEFORE the
+    # LLM, attempt a model-free resolution from base+sides via provably-safe
+    # rules (identical sides, one-sided change, disjoint line edits). Every
+    # resolution still runs the full validation pipeline; a guess that fails
+    # validation falls through to the model — so this only cuts LLM load on
+    # trivial conflicts, never produces a worse merge. Default ON (safe-by-
+    # construction); flip off to force the model to handle every conflict.
+    enable_structural_resolver: bool = True
 
 
 class StructuralConfig(BaseModel):
@@ -276,6 +297,12 @@ class CalibrationConfig(BaseModel):
 
     enabled: bool = False
     model_path: str = ".rebase-agent/memory/calibration.json"
+    # Path to the model capability profile written by ``capybase calibrate``.
+    # When present and its model name matches the active model, the profile's
+    # tuned knobs (max_tokens, json_mode, capture_token_entropy,
+    # generation_timeout_seconds) override the [model] settings at runtime —
+    # "Profile wins". Inert when absent/mismatched/corrupt (never crashes).
+    model_profile_path: str = ".rebase-agent/memory/model_profile.json"
     escalate_threshold: float = 0.7
     min_examples_for_calibration: int = 50
     # Consensus entropy above this → escalate (high-entropy splits mean no

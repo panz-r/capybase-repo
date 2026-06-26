@@ -147,6 +147,41 @@ def _extract_alternates(
     return alternates, consensus
 
 
+def _apply_model_profile(config: Config, repo_root: Path, journal: Journal) -> Config:
+    """Overlay the calibrated model profile onto ``config.model`` if present.
+
+    "Profile wins": the profile's tuned knobs override the [model] settings, but
+    ONLY when its model name matches. Returns ``config`` unchanged (and journals
+    nothing) when no profile exists or the names mismatch — so a repo without a
+    profile behaves exactly as before. The overlay touches only the four tuned
+    knobs; every other field keeps its value.
+    """
+    profile_path = config.calibration.model_profile_path
+    resolved = Path(profile_path)
+    if not resolved.is_absolute():
+        resolved = repo_root / profile_path
+    try:
+        from capybase.calibration_profile import ModelProfile, apply_profile
+
+        profile = ModelProfile.load(resolved)
+    except Exception:  # noqa: BLE001 - never crash on a bad artifact path/config
+        return config
+    if profile is None:
+        return config
+    new_model, overridden = apply_profile(config.model, profile)
+    if not overridden:
+        return config
+    journal.emit(
+        "model_profile_applied",
+        {
+            "model": profile.model,
+            "overridden_knobs": overridden,
+            "profile_path": str(resolved),
+        },
+    )
+    return config.model_copy(update={"model": new_model})
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -158,12 +193,18 @@ class Orchestrator:
         stdin_reader: Callable[[str], str] | None = None,
         out: Callable[[str], None] = print,
     ) -> None:
-        self.config = config
         self.git = GitBackend(repo)
         self.session_id = session_id or new_session_id()
         self.paths = SessionPaths(self.session_id, repo)
         self.paths.mkdirs()
         self.journal = Journal(self.paths)
+        # Model profile overlay ("Profile wins"): rebind the local ``config`` so
+        # the profile's tuned knobs flow into EVERY consumer below (resolution
+        # engine, verifier) — not just ``self.config``. Done after the journal is
+        # ready (it emits model_profile_applied) and before any config read. Inert
+        # when the profile is absent/mismatched/corrupt — resolution never crashes.
+        config = _apply_model_profile(config, self.git.repo, self.journal)
+        self.config = config
         self.extractor = ConflictExtractor(
             self.git, structural_config=config.structural
         )
@@ -204,6 +245,7 @@ class Orchestrator:
                 VerifierModelValidator(
                     self.resolution_engine.client,
                     model_name=config.model.model,
+                    json_mode=config.model.json_mode,
                 )
             )
         # VeriGuard-style deterministic policy gate (survey §4): auto-registered
@@ -373,6 +415,59 @@ class Orchestrator:
         self.journal.emit(
             "candidate_accepted",
             {"candidate_id": cand.candidate_id},
+            step_index=self.step,
+            path=unit.path,
+            unit_id=unit.unit_id,
+        )
+        return outcome
+
+    def _try_structural_resolve(self, unit: ConflictUnit) -> UnitOutcome | None:
+        """Attempt a deterministic, model-free resolution; accept only if it
+        passes the full validation pipeline, else return None (fall through to
+        the LLM). Survey §6.4 layer 1: structural/auto resolution before the model.
+
+        Safe by construction: the resolver only emits resolutions from provably-
+        safe rules (identical sides, one-sided change, disjoint line edits), and
+        this method validates the result exactly as an LLM candidate would be —
+        markers/splice/AST/syntax. A wrong deterministic guess is caught here and
+        discarded (returns None), so the model then handles it. Net effect: fewer
+        LLM calls on trivial conflicts, never a worse merge.
+        """
+        from capybase.structural_resolver import resolve_structurally
+
+        result = resolve_structurally(unit)
+        if not result.resolved or result.text is None:
+            return None
+        cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:structural",
+            unit_id=unit.unit_id,
+            model_name="structural",
+            prompt_version=f"structural.{result.rule}",
+            resolved_text=result.text,
+            explanation=f"deterministic resolution via {result.rule} rule",
+        )
+        validation = self.verification.verify(unit, cand)
+        self.journal.emit(
+            "structurally_resolved",
+            {
+                "candidate_id": cand.candidate_id,
+                "rule": result.rule,
+                "passed": validation.passed,
+            },
+            step_index=self.step,
+            path=unit.path,
+            unit_id=unit.unit_id,
+        )
+        if not validation.passed:
+            # The deterministic guess failed validation — discard and let the
+            # model handle it. This is the safety net: structural resolution can
+            # only help, never apply an invalid merge.
+            return None
+        outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+        outcome.accepted = cand
+        self.journal.emit(
+            "candidate_accepted",
+            {"candidate_id": cand.candidate_id, "via": "structural"},
             step_index=self.step,
             path=unit.path,
             unit_id=unit.unit_id,
@@ -645,6 +740,18 @@ class Orchestrator:
         # so the model gets the concrete cross-unit error on its first attempt.
         failures = list(seed_failures) if seed_failures else None
         prev_candidate = None
+
+        # Deterministic structural pre-resolution (survey §6.4 layer 1): BEFORE
+        # the LLM loop, attempt a safe, model-free resolution from base+sides.
+        # Only on a FRESH resolve (not CEGIS retries, where the model must see the
+        # counterexample). Any resolution still runs the full validation pipeline;
+        # on failure it falls through to the model, so this can only cut LLM load,
+        # never produce a worse merge. Gated by [future] enable_structural_resolver.
+        if failures is None and self.config.future.enable_structural_resolver:
+            early = self._try_structural_resolve(unit)
+            if early is not None:
+                return early  # accepted deterministically; LLM loop skipped entirely
+
         while True:
             context = self.context_builder.build(unit)
             if self.config.journal.enabled and self.config.journal.store_prompts:
@@ -713,6 +820,13 @@ class Orchestrator:
             else:
                 n_complex = self.config.model.samples
 
+            # Self-consistency: read from ModelConfig (so the calibrated profile
+            # overlay flows through) with fallback to the legacy FutureConfig flag.
+            self_consistency = (
+                self.config.model.enable_self_consistency
+                or self.config.future.enable_self_consistency
+            )
+
             if difficulty == "simple":
                 # Fast path: one low-temperature sample, no intent pass, no
                 # consensus. Simple isolated hunks resolve trivially.
@@ -727,11 +841,11 @@ class Orchestrator:
                     n_samples=n_complex,
                     temperature=self.config.model.sampling_temperature,
                 )
-                if self.config.future.enable_self_consistency and len(candidates) > 1:
+                if self_consistency and len(candidates) > 1:
                     candidates, consensus_report = (
                         rank_by_consensus(candidates, unit.language)
                     )
-            elif self.config.future.enable_self_consistency:
+            elif self_consistency:
                 candidates, consensus_report = (
                     self.resolution_engine.propose_with_consensus(
                         unit, context, failures=failures, n_samples=n_complex
@@ -954,6 +1068,12 @@ class Orchestrator:
         unit = outcome.unit
         out["conflict_side_chars"] = float(
             len(unit.base.text) + len(unit.current.text) + len(unit.replayed.text)
+        )
+        # Pre-resolution severity (survey §3.3): a triage signal computed at
+        # extraction, before any model call. Encoded numerically so the risk
+        # score / calibration model can consume it (low=0, medium=1, high=2).
+        out["conflict_severity"] = {"low": 0.0, "medium": 1.0, "high": 2.0}.get(
+            unit.severity, 1.0
         )
         # Enclosing AST node line count, if structural metadata recorded it.
         span = unit.structural_metadata.get("enclosing_node_span")

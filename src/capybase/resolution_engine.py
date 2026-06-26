@@ -715,7 +715,7 @@ class ResolutionEngine:
                 model=self.config.model,
                 temperature=temperature,
                 max_tokens=self.config.max_tokens,
-                json_mode=True,
+                json_mode=self.config.json_mode,
                 n=n,
             )
         except Exception as exc:  # noqa: BLE001 - fall back to thread pool
@@ -824,7 +824,7 @@ class ResolutionEngine:
                 model=self.config.model,
                 temperature=self.config.temperature,
                 max_tokens=min(self.config.max_tokens, 2048),
-                json_mode=True,
+                json_mode=self.config.json_mode,
             )
         except Exception:  # noqa: BLE001
             return None
@@ -884,7 +884,7 @@ class ResolutionEngine:
                 model=self.config.model,
                 temperature=self.config.temperature,
                 max_tokens=min(self.config.max_tokens, 2048),
-                json_mode=True,
+                json_mode=self.config.json_mode,
             )
         except Exception:  # noqa: BLE001
             return None
@@ -926,7 +926,7 @@ class ResolutionEngine:
                 model=self.config.model,
                 temperature=temperature,
                 max_tokens=self.config.max_tokens,
-                json_mode=True,
+                json_mode=self.config.json_mode,
             )
         except Exception as exc:  # noqa: BLE001 - degrade to retryable failure
             return _failed_candidate(

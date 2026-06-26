@@ -96,6 +96,12 @@ class ConflictUnit(BaseModel):
     enclosing_symbol: str | None = None
     structural_metadata: dict[str, Any] = Field(default_factory=dict)
     risk_tags: list[str] = Field(default_factory=list)
+    # Graded severity computed at extraction (survey §3.3) from cheap pre-LLM
+    # signals (hunk size, definition-touching, both-sides-changed-same-lines).
+    # Distinct from risk_tags (validator-added violation names): this is a
+    # pre-resolution triage signal for routing/escalation/attribution. Computed
+    # by ``compute_severity`` so it's a pure function of already-extracted data.
+    severity: Literal["low", "medium", "high"] = "medium"
 
     @property
     def refined_sides(self) -> tuple[str, str, str] | None:

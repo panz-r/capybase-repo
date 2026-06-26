@@ -242,12 +242,13 @@ class VerifierModelValidator:
 
     name = "verifier_model"
 
-    def __init__(self, client: object, model_name: str = "") -> None:
+    def __init__(self, client: object, model_name: str = "", *, json_mode: bool = True) -> None:
         # ``client`` is the same LLMClient the resolution engine uses. Typed as
         # ``object`` to avoid an import cycle (adapters → ... → verification);
         # it only needs a ``complete`` method.
         self.client = client
         self.model_name = model_name
+        self.json_mode = json_mode
 
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
         cfg = ctx.config
@@ -273,7 +274,7 @@ class VerifierModelValidator:
                 model=self.model_name or _default_model(ctx),
                 temperature=0.0,
                 max_tokens=512,
-                json_mode=True,
+                json_mode=self.json_mode,
             )
         except Exception:  # noqa: BLE001 - degrade, never crash resolution
             return VerificationCheckResult(

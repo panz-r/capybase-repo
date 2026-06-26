@@ -255,6 +255,51 @@ class GitBackend:
         )
         return [p for p in out.split("\0") if p]
 
+    def last_touch(self, path: str, *, ref: str = "HEAD") -> tuple[str, str]:
+        """Return ``(commit_sha, commit_subject)`` of the commit at ``ref`` that
+        last touched ``path``. Used for conflict provenance (survey §3.3):
+        attributing each side of a conflict to the commit that introduced it.
+
+        Returns ``("", "")`` when git has no history for the path (e.g. a
+        brand-new untracked conflict) so callers never crash on missing provenance.
+        Never raises — provenance is advisory metadata, not load-bearing.
+        """
+        try:
+            out = self._run_ok(
+                ["log", "-1", "--format=%H%x09%s", ref, "--", path],
+                what="git log (last_touch)",
+            ).strip()
+        except Exception:  # noqa: BLE001 - provenance is advisory; never crash
+            return "", ""
+        if not out:
+            return "", ""
+        sha, _, subject = out.partition("\t")
+        return sha, subject
+
+    def last_touch_blob(self, blob_oid: str) -> tuple[str, str]:
+        """Return ``(commit_sha, commit_subject)`` of a commit that introduced the
+        blob ``blob_oid``. Searches all refs (``--find-object``) since during a
+        conflicted rebase the side blobs live on different branches than HEAD.
+
+        Used for per-side conflict provenance: each ConflictSide carries a
+        ``blob_oid`` from the unmerged index, and this attributes it to a commit.
+        Returns ``("", "")`` when the blob isn't found in any reachable history.
+        Never raises — provenance is advisory.
+        """
+        if not blob_oid:
+            return "", ""
+        try:
+            out = self._run_ok(
+                ["log", "--all", "-1", "--format=%H%x09%s", "--find-object", blob_oid],
+                what="git log (last_touch_blob)",
+            ).strip()
+        except Exception:  # noqa: BLE001 - provenance is advisory; never crash
+            return "", ""
+        if not out:
+            return "", ""
+        sha, _, subject = out.partition("\t")
+        return sha, subject
+
     def has_unmerged_paths(self) -> bool:
         return any(True for _ in self._iter_unmerged_quick())
 

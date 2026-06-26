@@ -6,9 +6,13 @@
 [model]
 # OpenAI-compatible local endpoint (e.g. llama-server).
 provider = "openai_compatible"
-base_url = "http://192.168.1.123:8080/v1"
+base_url = "http://DESKTOP-NOVA.local:8085/v1"
 api_key = "sk-local"
-model = "vibethink"
+# The model id the llama-server reports in /v1/models (the loaded GGUF). capybase
+# sends this verbatim in every completion request, so it must match what the
+# server knows — not a friendly alias. `capybase calibrate` keys the stored
+# profile off this name, so keep it stable across runs.
+model = "..\\VibeThinker-3B.Q5_K_M.gguf"
 temperature = 0.2
 samples = 1
 # Difficulty-aware sample allocation (survey §4 UAB-lite): when [routing] is
@@ -33,10 +37,26 @@ parallel_samples = true
 # before answering. If this is too low, the model runs out of tokens mid-thought
 # (finish_reason=length) and never emits its JSON answer -> empty resolution.
 max_tokens = 8192
+# Send `response_format: {type: json_object}` on every completion. A few local
+# servers reject this key; set false to fall back to the fenced-JSON parser.
+# `capybase calibrate` detects support and stores it in the model profile below.
+json_mode = true
 request_timeout_seconds = 600
 # Hard wall-clock cap on one generation attempt. A stalled stream aborts and
 # becomes a retryable failure rather than hanging indefinitely.
 generation_timeout_seconds = 180
+
+# --- Model calibration -----------------------------------------------------
+# Run `capybase calibrate` once per model. It probes the endpoint and writes a
+# tuned profile to [calibration] model_profile_path (default
+# .rebase-agent/memory/model_profile.json) overriding the knobs above — AND the
+# resolution mechanisms below (two_pass, plan_search, prompt_variants,
+# diverse_sampling, enable_self_consistency, samples) — when the model name
+# matches. The mechanism choices are picked empirically by resolving a small
+# corpus of known-correct merges under each strategy on vs off. `capybase
+# recalibrate` redoes it (slow: runs the corpus many times); `--dry-run` is a
+# fast capabilities-only check. Delete the file to revert to the values here.
+# All mechanisms default off (samples = 1) until calibration turns one on.
 
 [policy]
 # Which conflict types (git unmerged modes) capybase will attempt.
@@ -162,6 +182,10 @@ min_examples_for_retrieval = 3
 [calibration]
 enabled = false
 model_path = ".rebase-agent/memory/calibration.json"
+# Model capability profile written by `capybase calibrate` / `recalibrate`.
+# When its model name matches [model] model, its tuned knobs override the [model]
+# settings at runtime ("Profile wins"). Absent/mismatched/corrupt = no-op.
+model_profile_path = ".rebase-agent/memory/model_profile.json"
 escalate_threshold = 0.7
 min_examples_for_calibration = 50
 # Consensus entropy above this → escalate (high-entropy splits mean no candidate
@@ -171,10 +195,15 @@ entropy_escalate_threshold = 0.8
 # --conformal; the p-value threshold guarantees this coverage of accepted merges.
 conformal_alpha = 0.1
 
-# [future] documents planned seams. It does nothing in the MVP.
+# [future] documents planned seams — most are parsed, some are now wired.
 [future]
 enable_self_consistency = false   # raise [model] samples + set true for majority voting
 enable_rag = false                # set true + [memory] enabled = true for RAG few-shot
 enable_structural_context = false  # set true + [structural] enabled = true for AST context
 enable_verifier_model = false
 enable_mutation_testing = false
+# Deterministic structural pre-resolution (survey §6.4 layer 1): BEFORE the LLM,
+# attempt a model-free resolution (identical sides / one-sided change / disjoint
+# line edits). Safe-by-construction + validated — a guess that fails validation
+# falls through to the model, so it only cuts LLM load, never a worse merge.
+enable_structural_resolver = true

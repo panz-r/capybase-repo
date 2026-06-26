@@ -43,6 +43,38 @@ def repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def _isolate_model_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the unit suite hermetic w.r.t. the model profile.
+
+    "Profile wins" overlays a saved profile onto every Orchestrator whose model
+    name matches. A profile saved on a developer's machine (``capybase
+    calibrate``) or committed to the repo must NOT change how the tests behave —
+    they use fake clients and canned responses, so tuned max_tokens/timeouts
+    would make them pass or fail based on an artifact file rather than the code.
+
+    Neuters ``ModelProfile.load`` globally for the suite: no profile can be
+    loaded, so every Orchestrator sees the pure-config values. The original
+    loader is stashed on the class so tests that EXERCISE the overlay can opt
+    back in via the ``real_profile_loader`` fixture below. The real ``capybase
+    run``/``inspect``/``manual`` commands are unaffected (they don't import here).
+    """
+    import capybase.calibration_profile as cp
+
+    if not getattr(cp.ModelProfile, "_real_load", None):
+        cp.ModelProfile._real_load = cp.ModelProfile.load
+    monkeypatch.setattr(cp.ModelProfile, "load", staticmethod(lambda path: None))
+
+
+@pytest.fixture
+def real_profile_loader(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opt IN to the real profile loader for tests that exercise the overlay
+    (otherwise the autouse ``_isolate_model_profile`` makes load return None)."""
+    import capybase.calibration_profile as cp
+
+    monkeypatch.setattr(cp.ModelProfile, "load", cp.ModelProfile._real_load)
+
+
 @pytest.fixture
 def conflicted_repo(repo: Path) -> dict:
     """A repo stopped at a UU rebase conflict over ``app.py``.

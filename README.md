@@ -74,6 +74,56 @@ Every session writes a journal and artifacts under `.rebase-agent/sessions/`.
 On any escalation capybase writes `final/review-bundle.md` explaining why it
 stopped and how to resume.
 
+## Calibrate for your model
+
+`max_tokens`, JSON-mode support, logprobs, and the generation timeout all
+depend on which model is behind your endpoint — not all servers behave like the
+default. Run this once per model:
+
+```bash
+capybase calibrate          # probe the endpoint, store a tuned profile
+capybase recalibrate        # redo calibration (overwrite the stored profile)
+capybase calibrate --dry-run   # show what it would tune, write nothing
+```
+
+Calibrate probes the live model: it binary-searches `max_tokens` for the
+smallest budget that finishes (`finish_reason != length`) *and* emits parseable
+JSON, detects whether the server honors `response_format` and per-token
+logprobs, times generation latency to set the timeout, and resolves a tiny
+synthetic conflict end-to-end. It then **empirically selects resolution
+mechanisms**: it resolves a small corpus of conflicts with known-correct merges
+under each mechanism (two-pass, plan-search, prompt-variants, diverse-sampling,
+self-consistency, multi-sampling) on vs off, and enables only the ones that
+measurably improve correctness. The result is written to
+`.rebase-agent/memory/model_profile.json`.
+
+The mechanism sweep is the slow part (it resolves the corpus many times), so a
+full `calibrate`/`recalibrate` can take many minutes on a slow model. Use
+`--dry-run` for a quick capability-only check (max_tokens/json_mode/logprobs)
+that skips the sweep:
+
+```bash
+capybase calibrate --dry-run     # fast: capabilities only, no mechanism sweep
+capybase calibrate               # full: capabilities + mechanism A/B selection
+```
+
+**Run against a specific profile** with the global `--profile PATH` flag. It sets
+the profile location for *every* command — where `calibrate` writes it and where
+`run`/`inspect`/`manual` read it back from:
+
+```bash
+capybase --profile ./profiles/gpu-box.json calibrate   # tune, write to this path
+capybase --profile ./profiles/gpu-box.json run         # run using that profile
+```
+
+Useful for keeping per-machine or per-GPU profiles separate, or for testing a
+candidate profile without overwriting the default.
+
+**Profile wins:** at runtime capybase overlays the profile's knobs onto your
+`[model]` settings — but only when the model name matches, so switching models
+silently reverts to your TOML values (run `recalibrate` for the new one). Delete
+the file to revert entirely. A missing or corrupt profile is a silent no-op.
+
 ## Test rebases (`fixtures/` submodule)
 
 The `fixtures/` submodule is a small sample repo with branches that stop on a
@@ -129,15 +179,18 @@ git checkout base
 
 ```
 src/capybase/
-  cli.py             inspect / manual / run
+  cli.py             inspect / manual / run / calibrate / recalibrate
   orchestrator.py    the state machine; sole Git mutator
   git_backend.py     subprocess git only
-  conflict_model.py  ConflictUnit, CandidateResolution, VerificationResult, RiskDecision, JournalEvent
-  conflict_extractor.py
+  conflict_model.py  ConflictUnit (+severity), CandidateResolution, VerificationResult, RiskDecision
+  conflict_extractor.py  (+ compute_severity, per-side provenance)
   context_builder.py
   resolution_engine.py
+  structural_resolver.py  deterministic pre-LLM resolution (survey §6.4 layer 1)
   verification.py    validators as plugins
-  risk.py            rules engine -> RiskDecision
+  risk.py            rules engine -> RiskDecision (consumes severity)
+  probes.py + quality.py + calibration_corpus.py + calibration_profile.py
+                     the calibrate command's probe + scoring + blessed corpus
   journal.py         JSONL event sourcing + artifacts
   escalation.py      review bundles
   policy.py          supported/skipped classification
@@ -148,6 +201,29 @@ src/capybase/
     parsers.py       marker blocks + JSON response parsing
     tests.py         test-command runner
 ```
+
+## Resolution layers
+
+A conflict is resolved through a layered pipeline (cheapest/safest first):
+
+1. **Deterministic structural resolution** (`[future] enable_structural_resolver`,
+   default on) — a model-free pass over base+sides. Provably-safe rules
+   (identical sides, one-sided change, disjoint line edits) handle trivial
+   conflicts with **zero LLM calls**. Every result still runs the full
+   validation pipeline; a guess that fails validation falls through, so this can
+   only cut cost/latency, never produce a worse merge.
+2. **LLM resolution** — the model resolves conflicts the structural pass
+   declined, grounded in base + both sides + AST context + RAG few-shot examples.
+   Multi-sample / consensus / two-pass mechanisms are available (see calibrate).
+3. **CEGIS repair** — failures (syntax/AST/splice/LSP) feed back as
+   counterexamples; the model re-resolves with the broken output + the specific
+   failure, bounded by retry policy. A whole-file variant attributes file-level
+   errors to the unit at fault.
+
+Each conflict also carries **graded severity** (low/medium/high, computed
+pre-LLM from hunk size + definition-touching + same-line overlap) and
+**per-side provenance** (the commit that introduced each side), feeding the risk
+engine and the review bundle.
 
 ## Status
 

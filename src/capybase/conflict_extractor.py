@@ -147,6 +147,18 @@ class ConflictExtractor:
                     risk_tags=[],
                 )
             )
+        # Per-side provenance (survey §3.3): attribute each side's blob to the
+        # commit that introduced it. Advisory — never blocks resolution. The blob
+        # OIDs come from the unmerged index (set above); this just enriches them.
+        for u in units:
+            try:
+                u.structural_metadata["provenance"] = {
+                    "base": _blob_provenance(self.git, u.base.blob_oid),
+                    "current": _blob_provenance(self.git, u.current.blob_oid),
+                    "replayed": _blob_provenance(self.git, u.replayed.blob_oid),
+                }
+            except Exception:  # noqa: BLE001 - provenance is advisory
+                pass
         # Record sibling units in each unit's structural_metadata so downstream
         # (context builder, future RAG/structural views) knows there are other
         # resolvable conflict blocks in the same file. This is the seam that
@@ -176,6 +188,14 @@ class ConflictExtractor:
             if self.structural_config.refine_with_diff3:
                 _refine_with_diff3(units, base_side.text, current_text, replayed_text)
             _enrich_structural(units, worktree_text, base_text, self.structural_config)
+        # Grade each unit's severity from pre-LLM signals (survey §3.3). Done
+        # AFTER structural enrichment so the definition-touching signal is known.
+        # Pure function; never fails (defaults to "medium" on any error).
+        for u in units:
+            try:
+                u.severity = compute_severity(u)
+            except Exception:  # noqa: BLE001 - severity is advisory
+                u.severity = "medium"
         return units
 
     # Convenience: extract across every unmerged path, classifying along the
@@ -235,6 +255,74 @@ class SkippedPath:
 
 def _unit_id(path: str, step_index: int, idx: int) -> str:
     return f"{path}:{step_index}:{idx}"
+
+
+def _blob_provenance(git: object, blob_oid: str | None) -> dict:
+    """Resolve a blob OID to its introducing commit (sha + subject). Returns an
+    empty-record dict on absence/failure — provenance is advisory."""
+    if not blob_oid:
+        return {"sha": "", "subject": ""}
+    sha, subject = git.last_touch_blob(blob_oid)  # type: ignore[attr-defined]
+    return {"sha": sha, "subject": subject}
+
+
+def compute_severity(unit: "ConflictUnit") -> str:
+    """Grade a conflict's severity (survey §3.3) from cheap pre-LLM signals.
+
+    A pure function of data already on the unit — no model, no git. Returns
+    ``"low"``/``"medium"``/``"high"`` for triage/routing/attribution. The signals:
+
+    - **Hunk size**: total non-empty lines across the three sides. Large hunks
+      are harder to merge correctly.
+    - **Touches a definition** (``enclosing_symbol`` set / definition-typed
+      enclosing node): changes to function/class signatures are higher-stakes.
+    - **Both sides changed the SAME lines** (real conflict): a genuine
+      both-modified overlap is harder than a disjoint-edits case.
+
+    "high" = large AND touches a definition; "low" = small with no same-line
+    overlap; otherwise "medium". These are hand-sensible defaults; the goal is a
+    stable pre-resolution triage signal, not a precise oracle.
+    """
+    import difflib
+
+    base = (unit.base.text or "").splitlines()
+    cur = (unit.current.text or "").splitlines()
+    rep = (unit.replayed.text or "").splitlines()
+
+    # Signal 1: hunk size (total meaningful lines).
+    size = sum(1 for lines in (base, cur, rep) for ln in lines if ln.strip())
+    large = size >= 30
+
+    # Signal 2: touches a definition (enclosing symbol resolved OR a definition-
+    # typed enclosing node recorded by the structural enricher).
+    touches_def = bool(unit.enclosing_symbol) or any(
+        unit.structural_metadata.get(k)
+        for k in ("enclosing_node_text", "enclosing_node_signature")
+    )
+
+    # Signal 3: both sides changed the SAME base lines (real overlap). Use
+    # difflib to map each side's edits onto base line indices; if they intersect,
+    # it's a genuine same-line conflict (harder) vs a disjoint case (easier).
+    def _base_changed(base_lines, other_lines):
+        changed = set()
+        for tag, i1, i2, _j1, _j2 in difflib.SequenceMatcher(
+            a=base_lines, b=other_lines, autojunk=False
+        ).get_opcodes():
+            if tag != "equal":
+                changed.update(range(i1, i2))
+        return changed
+
+    cur_changed = _base_changed(base, cur)
+    rep_changed = _base_changed(base, rep)
+    same_line_overlap = bool(cur_changed & rep_changed)
+
+    if large and touches_def:
+        return "high"
+    if same_line_overlap:
+        return "medium" if not large else "high"
+    if size <= 6 and not touches_def:
+        return "low"
+    return "medium"
 
 
 def _enclosing_symbol(worktree_text: str, block: MarkerBlock) -> str | None:
