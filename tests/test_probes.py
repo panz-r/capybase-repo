@@ -232,15 +232,17 @@ def test_run_calibration_assembles_profile_for_healthy_server():
     assert p.json_mode is True           # supported
     assert p.capture_token_entropy is True
     assert p.generation_timeout_seconds >= _MIN_GEN_TIMEOUT
-    # All six probes ran (mechanisms is the empirical A/B step).
+    # All seven probes ran (embeddings capability + mechanisms empirical A/B).
     assert [r.name for r in report.results] == [
         "reachability",
         "max_tokens",
         "json_mode",
         "logprobs",
+        "embeddings",
         "end_to_end",
         "mechanisms",
     ]
+    assert p.enable_embedding_rag is False  # CalibClient doesn't serve embeddings
 
 
 def test_run_calibration_disables_json_mode_when_rejected():

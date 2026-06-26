@@ -56,6 +56,9 @@ class ModelProfile:
     prompt_variants: bool = False
     diverse_sampling: bool = False
     enable_self_consistency: bool = False
+    # Capability flags (calibrate-detected, not mechanism A/B). These don't overlay
+    # ModelConfig; the orchestrator reads them to enable endpoint-dependent features.
+    enable_embedding_rag: bool = False  # /v1/embeddings endpoint supports embeddings
     avg_latency_ms: float = 0.0  # observed mean generation latency, for diagnostics
     probed_at: str = ""  # ISO-8601 timestamp
     capybase_version: str = ""
@@ -84,6 +87,7 @@ class ModelProfile:
             prompt_variants=bool(d.get("prompt_variants", False)),
             diverse_sampling=bool(d.get("diverse_sampling", False)),
             enable_self_consistency=bool(d.get("enable_self_consistency", False)),
+            enable_embedding_rag=bool(d.get("enable_embedding_rag", False)),
             avg_latency_ms=float(d.get("avg_latency_ms", 0.0)),
             probed_at=str(d.get("probed_at", "")),
             capybase_version=str(d.get("capybase_version", "")),

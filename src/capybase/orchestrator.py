@@ -170,6 +170,9 @@ def _apply_model_profile(config: Config, repo_root: Path, journal: Journal) -> C
         return config
     new_model, overridden = apply_profile(config.model, profile)
     if not overridden:
+        # Even if no ModelConfig knob changed, a capability flag may still apply
+        # (e.g. embedding RAG confirmed by calibration). Apply it before returning.
+        config = _apply_profile_capability_flags(config, profile)
         return config
     journal.emit(
         "model_profile_applied",
@@ -179,7 +182,22 @@ def _apply_model_profile(config: Config, repo_root: Path, journal: Journal) -> C
             "profile_path": str(resolved),
         },
     )
-    return config.model_copy(update={"model": new_model})
+    config = config.model_copy(update={"model": new_model})
+    return _apply_profile_capability_flags(config, profile)
+
+
+def _apply_profile_capability_flags(config: Config, profile: "object") -> Config:
+    """Apply profile capability flags that don't live on ModelConfig.
+
+    Currently: ``enable_embedding_rag`` flips ``config.memory.retriever`` to
+    ``"embedding"`` (the orchestrator then builds an EmbeddingRetriever). Only
+    honors the flag when the user has RAG enabled at all; never forces it on.
+    """
+    if getattr(profile, "enable_embedding_rag", False):
+        if config.memory.enabled and config.future.enable_rag:
+            if config.memory.retriever == "lexical":
+                config.memory.retriever = "embedding"
+    return config
 
 
 class Orchestrator:
@@ -214,13 +232,13 @@ class Orchestrator:
         self.memory_store = None
         retriever = None
         if config.memory.enabled and config.future.enable_rag:
-            from capybase.memory.retriever import LexicalRetriever
+            from capybase.memory.retriever import EmbeddingRetriever, LexicalRetriever
             from capybase.memory.store import ExperienceStore
 
             self.memory_store = ExperienceStore.for_repo(
                 str(self.git.repo), config.memory.store_path
             )
-            retriever = LexicalRetriever(self.memory_store)
+            retriever = self._build_retriever(config)
         self.context_builder = ContextBuilder(
             config.policy.context_lines,
             retriever=retriever,
@@ -473,6 +491,32 @@ class Orchestrator:
             unit_id=unit.unit_id,
         )
         return outcome
+
+    def _build_retriever(self, config: Config) -> object:
+        """Construct the configured RAG retriever over ``self.memory_store``.
+
+        ``"embedding"`` builds an :class:`EmbeddingRetriever` (semantic, survey
+        §4.2) from a fresh embeddings client pointed at the model endpoint; any
+        failure to construct it (no endpoint support, missing model) falls back to
+        the lexical BM25 retriever so RAG never hard-fails. ``"lexical"`` (default)
+        builds the dependency-free BM25 retriever.
+        """
+        from capybase.memory.retriever import EmbeddingRetriever, LexicalRetriever
+
+        if config.memory.retriever == "embedding":
+            try:
+                from capybase.memory.embeddings import OpenAIEmbeddingsClient
+
+                # The embeddings model: explicit config, else reuse the completion
+                # model name (a single-model llama-server serving both).
+                emb_cfg = config.model
+                if config.memory.embeddings_model:
+                    emb_cfg = emb_cfg.model_copy(update={"model": config.memory.embeddings_model})
+                client = OpenAIEmbeddingsClient(emb_cfg)
+                return EmbeddingRetriever(self.memory_store, client)
+            except Exception:  # noqa: BLE001 - fall back to BM25, never break RAG
+                pass
+        return LexicalRetriever(self.memory_store)
 
     # ==================================================================
     # M3: full run

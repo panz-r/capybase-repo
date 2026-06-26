@@ -124,6 +124,30 @@ candidate profile without overwriting the default.
 silently reverts to your TOML values (run `recalibrate` for the new one). Delete
 the file to revert entirely. A missing or corrupt profile is a silent no-op.
 
+### Semantic RAG (optional embeddings)
+
+By default, RAG few-shot retrieval is **lexical** (BM25, dependency-free). For
+"same intent, different identifiers" matches that lexical search misses, capybase
+also supports **semantic retrieval** via the `/v1/embeddings` endpoint. Enable it
+by starting your llama-server with an embedding model (`--embeddings`) and running
+`capybase recalibrate` — the probe detects support and records
+`enable_embedding_rag` in the profile; at runtime capybase switches to the
+embedding retriever automatically (falling back to BM25 if the endpoint ever
+fails). Configure the embedding model name separately in `[memory] embeddings_model`
+when your server serves completion + embedding as distinct models.
+
+Small local embedding models that pair well with llama.cpp (run as a separate
+`llama-server --embeddings --port 8086` process):
+
+- **bge-small-en-v1.5** (~33M params) — fastest, lowest memory, good for CPU;
+  the lightest option for semantic RAG.
+- **nomic-embed-text-v1.5** (~137M) — best overall quality, supports dimension
+  reduction; a strong default if you have the RAM.
+- **nomic-embed-code** — dedicated to code, if you want embeddings tuned for
+  source rather than prose.
+
+
+
 ## Test rebases (`fixtures/` submodule)
 
 The `fixtures/` submodule is a small sample repo with branches that stop on a

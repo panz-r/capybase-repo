@@ -172,7 +172,11 @@ refine_with_diff3 = true
 [memory]
 enabled = false
 store_path = ".rebase-agent/memory/experiences.jsonl"
-retriever = "lexical"        # "lexical" (BM25, no deps) or "embedding" (future)
+retriever = "lexical"        # "lexical" (BM25, no deps) or "embedding" (semantic)
+# The embedding model for /v1/embeddings (distinct from the completion model on
+# a server serving both). Empty = reuse [model] model. `capybase calibrate`
+# detects endpoint support and records it; when unsupported, RAG stays lexical.
+embeddings_model = ""
 retriever_k = 3
 min_examples_for_retrieval = 3
 

@@ -277,7 +277,15 @@ class MemoryConfig(BaseModel):
 
     enabled: bool = False
     store_path: str = ".rebase-agent/memory/experiences.jsonl"
-    retriever: str = "lexical"  # "lexical" (BM25) or "embedding" (future)
+    # "lexical" (dependency-free BM25, the default) or "embedding" (semantic
+    # retrieval via the /v1/embeddings endpoint, survey §4.2). The embedding
+    # retriever is used only when the endpoint actually supports embeddings
+    # (capybase calibrate detects this); otherwise it falls back to BM25.
+    retriever: str = "lexical"
+    # The embedding model name to send to /v1/embeddings (distinct from the
+    # completion model on a server serving both). Leave empty to reuse the
+    # completion model name; calibrate records the working model in the profile.
+    embeddings_model: str = ""
     retriever_k: int = 3
     # Minimum experiences before retrieval is attempted (avoid noisy few-shot
     # from a near-empty corpus).

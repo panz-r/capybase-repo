@@ -6,11 +6,14 @@ into ``ContextBundle.retrieved_examples`` (the existing contract seam) and are
 rendered into the prompt as dynamic few-shot — "here is how a similar conflict
 was resolved before."
 
-The default ``LexicalRetriever`` is a dependency-free BM25 over tokenized
-code. It splits identifiers (camelCase, snake_case), drops stopwords and
-punctuation, and ranks by BM25 score. An ``EmbeddingRetriever`` (using the
-llama-server ``/v1/embeddings`` endpoint) can slot in behind the same
-Protocol later.
+Two retrievers implement the same Protocol:
+
+- ``LexicalRetriever`` (default): dependency-free BM25 over tokenized code. Splits
+  identifiers (camelCase, snake_case), drops stopwords/punctuation, ranks by BM25.
+- ``EmbeddingRetriever``: semantic retrieval via the llama-server ``/v1/embeddings``
+  endpoint (survey §4.2, LLMinus pattern). Catches "same intent, different
+  identifiers" that lexical matching misses. Used only when the endpoint supports
+  embeddings (``capybase calibrate`` detects this); otherwise falls back to BM25.
 """
 
 from __future__ import annotations
@@ -191,3 +194,103 @@ class LexicalRetriever:
         """Force a rebuild of the index (after new experiences are appended)."""
         self._index = None
         self._accepted = []
+
+
+# ---------------------------------------------------------------------------
+# EmbeddingRetriever (survey §4.2, LLMinus-style semantic RAG)
+# ---------------------------------------------------------------------------
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two equal-length vectors. Returns 0 for zero vectors."""
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0.0 or nb <= 0.0:
+        return 0.0
+    return dot / (math.sqrt(na) * math.sqrt(nb))
+
+
+class EmbeddingRetriever:
+    """Semantic retrieval over accepted experiences via vector embeddings.
+
+    Embeds each accepted example's signature (base+current+replayed concatenated,
+    same as the lexical retriever's document text) ONCE and caches the vectors.
+    For a new conflict, embeds the query and cosine-ranks the corpus. Returns the
+    top-k above a small similarity floor (so unrelated conflicts aren't force-fit
+    as few-shot).
+
+    Falls back gracefully: if embedding fails (endpoint down/unsupported, empty
+    vectors), ``retrieve`` returns an empty list — the context builder then gets
+    no few-shot, exactly as when the corpus is too small. The caller (orchestrator)
+    selects this retriever only when ``probe_embeddings_support`` confirmed the
+    endpoint works, so in practice the fallback is for transient mid-run failures.
+    """
+
+    # Minimum cosine similarity to surface an example as a few-shot. Embeddings on
+    # a small local model are noisier than OpenAI-scale ones; a modest floor keeps
+    # genuinely-unrelated conflicts out of the prompt.
+    MIN_SIMILARITY = 0.35
+
+    def __init__(self, store: ExperienceStore, client: object) -> None:
+        self.store = store
+        self.client = client  # EmbeddingsClient (Protocol); typed loose to avoid import cycle
+        self._accepted: list[Experience] | None = None
+        self._vectors: list[list[float]] | None = None
+
+    def _signature(self, exp: Experience) -> str:
+        ex = exp.example
+        return " ".join([ex.base, ex.current, ex.replayed])
+
+    def _build(self) -> None:
+        """Embed every accepted example. Cached until ``refresh``."""
+        accepted = self.store.accepted()
+        self._accepted = accepted
+        if not accepted:
+            self._vectors = []
+            return
+        try:
+            sigs = [self._signature(e) for e in accepted]
+            self._vectors = self.client.embed(sigs)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - degrade to no few-shot on any embed failure
+            self._accepted = []
+            self._vectors = []
+
+    def retrieve(
+        self, query: str, *, k: int = 3, language: str | None = None
+    ) -> list[HistoricalExample]:
+        """Return the top-k semantically-similar past merges for ``query``.
+
+        Embeds the query, cosine-ranks the cached corpus, filters by language and
+        the similarity floor, and returns the top-k. Returns [] if the corpus is
+        empty, embedding fails, or nothing clears the floor.
+        """
+        if self._accepted is None:
+            self._build()
+        assert self._accepted is not None and self._vectors is not None
+        if not self._accepted or not self._vectors:
+            return []
+        try:
+            q_vec = self.client.embed(query)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - transient embed failure → no few-shot
+            return []
+        if not q_vec:
+            return []
+        q = q_vec[0]
+        scored = [
+            (_cosine(q, vec), exp)
+            for vec, exp in zip(self._vectors, self._accepted)
+            if language is None or exp.language == language
+        ]
+        scored = [(s, e) for s, e in scored if s >= self.MIN_SIMILARITY]
+        scored.sort(key=lambda t: -t[0])
+        return [exp.example for _, exp in scored[:k]]
+
+    def refresh(self) -> None:
+        """Force a rebuild of the vector cache (after new experiences appended)."""
+        self._accepted = None
+        self._vectors = None

@@ -311,6 +311,33 @@ def probe_logprobs(client: Any, model_cfg: ModelConfig) -> ProbeResult:
     return ProbeResult("logprobs", ok=False, detail="server returned no logprobs")
 
 
+def probe_embeddings(model_cfg: ModelConfig) -> ProbeResult:
+    """Detect whether the server serves the ``/v1/embeddings`` endpoint.
+
+    Uses a fresh ``OpenAIEmbeddingsClient`` (distinct from the completion client)
+    and the existing capability helper. Supported iff a probe text embeds to a
+    non-empty vector. When supported, the profile enables embedding RAG (semantic
+    retrieval over past resolutions, survey §4.2); when not (the common case for
+    a llama-server started without ``--embeddings``), RAG stays lexical (BM25).
+    """
+    from capybase.memory.embeddings import OpenAIEmbeddingsClient, probe_embeddings_support
+
+    # The embedding model: explicit config override, else reuse the completion
+    # model name (single-model server). ``model_cfg.embeddings_model`` lives on
+    # MemoryConfig, not ModelConfig, so the caller passes the effective model_cfg.
+    try:
+        client = OpenAIEmbeddingsClient(model_cfg)
+        supported = probe_embeddings_support(client)
+    except Exception as exc:  # noqa: BLE001 - unsupported = BM25, never abort calibrate
+        return ProbeResult("embeddings", ok=False, detail=f"probe failed: {exc}")
+    if supported:
+        return ProbeResult("embeddings", ok=True, detail="server serves /v1/embeddings")
+    return ProbeResult(
+        "embeddings", ok=False,
+        detail="endpoint does not support embeddings (start llama-server with --embeddings)",
+    )
+
+
 def probe_end_to_end(client: Any, model_cfg: ModelConfig) -> ProbeResult:
     """Confirm the model can produce a complete, parseable candidate for a tiny
     synthetic conflict via the REAL resolve prompt path. This is the strongest
@@ -594,6 +621,11 @@ def run_calibration(
     results.append(jm_result)
     lp_result = probe_logprobs(client, tuned_cfg)
     results.append(lp_result)
+    # Embeddings capability (survey §4.2): a quick one-call check, parallel to
+    # the logprobs probe. When supported, the profile enables semantic RAG; the
+    # BM25 retriever is the fallback otherwise. Cheap, so always run it.
+    emb_result = probe_embeddings(tuned_cfg)
+    results.append(emb_result)
     # End-to-end uses the DETECTED json_mode (not the config default): if the
     # server rejects response_format, exercising it here would only re-prove
     # the failure we already recorded. The e2e probe checks parseability of a
@@ -623,6 +655,10 @@ def run_calibration(
         notes.append("json_mode disabled (server rejected or mishandled response_format)")
     if not lp_result.ok:
         notes.append("logprobs unavailable; capture_token_entropy off")
+    if not emb_result.ok:
+        notes.append("embeddings unavailable; RAG stays lexical (BM25)")
+    else:
+        notes.append("embeddings available; semantic RAG enabled")
     if not e2e_result.ok:
         notes.append(f"end-to-end check failed: {e2e_result.detail}")
     if not mech_result.ok:
@@ -641,6 +677,7 @@ def run_calibration(
         prompt_variants=choices.prompt_variants,
         diverse_sampling=choices.diverse_sampling,
         enable_self_consistency=choices.enable_self_consistency,
+        enable_embedding_rag=emb_result.ok,
         avg_latency_ms=round(avg_ms, 1),
         probed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         capybase_version=getattr(capybase, "__version__", ""),
