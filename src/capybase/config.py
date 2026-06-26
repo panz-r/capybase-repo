@@ -290,6 +290,15 @@ class StructuralConfig(BaseModel):
     # One of "histogram" (default), "patience", "minimal", "myers". Unknown
     # values fall back to histogram silently; refinement is advisory only.
     diff_algorithm: Literal["histogram", "patience", "minimal", "myers"] = "histogram"
+    # Sesame-style separator projection (survey §1.2): for brace/semicolon
+    # languages (Rust/C/Java/JS/...), split each ``{`` ``}`` ``(`` ``)`` ``;`` onto
+    # its own line BEFORE re-running diff3, so the line-merger anchors on real
+    # statement/block boundaries instead of entangling trailing punctuation.
+    # ~41% fewer conflicts / ~88% fewer false positives vs raw diff3 on those
+    # languages; a no-op for Python (indentation/colon-based). The projected
+    # refinement is recorded only when it produces fewer/smaller conflict blocks
+    # than the raw diff3 view. Advisory only.
+    project_separators: bool = True
 
 
 class MemoryConfig(BaseModel):

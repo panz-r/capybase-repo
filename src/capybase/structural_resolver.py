@@ -40,7 +40,8 @@ from typing import Literal
 from capybase.conflict_model import ConflictUnit
 
 Rule = Literal[
-    "identical_sides", "one_sided_change", "disjoint_edits", "zealous_merge"
+    "identical_sides", "one_sided_change", "disjoint_edits", "zealous_merge",
+    "entity_disjoint",
 ]
 
 
@@ -136,6 +137,20 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         merged = _try_zealous_merge(base, current, replayed)
         if merged is not None:
             return StructuralResolution(rule="zealous_merge", text=merged)
+
+        # Rule 5: entity-level disjoint resolution (survey §3.2/§5.2 Weave/Aura).
+        # The line-granular rules above correctly DECLINE when both sides insert
+        # DISTINCT entities at the same base line (git sees two insertions at one
+        # point → conflict; zealous sees a two-sided insertion → ambiguous → give
+        # up). But at ENTITY granularity these are non-conflicting: each side
+        # added a different method/class to the same container. Different
+        # (kind, name) identities → no overlap → safe to merge both. This is the
+        # single most common real-world conflict that line-level merging cannot
+        # resolve deterministically. Declines the moment two sides touch the
+        # SAME entity (a genuine intra-entity conflict → existing resolvers).
+        merged = _try_entity_disjoint(unit)
+        if merged is not None:
+            return StructuralResolution(rule="entity_disjoint", text=merged)
 
     return StructuralResolution(rule=None, text=None)
 
@@ -330,3 +345,193 @@ def _regions_against_base(base: list[str], other: list[str]) -> dict[int, tuple[
         # (the walk consumes end_excl), but record the full range for overlap tests.
         regions[i1] = (i2, replacement)
     return regions
+
+
+# ---------------------------------------------------------------------------
+# Entity-level disjoint resolution (survey §3.2/§5.2 Weave/Aura)
+# ---------------------------------------------------------------------------
+
+
+def _try_entity_disjoint(unit: ConflictUnit) -> str | None:
+    """Resolve when both sides add/modify DISTINCT entities in one container.
+
+    Git's line-diff reports a conflict whenever two sides insert at the same base
+    line — but if those insertions are DIFFERENT entities (a method ``b`` on one
+    side, method ``c`` on the other, both added to the same class), there is no
+    real conflict at entity granularity: different ``(kind, name)`` identities
+    can't clobber each other. This is the Weave/Aura win — the single most common
+    real-world conflict line-level merging provably cannot resolve.
+
+    Algorithm (all pure, no I/O, no model):
+      1. Enumerate entities in base/current/replayed restricted to the enclosing
+         container (the class/impl the conflict sits inside).
+      2. Compute, per side, the set of entity IDENTITIES it ADDED (not in base)
+         or MODIFIED (in base, body changed).
+      3. If the two sides' touched identities are disjoint → merge both: emit the
+         union of entities (base entities, then current's adds, then replayed's
+         adds), preserving each side's relative order. No overlap ⇒ safe.
+      4. Decline (return None) the moment a single entity is touched by BOTH
+         sides — that's a genuine intra-entity conflict for the line/LLM resolvers.
+
+    Declines (returns None) when tree-sitter is unavailable, the conflict isn't
+    inside a parseable container, or any entity overlaps. Every resolution this
+    produces is STILL validated by the orchestrator before acceptance.
+    """
+    try:
+        from capybase.adapters import structural
+    except Exception:  # noqa: BLE001
+        return None
+    lang = unit.language
+    if lang not in ("python", "rust"):
+        return None
+    meta = unit.structural_metadata
+    enc_text = meta.get("enclosing_node_text")
+    if not enc_text:
+        return None  # no enclosing container known → can't enumerate
+
+    base_ents = structural.enumerate_entities(unit.base.text or "", lang)
+    cur_ents = structural.enumerate_entities(unit.current.text or "", lang)
+    rep_ents = structural.enumerate_entities(unit.replayed.text or "", lang)
+    if base_ents is None or cur_ents is None or rep_ents is None:
+        return None  # parse failed on at least one side
+
+    # The enclosing node is a CONTAINER (class/impl/module). The conflict sides
+    # are the whole container's evolution, so a module-level enumeration returns
+    # the container itself (one "class Store" entity) — not the methods inside
+    # it. To get the inner entities (the actual unit of entity merge), re-enumerate
+    # anchored INSIDE the container body. The first non-header line is a stable
+    # anchor that sits within the body for any non-empty class/impl.
+    if len(base_ents) <= 1 and len(cur_ents) <= 1 and len(rep_ents) <= 1:
+        span = _inner_anchor(enc_text)
+        if span is not None:
+            base_ents = structural.enumerate_entities(unit.base.text or "", lang, container_span=span) or base_ents
+            cur_ents = structural.enumerate_entities(unit.current.text or "", lang, container_span=span) or cur_ents
+            rep_ents = structural.enumerate_entities(unit.replayed.text or "", lang, container_span=span) or rep_ents
+
+    base_by_id = {e.identity: e for e in base_ents}
+
+    def _touched(ents):
+        """Identities a side ADDED or MODIFIED vs base."""
+        out = []
+        for e in ents:
+            prev = base_by_id.get(e.identity)
+            if prev is None:
+                out.append(e.identity)  # added
+            elif e.body != prev.body:
+                out.append(e.identity)  # modified
+        return out
+
+    cur_touched = _touched(cur_ents)
+    rep_touched = _touched(rep_ents)
+    # If either side touched nothing, an earlier rule (one_sided_change) would
+    # have handled it. Decline to avoid duplicate logic — but guard anyway.
+    if not cur_touched or not rep_touched:
+        return None
+    # Overlap → genuine intra-entity conflict. Decline for the line/LLM path.
+    if set(cur_touched) & set(rep_touched):
+        return None
+
+    # Disjoint: build the merged container. Start from base's entities, apply
+    # each side's modifications in place, then append each side's additions.
+    cur_by_id = {e.identity: e for e in cur_ents}
+    rep_by_id = {e.identity: e for e in rep_ents}
+    cur_touched_set = set(cur_touched)
+    rep_touched_set = set(rep_touched)
+    merged_ids: list = []
+    seen: set = set()
+    for e in base_ents:
+        ident = e.identity
+        # Touched sets are disjoint (checked above), so at most one side
+        # MODIFIED this entity. Take the modified version when present; else
+        # the unchanged base version (both sides kept it as-is).
+        if ident in cur_touched_set:
+            merged_ids.append(cur_by_id[ident])
+        elif ident in rep_touched_set:
+            merged_ids.append(rep_by_id[ident])
+        else:
+            merged_ids.append(e)  # unchanged by either side
+        seen.add(ident)
+    # Append additions: current's new entities first (preserving its order), then
+    # replayed's. Because the touched sets are disjoint there's no duplication.
+    for e in cur_ents:
+        if e.identity not in seen:
+            merged_ids.append(e)
+            seen.add(e.identity)
+    for e in rep_ents:
+        if e.identity not in seen:
+            merged_ids.append(e)
+            seen.add(e.identity)
+
+    # Reconstruct the container text. The enclosing node's text is the source of
+    # truth for its non-entity framing (class header, impl braces, indentation).
+    # We splice the merged entity bodies back into that framing.
+    return _rebuild_container(enc_text, [e.body for e in merged_ids], lang)
+
+
+def _inner_anchor(enclosing_text: str) -> tuple[int, int] | None:
+    """A span anchored inside a container's body (for inner entity enumeration).
+
+    The second non-blank line of the enclosing text reliably sits inside the
+    class/impl body (the first line is the header). Returns that line's span so
+    :func:`enumerate_entities` descends into the container's body. None when the
+    container has no body lines (degenerate).
+    """
+    lines = enclosing_text.split("\n")
+    body_line = None
+    for i, line in enumerate(lines):
+        if i == 0:
+            continue  # header
+        if line.strip():
+            body_line = i
+            break
+    if body_line is None:
+        return None
+    return (body_line, body_line)
+
+
+def _rebuild_container(enclosing_text: str, entity_bodies: list[str], language: str) -> str | None:
+    """Rebuild a container's text from its framing + the merged entity bodies.
+
+    The enclosing node text (e.g. ``class C:\\n    def a(): ...\\n    def b(): ...``)
+    carries the container's framing — the header line (``class C:`` /
+    ``impl S {``), its braces, and the indentation convention. We extract that
+    framing (everything before the first entity and after the last) and splice in
+    the merged entity bodies, preserving the original indentation prefix.
+
+    This is intentionally conservative: it only works for a SINGLE contiguous
+    entity block inside a container (the common case — a class/impl body or a
+    module-level def run). If the framing can't be cleanly identified, it
+    returns None so the resolver declines and the LLM handles it.
+    """
+    enc_lines = enclosing_text.split("\n")
+    if not enc_lines:
+        return None
+    # The body indent is the leading whitespace of the first body line (the
+    # convention under which the container's entities nest). tree-sitter's entity
+    # body slice EXCLUDES this leading indent on the def/header line but KEEPS
+    # the internal indentation, so we prepend the indent to the FIRST line of
+    # each body only — internal lines already carry correct relative indentation.
+    body_indent = ""
+    for line in enc_lines[1:]:
+        if line.strip():
+            body_indent = line[: len(line) - len(line.lstrip(" "))]
+            break
+    # The header is line 0; the trailer is the container's OWN closing brace (for
+    # brace languages) — exactly one line. We can't take more, because the method
+    # bodies' own closing braces (``    }``) sit just above the container's close
+    # and would be stolen. Python class bodies have no trailer.
+    header = enc_lines[0]
+    trailer_lines: list[str] = []
+    if language != "python" and enc_lines:
+        last = enc_lines[-1]
+        if last.strip() == "}":
+            trailer_lines = [last]
+    out = [header]
+    for body in entity_bodies:
+        blines = body.split("\n")
+        if blines:
+            # Prepend the container's body indent to the def/header line only.
+            blines[0] = body_indent + blines[0] if blines[0].strip() else blines[0]
+        out.append("\n".join(blines))
+    out.extend(trailer_lines)
+    return "\n".join(out)

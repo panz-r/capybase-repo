@@ -42,6 +42,31 @@ class NodeInfo:
     signature: str | None
 
 
+@dataclass(frozen=True)
+class Entity:
+    """A coarse, identity-stable top-level definition inside a container.
+
+    The unit of entity-level merge (survey §3.2 Weave/Aura): a function, method,
+    class, or field matched by ``(kind, name)`` so two sides that each add a
+    DISTINCT entity at the same insertion point can be recognized as
+    non-conflicting. ``kind`` is a coarse, language-neutral label
+    (``"function"``/``"class"``/``"method"``/``"field"``) so matching doesn't
+    depend on grammar-specific node type strings; ``name`` is the bare
+    identifier; ``body`` is the exact source text (the text-carrying leaf the
+    survey prescribes). ``span`` is the 0-based ``(start_row, end_row)`` range.
+    """
+
+    kind: str
+    name: str
+    body: str
+    span: tuple[int, int]
+
+    @property
+    def identity(self) -> tuple[str, str]:
+        """The stable entity key ``(kind, name)`` used for matching."""
+        return (self.kind, self.name)
+
+
 # Tree-sitter node types that represent a self-contained logical definition.
 # The lowest enclosing node is only "useful" if it is one of these; otherwise
 # we keep walking up (or give up at module level).
@@ -258,8 +283,174 @@ def _signature(node, language: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Structural fingerprint (for AST preservation checks)
+# Entity-level structure (survey §3.2 coarse AST / entity merge)
 # ---------------------------------------------------------------------------
+
+# Map grammar-specific definition node types to a coarse, language-neutral
+# ``kind`` label. Entity identity is (kind, name), so two sides that each add a
+# DISTINCT entity at the same insertion point are recognized as non-conflicting
+# even when git's line-diff reports a conflict (both insert at one base line).
+# "method" vs "function" distinguishes defs inside an impl/class body from
+# module-level ones — needed because Rust tracks ``fn`` in ``impl_item``
+# separately from free ``function_item``, and Python methods are just
+# ``function_definition`` inside a ``class_definition``.
+_KIND_BY_NODE_TYPE: dict[str, str] = {
+    # Python
+    "function_definition": "function",
+    "class_definition": "class",
+    # Rust
+    "function_item": "function",
+    "struct_item": "class",
+    "enum_item": "class",
+    "trait_item": "class",
+    "const_item": "field",
+    "static_item": "field",
+    "type_item": "field",
+    # common leaf-ish definitions (e.g. assignments inside class bodies) are
+    # NOT mapped — they don't carry a stable name from the node type alone.
+}
+
+# Node types whose direct children are the definitions we enumerate (i.e. a
+# container). Module root is always a container; class/impl/mod bodies too.
+# ``block``/``statement_block`` are the body wrappers Python/some grammars use
+# inside class/impl bodies — including them lets the scan reach the methods.
+# This is safe because the scan records each definition and does NOT recurse
+# into it (a function-body ``block`` is never scanned — its owning function is
+# recorded first and ``continue``s).
+_CONTAINER_NODE_TYPES = {
+    "module",
+    "class_definition",
+    "impl_item",
+    "implementation_list",
+    "declaration_list",
+    "struct_body",
+    "enum_body",
+    "trait_body",
+    "block",
+    "statement_block",
+}
+
+
+def _entity_name(node, language: str) -> str | None:
+    """The bare identifier name of a definition node, or None if unresolvable.
+
+    Walks the node's first child for a ``name``/``identifier``-typed token. This
+    avoids brittle regex on the source text and matches how tree-sitter exposes
+    names across grammars.
+    """
+    for child in node.children:
+        ctype = child.type
+        if ctype in ("identifier", "type_identifier", "field_identifier"):
+            try:
+                return child.text.decode("utf-8", errors="replace") if child.text else None
+            except Exception:  # noqa: BLE001
+                return None
+    return None
+
+
+def _coerce_kind(node_type: str, parent_type: str | None, language: str) -> str | None:
+    """Coarse ``kind`` for a definition node.
+
+    Functions inside an impl/class body are relabeled ``method`` so a method and
+    a same-named free function aren't conflated (different identity). Other
+    definitions keep their mapped kind. Returns None for unmapped node types
+    (we only enumerate stable-nameable top-level defs).
+    """
+    kind = _KIND_BY_NODE_TYPE.get(node_type)
+    if kind is None:
+        return None
+    if kind == "function" and parent_type in _CONTAINER_NODE_TYPES and parent_type != "module":
+        return "method"
+    return kind
+
+
+def enumerate_entities(
+    source: str, language: str, container_span: tuple[int, int] | None = None
+) -> list[Entity] | None:
+    """List the coarse top-level entities in ``source`` (survey §3.2/§5.3).
+
+    Parses ``source`` with tree-sitter and returns one :class:`Entity` per
+    definition-typed node that is a *direct child of a container* (module,
+    class, impl, mod body). Each carries a coarse ``kind`` (function/method/
+    class/field), its ``name``, and exact source ``body`` text — the text-
+    carrying leaves the survey prescribes. Identity is ``(kind, name)``.
+
+    ``container_span`` restricts the enumeration to the children of the container
+    enclosing that span (the typical case: "what entities live in the same
+    class/impl as this conflict?"). When None, the whole module is enumerated.
+
+    Returns ``None`` when tree-sitter is unavailable or parsing fails (callers
+    fall back to line-level handling). An empty list means the container had no
+    enumeratable entities.
+    """
+    tree = _parse(source, language)
+    if tree is None:
+        return None
+    root = tree.root_node
+
+    # Resolve the container node to enumerate within.
+    container = root  # module
+    if container_span is not None:
+        anchor = container_span[0]
+        # Descend to the deepest container enclosing the anchor, but stop at a
+        # definition node (the enclosing class/impl is itself a container).
+        node = root
+        while True:
+            child = None
+            for c in node.children:
+                if c.start_point.row <= anchor <= c.end_point.row:
+                    child = c
+                    break
+            if child is None or child == node:
+                break
+            node = child
+            if node.type in _CONTAINER_NODE_TYPES:
+                container = node
+                # Keep descending only while we're in containers; a def node is
+                # a leaf for this purpose.
+                if node.type in _DEFINITION_TYPES:
+                    break
+        # If the enclosing container is a definition node (e.g. class/impl),
+        # its CHILDREN are the entities, so don't break out yet — but we already
+        # set container=node above. For a class/impl, the body list is the child.
+
+    return _collect_entities(container, source, language)
+
+
+def _collect_entities(container, source: str, language: str) -> list[Entity] | None:
+    """Gather direct definition children of ``container`` as entities.
+
+    For class/impl bodies the definitions sit inside a body list node
+    (``implementation_list``/``declaration_list``/block); we look one level down
+    into that list when present so method/field definitions are found.
+    """
+    src = source.encode("utf-8")
+    entities: list[Entity] = []
+    parent_type = container.type
+
+    def _scan(node, ptype):
+        for child in node.children:
+            ctype = child.type
+            kind = _coerce_kind(ctype, ptype, language)
+            if kind is not None:
+                name = _entity_name(child, language)
+                if name:
+                    text = src[child.start_byte : child.end_byte].decode("utf-8", errors="replace")
+                    entities.append(
+                        Entity(
+                            kind=kind,
+                            name=name,
+                            body=text,
+                            span=(child.start_point.row, child.end_point.row),
+                        )
+                    )
+                    continue  # don't recurse into a definition we already took
+            # Recurse into body-list containers to find nested defs.
+            if ctype in _CONTAINER_NODE_TYPES or ctype in _DEFINITION_TYPES:
+                _scan(child, ctype)
+
+    _scan(container, parent_type)
+    return entities
 
 
 def ast_fingerprint(source: str, language: str) -> str | None:

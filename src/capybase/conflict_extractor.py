@@ -201,6 +201,8 @@ class ConflictExtractor:
                 current_text,
                 replayed_text,
                 self.structural_config.diff_algorithm,
+                project_separators=self.structural_config.project_separators,
+                language=detect_language(path),
             )
         # Grade each unit's severity from pre-LLM signals (survey §3.3). Done
         # AFTER structural enrichment so the definition-touching signal is known.
@@ -463,6 +465,9 @@ def _refine_with_diff3(
     current_text: str,
     replayed_text: str,
     diff_algorithm: str = "histogram",
+    *,
+    project_separators: bool = False,
+    language: str | None = None,
 ) -> None:
     """Refine conflict side texts with ``git merge-file --diff3``.
 
@@ -477,6 +482,13 @@ def _refine_with_diff3(
 
     ``diff_algorithm`` selects the xdiff backend (survey §1.3, default
     histogram); passed through to :func:`merge_file_diff3`.
+
+    ``project_separators`` (survey §1.2 Sesame): for brace/semicolon languages,
+    additionally run a projected diff3 — the three blobs with each ``{}();``
+    split onto its own line — and prefer it when it produces fewer/smaller
+    conflict blocks than the raw view. The recorded refined texts are the
+    *projected* side fragments (advisory; splicing is unaffected). No-op for
+    Python and other non-separator languages.
     """
     try:
         from capybase.adapters.git_diff3 import merge_file_diff3
@@ -485,6 +497,18 @@ def _refine_with_diff3(
     blocks = merge_file_diff3(
         base_text, current_text, replayed_text, diff_algorithm=diff_algorithm
     )
+    # Separator-projected pass (survey §1.2): re-run diff3 on projected blobs
+    # for brace/semicolon languages and prefer it when tighter. The projection
+    # lets line-diff anchor on real statement/block boundaries.
+    if project_separators and language is not None:
+        blocks = _maybe_use_projected(
+            blocks,
+            base_text,
+            current_text,
+            replayed_text,
+            language,
+            diff_algorithm,
+        )
     if not blocks or len(blocks) != len(units):
         # Only refine when diff3 produces exactly the same number of conflict
         # blocks as the worktree — otherwise the correspondence is ambiguous.
@@ -499,6 +523,73 @@ def _refine_with_diff3(
                 "base": block.base,
                 "replayed": block.theirs,
             }
+
+
+def _maybe_use_projected(
+    raw_blocks: list | None,
+    base_text: str,
+    current_text: str,
+    replayed_text: str,
+    language: str,
+    diff_algorithm: str,
+) -> list | None:
+    """Run a separator-projected diff3; prefer it when it's tighter (survey §1.2).
+
+    Returns the projected blocks if they have fewer conflict regions or a smaller
+    total side-line footprint than ``raw_blocks``; otherwise returns the raw
+    blocks unchanged. The projected side texts are the separator-split fragments
+    — they carry the same content, just aligned on statement/block boundaries, so
+    the resolver/prompt see a tighter conflict window. A no-op (returns raw) when
+    the language isn't a separator language or the projected merge fails.
+    """
+    try:
+        from capybase.adapters.git_diff3 import merge_file_diff3
+        from capybase.adapters.separator_projection import project_separators, supports
+    except Exception:  # noqa: BLE001
+        return raw_blocks
+    if not supports(language):
+        return raw_blocks
+    pb, pc, pr = (
+        project_separators(base_text, language),
+        project_separators(current_text, language),
+        project_separators(replayed_text, language),
+    )
+    # If projection changed nothing (no separators present), skip the extra call.
+    if pb == base_text and pc == current_text and pr == replayed_text:
+        return raw_blocks
+    projected = merge_file_diff3(pb, pc, pr, diff_algorithm=diff_algorithm)
+    if projected is None:
+        return raw_blocks  # projected merge itself failed → keep the raw view
+    # A clean projected merge ([]) is the strongest improvement: the projected
+    # alignment recognized the sides as compatible where raw diff3 saw a
+    # conflict. Always prefer it.
+    if len(projected) == 0:
+        return projected
+    raw_cost = _blocks_cost(raw_blocks)
+    proj_cost = _blocks_cost(projected)
+    # Prefer the projected view when it has strictly fewer regions or a strictly
+    # smaller total footprint. Ties go to the raw view (no benefit to switching).
+    if len(projected) < len(raw_blocks or []) or (
+        len(projected) == len(raw_blocks or []) and proj_cost < raw_cost
+    ):
+        return projected
+    return raw_blocks
+
+
+def _blocks_cost(blocks: list | None) -> int:
+    """Total side-line footprint of a set of diff3 blocks (ours+theirs lines).
+
+    A cheaper proxy for "how much conflict text the model sees" — fewer/smaller
+    is better. Returns a large sentinel for None so the comparison in
+    :func:`_maybe_use_projected` never prefers an absent raw view.
+    """
+    if not blocks:
+        return 1 << 30
+    return sum(
+        (b.ours.count("\n") + 1 if b.ours else 0)
+        + (b.theirs.count("\n") + 1 if b.theirs else 0)
+        for b in blocks
+    )
 
 
 def _blank_markers(text: str) -> str:
