@@ -246,6 +246,9 @@ class Orchestrator:
             min_examples=config.memory.min_examples_for_retrieval,
             use_enclosing_as_primary=config.structural.use_enclosing_as_primary,
             canonicalize_context=config.structural.canonicalize_context,
+            cross_file_slice=config.structural.cross_file_slice,
+            slice_search_globs=config.structural.slice_search_globs,
+            slice_repo_root=str(self.git.repo),
         )
         self.resolution_engine = resolution_engine or ResolutionEngine(config.model)
         self.verification = VerificationEngine.default(

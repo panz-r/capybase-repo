@@ -91,6 +91,17 @@ def _resolve_prompt_parts(unit: ConflictUnit, context: ContextBundle):
                 f"  RESOLVED: {ex.resolved}"
             )
         few_shot = "Similar past merges (for reference — match this style):\n" + "\n".join(blocks) + "\n\n"
+    # Cross-file dependency neighborhood (survey §5.3 Rover): definitions of
+    # symbols the conflict code references that live OUTSIDE the enclosing
+    # block. The merged result must stay consistent with these; showing them
+    # prevents the model from guessing at a helper's signature/behavior. Empty
+    # when no external dependencies were resolvable.
+    deps = ""
+    if context.related_snippets:
+        blocks = []
+        for i, snip in enumerate(context.related_snippets, 1):
+            blocks.append(f"[{i}] {snip.path} — {snip.reason}:\n{snip.text}")
+        deps = "Definitions this conflict depends on (merged result must be consistent with these):\n" + "\n".join(blocks) + "\n\n"
     intro = (
         "Resolve ONE git merge conflict by merging BOTH sides into one coherent\n"
         "result preserving each side's intent. Be CONCISE: reason in a few sentences,\n"
@@ -98,11 +109,12 @@ def _resolve_prompt_parts(unit: ConflictUnit, context: ContextBundle):
         f"file: {unit.path}\n"
         f"language: {unit.language or 'unknown'}\n\n"
     )
-    # The non-instruction sections (anchor, few-shot, three sides, context) form
-    # one contiguous block that variants keep together — re-ordering *within* it
-    # would risk disturbing the anchor/few-shot coupling to the sides.
+    # The non-instruction sections (anchor, deps, few-shot, three sides,
+    # context) form one contiguous block that variants keep together —
+    # re-ordering *within* it would risk disturbing the anchor/few-shot coupling
+    # to the sides.
     data_block = (
-        f"{structural_anchor}{few_shot}"
+        f"{structural_anchor}{deps}{few_shot}"
         f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
         f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
         f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"

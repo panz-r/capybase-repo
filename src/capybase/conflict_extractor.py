@@ -210,6 +210,17 @@ class ConflictExtractor:
                 u.severity = compute_severity(u)
             except Exception:  # noqa: BLE001 - severity is advisory
                 u.severity = "medium"
+        # Conflict feature spine (survey §6.7/§4.2): flatten the conflict's
+        # characteristics (size, balance, imbalance, touches-def, overlap,
+        # sibling count, severity) into one stable dict on each unit. This is
+        # the unified input vector the calibration flywheel and any learned
+        # router consume; previously these signals were computed piecemeal and
+        # discarded. Advisory — never blocks resolution.
+        for u in units:
+            try:
+                u.structural_metadata["conflict_features"] = conflict_features(u)
+            except Exception:  # noqa: BLE001 - features are advisory
+                pass
         return units
 
     # Convenience: extract across every unmerged path, classifying along the
@@ -337,6 +348,84 @@ def compute_severity(unit: "ConflictUnit") -> str:
     if size <= 6 and not touches_def:
         return "low"
     return "medium"
+
+
+def conflict_features(unit: ConflictUnit) -> dict[str, float | int | str | bool]:
+    """Flatten a conflict's characteristics into a stable feature vector.
+
+    Surveys §6.7 (routing/hybridization) and §4.2 (balance) frame the choice of
+    resolver as a function of conflict *characteristics*: size, imbalance,
+    language, whether it touches a definition, whether both sides changed the
+    same lines. Capybase computes these piecemeal (``compute_severity``,
+    ``sbcr.balance``, the difficulty classifier) and then discards the raw
+    signals — so the calibration flywheel, any future learned router, and offline
+    eval have no single stable input vector.
+
+    This pure function unifies those signals into one dict recorded on the unit
+    (``structural_metadata["conflict_features"]``) and surfaced into every
+    ``VerificationResult.features``, so downstream consumers read one spine
+    instead of each recomputing ad-hoc signals. It reuses the exact computations
+    already in ``compute_severity`` and ``sbcr.balance`` — no new heuristics.
+    """
+    from capybase.sbcr import balance as _balance
+
+    base = (unit.base.text or "").splitlines()
+    cur = (unit.current.text or "").splitlines()
+    rep = (unit.replayed.text or "").splitlines()
+
+    # Hunk size: total non-empty lines across the three sides (same definition
+    # as compute_severity, the documented "large" signal).
+    size = sum(1 for lines in (base, cur, rep) for ln in lines if ln.strip())
+
+    cur_n = sum(1 for ln in cur if ln.strip())
+    rep_n = sum(1 for ln in rep if ln.strip())
+    bal = float(_balance(unit))
+    # imbalance_ratio: how many times larger the bigger side is (>=1.0). 1.0 =
+    # balanced; large = one side dominates (the §4.2 LLM-favored regime). Inf
+    # when one side is empty, clamped to a finite sentinel for feature hygiene.
+    if min(cur_n, rep_n) == 0:
+        imbalance = float("inf")
+    else:
+        imbalance = max(cur_n, rep_n) / min(cur_n, rep_n)
+
+    touches_def = bool(unit.enclosing_symbol) or any(
+        unit.structural_metadata.get(k)
+        for k in ("enclosing_node_text", "enclosing_node_signature")
+    )
+
+    return {
+        "hunk_size": size,
+        "current_side_lines": cur_n,
+        "replayed_side_lines": rep_n,
+        "balance": bal,
+        "imbalance_ratio": imbalance,
+        "touches_definition": bool(touches_def),
+        "same_line_overlap": bool(_same_line_overlap(base, cur, rep)),
+        "sibling_count": int(unit.structural_metadata.get("sibling_count", 0) or 0),
+        "severity": unit.severity,
+        "language": unit.language or "unknown",
+    }
+
+
+def _same_line_overlap(base, cur, rep) -> bool:
+    """Whether both sides changed the SAME base lines (a genuine overlap).
+
+    Shared with ``compute_severity``'s logic: a real same-line conflict is
+    harder than a disjoint-edits case. Extracted so the feature spine and the
+    severity grader agree on the definition.
+    """
+    import difflib
+
+    def _base_changed(base_lines, other_lines):
+        changed = set()
+        for tag, i1, i2, _j1, _j2 in difflib.SequenceMatcher(
+            a=base_lines, b=other_lines, autojunk=False
+        ).get_opcodes():
+            if tag != "equal":
+                changed.update(range(i1, i2))
+        return changed
+
+    return bool(_base_changed(base, cur) & _base_changed(base, rep))
 
 
 def _enclosing_symbol(worktree_text: str, block: MarkerBlock) -> str | None:

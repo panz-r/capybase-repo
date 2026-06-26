@@ -1048,10 +1048,23 @@ class VerificationEngine:
         hard: list[VerificationFailure] = []
         warnings: list[VerificationWarning] = []
         features: dict[str, float | int | str | bool] = {}
+        # Conflict feature spine (survey §6.7/§4.2): seed the aggregated features
+        # with the pre-resolution characteristics recorded at extraction. This is
+        # the unified input vector for the calibration flywheel / any learned
+        # router — stable across validators and present even when all validators
+        # pass (so accepted merges are still labeled with their inputs). Validator
+        # features are merged on top and never overwrite these conflict-level keys.
+        cf = unit.structural_metadata.get("conflict_features")
+        if isinstance(cf, dict):
+            for k, val in cf.items():
+                features[k] = val
         for v in self.validators:
             res = v.verify(ctx)
             for k, val in res.features.items():
-                features[k] = val
+                # Conflict-level spine keys (seeded above) take precedence so a
+                # validator can't clobber the stable input vector.
+                if k not in features:
+                    features[k] = val
             if res.passed:
                 continue
             # severity gating: only some validators are enabled by config.

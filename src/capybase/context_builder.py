@@ -27,6 +27,11 @@ class ContextBuilder:
         min_examples: int = 3,
         use_enclosing_as_primary: bool = False,
         canonicalize_context: bool = False,
+        cross_file_slice: bool = False,
+        slice_search_globs: list[str] | None = None,
+        slice_repo_root: str | None = None,
+        max_related_snippets: int = 3,
+        max_snippet_chars: int = 400,
     ) -> None:
         self.context_lines = context_lines
         self.retriever = retriever
@@ -34,6 +39,18 @@ class ContextBuilder:
         self.min_examples = min_examples
         self.use_enclosing_as_primary = use_enclosing_as_primary
         self.canonicalize_context = canonicalize_context
+        # Cross-file dependency slicing (survey §5.3 Rover / §1.2): resolve the
+        # definitions of symbols the conflict code references across the repo
+        # and surface them as ``related_snippets`` in the context bundle — the
+        # dependency neighborhood a small model needs to merge correctly, found
+        # via the existing ``find_symbol_definitions`` (a grep+parse, no LSP).
+        # The slicer is dormant unless ``cross_file_slice`` is set, so the
+        # context contract is unchanged for callers that don't opt in.
+        self.cross_file_slice = cross_file_slice
+        self.slice_search_globs = slice_search_globs or ["**/*.py", "**/*.rs"]
+        self.slice_repo_root = slice_repo_root
+        self.max_related_snippets = max_related_snippets
+        self.max_snippet_chars = max_snippet_chars
 
     def build(self, unit: ConflictUnit, budget: TokenBudget | None = None) -> ContextBundle:
         budget = budget or TokenBudget()
@@ -109,9 +126,18 @@ class ContextBuilder:
                     retrieved = candidates
             except Exception:  # noqa: BLE001 - retrieval is best-effort
                 pass
+        # Cross-file dependency slicing (survey §5.3): resolve definitions of
+        # symbols referenced in the EDITED sides (current + replayed). These are
+        # the dependencies the merged result must stay consistent with — helpers,
+        # constants, methods on other types the model would otherwise guess. The
+        # enclosing node (already in primary_text) and trivially-short names are
+        # excluded so we surface only genuinely external dependencies. Pure
+        # best-effort: any failure yields no snippets rather than a crash.
+        related = _slice_dependencies(unit, self)
         return ContextBundle(
             primary_text=primary,
             side_summaries=side_summaries,
+            related_snippets=related,
             retrieved_examples=retrieved,
             token_estimate=est,
             structural_view=structural_view,
@@ -131,6 +157,102 @@ def _sibling_spans(unit: ConflictUnit) -> list[tuple[int, int]]:
         if isinstance(span, list) and len(span) == 2:
             out.append((int(span[0]), int(span[1])))
     return out
+
+
+def _slice_dependencies(unit: ConflictUnit, builder: "ContextBuilder") -> list:
+    """Resolve cross-repo definitions of symbols the conflict references.
+
+    Surveys §5.3 (Rover) and §1.2 (semistructured merge): the model needs the
+    *dependency neighborhood* — definitions of helpers/constants/types that the
+    conflict code calls — not just the enclosing block. We extract identifiers
+    referenced in the EDITED sides (current + replayed), then locate their
+    definitions across the repo via the existing grep+parse slicer.
+
+    Returns a best-effort list of ``RelatedSnippet`` (empty on any failure, when
+    slicing is disabled, or when no definitions are found — callers always get a
+    valid context bundle). Snippets are capped by ``max_related_snippets`` and a
+    per-snippet character budget so the dependency context can't crowd out the
+    three sides. The enclosing node's own text (already in ``primary_text``) is
+    excluded so only genuinely external dependencies are surfaced.
+    """
+    if not builder.cross_file_slice:
+        return []
+    lang = unit.language
+    if lang not in ("python", "rust"):
+        return []
+    try:
+        from capybase.adapters import structural
+    except Exception:  # noqa: BLE001
+        return []
+    # Symbols referenced by the edited sides — the merged result must remain
+    # consistent with these. We union both sides so a symbol only one side
+    # introduced is still resolved.
+    edited = f"{unit.current.text}\n{unit.replayed.text}"
+    try:
+        names = structural.referenced_symbols(edited, lang)
+    except Exception:  # noqa: BLE001
+        return []
+    if not names:
+        return []
+    # Exclude the enclosing node's own name (it is already primary_text) and
+    # filter to non-trivial identifiers. The enclosing signature looks like
+    # "def greet():" / "fn foo() -> Bar" — take the bare name after the keyword.
+    own_name = _enclosing_name(unit)
+    keep = [n for n in names if n != own_name]
+    if not keep:
+        return []
+    # Resolve the search globs relative to the repo root when known, so the
+    # slicer sees the same files regardless of the process cwd.
+    import os as _os
+
+    globs = builder.slice_search_globs
+    if builder.slice_repo_root:
+        globs = [
+            g if _os.path.isabs(g) else _os.path.join(builder.slice_repo_root, g)
+            for g in globs
+        ]
+    try:
+        snippets = structural.find_symbol_definitions(keep, globs, lang, max_per=1)
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    total = 0
+    for snip in snippets:
+        if len(out) >= builder.max_related_snippets:
+            break
+        text = snip.text or ""
+        if len(text) > builder.max_snippet_chars:
+            text = text[: builder.max_snippet_chars].rstrip() + " …"
+        total += len(text)
+        # Hard cap so dependency context can't dominate the prompt.
+        if total > builder.max_snippet_chars * builder.max_related_snippets:
+            break
+        out.append(snip.model_copy(update={"text": text}))
+    return out
+
+
+def _enclosing_name(unit: ConflictUnit) -> str | None:
+    """The bare name of the enclosing definition (e.g. ``greet`` from ``def greet():``).
+
+    Used to avoid re-slicing the very block already shown as ``primary_text``.
+    """
+    sig = unit.structural_metadata.get("enclosing_node_signature") or unit.enclosing_symbol
+    if not sig:
+        return None
+    s = sig.strip()
+    # Strip a leading keyword (def/class/async def/fn/struct/enum/trait/mod/...).
+    for kw in ("async def", "def", "class", "fn", "struct", "enum", "trait", "mod"):
+        if s.startswith(kw + " "):
+            s = s[len(kw) + 1 :]
+            break
+    # Take the token up to the first separator.
+    name = ""
+    for ch in s:
+        if ch.isalnum() or ch == "_":
+            name += ch
+        else:
+            break
+    return name or None
 
 
 def _clamp_low(lo: int, block_start: int, siblings: list[tuple[int, int]]) -> int:
