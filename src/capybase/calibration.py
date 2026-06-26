@@ -46,6 +46,8 @@ _FEATURE_KEYS: tuple[str, ...] = (
     "dropped_a_side",
     "dropped_current_additions",
     "dropped_replayed_additions",
+    "dropped_referenced_symbol",
+    "dropped_symbol_count",
     "model_needs_human",
     "syntax_passed",
     "ast_preserved",

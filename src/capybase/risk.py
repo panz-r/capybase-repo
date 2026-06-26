@@ -117,6 +117,16 @@ class RiskEngine:
                 reasons=soft or ["dropped a side's additions"],
                 required_followups=soft,
             )
+        # Dropping a base-referenced dependency (survey §2.2 SafeMerge necessary
+        # condition): the merge silently removed a symbol base + both sides kept
+        # — a semantic regression the syntactic checks miss. Retry so the model
+        # re-includes it; escalate if it persists.
+        if "referenced_symbol_dropped" in warning_names and retry_count < self.max_retries_per_unit:
+            return RiskDecision(
+                action="retry",
+                reasons=soft or ["dropped a base-referenced dependency"],
+                required_followups=soft,
+            )
 
         # Passed with no hard signals: accept — unless consensus shows no
         # reliable majority. Two complementary signals for small N:

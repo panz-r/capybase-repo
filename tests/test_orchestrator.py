@@ -388,8 +388,11 @@ def test_run_escalates_when_whole_file_invalid(multi_unit_conflicted_repo):
     # The ``return 1`` candidate deliberately drops both sides' content — it's
     # not a real merge. This test is about Phase B (whole-file juxtaposition),
     # so relax the Phase A both-sides-represented check so the candidate passes
-    # Phase A and actually reaches Phase B (the behavior under test).
+    # Phase A and actually reaches Phase B (the behavior under test). The
+    # dependency-preservation check (P3) is likewise relaxed: it would flag the
+    # same dropped-content pattern and reroute to a retry before Phase B.
     cfg.validation.reject_if_drops_a_side = False
+    cfg.validation.reject_if_drops_referenced_symbol = False
     engine = ResolutionEngine(cfg.model, client=FakeClient([bad, bad]))
     orch = Orchestrator(
         cfg, repo=str(repo), resolution_engine=engine,

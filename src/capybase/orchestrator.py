@@ -269,6 +269,25 @@ class Orchestrator:
                     json_mode=config.model.json_mode,
                 )
             )
+        # Dependency-preservation validator (survey §2.2 SafeMerge necessary
+        # condition): warns when a merge drops a base-referenced symbol that has
+        # an in-repo definition and neither side removed. Registered only when
+        # BOTH [structural] cross_file_slice (the slicer it depends on) AND
+        # [validation] reject_if_drops_referenced_symbol are on — it needs the
+        # search globs + repo root to resolve definitions. Inert otherwise, and
+        # a no-op (can't flag what it can't locate) when no defs are found.
+        if (
+            config.structural.cross_file_slice
+            and config.validation.reject_if_drops_referenced_symbol
+        ):
+            from capybase.verification import DependencyPreservationValidator
+
+            self.verification.register(
+                DependencyPreservationValidator(
+                    slice_search_globs=config.structural.slice_search_globs,
+                    slice_repo_root=str(self.git.repo),
+                )
+            )
         # VeriGuard-style deterministic policy gate (survey §4): auto-registered
         # by VerificationEngine.default() when enable_policy_gate is on AND rules
         # are configured. It inspects WHAT a patch introduces (the only such

@@ -150,6 +150,14 @@ class ValidationConfig(BaseModel):
     # candidate that drops a side's additions entirely — a tweaked-but-still-
     # one-sided merge the copy heuristic misses. Advisory warning.
     reject_if_drops_a_side: bool = True
+    # Dependency preservation (survey §2.2 SafeMerge necessary condition): warn
+    # when a merge drops a base-referenced symbol that has an in-repo definition
+    # and neither side removed. Companion to both-sides-represented — that
+    # guards a side's additions; this guards a shared base dependency (e.g. a
+    # validate() call the model silently removed). Advisory warning. Only active
+    # when [structural] cross_file_slice is on (the validator needs the slicer);
+    # inert otherwise.
+    reject_if_drops_referenced_symbol: bool = True
     reject_if_model_needs_human: bool = True
     # Phase B: validate the fully-spliced file (with *all* units resolved)
     # after per-unit validation passes. This catches cross-unit errors that

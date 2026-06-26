@@ -73,6 +73,13 @@ class ValidationConfig:
     # reject_if_copies_one_side — that catches verbatim copies; this catches
     # tweaked-but-still-one-sided merges. Advisory warning (feeds risk/retry).
     reject_if_drops_a_side: bool = True
+    # Dependency preservation (survey §2.2 SafeMerge necessary condition): warn
+    # when a merge drops a base-referenced symbol that has an in-repo definition
+    # and neither side removed. Companion to both-sides-represented — that
+    # guards a side's additions; this guards a shared base dependency. Advisory
+    # warning. Only active when the orchestrator registers the validator with
+    # slice config; inert otherwise (the table gate is a second safety).
+    reject_if_drops_referenced_symbol: bool = True
     reject_if_model_needs_human: bool = True
     require_whole_file_validation: bool = True
     require_ast_preservation: bool = True
@@ -286,6 +293,144 @@ class BothSidesRepresentedValidator:
                 "dropped_replayed_additions": rep_missing,
             },
         )
+
+
+class DependencyPreservationValidator:
+    """SafeMerge necessary-condition: don't drop a base dependency (survey §2.2).
+
+    The verification-time complement to the prompt-time dependency context (P1).
+    Both-sides-represented ensures a side's *additions* survive, but neither it
+    nor any validator catches the Rover/WizardMerge failure mode where the merge
+    silently removes a dependency that BASE and both sides relied on — e.g. the
+    model drops a ``validate(input)`` call, a safety check, or a resource release
+    that base + both edited sides all kept. That is a semantic regression the
+    syntactic validators are structurally blind to.
+
+    SafeMerge's full condition (build a 4-program product relation and prove
+    conflict-freedom for every input/output) is out of scope, but there is a
+    cheap deterministic *necessary* condition: if BASE references a symbol that
+    has an in-repo definition, and NEITHER side removed it, then a valid merge
+    must still reference it. Dropping it can't be justified by either branch's
+    change, so the merge is suspect.
+
+    Severity ``warning`` — a necessary-not-sufficient signal, so it feeds the
+    risk/retry engine rather than hard-rejecting (a symbol name can legitimately
+    appear in the resolution under a different spelling the heuristic misses).
+    Inert by default: it only runs when the orchestrator registers it with slice
+    config (search globs + repo root). When no in-repo definitions are found it
+    records no warning — it can't flag a drop it never located.
+    """
+
+    name = "referenced_symbol_dropped"
+
+    def __init__(
+        self,
+        slice_search_globs: list[str] | None = None,
+        slice_repo_root: str | None = None,
+        max_symbols: int = 12,
+    ) -> None:
+        self.slice_search_globs = slice_search_globs or ["**/*.py", "**/*.rs"]
+        self.slice_repo_root = slice_repo_root
+        self.max_symbols = max_symbols
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        lang = ctx.unit.language
+        if lang not in ("python", "rust"):
+            return self._pass("dependency check skipped (unsupported language)")
+        try:
+            from capybase.adapters import structural
+        except Exception:  # noqa: BLE001
+            return self._pass("dependency check skipped (structural adapter absent)")
+
+        base_text = ctx.unit.base.text or ""
+        cur_text = ctx.unit.current.text or ""
+        rep_text = ctx.unit.replayed.text or ""
+        merged_text = ctx.candidate.resolved_text or ""
+
+        base_refs = set(_referenced_symbols(base_text, lang))
+        if not base_refs:
+            return self._pass("base references no symbols")
+
+        # Only symbols that have an IN-REPO definition can be meaningfully
+        # flagged — a stdlib/builtin drop is undetectable without resolution,
+        # and flagging it would be pure false positive. So resolve base refs to
+        # those with a definition, capped to keep the check cheap.
+        globs = self._abs_globs()
+        try:
+            snippets = structural.find_symbol_definitions(
+                list(base_refs)[: self.max_symbols], globs, lang, max_per=1
+            )
+        except Exception:  # noqa: BLE001
+            return self._pass("dependency check skipped (slice failed)")
+        defined = {s.reason for s in snippets}
+        if not defined:
+            # No base dependency has a resolvable definition — can't flag a drop.
+            return self._pass("no in-repo dependency definitions found")
+
+        merged_tokens = set(_referenced_symbols(merged_text, lang))
+        # A symbol is "dropped" if: base referenced it, it has an in-repo
+        # definition, NEITHER side removed it (so the drop isn't a branch's
+        # intent), and the merge no longer references it.
+        cur_tokens = set(_referenced_symbols(cur_text, lang))
+        rep_tokens = set(_referenced_symbols(rep_text, lang))
+        kept_by_both = base_refs & cur_tokens & rep_tokens
+        dropped: list[str] = []
+        for sym in sorted(defined):
+            if sym in kept_by_both and sym not in merged_tokens:
+                dropped.append(sym)
+
+        if not dropped:
+            return self._pass("all in-repo base dependencies preserved")
+        return VerificationCheckResult(
+            name=self.name,
+            passed=False,
+            severity="warning",
+            message=(
+                f"resolved text drops base-referenced symbol(s) neither side "
+                f"removed: {', '.join(dropped)}"
+            ),
+            detail={"dropped_symbols": dropped},
+            features={
+                "dropped_referenced_symbol": True,
+                "dropped_symbol_count": len(dropped),
+            },
+        )
+
+    def _pass(self, msg: str) -> VerificationCheckResult:
+        return VerificationCheckResult(
+            name=self.name,
+            passed=True,
+            severity="warning",
+            message=msg,
+            features={
+                "dropped_referenced_symbol": False,
+                "dropped_symbol_count": 0,
+            },
+        )
+
+    def _abs_globs(self) -> list[str]:
+        import os
+
+        if not self.slice_repo_root:
+            return self.slice_search_globs
+        return [
+            g if os.path.isabs(g) else os.path.join(self.slice_repo_root, g)
+            for g in self.slice_search_globs
+        ]
+
+
+def _referenced_symbols(text: str, language: str) -> list[str]:
+    """Identifier extraction shared with the structural adapter.
+
+    Delegates to ``structural.referenced_symbols`` so the validator and the
+    context-builder slicer agree on what counts as a "reference". Imported
+    lazily; returns an empty list if the adapter is unavailable.
+    """
+    try:
+        from capybase.adapters import structural
+    except Exception:  # noqa: BLE001
+        return []
+    return structural.referenced_symbols(text, language)
 
 
 class NeedsHumanValidator:
@@ -1327,6 +1472,7 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
         "ast_preservation": cfg.require_ast_preservation,
         "preservation_heuristic": cfg.reject_if_copies_one_side,
         "both_sides_represented": cfg.reject_if_drops_a_side,
+        "referenced_symbol_dropped": cfg.reject_if_drops_referenced_symbol,
         "needs_human": cfg.reject_if_model_needs_human,
         "syntax": cfg.require_syntax_if_supported,
         "verifier_model": cfg.enable_verifier_model,
