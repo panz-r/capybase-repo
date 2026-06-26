@@ -361,6 +361,13 @@ class RoutingConfig(BaseModel):
     max_simple_node_lines: int = 40
     # Combined base+current+replayed side text longer than this (chars) → complex.
     max_simple_side_chars: int = 1200
+    # Minimum conflict balance for SBCR to ACCEPT outright (survey §4.2). Balance
+    # = min/max of the two sides' non-blank line counts (1.0 = equal, →0 =
+    # heavily imbalanced). SBCR wins on balanced conflicts and loses to the LLM
+    # on imbalanced ones, so below this threshold an SBCR result is NOT
+    # short-circuited — the LLM runs instead. 0.0 = always accept SBCR when it
+    # resolves (the conservative default: don't change behavior unless tuned).
+    min_balance_for_sbcr_accept: float = 0.0
 
 
 class Config(BaseModel):

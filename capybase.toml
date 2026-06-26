@@ -207,6 +207,19 @@ entropy_escalate_threshold = 0.8
 # --conformal; the p-value threshold guarantees this coverage of accepted merges.
 conformal_alpha = 0.1
 
+# Difficulty-aware routing (survey §6.1) + balance-aware SBCR/LLM routing
+# (survey §4.2). All opt-in; defaults keep behavior unchanged.
+[routing]
+enabled = false
+complex_if_sibling_count_gt = 0   # >0 sibling hunks → "complex" (full pipeline)
+max_simple_node_lines = 40        # enclosing AST node larger → complex
+max_simple_side_chars = 1200      # combined side text longer → complex
+# SBCR wins on balanced conflicts, loses to the LLM on imbalanced ones (§4.2).
+# balance = min/max of the two sides' non-blank line counts (1.0=equal). Below
+# this threshold an SBCR result is NOT short-circuited — the LLM runs instead.
+# 0.0 = always accept SBCR when it resolves (the conservative default).
+min_balance_for_sbcr_accept = 0.0
+
 # [future] documents planned seams — most are parsed, some are now wired.
 [future]
 enable_self_consistency = false   # raise [model] samples + set true for majority voting

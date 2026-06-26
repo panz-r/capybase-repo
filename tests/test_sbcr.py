@@ -27,6 +27,7 @@ from capybase.sbcr import (
     CombinationResolution,
     _interleaving_count,
     _interleavings,
+    balance,
     fitness,
     resolve_by_combination_search,
 )
@@ -69,6 +70,38 @@ def test_fitness_is_symmetric_in_parents():
 
 def test_fitness_empty_equal_parents_is_one():
     assert fitness([], [], []) == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Balance: the §4.2 routing signal (SBCR wins balanced, LLM wins imbalanced)
+# ---------------------------------------------------------------------------
+
+
+def test_balance_perfectly_balanced():
+    # Equal non-blank line counts on both sides → 1.0.
+    assert balance(_unit("a\nb", "c\nd", base="")) == 1.0
+    assert balance(_unit("x", "y", base="")) == 1.0
+
+
+def test_balance_heavily_imbalanced():
+    # 1 line vs 8 lines → 1/8 = 0.125.
+    assert balance(_unit("x", "a\nb\nc\nd\ne\nf\ng\nh", base="")) == pytest.approx(0.125)
+
+
+def test_balance_moderate():
+    # 2 vs 5 → 0.4.
+    assert balance(_unit("a\nb", "c\nd\ne\nf\ng", base="")) == pytest.approx(0.4)
+
+
+def test_balance_ignores_blank_lines():
+    # Blank lines don't count toward size, so balance is over content lines.
+    assert balance(_unit("a\n\n", "b\n", base="")) == 1.0  # 1 content line each
+
+
+def test_balance_zero_when_one_side_empty():
+    # Degenerate: SBCR declines on empty sides anyway; balance is 0.0.
+    assert balance(_unit("a", "", base="")) == 0.0
+    assert balance(_unit("", "a", base="")) == 0.0
 
 
 # ---------------------------------------------------------------------------

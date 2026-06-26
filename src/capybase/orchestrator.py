@@ -507,10 +507,35 @@ class Orchestrator:
         Net effect: resolves both-sides-add / restructure conflicts with no LLM
         call when the combination is sound; never applies an invalid merge.
         """
-        from capybase.sbcr import resolve_by_combination_search
+        from capybase.sbcr import balance, resolve_by_combination_search
 
         result = resolve_by_combination_search(unit)
         if not result.resolved or result.text is None:
+            return None
+        # Balance-aware routing (survey §4.2): SBCR wins on BALANCED conflicts
+        # and loses to the LLM on imbalanced ones (one side changed far more).
+        # When routing is on and the conflict is more imbalanced than the
+        # configured threshold, do NOT short-circuit — decline so the LLM runs,
+        # which is the stronger engine there. Conservative default (0.0) keeps
+        # SBCR accepting whenever it resolves; this only diverts imbalanced
+        # conflicts when explicitly tuned.
+        bal = balance(unit)
+        threshold = self.config.routing.min_balance_for_sbcr_accept
+        if self.config.routing.enabled and bal < threshold:
+            self.journal.emit(
+                "combination_resolved",
+                {
+                    "candidate_id": f"{unit.unit_id}:sbcr",
+                    "fitness": round(result.fitness, 4),
+                    "balance": round(bal, 4),
+                    "passed": False,
+                    "deferred_to_llm": True,
+                    "reason": f"balance {bal:.2f} < threshold {threshold:.2f}",
+                },
+                step_index=self.step,
+                path=unit.path,
+                unit_id=unit.unit_id,
+            )
             return None
         cand = CandidateResolution(
             candidate_id=f"{unit.unit_id}:sbcr",
@@ -519,7 +544,8 @@ class Orchestrator:
             prompt_version="sbcr.combination",
             resolved_text=result.text,
             explanation=(
-                f"search-based combination resolution (fitness={result.fitness:.3f})"
+                f"search-based combination resolution "
+                f"(fitness={result.fitness:.3f}, balance={bal:.2f})"
             ),
         )
         validation = self.verification.verify(unit, cand)
@@ -528,6 +554,7 @@ class Orchestrator:
             {
                 "candidate_id": cand.candidate_id,
                 "fitness": round(result.fitness, 4),
+                "balance": round(bal, 4),
                 "passed": validation.passed,
             },
             step_index=self.step,

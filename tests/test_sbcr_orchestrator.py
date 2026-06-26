@@ -173,3 +173,65 @@ def test_contradictory_conflict_declined_falls_to_model(repo: Path):
     # absence (or any non-"sbcr" value) confirms SBCR didn't accept this one.
     via = accepted[-1].payload.get("via")
     assert via != "sbcr"
+
+
+# ---------------------------------------------------------------------------
+# Balance-aware routing (survey §4.2): SBCR wins balanced, LLM wins imbalanced
+#
+# Two mechanisms encode the survey's finding:
+# 1. SBCR's similarity floor already self-declines on heavily-imbalanced conflicts
+#    (the union's mean-similarity-to-both-parents can't clear 0.6 when one side
+#    dwarfs the other). See test_sbcr.py for that floor behavior.
+# 2. The explicit balance gate here: when routing is ON and balance < threshold,
+#    SBCR declines to short-circuit even if it WOULD resolve, deferring to the
+#    LLM. This makes the imbalance signal explicit + tunable rather than relying
+#    on the floor's incidental behavior near the boundary.
+# ---------------------------------------------------------------------------
+
+
+def test_balanced_conflict_diverts_to_llm_when_threshold_high(repo: Path):
+    """With routing ON and a threshold above a BALANCED conflict's fitness-clears
+    region, SBCR resolves but does NOT short-circuit — the LLM runs. This proves
+    the balance gate can divert even conflicts SBCR would otherwise accept."""
+    _make_both_add_imports(repo)  # balanced 1+1 addition; SBCR clears the floor
+    # A valid merge the LLM would produce (carries both sides' additions).
+    payload = json.dumps({
+        "resolved_text": "import sys\nimport json",
+        "self_reported_confidence": 0.8,
+    })
+    client = CallCountingClient(payload)
+    cfg = _config(repo)
+    cfg.routing.enabled = True
+    # balance of a 1+1 conflict is 1.0; set threshold above it to force diversion.
+    cfg.routing.min_balance_for_sbcr_accept = 1.5
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    assert not result.escalated, result.reason
+    # The LLM WAS called — SBCR declined to short-circuit (threshold diversion).
+    assert client.calls > 0, "expected LLM call when balance < threshold"
+    # Journal records SBCR deferred (not accepted).
+    sbcr_events = [e for e in orch.journal.read_events()
+                   if e.event_type == "combination_resolved"]
+    assert sbcr_events and sbcr_events[0].payload.get("deferred_to_llm") is True
+
+
+def test_balanced_conflict_uses_sbcr_when_routing_off(repo: Path):
+    """The conservative default: with routing OFF, SBCR accepts a balanced
+    conflict whenever it resolves — exactly as before. The balance gate is
+    opt-in; it never changes behavior unless enabled."""
+    _make_both_add_imports(repo)
+    client = CallCountingClient()
+    cfg = _config(repo)
+    # routing.enabled stays False (default) → balance check is skipped.
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    assert not result.escalated, result.reason
+    # SBCR handled it — no LLM call.
+    assert client.calls == 0
+    accepted = [e for e in orch.journal.read_events()
+                if e.event_type == "candidate_accepted"]
+    assert accepted and accepted[-1].payload["via"] == "sbcr"

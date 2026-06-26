@@ -96,6 +96,32 @@ def _effective_base(unit: ConflictUnit) -> str:
     return unit.base.text or ""
 
 
+def _nonblank_lines(text: str) -> int:
+    """Count of non-blank lines — the size signal for the balance metric."""
+    return sum(1 for line in (text or "").splitlines() if line.strip())
+
+
+def balance(unit: ConflictUnit) -> float:
+    """How balanced the two conflict sides are, in ``[0, 1]``.
+
+    Defined as ``min(cur, rep) / max(cur, rep)`` over non-blank line counts.
+    1.0 = perfectly balanced (both sides the same size); →0 = heavily imbalanced
+    (one side much larger). Survey §4.2: SBCR (combination search) WINS on
+    balanced conflicts and LOSES to the LLM on imbalanced ones — the LLM is
+    better when one side changed far more than the other. So the orchestrator
+    uses this to decide whether an SBCR result is accepted outright (balanced)
+    or treated as advisory while the LLM runs (imbalanced).
+
+    Pure function of the unit's current/replayed side texts; no I/O. Returns 0.0
+    if either side is empty (those are degenerate — SBCR declines anyway).
+    """
+    cur = _nonblank_lines(unit.current.text or "")
+    rep = _nonblank_lines(unit.replayed.text or "")
+    if cur == 0 or rep == 0:
+        return 0.0
+    return min(cur, rep) / max(cur, rep)
+
+
 # ---------------------------------------------------------------------------
 # Fitness: mean textual similarity to both parents (survey §4.1)
 # ---------------------------------------------------------------------------
