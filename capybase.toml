@@ -81,6 +81,9 @@ require_no_markers = true
 require_exact_splice_scope = true
 require_syntax_if_supported = true
 reject_if_copies_one_side = true
+# Both-sides-represented (survey §5.1): flag a candidate that drops a side's
+# additions entirely (a tweaked-but-one-sided merge the copy heuristic misses).
+reject_if_drops_a_side = true
 reject_if_model_needs_human = true
 require_whole_file_validation = true
 require_ast_preservation = true

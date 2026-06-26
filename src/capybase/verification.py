@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import subprocess
 import tempfile
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 import ast
@@ -67,6 +68,11 @@ class ValidationConfig:
     require_exact_splice_scope: bool = True
     require_syntax_if_supported: bool = True
     reject_if_copies_one_side: bool = True
+    # Both-sides-represented (survey §5.1 cheap necessary condition): flag a
+    # candidate that drops a side's additions entirely. Companion to
+    # reject_if_copies_one_side — that catches verbatim copies; this catches
+    # tweaked-but-still-one-sided merges. Advisory warning (feeds risk/retry).
+    reject_if_drops_a_side: bool = True
     reject_if_model_needs_human: bool = True
     require_whole_file_validation: bool = True
     require_ast_preservation: bool = True
@@ -198,6 +204,86 @@ class PreservationHeuristicValidator:
                 "copied_one_side": copied_one,
                 "copied_current_side": copied_current,
                 "copied_replayed_side": copied_replayed,
+            },
+        )
+
+
+class BothSidesRepresentedValidator:
+    """Cheap necessary condition for semantic conflict-freedom (survey §5.1).
+
+    The expensive formulation (SafeMerge) treats merge as a 4-program relation:
+    a candidate M is semantically conflict-free only if, wherever a side diverged
+    from base, M carries that side's change. Building the product program to
+    *prove* that is out of scope, but there is a cheap *necessary* condition
+    capybase can check deterministically: a valid combination must contain at
+    least one distinctive line from EACH side that added content. A merge that
+    silently drops a side's additions violates §5.1 by construction.
+
+    This complements :class:`PreservationHeuristicValidator`, which only catches
+    *verbatim* copies. A candidate can tweak one side (so it no longer matches
+    that side verbatim) while still omitting the other side's additions entirely
+    — the copy heuristic misses that, but this check flags it.
+
+    Pure token-set logic (no I/O, no parser). A side that only DELETED base
+    content (no additions) imposes no requirement here, so pure-deletion sides
+    don't trip false positives. Severity ``warning`` (bias toward retry, like the
+    copy heuristic) — it's a necessary-not-sufficient signal, so it feeds the
+    risk/retry engine rather than hard-rejecting.
+    """
+
+    name = "both_sides_represented"
+
+    @staticmethod
+    def _token_set(text: str) -> set[str]:
+        """Word-tokens of a side, for distinctive-addition matching.
+
+        Matching at LINE granularity is too coarse for line-*modifications*: if
+        a side's addition is a modified version of an existing line (e.g.
+        appending an element to a list), the whole modified line is treated as
+        the "addition" and the merge's different-but-related line won't match
+        it. Token granularity recognizes that a merge carrying ``scheduler``
+        represents a side that changed the line to add ``scheduler``, even
+        though the surrounding punctuation/formatting differs.
+
+        ``\\w+`` (underscores included by default) extracts identifier-like
+        tokens, ignoring brackets/quotes/commas/operators — so the distinctive
+        *content* a side added (a new element, a new symbol) is what's matched,
+        not incidental formatting. Splitting on whitespace alone would keep
+        ``"scheduler"]`` as one token and miss the match against a merge that
+        wrote ``"scheduler",``.
+        """
+        return set(re.findall(r"\w+", text or ""))
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        base = self._token_set(ctx.unit.base.text)
+        cur = self._token_set(ctx.unit.current.text)
+        rep = self._token_set(ctx.unit.replayed.text)
+        merged = self._token_set(ctx.candidate.resolved_text)
+        # Distinctive additions: tokens a side added that weren't in base.
+        cur_added = cur - base
+        rep_added = rep - base
+        # A side is "represented" if either it added nothing (pure deletion — no
+        # requirement) or the merge carries at least one of its added tokens.
+        cur_missing = bool(cur_added) and not (cur_added & merged)
+        rep_missing = bool(rep_added) and not (rep_added & merged)
+        dropped = cur_missing or rep_missing
+        return VerificationCheckResult(
+            name=self.name,
+            passed=not dropped,
+            severity="warning",
+            message=(
+                "resolved text drops a side's additions"
+                if dropped
+                else "resolved text represents both sides' additions"
+            ),
+            detail={
+                "current_additions_dropped": cur_missing,
+                "replayed_additions_dropped": rep_missing,
+            },
+            features={
+                "dropped_a_side": dropped,
+                "dropped_current_additions": cur_missing,
+                "dropped_replayed_additions": rep_missing,
             },
         )
 
@@ -930,6 +1016,7 @@ class VerificationEngine:
             ExactSpliceScopeValidator(),
             AstPreservationValidator(),
             PreservationHeuristicValidator(),
+            BothSidesRepresentedValidator(),
             NeedsHumanValidator(),
         ]
         # Extra validators (e.g. the opt-in VerifierModelValidator) are appended
@@ -1226,6 +1313,7 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
         "exact_splice_scope": cfg.require_exact_splice_scope,
         "ast_preservation": cfg.require_ast_preservation,
         "preservation_heuristic": cfg.reject_if_copies_one_side,
+        "both_sides_represented": cfg.reject_if_drops_a_side,
         "needs_human": cfg.reject_if_model_needs_human,
         "syntax": cfg.require_syntax_if_supported,
         "verifier_model": cfg.enable_verifier_model,

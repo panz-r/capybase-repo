@@ -94,11 +94,27 @@ class RiskEngine:
 
         # --- soft signals (warnings) ---
         soft: list[str] = [f"{w.validator}: {w.message}" for w in result.warnings]
+        # Check the WARNING list (not raw features) for these soft-retry signals:
+        # features are always recorded, but a warning only exists when the
+        # validator is enabled (gated by config). So gating a validator off also
+        # disables its retry behavior — turning off reject_if_drops_a_side means
+        # the risk engine won't retry on it either.
+        warning_names = {w.validator for w in result.warnings}
         # Copying one side verbatim is a warning; treat as retryable then escalate.
-        if feats.get("copied_one_side") and retry_count < self.max_retries_per_unit:
+        if "preservation_heuristic" in warning_names and retry_count < self.max_retries_per_unit:
             return RiskDecision(
                 action="retry",
                 reasons=soft or ["copied one side verbatim"],
+                required_followups=soft,
+            )
+        # Dropping a side's additions (survey §5.1 violation) is the same class
+        # of "didn't actually merge" signal as copying one side — the candidate
+        # silently lost a branch's change. Retry so the model gets another chance
+        # to represent both sides; escalate if it keeps happening.
+        if "both_sides_represented" in warning_names and retry_count < self.max_retries_per_unit:
+            return RiskDecision(
+                action="retry",
+                reasons=soft or ["dropped a side's additions"],
                 required_followups=soft,
             )
 

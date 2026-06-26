@@ -236,8 +236,10 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
     # The multi-unit file has two DISTINCT hunks needing different resolutions;
     # a single canned payload can't satisfy both. This test measures the SAMPLE
     # COUNT (the allocation lever), not merge validity, so skip whole-file
-    # syntax validation.
+    # syntax validation and the both-sides-represented warning (the canned
+    # payload is deliberately not a real two-sided merge).
     cfg.validation.require_whole_file_validation = False
+    cfg.validation.reject_if_drops_a_side = False
     engine = ResolutionEngine(cfg.model, client=client)
     orch = Orchestrator(
         cfg, repo=str(repo), resolution_engine=engine,

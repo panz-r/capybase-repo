@@ -64,6 +64,70 @@ def test_flags_copying_one_side():
     assert any(w.validator == "preservation_heuristic" for w in res.warnings)
 
 
+# ---------------------------------------------------------------------------
+# Both-sides-represented (survey §5.1 cheap necessary condition)
+# ---------------------------------------------------------------------------
+
+
+def test_flags_drop_replayed_but_tweaked():
+    """The gap the copy heuristic misses: candidate tweaks current so it no
+    longer matches verbatim, but still drops replayed's additions entirely.
+    §5.1 says a valid merge must carry each side's change where it diverged."""
+    worktree = "x\n<<<<<<< H\ncur1\ncur2\n=======\nrep1\nrep2\n>>>>>>> b\n"
+    unit = _unit("x", "cur1\ncur2", "rep1\nrep2", worktree)
+    cand = _candidate("cur1\ncur2X")  # tweaked current, replayed additions dropped
+    res = _engine().verify(unit, cand)
+    # both_sides_represented flags it (warning level); copy heuristic does NOT
+    # (it's not a verbatim copy anymore).
+    assert any(w.validator == "both_sides_represented" for w in res.warnings)
+    assert not any(w.validator == "preservation_heuristic" for w in res.warnings)
+    assert res.features["dropped_a_side"] is True
+    assert res.features["dropped_replayed_additions"] is True
+    assert res.features["dropped_current_additions"] is False
+
+
+def test_both_sides_present_passes():
+    worktree = "x\n<<<<<<< H\ncur\n=======\nrep\n>>>>>>> b\n"
+    unit = _unit("x", "cur", "rep", worktree)
+    cand = _candidate("cur\nrep")  # union — both sides represented
+    res = _engine().verify(unit, cand)
+    assert not any(w.validator == "both_sides_represented" for w in res.warnings)
+    assert res.features["dropped_a_side"] is False
+
+
+def test_pure_deletion_side_no_false_positive():
+    """A side that only DELETED base content (no additions) imposes no
+    requirement — representing "nothing new" is trivially satisfied."""
+    worktree = "keep\ndrop\n<<<<<<< H\nkeep\n=======\nkeep\nextra\n>>>>>>> b\n"
+    # current side deleted 'drop' (pure deletion, no additions); replayed added
+    # 'extra'. A merge carrying 'extra' must pass — current had nothing to add.
+    unit = _unit("keep\ndrop", "keep", "keep\nextra", worktree)
+    cand = _candidate("keep\nextra")
+    res = _engine().verify(unit, cand)
+    assert not any(w.validator == "both_sides_represented" for w in res.warnings)
+    assert res.features["dropped_a_side"] is False
+
+
+def test_both_sides_deletion_only_passes():
+    # Both sides only removed content (no additions on either) → no requirement.
+    worktree = "a\nb\nc\n<<<<<<< H\na\nc\n=======\na\nc\n>>>>>>> b\n"
+    unit = _unit("a\nb\nc", "a\nc", "a\nc", worktree)
+    cand = _candidate("a\nc")
+    res = _engine().verify(unit, cand)
+    assert not any(w.validator == "both_sides_represented" for w in res.warnings)
+
+
+def test_both_sides_represented_disabled_via_config():
+    # With the gate off, the warning is suppressed (gated by _enabled_for).
+    worktree = "x\n<<<<<<< H\ncur\n=======\nrep\n>>>>>>> b\n"
+    unit = _unit("x", "cur", "rep", worktree)
+    cand = _candidate("cur")  # drops replayed
+    cfg = ValidationConfig(reject_if_drops_a_side=False)
+    res = VerificationEngine.default(cfg).verify(unit, cand)
+    assert not any(w.validator == "both_sides_represented" for w in res.warnings)
+
+
+
 def test_exact_splice_scope_rejects_outside_edits():
     worktree = "l1\nl2\n<<<<<<< H\na\n=======\nb\n>>>>>>> b\nl5\nl6\n"
     unit = _unit("x", "a", "b", worktree, span=(2, 6))

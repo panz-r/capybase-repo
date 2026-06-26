@@ -146,6 +146,10 @@ class ValidationConfig(BaseModel):
     require_exact_splice_scope: bool = True
     require_syntax_if_supported: bool = True
     reject_if_copies_one_side: bool = True
+    # Both-sides-represented (survey §5.1 cheap necessary condition): flag a
+    # candidate that drops a side's additions entirely — a tweaked-but-still-
+    # one-sided merge the copy heuristic misses. Advisory warning.
+    reject_if_drops_a_side: bool = True
     reject_if_model_needs_human: bool = True
     # Phase B: validate the fully-spliced file (with *all* units resolved)
     # after per-unit validation passes. This catches cross-unit errors that

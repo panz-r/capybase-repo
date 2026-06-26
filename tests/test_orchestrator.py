@@ -384,9 +384,15 @@ def test_run_escalates_when_whole_file_invalid(multi_unit_conflicted_repo):
     # Both hunks resolve to a bare ``return`` at module level: valid alone in
     # the per-unit context but a SyntaxError when juxtaposed at module scope.
     bad = _make_resolved_payload("return 1")
-    engine = ResolutionEngine(_config(repo).model, client=FakeClient([bad, bad]))
+    cfg = _config(repo)
+    # The ``return 1`` candidate deliberately drops both sides' content — it's
+    # not a real merge. This test is about Phase B (whole-file juxtaposition),
+    # so relax the Phase A both-sides-represented check so the candidate passes
+    # Phase A and actually reaches Phase B (the behavior under test).
+    cfg.validation.reject_if_drops_a_side = False
+    engine = ResolutionEngine(cfg.model, client=FakeClient([bad, bad]))
     orch = Orchestrator(
-        _config(repo), repo=str(repo), resolution_engine=engine,
+        cfg, repo=str(repo), resolution_engine=engine,
         out=lambda *_a, **_k: None,
     )
     result = orch.run()

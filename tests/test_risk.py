@@ -56,6 +56,20 @@ def test_copied_one_side_retries():
     assert eng.decide(res, retry_count=0).action == "retry"
 
 
+def test_dropped_a_side_retries():
+    """Survey §5.1: silently dropping a side's additions is the same class of
+    'didn't actually merge' signal as copying one side → retry, not accept.
+    (Like copied_one_side, this is a soft signal: it retries while budget
+    remains; once exhausted the merge is accepted-with-warning, matching the
+    existing copied_one_side semantics.)"""
+    eng = RiskEngine(max_retries_per_unit=2)
+    res = _result(
+        True, {"dropped_a_side": True},
+        warnings=[VerificationWarning(validator="both_sides_represented", message="dropped")],
+    )
+    assert eng.decide(res, retry_count=0).action == "retry"
+
+
 # --- failure_kind: retry technical failures, escalate genuine refusals ---
 
 
