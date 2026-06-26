@@ -185,15 +185,23 @@ class ConflictExtractor:
         # is absent or the language has no grammar — units keep unit_kind
         # "text_marker_block" and downstream code falls back to line windows.
         if self.structural_config and self.structural_config.enabled:
-            if self.structural_config.refine_with_diff3:
-                _refine_with_diff3(
-                    units,
-                    base_side.text,
-                    current_text,
-                    replayed_text,
-                    self.structural_config.diff_algorithm,
-                )
             _enrich_structural(units, worktree_text, base_text, self.structural_config)
+        # Diff3 marker refinement (survey §1.3/§1.4): recompute the tightest
+        # conflict boundaries via `git merge-file`. This is logically SEPARATE
+        # from tree-sitter AST enrichment above — it only rewrites the side/base
+        # texts recorded for resolution (advisory; splicing still uses worktree
+        # coordinates). It must run even when [structural] is disabled, because
+        # the accurate refined base is what scopes the SBCR combination search
+        # (a non-empty refined base = modification conflict; empty = addition).
+        # Gated by its own flag (default on) so it can be disabled for diagnostics.
+        if self.structural_config and self.structural_config.refine_with_diff3:
+            _refine_with_diff3(
+                units,
+                base_side.text,
+                current_text,
+                replayed_text,
+                self.structural_config.diff_algorithm,
+            )
         # Grade each unit's severity from pre-LLM signals (survey §3.3). Done
         # AFTER structural enrichment so the definition-touching signal is known.
         # Pure function; never fails (defaults to "medium" on any error).

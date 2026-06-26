@@ -216,3 +216,10 @@ enable_mutation_testing = false
 # line edits). Safe-by-construction + validated — a guess that fails validation
 # falls through to the model, so it only cuts LLM load, never a worse merge.
 enable_structural_resolver = true
+# Search-based combination resolution (survey §4.1 SBCR): AFTER the structural
+# resolver declines, search order-preserving interleavings of the two sides for
+# the best combination (mean similarity to both parents). Covers the ~98.6% of
+# combination resolutions that add no new lines. Pure/heuristic, so every
+# candidate is validated before acceptance; an invalid combination (e.g.
+# contradictory lines concatenated) is rejected and falls through to the model.
+enable_combination_search = true

@@ -231,6 +231,16 @@ class FutureConfig(BaseModel):
     # trivial conflicts, never produces a worse merge. Default ON (safe-by-
     # construction); flip off to force the model to handle every conflict.
     enable_structural_resolver: bool = True
+    # Search-based combination resolution (survey §4.1 SBCR): AFTER the
+    # structural resolver declines and BEFORE the LLM, search order-preserving
+    # interleavings of the two sides for the best combination (mean similarity
+    # to both parents). Covers the ~98.6% of combination resolutions that use no
+    # newly-invented lines. Pure/heuristic — so, like the structural resolver,
+    # every candidate is STILL validated (syntax/AST/splice) before acceptance;
+    # an invalid combination (e.g. contradictory lines concatenated) is rejected
+    # and falls through to the LLM. Default ON; only fires when the structural
+    # resolver declined, so the cheap provably-safe rules always run first.
+    enable_combination_search: bool = True
 
 
 class StructuralConfig(BaseModel):

@@ -492,6 +492,64 @@ class Orchestrator:
         )
         return outcome
 
+    def _try_combination_search(self, unit: ConflictUnit) -> UnitOutcome | None:
+        """Attempt a search-based combination resolution; accept only if it
+        passes the full validation pipeline. Survey §4.1 (SBCR).
+
+        Runs AFTER the structural resolver declines and BEFORE the LLM. SBCR is a
+        *candidate generator*, not a decider: it searches order-preserving
+        interleavings of the two sides for the one with maximal mean similarity
+        to both parents (the survey's fitness, correlation ~0.64 with developer
+        resolution quality). Its search space includes invalid combinations
+        (e.g. two contradictory lines concatenated), so — exactly like the
+        structural resolver — every candidate is validated (syntax/AST/splice)
+        before acceptance, and a rejected candidate falls through to the model.
+        Net effect: resolves both-sides-add / restructure conflicts with no LLM
+        call when the combination is sound; never applies an invalid merge.
+        """
+        from capybase.sbcr import resolve_by_combination_search
+
+        result = resolve_by_combination_search(unit)
+        if not result.resolved or result.text is None:
+            return None
+        cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:sbcr",
+            unit_id=unit.unit_id,
+            model_name="sbcr",
+            prompt_version="sbcr.combination",
+            resolved_text=result.text,
+            explanation=(
+                f"search-based combination resolution (fitness={result.fitness:.3f})"
+            ),
+        )
+        validation = self.verification.verify(unit, cand)
+        self.journal.emit(
+            "combination_resolved",
+            {
+                "candidate_id": cand.candidate_id,
+                "fitness": round(result.fitness, 4),
+                "passed": validation.passed,
+            },
+            step_index=self.step,
+            path=unit.path,
+            unit_id=unit.unit_id,
+        )
+        if not validation.passed:
+            # The combination guess failed validation (e.g. contradictory lines
+            # concatenated into invalid code). Discard and let the model handle
+            # it. This is why SBCR is safe despite a heuristic fitness function.
+            return None
+        outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+        outcome.accepted = cand
+        self.journal.emit(
+            "candidate_accepted",
+            {"candidate_id": cand.candidate_id, "via": "sbcr"},
+            step_index=self.step,
+            path=unit.path,
+            unit_id=unit.unit_id,
+        )
+        return outcome
+
     def _build_retriever(self, config: Config) -> object:
         """Construct the configured RAG retriever over ``self.memory_store``.
 
@@ -795,6 +853,17 @@ class Orchestrator:
             early = self._try_structural_resolve(unit)
             if early is not None:
                 return early  # accepted deterministically; LLM loop skipped entirely
+
+        # Search-based combination resolution (survey §4.1 SBCR): AFTER the
+        # structural resolver declines and BEFORE the LLM. Searches order-
+        # preserving interleavings for the best combination; the candidate is
+        # validated before acceptance, so an invalid combination falls through to
+        # the model. Only on a FRESH resolve. Gated by [future]
+        # enable_combination_search.
+        if failures is None and self.config.future.enable_combination_search:
+            early = self._try_combination_search(unit)
+            if early is not None:
+                return early  # accepted via combination search; LLM loop skipped
 
         while True:
             context = self.context_builder.build(unit)
