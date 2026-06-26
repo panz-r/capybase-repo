@@ -233,3 +233,54 @@ def test_probe_embeddings_reports_supported_when_working(monkeypatch):
     cfg = ModelConfig(base_url="http://x/v1", model="m")
     result = probe_embeddings(cfg)
     assert result.ok is True
+
+
+def test_probe_embeddings_uses_embeddings_model_alias_not_completion(monkeypatch):
+    """Multi-model llama-server: the embeddings slot only accepts the EMBEDDING
+    model's id/alias, not the completion model's. probe_embeddings must construct
+    the client with the embedding model name when given. Regression guard for the
+    bug where the completion model name was sent to /v1/embeddings (→ 400 'model
+    not found' → spurious unsupported verdict)."""
+    from capybase.config import ModelConfig
+    from capybase.probes import probe_embeddings
+
+    seen_models: list[str] = []
+
+    def fake_init(self, config, **kw):
+        self.config = config
+        seen_models.append(config.model)
+
+    monkeypatch.setattr(
+        "capybase.memory.embeddings.OpenAIEmbeddingsClient.__init__", fake_init
+    )
+    monkeypatch.setattr(
+        "capybase.memory.embeddings.OpenAIEmbeddingsClient.embed",
+        lambda self, t: [[0.1, 0.2, 0.3]],
+    )
+    # Completion model is "chat"; embedding slot is the alias "embed".
+    cfg = ModelConfig(base_url="http://x/v1", model="chat")
+    result = probe_embeddings(cfg, embeddings_model="embed")
+    assert result.ok is True
+    # The client was constructed with the EMBEDDING model, not "chat".
+    assert seen_models == ["embed"], seen_models
+
+
+def test_probe_embeddings_falls_back_to_completion_model_when_no_alias(monkeypatch):
+    """When embeddings_model is empty (single-model server that also embeds), the
+    probe reuses the completion model name — the original behavior."""
+    from capybase.config import ModelConfig
+    from capybase.probes import probe_embeddings
+
+    seen_models: list[str] = []
+    monkeypatch.setattr(
+        "capybase.memory.embeddings.OpenAIEmbeddingsClient.__init__",
+        lambda self, config, **kw: (seen_models.append(config.model), setattr(self, "config", config))[1],
+    )
+    monkeypatch.setattr(
+        "capybase.memory.embeddings.OpenAIEmbeddingsClient.embed",
+        lambda self, t: [[0.1, 0.2, 0.3]],
+    )
+    cfg = ModelConfig(base_url="http://x/v1", model="singlemodel")
+    result = probe_embeddings(cfg, embeddings_model="")
+    assert result.ok is True
+    assert seen_models == ["singlemodel"], seen_models

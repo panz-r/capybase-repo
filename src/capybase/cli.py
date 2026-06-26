@@ -151,7 +151,12 @@ def _run_calibrate(
     )
     # --dry-run skips the expensive mechanism A/B sweep (resolves the corpus
     # ~14×); it's a quick capability check (max_tokens/json_mode/logprobs) only.
-    report = run_calibration(client, config.model, run_mechanisms=not dry_run)
+    report = run_calibration(
+        client,
+        config.model,
+        run_mechanisms=not dry_run,
+        embeddings_model=config.memory.embeddings_model,
+    )
 
     resolved = resolve_profile_path(repo, profile_path)
     written = False

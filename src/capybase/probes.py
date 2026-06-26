@@ -311,7 +311,7 @@ def probe_logprobs(client: Any, model_cfg: ModelConfig) -> ProbeResult:
     return ProbeResult("logprobs", ok=False, detail="server returned no logprobs")
 
 
-def probe_embeddings(model_cfg: ModelConfig) -> ProbeResult:
+def probe_embeddings(model_cfg: ModelConfig, *, embeddings_model: str = "") -> ProbeResult:
     """Detect whether the server serves the ``/v1/embeddings`` endpoint.
 
     Uses a fresh ``OpenAIEmbeddingsClient`` (distinct from the completion client)
@@ -319,14 +319,24 @@ def probe_embeddings(model_cfg: ModelConfig) -> ProbeResult:
     non-empty vector. When supported, the profile enables embedding RAG (semantic
     retrieval over past resolutions, survey §4.2); when not (the common case for
     a llama-server started without ``--embeddings``), RAG stays lexical (BM25).
+
+    ``embeddings_model`` is the embedding model name to send. On a multi-model
+    llama-server (a completion slot + a separate ``--embeddings`` slot), the
+    embeddings endpoint only accepts the EMBEDDING model's id/alias, NOT the
+    completion model's — so sending ``model_cfg.model`` here gets a 400 "model
+    not found". When ``embeddings_model`` is set, the probe uses it; otherwise it
+    falls back to the completion model name (correct for a single-model server
+    that also embeds).
     """
     from capybase.memory.embeddings import OpenAIEmbeddingsClient, probe_embeddings_support
 
-    # The embedding model: explicit config override, else reuse the completion
-    # model name (single-model server). ``model_cfg.embeddings_model`` lives on
-    # MemoryConfig, not ModelConfig, so the caller passes the effective model_cfg.
+    # The embedding model: explicit override, else the completion model name
+    # (single-model server that also embeds).
+    emb_cfg = model_cfg
+    if embeddings_model:
+        emb_cfg = model_cfg.model_copy(update={"model": embeddings_model})
     try:
-        client = OpenAIEmbeddingsClient(model_cfg)
+        client = OpenAIEmbeddingsClient(emb_cfg)
         supported = probe_embeddings_support(client)
     except Exception as exc:  # noqa: BLE001 - unsupported = BM25, never abort calibrate
         return ProbeResult("embeddings", ok=False, detail=f"probe failed: {exc}")
@@ -574,7 +584,11 @@ class CalibrationReport:
 
 
 def run_calibration(
-    client: Any, model_cfg: ModelConfig, *, run_mechanisms: bool = True
+    client: Any,
+    model_cfg: ModelConfig,
+    *,
+    run_mechanisms: bool = True,
+    embeddings_model: str = "",
 ) -> CalibrationReport:
     """Run every probe and assemble a :class:`ModelProfile`.
 
@@ -590,6 +604,12 @@ def run_calibration(
     ``model_cfg`` is the active config (its ``model``/``base_url``/``api_key``
     identify the target). The returned profile's ``model`` is taken from
     ``model_cfg`` so the runtime overlay matches by name.
+
+    ``embeddings_model`` is the embedding model name for the ``/v1/embeddings``
+    probe. On a multi-model server this is the EMBEDDING slot's id/alias (distinct
+    from the completion model); passing the completion model name there yields a
+    400 "model not found" and a spurious unsupported verdict. Empty = reuse the
+    completion model name (single-model server that also embeds).
     """
     results: list[ProbeResult] = []
 
@@ -624,7 +644,7 @@ def run_calibration(
     # Embeddings capability (survey §4.2): a quick one-call check, parallel to
     # the logprobs probe. When supported, the profile enables semantic RAG; the
     # BM25 retriever is the fallback otherwise. Cheap, so always run it.
-    emb_result = probe_embeddings(tuned_cfg)
+    emb_result = probe_embeddings(tuned_cfg, embeddings_model=embeddings_model)
     results.append(emb_result)
     # End-to-end uses the DETECTED json_mode (not the config default): if the
     # server rejects response_format, exercising it here would only re-prove
