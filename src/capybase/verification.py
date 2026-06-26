@@ -82,6 +82,9 @@ class ValidationConfig:
     # VeriGuard policy gate (mirrors config.ValidationConfig).
     enable_policy_gate: bool = False
     policy_rules: tuple = ()  # tuple of config.PolicyRule; default empty = no-op
+    # LLM code-smell checks (mirrors config.ValidationConfig).
+    enable_code_smell_checks: bool = False
+    code_smell_severity: str = "warning"
 
     @classmethod
     def from_dict(cls, d: dict) -> "ValidationConfig":
@@ -533,6 +536,184 @@ class PolicyGateValidator:
         )
 
 
+# ---------------------------------------------------------------------------
+# LLM code-smell detection (survey §7)
+#
+# A cheap pre-test quality filter for smells common in LLM-generated code,
+# detected statically via stdlib ast. A sibling of the policy gate: same
+# fragment-tolerant parsing (_safe_parse_fragment), same NodeVisitor pattern,
+# same Validator -> VerificationCheckResult protocol. Only the AST-clean smells
+# are implemented; dataflow smells (scaling/leakage/hyperparameters) need
+# richer analysis and are deferred.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SmellFinding:
+    """One detected code smell."""
+
+    name: str        # canonical smell id, e.g. "nan_comparison"
+    detail: str      # short human message
+
+
+class _SmellDetector(ast.NodeVisitor):
+    """ast visitor collecting LLM-specific code smells (Python).
+
+    Three AST-clean detectors (single pass over a fragment):
+
+    - ``nan_comparison``: ``x == np.nan`` / ``x != np.nan``. NaN compares
+      unequal to everything in IEEE 754, so these are always False/True — a
+      classic LLM bug. The correct idiom is ``np.isnan``.
+    - ``chain_indexing``: ``df[a][b]`` — a Subscript whose value is itself a
+      Subscript over a likely DataFrame (Name/Attribute). Ambiguous, the
+      SettingWithCopyWarning source. ``.loc``/``.iloc`` are not flagged.
+    - ``unseeded_randomness``: calls to ``random.*`` / ``numpy.random.*`` with
+      no ``random.seed``/``numpy.random.seed`` anywhere in the fragment.
+      Affects reproducibility.
+    """
+
+    # Module names whose ``.nan`` attribute is a float NaN.
+    _NAN_MODULES = {"numpy", "np", "math"}
+    # Random-call prefixes (dotted); matched as startswith.
+    _RANDOM_PREFIXES = ("random.", "numpy.random.", "np.random.")
+    _SEED_CALLS = {"random.seed", "numpy.random.seed", "np.random.seed"}
+
+    def __init__(self) -> None:
+        self.findings: list[SmellFinding] = []
+        self._random_calls: int = 0
+        self._has_seed: bool = False
+
+    # --- NaN comparison -------------------------------------------------
+    def visit_Compare(self, node) -> None:  # noqa: N802 - ast convention
+        for cmp in node.comparators:
+            if self._is_nan(cmp):
+                self.findings.append(SmellFinding(
+                    name="nan_comparison",
+                    detail="comparison to nan is always False/True; use isnan()",
+                ))
+                break  # one finding per Compare node
+        self.generic_visit(node)
+
+    @staticmethod
+    def _is_nan(node) -> bool:
+        # np.nan / numpy.nan / math.nan
+        if isinstance(node, ast.Attribute) and node.attr == "nan":
+            base = node.value
+            return isinstance(base, ast.Name) and base.id in _SmellDetector._NAN_MODULES
+        # bare `nan` name (rare without a binding, but detectable)
+        return isinstance(node, ast.Name) and node.id == "nan"
+
+    # --- Pandas chain indexing ------------------------------------------
+    def visit_Subscript(self, node) -> None:  # noqa: N802 - ast convention
+        inner = node.value
+        if (
+            isinstance(inner, ast.Subscript)
+            and isinstance(inner.value, (ast.Name, ast.Attribute))
+            and not isinstance(node.slice, ast.Tuple)
+        ):
+            self.findings.append(SmellFinding(
+                name="chain_indexing",
+                detail="chained subscript df[a][b] is ambiguous; use .loc/.iloc",
+            ))
+        self.generic_visit(node)
+
+    # --- Uncontrolled randomness ----------------------------------------
+    def visit_Call(self, node) -> None:  # noqa: N802 - ast convention
+        name = _dotted_name(node.func)
+        if name:
+            if any(name.startswith(p) for p in self._RANDOM_PREFIXES):
+                if name not in self._SEED_CALLS:
+                    self._random_calls += 1
+            if name in self._SEED_CALLS:
+                self._has_seed = True
+        self.generic_visit(node)
+
+    def finalize(self) -> list[SmellFinding]:
+        """Emit the unseeded-randomness finding (needs the full pass first to
+        know whether a seed appeared). Call after ``visit``."""
+        if self._random_calls > 0 and not self._has_seed:
+            self.findings.append(SmellFinding(
+                name="unseeded_randomness",
+                detail=f"{self._random_calls} random call(s) with no seed set; "
+                       "reproducibility at risk",
+            ))
+        return self.findings
+
+
+def _detect_code_smells(text: str, language: str | None) -> list[SmellFinding]:
+    """Detect LLM code smells in Python source. Empty for other languages or
+    unparseable text (reuses the policy gate's fragment-tolerant parser)."""
+    if language != "python" or not text:
+        return []
+    tree = _safe_parse_fragment(text)
+    if tree is None:
+        return []
+    detector = _SmellDetector()
+    detector.visit(tree)
+    return detector.finalize()
+
+
+class CodeSmellValidator:
+    """Deterministic LLM code-smell checker (survey §7).
+
+    Statically detects smells common in LLM-generated code (NaN comparison,
+    pandas chain indexing, uncontrolled randomness) via stdlib ast and returns a
+    VerificationCheckResult like any validator. A sibling of PolicyGateValidator:
+    same fragment-tolerant parsing, same NodeVisitor pattern, same opt-in gate.
+
+    Cost & safety contract:
+
+    - **Opt-in.** Inert unless ``enable_code_smell_checks`` is on.
+    - **Deterministic.** No LLM call, no execution — stdlib ast only.
+    - **Graceful.** Non-Python language and unparseable text yield no findings.
+    - **Severity configurable.** Defaults to ``"warning"`` (smells are quality
+      issues that bias toward review, not always correctness bugs); strict
+      deployments set ``"error"`` to hard-block smelly patches.
+    """
+
+    name = "code_smell"
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        cfg = ctx.config
+        if not getattr(cfg, "enable_code_smell_checks", False):
+            return VerificationCheckResult(
+                name=self.name,
+                passed=True,
+                severity=getattr(cfg, "code_smell_severity", "warning"),
+                message="code smell checks disabled",
+                features={"smell_checked": False},
+            )
+
+        findings = _detect_code_smells(ctx.candidate.resolved_text, ctx.unit.language)
+        severity = getattr(cfg, "code_smell_severity", "warning")
+        features: dict[str, float | int | str | bool] = {"smell_checked": True}
+        for f in findings:
+            features[f"smell_{f.name}"] = True
+        features["smell_count"] = len(findings)
+
+        # Tag the unit's risk_tags with the smell names.
+        if findings:
+            existing = set(ctx.unit.risk_tags)
+            for f in findings:
+                existing.add(f"smell:{f.name}")
+            ctx.unit.risk_tags = sorted(existing)
+
+        passed = len(findings) == 0 or severity != "error"
+        msg = (
+            "code smells: " + "; ".join(f.detail for f in findings)
+            if findings else "code smells: none"
+        )
+        return VerificationCheckResult(
+            name=self.name,
+            passed=passed,
+            severity=severity,
+            message=msg,
+            detail={"findings": [{"name": f.name, "detail": f.detail}
+                                  for f in findings]},
+            features=features,
+        )
+
+
 class SyntaxValidator:
     """Deprecated per-unit syntax validator.
 
@@ -763,6 +944,11 @@ class VerificationEngine:
         # gate is a no-op even when enabled, so registering it is harmless.
         if getattr(config, "enable_policy_gate", False) and getattr(config, "policy_rules", ()):
             validators.append(PolicyGateValidator())
+        # LLM code-smell checks (survey §7): same shape as the policy gate —
+        # deterministic, dependency-free (stdlib ast), so the factory wires it
+        # when enabled. A cheap pre-test quality filter.
+        if getattr(config, "enable_code_smell_checks", False):
+            validators.append(CodeSmellValidator())
         return cls(validators, config)
 
     def register(self, validator: Validator) -> None:
@@ -1043,6 +1229,7 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
         "syntax": cfg.require_syntax_if_supported,
         "verifier_model": cfg.enable_verifier_model,
         "policy_gate": cfg.enable_policy_gate,
+        "code_smell": cfg.enable_code_smell_checks,
     }
     return table.get(name, True)
 

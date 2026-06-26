@@ -180,6 +180,16 @@ class ValidationConfig(BaseModel):
     # for other languages. When off OR no rules configured, the gate is inert.
     enable_policy_gate: bool = False
     policy_rules: list[PolicyRule] = Field(default_factory=list)
+    # LLM code-smell checks (survey §7): statically detect smells common in
+    # LLM-generated code via stdlib ast — NaN comparison (x == np.nan, always
+    # False), pandas chain indexing (df[a][b], ambiguous), uncontrolled
+    # randomness (random.* with no seed). A cheap pre-test quality filter,
+    # deterministic (no LLM, no execution), Python-only, graceful no-op
+    # otherwise. Only the AST-clean smells are implemented; dataflow smells
+    # (missing scaling, data leakage, implicit hyperparameters) need richer
+    # analysis and are deferred. When off (default) the checker is inert.
+    enable_code_smell_checks: bool = False
+    code_smell_severity: str = "warning"
 
 
 class JournalConfig(BaseModel):

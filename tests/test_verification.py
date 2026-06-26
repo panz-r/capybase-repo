@@ -467,3 +467,143 @@ def test_policy_gate_error_dominates_warning():
 
 # Import the validator used by the helpers above.
 from capybase.verification import PolicyGateValidator  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# LLM code-smell detection (survey §7): a deterministic ast-based pre-test
+# quality filter for smells common in LLM-generated code.
+# ---------------------------------------------------------------------------
+
+
+def _smell_engine(severity="warning"):
+    cfg = ValidationConfig(enable_code_smell_checks=True, code_smell_severity=severity)
+    return VerificationEngine.default(cfg)
+
+
+def _py_unit():
+    return _unit(
+        "def f():\n    pass", "    return 1", "    return 2",
+        "def f():\n<<<<<<< H\n    return 1\n=======\n    return 2\n>>>>>>> b\n",
+    )
+
+
+def test_smell_detect_nan_comparison():
+    from capybase.verification import _detect_code_smells
+
+    findings = _detect_code_smells("import numpy as np\nx = (a == np.nan)\n", "python")
+    names = [f.name for f in findings]
+    assert "nan_comparison" in names
+
+
+def test_smell_detect_nan_comparison_inequality():
+    from capybase.verification import _detect_code_smells
+
+    findings = _detect_code_smells("import numpy as np\nflag = a != np.nan\n", "python")
+    assert any(f.name == "nan_comparison" for f in findings)
+
+
+def test_smell_detect_chain_indexing():
+    from capybase.verification import _detect_code_smells
+
+    findings = _detect_code_smells("x = df['a']['b']\n", "python")
+    assert any(f.name == "chain_indexing" for f in findings)
+
+
+def test_smell_detect_unseeded_randomness():
+    from capybase.verification import _detect_code_smells
+
+    findings = _detect_code_smells("import random\nx = random.random()\n", "python")
+    assert any(f.name == "unseeded_randomness" for f in findings)
+
+
+def test_smell_clean_code_no_findings():
+    """Correct idioms are NOT flagged: np.isnan, .loc indexing, seeded random."""
+    from capybase.verification import _detect_code_smells
+
+    findings = _detect_code_smells(
+        "import numpy as np\nimport random\n"
+        "random.seed(42)\n"
+        "flag = np.isnan(a)\n"   # correct idiom, not == np.nan
+        "x = df.loc['a', 'b']\n",  # .loc, not chained [][]
+        "python",
+    )
+    assert findings == []
+
+
+def test_smell_seeded_random_not_flagged():
+    """random calls WITH a seed present → no unseeded_randomness finding."""
+    from capybase.verification import _detect_code_smells
+
+    findings = _detect_code_smells(
+        "import random\nrandom.seed(0)\nx = random.randint(1, 10)\n", "python"
+    )
+    assert not any(f.name == "unseeded_randomness" for f in findings)
+
+
+def test_smell_empty_for_non_python():
+    from capybase.verification import _detect_code_smells
+
+    assert _detect_code_smells("let x = a == np.nan;", "rust") == []
+
+
+def test_smell_empty_for_unparseable():
+    from capybase.verification import _detect_code_smells
+
+    assert _detect_code_smells("def f(:\n  broken", "python") == []
+
+
+def test_smell_validator_inert_when_disabled():
+    """enable_code_smell_checks off → inert: passed, smell_checked False,
+    risk_tags untouched. The zero-cost default."""
+    cfg = ValidationConfig(enable_code_smell_checks=False)
+    engine = VerificationEngine.default(
+        cfg, extra_validators=[CodeSmellValidator()]
+    )
+    unit = _py_unit()
+    res = engine.verify(unit, _candidate("import numpy as np\nx = a == np.nan\n"))
+    assert res.passed
+    assert res.features["smell_checked"] is False
+    assert unit.risk_tags == []
+
+
+def test_smell_validator_flags_nan_comparison():
+    """Gate on + a candidate with == np.nan → flagged + tagged."""
+    engine = _smell_engine()
+    unit = _py_unit()
+    res = engine.verify(unit, _candidate("import numpy as np\nx = a == np.nan\n"))
+    # Default severity is warning → not a hard failure, but flagged.
+    assert res.features["smell_checked"] is True
+    assert res.features["smell_count"] == 1
+    assert res.features["smell_nan_comparison"] is True
+    assert "smell:nan_comparison" in unit.risk_tags
+
+
+def test_smell_validator_clean_patch_passes():
+    """A clean candidate → passed, smell_checked True, empty tags."""
+    engine = _smell_engine()
+    unit = _py_unit()
+    res = engine.verify(unit, _candidate("x = a + b\n"))
+    assert res.passed
+    assert res.features["smell_checked"] is True
+    assert res.features["smell_count"] == 0
+    assert unit.risk_tags == []
+
+
+def test_smell_validator_error_severity_hard_fails():
+    """code_smell_severity='error' → a smelly candidate is hard-blocked."""
+    engine = _smell_engine(severity="error")
+    res = engine.verify(_py_unit(), _candidate("x = df['a']['b']\n"))
+    assert not res.passed
+    assert res.features["smell_chain_indexing"] is True
+
+
+def test_smell_validator_handles_fragment():
+    """A bare-return splice fragment with a smell inside is still detected —
+    reuses the policy gate's fragment-tolerant parser."""
+    engine = _smell_engine()
+    unit = _py_unit()
+    res = engine.verify(unit, _candidate("    return a == np.nan\n"))
+    assert res.features["smell_nan_comparison"] is True
+
+
+from capybase.verification import CodeSmellValidator  # noqa: E402
