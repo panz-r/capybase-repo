@@ -176,6 +176,18 @@ def _run_calibrate(
     resolved = resolve_profile_path(repo, profile_path)
     written = False
     if report.ok and not dry_run:
+        # Preserve the embeddings calibration across an LLM re-tune: the two
+        # commands co-own this file, so a fresh ``calibrate`` must not silently
+        # wipe the model-specific ``embedding_min_similarity`` + envelope that
+        # ``calibrate-embeddings`` derived. Carry them over ONLY when the stored
+        # profile is for the same model — a model swap correctly drops them (the
+        # calibrated floor was fit for the old model and would be wrong now).
+        from capybase.calibration_profile import ModelProfile
+
+        prior = ModelProfile.load(resolved)
+        if prior is not None and prior.model == report.profile.model:
+            report.profile.embedding_min_similarity = prior.embedding_min_similarity
+            report.profile.embedding_calibration = prior.embedding_calibration
         report.profile.save(resolved)
         written = True
 
@@ -290,19 +302,23 @@ def _run_calibrate_embeddings(
     resolved = resolve_profile_path(repo, profile_path)
     written = False
     prev_floor = 0.35
-    if cal.ok and not dry_run:
-        # Load the existing profile (preserving LLM-calibration knobs) and update
-        # only the embeddings fields. A missing profile is created fresh via
-        # from_dict (which fills the required fields with safe defaults).
+    if cal.ok:
+        # Load the existing profile (preserving LLM-calibration knobs); a missing
+        # profile is created fresh via from_dict (safe defaults for required
+        # fields). Read the prior floor whenever the endpoint worked so the
+        # "was X.XXX" delta in the report reflects the stored value — including
+        # under --dry-run (the user runs it precisely to see what would change).
         profile = ModelProfile.load(resolved)
         if profile is None:
             profile = ModelProfile.from_dict({"model": config.model.model})
-        prev_floor = profile.embedding_min_similarity
-        profile.model = config.model.model  # keep the match key current
-        profile.embedding_min_similarity = cal.min_similarity
-        profile.embedding_calibration = cal.to_dict()
-        profile.save(resolved)
-        written = True
+        if profile.model == config.model.model:
+            prev_floor = profile.embedding_min_similarity
+        if not dry_run:
+            profile.model = config.model.model  # keep the match key current
+            profile.embedding_min_similarity = cal.min_similarity
+            profile.embedding_calibration = cal.to_dict()
+            profile.save(resolved)
+            written = True
 
     if json_output:
         payload = cal.to_dict()

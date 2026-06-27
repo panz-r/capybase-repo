@@ -266,6 +266,71 @@ def test_calibrate_embeddings_report_shows_distributions_and_estimates(tmp_path:
     assert "unrelated_p90" in text
 
 
+def _seed_floor(path: Path, *, model: str = "vibethink", floor: float = 0.71) -> None:
+    """Write a prior profile carrying a known calibrated floor (as if a previous
+    ``calibrate-embeddings`` had run)."""
+    ModelProfile(
+        model=model,
+        max_tokens=8192,
+        json_mode=True,
+        capture_token_entropy=False,
+        generation_timeout_seconds=60,
+        embedding_min_similarity=floor,
+    ).save(path)
+
+
+def test_calibrate_embeddings_report_shows_prior_floor_on_rerun(tmp_path: Path):
+    """A re-run reports the delta against the STORED floor, not the 0.35 default
+    — the 'chosen ... (was X.XXX)' line must reflect the previous run."""
+    profile_path = tmp_path / "model_profile.json"
+    _seed_floor(profile_path, floor=0.71)
+    out = io.StringIO()
+    _run_calibrate_embeddings(
+        _config_with_model(),
+        repo=str(tmp_path),
+        profile_path=str(profile_path),
+        client_factory=_factory(_DomainFakeClient()),
+        out=out,
+    )
+    text = out.getvalue()
+    assert "(was 0.710)" in text  # the seeded prior floor, not 0.350
+
+
+def test_calibrate_embeddings_dry_run_shows_prior_floor(tmp_path: Path):
+    """``--dry-run`` exists to preview what would change, so the 'was X.XXX'
+    delta must reflect the stored floor even though nothing is written."""
+    profile_path = tmp_path / "model_profile.json"
+    _seed_floor(profile_path, floor=0.71)
+    out = io.StringIO()
+    rc = _run_calibrate_embeddings(
+        _config_with_model(),
+        repo=str(tmp_path),
+        profile_path=str(profile_path),
+        dry_run=True,
+        client_factory=_factory(_DomainFakeClient()),
+        out=out,
+    )
+    assert rc == 0
+    # The stored floor is unchanged (dry-run wrote nothing)...
+    assert _load_json(profile_path)["embedding_min_similarity"] == 0.71
+    # ...yet the report shows the real prior floor, not the 0.35 default.
+    assert "(was 0.710)" in out.getvalue()
+
+
+def test_calibrate_embeddings_first_run_shows_default_prior(tmp_path: Path):
+    """No prior profile: the 'was' value is the 0.35 default (nothing to delta
+    against). Confirms the prior-floor read is a no-op when there's no profile."""
+    out = io.StringIO()
+    _run_calibrate_embeddings(
+        _config_with_model(),
+        repo=str(tmp_path),
+        profile_path=str(tmp_path / "p.json"),
+        client_factory=_factory(_DomainFakeClient()),
+        out=out,
+    )
+    assert "(was 0.350)" in out.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # subcommand wiring (argparse → _run_calibrate_embeddings)
 # ---------------------------------------------------------------------------

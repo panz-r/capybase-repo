@@ -197,3 +197,67 @@ def test_to_dict_roundtrip_shape():
     assert d["ok"] is True
     assert "probed_at" in d
     assert isinstance(d["notes"], list)
+
+
+# ---------------------------------------------------------------------------
+# Overlap-fallback branch (the "weak model" path)
+# ---------------------------------------------------------------------------
+
+
+class _ZeroVectorClient:
+    """Every text embeds to the zero vector — cosine is 0.0 for every pair.
+
+    This is the degenerate 'distributions overlap entirely' case: related and
+    unrelated scores are indistinguishable, so the quantile-gap estimate
+    collapses to 0 and the calibrator must fall back to the conservative floor
+    (unrelated_p90) rather than admit every conflict as a few-shot match.
+    """
+
+    def embed(self, texts):
+        if isinstance(texts, str):
+            texts = [texts]
+        return [[0.0, 0.0, 0.0] for _ in texts]
+
+
+def test_overlap_fallback_applies_conservative_floor():
+    """When the quantile-gap collapses (overlap), the applied floor falls back to
+    unrelated_p90 rather than 0.0 — and a diagnostic note is recorded."""
+    cal = calibrate_thresholds(_ZeroVectorClient(), embeddings_model="embed")
+    assert cal.ok  # the endpoint worked; the MODEL is just too weak
+    # Both distributions are all zeros → gap_threshold is 0.0 → fallback fires.
+    assert cal.quantile_gap == 0.0
+    # The applied floor is the conservative reference (unrelated_p90 = 0.0 here).
+    assert cal.min_similarity == cal.unrelated_p90
+    assert any("overlap" in n for n in cal.notes)
+    assert any("too weak" in n for n in cal.notes)
+
+
+def test_overlap_fallback_recorded_envelope_carries_note():
+    """The overlap note survives into the serialized envelope (so the report /
+    profile shows the user the model is too weak for reliable RAG)."""
+    cal = calibrate_thresholds(_ZeroVectorClient(), embeddings_model="embed")
+    d = cal.to_dict()
+    assert d["ok"] is True
+    assert d["min_similarity"] == d["estimates"]["unrelated_p90"]
+    assert any("overlap" in n for n in d["notes"])
+
+
+class _ConstantVectorClient:
+    """Every text embeds to the SAME non-zero vector — cosine is 1.0 for every
+    pair. A different degeneracy: the gap is well-defined (0) but at the top of
+    the range, so the fallback does NOT fire; the threshold is a valid positive
+    value. Guards against the fallback over-triggering."""
+
+    def embed(self, texts):
+        if isinstance(texts, str):
+            texts = [texts]
+        return [[1.0, 0.5] for _ in texts]
+
+
+def test_constant_vectors_do_not_trigger_overlap_fallback():
+    """A constant-vectors model (all cosine 1.0) has a positive median-midpoint
+    threshold, so the conservative fallback must NOT fire (no overlap note)."""
+    cal = calibrate_thresholds(_ConstantVectorClient(), embeddings_model="embed")
+    assert cal.ok
+    assert cal.min_similarity > 0.0
+    assert not any("overlap" in n for n in cal.notes)
