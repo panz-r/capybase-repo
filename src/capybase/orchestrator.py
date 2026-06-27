@@ -649,35 +649,62 @@ class Orchestrator:
     def _build_retriever(self, config: Config) -> object:
         """Construct the configured RAG retriever over ``self.memory_store``.
 
-        ``"embedding"`` builds an :class:`EmbeddingRetriever` (semantic, survey
-        §4.2) from a fresh embeddings client pointed at the model endpoint; any
-        failure to construct it (no endpoint support, missing model) falls back to
-        the lexical BM25 retriever so RAG never hard-fails. ``"lexical"`` (default)
-        builds the dependency-free BM25 retriever. When an embeddings-calibration
-        envelope is present it is reconstructed and passed to the EmbeddingRetriever
-        so the isotonic score transform + calibrated floor apply (survey §2.1).
+        - ``"lexical"`` (default): dependency-free BM25.
+        - ``"embedding"``: an :class:`EmbeddingRetriever` (semantic, survey §4.2)
+          from a fresh embeddings client. Any failure to construct it falls back to
+          BM25 so RAG never hard-fails.
+        - ``"hybrid"``: a :class:`HybridRetriever` fusing BM25 + embeddings (survey
+          §4). Degrades to lexical-only when the embedding endpoint is unavailable.
+
+        When an embeddings-calibration envelope is present it is reconstructed and
+        passed to the EmbeddingRetriever so the isotonic score transform +
+        calibrated floor apply (survey §2.1).
         """
-        from capybase.memory.retriever import EmbeddingRetriever, LexicalRetriever
+        from capybase.memory.retriever import EmbeddingRetriever, HybridRetriever, LexicalRetriever
+
+        lex = LexicalRetriever(self.memory_store)
 
         if config.memory.retriever == "embedding":
-            try:
-                from capybase.memory.embeddings import OpenAIEmbeddingsClient
+            emb = self._build_embedding_retriever(config)
+            return emb if emb is not None else lex
 
-                # The embeddings model: explicit config, else reuse the completion
-                # model name (a single-model llama-server serving both).
-                emb_cfg = config.model
-                if config.memory.embeddings_model:
-                    emb_cfg = emb_cfg.model_copy(update={"model": config.memory.embeddings_model})
-                client = OpenAIEmbeddingsClient(emb_cfg)
-                return EmbeddingRetriever(
-                    self.memory_store,
-                    client,
-                    min_similarity=config.memory.embedding_min_similarity,
-                    calibration=_reconstruct_calibration(config),
-                )
-            except Exception:  # noqa: BLE001 - fall back to BM25, never break RAG
-                pass
-        return LexicalRetriever(self.memory_store)
+        if config.memory.retriever == "hybrid":
+            emb = self._build_embedding_retriever(config)
+            if emb is None:
+                return lex  # embedding endpoint unavailable → lexical-only hybrid
+            return HybridRetriever(
+                lex, emb, fusion=config.memory.fusion_method or "rrf"
+            )
+
+        return lex
+
+    def _build_embedding_retriever(self, config: Config) -> "object | None":
+        """Build an EmbeddingRetriever, or None if the endpoint is unavailable.
+
+        Returns None (rather than raising) on any construction failure so callers
+        can fall back to BM25 — RAG never hard-fails. The calibrated envelope is
+        reconstructed and attached so the isotonic transform + calibrated floor
+        apply when present (survey §2.1).
+        """
+        from capybase.memory.retriever import EmbeddingRetriever
+
+        try:
+            from capybase.memory.embeddings import OpenAIEmbeddingsClient
+
+            # The embeddings model: explicit config, else reuse the completion
+            # model name (a single-model llama-server serving both).
+            emb_cfg = config.model
+            if config.memory.embeddings_model:
+                emb_cfg = emb_cfg.model_copy(update={"model": config.memory.embeddings_model})
+            client = OpenAIEmbeddingsClient(emb_cfg)
+            return EmbeddingRetriever(
+                self.memory_store,
+                client,
+                min_similarity=config.memory.embedding_min_similarity,
+                calibration=_reconstruct_calibration(config),
+            )
+        except Exception:  # noqa: BLE001 - fall back to BM25, never break RAG
+            return None
 
     # ==================================================================
     # M3: full run

@@ -188,6 +188,7 @@ def _run_calibrate(
         if prior is not None and prior.model == report.profile.model:
             report.profile.embedding_min_similarity = prior.embedding_min_similarity
             report.profile.embedding_calibration = prior.embedding_calibration
+            report.profile.fusion_method = prior.fusion_method
         report.profile.save(resolved)
         written = True
 

@@ -269,6 +269,28 @@ def test_profile_embedding_min_similarity_default():
     assert p.embedding_calibration == {}
 
 
+def test_profile_fusion_method_roundtrip():
+    """The hybrid fusion method (survey §4) round-trips through to_dict/from_dict."""
+    p = _profile(fusion_method="dbsf")
+    d = p.to_dict()
+    assert d["fusion_method"] == "dbsf"
+    again = ModelProfile.from_dict(d)
+    assert again.fusion_method == "dbsf"
+    assert again == p
+
+
+def test_profile_fusion_method_default_empty():
+    """Default fusion_method is "" — the orchestrator reads "" as "rrf" at runtime."""
+    p = _profile()
+    assert p.fusion_method == ""
+
+
+def test_from_dict_backward_compatible_without_fusion_method():
+    """An older profile (pre-hybrid) omits fusion_method; it loads as "" (→ rrf)."""
+    p = ModelProfile.from_dict({"model": "vibethink", "max_tokens": 4096})
+    assert p.fusion_method == ""
+
+
 def test_from_dict_backward_compatible_without_embedding_fields():
     """An older profile (pre-calibrate-embeddings) omits the embedding fields.
     It must still load, defaulting the floor to 0.35 and the envelope to {}."""

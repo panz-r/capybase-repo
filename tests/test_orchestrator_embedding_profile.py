@@ -225,3 +225,93 @@ def test_calibration_envelope_empty_without_profile(repo: Path, monkeypatch):
     assert isinstance(retriever, EmbeddingRetriever)
     assert retriever.calibration is None
     assert orch.config.memory.embedding_calibration == {}
+
+
+# ---------------------------------------------------------------------------
+# B2: hybrid retriever wiring (survey §4)
+# ---------------------------------------------------------------------------
+
+
+def test_hybrid_retriever_built_from_config(repo: Path, monkeypatch):
+    """``retriever == "hybrid"`` builds a HybridRetriever wrapping both lexical
+    and embedding retrievers, with the calibrated floor + envelope applied to the
+    embedding half."""
+    _profile(
+        enable_embedding_rag=True,
+        embedding_min_similarity=0.6,
+        embedding_calibration=_envelope_with_fit(),
+    ).save(_profile_path(repo))
+    _patch_embeddings_client(monkeypatch)
+    cfg = _cfg(repo, retriever="hybrid")
+
+    orch = Orchestrator(cfg, repo=str(repo))
+
+    from capybase.memory.retriever import HybridRetriever
+
+    retriever = orch.context_builder.retriever
+    assert isinstance(retriever, HybridRetriever)
+    # The embedding half carries the calibrated floor + transform.
+    assert isinstance(retriever.embedding, EmbeddingRetriever)
+    assert retriever.embedding.min_similarity == 0.6
+    assert retriever.embedding.calibration is not None
+    # Default fusion is RRF.
+    assert retriever.fusion == "rrf"
+
+
+def test_hybrid_fusion_method_from_profile(repo: Path, monkeypatch):
+    """The profile's fusion_method reaches the HybridRetriever."""
+    _profile(
+        enable_embedding_rag=True,
+        embedding_min_similarity=0.6,
+        fusion_method="dbsf",
+    ).save(_profile_path(repo))
+    _patch_embeddings_client(monkeypatch)
+    cfg = _cfg(repo, retriever="hybrid")
+
+    orch = Orchestrator(cfg, repo=str(repo))
+
+    from capybase.memory.retriever import HybridRetriever
+
+    retriever = orch.context_builder.retriever
+    assert isinstance(retriever, HybridRetriever)
+    assert retriever.fusion == "dbsf"
+    assert orch.config.memory.fusion_method == "dbsf"
+
+
+def test_hybrid_degrades_to_lexical_when_embedding_unavailable(repo: Path, monkeypatch):
+    """If the embedding endpoint can't be constructed, hybrid falls back to plain
+    lexical (no crash). The HybridRetriever is NOT built — lexical-only wins."""
+    # Make the embeddings client construction raise.
+    def _boom(_cfg, *_a, **_k):
+        raise RuntimeError("no embeddings endpoint")
+
+    monkeypatch.setattr(
+        "capybase.memory.embeddings.OpenAIEmbeddingsClient.__init__", _boom
+    )
+    cfg = _cfg(repo, retriever="hybrid")
+
+    orch = Orchestrator(cfg, repo=str(repo))
+
+    from capybase.memory.retriever import HybridRetriever, LexicalRetriever
+
+    retriever = orch.context_builder.retriever
+    # Embedding construction failed → plain lexical (not a lexical-only hybrid).
+    assert isinstance(retriever, LexicalRetriever)
+    assert not isinstance(retriever, HybridRetriever)
+
+
+def test_hybrid_with_lexical_config_stays_lexical(repo: Path, monkeypatch):
+    """Without ``retriever == "hybrid"`` set, no HybridRetriever is built even if
+    the profile enables embedding RAG (it flips to "embedding" instead)."""
+    _profile(enable_embedding_rag=True, embedding_min_similarity=0.6).save(
+        _profile_path(repo)
+    )
+    _patch_embeddings_client(monkeypatch)
+    cfg = _cfg(repo, retriever="lexical")
+
+    orch = Orchestrator(cfg, repo=str(repo))
+
+    from capybase.memory.retriever import HybridRetriever
+
+    retriever = orch.context_builder.retriever
+    assert not isinstance(retriever, HybridRetriever)  # flipped to embedding, not hybrid
