@@ -38,7 +38,12 @@ skip on CI without `cargo`/`rustc`.
 | move semantics | `move_then_use` | one branch moves a value, the other uses it after → E0382 | cargo |
 | lifetimes | `lifetime_mismatch` | a body borrowing from the wrong input lifetime → E0623 | cargo |
 | struct field (compile floor) | `add_field_no_init` | struct gains a field but `new()` drops the init → E0063 | cargo |
-| trait coherence | `orphan_impl` | conflicting/malformed trait impls | cargo |
+| trait coherence / blanket impl | `orphan_impl` | `From` + `Into` blanket-impl conflict → E0119 (genuine coherence) | cargo |
+| associated types | `associated_type_change` | assoc-type concrete type vs body return → E0308 | cargo |
+| derive macros | `conflicting_derives` | `#[derive(Clone)]` on a non-`Clone` field → E0277 | cargo |
+| FFI / `extern "C"` | `extern_ffi_signature` | foreign-fn signature/call type mismatch → E0308 (no linking) | cargo |
+| Pin / Future impl | `future_impl_poll` | manual `Future`, wrong-type `Poll::Ready` vs `Output` → E0308 | cargo |
+| mod / submodule move | `mod_submodule_move` | re-export vs local fn → E0255 on a keep-both merge | cargo |
 | use imports | `use_import_conflict` | `use std::fmt;` vs `use std::fmt::Display;` tension | cargo |
 | async / await | `await_insertion` | `.await` dropped from a future in an async block → E0271 | cargo |
 | unsafe | `unsafe_block_edit` | one branch adds `unsafe`, the other changes an invariant; malformed merge | cargo |
@@ -49,8 +54,10 @@ skip on CI without `cargo`/`rustc`.
 | Axis | Catalog ID / Test | What it exercises | Verifier |
 |---|---|---|---|
 | manifest / dependency | `cargo_dep_version` | dependency-version mismatch in `Cargo.toml` (manifest verification) | cargo (toml branch) |
+| feature flags | `cargo_feature_flag` | `default` referencing an undefined feature → manifest parse error | cargo (toml branch) |
 | edition | `edition_2024_default` | a 2024-edition crate resolving a `crate::` leaf | cargo |
-| test gate (intent preservation) | `test_rust_test_gate_*` | a merge that compiles but fails the project's own `#[cfg(test)]` | cargo test |
+| test gate — orchestrator | `test_rust_test_gate_*` | a merge that compiles but fails the project's own `#[cfg(test)]` | cargo test |
+| test gate — file level | `compile_but_test_fails` | same, via `verify_file`'s shadow oracle (`enable_shadow_tests`) | cargo test |
 
 ### Loose files (standalone rustc)
 
@@ -85,10 +92,9 @@ These taxonomy cells are **not** covered and are tracked as future work:
   Rust repos (serde, tokio, clap). No real-world cases in the corpus.
 - **Cross-crate / workspace support**: the manifest check targets a single
   repo-root `Cargo.toml`; nested workspace-member manifests aren't handled.
-- **Proc-macro / derive-macro verification**: `#[derive(...)]` overlaps and
-  proc-macro expansion conflicts aren't exercised (cargo expands them, but no
-  case targets derive-trait clashes specifically).
-- **FFI / `extern` blocks**: `extern "C"` signature conflicts aren't covered.
+- **Proc-macro verification** (beyond `#[derive]`): attribute/proc-macro
+  expansion conflicts aren't exercised (derive-trait clashes are covered via
+  `conflicting_derives`, but custom proc-macro bodies aren't).
 - **MIRI / property-based equivalence**: no UB detection or `proptest`
   semantic-equivalence checks (compile + test are the only oracles).
 - **`rustfmt --check` formatter gate**: not implemented; formatting is not a
@@ -105,3 +111,14 @@ These taxonomy cells are **not** covered and are tracked as future work:
 - The baseline comparison (cargo syntax check) now uses `_blank_markers_one_side`
   so an add-add conflict doesn't mask its own duplicate-definition error in the
   baseline — see the commit that introduced `add_add_const`.
+- The `shadow_test` flag marks a case whose `broken_resolved` **compiles** but
+  fails a `#[cfg(test)]` assertion living in the file as shared context. Such
+  cases are excluded from the compile-reject set (their break isn't a compile
+  error) and run under the dedicated shadow-gate set with
+  `enable_shadow_tests=True`. `_run_shadow_tests` writes the resolved `whole`
+  to disk for the cargo-test run (then restores), because `verify_file` runs
+  before the orchestrator writes — without this the oracle would test the
+  baseline, not the merge.
+- A derive-macro case only produces a real conflict when the two derive lines
+  **differ textually** (e.g. `#[derive(Debug)]` vs `#[derive(Clone)]`); identical
+  derives normalize away under `git merge-file`, yielding no conflict.
