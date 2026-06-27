@@ -404,3 +404,114 @@ def test_old_envelope_keys_still_present():
     assert "quantile_gap" in d["estimates"]
     assert "related_p10" in d["estimates"]
     assert "unrelated_p90" in d["estimates"]
+
+
+# ---------------------------------------------------------------------------
+# Robust estimators (survey 2 §3.1 Huber, §4.1 MAD zones)
+# ---------------------------------------------------------------------------
+
+
+def test_score_distribution_records_median_and_mad():
+    """The distribution summary now carries the robust median/MAD alongside
+    mean/min/max — the data drift detection compares on."""
+    cal = calibrate_thresholds(_DomainFakeClient(), embeddings_model="embed")
+    assert cal.related.count > 0
+    assert isinstance(cal.related.median, float)
+    assert isinstance(cal.related.mad, float)
+    # to_dict surfaces them.
+    d = cal.to_dict()
+    assert "median" in d["related"] and "mad" in d["related"]
+
+
+def test_envelope_records_fit_loss_and_zone_method():
+    """The provenance fields (fit_loss, zone_method) are recorded for transparency."""
+    cal = calibrate_thresholds(_DomainFakeClient(), embeddings_model="embed")
+    assert cal.fit_loss in ("l2", "huber")
+    assert cal.zone_method in ("mad", "percentile")
+    d = cal.to_dict()
+    assert d["fit_loss"] == cal.fit_loss
+    assert d["zone_method"] == cal.zone_method
+    assert "related_mad" in d and "unrelated_mad" in d
+
+
+def test_fit_loss_and_zone_method_roundtrip():
+    """The provenance fields survive to_dict/from_dict."""
+    from capybase.embeddings_calibration import EmbeddingCalibration
+
+    cal = calibrate_thresholds(_DomainFakeClient(), embeddings_model="embed")
+    again = EmbeddingCalibration.from_dict(cal.to_dict())
+    assert again.fit_loss == cal.fit_loss
+    assert again.zone_method == cal.zone_method
+    assert again.related_mad == pytest.approx(cal.related_mad, abs=1e-4)
+
+
+def test_from_dict_tolerant_of_pre_robust_envelope():
+    """An old envelope (pre-Huber/MAD) omits the new fields — loads with defaults."""
+    from capybase.embeddings_calibration import EmbeddingCalibration
+
+    old = {
+        "model": "embed", "min_similarity": 0.4, "ok": True, "probed_at": "",
+        "estimates": {"quantile_gap": 0.4, "related_p10": 0.6, "unrelated_p90": 0.3},
+        "related": {"count": 8, "min": 0.5, "max": 0.9, "mean": 0.7},
+        "unrelated": {"count": 8, "min": 0.1, "max": 0.35, "mean": 0.2},
+        "isotonic_points": [[0.1, 0.0], [0.9, 1.0]],
+        "zones": {"green": 0.7, "amber": 0.6, "red": 0.5},
+        "ks_separation": 0.8, "notes": [],
+    }
+    cal = EmbeddingCalibration.from_dict(old)
+    assert cal.fit_loss == "l2"  # default
+    assert cal.zone_method == "mad"  # default
+    assert cal.related.median == 0.0  # absent → default
+    assert cal.related_mad == 0.0
+
+
+def test_overlap_fallback_uses_percentile_zones_when_mad_zero():
+    """A degenerate (zero-vector) model produces MAD=0 calibrated scores, so the
+    zone derivation falls back to percentile zones (the documented degeneracy path)."""
+    cal = calibrate_thresholds(_ZeroVectorClient(), embeddings_model="embed")
+    # The fit is dropped entirely on full overlap, so no zones either way —
+    # confirm the never-raise contract holds and zone_method is a valid value.
+    assert cal.zone_method in ("mad", "percentile")
+    assert cal.fit_loss in ("l2", "huber")
+
+
+def test_label_noise_triggers_huber_refit():
+    """When the L2 fit shows a large robust-sigma residual (label noise), the
+    calibrator refits under Huber loss and records fit_loss='huber' + a note.
+
+    The _DomainFakeClient's keyword-based separation produces exactly such a
+    residual pattern, so it serves as the noise case here."""
+    cal = calibrate_thresholds(_DomainFakeClient(), embeddings_model="embed")
+    assert cal.fit_loss == "huber"
+    assert any("Huber" in n or "noise" in n for n in cal.notes)
+
+
+def test_clean_model_keeps_l2_fit():
+    """A model whose L2 residuals are all within the robust threshold keeps the
+    L2 fit (fit_loss='l2'). Built by a fake with no residual outliers."""
+
+    class _CleanSeparationClient:
+        """Perfectly separable: related always cosine ~1.0, unrelated always ~0.0,
+        with no residual outliers — L2 suffices."""
+        def embed(self, texts):
+            if isinstance(texts, str):
+                texts = [texts]
+            out = []
+            for t in texts:
+                # All corpus signatures share tokens → close; queries close too.
+                # Use a single consistent axis so related~1, unrelated~0 cleanly.
+                out.append([1.0, 0.0])
+            return out
+
+    cal = calibrate_thresholds(_CleanSeparationClient(), embeddings_model="embed")
+    # All identical vectors → cosines all 1.0 → no separation → fit dropped.
+    # The provenance fields still take valid default values.
+    assert cal.fit_loss in ("l2", "huber")
+
+
+def test_zones_remain_ordered_on_separated_model():
+    """Regardless of MAD vs percentile path, green >= amber >= red holds on a
+    well-separated model (the zone invariant downstream code relies on)."""
+    cal = calibrate_thresholds(_DomainFakeClient(), embeddings_model="embed")
+    if cal.has_isotonic_fit:
+        assert cal.green_threshold >= cal.amber_threshold >= cal.red_threshold

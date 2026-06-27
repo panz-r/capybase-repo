@@ -30,22 +30,45 @@ from datetime import datetime, timezone
 
 from capybase.embeddings_corpus import SimilarityProbe, probes
 from capybase.memory.retriever import _cosine
-from capybase.stats import isotonic_fit, ks_stat, percentile as _percentile
+from capybase.stats import (
+    huber_isotonic_fit,
+    isotonic_fit,
+    ks_stat,
+    mad as _mad,
+    median as _median,
+    percentile as _percentile,
+)
 
 
 # The default floor the EmbeddingRetriever ships with — used as the fallback
 # when calibration can't run, and as the baseline the report compares against.
 DEFAULT_MIN_SIMILARITY = 0.35
 
+# Multiplier for the MAD-based zone thresholds (survey 2 §4.1): a zone boundary
+# sits k robust-σ from the class median. k=2.5 ≈ the ~99% band under mild
+# assumptions, balancing precision (green) against recall (red).
+_ZONE_K = 2.5
+
+# A fit residual exceeding this many robust-σ flags a (likely mislabeled) probe,
+# triggering the Huber-loss refit (survey 2 §3.1).
+_NOISE_OUTLIER_C = 1.345
+
 
 @dataclass(frozen=True)
 class ScoreDistribution:
-    """Summary statistics of one class's measured similarity scores."""
+    """Summary statistics of one class's measured similarity scores.
+
+    The robust ``median``/``mad`` (survey 2 §4.1) are recorded alongside the
+    classic min/max/mean so drift detection can compare distributions on
+    robust statistics and the report can show dispersion that ignores outliers.
+    """
 
     count: int
     minimum: float
     maximum: float
     mean: float
+    median: float = 0.0
+    mad: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -53,6 +76,8 @@ class ScoreDistribution:
             "min": round(self.minimum, 4),
             "max": round(self.maximum, 4),
             "mean": round(self.mean, 4),
+            "median": round(self.median, 4),
+            "mad": round(self.mad, 4),
         }
 
 
@@ -96,6 +121,15 @@ class EmbeddingCalibration:
     # KS separation on the calibrated scale: 1.0 = classes fully separated, 0.0
     # = identical. A fit-quality signal for the report.
     ks_separation: float = 0.0
+    # Robust-estimator provenance (survey 2 §3.1, §4.1). ``fit_loss`` records
+    # whether the isotonic transform used L2 (default) or Huber (selected when
+    # label noise was detected). ``zone_method`` records whether the zones used
+    # MAD (default, robust) or fell back to percentile (MAD=0 degeneracy).
+    # ``related_mad``/``unrelated_mad`` expose the robust scales for drift.
+    fit_loss: str = "l2"
+    zone_method: str = "mad"
+    related_mad: float = 0.0
+    unrelated_mad: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -122,6 +156,11 @@ class EmbeddingCalibration:
                 "red": round(self.red_threshold, 4),
             },
             "ks_separation": round(self.ks_separation, 4),
+            # Robust-estimator provenance (survey 2 §3.1, §4.1).
+            "fit_loss": self.fit_loss,
+            "zone_method": self.zone_method,
+            "related_mad": round(self.related_mad, 4),
+            "unrelated_mad": round(self.unrelated_mad, 4),
         }
 
     @classmethod
@@ -158,6 +197,10 @@ class EmbeddingCalibration:
             amber_threshold=float(zones.get("amber", 0.0)),
             red_threshold=float(zones.get("red", 0.0)),
             ks_separation=float(d.get("ks_separation", 0.0)),
+            fit_loss=str(d.get("fit_loss", "l2") or "l2"),
+            zone_method=str(d.get("zone_method", "mad") or "mad"),
+            related_mad=float(d.get("related_mad", 0.0)),
+            unrelated_mad=float(d.get("unrelated_mad", 0.0)),
         )
 
     @property
@@ -225,11 +268,16 @@ def _distribution(scores: list[float]) -> ScoreDistribution:
         minimum=min(scores),
         maximum=max(scores),
         mean=sum(scores) / len(scores),
+        median=_median(scores),
+        mad=_mad(scores),
     )
 
 
 def _distribution_from_dict(d: dict | None) -> ScoreDistribution:
-    """Reconstruct a ScoreDistribution from its serialized form (tolerant)."""
+    """Reconstruct a ScoreDistribution from its serialized form (tolerant).
+
+    Older envelopes (pre-robust) omit median/mad — they default to 0.0.
+    """
     if not d:
         return ScoreDistribution(0, 0.0, 0.0, 0.0)
     try:
@@ -238,6 +286,8 @@ def _distribution_from_dict(d: dict | None) -> ScoreDistribution:
             minimum=float(d.get("min", 0.0)),
             maximum=float(d.get("max", 0.0)),
             mean=float(d.get("mean", 0.0)),
+            median=float(d.get("median", 0.0)),
+            mad=float(d.get("mad", 0.0)),
         )
     except (TypeError, ValueError):
         return ScoreDistribution(0, 0.0, 0.0, 0.0)
@@ -345,28 +395,57 @@ def calibrate_thresholds(
     iso_points: list[tuple[float, float]] = []
     green_t = amber_t = red_t = 0.0
     ks_sep = 0.0
+    fit_loss = "l2"
+    zone_method = "mad"
     try:
         fit_xs = related_scores + unrelated_scores
         fit_ys = [1.0] * len(related_scores) + [0.0] * len(unrelated_scores)
+        # First the L2 (squared-loss) isotonic fit.
         cal_f = isotonic_fit(fit_xs, fit_ys)
+        # Label-noise detection (survey 2 §3.1): if any probe's L2 residual is a
+        # robust outlier (> _NOISE_OUTLIER_C robust-σ), refit under Huber loss so
+        # the mislabeled probe has bounded influence on the curve.
+        l2_pts = list(getattr(cal_f, "isotonic_points", []))
+        if l2_pts:
+            l2_fitted = [cal_f(x) for x in fit_xs]
+            residuals = [fit_ys[i] - l2_fitted[i] for i in range(len(fit_xs))]
+            from capybase.stats import mad_scaled
+
+            resid_scale = mad_scaled(residuals)
+            if resid_scale > 0 and any(
+                abs(r) > _NOISE_OUTLIER_C * resid_scale for r in residuals
+            ):
+                cal_f = huber_isotonic_fit(fit_xs, fit_ys)
+                fit_loss = "huber"
+                notes.append(
+                    "label noise detected (large isotonic residual); refit under "
+                    "Huber loss for bounded-influence calibration (survey 2 §3.1)"
+                )
         iso_points = list(getattr(cal_f, "isotonic_points", []))
         if iso_points:
-            cal_related = sorted(cal_f(s) for s in related_scores)
-            cal_unrelated = sorted(cal_f(s) for s in unrelated_scores)
+            cal_related = [cal_f(s) for s in related_scores]
+            cal_unrelated = [cal_f(s) for s in unrelated_scores]
             # Zone derivation on the calibrated scale (related -> ~1.0, unrelated
-            # -> ~0.0). The semantics (survey §3.2): a pair scoring above GREEN
-            # is almost certainly related (high precision), one below RED is
-            # almost certainly unrelated (the hard reject floor); AMBER is the
-            # borderline band where a reranker / human review would add value.
-            #   green = p95 of calibrated UNRELATED  (only ~5% of unrelated clear
-            #     it → high precision above it);
-            #   red   = p05 of calibrated RELATED     (only ~5% of related fall
-            #     below it → high-confidence reject below it);
-            # so green >= amber >= red when the classes separate.
-            green_t = _percentile(cal_unrelated, 95)
-            red_t = _percentile(cal_related, 5)
-            amber_t = (green_t + red_t) / 2.0
-            ks_sep = ks_stat(cal_related, cal_unrelated)
+            # -> ~0.0). MAD-based thresholds (survey 2 §4.1): a zone boundary
+            # sits k·MAD from the class median — robust (50% breakdown) so a few
+            # outliers don't move it. Falls back to percentile zones when MAD=0
+            # (degenerate, e.g. a constant-vector model).
+            mad_rel = _mad(cal_related)
+            mad_unrel = _mad(cal_unrelated)
+            if mad_rel > 0 and mad_unrel > 0:
+                med_rel = _median(cal_related)
+                med_unrel = _median(cal_unrelated)
+                green_t = med_unrel + _ZONE_K * mad_unrel
+                red_t = med_rel - _ZONE_K * mad_rel
+                amber_t = (green_t + red_t) / 2.0
+                zone_method = "mad"
+            else:
+                # MAD=0 degeneracy: fall back to percentile zones (survey §3.2).
+                green_t = _percentile(sorted(cal_unrelated), 95)
+                red_t = _percentile(sorted(cal_related), 5)
+                amber_t = (green_t + red_t) / 2.0
+                zone_method = "percentile"
+            ks_sep = ks_stat(sorted(cal_related), sorted(cal_unrelated))
             if ks_sep <= 0.0:
                 # No calibrated separation either — drop the fit, keep raw floor.
                 iso_points = []
@@ -394,6 +473,10 @@ def calibrate_thresholds(
         amber_threshold=amber_t,
         red_threshold=red_t,
         ks_separation=ks_sep,
+        fit_loss=fit_loss,
+        zone_method=zone_method,
+        related_mad=_mad(related_scores) if related_scores else 0.0,
+        unrelated_mad=_mad(unrelated_scores) if unrelated_scores else 0.0,
     )
 
 
