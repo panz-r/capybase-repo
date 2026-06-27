@@ -67,6 +67,23 @@ def test_compile_rust_edition_2015_accepted():
 
 
 @skip_no_rustc
+def test_compile_rust_edition_2024_accepted():
+    # Edition 2024 stabilized in Rust 1.85 (Feb 2025); the default for new
+    # crates. rustc 1.85+ accepts --edition 2024.
+    ok, _ = _compile_rust("pub fn x() -> u32 { 1 }\n", edition="2024")
+    assert ok is True
+
+
+@skip_no_rustc
+def test_compile_rust_edition_2024_rejects_bogus():
+    # An edition rustc doesn't recognize must surface as a failure (caught),
+    # not silently pass. 2099 is not a valid edition.
+    ok, msg = _compile_rust("pub fn x() -> u32 { 1 }\n", edition="2099")
+    assert ok is False
+    assert "edition" in msg.lower() or "error" in msg.lower()
+
+
+@skip_no_rustc
 def test_compile_rust_missing_binary_raises_file_not_found():
     # A non-existent rustc path raises FileNotFoundError (the caller gates on
     # _resolve first, so this never reaches a false syntax failure in practice).
@@ -91,6 +108,21 @@ def test_infer_edition_from_cargo_toml(tmp_path):
     src_dir = tmp_path / "src"
     src_dir.mkdir()
     assert _infer_rust_edition(str(tmp_path), str(src_dir / "lib.rs")) == "2018"
+
+
+def test_infer_edition_2024_from_cargo_toml(tmp_path):
+    # Edition 2024 (the default for cargo new since Rust 1.85) is recognized.
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "x"\nversion = "0.1.0"\nedition = "2024"\n'
+    )
+    assert _infer_rust_edition(str(tmp_path), str(tmp_path / "src" / "lib.rs")) == "2024"
+
+
+def test_rust_editions_constant_includes_2024():
+    from capybase.verification import _RUST_EDITIONS
+
+    assert "2024" in _RUST_EDITIONS
+    assert "2021" in _RUST_EDITIONS
 
 
 def test_infer_edition_walks_up_to_nearest_manifest(tmp_path):

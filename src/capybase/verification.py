@@ -1199,17 +1199,27 @@ def _compile_rust(
         Path(out_path).unlink(missing_ok=True)
 
 
+# The Rust editions rustc accepts for ``--edition``. 2024 stabilized in Rust
+# 1.85 (Feb 2025) and is the default for ``cargo new`` since, so real crates
+# now commonly carry ``edition = "2024"``. Kept as a constant so inference and
+# any validation share one source of truth.
+_RUST_EDITIONS = ("2015", "2018", "2021", "2024")
+
+
 def _infer_rust_edition(repo_root: str, path: str) -> str:
     """Infer the Rust edition from the nearest ``Cargo.toml``.
 
     Walks upward from ``path`` toward ``repo_root`` looking for a
     ``Cargo.toml`` with an ``edition = "X"`` field (the conventional place a
     crate declares its edition). Returns the edition string ("2015"/"2018"/
-    "2021") when found, else "2021" (the modern default for new code). This
-    matters because edition changes parsing rules (e.g. 2015 vs 2018 module
-    paths, ``async``, ``dyn``); checking with the wrong edition can produce
-    spurious errors. Pure TOML-field grep — no dependency on a TOML parser,
-    tolerant of comments/whitespace.
+    "2021"/"2024") when found, else "2021" for a loose ``.rs`` file with no
+    Cargo.toml. This matters because edition changes parsing rules (e.g. 2015
+    vs 2018 module paths, ``async``, ``dyn``, 2024's ``gen`` blocks and
+    tightened lints); checking with the wrong edition can produce spurious
+    errors. Pure TOML-field grep — no dependency on a TOML parser, tolerant of
+    comments/whitespace. Note the cargo path (the default in a cargo project)
+    doesn't use this — cargo passes the correct ``--edition`` itself; this
+    inference feeds only the loose-file standalone-rustc fallback.
 
     The walk is strictly bounded by ``repo_root``: it never consults a
     manifest above the project root, so an outer workspace's edition can't
@@ -1248,10 +1258,15 @@ def _infer_rust_edition(repo_root: str, path: str) -> str:
                 if stripped.startswith("edition"):
                     _, _, rest = stripped.partition("=")
                     val = rest.strip().strip("'\"")
-                    if val in ("2015", "2018", "2021"):
+                    if val in _RUST_EDITIONS:
                         return val
         except OSError:
             continue
+    # Loose .rs (no Cargo.toml) or no edition field: 2021 is the safest default
+    # for standalone files. 2024 tightened some lints (e.g. unsafe_op_in_unsafe_fn
+    # is now deny-by-default) that could spuriously fail older code checked in
+    # isolation. The cargo path (the default in a cargo project) doesn't use
+    # this inference at all — cargo passes the correct --edition itself.
     return "2021"
 
 
