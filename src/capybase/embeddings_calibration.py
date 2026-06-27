@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 
 from capybase.embeddings_corpus import SimilarityProbe, probes
 from capybase.memory.retriever import _cosine
-from capybase.stats import percentile as _percentile
+from capybase.stats import isotonic_fit, ks_stat, percentile as _percentile
 
 
 # The default floor the EmbeddingRetriever ships with — used as the fallback
@@ -60,12 +60,20 @@ class ScoreDistribution:
 class EmbeddingCalibration:
     """The result of a calibration run.
 
-    ``min_similarity`` is the applied threshold (what the retriever should use).
-    ``quantile_gap`` / ``related_p10`` / ``unrelated_p90`` are the three
-    estimates; the report shows all three for transparency. ``related`` and
-    ``unrelated`` are the measured score distributions. ``ok`` is False when the
-    endpoint was unreachable or produced no valid scores (caller keeps the
-    default floor).
+    ``min_similarity`` is the applied threshold (what the retriever should use) —
+    kept equal to ``red_threshold`` for backward-compat (the retriever floor is
+    unchanged in meaning). ``quantile_gap`` / ``related_p10`` / ``unrelated_p90``
+    are the three estimates; the report shows all three for transparency.
+
+    ``isotonic_points`` is the fitted score-calibration transform (survey §2.1):
+    a monotone stepwise map from raw cosine to a model-agnostic calibrated scale,
+    stored as ``(raw, calibrated)`` breakpoints. The three-zone thresholds
+    (``green``/``amber``/``red``, survey §3.2) are derived on that calibrated
+    scale — green/amber are advisory (journaled), red is the hard filter floor.
+
+    ``related`` and ``unrelated`` are the measured score distributions. ``ok`` is
+    False when the endpoint was unreachable or produced no valid scores (caller
+    keeps the default floor).
     """
 
     model: str
@@ -78,6 +86,16 @@ class EmbeddingCalibration:
     ok: bool
     probed_at: str
     notes: list[str] = field(default_factory=list)
+    # Score-calibration transform + three-zone thresholds (survey §2.1, §3.2).
+    # Empty when calibration fell back to quantile-gap-only (older profiles load
+    # with these defaults — backward-compatible).
+    isotonic_points: list[tuple[float, float]] = field(default_factory=list)
+    green_threshold: float = 0.0
+    amber_threshold: float = 0.0
+    red_threshold: float = 0.0
+    # KS separation on the calibrated scale: 1.0 = classes fully separated, 0.0
+    # = identical. A fit-quality signal for the report.
+    ks_separation: float = 0.0
 
     def to_dict(self) -> dict:
         return {
@@ -93,7 +111,69 @@ class EmbeddingCalibration:
             "ok": self.ok,
             "probed_at": self.probed_at,
             "notes": list(self.notes),
+            # The fitted score-calibration transform (survey §2.1).
+            "isotonic_points": [
+                [round(r, 4), round(c, 4)] for r, c in self.isotonic_points
+            ],
+            # Three-zone thresholds on the calibrated scale (survey §3.2).
+            "zones": {
+                "green": round(self.green_threshold, 4),
+                "amber": round(self.amber_threshold, 4),
+                "red": round(self.red_threshold, 4),
+            },
+            "ks_separation": round(self.ks_separation, 4),
         }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "EmbeddingCalibration":
+        """Reconstruct from a serialized envelope (``to_dict`` round-trip).
+
+        Tolerant: missing/additive keys default gracefully so older envelopes
+        (pre-isotonic) still load. ``isotonic_points`` may be stored as a list
+        of ``[raw, cal]`` pairs (JSON has no tuples).
+        """
+        estimates = d.get("estimates", {}) or {}
+        zones = d.get("zones", {}) or {}
+        raw_pts = d.get("isotonic_points", []) or []
+        # Accept either tuple/list pairs; coerce to (float, float).
+        iso_pts: list[tuple[float, float]] = []
+        for pair in raw_pts:
+            try:
+                iso_pts.append((float(pair[0]), float(pair[1])))
+            except (TypeError, IndexError, ValueError):
+                continue
+        return cls(
+            model=str(d.get("model", "")),
+            min_similarity=float(d.get("min_similarity", DEFAULT_MIN_SIMILARITY)),
+            quantile_gap=float(estimates.get("quantile_gap", DEFAULT_MIN_SIMILARITY)),
+            related_p10=float(estimates.get("related_p10", DEFAULT_MIN_SIMILARITY)),
+            unrelated_p90=float(estimates.get("unrelated_p90", DEFAULT_MIN_SIMILARITY)),
+            related=_distribution_from_dict(d.get("related", {})),
+            unrelated=_distribution_from_dict(d.get("unrelated", {})),
+            ok=bool(d.get("ok", False)),
+            probed_at=str(d.get("probed_at", "")),
+            notes=list(d.get("notes", []) or []),
+            isotonic_points=iso_pts,
+            green_threshold=float(zones.get("green", 0.0)),
+            amber_threshold=float(zones.get("amber", 0.0)),
+            red_threshold=float(zones.get("red", 0.0)),
+            ks_separation=float(d.get("ks_separation", 0.0)),
+        )
+
+    @property
+    def has_isotonic_fit(self) -> bool:
+        """True when an isotonic score-calibration transform was fit."""
+        return bool(self.isotonic_points)
+
+    def calibrated_score(self, raw: float) -> float:
+        """Apply the isotonic transform to a raw cosine.
+
+        Returns ``raw`` unchanged when no fit exists (degrades to identity, so
+        the floor is evaluated on the raw scale exactly as before isotonic).
+        """
+        if not self.has_isotonic_fit:
+            return raw
+        return _apply_isotonic(self.isotonic_points, raw)
 
 
 # ``_percentile`` is imported from :mod:`capybase.stats` (shared numerics).
@@ -146,6 +226,35 @@ def _distribution(scores: list[float]) -> ScoreDistribution:
         maximum=max(scores),
         mean=sum(scores) / len(scores),
     )
+
+
+def _distribution_from_dict(d: dict | None) -> ScoreDistribution:
+    """Reconstruct a ScoreDistribution from its serialized form (tolerant)."""
+    if not d:
+        return ScoreDistribution(0, 0.0, 0.0, 0.0)
+    try:
+        return ScoreDistribution(
+            count=int(d.get("count", 0)),
+            minimum=float(d.get("min", 0.0)),
+            maximum=float(d.get("max", 0.0)),
+            mean=float(d.get("mean", 0.0)),
+        )
+    except (TypeError, ValueError):
+        return ScoreDistribution(0, 0.0, 0.0, 0.0)
+
+
+def _apply_isotonic(points: list[tuple[float, float]], x: float) -> float:
+    """Evaluate a serialized isotonic transform (its breakpoints) at ``x``.
+
+    A thin wrapper that rebuilds the callable from the stored breakpoints and
+    applies it. Constant extrapolation outside the fitted range (matches
+    :func:`capybase.stats.isotonic_fit`).
+    """
+    if not points:
+        return x
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    return isotonic_fit(xs, ys)(x)
 
 
 def calibrate_thresholds(
@@ -214,7 +323,9 @@ def calibrate_thresholds(
 
     # The applied threshold is the quantile-gap estimate. Clamp to [0, 1]; if the
     # distributions badly overlap (gap < 0), fall back to the more conservative
-    # of the two reference estimates so we don't admit noise.
+    # of the two reference estimates so we don't admit noise. This stays on the
+    # RAW scale — the meaning of ``min_similarity`` is unchanged from before the
+    # isotonic work, so existing retrievers/tests keep working byte-identically.
     applied = max(0.0, min(1.0, gap_threshold))
     if applied <= 0.0:
         # Distributions overlap entirely — use the stricter of the two references
@@ -224,6 +335,48 @@ def calibrate_thresholds(
             "related/unrelated distributions overlap; using unrelated_p90 as a "
             "conservative floor (this model may be too weak for reliable RAG)"
         )
+
+    # Score calibration (survey §2.1): fit an isotonic transform mapping raw
+    # cosines onto a model-agnostic [0,1] scale, then derive three-zone
+    # thresholds on that calibrated scale (survey §3.2). This is ADDITIVE to the
+    # raw-scale floor above — ``min_similarity`` keeps its old meaning, and the
+    # zones/isotonic transform are the new, richer capability. The fit needs both
+    # classes non-empty (guaranteed here: we returned _failed above otherwise).
+    iso_points: list[tuple[float, float]] = []
+    green_t = amber_t = red_t = 0.0
+    ks_sep = 0.0
+    try:
+        fit_xs = related_scores + unrelated_scores
+        fit_ys = [1.0] * len(related_scores) + [0.0] * len(unrelated_scores)
+        cal_f = isotonic_fit(fit_xs, fit_ys)
+        iso_points = list(getattr(cal_f, "isotonic_points", []))
+        if iso_points:
+            cal_related = sorted(cal_f(s) for s in related_scores)
+            cal_unrelated = sorted(cal_f(s) for s in unrelated_scores)
+            # Zone derivation on the calibrated scale (related -> ~1.0, unrelated
+            # -> ~0.0). The semantics (survey §3.2): a pair scoring above GREEN
+            # is almost certainly related (high precision), one below RED is
+            # almost certainly unrelated (the hard reject floor); AMBER is the
+            # borderline band where a reranker / human review would add value.
+            #   green = p95 of calibrated UNRELATED  (only ~5% of unrelated clear
+            #     it → high precision above it);
+            #   red   = p05 of calibrated RELATED     (only ~5% of related fall
+            #     below it → high-confidence reject below it);
+            # so green >= amber >= red when the classes separate.
+            green_t = _percentile(cal_unrelated, 95)
+            red_t = _percentile(cal_related, 5)
+            amber_t = (green_t + red_t) / 2.0
+            ks_sep = ks_stat(cal_related, cal_unrelated)
+            if ks_sep <= 0.0:
+                # No calibrated separation either — drop the fit, keep raw floor.
+                iso_points = []
+                notes.append(
+                    "isotonic fit produced no class separation on the calibrated "
+                    "scale; keeping the raw quantile-gap floor only"
+                )
+    except Exception as exc:  # noqa: BLE001 - calibration is best-effort
+        notes.append(f"isotonic fit failed ({exc}); keeping the raw floor only")
+        iso_points = []
 
     return EmbeddingCalibration(
         model=embeddings_model,
@@ -236,6 +389,11 @@ def calibrate_thresholds(
         ok=True,
         probed_at=datetime.now(timezone.utc).isoformat(),
         notes=notes,
+        isotonic_points=iso_points,
+        green_threshold=green_t,
+        amber_threshold=amber_t,
+        red_threshold=red_t,
+        ks_separation=ks_sep,
     )
 
 

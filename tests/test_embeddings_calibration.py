@@ -284,3 +284,123 @@ def test_constant_vectors_do_not_trigger_overlap_fallback():
     assert cal.ok
     assert cal.min_similarity > 0.0
     assert not any("overlap" in n for n in cal.notes)
+
+
+# ---------------------------------------------------------------------------
+# Score calibration (§2.1): isotonic transform + 3-zone thresholds (§3.2)
+# ---------------------------------------------------------------------------
+
+
+def test_isotonic_fit_produced_on_well_separated_model():
+    """A well-separated model (related high, unrelated low) yields an isotonic
+    transform with recorded breakpoints and an ordered green/amber/red zone."""
+    cal = calibrate_thresholds(_DomainFakeClient(), embeddings_model="embed")
+    assert cal.ok
+    assert cal.has_isotonic_fit
+    assert len(cal.isotonic_points) > 0
+    # green (high-confidence band) >= amber (borderline) >= red (hard floor).
+    assert cal.green_threshold >= cal.amber_threshold >= cal.red_threshold
+    # The classes separate on the calibrated scale.
+    assert cal.ks_separation > 0.0
+
+
+def test_isotonic_transform_is_monotone():
+    """The calibrated transform is monotone-nondecreasing: higher raw cosine ->
+    higher-or-equal calibrated score. (Isotonic regression's defining property.)"""
+    cal = calibrate_thresholds(_DomainFakeClient(), embeddings_model="embed")
+    assert cal.has_isotonic_fit
+    raws = sorted({p[0] for p in cal.isotonic_points})
+    cals = [cal.calibrated_score(r) for r in raws]
+    assert cals == sorted(cals)
+    # The calibrated score of a high raw value exceeds a low raw value's.
+    assert cal.calibrated_score(raws[-1]) >= cal.calibrated_score(raws[0])
+
+
+def test_calibrated_score_is_identity_without_fit():
+    """No isotonic fit (overlap/weak model) -> calibrated_score returns the raw
+    value unchanged (the floor is then evaluated on the raw scale as before)."""
+    cal = calibrate_thresholds(_ZeroVectorClient(), embeddings_model="embed")
+    assert not cal.has_isotonic_fit
+    assert cal.calibrated_score(0.42) == 0.42
+
+
+def test_overlap_drops_isotonic_fit_keeps_raw_floor():
+    """When the model is too weak (overlap), the isotonic fit is dropped and the
+    raw quantile-gap floor still applies. Both contracts hold together."""
+    cal = calibrate_thresholds(_ZeroVectorClient(), embeddings_model="embed")
+    assert cal.ok
+    assert not cal.has_isotonic_fit
+    assert cal.isotonic_points == []
+    # The raw floor still fires (the pre-isotonic behavior, preserved).
+    assert cal.min_similarity == cal.unrelated_p90
+
+
+def test_zones_and_isotonic_roundtrip_via_to_dict():
+    """The isotonic points + zones survive serialization (to_dict)."""
+    cal = calibrate_thresholds(_DomainFakeClient(), embeddings_model="embed")
+    d = cal.to_dict()
+    assert d["ok"] is True
+    assert "zones" in d and {"green", "amber", "red"} <= set(d["zones"])
+    assert isinstance(d["isotonic_points"], list)
+    assert all(isinstance(p, list) and len(p) == 2 for p in d["isotonic_points"])
+    assert d["ks_separation"] > 0.0
+
+
+def test_from_dict_roundtrips_isotonic_and_zones():
+    """from_dict reconstructs the full envelope incl. the transform + zones, and
+    the reconstructed transform scores identically (within the 4dp serialization
+    rounding that to_dict deliberately applies)."""
+    from capybase.embeddings_calibration import EmbeddingCalibration
+
+    cal = calibrate_thresholds(_DomainFakeClient(), embeddings_model="embed")
+    again = EmbeddingCalibration.from_dict(cal.to_dict())
+    assert again.has_isotonic_fit
+    assert len(again.isotonic_points) == len(cal.isotonic_points)
+    # Thresholds round to 4dp on serialization.
+    assert again.green_threshold == pytest.approx(cal.green_threshold, abs=1e-4)
+    assert again.red_threshold == pytest.approx(cal.red_threshold, abs=1e-4)
+    assert again.ks_separation == pytest.approx(cal.ks_separation, abs=1e-4)
+    # The reconstructed transform scores a known raw value within rounding.
+    raw = cal.isotonic_points[0][0]
+    assert again.calibrated_score(raw) == pytest.approx(
+        cal.calibrated_score(raw), abs=1e-3
+    )
+
+
+def test_from_dict_tolerant_of_pre_isotonic_envelope():
+    """An old envelope (pre-isotonic, missing zones/isotonic_points) still loads,
+    with the additive fields defaulting gracefully."""
+    from capybase.embeddings_calibration import EmbeddingCalibration
+
+    old_envelope = {
+        "model": "embed",
+        "min_similarity": 0.4,
+        "estimates": {"quantile_gap": 0.4, "related_p10": 0.6, "unrelated_p90": 0.3},
+        "related": {"count": 8, "min": 0.5, "max": 0.9, "mean": 0.7},
+        "unrelated": {"count": 8, "min": 0.1, "max": 0.35, "mean": 0.2},
+        "ok": True,
+        "probed_at": "2026-06-27T00:00:00+00:00",
+        "notes": [],
+    }
+    cal = EmbeddingCalibration.from_dict(old_envelope)
+    assert cal.min_similarity == 0.4
+    assert not cal.has_isotonic_fit
+    assert cal.isotonic_points == []
+    assert cal.green_threshold == 0.0
+    # Identity transform (no fit) -> calibrated_score returns raw unchanged.
+    assert cal.calibrated_score(0.4) == 0.4
+
+
+def test_old_envelope_keys_still_present():
+    """Backward-compat: the pre-isotonic envelope keys all still appear in
+    to_dict (existing readers/tests aren't broken by the additive zones)."""
+    cal = calibrate_thresholds(_DomainFakeClient(), embeddings_model="embed")
+    d = cal.to_dict()
+    for key in (
+        "model", "min_similarity", "estimates", "related", "unrelated",
+        "ok", "probed_at", "notes",
+    ):
+        assert key in d, f"missing legacy key: {key}"
+    assert "quantile_gap" in d["estimates"]
+    assert "related_p10" in d["estimates"]
+    assert "unrelated_p90" in d["estimates"]
