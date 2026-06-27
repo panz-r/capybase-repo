@@ -515,3 +515,113 @@ def test_zones_remain_ordered_on_separated_model():
     cal = calibrate_thresholds(_DomainFakeClient(), embeddings_model="embed")
     if cal.has_isotonic_fit:
         assert cal.green_threshold >= cal.amber_threshold >= cal.red_threshold
+
+
+# ---------------------------------------------------------------------------
+# Offline drift detection (survey 2 §7) — compare_calibration
+# ---------------------------------------------------------------------------
+
+
+def _cal(
+    *,
+    related_median=0.9, related_mad=0.05,
+    unrelated_median=0.2, unrelated_mad=0.05,
+    ks_separation=0.8, count=24,
+):
+    """Build an EmbeddingCalibration with controlled summary statistics for drift
+    tests (the comparison uses medians/MAD/KS, not raw scores)."""
+    from capybase.embeddings_calibration import EmbeddingCalibration, ScoreDistribution
+
+    return EmbeddingCalibration(
+        model="embed", min_similarity=0.6, quantile_gap=0.6,
+        related_p10=0.8, unrelated_p90=0.4,
+        related=ScoreDistribution(count, 0.5, 0.99, related_median, related_median, related_mad),
+        unrelated=ScoreDistribution(count, 0.05, 0.4, unrelated_median, unrelated_median, unrelated_mad),
+        ok=True, probed_at="",
+        ks_separation=ks_separation,
+        related_mad=related_mad, unrelated_mad=unrelated_mad,
+    )
+
+
+def test_drift_identical_distributions_not_drifted():
+    """Same medians/MAD/KS → no drift."""
+    from capybase.embeddings_calibration import compare_calibration
+
+    base = _cal()
+    report = compare_calibration(base, base)
+    assert not report.drifted
+    assert report.reasons == []
+
+
+def test_drift_median_shift_flagged():
+    """A related-median shift beyond 2·baseline-σ is flagged as drift."""
+    from capybase.embeddings_calibration import compare_calibration
+
+    # baseline MAD 0.02 → shift threshold 2·(1.345·0.02) ≈ 0.054.
+    base = _cal(related_median=0.9, related_mad=0.02)
+    # Shift related median up to 0.99 (Δ 0.09 > 0.054) → flagged.
+    moved = _cal(related_median=0.99, related_mad=0.02)
+    report = compare_calibration(moved, base)
+    assert report.drifted
+    assert any("related" in r and "median" in r for r in report.reasons)
+    assert report.related_median_shift == pytest.approx(0.09, abs=1e-9)
+
+
+def test_drift_dispersion_change_flagged():
+    """A MAD ratio outside [0.5, 2.0] is flagged (scale/dispersion drift)."""
+    from capybase.embeddings_calibration import compare_calibration
+
+    base = _cal(related_mad=0.05)
+    spread = _cal(related_mad=0.20)  # ratio 4.0 → outside band
+    report = compare_calibration(spread, base)
+    assert report.drifted
+    assert any("dispersion" in r for r in report.reasons)
+    assert report.related_mad_ratio == pytest.approx(4.0)
+
+
+def test_drift_separation_change_flagged():
+    """A KS-separation swing > 0.15 is flagged (class-separation drift)."""
+    from capybase.embeddings_calibration import compare_calibration
+
+    base = _cal(ks_separation=0.8)
+    worse = _cal(ks_separation=0.5)  # Δ = -0.3
+    report = compare_calibration(worse, base)
+    assert report.drifted
+    assert any("separation" in r and "degraded" in r for r in report.reasons)
+    assert report.ks_separation_delta == pytest.approx(-0.3)
+
+
+def test_drift_small_shift_within_tolerance_not_flagged():
+    """A median shift within 2·baseline-σ is NOT drift (avoid false positives)."""
+    from capybase.embeddings_calibration import compare_calibration
+
+    base = _cal(related_median=0.9, related_mad=0.05)
+    # Shift within tolerance: 2·(1.345·0.05) = 0.1345; shift 0.05 is well within.
+    nudged = _cal(related_median=0.95, related_mad=0.05)
+    report = compare_calibration(nudged, base)
+    assert not report.drifted
+
+
+def test_drift_degenerate_baseline_not_drifted():
+    """A baseline with no data (count=0) yields no drift signal, never raises."""
+    from capybase.embeddings_calibration import compare_calibration
+
+    empty = _cal(count=0)
+    current = _cal()
+    report = compare_calibration(current, empty)
+    assert not report.drifted  # nothing to compare against
+
+
+def test_drift_report_to_dict_roundtrips():
+    """The drift report serializes for the JSON payload + stored envelope."""
+    from capybase.embeddings_calibration import compare_calibration
+
+    # baseline MAD 0.02 so the median shift (0.09) exceeds the threshold.
+    base = _cal(related_mad=0.02)
+    moved = _cal(related_median=0.99, related_mad=0.02)
+    d = compare_calibration(moved, base).to_dict()
+    assert d["drifted"] is True
+    assert isinstance(d["reasons"], list) and len(d["reasons"]) >= 1
+    assert "related_median_shift" in d
+    assert "related_mad_ratio" in d
+    assert "ks_separation_delta" in d

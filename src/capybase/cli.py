@@ -232,7 +232,9 @@ def _real_embeddings_client(model_cfg: ModelConfig, embeddings_model: str):
     return OpenAIEmbeddingsClient(emb_cfg)
 
 
-def _format_embeddings_report(cal, profile_path: Path, *, written: bool, prev_floor: float) -> str:
+def _format_embeddings_report(
+    cal, profile_path: Path, *, written: bool, prev_floor: float, drift=None
+) -> str:
     """Human-readable summary of an embeddings-calibration run."""
     lines = [f"capybase calibrate-embeddings — model: {cal.model}"]
     lines.append(f"status: {'ok' if cal.ok else 'FAILED (endpoint unreachable)'}")
@@ -272,6 +274,21 @@ def _format_embeddings_report(cal, profile_path: Path, *, written: bool, prev_fl
         lines.append("notes:")
         for n in cal.notes:
             lines.append(f"  - {n}")
+    if drift is not None:
+        lines.append("")
+        flag = "DRIFT DETECTED" if drift.drifted else "no drift vs last calibration"
+        lines.append(f"drift vs last calibration: {flag}")
+        lines.append(
+            f"  related median shift   = {drift.related_median_shift:+.3f}  "
+            f"(MAD ratio {drift.related_mad_ratio:.2f})"
+        )
+        lines.append(
+            f"  unrelated median shift = {drift.unrelated_median_shift:+.3f}  "
+            f"(MAD ratio {drift.unrelated_mad_ratio:.2f})"
+        )
+        lines.append(f"  class separation Δ     = {drift.ks_separation_delta:+.3f}")
+        for r in drift.reasons:
+            lines.append(f"    - {r}")
     lines.append("")
     if written:
         lines.append(f"wrote embedding calibration to: {profile_path}")
@@ -302,7 +319,11 @@ def _run_calibrate_embeddings(
     import json
 
     from capybase.calibration_profile import ModelProfile, resolve_profile_path
-    from capybase.embeddings_calibration import calibrate_thresholds
+    from capybase.embeddings_calibration import (
+        EmbeddingCalibration,
+        calibrate_thresholds,
+        compare_calibration,
+    )
 
     embeddings_model = config.memory.embeddings_model
     client = (
@@ -315,6 +336,7 @@ def _run_calibrate_embeddings(
     resolved = resolve_profile_path(repo, profile_path)
     written = False
     prev_floor = 0.35
+    drift = None  # advisory drift-vs-baseline report (survey 2 §7)
     if cal.ok:
         # Load the existing profile (preserving LLM-calibration knobs); a missing
         # profile is created fresh via from_dict (safe defaults for required
@@ -326,10 +348,22 @@ def _run_calibrate_embeddings(
             profile = ModelProfile.from_dict({"model": config.model.model})
         if profile.model == config.model.model:
             prev_floor = profile.embedding_min_similarity
+            # Offline drift detection: compare against the prior run's envelope
+            # for the same model (advisory; never blocks the write).
+            prior_env = profile.embedding_calibration or {}
+            if prior_env:
+                try:
+                    baseline = EmbeddingCalibration.from_dict(prior_env)
+                    drift = compare_calibration(cal, baseline)
+                except Exception:  # noqa: BLE001 - best-effort; a bad envelope is no-drift
+                    drift = None
         if not dry_run:
             profile.model = config.model.model  # keep the match key current
             profile.embedding_min_similarity = cal.min_similarity
-            profile.embedding_calibration = cal.to_dict()
+            env = cal.to_dict()
+            if drift is not None:
+                env["drift"] = drift.to_dict()
+            profile.embedding_calibration = env
             profile.save(resolved)
             written = True
 
@@ -337,9 +371,13 @@ def _run_calibrate_embeddings(
         payload = cal.to_dict()
         payload["_written"] = written
         payload["_ok"] = cal.ok
+        if drift is not None:
+            payload["drift"] = drift.to_dict()
         print(json.dumps(payload, indent=2), file=out)
     else:
-        text = _format_embeddings_report(cal, resolved, written=written, prev_floor=prev_floor)
+        text = _format_embeddings_report(
+            cal, resolved, written=written, prev_floor=prev_floor, drift=drift
+        )
         if dry_run:
             text += "\n(dry-run: profile not written)"
         elif not cal.ok:

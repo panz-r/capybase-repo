@@ -495,3 +495,125 @@ def _failed(model: str, notes: list[str]) -> EmbeddingCalibration:
         probed_at=datetime.now(timezone.utc).isoformat(),
         notes=notes,
     )
+
+
+# ---------------------------------------------------------------------------
+# Offline drift detection (survey 2 §7) — compare a new calibration against the
+# stored baseline. Pure summary-statistic comparison (no raw scores persisted).
+# ---------------------------------------------------------------------------
+
+# Drift thresholds (conservative — drift is advisory, never blocks a write).
+# A median shift is "large" relative to the baseline's own robust spread.
+_MEDIAN_SHIFT_K = 2.0
+# A scale (MAD) change outside this ratio band signals dispersion drift.
+_MAD_RATIO_BAND = (0.5, 2.0)
+# A KS-separation swing larger than this flags a class-separation change.
+_KS_DELTA = 0.15
+
+
+@dataclass(frozen=True)
+class DriftReport:
+    """The result of comparing a new calibration against the stored baseline.
+
+    Offline-only (survey 2 §7): computed at calibrate-embeddings time against the
+    previous run's envelope. ``drifted`` is advisory — it never blocks writing the
+    new calibration; it surfaces that the model's score behavior changed enough
+    to warrant attention (the floor/zones the retriever now uses may differ).
+    """
+
+    drifted: bool
+    reasons: list[str] = field(default_factory=list)
+    # Hodges-Lehmann-style location shift (survey 2 §4.3): how far the related
+    # distribution's median moved, in absolute calibrated-scale units.
+    related_median_shift: float = 0.0
+    unrelated_median_shift: float = 0.0
+    # MAD ratio (current/baseline): 1.0 = no dispersion change.
+    related_mad_ratio: float = 1.0
+    unrelated_mad_ratio: float = 1.0
+    # KS-separation change (current - baseline): positive = better separated.
+    ks_separation_delta: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "drifted": self.drifted,
+            "reasons": list(self.reasons),
+            "related_median_shift": round(self.related_median_shift, 4),
+            "unrelated_median_shift": round(self.unrelated_median_shift, 4),
+            "related_mad_ratio": round(self.related_mad_ratio, 4),
+            "unrelated_mad_ratio": round(self.unrelated_mad_ratio, 4),
+            "ks_separation_delta": round(self.ks_separation_delta, 4),
+        }
+
+
+def _mad_ratio(current: float, baseline: float) -> float:
+    """Safe MAD ratio (current/baseline); 1.0 when baseline is zero/absent."""
+    if baseline <= 0:
+        return 1.0 if current <= 0 else float("inf")
+    return current / baseline
+
+
+def _median_shift(current: ScoreDistribution, baseline: ScoreDistribution) -> float:
+    """Absolute median shift between two distributions (0.0 if either is empty)."""
+    if current.count == 0 or baseline.count == 0:
+        return 0.0
+    return current.median - baseline.median
+
+
+def compare_calibration(
+    current: "EmbeddingCalibration", baseline: "EmbeddingCalibration"
+) -> DriftReport:
+    """Compare a new calibration against the stored baseline (survey 2 §7).
+
+    Uses summary statistics (median/MAD/KS-separation) — the envelope persists
+    these, not raw score lists, to avoid bloat. A drift signal fires when the
+    related/unrelated distributions' location or dispersion moved meaningfully,
+    or the class separation changed. Pure advisory; never raises (a degenerate
+    baseline yields ``drifted=False`` with empty reasons).
+    """
+    reasons: list[str] = []
+    rel_shift = _median_shift(current.related, baseline.related)
+    unrel_shift = _median_shift(current.unrelated, baseline.unrelated)
+    rel_ratio = _mad_ratio(current.related_mad, baseline.related_mad)
+    unrel_ratio = _mad_ratio(current.unrelated_mad, baseline.unrelated_mad)
+    ks_delta = current.ks_separation - baseline.ks_separation
+
+    # Location drift: a median shift beyond k·(baseline robust spread). The
+    # baseline's own MAD (scaled to σ) is the yardstick.
+    for name, shift, base_mad in (
+        ("related", rel_shift, baseline.related_mad),
+        ("unrelated", unrel_shift, baseline.unrelated_mad),
+    ):
+        yardstick = max(1.345 * base_mad, 1e-3)
+        if abs(shift) > _MEDIAN_SHIFT_K * yardstick:
+            reasons.append(
+                f"{name} score median shifted {shift:+.3f} (> {_MEDIAN_SHIFT_K}·"
+                f"baseline-σ {yardstick:.3f})"
+            )
+
+    # Dispersion drift: MAD ratio outside the band.
+    lo, hi = _MAD_RATIO_BAND
+    for name, ratio in (("related", rel_ratio), ("unrelated", unrel_ratio)):
+        if ratio != float("inf") and (ratio < lo or ratio > hi):
+            reasons.append(
+                f"{name} score dispersion changed (MAD ratio {ratio:.2f} outside "
+                f"[{lo}, {hi}])"
+            )
+        elif ratio == float("inf"):
+            reasons.append(f"{name} score dispersion emerged (baseline MAD was 0)")
+
+    # Separation drift: KS-separation swing.
+    if abs(ks_delta) > _KS_DELTA:
+        direction = "improved" if ks_delta > 0 else "degraded"
+        reasons.append(
+            f"class separation {direction} (KS Δ {ks_delta:+.3f}, > ±{_KS_DELTA})"
+        )
+
+    return DriftReport(
+        drifted=bool(reasons),
+        reasons=reasons,
+        related_median_shift=rel_shift,
+        unrelated_median_shift=unrel_shift,
+        related_mad_ratio=rel_ratio,
+        unrelated_mad_ratio=unrel_ratio,
+        ks_separation_delta=ks_delta,
+    )

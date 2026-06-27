@@ -322,6 +322,84 @@ def test_calibrate_embeddings_json_payload_carries_zones(tmp_path: Path):
     assert env["ks_separation"] > 0.0
 
 
+# ---------------------------------------------------------------------------
+# Offline drift detection (survey 2 §7) — drift block vs a prior run
+# ---------------------------------------------------------------------------
+
+
+def _seed_envelope(path: Path, *, model: str = "vibethink", related_mad: float = 0.02) -> None:
+    """Write a prior profile carrying a full calibration envelope (as if a
+    previous calibrate-embeddings had run), with a small related MAD so a later
+    median shift reliably trips the drift threshold."""
+    env = {
+        "model": model,
+        "min_similarity": 0.6,
+        "estimates": {"quantile_gap": 0.6, "related_p10": 0.9, "unrelated_p90": 0.3},
+        "related": {"count": 24, "min": 0.7, "max": 0.99, "mean": 0.9, "median": 0.9, "mad": related_mad},
+        "unrelated": {"count": 24, "min": 0.05, "max": 0.4, "mean": 0.2, "median": 0.2, "mad": related_mad},
+        "ok": True, "probed_at": "2026-06-01T00:00:00+00:00", "notes": [],
+        "isotonic_points": [[0.1, 0.0], [0.9, 1.0]],
+        "zones": {"green": 0.7, "amber": 0.6, "red": 0.5},
+        "ks_separation": 0.8,
+        "fit_loss": "l2", "zone_method": "mad",
+        "related_mad": related_mad, "unrelated_mad": related_mad,
+    }
+    ModelProfile(
+        model=model, max_tokens=8192, json_mode=True,
+        capture_token_entropy=False, generation_timeout_seconds=60,
+        embedding_min_similarity=0.6, embedding_calibration=env,
+    ).save(path)
+
+
+def test_calibrate_embeddings_report_shows_drift_block_on_rerun(tmp_path: Path):
+    """On a re-run (prior envelope present), the report surfaces a drift-vs-last-
+    calibration block — either 'DRIFT DETECTED' or 'no drift'."""
+    profile_path = tmp_path / "model_profile.json"
+    _seed_envelope(profile_path)
+    out = io.StringIO()
+    _run_calibrate_embeddings(
+        _config_with_model(),
+        repo=str(tmp_path),
+        profile_path=str(profile_path),
+        client_factory=_factory(_DomainFakeClient()),
+        out=out,
+    )
+    text = out.getvalue()
+    assert "drift vs last calibration" in text
+
+
+def test_calibrate_embeddings_no_drift_block_on_first_run(tmp_path: Path):
+    """First run (no prior envelope) → no drift block (nothing to compare)."""
+    out = io.StringIO()
+    _run_calibrate_embeddings(
+        _config_with_model(),
+        repo=str(tmp_path),
+        profile_path=str(tmp_path / "p.json"),
+        client_factory=_factory(_DomainFakeClient()),
+        out=out,
+    )
+    assert "drift vs last calibration" not in out.getvalue()
+
+
+def test_calibrate_embeddings_drift_in_json_payload_on_rerun(tmp_path: Path):
+    """The --json payload carries the drift comparison against the prior run."""
+    profile_path = tmp_path / "model_profile.json"
+    _seed_envelope(profile_path)
+    out = io.StringIO()
+    _run_calibrate_embeddings(
+        _config_with_model(),
+        repo=str(tmp_path),
+        profile_path=str(profile_path),
+        json_output=True,
+        client_factory=_factory(_DomainFakeClient()),
+        out=out,
+    )
+    payload = json.loads(out.getvalue())
+    assert "drift" in payload
+    assert "drifted" in payload["drift"]
+    assert "reasons" in payload["drift"]
+
+
 def _seed_floor(path: Path, *, model: str = "vibethink", floor: float = 0.71) -> None:
     """Write a prior profile carrying a known calibrated floor (as if a previous
     ``calibrate-embeddings`` had run)."""
