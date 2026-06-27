@@ -13,12 +13,14 @@ gitignored (too large for the repo; licenses require attribution not
 redistribution), so a fresh clone has NO data and this module SKIPS entirely. To
 populate it:
 
-    .venv/bin/python scripts/fetch_mergeconflict_datasets.py
+    .venv/bin/python scripts/fetch_mergeconflict_datasets.py --language python --limit 50
 
-(As of this writing the zenodo-hdiff dataset contains Python/JS/Java/Clojure/
-Lua/Shell conflicts but NO Rust, so this set skips until a Rust-bearing dataset
-is added to the script's DATASETS registry. The infrastructure — loader,
-harness, skip-on-absent — is in place and verified.)
+The script's DATASETS registry selects the language and caps the case count
+(a dataset's thousands of conflicts would explode test parametrization). The
+zenodo-hdiff dataset has 4,298 Python conflicts (and JS/Java/Clojure/Lua/Shell)
+but no Rust; the Python cases run here against the always-on py_compile floor
+(no toolchain gate). Rust cases, when a Rust-bearing dataset is added, will run
+against the cargo floor (cargo-gated per case).
 
 Oracle policy: real-world M is the human merge, but it may NOT compile under our
 floor if the original repo had pre-existing errors or used a different toolchain.
@@ -80,11 +82,16 @@ def test_realworld_human_merge_is_marker_free(case: RealWorldCase):
 
 
 # ---------------------------------------------------------------------------
-# Verifier verdict: does capybase accept the human merge? (cargo-gated)
+# Verifier verdict: does capybase accept the human merge?
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(CARGO is None, reason="cargo not installed")
+def _needs_toolchain(case: RealWorldCase) -> bool:
+    """Rust cases need cargo (loose-file rustc or cargo floor); Python's
+    py_compile floor is always available. So only Rust cases are cargo-gated."""
+    return case.language == "rust"
+
+
 @pytest.mark.parametrize("case", CASES, ids=[c.id for c in CASES])
 def test_realworld_human_merge_verifier_verdict(case: RealWorldCase, tmp_path):
     """The verifier runs against the human merge; record the verdict honestly.
@@ -92,23 +99,26 @@ def test_realworld_human_merge_verifier_verdict(case: RealWorldCase, tmp_path):
     The human resolution M is the whole merged file. We pass it as the file to
     verify (``original=M`` with no resolutions → the verifier checks M directly).
     Real-world M may NOT pass our floor: the original repo could have
-    pre-existing errors, use a different edition/toolchain, or M resolves all
-    hunks while a single-span splice wouldn't. So this test does NOT force
-    ``passed`` — it asserts the verifier RAN (``syntax_checked`` reflects whether
-    the floor engaged) and records the verdict. The value is "does capybase
-    accept the human merge", an honest real-world signal. A failure here means
-    either the verifier didn't engage (infrastructure regression) or the harness
-    couldn't check a Rust file at all.
+    pre-existing errors, an unsupported toolchain, or M resolves all hunks while
+    a single-span splice wouldn't. So this test does NOT force ``passed`` — it
+    asserts the verifier RAN (``syntax_checked`` reflects whether the floor
+    engaged) and records the verdict. The value is "does capybase accept the
+    human merge", an honest real-world signal.
+
+    Python's py_compile floor runs everywhere (no toolchain gate); Rust needs
+    cargo, so Rust cases skip when cargo is absent.
     """
+    if _needs_toolchain(case) and CARGO is None:
+        pytest.skip("cargo not installed")
     eng = VerificationEngine.default(ValidationConfig())
     # M is the whole resolved file: verify it directly (no splicing).
     res = eng.verify_file(
         case.path, case.language, case.expected_resolved, [],
         repo_root=str(tmp_path),
     )
-    # The verifier must have engaged on a Rust file (rustc fallback for a loose
-    # .rs in tmp_path, or cargo if a manifest existed). syntax_checked=False here
-    # would mean the infrastructure regressed (toolchain present but not used).
+    # The verifier must have engaged. Python's py_compile is always on; Rust's
+    # floor needs a toolchain (gated above). syntax_checked=False would mean the
+    # infrastructure regressed (a supported floor failed to run).
     assert res.features.get("syntax_checked") is True, (
         f"{case.id}: the compile floor did not engage on the human merge "
         f"(syntax_checked=False) — infrastructure regression, not a real "
@@ -116,11 +126,8 @@ def test_realworld_human_merge_verifier_verdict(case: RealWorldCase, tmp_path):
     )
     # Record the verdict in the test output (not asserted): a real-world merge
     # that compiles is a pass signal; one that doesn't is an informative flag.
-    # We only hard-fail on a marker leak (M is supposed to be marker-free) or a
-    # verifier that crashed without a result.
+    # We only hard-fail on the verifier not engaging (above) — a real-world merge
+    # that trips the floor is an honest finding, recorded not asserted.
     if not res.passed:
-        # The merge didn't pass the floor — record why, but don't fail the test
-        # (pre-existing errors are the repo's, not the merge's). This is the
-        # honest real-world outcome.
         msgs = [f.message[:80] for f in res.hard_failures[:2]]
         print(f"  {case.id}: human merge did not pass the floor: {msgs}")

@@ -344,12 +344,19 @@ def build_markers(base: str, current: str, replayed: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def process(dataset: Dataset, *, rust_only: bool = True) -> int:
-    """Walk the extracted dataset, emit Rust (or all-language) JSON cases.
+# File extension per language for emitted case paths.
+_LANG_EXT = {"rust": "rs", "python": "py", "javascript": "js", "java": "java",
+             "clojure": "clj", "lua": "lua", "shell": "sh", "go": "go",
+             "ruby": "rb", "haskell": "hs", "c": "c", "cpp": "cpp"}
 
-    Prints a language histogram so we can see what the dataset contains even
-    when it has no Rust (the expected outcome for hdiff). Returns the count of
-    JSON cases written.
+
+def process(dataset: Dataset, *, language: str | None = "rust", limit: int | None = None) -> int:
+    """Walk the extracted dataset, emit JSON cases for ``language``.
+
+    ``language=None`` emits ALL languages (for surveying). ``limit`` caps the
+    case count (a large dataset like hdiff's 4298 Python conflicts would explode
+    test parametrization). Always prints a language histogram so we see the full
+    distribution even when filtering. Returns the count of JSON cases written.
     """
     root = EXTERNAL / dataset.extract_subdir
     if not root.exists():
@@ -358,7 +365,7 @@ def process(dataset: Dataset, *, rust_only: bool = True) -> int:
     extractor = EXTRACTORS[dataset.extractor]
 
     lang_hist: Counter[str] = Counter()
-    rust_cases: list[dict] = []
+    cases: list[dict] = []
     n = 0
     for ct in extractor(root):
         n += 1
@@ -366,17 +373,20 @@ def process(dataset: Dataset, *, rust_only: bool = True) -> int:
         # → content heuristics). Fall back to "unknown" only if it couldn't.
         lang = ct.language or "unknown"
         lang_hist[lang] += 1
-        if rust_only and lang != "rust":
+        if language is not None and lang != language:
             continue
+        if limit is not None and len(cases) >= limit:
+            continue  # keep scanning for the histogram, but stop emitting
         # Regenerate authentic markers from A/O/B. Skip clean merges.
         marker_original = build_markers(ct.base, ct.current, ct.replayed)
         if marker_original is None:
             continue
-        ext = "rs" if lang == "rust" else "txt"
-        rust_cases.append({
-            "id": f"{dataset.id}-{len(rust_cases) + 1:04d}",
+        ext = _LANG_EXT.get(lang, "txt")
+        idx = len(cases) + 1
+        cases.append({
+            "id": f"{dataset.id}-{idx:04d}",
             "dataset": dataset.id,
-            "path": f"conflict_{len(rust_cases) + 1:04d}.rs" if lang == "rust" else f"conflict_{len(rust_cases) + 1:04d}.txt",
+            "path": f"conflict_{idx:04d}.{ext}",
             "language": lang,
             "base": ct.base,
             "current": ct.current,
@@ -387,17 +397,20 @@ def process(dataset: Dataset, *, rust_only: bool = True) -> int:
             "source_url": dataset.source_url,
         })
 
-    # Histogram report (the key diagnostic: does this dataset have Rust?).
+    # Histogram report (the key diagnostic: what does this dataset contain?).
     print(f"  [scan] {dataset.id}: {n} conflict tuples")
     print("  [histogram] language distribution:")
     for lang, count in lang_hist.most_common():
-        marker = "  <-- RUST" if lang == "rust" else ""
+        marker = ""
+        if language is not None and lang == language:
+            marker = f"  <-- selected ({language})"
         print(f"    {lang:12s} {count:6d}{marker}")
 
-    if not rust_cases:
-        print(f"  [result] no {'Rust ' if rust_only else ''}conflicts found in {dataset.id}")
-        if rust_only and "rust" not in lang_hist:
-            print("           (this dataset has no Rust content; the registry is")
+    if not cases:
+        label = language or "any language"
+        print(f"  [result] no {label} conflicts found in {dataset.id}")
+        if language is not None and language not in lang_hist:
+            print(f"           (this dataset has no {language} content; the registry is")
             print("            ready for the next dataset — add a DATASETS entry)")
         return 0
 
@@ -406,12 +419,15 @@ def process(dataset: Dataset, *, rust_only: bool = True) -> int:
     # Clear prior cases for this dataset so re-runs don't accumulate stale ones.
     for old in TESTDATA.glob(f"{dataset.id}-*.json"):
         old.unlink()
-    for case in rust_cases:
+    for case in cases:
         (TESTDATA / f"{case['id']}.json").write_text(
             json.dumps(case, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-    print(f"  [wrote] {len(rust_cases)} Rust case(s) to {TESTDATA}")
-    return len(rust_cases)
+    wrote = len(cases)
+    capped = f" (capped at {limit})" if limit and lang_hist.get(language, 0) > limit else ""
+    label = language or "all-language"
+    print(f"  [wrote] {wrote} {label} case(s) to {TESTDATA}{capped}")
+    return wrote
 
 
 # ---------------------------------------------------------------------------
@@ -432,8 +448,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--list", action="store_true", help="list the dataset registry and exit")
     ap.add_argument(
-        "--all-languages", action="store_true",
-        help="process all languages, not just Rust (for surveying a dataset)",
+        "--language", default="rust",
+        help="which language's conflicts to emit (default: rust). Use 'all' to "
+             "emit every language (surveying a dataset).",
+    )
+    ap.add_argument(
+        "--limit", type=int, default=None,
+        help="cap the number of cases emitted per dataset (a large dataset would "
+             "explode test parametrization). The full histogram still prints.",
     )
     args = ap.parse_args(argv)
 
@@ -443,13 +465,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {ds.id:20s} {ds.license:10s} {ds.source_url}")
         return 0
 
+    language = None if args.language == "all" else args.language
     selected = list(DATASETS.values()) if args.dataset == "all" else [DATASETS[args.dataset]]
     total_cases = 0
     for ds in selected:
         print(f"==> dataset: {ds.id} ({ds.license})")
         download(ds)
         extract(ds)
-        total_cases += process(ds, rust_only=not args.all_languages)
+        total_cases += process(ds, language=language, limit=args.limit)
         print()
     print(f"==> done. {total_cases} case(s) written to {TESTDATA}")
     if total_cases == 0:
