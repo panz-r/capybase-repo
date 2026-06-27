@@ -253,6 +253,18 @@ def _format_embeddings_report(cal, profile_path: Path, *, written: bool, prev_fl
     lines.append(f"  quantile_gap (applied) = {cal.min_similarity:.3f}")
     lines.append(f"  related_p10            = {cal.related_p10:.3f}")
     lines.append(f"  unrelated_p90          = {cal.unrelated_p90:.3f}")
+    if cal.has_isotonic_fit:
+        # Score-calibration (survey §2.1): the isotonic transform maps raw cosines
+        # onto a model-agnostic scale; the three zones (§3.2) are derived on it.
+        lines.append("")
+        lines.append(
+            f"score calibration: isotonic transform ({len(cal.isotonic_points)} pts), "
+            f"KS separation = {cal.ks_separation:.3f} on calibrated scale"
+        )
+        lines.append("  three-zone thresholds (calibrated scale):")
+        lines.append(f"    green (high-confidence) = {cal.green_threshold:.3f}")
+        lines.append(f"    amber (borderline)      = {cal.amber_threshold:.3f}")
+        lines.append(f"    red   (hard floor)      = {cal.red_threshold:.3f}")
     lines.append("")
     lines.append(f"chosen min_similarity   = {cal.min_similarity:.3f}  (was {prev_floor:.3f})")
     if cal.notes:

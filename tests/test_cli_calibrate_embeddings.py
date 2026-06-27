@@ -266,6 +266,62 @@ def test_calibrate_embeddings_report_shows_distributions_and_estimates(tmp_path:
     assert "unrelated_p90" in text
 
 
+def test_calibrate_embeddings_report_shows_zones_and_fit_quality(tmp_path: Path):
+    """A well-separated model yields an isotonic fit, so the report surfaces the
+    three-zone thresholds (green/amber/red) and the KS fit-quality line."""
+    out = io.StringIO()
+    _run_calibrate_embeddings(
+        _config_with_model(),
+        repo=str(tmp_path),
+        profile_path=str(tmp_path / "p.json"),
+        client_factory=_factory(_DomainFakeClient()),
+        out=out,
+    )
+    text = out.getvalue()
+    assert "score calibration" in text
+    assert "isotonic transform" in text
+    assert "KS separation" in text
+    # All three zones appear on the calibrated scale.
+    assert "green" in text and "amber" in text and "red" in text
+    assert "calibrated scale" in text
+
+
+def test_calibrate_embeddings_report_no_zones_when_fit_dropped(tmp_path: Path):
+    """A weak/overlapping model drops the isotonic fit — the zones/fit-quality
+    block must NOT appear (graceful: report stays useful without it)."""
+    from tests.test_embeddings_calibration import _ZeroVectorClient
+
+    out = io.StringIO()
+    _run_calibrate_embeddings(
+        _config_with_model(),
+        repo=str(tmp_path),
+        profile_path=str(tmp_path / "p.json"),
+        client_factory=_factory(_ZeroVectorClient()),
+        out=out,
+    )
+    text = out.getvalue()
+    assert "score calibration" not in text
+    assert "green" not in text  # no zones block
+
+
+def test_calibrate_embeddings_json_payload_carries_zones(tmp_path: Path):
+    """The --json payload includes the zones + isotonic points + ks_separation."""
+    out = io.StringIO()
+    _run_calibrate_embeddings(
+        _config_with_model(),
+        repo=str(tmp_path),
+        profile_path=str(tmp_path / "p.json"),
+        json_output=True,
+        client_factory=_factory(_DomainFakeClient()),
+        out=out,
+    )
+    payload = json.loads(out.getvalue())
+    env = payload  # the JSON output is the calibration envelope + flags
+    assert "zones" in env and {"green", "amber", "red"} <= set(env["zones"])
+    assert isinstance(env["isotonic_points"], list) and len(env["isotonic_points"]) > 0
+    assert env["ks_separation"] > 0.0
+
+
 def _seed_floor(path: Path, *, model: str = "vibethink", floor: float = 0.71) -> None:
     """Write a prior profile carrying a known calibrated floor (as if a previous
     ``calibrate-embeddings`` had run)."""
