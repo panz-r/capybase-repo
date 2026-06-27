@@ -432,8 +432,12 @@ RUST_CONFLICTS: list[RustConflict] = [
     _conflict(
         id="orphan_impl",
         path="src/config.rs",
-        # Both sides impl a foreign trait (From) for a type; one is an orphan
-        # violation. We exercise it via a local wrapper so cargo catches it.
+        # Trait/coherence. Side A adds ``impl From<u32> for Wrap``; side B adds
+        # ``impl Into<Wrap> for u32``. Each is individually valid, but ``Into``
+        # has a blanket impl from ``From`` (``impl<T, U> Into<U> for T where T:
+        # From<U>``), so keeping BOTH impls → E0119 conflicting implementations.
+        # The two impl lines differ textually, so git produces a real conflict.
+        # (A genuine coherence error, not a syntax break.)
         base=(
             "pub struct Wrap(pub u32);\n"
         ),
@@ -443,21 +447,24 @@ RUST_CONFLICTS: list[RustConflict] = [
         ),
         replayed=(
             "pub struct Wrap(pub u32);\n"
-            "impl From<u64> for Wrap {\n    fn from(v: u64) -> Self { Wrap(v as u32) }\n}\n"
+            "impl std::convert::Into<Wrap> for u32 {\n"
+            "    fn into(self) -> Wrap { Wrap(self) }\n}\n"
         ),
-        # Correct: keep one impl (the span is the 2 differing impl lines; the
-        # trailing shared `}` stays outside the span).
+        # Correct: keep ONE impl (no coherence conflict). The From impl is the
+        # canonical form; the span is the 2 differing impl lines.
         expected_resolved=(
             "impl From<u32> for Wrap {\n    fn from(v: u32) -> Self { Wrap(v) }"
         ),
-        # Broken: a malformed impl (unclosed body) → syntax error.
+        # Broken: keep BOTH impls → E0119 (Into blanket-impl conflict).
         broken_resolved=(
-            "impl From<u32> for Wrap {\n    fn from(v: u32) -> Self { Wrap(v"
+            "impl From<u32> for Wrap {\n    fn from(v: u32) -> Self { Wrap(v) }\n}\n"
+            "impl std::convert::Into<Wrap> for u32 {\n"
+            "    fn into(self) -> Wrap { Wrap(self) }\n}"
         ),
-        taxonomy=("semantic", "trait", "coherence"),
+        taxonomy=("semantic", "trait", "coherence", "blanket-impl"),
         scaffold={"Cargo.toml": _manifest("orphan_impl"),
                   "src/lib.rs": _LIB_CONFIG},
-        notes="Trait/impl coherence: conflicting impls and malformed impl bodies.",
+        notes="From + Into blanket-impl conflict → E0119 (genuine coherence).",
     ),
     _conflict(
         id="use_import_conflict",
@@ -577,6 +584,210 @@ RUST_CONFLICTS: list[RustConflict] = [
                   "src/lib.rs": _LIB_CONFIG},
         notes="Macro pattern vs invocation: a merge that matches no rule.",
     ),
+    _conflict(
+        id="conflicting_derives",
+        path="src/config.rs",
+        # Derive-macro overlap. The field type NotClone is Debug (manual impl)
+        # but NOT Clone. Side A derives Debug (satisfied); side B derives Clone
+        # (E0277). The two derive-attribute lines differ textually, so git
+        # produces a real conflict hunk (identical derives would normalize away).
+        base=(
+            "struct NotClone(u32);\n"
+            "impl std::fmt::Debug for NotClone {\n"
+            "    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n"
+            '        write!(f, "nc")\n'
+            "    }\n}\n"
+            "pub struct Config { pub port: u16, pub nc: NotClone }\n"
+        ),
+        current=(
+            "struct NotClone(u32);\n"
+            "impl std::fmt::Debug for NotClone {\n"
+            "    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n"
+            '        write!(f, "nc")\n'
+            "    }\n}\n"
+            "#[derive(Debug)]\n"
+            "pub struct Config { pub port: u16, pub nc: NotClone }\n"
+        ),
+        replayed=(
+            "struct NotClone(u32);\n"
+            "impl std::fmt::Debug for NotClone {\n"
+            "    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n"
+            '        write!(f, "nc")\n'
+            "    }\n}\n"
+            "#[derive(Clone)]\n"
+            "pub struct Config { pub port: u16, pub nc: NotClone }\n"
+        ),
+        # Correct: keep the Debug derive (satisfied — NotClone: Debug holds).
+        expected_resolved="#[derive(Debug)]",
+        # Broken: derive Clone → E0277 (NotClone: Clone is not satisfied).
+        broken_resolved="#[derive(Clone)]",
+        taxonomy=("semantic", "derive-macro", "trait-bound"),
+        scaffold={"Cargo.toml": _manifest("conflicting_derives"),
+                  "src/lib.rs": _LIB_CONFIG},
+        notes="Conflicting #[derive(...)] on a non-Clone field → E0277.",
+    ),
+    _conflict(
+        id="extern_ffi_signature",
+        path="src/config.rs",
+        # FFI: an extern "C" foreign-fn signature. Both sides edit the call site
+        # value; one side also changes the foreign-fn signature's parameter
+        # type. cargo check catches a signature/call mismatch as a type error
+        # WITHOUT linking (the symbol need not exist). The span is the 2 lines
+        # (signature + body call) that both differ.
+        base=(
+            'extern "C" { fn get_port(x: u32) -> u16; }\n'
+            "pub fn label() -> u16 { unsafe { get_port(8080) } }\n"
+        ),
+        current=(
+            'extern "C" { fn get_port(x: *const u8) -> u16; }\n'
+            "pub fn label() -> u16 { unsafe { get_port(&8080u8) } }\n"
+        ),
+        replayed=(
+            'extern "C" { fn get_port(x: u32) -> u16; }\n'
+            "pub fn label() -> u16 { unsafe { get_port(9090) } }\n"
+        ),
+        # Correct: the new signature with the matching pointer call.
+        expected_resolved=(
+            'extern "C" { fn get_port(x: *const u8) -> u16; }\n'
+            "pub fn label() -> u16 { unsafe { get_port(&9090u8) } }"
+        ),
+        # Broken: new signature (*const u8) but old integer call → E0308.
+        broken_resolved=(
+            'extern "C" { fn get_port(x: *const u8) -> u16; }\n'
+            "pub fn label() -> u16 { unsafe { get_port(9090) } }"
+        ),
+        taxonomy=("semantic", "ffi", "extern"),
+        scaffold={"Cargo.toml": _manifest("extern_ffi_signature"),
+                  "src/lib.rs": _LIB_CONFIG},
+        notes="extern \"C\" signature/call mismatch → E0308 (cargo, no linking).",
+    ),
+    _conflict(
+        id="associated_type_change",
+        path="src/config.rs",
+        # Associated type: both sides edit the ``type Out`` line (the concrete
+        # type for the trait's assoc type). ``provide()``'s body must return a
+        # value of that concrete type. The correct merge keeps the u64 type with
+        # a u64 body; a botched merge takes u64 type with a u32 body → E0308.
+        # The span is the 2 diverging lines (type Out + body).
+        base=(
+            "pub trait Provider { type Out; fn provide() -> Self::Out; }\n"
+            "pub struct P;\n"
+            "impl Provider for P {\n"
+            "    type Out = u32;\n"
+            "    fn provide() -> Self::Out { 1u32 }\n"
+            "}\n"
+        ),
+        current=(
+            "pub trait Provider { type Out; fn provide() -> Self::Out; }\n"
+            "pub struct P;\n"
+            "impl Provider for P {\n"
+            "    type Out = u64;\n"
+            "    fn provide() -> Self::Out { 1u64 }\n"
+            "}\n"
+        ),
+        replayed=(
+            "pub trait Provider { type Out; fn provide() -> Self::Out; }\n"
+            "pub struct P;\n"
+            "impl Provider for P {\n"
+            "    type Out = u32;\n"
+            "    fn provide() -> Self::Out { 2u32 }\n"
+            "}\n"
+        ),
+        # Correct: u64 assoc type with a u64 body.
+        expected_resolved=(
+            "    type Out = u64;\n"
+            "    fn provide() -> Self::Out { 2u64 }"
+        ),
+        # Broken: u64 assoc type but a u32 body → E0308.
+        broken_resolved=(
+            "    type Out = u64;\n"
+            "    fn provide() -> Self::Out { 2u32 }"
+        ),
+        taxonomy=("semantic", "trait", "associated-type"),
+        scaffold={"Cargo.toml": _manifest("associated_type_change"),
+                  "src/lib.rs": _LIB_CONFIG},
+        notes="Associated-type concrete type vs body return → E0308.",
+    ),
+    _conflict(
+        id="future_impl_poll",
+        path="src/config.rs",
+        # A manual Future impl. Both sides edit the Poll::Ready value; one side
+        # changes the ready value's type. A merge with the wrong type for the
+        # declared Output → E0308. The span is the single poll body line.
+        base=(
+            "use std::future::Future;\n"
+            "use std::pin::Pin;\n"
+            "use std::task::{Context, Poll};\n"
+            "pub struct Ready(u32);\n"
+            "impl Future for Ready {\n"
+            "    type Output = u32;\n"
+            "    fn poll(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Self::Output> {\n"
+            "        Poll::Ready(1)\n"
+            "    }\n}\n"
+        ),
+        current=(
+            "use std::future::Future;\n"
+            "use std::pin::Pin;\n"
+            "use std::task::{Context, Poll};\n"
+            "pub struct Ready(u32);\n"
+            "impl Future for Ready {\n"
+            "    type Output = u32;\n"
+            "    fn poll(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Self::Output> {\n"
+            "        Poll::Ready(2)\n"
+            "    }\n}\n"
+        ),
+        replayed=(
+            "use std::future::Future;\n"
+            "use std::pin::Pin;\n"
+            "use std::task::{Context, Poll};\n"
+            "pub struct Ready(u32);\n"
+            "impl Future for Ready {\n"
+            "    type Output = u32;\n"
+            "    fn poll(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<Self::Output> {\n"
+            "        Poll::Ready(1u16)\n"
+            "    }\n}\n"
+        ),
+        # Correct: current's value with the declared u32 Output.
+        expected_resolved="        Poll::Ready(2)",
+        # Broken: u16 ready value for a u32 Output → E0308.
+        broken_resolved="        Poll::Ready(1u16)",
+        taxonomy=("semantic", "async", "future-impl"),
+        scaffold={"Cargo.toml": _manifest("future_impl_poll"),
+                  "src/lib.rs": _LIB_CONFIG},
+        notes="Manual Future impl: wrong-type Poll::Ready vs Output → E0308.",
+    ),
+    _conflict(
+        id="mod_submodule_move",
+        path="src/config.rs",
+        # Simulated submodule move (single-file). The submodule pre-exists in
+        # scaffold. Base has a local fn; current re-exports it from the submodule
+        # (the "move"); replayed edits the local body. A naive "keep both" merge
+        # holds the re-export AND the local fn → E0255 (name defined twice). The
+        # span is the single diverging line.
+        base=(
+            "pub fn helper() -> u32 { 8080 }\n"
+        ),
+        current=(
+            "pub use crate::submod::helper;\n"
+        ),
+        replayed=(
+            "pub fn helper() -> u32 { 9090 }\n"
+        ),
+        # Correct: keep the re-export (the function moved to the submodule).
+        expected_resolved="pub use crate::submod::helper;",
+        # Broken: keep BOTH the re-export and the local fn → E0255.
+        broken_resolved=(
+            "pub use crate::submod::helper;\n"
+            "pub fn helper() -> u32 { 9090 }"
+        ),
+        taxonomy=("structural", "mod", "submodule-move"),
+        scaffold={
+            "Cargo.toml": _manifest("mod_submodule_move"),
+            "src/lib.rs": "pub mod config;\npub mod submod;\n",
+            "src/submod.rs": "pub fn helper() -> u32 { 100 }\n",
+        },
+        notes="Re-export vs local fn → E0255 on a naive keep-both merge.",
+    ),
 
     # --- Edition coverage ---
 
@@ -638,6 +849,43 @@ RUST_CONFLICTS: list[RustConflict] = [
             "src/lib.rs": "pub fn ping() -> u32 { 1 }\n",
         },
         notes="Dependency-version mismatch in Cargo.toml (manifest verification).",
+    ),
+    _conflict(
+        id="cargo_feature_flag",
+        path="Cargo.toml",
+        language="toml",
+        # A feature-flag conflict: both sides change the `default` feature set.
+        # The correct merge references a defined feature; a botched merge
+        # references an undefined feature → cargo aborts with a manifest parse
+        # error on stderr (no JSON stream), caught by _check_cargo's fallback.
+        base=(
+            '[package]\nname = "feattest"\nversion = "0.1.0"\nedition = "2021"\n\n'
+            "[features]\n"
+            'default = []\n'
+            'foo = []\n'
+        ),
+        current=(
+            '[package]\nname = "feattest"\nversion = "0.1.0"\nedition = "2021"\n\n'
+            "[features]\n"
+            'default = ["foo"]\n'
+            'foo = []\n'
+        ),
+        replayed=(
+            '[package]\nname = "feattest"\nversion = "0.1.0"\nedition = "2021"\n\n'
+            "[features]\n"
+            'default = ["bar"]\n'
+            'foo = []\n'
+        ),
+        # Correct: reference the defined feature.
+        expected_resolved='default = ["foo"]',
+        # Broken: reference an undefined feature → cargo manifest parse error.
+        broken_resolved='default = ["bar"]',
+        taxonomy=("cargo-toml", "feature-flags"),
+        needs_cargo=True,
+        scaffold={
+            "src/lib.rs": "pub fn ping() -> u32 { 1 }\n",
+        },
+        notes="Feature-flag conflict: default references an undefined feature.",
     ),
 
     # --- Loose file (standalone rustc path) ---
