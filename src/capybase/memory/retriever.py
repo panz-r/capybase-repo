@@ -28,6 +28,7 @@ from typing import Protocol
 
 from capybase.conflict_model import HistoricalExample
 from capybase.memory.store import Experience, ExperienceStore
+from capybase.stats import mad as _mad, median as _median
 
 
 class Retriever(Protocol):
@@ -408,19 +409,33 @@ def _rrf_scores(ranked: list[tuple[float, HistoricalExample]]) -> dict[tuple[str
 def _dbsf_scores(
     ranked: list[tuple[float, HistoricalExample]],
 ) -> dict[tuple[str, ...], float]:
-    """Distribution-Based Score Fusion: min-max normalize one retriever's scores
-    to [0,1] so disparate score scales (BM25 unbounded, cosine in [-1,1]) combine
-    additively. Returns content-key -> normalized score.
+    """Distribution-Based Score Fusion with ROBUST normalization (survey 2 §5.1).
+
+    Normalizes one retriever's raw scores to [0,1] via a median+MAD robust
+    z-score rather than min-max: ``z = (s - median) / MAD``, clipped to [-3, 3],
+    then shifted to [0,1]. 50% breakdown point — a single extreme BM25 score (or
+    a near-zero cosine) no longer skews the whole fusion the way min-max would.
+    Returns content-key -> normalized score.
+
+    Degenerate cases (matching the prior min-max contract): MAD=0 (all scores
+    equal, or a step-function's tied values) → every result gets the same neutral
+    weight (1.0); empty input → {}.
     """
     if not ranked:
         return {}
     vals = [s for s, _ in ranked]
-    lo, hi = min(vals), max(vals)
-    span = hi - lo
-    if span <= 0:
-        # All scores equal — give every result the same neutral weight.
+    med = _median(vals)
+    scale = _mad(vals)
+    if scale <= 0:
+        # No robust spread — neutral weight, same as the all-equal min-max case.
         return {_example_key(ex): 1.0 for _, ex in ranked}
-    return {_example_key(ex): (s - lo) / span for s, ex in ranked}
+    out: dict[tuple[str, ...], float] = {}
+    for s, ex in ranked:
+        z = (s - med) / scale
+        # Clip to [-3, 3] (a robust-σ bound) then shift to [0, 1].
+        z = max(-3.0, min(3.0, z))
+        out[_example_key(ex)] = (z + 3.0) / 6.0
+    return out
 
 
 class HybridRetriever:
@@ -438,10 +453,11 @@ class HybridRetriever:
     - ``"rrf"`` (default): Reciprocal Rank Fusion. Uses only rank position
       (``score = Σ 1/(k+rank)``), so it needs no labeled data and is robust to the
       incompatible score scales. The survey's "no-tuning baseline" (§4.2).
-    - ``"dbsf"``: Distribution-Based Score Fusion. Min-max normalizes each
-      retriever's raw scores to [0,1] then sums them. Better when the score
-      magnitudes carry signal beyond rank (§4.1); pairs with the calibrated score
-      scale from the isotonic transform when available.
+    - ``"dbsf"``: Distribution-Based Score Fusion. Normalizes each retriever's
+      raw scores to [0,1] via a median+MAD robust z-score (survey 2 §5.1), then
+      sums them. 50% breakdown — a single extreme score no longer dominates.
+      Better when the score magnitudes carry signal beyond rank (§4.1); pairs
+      with the calibrated score scale from the isotonic transform when available.
 
     Implements the same ``retrieve_scored`` / ``retrieve`` / ``refresh`` shape as
     the single retrievers so it drops into the context builder unchanged. Never

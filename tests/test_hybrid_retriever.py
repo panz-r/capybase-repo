@@ -10,6 +10,8 @@ Exercises the fusion semantics with controlled stores + fake embedding clients:
 
 from __future__ import annotations
 
+import pytest
+
 from capybase.conflict_model import HistoricalExample
 from capybase.context_builder import ContextBuilder
 from capybase.memory.retriever import (
@@ -145,9 +147,9 @@ def test_rrf_score_is_summed_reciprocal_rank(tmp_path):
 
 
 def test_dbsf_normalizes_disparate_scales(tmp_path):
-    """DBSF min-max normalizes each retriever's scores to [0,1] before summing.
-    A corpus where BM25 scores vary but embeddings are constant still yields a
-    usable fused ranking (no NaN, all in range)."""
+    """DBSF robustly normalizes each retriever's scores to [0,1] (median+MAD
+    z-score) before summing. A corpus where BM25 scores vary but embeddings are
+    constant still yields a usable fused ranking (no NaN, all in range)."""
     store = ExperienceStore(tmp_path / "exp.jsonl")
     store.append(_exp("match strong", "match strong two", "match strong", "match strong"))
     store.append(_exp("match weak", "match weak two", "match weak", "match weak"))
@@ -159,6 +161,53 @@ def test_dbsf_normalizes_disparate_scales(tmp_path):
     assert len(scored) >= 1
     for s, _ in scored:
         assert isinstance(s, float) and s >= 0.0
+
+
+def test_dbsf_robust_to_a_single_extreme_score(tmp_path):
+    """Median+MAD normalization (50% breakdown): one extreme BM25 outlier among
+    several results does NOT skew the whole fusion. Under min-max it would have
+    crushed every other normalized score toward 0; under robust z-score the
+    outlier is clipped at +3σ and the others keep their relative spacing.
+
+    We assert the unit property directly: _dbsf_scores maps a clear outlier to
+    the clip ceiling while preserving meaningful spread among the rest.
+    """
+    from capybase.memory.retriever import _dbsf_scores, _example_key
+
+    # Four "normal" results clustered around 1.0–2.0, plus one extreme at 1000.0.
+    from capybase.conflict_model import HistoricalExample
+
+    def _ex(base):
+        return HistoricalExample(
+            summary="s", base=base, current="c", replayed="r", resolved="x"
+        )
+
+    ranked = [
+        (1.0, _ex("a")), (1.5, _ex("b")), (2.0, _ex("c")), (1.2, _ex("d")),
+        (1000.0, _ex("outlier")),
+    ]
+    norm = _dbsf_scores(ranked)
+    # The outlier clips to the ceiling (the top of the [0,1] band).
+    assert norm[_example_key(_ex("outlier"))] == pytest.approx(1.0)
+    # The clustered results are NOT all crushed to ~0 (as min-max would): they
+    # retain distinct, mid-band normalized values.
+    clustered = [norm[_example_key(_ex(b))] for b in ("a", "b", "c", "d")]
+    assert all(0.0 < v < 1.0 for v in clustered)
+    assert len(set(round(v, 3) for v in clustered)) >= 2  # not all identical
+
+
+def test_dbsf_equal_scores_get_neutral_weight(tmp_path):
+    """MAD=0 (all scores equal) → every result gets the same neutral weight, not
+    a division-by-zero (the documented degeneracy path)."""
+    from capybase.memory.retriever import _dbsf_scores, _example_key
+    from capybase.conflict_model import HistoricalExample
+
+    def _ex(base):
+        return HistoricalExample(summary="s", base=base, current="c", replayed="r", resolved="x")
+
+    ranked = [(5.0, _ex("a")), (5.0, _ex("b")), (5.0, _ex("c"))]
+    norm = _dbsf_scores(ranked)
+    assert all(v == 1.0 for v in norm.values())
 
 
 def test_unknown_fusion_falls_back_to_rrf(tmp_path):
