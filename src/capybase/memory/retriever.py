@@ -14,6 +14,9 @@ Two retrievers implement the same Protocol:
   endpoint (survey §4.2, LLMinus pattern). Catches "same intent, different
   identifiers" that lexical matching misses. Used only when the endpoint supports
   embeddings (``capybase calibrate`` detects this); otherwise falls back to BM25.
+- ``HybridRetriever``: fuses the two (survey §4) via RRF (default) or DBSF so BM25's
+  exact-identifier strength and embeddings' semantic strength combine — degrading
+  to lexical ranking when the embedding endpoint is unavailable.
 """
 
 from __future__ import annotations
@@ -327,3 +330,148 @@ class EmbeddingRetriever:
         """Force a rebuild of the vector cache (after new experiences appended)."""
         self._accepted = None
         self._vectors = None
+
+
+# ---------------------------------------------------------------------------
+# HybridRetriever (survey §4: BM25 + dense fusion)
+# ---------------------------------------------------------------------------
+
+# RRF constant. The literature default (k=60) smooths the rank contribution so a
+# single retriever's rank-1 doesn't dominate; it's scale-robust across models.
+_RRF_K = 60
+
+
+def _example_key(ex: HistoricalExample) -> tuple[str, ...]:
+    """A stable content-based key for a HistoricalExample.
+
+    The two retrievers call ``store.accepted()`` independently and get distinct
+    Python objects for the same logical example, so fusing by ``id()`` would
+    double-count it. Keying on the example's content (the three conflict sides +
+    the resolved text) merges them correctly.
+    """
+    return (ex.base, ex.current, ex.replayed, ex.resolved)
+
+
+def _rrf_scores(ranked: list[tuple[float, HistoricalExample]]) -> dict[tuple[str, ...], float]:
+    """Reciprocal Rank Fusion scores for one retriever's ranked results.
+
+    Maps each example (by content key) to ``1 / (k + rank)`` where rank is
+    0-indexed. RRF is scale-agnostic: it uses only rank position, so BM25's
+    unbounded scores and cosine's bounded scores contribute comparably without
+    normalization.
+    """
+    return {_example_key(ex): 1.0 / (_RRF_K + r) for r, (_, ex) in enumerate(ranked)}
+
+
+def _dbsf_scores(
+    ranked: list[tuple[float, HistoricalExample]],
+) -> dict[tuple[str, ...], float]:
+    """Distribution-Based Score Fusion: min-max normalize one retriever's scores
+    to [0,1] so disparate score scales (BM25 unbounded, cosine in [-1,1]) combine
+    additively. Returns content-key -> normalized score.
+    """
+    if not ranked:
+        return {}
+    vals = [s for s, _ in ranked]
+    lo, hi = min(vals), max(vals)
+    span = hi - lo
+    if span <= 0:
+        # All scores equal — give every result the same neutral weight.
+        return {_example_key(ex): 1.0 for _, ex in ranked}
+    return {_example_key(ex): (s - lo) / span for s, ex in ranked}
+
+
+class HybridRetriever:
+    """Fuses lexical (BM25) and semantic (embedding) retrieval (survey §4).
+
+    BM25 and embeddings catch complementary failures: BM25 nails exact-identifier
+    matches (``getUserName`` vs ``get_user_name``) that a semantic model may rank
+    as paraphrases; embeddings catch same-intent-different-identifiers (``fetch``
+    vs ``retrieve``) that BM25 misses entirely. Combining them is strictly better
+    when both work, and degrades to lexical ranking when the embedding endpoint is
+    unavailable (the embedding retriever returns []).
+
+    Two fusion methods:
+
+    - ``"rrf"`` (default): Reciprocal Rank Fusion. Uses only rank position
+      (``score = Σ 1/(k+rank)``), so it needs no labeled data and is robust to the
+      incompatible score scales. The survey's "no-tuning baseline" (§4.2).
+    - ``"dbsf"``: Distribution-Based Score Fusion. Min-max normalizes each
+      retriever's raw scores to [0,1] then sums them. Better when the score
+      magnitudes carry signal beyond rank (§4.1); pairs with the calibrated score
+      scale from the isotonic transform when available.
+
+    Implements the same ``retrieve_scored`` / ``retrieve`` / ``refresh`` shape as
+    the single retrievers so it drops into the context builder unchanged. Never
+    raises: an embedding failure just drops that retriever's contribution.
+    """
+
+    def __init__(
+        self,
+        lexical: LexicalRetriever,
+        embedding: EmbeddingRetriever,
+        *,
+        fusion: str = "rrf",
+    ) -> None:
+        self.lexical = lexical
+        self.embedding = embedding
+        self.fusion = fusion if fusion in ("rrf", "dbsf") else "rrf"
+
+    def retrieve_scored(
+        self, query: str, *, k: int = 3, language: str | None = None
+    ) -> list[tuple[float, HistoricalExample]]:
+        """Return ``(fused_score, example)`` pairs for the top-k matches.
+
+        Asks each retriever for its own top-k (so a result only one retriever
+        notices can still surface), fuses the two rankings by the configured
+        method, and returns the top-k by fused score. The score is the FUSED
+        value (RRF weight or summed normalized score), not either retriever's raw
+        score — so it's comparable across examples but not on a raw-cosine scale.
+        """
+        # Each retriever contributes its own top-k. Retrieve failures degrade to
+        # [] (the existing per-retriever contract), never raise.
+        try:
+            lex_ranked = self.lexical.retrieve_scored(query, k=k, language=language)
+        except Exception:  # noqa: BLE001 - best-effort fusion
+            lex_ranked = []
+        try:
+            emb_ranked = self.embedding.retrieve_scored(query, k=k, language=language)
+        except Exception:  # noqa: BLE001 - best-effort fusion
+            emb_ranked = []
+
+        if self.fusion == "dbsf":
+            lex_scores = _dbsf_scores(lex_ranked)
+            emb_scores = _dbsf_scores(emb_ranked)
+        else:  # "rrf"
+            lex_scores = _rrf_scores(lex_ranked)
+            emb_scores = _rrf_scores(emb_ranked)
+
+        # Merge by example CONTENT key (not id() — the two retrievers return
+        # distinct objects for the same logical example). Keep the example from
+        # whichever retriever surfaced it first.
+        by_key: dict[tuple[str, ...], HistoricalExample] = {}
+        for _, ex in lex_ranked + emb_ranked:
+            by_key.setdefault(_example_key(ex), ex)
+
+        # Sum the two retrievers' contributions per example (missing = 0).
+        keys = set(lex_scores) | set(emb_scores)
+        fused: list[tuple[float, HistoricalExample]] = []
+        for key in keys:
+            ex = by_key.get(key)
+            if ex is None:
+                continue
+            total = lex_scores.get(key, 0.0) + emb_scores.get(key, 0.0)
+            fused.append((total, ex))
+        fused.sort(key=lambda t: -t[0])
+        return fused[:k]
+
+    def retrieve(
+        self, query: str, *, k: int = 3, language: str | None = None
+    ) -> list[HistoricalExample]:
+        """Top-k past merges by fused rank. Delegates to :meth:`retrieve_scored`."""
+        return [ex for _, ex in self.retrieve_scored(query, k=k, language=language)]
+
+    def refresh(self) -> None:
+        """Force both sub-retrievers to rebuild their indexes/caches."""
+        self.lexical.refresh()
+        self.embedding.refresh()
