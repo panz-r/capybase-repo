@@ -321,3 +321,85 @@ def rust_conflicted_repo(repo: Path) -> dict:
         "replayed": replayed,
         "correct": correct,
     }
+
+
+@pytest.fixture
+def rust_multi_file_conflicted_repo(repo: Path) -> dict:
+    """A repo stopped at UU conflicts in TWO Rust files of one crate.
+
+    Exercises cross-file (whole-crate) verification: a rebase that stops with
+    conflicts in BOTH ``src/config.rs`` and ``src/server.rs`` at once. Each
+    file uses ``crate::`` paths, so a per-file ``cargo check`` fails while the
+    sibling still holds raw ``<<<<<<<`` markers (``error: encountered diff
+    marker``). This is the fixture behind the cross-file batch verification
+    fix: all files must be resolved and written before the crate-wide check.
+
+    To produce a *genuine* conflict in two files at once (git auto-merges
+    edits to different non-overlapping regions), both branches edit the SAME
+    line in each file to different values: config.rs's default port, and
+    server.rs's log label — both diverging on the same line from a common base.
+
+    Returns paths + the correct per-file merges.
+    """
+    base_lib = "pub mod config;\npub mod server;\n"
+    base_config = (
+        "pub struct Config { pub port: u16 }\n"
+        "impl Config {\n"
+        "    pub fn new() -> Self { Config { port: 8080 } }\n"
+        "}\n"
+    )
+    base_server = (
+        "use crate::config::Config;\n"
+        "pub fn label(c: &Config) -> String { format!(\"port={}\", c.port) }\n"
+    )
+    # Both sides change the SAME line in config.rs (port default) to different
+    # values, AND the SAME line in server.rs (label format) to different values.
+    # That yields a genuine both-modified conflict in EACH file simultaneously.
+    up_config = base_config.replace("port: 8080 }", "port: 9090 }")
+    rep_config = base_config.replace("port: 8080 }", "port: 7070 }")
+    up_server = base_server.replace('format!("port={}"', 'format!("[port]={}"')
+    rep_server = base_server.replace('format!("port={}"', 'format!("PORT={}"')
+    # Correct merges: config.rs takes the higher port; server.rs combines both
+    # label styles into one coherent string.
+    correct_config = up_config.replace("port: 9090 }", "port: 9090 }")
+    correct_server = (
+        "pub fn label(c: &Config) -> String { format!(\"[PORT]={}\", c.port) }"
+    )
+
+    (repo / "src").mkdir()
+    (repo / "src" / "lib.rs").write_text(base_lib)
+    (repo / "src" / "config.rs").write_text(base_config)
+    (repo / "src" / "server.rs").write_text(base_server)
+    (repo / "Cargo.toml").write_text(
+        '[package]\nname = "multifile"\nversion = "0.1.0"\nedition = "2021"\n'
+    )
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "base")
+
+    # feat branch: change the port default AND the label format (the replayed side).
+    git(repo, "branch", "feat")
+    git(repo, "checkout", "-q", "feat")
+    (repo / "src" / "config.rs").write_text(rep_config)
+    (repo / "src" / "server.rs").write_text(rep_server)
+    git(repo, "add", "src/config.rs", "src/server.rs")
+    git(repo, "commit", "-q", "-m", "feat: port 7070 + PORT= label")
+
+    # main branch: change the same two lines differently (the upstream side).
+    git(repo, "checkout", "-q", "main")
+    (repo / "src" / "config.rs").write_text(up_config)
+    (repo / "src" / "server.rs").write_text(up_server)
+    git(repo, "add", "src/config.rs", "src/server.rs")
+    git(repo, "commit", "-q", "-m", "main: port 9090 + [port]= label")
+
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected a rebase conflict"
+    # Sanity: both files should be unmerged.
+    unmerged = git(repo, "diff", "--name-only", "--diff-filter=U").stdout.split()
+    assert "src/config.rs" in unmerged and "src/server.rs" in unmerged
+    return {
+        "repo": repo,
+        "paths": ["src/config.rs", "src/server.rs"],
+        "correct_config": correct_config,
+        "correct_server": correct_server,
+    }

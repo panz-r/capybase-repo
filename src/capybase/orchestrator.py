@@ -793,6 +793,29 @@ class Orchestrator:
             self.out("no conflict units at this stop; continuing.")
             return result
 
+        # Two-phase resolution so cross-file (whole-crate) verification works.
+        #
+        # Phase 1: resolve every unit in every conflicted file and WRITE each
+        # resolved buffer to the worktree, without staging or crate-wide
+        # checking. This is critical for Rust: a per-file ``cargo check`` reads
+        # the REAL worktree, so while sibling conflicted files still hold raw
+        # ``<<<<<<<`` markers, the check fails with ``error: encountered diff
+        # marker`` — a correct merge gets rejected through no fault of its own.
+        # Writing every file resolved first makes the whole crate marker-free
+        # before any cargo check runs. If any unit escalates, bail before any
+        # write (nothing staged, rebase stays stoppable).
+        #
+        # Phase 2: with all files written, run the per-file Phase-B validation
+        # (markers/splice/syntax/cargo) + CEGIS repair loop, then stage. Each
+        # file's cargo check now sees a clean crate.
+        from capybase.adapters.parsers import splice_all_resolutions
+
+        resolved_files: dict[str, str] = {}  # path -> spliced buffer (all units)
+        accepted_by_path: dict[str, list] = {}  # path -> [(unit, candidate), ...]
+        # Snapshot the original worktree text per path so Phase 2 can re-splice.
+        originals: dict[str, str] = {}
+
+        # ---- Phase 1: resolve + write all files (no staging, no cargo) ----
         for path, units in result.units_by_path.items():
             # Resolve ALL units in the file before splicing anything. We must
             # not write a partially-resolved file: if a later unit escalates,
@@ -824,6 +847,24 @@ class Orchestrator:
                     consensus=_consensus,
                 )
                 return result
+            # Splice every accepted resolution in one offset-correct batch.
+            spans_and_texts = [
+                (unit.marker_span, cand.resolved_text) for unit, cand in accepted
+            ]
+            original = accepted[0][0].original_worktree_text
+            buffer = splice_all_resolutions(original, spans_and_texts)
+            resolved_files[path] = buffer
+            accepted_by_path[path] = accepted
+            originals[path] = original
+            # Write the resolved file to the worktree NOW (no staging yet) so
+            # sibling files' cargo checks in Phase 2 see a marker-free crate.
+            self._write_worktree_only(path, buffer)
+
+        # ---- Phase 2: per-file Phase-B validation + CEGIS repair + stage ----
+        for path, units in result.units_by_path.items():
+            accepted = accepted_by_path[path]
+            original = originals[path]
+            language = units[0].language
             # Splice every accepted resolution in one offset-correct batch and
             # validate the whole file. Phase B (whole-file validation) is the
             # only place that can catch cross-unit errors (duplicate symbols,
@@ -837,14 +878,11 @@ class Orchestrator:
             # fault and re-resolve it via the repair prompt, then re-splice and
             # re-validate. Bounded by the policy retry ceiling so it can't loop
             # forever; escalate only when the budget is exhausted.
-            from capybase.adapters.parsers import splice_all_resolutions
-
-            buffer = ""
+            buffer = resolved_files[path]
             if self.config.validation.require_whole_file_validation and units:
-                language = units[0].language
-                original = accepted[0][0].original_worktree_text
                 wf_retries = 0
                 wf_budget = self.config.policy.max_retries_per_unit
+                file_validation = None  # type: ignore[assignment]
                 while True:
                     spans_and_texts = [
                         (unit.marker_span, cand.resolved_text) for unit, cand in accepted
@@ -912,6 +950,8 @@ class Orchestrator:
                         step_index=result.step_index,
                     )
                     return result
+            # Stage the validated file (it was already written to the worktree
+            # in Phase 1; re-write in case the CEGIS loop changed it, then stage).
             self._write_and_stage(path, buffer, result)
         # After staging: assert no unmerged paths remain for our files.
         if self.git.has_unmerged_paths():
@@ -1425,6 +1465,18 @@ class Orchestrator:
                 step_index=self.step,
                 path=path,
             )
+
+    def _write_worktree_only(self, path: str, buffer: str) -> None:
+        """Write a resolved file to the worktree WITHOUT staging it.
+
+        Used by Phase 1 of cross-file resolution: every conflicted file is
+        written resolved first, so the whole crate is marker-free before any
+        cargo check runs in Phase 2. Staging is deferred to ``_write_and_stage``
+        (called in Phase 2 after validation passes) so an escalatable failure
+        never leaves staged-but-invalid state. The journal snapshot is skipped
+        here (Phase 2's ``_write_and_stage`` records the final staged buffer).
+        """
+        self.git.write_worktree_file(path, buffer.encode("utf-8"))
 
     def _run_tests(self, label: str, result: StepResult) -> bool:
         cmd = getattr(self.config.tests, label) if hasattr(self.config.tests, label) else None
