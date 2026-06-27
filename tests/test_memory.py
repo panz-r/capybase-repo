@@ -270,3 +270,59 @@ def test_resolve_prompt_no_few_shot_when_empty():
     ctx = cb.build(unit)
     prompt = build_resolve_prompt(unit, ctx)
     assert "Similar past merges" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Retrieval-score journaling (F4): ContextBuilder surfaces retriever confidence
+# ---------------------------------------------------------------------------
+
+
+def test_context_builder_journals_retrieval_scores(populated_store):
+    """The retrieval scores are captured parallel to the retrieved examples —
+    the diagnostic data for validating the calibrated min_similarity floor."""
+    ret = LexicalRetriever(populated_store)
+    cb = ContextBuilder(context_lines=5, retriever=ret, retriever_k=2, min_examples=0)
+    worktree = "def greet():\n<<<<<<< H\n    return 'hi'\n=======\n    return 'howdy'\n>>>>>>> b\n"
+    unit = _unit("def greet():\n    pass", "    return 'hi'", "    return 'howdy'", worktree)
+    ctx = cb.build(unit)
+
+    assert len(ctx.retrieved_examples) >= 1
+    # One score per retrieved example, same ordering, all rounded floats.
+    assert len(ctx.retrieval_scores) == len(ctx.retrieved_examples)
+    assert all(isinstance(s, float) for s in ctx.retrieval_scores)
+    # Sorted descending — the top example is the most confident.
+    assert ctx.retrieval_scores == sorted(ctx.retrieval_scores, reverse=True)
+
+
+def test_context_builder_scores_are_rounded(populated_store):
+    """Scores are rounded to 4dp so the journal payload is compact/stable."""
+    ret = LexicalRetriever(populated_store)
+    cb = ContextBuilder(context_lines=5, retriever=ret, retriever_k=3, min_examples=0)
+    worktree = "greet\n<<<<<<< H\nhi\n=======\nhowdy\n>>>>>>> b\n"
+    unit = _unit("greet pass", "hi", "howdy", worktree)
+    ctx = cb.build(unit)
+    for s in ctx.retrieval_scores:
+        assert round(s, 4) == s
+
+
+def test_context_builder_no_retriever_leaves_scores_empty():
+    """Without a retriever, the scores list is empty (parallel to no examples)."""
+    cb = ContextBuilder(context_lines=5)
+    worktree = "def f():\n<<<<<<< H\n1\n=======\n2\n>>>>>>> b\n"
+    unit = _unit("def f():\n    pass", "1", "2", worktree)
+    ctx = cb.build(unit)
+    assert ctx.retrieval_scores == []
+    assert ctx.retrieved_examples == []
+
+
+def test_context_builder_scores_empty_when_nothing_retrieved(populated_store):
+    """When the retriever finds no matches (e.g. a query that tokenizes to
+    nothing), both examples and scores stay empty — the gate short-circuits."""
+    ret = LexicalRetriever(populated_store)
+    cb = ContextBuilder(context_lines=5, retriever=ret, retriever_k=3, min_examples=0)
+    worktree = "def f():\n<<<<<<< H\n1\n=======\n2\n>>>>>>> b\n"
+    # All-stopword sides → the query tokenizes to [] → no BM25 matches.
+    unit = _unit("def return self", "def", "return", worktree)
+    ctx = cb.build(unit)
+    assert ctx.retrieved_examples == []
+    assert ctx.retrieval_scores == []

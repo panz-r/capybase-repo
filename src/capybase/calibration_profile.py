@@ -59,6 +59,15 @@ class ModelProfile:
     # Capability flags (calibrate-detected, not mechanism A/B). These don't overlay
     # ModelConfig; the orchestrator reads them to enable endpoint-dependent features.
     enable_embedding_rag: bool = False  # /v1/embeddings endpoint supports embeddings
+    # Calibrated embeddings threshold (written by ``calibrate-embeddings``). The
+    # value the EmbeddingRetriever uses as its min_similarity floor at runtime —
+    # replacing the 0.35 class-constant guess with a model-specific, statistically
+    # derived constant (the quantile-gap between related and unrelated scores).
+    embedding_min_similarity: float = 0.35
+    # The full embeddings-calibration envelope (the three threshold estimates +
+    # measured score distributions), for transparency and manual re-tuning. Empty
+    # until ``calibrate-embeddings`` is run.
+    embedding_calibration: dict[str, Any] = field(default_factory=dict)
     avg_latency_ms: float = 0.0  # observed mean generation latency, for diagnostics
     probed_at: str = ""  # ISO-8601 timestamp
     capybase_version: str = ""
@@ -68,6 +77,8 @@ class ModelProfile:
         d = asdict(self)
         # ``notes`` may be empty; keep it so the schema is stable.
         d["notes"] = list(d.get("notes") or [])
+        # ``embedding_calibration`` must serialize cleanly; coerce defensively.
+        d["embedding_calibration"] = _coerce_calibration(d.get("embedding_calibration"))
         return d
 
     @classmethod
@@ -88,6 +99,8 @@ class ModelProfile:
             diverse_sampling=bool(d.get("diverse_sampling", False)),
             enable_self_consistency=bool(d.get("enable_self_consistency", False)),
             enable_embedding_rag=bool(d.get("enable_embedding_rag", False)),
+            embedding_min_similarity=float(d.get("embedding_min_similarity", 0.35)),
+            embedding_calibration=_coerce_calibration(d.get("embedding_calibration")),
             avg_latency_ms=float(d.get("avg_latency_ms", 0.0)),
             probed_at=str(d.get("probed_at", "")),
             capybase_version=str(d.get("capybase_version", "")),
@@ -115,6 +128,19 @@ class ModelProfile:
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(self.to_dict(), indent=2), encoding="utf-8")
+
+
+def _coerce_calibration(value: Any) -> dict[str, Any]:
+    """Defensively coerce an embeddings-calibration envelope to a plain dict.
+
+    The envelope is a nested dict of threshold estimates + score distributions.
+    A corrupt or non-dict value yields an empty dict (graceful absence), matching
+    the profile's never-crash-on-load contract. We don't recurse-validation every
+    leaf — only ensure the top-level is a JSON-serializable dict.
+    """
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
 
 
 # Knobs that a profile is allowed to override. Centralized so ``apply_profile``

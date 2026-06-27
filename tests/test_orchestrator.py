@@ -669,3 +669,71 @@ def test_code_smell_warning_does_not_block_clean_merge(conflicted_repo):
     result = orch.run()
     assert not result.escalated, result.reason
 
+
+# ---------------------------------------------------------------------------
+# F4: retrieval scores journaled into context_built (end-to-end RAG)
+# ---------------------------------------------------------------------------
+
+
+def test_context_built_event_carries_retrieval_scores(conflicted_repo):
+    """When RAG retrieves few-shot examples, the ``context_built`` journal event
+    records the per-example retrieval scores — the diagnostic data for validating
+    the calibrated min_similarity floor in production."""
+    from capybase.conflict_model import HistoricalExample
+    from capybase.memory.store import Experience, ExperienceStore
+
+    repo = conflicted_repo["repo"]
+    # Seed the experience store at the path the orchestrator will read.
+    store = ExperienceStore.for_repo(str(repo), ".rebase-agent/memory/experiences.jsonl")
+    store.append(
+        Experience(
+            example=HistoricalExample(
+                summary="greet", base="def greet(): return hi",
+                current="return hi", replayed="return howdy",
+                resolved="return ('hi','howdy')",
+            ),
+            outcome="accepted", language="python", path="app.py",
+        )
+    )
+
+    cfg = _config(repo)
+    cfg.memory.enabled = True
+    cfg.future.enable_rag = True
+    cfg.memory.retriever = "lexical"  # dependency-free; no network needed
+    cfg.memory.min_examples_for_retrieval = 1
+    payload = _make_resolved_payload("    return 'hi' + 'howdy'")
+    engine = ResolutionEngine(cfg.model, client=CyclingClient([payload]))
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    assert not result.escalated, result.reason
+
+    events = orch.journal.read_events()
+    built = [e for e in events if e.event_type == "context_built"]
+    assert built, "expected a context_built event"
+    payload_evt = built[0].payload
+    assert "retrieval_scores" in payload_evt
+    # The seeded 'greet' example overlaps the conflict's tokens → at least one
+    # score is journaled, and they parallel the retrieved examples.
+    assert isinstance(payload_evt["retrieval_scores"], list)
+    assert len(payload_evt["retrieval_scores"]) >= 1
+    assert all(isinstance(s, (int, float)) for s in payload_evt["retrieval_scores"])
+
+
+def test_context_built_event_has_empty_scores_when_rag_disabled(conflicted_repo):
+    """Without RAG, ``context_built`` still carries the key but it's empty —
+    the schema is stable whether or not retrieval ran."""
+    repo = conflicted_repo["repo"]
+    cfg = _config(repo)
+    payload = _make_resolved_payload("    return 'hi' + 'howdy'")
+    engine = ResolutionEngine(cfg.model, client=CyclingClient([payload]))
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    assert not result.escalated, result.reason
+
+    events = orch.journal.read_events()
+    built = [e for e in events if e.event_type == "context_built"]
+    assert built
+    assert built[0].payload["retrieval_scores"] == []
+

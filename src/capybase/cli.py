@@ -74,6 +74,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="redo calibration: overwrites the stored profile (alias for calibrate)",
     )
 
+    emb_p = sub.add_parser(
+        "calibrate-embeddings",
+        help="calibrate the embedding-retrieval similarity floor for this model",
+    )
+    emb_p.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the calibration envelope as JSON instead of a human-readable report",
+    )
+    emb_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="run the calibration and print results, but do not write the profile",
+    )
+
     return p
 
 
@@ -189,6 +204,121 @@ def _real_client(model_cfg: ModelConfig):
     return OpenAICompatibleClient(model_cfg)
 
 
+def _real_embeddings_client(model_cfg: ModelConfig, embeddings_model: str):
+    """Build the live embeddings client, using the embedding model name when set.
+
+    On a multi-model llama-server the embedding slot has a distinct id; on a
+    single-model server the completion model name is reused. Mirrors the
+    orchestrator's retriever construction.
+    """
+    from capybase.memory.embeddings import OpenAIEmbeddingsClient
+
+    emb_cfg = model_cfg
+    if embeddings_model:
+        emb_cfg = emb_cfg.model_copy(update={"model": embeddings_model})
+    return OpenAIEmbeddingsClient(emb_cfg)
+
+
+def _format_embeddings_report(cal, profile_path: Path, *, written: bool, prev_floor: float) -> str:
+    """Human-readable summary of an embeddings-calibration run."""
+    lines = [f"capybase calibrate-embeddings — model: {cal.model}"]
+    lines.append(f"status: {'ok' if cal.ok else 'FAILED (endpoint unreachable)'}")
+    lines.append("")
+    lines.append("measured score distributions:")
+    lines.append(
+        f"  related   : n={cal.related.count}  "
+        f"min={cal.related.minimum:.3f}  max={cal.related.maximum:.3f}  "
+        f"mean={cal.related.mean:.3f}"
+    )
+    lines.append(
+        f"  unrelated : n={cal.unrelated.count}  "
+        f"min={cal.unrelated.minimum:.3f}  max={cal.unrelated.maximum:.3f}  "
+        f"mean={cal.unrelated.mean:.3f}"
+    )
+    lines.append("")
+    lines.append("threshold estimates:")
+    lines.append(f"  quantile_gap (applied) = {cal.min_similarity:.3f}")
+    lines.append(f"  related_p10            = {cal.related_p10:.3f}")
+    lines.append(f"  unrelated_p90          = {cal.unrelated_p90:.3f}")
+    lines.append("")
+    lines.append(f"chosen min_similarity   = {cal.min_similarity:.3f}  (was {prev_floor:.3f})")
+    if cal.notes:
+        lines.append("")
+        lines.append("notes:")
+        for n in cal.notes:
+            lines.append(f"  - {n}")
+    lines.append("")
+    if written:
+        lines.append(f"wrote embedding calibration to: {profile_path}")
+    else:
+        lines.append(f"profile path: {profile_path} (not written)")
+    return "\n".join(lines)
+
+
+def _run_calibrate_embeddings(
+    config: Config,
+    repo: str,
+    profile_path: str,
+    *,
+    json_output: bool = False,
+    dry_run: bool = False,
+    out=sys.stdout,
+    err=sys.stderr,
+    client_factory: Callable[[ModelConfig, str], object] | None = None,
+) -> int:
+    """Calibrate the embedding-retrieval similarity floor for the active model.
+
+    Derives a model-specific ``min_similarity`` from the corpus score distribution
+    and writes it into the model profile (alongside the LLM-calibration knobs),
+    preserving all other profile fields. ``client_factory`` lets tests inject a
+    fake embeddings client; when None the real client is built. Exits non-zero if
+    the embeddings endpoint was unreachable.
+    """
+    import json
+
+    from capybase.calibration_profile import ModelProfile, resolve_profile_path
+    from capybase.embeddings_calibration import calibrate_thresholds
+
+    embeddings_model = config.memory.embeddings_model
+    client = (
+        client_factory(config.model, embeddings_model)
+        if client_factory is not None
+        else _real_embeddings_client(config.model, embeddings_model)
+    )
+    cal = calibrate_thresholds(client, embeddings_model=embeddings_model)
+
+    resolved = resolve_profile_path(repo, profile_path)
+    written = False
+    prev_floor = 0.35
+    if cal.ok and not dry_run:
+        # Load the existing profile (preserving LLM-calibration knobs) and update
+        # only the embeddings fields. A missing profile is created fresh via
+        # from_dict (which fills the required fields with safe defaults).
+        profile = ModelProfile.load(resolved)
+        if profile is None:
+            profile = ModelProfile.from_dict({"model": config.model.model})
+        prev_floor = profile.embedding_min_similarity
+        profile.model = config.model.model  # keep the match key current
+        profile.embedding_min_similarity = cal.min_similarity
+        profile.embedding_calibration = cal.to_dict()
+        profile.save(resolved)
+        written = True
+
+    if json_output:
+        payload = cal.to_dict()
+        payload["_written"] = written
+        payload["_ok"] = cal.ok
+        print(json.dumps(payload, indent=2), file=out)
+    else:
+        text = _format_embeddings_report(cal, resolved, written=written, prev_floor=prev_floor)
+        if dry_run:
+            text += "\n(dry-run: profile not written)"
+        elif not cal.ok:
+            text += "\nembeddings endpoint unreachable — profile NOT written"
+        print(text, file=out)
+    return 0 if cal.ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -205,6 +335,15 @@ def main(argv: list[str] | None = None) -> int:
     # calibrate / recalibrate don't need an orchestrator or a git repo session.
     if args.command in ("calibrate", "recalibrate"):
         return _run_calibrate(
+            config,
+            repo=args.repo,
+            profile_path=profile_path,
+            json_output=getattr(args, "json", False),
+            dry_run=getattr(args, "dry_run", False),
+        )
+
+    if args.command == "calibrate-embeddings":
+        return _run_calibrate_embeddings(
             config,
             repo=args.repo,
             profile_path=profile_path,

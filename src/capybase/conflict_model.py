@@ -157,6 +157,12 @@ class ContextBundle(BaseModel):
     side_summaries: dict[str, str] = Field(default_factory=dict)
     related_snippets: list[RelatedSnippet] = Field(default_factory=list)
     retrieved_examples: list[HistoricalExample] = Field(default_factory=list)
+    # Confidence scores of the retrieved examples (cosine for embedding
+    # retrieval, BM25 for lexical), parallel to ``retrieved_examples``. Empty
+    # when no retrieval ran or the retriever doesn't expose scores. Surfaced so
+    # the orchestrator can journal retrieval confidence (the diagnostic data for
+    # validating the calibrated min_similarity threshold in production).
+    retrieval_scores: list[float] = Field(default_factory=list)
     structural_view: dict[str, Any] = Field(default_factory=dict)
     token_estimate: int = 0
 

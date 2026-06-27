@@ -98,11 +98,17 @@ def test_mismatched_model_profile_is_noop(repo: Path):
     cfg = _cfg_with_profile_path(repo)
     original_max = cfg.model.max_tokens
 
-    orch = Orchestrator(cfg, repo=str(repo))
+    import warnings
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        orch = Orchestrator(cfg, repo=str(repo))
 
     assert orch.config.model.max_tokens == original_max  # unchanged
     events = orch.journal.read_events()
     assert not [e for e in events if e.event_type == "model_profile_applied"]
+    # The user is nudged to recalibrate (the profile was fit for another model).
+    assert any("recalibrate" in str(w.message) for w in caught)
 
 
 def test_absent_profile_is_noop(repo: Path):

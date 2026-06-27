@@ -120,16 +120,20 @@ class ContextBuilder:
         # RAG few-shot: retrieve similar past merges from the experience store
         # and inject them as dynamic demonstrations. The query is the conflict
         # "signature" (the three sides concatenated). Skipped when the retriever
-        # is absent or the corpus is too small to be meaningful.
+        # is absent or the corpus is too small to be meaningful. Uses the scored
+        # retrieval API so the confidence of each example is captured — the
+        # diagnostic data for validating the calibrated min_similarity floor.
         retrieved: list = []
+        retrieval_scores: list[float] = []
         if self.retriever is not None:
             query = " ".join([unit.base.text, unit.current.text, unit.replayed.text])
             try:
-                candidates = self.retriever.retrieve(
+                scored = self.retriever.retrieve_scored(
                     query, k=self.retriever_k, language=unit.language
                 )
-                if len(candidates) >= self.min_examples or candidates:
-                    retrieved = candidates
+                if len(scored) >= self.min_examples or scored:
+                    retrieval_scores = [round(s, 4) for s, _ in scored]
+                    retrieved = [ex for _, ex in scored]
             except Exception:  # noqa: BLE001 - retrieval is best-effort
                 pass
         # Cross-file dependency slicing (survey §5.3): resolve definitions of
@@ -145,6 +149,7 @@ class ContextBuilder:
             side_summaries=side_summaries,
             related_snippets=related,
             retrieved_examples=retrieved,
+            retrieval_scores=retrieval_scores,
             token_estimate=est,
             structural_view=structural_view,
         )

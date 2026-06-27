@@ -161,14 +161,13 @@ class LexicalRetriever:
         ]
         self._index = _BM25Index(docs) if docs else _BM25Index([])
 
-    def retrieve(
+    def retrieve_scored(
         self, query: str, *, k: int = 3, language: str | None = None
-    ) -> list[HistoricalExample]:
-        """Return the top-k most similar past merges for ``query``.
+    ) -> list[tuple[float, HistoricalExample]]:
+        """Return ``(bm25_score, example)`` pairs for the top-k matches.
 
-        ``query`` is typically the concatenation of the new conflict's sides.
-        ``language`` filters examples to the same language when given. Returns
-        an empty list if the corpus is too small or no matches score above 0.
+        Same ranking as :meth:`retrieve` but keeps the score, so the retrieval-
+        score diagnostic can observe lexical-retrieval confidence too.
         """
         if self._index is None:
             self._build()
@@ -179,7 +178,6 @@ class LexicalRetriever:
         if not q_tokens:
             return []
         scores = self._index.score(q_tokens)
-        # Pair (score, experience), filter zero scores and language, take top-k.
         ranked = sorted(
             (
                 (s, exp)
@@ -188,7 +186,19 @@ class LexicalRetriever:
             ),
             key=lambda t: -t[0],
         )
-        return [exp.example for _, exp in ranked[:k]]
+        return [(s, exp.example) for s, exp in ranked[:k]]
+
+    def retrieve(
+        self, query: str, *, k: int = 3, language: str | None = None
+    ) -> list[HistoricalExample]:
+        """Return the top-k most similar past merges for ``query``.
+
+        ``query`` is typically the concatenation of the new conflict's sides.
+        ``language`` filters examples to the same language when given. Returns
+        an empty list if the corpus is too small or no matches score above 0.
+        Delegates to :meth:`retrieve_scored` and drops the scores.
+        """
+        return [ex for _, ex in self.retrieve_scored(query, k=k, language=language)]
 
     def refresh(self) -> None:
         """Force a rebuild of the index (after new experiences are appended)."""
@@ -233,12 +243,17 @@ class EmbeddingRetriever:
 
     # Minimum cosine similarity to surface an example as a few-shot. Embeddings on
     # a small local model are noisier than OpenAI-scale ones; a modest floor keeps
-    # genuinely-unrelated conflicts out of the prompt.
+    # genuinely-unrelated conflicts out of the prompt. This is the DEFAULT; the
+    # applied value comes from a calibrated profile (``calibrate-embeddings``) and
+    # is injected via the ``min_similarity`` constructor parameter.
     MIN_SIMILARITY = 0.35
 
-    def __init__(self, store: ExperienceStore, client: object) -> None:
+    def __init__(
+        self, store: ExperienceStore, client: object, *, min_similarity: float = MIN_SIMILARITY
+    ) -> None:
         self.store = store
         self.client = client  # EmbeddingsClient (Protocol); typed loose to avoid import cycle
+        self.min_similarity = float(min_similarity)
         self._accepted: list[Experience] | None = None
         self._vectors: list[list[float]] | None = None
 
@@ -260,14 +275,16 @@ class EmbeddingRetriever:
             self._accepted = []
             self._vectors = []
 
-    def retrieve(
+    def retrieve_scored(
         self, query: str, *, k: int = 3, language: str | None = None
-    ) -> list[HistoricalExample]:
-        """Return the top-k semantically-similar past merges for ``query``.
+    ) -> list[tuple[float, HistoricalExample]]:
+        """Return ``(cosine_score, example)`` pairs for the top-k matches.
 
-        Embeds the query, cosine-ranks the cached corpus, filters by language and
-        the similarity floor, and returns the top-k. Returns [] if the corpus is
-        empty, embedding fails, or nothing clears the floor.
+        Same ranking/filtering as :meth:`retrieve`, but keeps the score so callers
+        (the retrieval-score diagnostic, embeddings calibration) can observe the
+        confidence of each retrieved example. Pairs are sorted by descending
+        score; the score is the raw cosine, before the ``min_similarity`` filter
+        is applied — so a caller can see what was filtered out and why.
         """
         if self._accepted is None:
             self._build()
@@ -286,9 +303,25 @@ class EmbeddingRetriever:
             for vec, exp in zip(self._vectors, self._accepted)
             if language is None or exp.language == language
         ]
-        scored = [(s, e) for s, e in scored if s >= self.MIN_SIMILARITY]
         scored.sort(key=lambda t: -t[0])
-        return [exp.example for _, exp in scored[:k]]
+        # Return the top-k scored pairs (above the floor) — scores preserved.
+        return [
+            (s, exp.example) for s, exp in scored[:k] if s >= self.min_similarity
+        ]
+
+    def retrieve(
+        self, query: str, *, k: int = 3, language: str | None = None
+    ) -> list[HistoricalExample]:
+        """Return the top-k semantically-similar past merges for ``query``.
+
+        Embeds the query, cosine-ranks the cached corpus, filters by language and
+        the similarity floor, and returns the top-k. Returns [] if the corpus is
+        empty, embedding fails, or nothing clears the floor. Delegates to
+        :meth:`retrieve_scored` and drops the scores.
+        """
+        return [
+            ex for _, ex in self.retrieve_scored(query, k=k, language=language)
+        ]
 
     def refresh(self) -> None:
         """Force a rebuild of the vector cache (after new experiences appended)."""

@@ -230,3 +230,78 @@ def test_resolve_profile_path_relative_to_repo(tmp_path: Path):
 def test_resolve_profile_path_absolute_passthrough(tmp_path: Path):
     abs_path = tmp_path / "abs.json"
     assert resolve_profile_path("/any/repo", str(abs_path)) == abs_path
+
+
+# ---------------------------------------------------------------------------
+# Embeddings-calibration fields (F2): embedding_min_similarity + embedding_calibration
+# ---------------------------------------------------------------------------
+
+# A representative calibration envelope as ``calibrate-embeddings`` would write
+# it (a subset of EmbeddingCalibration.to_dict); used to exercise persistence.
+_CALIBRATION_ENV = {
+    "model": "qwen-embed",
+    "min_similarity": 0.71,
+    "estimates": {"quantile_gap": 0.71, "related_p10": 0.83, "unrelated_p90": 0.40},
+    "related": {"count": 8, "min": 0.7, "max": 0.99, "mean": 0.88},
+    "unrelated": {"count": 8, "min": 0.05, "max": 0.41, "mean": 0.22},
+    "ok": True,
+    "probed_at": "2026-06-27T00:00:00+00:00",
+    "notes": [],
+}
+
+
+def test_profile_roundtrip_preserves_embedding_fields():
+    """The calibrated floor and its calibration envelope survive to_dict/from_dict."""
+    p = _profile(embedding_min_similarity=0.71, embedding_calibration=_CALIBRATION_ENV)
+    d = p.to_dict()
+    assert d["embedding_min_similarity"] == 0.71
+    assert d["embedding_calibration"] == _CALIBRATION_ENV
+    again = ModelProfile.from_dict(d)
+    assert again == p
+    assert again.embedding_min_similarity == 0.71
+    assert again.embedding_calibration == _CALIBRATION_ENV
+
+
+def test_profile_embedding_min_similarity_default():
+    """Without calibration, the field is the conservative 0.35 guess."""
+    p = _profile()
+    assert p.embedding_min_similarity == 0.35
+    assert p.embedding_calibration == {}
+
+
+def test_from_dict_backward_compatible_without_embedding_fields():
+    """An older profile (pre-calibrate-embeddings) omits the embedding fields.
+    It must still load, defaulting the floor to 0.35 and the envelope to {}."""
+    p = ModelProfile.from_dict({"model": "vibethink", "max_tokens": 4096})
+    assert p.embedding_min_similarity == 0.35
+    assert p.embedding_calibration == {}
+
+
+def test_from_dict_coerces_non_dict_calibration_to_empty():
+    """A corrupt calibration envelope (non-dict) degrades to {} — the profile's
+    never-crash-on-load contract."""
+    p = ModelProfile.from_dict(
+        {"model": "x", "max_tokens": 1, "embedding_calibration": ["not", "a", "dict"]}
+    )
+    assert p.embedding_calibration == {}
+
+
+def test_to_dict_coerces_non_dict_calibration_to_empty():
+    """``to_dict`` defensively coerces a non-dict envelope so the serialized form
+    is always a clean dict (a hand-mangled profile object must still serialize)."""
+    p = _profile()
+    object.__setattr__(p, "embedding_calibration", "oops")  # bypass dataclass typing
+    d = p.to_dict()
+    assert d["embedding_calibration"] == {}
+
+
+def test_save_load_preserves_calibration_envelope(tmp_path: Path):
+    """The full envelope (nested estimates + distributions) round-trips via JSON."""
+    p = _profile(embedding_min_similarity=0.66, embedding_calibration=_CALIBRATION_ENV)
+    path = tmp_path / "profile.json"
+    p.save(path)
+    loaded = ModelProfile.load(path)
+    assert loaded is not None
+    assert loaded.embedding_min_similarity == 0.66
+    assert loaded.embedding_calibration["estimates"]["quantile_gap"] == 0.71
+    assert loaded.embedding_calibration["related"]["mean"] == 0.88

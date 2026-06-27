@@ -327,6 +327,11 @@ class MemoryConfig(BaseModel):
     # Minimum experiences before retrieval is attempted (avoid noisy few-shot
     # from a near-empty corpus).
     min_examples_for_retrieval: int = 3
+    # The cosine-similarity floor below which an embedding match is NOT surfaced
+    # as few-shot (embeddings retriever only). Default is the conservative guess;
+    # ``capybase calibrate-embeddings`` derives a model-specific value and stores
+    # it in the profile, which overrides this at runtime ("profile wins").
+    embedding_min_similarity: float = 0.35
 
 
 class CalibrationConfig(BaseModel):

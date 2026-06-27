@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
+import warnings
 
 from capybase.conflict_extractor import ConflictExtractor, SkippedPath
 from capybase.conflict_model import (
@@ -154,7 +155,9 @@ def _apply_model_profile(config: Config, repo_root: Path, journal: Journal) -> C
     ONLY when its model name matches. Returns ``config`` unchanged (and journals
     nothing) when no profile exists or the names mismatch — so a repo without a
     profile behaves exactly as before. The overlay touches only the four tuned
-    knobs; every other field keeps its value.
+    knobs; every other field keeps its value. Capability flags
+    (``enable_embedding_rag``, ``embedding_min_similarity``) follow the SAME
+    name-match gate — a profile fit for another model never leaks them through.
     """
     profile_path = config.calibration.model_profile_path
     resolved = Path(profile_path)
@@ -168,21 +171,32 @@ def _apply_model_profile(config: Config, repo_root: Path, journal: Journal) -> C
         return config
     if profile is None:
         return config
-    new_model, overridden = apply_profile(config.model, profile)
-    if not overridden:
-        # Even if no ModelConfig knob changed, a capability flag may still apply
-        # (e.g. embedding RAG confirmed by calibration). Apply it before returning.
-        config = _apply_profile_capability_flags(config, profile)
+    # The name match is the gate for EVERYTHING the profile carries — tuned
+    # knobs AND capability flags. ``apply_profile`` would warn + no-op on a
+    # mismatch, but we re-check here FIRST so capability flags don't leak
+    # through when ``overridden`` is empty merely because no ModelConfig knob
+    # differed. Nudge the user to recalibrate, then leave config untouched.
+    if profile.model != config.model.model:
+        warnings.warn(
+            f"Model profile is for {profile.model!r} but active model is "
+            f"{config.model.model!r}; ignoring the profile. Run "
+            f"`capybase recalibrate` to fit it for the current model.",
+            stacklevel=2,
+        )
         return config
-    journal.emit(
-        "model_profile_applied",
-        {
-            "model": profile.model,
-            "overridden_knobs": overridden,
-            "profile_path": str(resolved),
-        },
-    )
-    config = config.model_copy(update={"model": new_model})
+    new_model, overridden = apply_profile(config.model, profile)
+    if overridden:
+        journal.emit(
+            "model_profile_applied",
+            {
+                "model": profile.model,
+                "overridden_knobs": overridden,
+                "profile_path": str(resolved),
+            },
+        )
+        config = config.model_copy(update={"model": new_model})
+    # Capability flags (e.g. embedding RAG, the calibrated floor) apply even when
+    # no ModelConfig knob changed — but only after the name match above passed.
     return _apply_profile_capability_flags(config, profile)
 
 
@@ -192,11 +206,18 @@ def _apply_profile_capability_flags(config: Config, profile: "object") -> Config
     Currently: ``enable_embedding_rag`` flips ``config.memory.retriever`` to
     ``"embedding"`` (the orchestrator then builds an EmbeddingRetriever). Only
     honors the flag when the user has RAG enabled at all; never forces it on.
+
+    The calibrated ``embedding_min_similarity`` (from ``calibrate-embeddings``)
+    overrides the config default so the EmbeddingRetriever uses a model-specific
+    floor rather than the 0.35 guess.
     """
     if getattr(profile, "enable_embedding_rag", False):
         if config.memory.enabled and config.future.enable_rag:
             if config.memory.retriever == "lexical":
                 config.memory.retriever = "embedding"
+    emb_sim = getattr(profile, "embedding_min_similarity", None)
+    if emb_sim is not None:
+        config.memory.embedding_min_similarity = float(emb_sim)
     return config
 
 
@@ -620,7 +641,11 @@ class Orchestrator:
                 if config.memory.embeddings_model:
                     emb_cfg = emb_cfg.model_copy(update={"model": config.memory.embeddings_model})
                 client = OpenAIEmbeddingsClient(emb_cfg)
-                return EmbeddingRetriever(self.memory_store, client)
+                return EmbeddingRetriever(
+                    self.memory_store,
+                    client,
+                    min_similarity=config.memory.embedding_min_similarity,
+                )
             except Exception:  # noqa: BLE001 - fall back to BM25, never break RAG
                 pass
         return LexicalRetriever(self.memory_store)
@@ -933,7 +958,10 @@ class Orchestrator:
                 self.journal.store_prompt(unit.unit_id, retry_count, prompt)
             self.journal.emit(
                 "context_built",
-                {"token_estimate": context.token_estimate},
+                {
+                    "token_estimate": context.token_estimate,
+                    "retrieval_scores": context.retrieval_scores,
+                },
                 step_index=self.step,
                 path=unit.path,
                 unit_id=unit.unit_id,
