@@ -199,7 +199,7 @@ def test_locate_shadow_test_finds_conventional_path(tmp_path):
     test_file = tmp_path / "tests" / "test_app.py"
     test_file.write_text("def test_x(): pass\n")
     found = _locate_shadow_test("app.py", str(tmp_path))
-    assert found == str(test_file)
+    assert found == (str(test_file), "python")
 
 
 def test_locate_shadow_test_returns_none_when_absent(tmp_path):
@@ -211,6 +211,7 @@ def test_locate_shadow_test_returns_none_when_absent(tmp_path):
 def test_locate_shadow_test_ignores_non_python():
     from capybase.verification import _locate_shadow_test
 
+    # Rust file in a directory with no Cargo.toml → no cargo project → None.
     assert _locate_shadow_test("config.rs", "/tmp") is None
 
 

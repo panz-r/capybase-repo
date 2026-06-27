@@ -1430,6 +1430,7 @@ class Orchestrator:
         cmd = getattr(self.config.tests, label) if hasattr(self.config.tests, label) else None
         if not cmd:
             return True
+        cmd = self._resolve_test_command(cmd)
         self.journal.emit("tests_started", {"label": label, "command": cmd}, step_index=self.step)
         run = self.tests.run(cmd)
         self.journal.emit(
@@ -1448,6 +1449,29 @@ class Orchestrator:
         if not run.passed:
             self.out(f"  ! {label} tests failed (rc={run.returncode})")
         return run.passed
+
+    def _resolve_test_command(self, cmd: str) -> str:
+        """Resolve a (possibly language-default) test command to a real one.
+
+        The shipped default is ``"pytest"`` (Python-centric). When that default
+        is configured and the repo is a Cargo project with no pytest on PATH,
+        substitute ``"cargo test"`` — a pure-Rust repo would otherwise fail
+        every ``run`` at the pre-continue gate. An *explicit* command (anything
+        other than the bare ``"pytest"`` default, including a user who set
+        ``pre_continue = "cargo test"`` themselves) is returned unchanged:
+        we never override a deliberate choice. This keeps Python repos on
+        pytest (the common case) while making Rust repos work out of the box.
+        """
+        if cmd.strip() != "pytest":
+            return cmd
+        has_cargo = (self.git.repo / "Cargo.toml").is_file()
+        if not has_cargo:
+            return cmd
+        from shutil import which
+
+        if which("pytest") is not None:
+            return cmd  # mixed repo with pytest installed → honor the default
+        return "cargo test"
 
     def _summarize(self, result: StepResult | None) -> None:
         if result is None:

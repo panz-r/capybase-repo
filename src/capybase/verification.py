@@ -1567,23 +1567,48 @@ class VerificationEngine:
         hard: list[VerificationFailure],
         features: dict[str, float | int | str | bool],
     ) -> None:
-        """Best-effort: run tests/test_<module>.py for the modified file.
+        """Best-effort: run the file's tests for a quick sanity check.
 
-        Locates a test file by convention (``tests/test_<basename>.py``) and
-        runs it via pytest. A failure is a WARNING, not a hard error — the
-        merge may be correct even if pre-existing tests fail for unrelated
-        reasons. This records ``shadow_tests_passed`` as a calibration feature.
+        Dispatches by language:
+        - **Python**: runs ``tests/test_<module>.py`` via pytest.
+        - **Rust**: runs ``cargo test`` scoped to the module (e.g.
+          ``src/config.rs`` → ``cargo test config::``), which compiles + runs
+          any ``#[test]`` items in that module. Falls back to a bare
+          ``cargo test`` when no Cargo.toml is found or the module has no tests.
+
+        A failure is a WARNING, not a hard error — the merge may be correct
+        even if pre-existing tests fail for unrelated reasons. This records
+        ``shadow_tests_passed`` as a calibration feature. No-op when disabled,
+        when no test file/target is found, or when the toolchain is absent.
         """
         features.setdefault("shadow_tests_run", False)
         features.setdefault("shadow_tests_passed", True)
         if not self.config.enable_shadow_tests:
             return
-        test_path = _locate_shadow_test(path, repo_root)
-        if test_path is None:
+        located = _locate_shadow_test(path, repo_root)
+        if located is None:
             return
+        target, lang = located
+        if lang == "rust":
+            ok, rc, outpath = _run_rust_shadow_test(target, repo_root)
+            if ok is None:
+                return  # cargo absent / no Cargo.toml → not run
+            features["shadow_tests_run"] = True
+            features["shadow_tests_passed"] = ok
+            if not ok:
+                hard.append(
+                    VerificationFailure(
+                        validator="shadow_tests",
+                        severity="warning",
+                        message=f"cargo shadow tests failed: {target}",
+                        detail={"test_target": target, "returncode": rc},
+                    )
+                )
+            return
+        # Python (default): pytest on the located test file.
         try:
             proc = subprocess.run(
-                ["python3", "-m", "pytest", test_path, "-q"],
+                ["python3", "-m", "pytest", target, "-q"],
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -1602,7 +1627,7 @@ class VerificationEngine:
                     validator="shadow_tests",
                     severity="warning",
                     message=f"shadow tests failed: {tail_str}",
-                    detail={"test_path": test_path, "returncode": proc.returncode},
+                    detail={"test_path": target, "returncode": proc.returncode},
                 )
             )
 
@@ -1642,19 +1667,95 @@ def _blank_markers(text: str) -> str:
     return "\n".join(out)
 
 
-def _locate_shadow_test(path: str, repo_root: str) -> str | None:
-    """Find a test file for ``path`` by convention: tests/test_<basename>.py.
+def _locate_shadow_test(path: str, repo_root: str) -> tuple[str, str] | None:
+    """Find a test target for ``path`` by convention.
 
-    ``src/config.rs`` → looks for ``tests/test_config.py`` (Rust has no pytest,
-    so this is a no-op for non-Python; the feature is Python-centric for now).
-    Returns the absolute path if it exists, else None.
+    Returns ``(target, language)`` so the caller dispatches to the right
+    runner, or ``None`` when nothing test-shaped is found:
+
+    - **Python** (``src/app.py``): ``tests/test_app.py`` (pytest).
+    - **Rust** (``src/config.rs``): the module path ``config::`` is the cargo
+      test filter target (run as ``cargo test config::``). Rust colocates
+      ``#[test]`` items inside the source module rather than in a separate
+      ``tests/`` file, so there is no file to *locate* — the target is the
+      module-name filter. Returns ``None`` only when the repo has no
+      ``Cargo.toml`` (not a cargo project → no cargo tests to run).
+
+    The Rust case never touches the filesystem for a test file (cargo resolves
+    the module), so it returns a target string even though no ``tests/`` entry
+    exists; ``_run_rust_shadow_test`` handles a module with zero tests
+    gracefully (cargo reports "0 ran", rc 0).
     """
     from pathlib import Path
 
     p = Path(path)
-    if p.suffix != ".py":
+    if p.suffix == ".py":
+        candidate = Path(repo_root) / "tests" / f"test_{p.stem}.py"
+        if candidate.is_file():
+            return (str(candidate), "python")
         return None
-    candidate = Path(repo_root) / "tests" / f"test_{p.stem}.py"
-    if candidate.is_file():
-        return str(candidate)
+    if p.suffix == ".rs":
+        # Only meaningful inside a cargo project; otherwise no test runner.
+        if (Path(repo_root) / "Cargo.toml").is_file():
+            return (_rust_module_filter(p), "rust")
+        return None
     return None
+
+
+def _rust_module_filter(path: Path) -> str:
+    """The ``cargo test`` module-path filter for a Rust source file.
+
+    ``src/config.rs`` → ``config::``, ``src/net/conn.rs`` → ``net::conn::``.
+    cargo's test filter matches the fully-qualified module path of each test
+    function, so scoping to ``<module>::`` runs only that module's ``#[test]``
+    items (and its submodules). Dropping the ``src/`` prefix and slashes→``::``
+    yields the crate-relative module path.
+
+    The crate root files ``lib.rs`` and ``main.rs`` have no module qualifier of
+    their own (their tests live at the crate top level), so they return "" —
+    meaning "run all tests" (the only sensible scope for a root file).
+    """
+    parts = list(path.with_suffix("").parts)
+    # Strip a leading "src" (the conventional crate root) so the filter is the
+    # module path, not the filesystem path.
+    if parts and parts[0] == "src":
+        parts = parts[1:]
+    # Crate roots (lib.rs / main.rs) have no module qualifier → run all tests.
+    if not parts or parts[-1] in ("lib", "main"):
+        return ""
+    return "::".join(parts) + "::"
+
+
+def _run_rust_shadow_test(
+    target: str, repo_root: str, *, timeout: int = 180
+) -> tuple[bool | None, int, str]:
+    """Run ``cargo test <target>`` and return ``(passed, returncode, target)``.
+
+    ``passed`` is None when cargo is absent or the project can't be tested
+    (e.g. no Cargo.toml, compile error in unrelated code) — the caller treats
+    that as "not run" rather than a failure, mirroring the Python path's
+    tolerance for missing pytest. An empty ``target`` runs the whole test
+    suite (for a crate-root file like ``lib.rs``). A non-zero return code from
+    cargo (failed compile or a failed ``#[test]``) is a failure.
+    """
+    from shutil import which
+
+    cargo = which("cargo")
+    if cargo is None:
+        return (None, -1, target)
+    argv = ["cargo", "test", "--quiet"]
+    if target:
+        argv.append(target)
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=repo_root,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return (None, -1, target)
+    # cargo test exits 0 when tests pass (including "0 ran" — no tests in the
+    # module), non-zero on a failed assertion or a compile error.
+    return (proc.returncode == 0, proc.returncode, target)
