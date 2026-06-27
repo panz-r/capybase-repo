@@ -243,7 +243,7 @@ def _parse_cargo_messages(stdout: str, path: str) -> list[Diagnostic]:
                 message=str(inner.get("message", "")),
                 line=line_no,
                 column=col,
-                code=str(inner.get("code", {}).get("code", "")),
+                code=str((inner.get("code") or {}).get("code", "")),
                 source="cargo",
             )
         )

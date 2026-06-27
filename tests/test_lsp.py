@@ -291,6 +291,21 @@ def test_parse_cargo_messages_tolerates_garbage():
     assert _parse_cargo_messages(stdout, "src/lib.rs") == []
 
 
+def test_parse_cargo_messages_handles_null_code():
+    """A message with ``"code": null`` (e.g. "aborting due to N errors") must
+    not crash the parser. cargo emits null for messages without an error code."""
+    from capybase.adapters.lsp import _parse_cargo_messages
+
+    stdout = (
+        '{"reason":"compiler-message","message":{"level":"error",'
+        '"message":"aborting due to 2 previous errors","code":null}}'
+    )
+    diags = _parse_cargo_messages(stdout, "src/lib.rs")
+    assert len(diags) == 1
+    assert diags[0].code == ""  # null → empty, not a crash
+    assert "aborting" in diags[0].message
+
+
 def test_rust_analyzer_runner_missing_cargo_reports_unchecked(tmp_path, monkeypatch):
     # When cargo is absent (and no rust-analyzer fallback), the runner reports
     # checked=False rather than raising.

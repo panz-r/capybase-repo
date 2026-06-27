@@ -259,13 +259,16 @@ engine and the review bundle.
 **Python and Rust are first-class.** Both get the same layered pipeline and the
 same Phase-B verification guarantees:
 
-- **Compile floor.** The fully-spliced file is syntax/parse-checked after every
-  resolution — `py_compile` for Python, `rustc --emit=metadata` for Rust. A
-  merge that doesn't compile (dropped `;`, unbalanced braces, a struct field
-  added but never initialized) is rejected before it can be applied. Rust
-  edition is inferred from the nearest `Cargo.toml` (else 2021); override with
-  `validation.rust_edition`. This is the check that catches cross-hunk errors
-  per-unit validation structurally cannot.
+- **Compile floor.** The fully-spliced file is compile-checked after every
+  resolution, rejecting merges that don't compile (dropped `;`, unbalanced
+  braces, a struct field added but never initialized) before they're applied.
+  For Python this is `py_compile`. For Rust it's **crate-aware**: inside a
+  Cargo project, `cargo check` runs against the whole crate (the only way to
+  resolve `crate::`/`super::` paths — a single-file check would false-positive
+  on every leaf module), and a merge fails only on errors it *introduces*, not
+  pre-existing ones. Standalone `rustc --emit=metadata` is the fallback for
+  loose `.rs` files with no `Cargo.toml`. This is the check that catches
+  cross-hunk errors per-unit validation structurally cannot.
 - **Structural analysis.** With the optional `structural` extra installed,
   tree-sitter resolves the enclosing AST node (`def`/`fn`/`impl`/`struct`),
   powers entity-level merge, AST-preservation checks, and sibling-entity
@@ -275,10 +278,10 @@ same Phase-B verification guarantees:
   the repo is a Cargo project with no pytest). Shadow tests dispatch to
   `cargo test` for `.rs` files.
 
-For deeper type checking (catching *new* type errors beyond what the compile
-floor covers), enable `validation.enable_lsp_diagnostics` — capybase runs
-`cargo check` on the fully-spliced file and rejects errors not present in the
-pre-conflict baseline.
+For an additional deeper check on top of the compile floor, enable
+`validation.enable_lsp_diagnostics` — capybase runs `rust-analyzer` diagnostics
+on the fully-spliced file and rejects errors not present in the pre-conflict
+baseline.
 
 ## Status
 

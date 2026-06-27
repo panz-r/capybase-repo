@@ -1442,38 +1442,61 @@ class VerificationEngine:
                     )
                 )
         elif language == "rust":
-            # Rust compile floor (parity with Python's py_compile): parse-check
-            # the fully-spliced file with ``rustc --emit=metadata``. Edition is
-            # taken from config (rust_edition) or inferred from the nearest
-            # Cargo.toml. A missing rustc → "not checked" (never a false fail);
-            # use _resolve so absence is detected cheaply before _compile_rust.
-            from capybase.adapters.lsp import _resolve
+            # Rust verification is crate-aware, not file-isolated. Standalone
+            # ``rustc`` on a single file can't resolve ``crate::`` / ``super::``
+            # paths, so it FALSE-POSITIVES on virtually every non-crate-root
+            # file (any leaf that does ``use crate::config::Config`` fails with
+            # E0432 even when the merge is correct). The only correct check is
+            # against the whole crate via ``cargo check``, which the existing
+            # RustAnalyzerRunner._check_cargo already does (writes the resolved
+            # source to the real path, runs cargo, parses JSON diagnostics).
+            #
+            # Strategy: prefer cargo (default-on, no flag needed) for any Rust
+            # file inside a Cargo project. Only fall back to standalone rustc
+            # for a loose ``.rs`` with no Cargo.toml (single-file scripts, the
+            # rust-uu fixture). A missing tool → "not checked" (never a false
+            # failure). This mirrors Python's always-on py_compile but uses the
+            # crate context Rust requires.
+            from capybase.adapters.lsp import _has_cargo_manifest, _resolve
 
-            rustc = _resolve(self.config.rustc_path)
-            if rustc is not None:
-                syntax_checked = True
-                edition = self.config.rust_edition or _infer_rust_edition(
-                    repo_root, path
+            used_cargo = False
+            if _has_cargo_manifest(repo_root) and _resolve(self.config.cargo_path):
+                used_cargo = self._run_cargo_syntax_check(
+                    path, original, whole, repo_root, hard, features
                 )
-                try:
-                    ok, msg = _compile_rust(
-                        whole, rustc_path=rustc, edition=edition
+            if used_cargo:
+                syntax_checked = features.get("syntax_checked", False)
+                syntax_ok = features.get("syntax_passed", True)
+            else:
+                # Loose .rs (no Cargo.toml) or cargo absent: standalone rustc is
+                # the only option and is correct here (no crate paths to resolve).
+                rustc = _resolve(self.config.rustc_path)
+                if rustc is not None:
+                    syntax_checked = True
+                    edition = self.config.rust_edition or _infer_rust_edition(
+                        repo_root, path
                     )
-                except FileNotFoundError:
-                    ok = True  # tool vanished between resolve & run → skip
-                    msg = "rustc not available; syntax not checked"
-                syntax_ok = ok
-                if not ok and self.config.require_syntax_if_supported:
-                    hard.append(
-                        VerificationFailure(
-                            validator="syntax",
-                            severity="error",
-                            message=msg,
-                            detail={"edition": edition},
+                    try:
+                        ok, msg = _compile_rust(
+                            whole, rustc_path=rustc, edition=edition
                         )
-                    )
-        features["syntax_checked"] = syntax_checked
-        features["syntax_passed"] = syntax_ok
+                    except FileNotFoundError:
+                        ok = True  # tool vanished between resolve & run → skip
+                        msg = "rustc not available; syntax not checked"
+                    syntax_ok = ok
+                    if not ok and self.config.require_syntax_if_supported:
+                        hard.append(
+                            VerificationFailure(
+                                validator="syntax",
+                                severity="error",
+                                message=msg,
+                                detail={"edition": edition},
+                            )
+                        )
+                features["syntax_checked"] = syntax_checked
+                features["syntax_passed"] = syntax_ok
+        features["syntax_checked"] = features.get("syntax_checked", syntax_checked)
+        features["syntax_passed"] = features.get("syntax_passed", syntax_ok)
 
         # LSP / type-checker diagnostics (Phase B): reject NEW errors.
         self._run_lsp_diagnostics(
@@ -1499,6 +1522,75 @@ class VerificationEngine:
     # Phase B helpers: LSP diagnostics and shadow tests.
     # ------------------------------------------------------------------
 
+    def _run_cargo_syntax_check(
+        self,
+        path: str,
+        original: str,
+        whole: str,
+        repo_root: str,
+        hard: list[VerificationFailure],
+        features: dict[str, float | int | str | bool],
+    ) -> bool:
+        """Run ``cargo check`` as the default Rust syntax/compile check.
+
+        This is the correct, crate-aware verification for Rust (the only way to
+        resolve ``crate::``/``super::`` paths), run via the existing
+        ``RustAnalyzerRunner._check_cargo`` which writes the resolved source to
+        the real file path and parses cargo's JSON diagnostics.
+
+        Uses the same baseline/new-error logic as ``_run_lsp_diagnostics``: a
+        merge fails ONLY on errors it introduces, not on pre-existing crate
+        errors (a repo that already doesn't compile is the developer's problem).
+        The baseline is the pre-conflict ``original`` with markers blanked to
+        comments so it parses; we compare error *messages* between baseline and
+        the resolved file.
+
+        Records into the ``syntax_*`` features (this IS the default syntax check
+        for Rust in a cargo project) and returns True when cargo actually ran
+        (so the caller knows not to also run standalone rustc). Returns False
+        when cargo was absent or the check didn't run — the caller then falls
+        back to standalone rustc for loose files.
+        """
+        try:
+            from capybase.adapters import lsp as lsp_mod
+        except Exception:  # noqa: BLE001
+            return False
+        runner = lsp_mod.RustAnalyzerRunner(
+            cargo_path=self.config.cargo_path,
+            rust_analyzer_path=self.config.rust_analyzer_path,
+        )
+        # Baseline: the original file with conflict markers blanked so it parses.
+        baseline_src = _blank_markers(original)
+        baseline = runner.check(baseline_src, path=path, repo_root=repo_root)
+        after = runner.check(whole, path=path, repo_root=repo_root)
+        if not after.checked:
+            # cargo absent or failed to run → not checked (never a false fail).
+            features["syntax_checked"] = False
+            features["syntax_passed"] = True
+            return False
+        features["syntax_checked"] = True
+        # New errors = after errors absent from the baseline (by message).
+        baseline_msgs = {d.message for d in baseline.errors}
+        new_errors = [d for d in after.errors if d.message not in baseline_msgs]
+        syntax_ok = len(new_errors) == 0
+        features["syntax_passed"] = syntax_ok
+        features["syntax_tool"] = "cargo"
+        features["syntax_new_error_count"] = len(new_errors)
+        if new_errors and self.config.require_syntax_if_supported:
+            msg = "; ".join(d.message[:80] for d in new_errors[:3])
+            hard.append(
+                VerificationFailure(
+                    validator="syntax",
+                    severity="error",
+                    message=f"cargo check: {len(new_errors)} new error(s): {msg}",
+                    detail={
+                        "new_errors": [d.message for d in new_errors[:5]],
+                        "tool": "cargo",
+                    },
+                )
+            )
+        return True
+
     def _run_lsp_diagnostics(
         self,
         path: str,
@@ -1517,6 +1609,13 @@ class VerificationEngine:
         failures: pre-existing issues in the repo are the developer's problem,
         not the merge's. All LSP work is skipped when disabled or the tool is
         absent (``checked=False``).
+
+        For Rust, ``cargo check`` already runs as the DEFAULT syntax check in
+        ``_run_cargo_syntax_check`` (crate-aware, no flag needed), so this LSP
+        path is a no-op for Rust unless ``enable_lsp_diagnostics`` is explicitly
+        on — in which case rust-analyzer runs as an additional (deeper) check on
+        top of cargo. Without the flag, re-running cargo here would duplicate
+        the syntax check and could produce competing results.
         """
         if not self.config.enable_lsp_diagnostics:
             features["lsp_checked"] = False
