@@ -22,7 +22,6 @@ script (an optional dep), not in the runtime path.
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +29,7 @@ from typing import Any
 from capybase.conflict_model import RiskDecision, VerificationResult
 from capybase.memory.store import Experience, ExperienceStore
 from capybase.risk import RiskEngine
+from capybase.stats import sigmoid
 
 
 # The canonical feature vector used for calibration. These keys come from
@@ -159,11 +159,8 @@ class CalibrationModel:
 
 
 def _sigmoid(z: float) -> float:
-    if z >= 0:
-        ez = math.exp(-z)
-        return 1.0 / (1.0 + ez)
-    ez = math.exp(z)
-    return ez / (1.0 + ez)
+    """Numerically stable sigmoid. Delegates to :func:`capybase.stats.sigmoid`."""
+    return sigmoid(z)
 
 
 # ---------------------------------------------------------------------------

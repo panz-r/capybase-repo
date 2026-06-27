@@ -25,12 +25,12 @@ so the caller keeps the default floor.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from capybase.embeddings_corpus import SimilarityProbe, probes
 from capybase.memory.retriever import _cosine
+from capybase.stats import percentile as _percentile
 
 
 # The default floor the EmbeddingRetriever ships with — used as the fallback
@@ -96,24 +96,7 @@ class EmbeddingCalibration:
         }
 
 
-def _percentile(sorted_scores: list[float], p: float) -> float:
-    """The ``p``-th percentile (0..100) of a sorted-ascending score list.
-
-    Linear interpolation between closest ranks (the numpy default). Returns 0.0
-    for an empty list so callers don't crash on a degenerate corpus.
-    """
-    if not sorted_scores:
-        return 0.0
-    if len(sorted_scores) == 1:
-        return sorted_scores[0]
-    # Rank, 1-indexed, interpolated.
-    rank = (p / 100.0) * (len(sorted_scores) - 1)
-    lo = int(math.floor(rank))
-    hi = int(math.ceil(rank))
-    if lo == hi:
-        return sorted_scores[lo]
-    frac = rank - lo
-    return sorted_scores[lo] + (sorted_scores[hi] - sorted_scores[lo]) * frac
+# ``_percentile`` is imported from :mod:`capybase.stats` (shared numerics).
 
 
 def _largest_gap_threshold(related: list[float], unrelated: list[float]) -> float:
