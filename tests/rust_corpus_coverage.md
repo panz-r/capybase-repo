@@ -81,13 +81,37 @@ test files cover the surrounding machinery:
 | full-orchestrator multi-file (cross-file/crate) rebase | `test_rust_cross_file.py` |
 | cargo/lsp adapters | `test_lsp.py` |
 
+## Verifier-robustness property tests (Method C)
+
+The hand-authored catalog is curated semantic tension; it cannot state invariants
+about the verifier's own consistency. The catalog-mutation generator fills this:
+
+| Invariant | Test | What it catches |
+|---|---|---|
+| no-crash | `test_mutation_does_not_crash_verifier` | `verify_file` raises on a valid-but-odd mutated splice |
+| verdict-invariance | `test_mutation_preserves_verdict` | a cosmetic mutation (literal bump, local rename) flips the accept/reject verdict — the verifier is sensitive to something it shouldn't be |
+| generator integrity | `test_each_mutation_yields_a_genuine_conflict` | a mutator produces a clean auto-merge (no real conflict) or a multi-block splice |
+
+The mutators are deterministic (enumerated from the catalog structure, no random
+seed → reviewable, not flaky). The AST-preservation-stability invariant (a
+mutation outside the conflict span leaving `ast_preserved` unchanged) is deferred
+to a later round: it runs on the Phase A per-unit path, which `verify_file` does
+not exercise.
+
 ## Known gaps (deliberately deferred)
 
 These taxonomy cells are **not** covered and are tracked as future work:
 
-- **Fuzzing harness** (Method C): random valid-AST edits via `syn`/`quote` +
-  `git merge` to auto-discover edge cases. No generator exists; the catalog is
-  hand-authored.
+- **Verfier-robustness property tests (Method C, catalog-mutation form)**:
+  `tests/rust_mutation_generator.py` applies deterministic structure-preserving
+  mutations (literal bump, local-identifier rename) to the curated catalog bases
+  and asserts no-crash + verdict-invariance via `tests/test_rust_mutation_generator.py`.
+  This is the honest, high-value form of "fuzzing": it states invariants the
+  hand-authored rows cannot (a cosmetic mutation must preserve the verdict).
+  **Remaining Method-C frontier**: full random-AST generation with a
+  baseline-comparison oracle (the brief's "filter to cases where the agent fails
+  but a baseline succeeds") is still deferred — it needs a second resolver to
+  compare against, which the test suite lacks (tests use a fake canned client).
 - **Real-world harvesting** (Method D): scraping merged conflicts from public
   Rust repos (serde, tokio, clap). No real-world cases in the corpus.
 - **Cross-crate / workspace support**: the manifest check targets a single
