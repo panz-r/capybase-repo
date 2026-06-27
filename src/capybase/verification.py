@@ -90,6 +90,9 @@ class ValidationConfig:
     # Rust compile floor (mirrors config.ValidationConfig; the live flags).
     rustc_path: str = "rustc"
     rust_edition: str = ""
+    # Clippy lint check (mirrors config.ValidationConfig; the live flags).
+    enable_clippy: bool = False
+    clippy_severity: str = "warning"
     lsp_baseline_strict: bool = True
     enable_shadow_tests: bool = False
     # Verifier-model critic (mirrors config.ValidationConfig; the live flags).
@@ -1088,7 +1091,7 @@ class AstPreservationValidator:
         spliced = splice_resolution(
             unit.original_worktree_text, unit.marker_span, ctx.candidate.resolved_text
         )
-        spliced = _blank_markers(spliced)
+        spliced = _blank_markers(spliced, lang)
         after_outside, _ = structural.fingerprint_region(
             spliced, lang, unit.marker_span
         )
@@ -1518,6 +1521,13 @@ class VerificationEngine:
             path, language, original, whole, repo_root, hard, features
         )
 
+        # Clippy lint check (Phase B, opt-in): flag NEW clippy findings the
+        # merge introduces. Rust-only; inert otherwise and when disabled.
+        if language == "rust":
+            self._run_clippy_check(
+                path, original, whole, repo_root, hard, features
+            )
+
         # Shadow tests (Phase B): best-effort run of tests for this module.
         self._run_shadow_tests(path, repo_root, hard, features)
 
@@ -1575,7 +1585,7 @@ class VerificationEngine:
             rust_analyzer_path=self.config.rust_analyzer_path,
         )
         # Baseline: the original file with conflict markers blanked so it parses.
-        baseline_src = _blank_markers(original)
+        baseline_src = _blank_markers(original, "rust")
         baseline = runner.check(baseline_src, path=path, repo_root=repo_root)
         after = runner.check(whole, path=path, repo_root=repo_root)
         if not after.checked:
@@ -1605,6 +1615,106 @@ class VerificationEngine:
                 )
             )
         return True
+
+    def _run_clippy_check(
+        self,
+        path: str,
+        original: str,
+        whole: str,
+        repo_root: str,
+        hard: list[VerificationFailure],
+        features: dict[str, float | int | str | bool],
+    ) -> None:
+        """Run ``cargo clippy`` and flag NEW lint findings the merge introduces.
+
+        Clippy is a quality check (not a compile check — the cargo floor
+        already proved the merge compiles). It runs against the whole crate's
+        CURRENT worktree state (Phase 2 has written every resolved file), and
+        uses the same baseline/new-finding comparison: a merge is flagged only
+        for clippy findings NOT present in the pre-conflict ``original``
+        (markers blanked), so a repo's pre-existing lint debt is ignored.
+
+        Severity defaults to ``"warning"`` (record the finding, bias toward
+        review, don't hard-reject a compiling merge); ``"error"`` blocks
+        lint-introducing merges. Opt-in via ``enable_clippy``. Inert when cargo
+        is absent, there's no Cargo.toml, or the language isn't Rust.
+        """
+        features.setdefault("clippy_checked", False)
+        features.setdefault("clippy_new_finding_count", 0)
+        if not self.config.enable_clippy:
+            return
+        try:
+            from capybase.adapters import lsp as lsp_mod
+        except Exception:  # noqa: BLE001
+            return
+        # Baseline: the original file with markers blanked so clippy runs on a
+        # valid (if marker-laden-blanked) crate. We compare clippy findings
+        # (by message) between baseline and the resolved worktree.
+        # NOTE: clippy is crate-wide, so the baseline/after both reflect the
+        # whole crate. ``whole`` (the resolved file) is in memory here — it is
+        # NOT yet on disk (verify_file runs before the orchestrator writes) —
+        # so we write it temporarily for the "after" run, then the blanked
+        # original for the baseline, then restore whatever was on disk.
+        target_path = Path(repo_root) / path
+        saved = target_path.read_bytes() if target_path.exists() else None
+        try:
+            # After state: write the resolved file, run clippy.
+            target_path.write_text(whole, encoding="utf-8")
+            after = lsp_mod.run_clippy(
+                repo_root, cargo_path=self.config.cargo_path
+            )
+        finally:
+            # Restore the pre-check worktree state immediately; the orchestrator
+            # writes the final buffer later iff validation passes.
+            if saved is not None:
+                target_path.write_bytes(saved)
+            elif target_path.exists():
+                # saved was None (file didn't exist) → remove what we created.
+                target_path.unlink(missing_ok=True)
+        if not after.checked:
+            features["clippy_checked"] = False
+            return
+        features["clippy_checked"] = True
+        # Baseline: temporarily write the marker-blanked (one-side) original,
+        # run clippy, then restore the saved worktree state.
+        try:
+            target_path.write_text(_blank_markers_one_side(original, "rust"), encoding="utf-8")
+            baseline = lsp_mod.run_clippy(
+                repo_root, cargo_path=self.config.cargo_path
+            )
+        finally:
+            if saved is not None:
+                target_path.write_bytes(saved)
+            elif target_path.exists():
+                target_path.unlink(missing_ok=True)
+        baseline_msgs = (
+            {d.message for d in baseline.diagnostics} if baseline.checked else set()
+        )
+        new_findings = [
+            d for d in after.diagnostics if d.message not in baseline_msgs
+        ]
+        features["clippy_new_finding_count"] = len(new_findings)
+        if new_findings:
+            severity = self.config.clippy_severity
+            msg = "; ".join(d.message[:80] for d in new_findings[:3])
+            check = VerificationCheckResult(
+                name="clippy",
+                passed=severity != "error",
+                severity=severity,
+                message=f"clippy: {len(new_findings)} new finding(s): {msg}",
+                detail={"findings": [d.message for d in new_findings[:5]]},
+                features={"clippy_new_findings": True},
+            )
+            # Reuse the hard/warning classification: error severity → hard fail.
+            if severity == "error":
+                hard.append(
+                    VerificationFailure(
+                        validator="clippy",
+                        severity="error",
+                        message=check.message,
+                        detail=check.detail,
+                    )
+                )
 
     def _run_lsp_diagnostics(
         self,
@@ -1656,7 +1766,7 @@ class VerificationEngine:
         # Baseline: the original file with conflict markers blanked to comments
         # so it parses. We only care about errors OUTSIDE the conflict regions
         # for the baseline (those pre-date the merge).
-        baseline_src = _blank_markers(original)
+        baseline_src = _blank_markers(original, language)
         baseline = runner.check(baseline_src, path=path, repo_root=repo_root)
         after = runner.check(whole, path=path, repo_root=repo_root)
         if not after.checked:
@@ -1774,20 +1884,61 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
     return table.get(name, True)
 
 
-def _blank_markers(text: str) -> str:
+def _blank_markers(text: str, language: str | None = None) -> str:
     """Replace conflict-marker lines with comments so the baseline parses.
 
     The pre-conflict ``original`` (the worktree with raw markers) isn't valid
-    Python/Rust. For the LSP baseline we only need it to parse so we can
-    collect pre-existing errors outside the conflict — blanking each marker
-    line to a comment preserves line numbers and lets the parser recover.
+    Python/Rust. For the LSP/cargo/clippy baseline we only need it to parse so
+    we can collect pre-existing diagnostics outside the conflict — blanking
+    each marker line to a COMMENT preserves line numbers and lets the parser
+    recover. The comment syntax is language-appropriate: ``//`` for Rust (a
+    bare ``#`` is an attribute, not a comment, and breaks the Rust parse),
+    ``#`` otherwise (Python). When ``language`` is None, defaults to ``#``
+    (the original behavior, kept for any direct callers).
     """
+    comment = "//" if language == "rust" else "#"
     out = []
     for line in text.split("\n"):
         if line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
-            out.append("# conflict-marker")
+            out.append(f"{comment} conflict-marker")
         else:
             out.append(line)
+    return "\n".join(out)
+
+
+def _blank_markers_one_side(text: str, language: str | None = None) -> str:
+    """Blank conflict blocks to ONE side so the baseline parses as valid code.
+
+    ``_blank_markers`` keeps BOTH sides' content (just marking the fences),
+    which produces a duplicate-definition compile error in Rust (two ``fn
+    new()`` bodies) that masks the real baseline lints — so any pre-existing
+    clippy finding suppressed by that error reads as "new". For a quality
+    baseline (clippy) we need valid code: keep the upstream (first) side's
+    lines and comment out the replayed (second) side's lines. Line numbers are
+    NOT preserved here (the second side is dropped), but clippy findings are
+    compared by message, not line — so position shifts don't matter.
+    """
+    comment = "//" if language == "rust" else "#"
+    out: list[str] = []
+    state = "code"  # code | in_first_side | in_second_side
+    for line in text.split("\n"):
+        if line.startswith("<<<<<<<"):
+            state = "in_first_side"
+            out.append(f"{comment} conflict-marker")
+            continue
+        if line.startswith("======="):
+            state = "in_second_side"
+            out.append(f"{comment} conflict-marker")
+            continue
+        if line.startswith(">>>>>>>"):
+            state = "code"
+            out.append(f"{comment} conflict-marker")
+            continue
+        if state == "in_second_side":
+            # Drop the second side (comment it out) so only one definition remains.
+            out.append(f"{comment} {line}" if line.strip() else line)
+            continue
+        out.append(line)
     return "\n".join(out)
 
 

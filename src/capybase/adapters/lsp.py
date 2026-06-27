@@ -331,6 +331,39 @@ def _has_cargo_manifest(repo_root: str) -> bool:
     return (Path(repo_root) / "Cargo.toml").exists()
 
 
+def run_clippy(
+    repo_root: str, *, cargo_path: str = "cargo", deny_warnings: bool = True,
+    timeout: int = 180,
+) -> Diagnostics:
+    """Run ``cargo clippy`` on the crate and return its diagnostics.
+
+    Clippy emits the SAME ``--message-format=json`` format as ``cargo check``
+    (``reason: compiler-message`` with ``message.level``/``message.message``),
+    so diagnostics parse identically via ``_parse_cargo_messages``. By default
+    ``-D warnings`` is passed so lint findings surface as errors (clippy
+    otherwise exits 0 even with warnings); pass ``deny_warnings=False`` to keep
+    them as warnings. Runs against the CURRENT worktree state — the caller
+    (Phase B) has already written every resolved file, so the whole crate is
+    checked. Returns ``checked=False`` (never raises) when cargo is absent,
+    there's no Cargo.toml, or the invocation fails.
+    """
+    cargo = _resolve(cargo_path)
+    if cargo is None or not _has_cargo_manifest(repo_root):
+        return Diagnostics(checked=False, tool="clippy")
+    argv = [cargo, "clippy", "--message-format=json", "--quiet"]
+    if deny_warnings:
+        argv += ["--", "-D", "warnings"]
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=timeout, cwd=repo_root,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return Diagnostics(checked=False, tool="clippy")
+    # Clippy always produces JSON regardless of exit code; parse the messages.
+    diags = _parse_cargo_messages(proc.stdout, "")
+    return Diagnostics(checked=True, tool="clippy", diagnostics=diags)
+
+
 @dataclass
 class LspConfig:
     """Paths and toggles for the LSP runners."""

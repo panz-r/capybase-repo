@@ -193,6 +193,17 @@ class ValidationConfig(BaseModel):
     # field, falling back to "2021".
     rustc_path: str = "rustc"
     rust_edition: str = ""
+    # Clippy lint check (cargo clippy) for Rust: a quality check that runs in
+    # Phase B on the fully-spliced file and flags clippy findings the merge
+    # INTRODUCES (compared to a pre-conflict baseline, so a repo's pre-existing
+    # lint debt is ignored). Distinct from the compile floor: clippy findings
+    # are quality issues, not compile errors, so the default severity is
+    # "warning" (bias toward review, don't hard-reject a compiling merge); set
+    # "error" to block lint-introducing merges. Reuses the cargo JSON format,
+    # so it needs a cargo project (inert for loose .rs / non-Rust / missing
+    # cargo). Opt-in like the LSP diagnostics.
+    enable_clippy: bool = False
+    clippy_severity: str = "warning"
     # Shadow tests: if a tests/test_<module>.py exists for the modified file,
     # run it before declaring success (best-effort, Phase B).
     enable_shadow_tests: bool = False
