@@ -154,10 +154,11 @@ The `fixtures/` submodule is a small sample repo with branches that stop on a
 genuine **UU** (both-modified, content) conflict during `git rebase`. It's how
 you exercise capybase end to end without crafting conflicts by hand.
 
-| Replayed branch   | Rebase onto         | Conflicts in | Notes                   |
-|-------------------|---------------------|--------------|-------------------------|
-| `text-uu-simple`  | `text-uu-upstream`  | `story.txt`  | plain text, single line |
-| `python-uu`       | `python-uu-upstream`| `app.py`     | Python, indent-sensitive |
+| Replayed branch   | Rebase onto         | Conflicts in   | Notes                          |
+|-------------------|---------------------|----------------|--------------------------------|
+| `text-uu-simple`  | `text-uu-upstream`  | `story.txt`    | plain text, single line        |
+| `python-uu`       | `python-uu-upstream`| `app.py`       | Python, indent-sensitive       |
+| `rust-uu`         | `rust-uu-upstream`  | `src/config.rs`| Rust, `impl`-block + struct field merge |
 
 ```bash
 # 0. one-time checkout (and after a fresh clone)
@@ -168,10 +169,13 @@ cd fixtures/
 git branch text-uu-upstream origin/text-uu-upstream
 git branch python-uu      origin/python-uu
 git branch python-uu-upstream origin/python-uu-upstream
+git branch rust-uu          origin/rust-uu
+git branch rust-uu-upstream origin/rust-uu-upstream
 
 # 2. land on a conflict
 git checkout python-uu
 git rebase python-uu-upstream      # -> CONFLICT (content) in app.py
+# (or: git checkout rust-uu && git rebase rust-uu-upstream  -> src/config.rs)
 
 # 3. resolve it with capybase (from the repo root)
 cd ..
@@ -232,14 +236,15 @@ A conflict is resolved through a layered pipeline (cheapest/safest first):
 
 1. **Deterministic structural resolution** (`[future] enable_structural_resolver`,
    default on) — a model-free pass over base+sides. Provably-safe rules
-   (identical sides, one-sided change, disjoint line edits) handle trivial
-   conflicts with **zero LLM calls**. Every result still runs the full
-   validation pipeline; a guess that fails validation falls through, so this can
-   only cut cost/latency, never produce a worse merge.
+   (identical sides, one-sided change, disjoint line edits, entity-level and
+   token-level disjoint merge) handle trivial conflicts with **zero LLM calls**.
+   Every result still runs the full validation pipeline; a guess that fails
+   validation falls through, so this can only cut cost/latency, never produce a
+   worse merge.
 2. **LLM resolution** — the model resolves conflicts the structural pass
    declined, grounded in base + both sides + AST context + RAG few-shot examples.
    Multi-sample / consensus / two-pass mechanisms are available (see calibrate).
-3. **CEGIS repair** — failures (syntax/AST/splice/LSP) feed back as
+3. **CEGIS repair** — failures (syntax/AST/splice/LSP/compile) feed back as
    counterexamples; the model re-resolves with the broken output + the specific
    failure, bounded by retry policy. A whole-file variant attributes file-level
    errors to the unit at fault.
@@ -249,8 +254,37 @@ pre-LLM from hunk size + definition-touching + same-line overlap) and
 **per-side provenance** (the commit that introduced each side), feeding the risk
 engine and the review bundle.
 
+### Language support
+
+**Python and Rust are first-class.** Both get the same layered pipeline and the
+same Phase-B verification guarantees:
+
+- **Compile floor.** The fully-spliced file is syntax/parse-checked after every
+  resolution — `py_compile` for Python, `rustc --emit=metadata` for Rust. A
+  merge that doesn't compile (dropped `;`, unbalanced braces, a struct field
+  added but never initialized) is rejected before it can be applied. Rust
+  edition is inferred from the nearest `Cargo.toml` (else 2021); override with
+  `validation.rust_edition`. This is the check that catches cross-hunk errors
+  per-unit validation structurally cannot.
+- **Structural analysis.** With the optional `structural` extra installed,
+  tree-sitter resolves the enclosing AST node (`def`/`fn`/`impl`/`struct`),
+  powers entity-level merge, AST-preservation checks, and sibling-entity
+  context — for Rust just as for Python.
+- **Tests.** Set `tests.pre_continue = "cargo test"` for a Rust repo (capybase
+  also auto-substitutes `cargo test` when the default `pytest` is configured but
+  the repo is a Cargo project with no pytest). Shadow tests dispatch to
+  `cargo test` for `.rs` files.
+
+For deeper type checking (catching *new* type errors beyond what the compile
+floor covers), enable `validation.enable_lsp_diagnostics` — capybase runs
+`cargo check` on the fully-spliced file and rejects errors not present in the
+pre-conflict baseline.
+
 ## Status
 
-MVP (M1+M2+M3). Deferred by design but interface-ready: AST three-way merge,
-RAG, LoRA, verifier model, conformal risk, mutation testing, multi-model
-ensemble. The `[future]` config section documents these seams and is inert.
+MVP (M1+M2+M3). **Python and Rust are both fully supported** end to end —
+structural resolution, AST context, compile-checked verification, and an
+end-to-end fixture (`rust-uu`) for each. Deferred by design but interface-ready:
+AST three-way merge, LoRA, verifier model, conformal risk, mutation testing,
+multi-model ensemble. The `[future]` config section documents these seams and is
+inert.
