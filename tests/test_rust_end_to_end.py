@@ -148,3 +148,80 @@ def test_rust_rebase_inspect_extracts_units(rust_conflicted_repo):
     assert len(units) >= 2  # at least the two conflict hunks
     # language inferred from the .rs extension
     assert all(u.language == "rust" for u in units)
+
+
+# ---------------------------------------------------------------------------
+# Test gate: "compiles but the project's own test fails" (cargo test).
+#
+# The compile floor (Phase B) only proves the merge compiles. The intent of a
+# change is often encoded in the project's test suite, which only ``cargo test``
+# can check. The ``rust_test_gated_repo`` fixture carries a test that asserts the
+# resolved port value, so a merge that compiles but picks the wrong value fails
+# the gate. This is the first end-to-end proof of the Rust test gate with a REAL
+# failing assertion (the Python analog, test_run_aborts_tests_when_required_and_failing,
+# uses a ``false`` shim). Requires cargo.
+# ---------------------------------------------------------------------------
+
+cargo_bin = shutil.which("cargo")
+skip_no_cargo = pytest.mark.skipif(cargo_bin is None, reason="cargo not installed")
+
+
+def _test_gated_config(repo) -> Config:
+    """Config with the cargo test gate REQUIRED (real ``cargo test``, no shim)."""
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.tests.required = True
+    # Explicit cargo test command (don't rely on the pytest→cargo auto-subst).
+    cfg.tests.pre_continue = "cargo test"
+    cfg.tests.final = None
+    return cfg
+
+
+@skip_no_cargo
+def test_rust_test_gate_accepts_value_preserving_merge(rust_test_gated_repo):
+    """A correct merge passes BOTH the compile floor AND the real cargo test.
+
+    The merge keeps the port the test expects (9090): it compiles, the
+    ``#[cfg(test)]`` assertion holds, and the rebase continues.
+    """
+    repo = rust_test_gated_repo["repo"]
+    engine = ResolutionEngine(
+        _test_gated_config(repo).model,
+        client=CyclingClient([_payload(rust_test_gated_repo["correct"])]),
+    )
+    orch = Orchestrator(
+        _test_gated_config(repo), repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert not result.escalated, result.reason
+    text = (repo / "src" / "lib.rs").read_text()
+    assert "<<<<<<<" not in text
+    assert "port: 9090" in text  # the value the test guards
+    # The rebase continued to completion (no longer mid-rebase).
+    assert git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "feat"
+
+
+@skip_no_cargo
+def test_rust_test_gate_rejects_compiling_but_wrong_merge(rust_test_gated_repo):
+    """A merge that compiles but fails the project's test is rejected at the gate.
+
+    The merge keeps the wrong port (7070): it compiles cleanly (so Phase B's
+    cargo floor accepts it), but the ``#[cfg(test)]`` assertion fails under
+    ``cargo test``. With ``tests.required``, the orchestrator escalates rather
+    than silently shipping a value the test suite rejects. This is the gap the
+    compile floor alone cannot close.
+    """
+    repo = rust_test_gated_repo["repo"]
+    engine = ResolutionEngine(
+        _test_gated_config(repo).model,
+        client=CyclingClient([_payload(rust_test_gated_repo["wrong"])]),
+    )
+    orch = Orchestrator(
+        _test_gated_config(repo), repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    # The merge compiled but the test gate caught the wrong value → escalate.
+    assert result.escalated
+

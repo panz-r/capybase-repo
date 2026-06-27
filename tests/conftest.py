@@ -403,3 +403,72 @@ def rust_multi_file_conflicted_repo(repo: Path) -> dict:
         "correct_config": correct_config,
         "correct_server": correct_server,
     }
+
+
+@pytest.fixture
+def rust_test_gated_repo(repo: Path) -> dict:
+    """A cargo crate whose ``#[cfg(test)]`` test guards the resolved value.
+
+    Drives the orchestrator's test gate (``_run_tests`` → ``cargo test``) with a
+    REAL failing assertion rather than a ``false`` shim. The crate has a
+    ``Config`` with a ``port`` field and a test asserting ``port == 9090``. The
+    rebase conflict is the ``new()`` default port: base 8080, upstream 9090,
+    replayed 7070. A correct merge keeps 9090 (compiles AND the test passes); a
+    wrong merge keeps 7070 (still compiles, but the test fails — the "compiles
+    but a test fails" scenario the compile floor alone can't catch).
+
+    This is the first end-to-end proof that the Rust pipeline's *test* gate
+    works, and covers the "intent preservation via the project's own test suite"
+    axis. Requires cargo (the gate runs ``cargo test``).
+    """
+    base = (
+        "pub struct Config {\n    pub port: u16,\n}\n"
+        "impl Config {\n    pub fn new() -> Self { Config { port: 8080 } }\n}\n"
+        "\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        "    use super::*;\n"
+        "    #[test]\n"
+        "    fn port_is_9090() {\n"
+        "        let c = Config::new();\n"
+        "        assert_eq!(c.port, 9090);\n"
+        "    }\n"
+        "}\n"
+    )
+    # Upstream (CURRENT): bump the default port to 9090 (what the test expects).
+    upstream = base.replace("port: 8080 }", "port: 9090 }")
+    # Replayed: set the default port to 7070 (diverges on the same line).
+    replayed = base.replace("port: 8080 }", "port: 7070 }")
+    # Correct merge: keep upstream's 9090 (compiles, test passes).
+    correct = "    pub fn new() -> Self { Config { port: 9090 } }"
+    # Wrong merge: keep replayed's 7070 (compiles, but the test fails).
+    wrong = "    pub fn new() -> Self { Config { port: 7070 } }"
+
+    (repo / "src").mkdir()
+    (repo / "src" / "lib.rs").write_text(base)
+    (repo / "Cargo.toml").write_text(
+        '[package]\nname = "testgated"\nversion = "0.1.0"\nedition = "2021"\n'
+    )
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "base")
+
+    git(repo, "branch", "feat")
+    git(repo, "checkout", "-q", "feat")
+    (repo / "src" / "lib.rs").write_text(replayed)
+    git(repo, "add", "src/lib.rs")
+    git(repo, "commit", "-q", "-m", "feat: port 7070")
+
+    git(repo, "checkout", "-q", "main")
+    (repo / "src" / "lib.rs").write_text(upstream)
+    git(repo, "add", "src/lib.rs")
+    git(repo, "commit", "-q", "-m", "main: port 9090")
+
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected a rebase conflict"
+    return {
+        "repo": repo,
+        "path": "src/lib.rs",
+        "correct": correct,
+        "wrong": wrong,
+    }
