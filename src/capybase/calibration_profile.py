@@ -68,6 +68,9 @@ class ModelProfile:
     # measured score distributions), for transparency and manual re-tuning. Empty
     # until ``calibrate-embeddings`` is run.
     embedding_calibration: dict[str, Any] = field(default_factory=dict)
+    # Hybrid-retrieval fusion method, read when the retriever is "hybrid"
+    # (survey §4): "rrf" (default) or "dbsf". Empty/unset → "rrf" at runtime.
+    fusion_method: str = ""
     avg_latency_ms: float = 0.0  # observed mean generation latency, for diagnostics
     probed_at: str = ""  # ISO-8601 timestamp
     capybase_version: str = ""
@@ -101,6 +104,7 @@ class ModelProfile:
             enable_embedding_rag=bool(d.get("enable_embedding_rag", False)),
             embedding_min_similarity=float(d.get("embedding_min_similarity", 0.35)),
             embedding_calibration=_coerce_calibration(d.get("embedding_calibration")),
+            fusion_method=str(d.get("fusion_method", "") or ""),
             avg_latency_ms=float(d.get("avg_latency_ms", 0.0)),
             probed_at=str(d.get("probed_at", "")),
             capybase_version=str(d.get("capybase_version", "")),

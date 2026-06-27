@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -332,6 +332,15 @@ class MemoryConfig(BaseModel):
     # ``capybase calibrate-embeddings`` derives a model-specific value and stores
     # it in the profile, which overrides this at runtime ("profile wins").
     embedding_min_similarity: float = 0.35
+    # The full embeddings-calibration envelope (EmbeddingCalibration.to_dict()),
+    # carried from the profile so the retriever can apply the isotonic score
+    # transform and use the calibrated red_threshold floor (survey §2.1). Empty
+    # until ``calibrate-embeddings`` runs; the profile overrides this at runtime.
+    embedding_calibration: dict[str, Any] = Field(default_factory=dict)
+    # Hybrid-retrieval fusion method, read only when ``retriever == "hybrid"``
+    # (survey §4). "rrf" (default, rank-only, scale-agnostic) or "dbsf"
+    # (min-max normalized score sum). The profile may override this.
+    fusion_method: str = "rrf"
 
 
 class CalibrationConfig(BaseModel):

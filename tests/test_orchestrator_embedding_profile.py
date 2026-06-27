@@ -165,3 +165,63 @@ def test_explicit_config_floor_used_without_profile(repo: Path, monkeypatch):
     retriever = orch.context_builder.retriever
     assert isinstance(retriever, EmbeddingRetriever)
     assert retriever.min_similarity == 0.42
+
+
+# ---------------------------------------------------------------------------
+# A5: the calibrated envelope reaches the retriever (isotonic transform applied)
+# ---------------------------------------------------------------------------
+
+
+def _envelope_with_fit(*, red: float = 0.6) -> dict:
+    """A calibration envelope as calibrate-embeddings would write it (with a
+    fitted isotonic transform + zones)."""
+    return {
+        "model": "vibethink",
+        "min_similarity": red,
+        "estimates": {"quantile_gap": red, "related_p10": 0.9, "unrelated_p90": 0.4},
+        "related": {"count": 24, "min": 0.7, "max": 0.99, "mean": 0.88},
+        "unrelated": {"count": 24, "min": 0.05, "max": 0.41, "mean": 0.22},
+        "ok": True,
+        "probed_at": "2026-06-27T00:00:00+00:00",
+        "notes": [],
+        "isotonic_points": [[0.1, 0.0], [0.9, 1.0]],
+        "zones": {"green": 0.7, "amber": 0.65, "red": red},
+        "ks_separation": 0.85,
+    }
+
+
+def test_profile_calibration_envelope_reaches_retriever(repo: Path, monkeypatch):
+    """A matching profile's full calibration envelope (isotonic transform + zones)
+    is reconstructed and attached to the built EmbeddingRetriever, so the isotonic
+    score transform applies at retrieval time."""
+    _profile(
+        enable_embedding_rag=True,
+        embedding_min_similarity=0.6,
+        embedding_calibration=_envelope_with_fit(),
+    ).save(_profile_path(repo))
+    _patch_embeddings_client(monkeypatch)
+    cfg = _cfg(repo, retriever="lexical")  # profile flips it to embedding
+
+    orch = Orchestrator(cfg, repo=str(repo))
+
+    retriever = orch.context_builder.retriever
+    assert isinstance(retriever, EmbeddingRetriever)
+    # The calibration was reconstructed and attached.
+    cal = retriever.calibration
+    assert cal is not None
+    assert getattr(cal, "has_isotonic_fit", False)
+    assert getattr(cal, "red_threshold", 0.0) == 0.6
+
+
+def test_calibration_envelope_empty_without_profile(repo: Path, monkeypatch):
+    """No profile → no calibration envelope in config, and the retriever's
+    calibration is None (raw-cosine path)."""
+    _patch_embeddings_client(monkeypatch)
+    cfg = _cfg(repo, retriever="embedding")
+
+    orch = Orchestrator(cfg, repo=str(repo))
+
+    retriever = orch.context_builder.retriever
+    assert isinstance(retriever, EmbeddingRetriever)
+    assert retriever.calibration is None
+    assert orch.config.memory.embedding_calibration == {}

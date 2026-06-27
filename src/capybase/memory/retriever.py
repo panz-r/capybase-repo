@@ -228,6 +228,24 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
+def _cal_score(calibration: "object | None", raw: float) -> float:
+    """Apply an attached calibration's transform to a raw cosine.
+
+    Calls ``calibration.calibrated_score(raw)`` when present; returns ``raw``
+    unchanged otherwise (no calibration → identity). Typed loose to avoid the
+    import cycle between retriever and embeddings_calibration.
+    """
+    if calibration is None:
+        return raw
+    fn = getattr(calibration, "calibrated_score", None)
+    if fn is None:
+        return raw
+    try:
+        return float(fn(raw))
+    except Exception:  # noqa: BLE001 - best-effort; never break retrieval
+        return raw
+
+
 class EmbeddingRetriever:
     """Semantic retrieval over accepted experiences via vector embeddings.
 
@@ -252,11 +270,20 @@ class EmbeddingRetriever:
     MIN_SIMILARITY = 0.35
 
     def __init__(
-        self, store: ExperienceStore, client: object, *, min_similarity: float = MIN_SIMILARITY
+        self, store: ExperienceStore, client: object, *,
+        min_similarity: float = MIN_SIMILARITY,
+        calibration: "object | None" = None,
     ) -> None:
         self.store = store
         self.client = client  # EmbeddingsClient (Protocol); typed loose to avoid import cycle
         self.min_similarity = float(min_similarity)
+        # An optional EmbeddingCalibration (typed loose to avoid the import cycle
+        # with embeddings_calibration). When present and carrying an isotonic fit,
+        # retrieve_scored applies the transform to each raw cosine BEFORE the
+        # min_similarity filter — so the floor is evaluated on the calibrated
+        # scale and the journaled scores reflect it. None → byte-identical to the
+        # pre-calibration behavior.
+        self.calibration = calibration
         self._accepted: list[Experience] | None = None
         self._vectors: list[list[float]] | None = None
 
@@ -281,13 +308,19 @@ class EmbeddingRetriever:
     def retrieve_scored(
         self, query: str, *, k: int = 3, language: str | None = None
     ) -> list[tuple[float, HistoricalExample]]:
-        """Return ``(cosine_score, example)`` pairs for the top-k matches.
+        """Return ``(score, example)`` pairs for the top-k matches.
 
         Same ranking/filtering as :meth:`retrieve`, but keeps the score so callers
         (the retrieval-score diagnostic, embeddings calibration) can observe the
         confidence of each retrieved example. Pairs are sorted by descending
-        score; the score is the raw cosine, before the ``min_similarity`` filter
-        is applied — so a caller can see what was filtered out and why.
+        score.
+
+        When a calibration with an isotonic fit is attached, the score is the
+        CALIBRATED value (the raw cosine passed through the fitted transform) and
+        the floor filter uses the calibration's ``red_threshold`` — so few-shot
+        admission and the journaled scores both reflect the model-agnostic
+        calibrated scale (survey §2.1). Without a fit, the score is the raw
+        cosine and the filter uses ``min_similarity`` exactly as before.
         """
         if self._accepted is None:
             self._build()
@@ -301,15 +334,24 @@ class EmbeddingRetriever:
         if not q_vec:
             return []
         q = q_vec[0]
+        # Apply the calibration transform if a fit is present; else raw cosine.
+        # ``_cal_score`` is the identity when no calibration/fit is attached.
+        cal = self.calibration
+        has_fit = cal is not None and getattr(cal, "has_isotonic_fit", False)
+        floor = (
+            float(getattr(cal, "red_threshold", 0.0))
+            if has_fit
+            else self.min_similarity
+        )
         scored = [
-            (_cosine(q, vec), exp)
+            (_cal_score(cal, _cosine(q, vec)) if has_fit else _cosine(q, vec), exp)
             for vec, exp in zip(self._vectors, self._accepted)
             if language is None or exp.language == language
         ]
         scored.sort(key=lambda t: -t[0])
         # Return the top-k scored pairs (above the floor) — scores preserved.
         return [
-            (s, exp.example) for s, exp in scored[:k] if s >= self.min_similarity
+            (s, exp.example) for s, exp in scored[:k] if s >= floor
         ]
 
     def retrieve(

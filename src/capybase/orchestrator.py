@@ -209,7 +209,9 @@ def _apply_profile_capability_flags(config: Config, profile: "object") -> Config
 
     The calibrated ``embedding_min_similarity`` (from ``calibrate-embeddings``)
     overrides the config default so the EmbeddingRetriever uses a model-specific
-    floor rather than the 0.35 guess.
+    floor rather than the 0.35 guess. The full ``embedding_calibration`` envelope
+    rides along so the retriever can apply the isotonic score transform (survey
+    §2.1). ``fusion_method`` is threaded for the HybridRetriever (survey §4).
     """
     if getattr(profile, "enable_embedding_rag", False):
         if config.memory.enabled and config.future.enable_rag:
@@ -218,7 +220,31 @@ def _apply_profile_capability_flags(config: Config, profile: "object") -> Config
     emb_sim = getattr(profile, "embedding_min_similarity", None)
     if emb_sim is not None:
         config.memory.embedding_min_similarity = float(emb_sim)
+    emb_cal = getattr(profile, "embedding_calibration", None)
+    if emb_cal:  # a non-empty envelope
+        config.memory.embedding_calibration = dict(emb_cal)
+    fusion = getattr(profile, "fusion_method", None)
+    if fusion:
+        config.memory.fusion_method = str(fusion)
     return config
+
+
+def _reconstruct_calibration(config: Config) -> "object | None":
+    """Rebuild an EmbeddingCalibration from the config's serialized envelope.
+
+    Returns None when no envelope is stored (so the retriever behaves as before
+    calibration). Tolerant of a corrupt/partial envelope — returns None rather
+    than crashing, so a bad artifact never breaks retrieval.
+    """
+    env = config.memory.embedding_calibration
+    if not env:
+        return None
+    try:
+        from capybase.embeddings_calibration import EmbeddingCalibration
+
+        return EmbeddingCalibration.from_dict(dict(env))
+    except Exception:  # noqa: BLE001 - never break retrieval on a bad envelope
+        return None
 
 
 class Orchestrator:
@@ -627,7 +653,9 @@ class Orchestrator:
         §4.2) from a fresh embeddings client pointed at the model endpoint; any
         failure to construct it (no endpoint support, missing model) falls back to
         the lexical BM25 retriever so RAG never hard-fails. ``"lexical"`` (default)
-        builds the dependency-free BM25 retriever.
+        builds the dependency-free BM25 retriever. When an embeddings-calibration
+        envelope is present it is reconstructed and passed to the EmbeddingRetriever
+        so the isotonic score transform + calibrated floor apply (survey §2.1).
         """
         from capybase.memory.retriever import EmbeddingRetriever, LexicalRetriever
 
@@ -645,6 +673,7 @@ class Orchestrator:
                     self.memory_store,
                     client,
                     min_similarity=config.memory.embedding_min_similarity,
+                    calibration=_reconstruct_calibration(config),
                 )
             except Exception:  # noqa: BLE001 - fall back to BM25, never break RAG
                 pass
