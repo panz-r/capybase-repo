@@ -1549,7 +1549,10 @@ class VerificationEngine:
             )
 
         # Shadow tests (Phase B): best-effort run of tests for this module.
-        self._run_shadow_tests(path, repo_root, hard, features)
+        # ``whole`` (the resolved file) is threaded in so the oracle runs
+        # against the RESOLVED merge, not the on-disk baseline (see
+        # _run_shadow_tests).
+        self._run_shadow_tests(path, whole, repo_root, hard, features)
 
         passed = len(hard) == 0
         features["hard_failure_count"] = len(hard)
@@ -1912,6 +1915,7 @@ class VerificationEngine:
     def _run_shadow_tests(
         self,
         path: str,
+        whole: str,
         repo_root: str,
         hard: list[VerificationFailure],
         features: dict[str, float | int | str | bool],
@@ -1929,6 +1933,15 @@ class VerificationEngine:
         even if pre-existing tests fail for unrelated reasons. This records
         ``shadow_tests_passed`` as a calibration feature. No-op when disabled,
         when no test file/target is found, or when the toolchain is absent.
+
+        ``whole`` is the RESOLVED file (in memory at the ``verify_file`` level).
+        For Rust we must run the test against the resolved content, not whatever
+        happens to be on disk — but ``verify_file`` runs before the orchestrator
+        writes, so the worktree may hold the conflict-marked baseline. We write
+        ``whole`` to the file path for the cargo-test run and restore the prior
+        bytes after (the proven save/write/restore dance from _run_clippy_check).
+        At the orchestrator level (Phase 2) the file is already written resolved,
+        so the write/restore is a transparent no-op there.
         """
         features.setdefault("shadow_tests_run", False)
         features.setdefault("shadow_tests_passed", True)
@@ -1939,7 +1952,19 @@ class VerificationEngine:
             return
         target, lang = located
         if lang == "rust":
-            ok, rc, outpath = _run_rust_shadow_test(target, repo_root)
+            # Run against the RESOLVED file, restoring whatever was on disk.
+            target_path = Path(repo_root) / path
+            saved = target_path.read_bytes() if target_path.exists() else None
+            try:
+                if whole is not None:
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_path.write_text(whole, encoding="utf-8")
+                ok, rc, outpath = _run_rust_shadow_test(target, repo_root)
+            finally:
+                if saved is not None:
+                    target_path.write_bytes(saved)
+                elif target_path.exists():
+                    target_path.unlink(missing_ok=True)
             if ok is None:
                 return  # cargo absent / no Cargo.toml → not run
             features["shadow_tests_run"] = True

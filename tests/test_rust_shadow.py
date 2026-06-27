@@ -125,7 +125,7 @@ def test_shadow_tests_rust_dispatch_calls_rust_runner(tmp_path, monkeypatch):
     eng = VerificationEngine.default(cfg)
     features: dict = {}
     hard: list = []
-    eng._run_shadow_tests("src/config.rs", str(tmp_path), hard, features)
+    eng._run_shadow_tests("src/config.rs", "pub fn x() {}", str(tmp_path), hard, features)
     assert calls == [""]
     assert features["shadow_tests_run"] is True
     assert features["shadow_tests_passed"] is False
@@ -138,7 +138,7 @@ def test_shadow_tests_rust_none_when_no_cargo_project(tmp_path):
     eng = VerificationEngine.default(cfg)
     features: dict = {}
     hard: list = []
-    eng._run_shadow_tests("src/config.rs", str(tmp_path), hard, features)
+    eng._run_shadow_tests("src/config.rs", "pub fn x() {}", str(tmp_path), hard, features)
     assert features.get("shadow_tests_run") is not True
     assert hard == []
 

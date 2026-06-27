@@ -63,6 +63,7 @@ class RustConflict:
     scaffold: dict[str, str] = field(default_factory=dict)
     edition: str = "2021"
     notes: str = ""
+    shadow_test: bool = False
 
 
 def build_markers(base: str, current: str, replayed: str) -> str:
@@ -135,13 +136,14 @@ def _conflict(
     scaffold: dict[str, str] | None = None,
     edition: str = "2021",
     notes: str = "",
+    shadow_test: bool = False,
 ) -> RustConflict:
     return RustConflict(
         id=id, path=path, language=language, base=base, current=current,
         replayed=replayed, expected_resolved=expected_resolved,
         broken_resolved=broken_resolved, taxonomy=taxonomy,
         needs_cargo=needs_cargo, scaffold=scaffold or {}, edition=edition,
-        notes=notes,
+        notes=notes, shadow_test=shadow_test,
     )
 
 
@@ -787,6 +789,67 @@ RUST_CONFLICTS: list[RustConflict] = [
             "src/submod.rs": "pub fn helper() -> u32 { 100 }\n",
         },
         notes="Re-export vs local fn → E0255 on a naive keep-both merge.",
+    ),
+
+    # --- C. Build & test correctness (compile-but-test-fails, cell 7) ---
+    #
+    # A merge that COMPILES but fails the project's own #[cfg(test)] assertion.
+    # The compile floor (cargo check) accepts both the expected and broken
+    # merge; only the shadow-test oracle (cargo test) catches the broken one.
+    # The #[cfg(test)] module is shared context (outside the conflict span).
+
+    _conflict(
+        id="compile_but_test_fails",
+        path="src/config.rs",
+        shadow_test=True,
+        # A const PORT whose value conflicts. The #[cfg(test)] module (shared
+        # context, outside the span) asserts PORT == 9090. Both the expected and
+        # broken merge COMPILE cleanly; only cargo test distinguishes them.
+        base=(
+            "pub const PORT: u16 = 8080;\n"
+            "\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    use super::*;\n"
+            "    #[test]\n"
+            "    fn port_is_9090() {\n"
+            "        assert_eq!(PORT, 9090);\n"
+            "    }\n"
+            "}\n"
+        ),
+        current=(
+            "pub const PORT: u16 = 9090;\n"
+            "\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    use super::*;\n"
+            "    #[test]\n"
+            "    fn port_is_9090() {\n"
+            "        assert_eq!(PORT, 9090);\n"
+            "    }\n"
+            "}\n"
+        ),
+        replayed=(
+            "pub const PORT: u16 = 7070;\n"
+            "\n"
+            "#[cfg(test)]\n"
+            "mod tests {\n"
+            "    use super::*;\n"
+            "    #[test]\n"
+            "    fn port_is_9090() {\n"
+            "        assert_eq!(PORT, 9090);\n"
+            "    }\n"
+            "}\n"
+        ),
+        # Correct: keep 9090 (the value the test guards) → compiles AND passes.
+        expected_resolved="pub const PORT: u16 = 9090;",
+        # Broken: keep 7070 → compiles cleanly, but cargo test panics on the
+        # assertion. Only the shadow-test oracle catches this.
+        broken_resolved="pub const PORT: u16 = 7070;",
+        taxonomy=("semantic", "compile-but-test-fails", "intent-preservation"),
+        scaffold={"Cargo.toml": _manifest("compile_but_test_fails"),
+                  "src/lib.rs": _LIB_CONFIG},
+        notes="Compiles but fails the #[cfg(test)] assertion (shadow-test oracle).",
     ),
 
     # --- Edition coverage ---

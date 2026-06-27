@@ -120,9 +120,14 @@ def test_loose_conflict_expected_resolved_passes(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+# Compile-floor rejects exclude shadow_test cases: their broken merge COMPILES
+# cleanly (the cargo floor finds nothing) and only fails a #[cfg(test)] — that
+# path is the dedicated shadow-gate set below, not this compile-reject set.
+_COMPILE_REJECT = [c for c in RUST_CONFLICTS if c.needs_cargo and not c.shadow_test]
+
+
 @pytest.mark.parametrize(
-    "conflict", [c for c in RUST_CONFLICTS if c.needs_cargo],
-    ids=[c.id for c in RUST_CONFLICTS if c.needs_cargo],
+    "conflict", _COMPILE_REJECT, ids=[c.id for c in _COMPILE_REJECT],
 )
 def test_cargo_conflict_broken_resolved_fails(conflict: RustConflict, tmp_path):
     """The catalog's known-broken merge is caught as a syntax failure."""
@@ -177,3 +182,86 @@ def test_catalog_markers_round_trip(conflict: RustConflict):
     assert not contains_markers(spliced), (
         f"{conflict.id}: markers leaked after splicing the expected resolution"
     )
+
+
+# ---------------------------------------------------------------------------
+# File-level test gate: "compiles but the project's own test fails" (cell 7).
+#
+# For cases flagged ``shadow_test``, the broken merge COMPILES cleanly (so the
+# cargo compile floor accepts it) but fails a #[cfg(test)] assertion that lives
+# in the file as shared context. Only the shadow-test oracle (cargo test via
+# ``_run_shadow_tests``, gated on ``enable_shadow_tests``) catches it — a
+# distinct failure path from the compile floor. This is the file-level analog
+# of the orchestrator-level test_rust_test_gate_* (round 1); previously the
+# "intent preservation via the project's own test suite" axis had NO file-level
+# coverage. Requires cargo.
+# ---------------------------------------------------------------------------
+
+
+_SHADOW_CASES = [c for c in RUST_CONFLICTS if c.shadow_test]
+
+
+def _verify_shadow(conflict: RustConflict, resolved: str, tmp_path: Path):
+    """Like _verify but with the shadow-test oracle ENABLED (cargo test)."""
+    original = build_markers(conflict.base, conflict.current, conflict.replayed)
+    eng = VerificationEngine.default(ValidationConfig(enable_shadow_tests=True))
+    _write_scaffold(tmp_path, conflict)
+    return eng.verify_file(
+        conflict.path, conflict.language, original,
+        [(_span(original), resolved)], repo_root=str(tmp_path),
+    )
+
+
+@pytest.mark.skipif(CARGO is None, reason="cargo not installed")
+@pytest.mark.parametrize(
+    "conflict", _SHADOW_CASES, ids=[c.id for c in _SHADOW_CASES],
+)
+def test_shadow_gate_accepts_value_preserving_merge(conflict: RustConflict, tmp_path):
+    """The known-good merge passes BOTH the compile floor AND cargo test.
+
+    The merge keeps the value the #[cfg(test)] assertion guards: it compiles
+    AND the shadow test holds.
+    """
+    res = _verify_shadow(conflict, conflict.expected_resolved, tmp_path)
+    assert res.passed, (
+        f"{conflict.id}: expected merge FAILED (compile or shadow): "
+        f"{[f.message for f in res.hard_failures]}"
+    )
+    # The shadow oracle actually ran and passed.
+    assert res.features.get("shadow_tests_run") is True
+    assert res.features.get("shadow_tests_passed") is True
+
+
+@pytest.mark.skipif(CARGO is None, reason="cargo not installed")
+@pytest.mark.parametrize(
+    "conflict", _SHADOW_CASES, ids=[c.id for c in _SHADOW_CASES],
+)
+def test_shadow_gate_rejects_compiling_but_wrong_merge(conflict: RustConflict, tmp_path):
+    """A merge that compiles but fails the project's test is caught by the gate.
+
+    The broken merge compiles cleanly (the compile floor — ``validator ==
+    "syntax"`` — finds NOTHING new), but the #[cfg(test)] assertion fails under
+    cargo test. With the shadow oracle on, this surfaces as a ``shadow_tests``
+    failure (a warning-severity VerificationFailure). This is the gap the
+    compile floor alone cannot close, exercised at the file level.
+    """
+    res = _verify_shadow(conflict, conflict.broken_resolved, tmp_path)
+    # It compiled fine (no syntax failure introduced)...
+    syntax_fails = [f for f in res.hard_failures if f.validator == "syntax"]
+    assert syntax_fails == [], (
+        f"{conflict.id}: broken merge was a compile error, not a test-only "
+        f"failure: {[f.message for f in syntax_fails]}"
+    )
+    # ...but the shadow test caught the wrong value.
+    assert not res.passed, (
+        f"{conflict.id}: compiling-but-wrong merge was ACCEPTED by the shadow "
+        f"gate (should have failed the test)"
+    )
+    shadow_fails = [f for f in res.hard_failures if f.validator == "shadow_tests"]
+    assert shadow_fails, (
+        f"{conflict.id}: merge failed but not via a shadow_tests failure: "
+        f"{[f.validator for f in res.hard_failures]}"
+    )
+    assert res.features.get("shadow_tests_run") is True
+    assert res.features.get("shadow_tests_passed") is False
+
