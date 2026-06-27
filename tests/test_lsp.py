@@ -246,3 +246,69 @@ def test_risk_escalates_lsp_failed_after_max():
         res, retry_count=2, failure_kind="lsp_failed"
     )
     assert decision.action == "escalate"
+
+
+# ---------------------------------------------------------------------------
+# Rust: cargo check + rust-analyzer runner
+# ---------------------------------------------------------------------------
+
+
+def test_rust_runner_returned_for_rust():
+    from capybase.adapters.lsp import RustAnalyzerRunner, runner_for
+
+    r = runner_for("rust")
+    assert isinstance(r, RustAnalyzerRunner)
+
+
+def test_parse_cargo_messages_extracts_errors():
+    from capybase.adapters.lsp import _parse_cargo_messages
+
+    # Two compiler-message lines: one error, one warning.
+    stdout = "\n".join([
+        '{"reason":"compiler-message","message":{"level":"error",'
+        '"message":"cannot find value `X`","spans":[{"is_primary":true,'
+        '"line_start":10,"column_start":5}],"code":{"code":"E0425"}}}',
+        '{"reason":"compiler-message","message":{"level":"warning",'
+        '"message":"unused variable","spans":[{"is_primary":true,'
+        '"line_start":3,"column_start":9}]}}',
+        '{"reason":"compiler-artifact"}',  # ignored line
+    ])
+    diags = _parse_cargo_messages(stdout, "src/lib.rs")
+    assert len(diags) == 2
+    err = next(d for d in diags if d.severity == "error")
+    assert "cannot find value" in err.message
+    assert err.line == 9  # cargo is 1-based → 0-based
+    assert err.column == 4
+    assert err.code == "E0425"
+    assert err.source == "cargo"
+
+
+def test_parse_cargo_messages_tolerates_garbage():
+    from capybase.adapters.lsp import _parse_cargo_messages
+
+    # Non-JSON lines and non-compiler-message reasons are skipped, never crash.
+    stdout = "not json\n{}\n" + '{"reason":"compiler-artifact"}\n'
+    assert _parse_cargo_messages(stdout, "src/lib.rs") == []
+
+
+def test_rust_analyzer_runner_missing_cargo_reports_unchecked(tmp_path, monkeypatch):
+    # When cargo is absent (and no rust-analyzer fallback), the runner reports
+    # checked=False rather than raising.
+    from capybase.adapters.lsp import RustAnalyzerRunner
+
+    monkeypatch.setattr("capybase.adapters.lsp._resolve", lambda cmd: None)
+    monkeypatch.setattr(
+        "capybase.adapters.lsp._has_cargo_manifest", lambda root: True
+    )
+    r = RustAnalyzerRunner()
+    d = r.check("pub fn x() {}\n", path="src/lib.rs", repo_root=str(tmp_path))
+    assert d.checked is False
+
+
+def test_has_cargo_manifest_detection(tmp_path):
+    from capybase.adapters.lsp import _has_cargo_manifest
+
+    assert _has_cargo_manifest(str(tmp_path)) is False
+    (tmp_path / "Cargo.toml").write_text('[package]\nname="x"\n')
+    assert _has_cargo_manifest(str(tmp_path)) is True
+

@@ -1210,21 +1210,31 @@ def _infer_rust_edition(repo_root: str, path: str) -> str:
     paths, ``async``, ``dyn``); checking with the wrong edition can produce
     spurious errors. Pure TOML-field grep — no dependency on a TOML parser,
     tolerant of comments/whitespace.
-    """
-    import os
 
-    # Build the directory chain from the file's dir up to (and including)
-    # repo_root. Anchor the search so a misconfigured repo_root can't escape
-    # upward indefinitely.
+    The walk is strictly bounded by ``repo_root``: it never consults a
+    manifest above the project root, so an outer workspace's edition can't
+    leak in. If ``path`` is not itself under ``repo_root`` (a misconfigured
+    root), no walk happens and the default edition is returned.
+    """
     start = Path(path).resolve()
     root = Path(repo_root).resolve()
+    # Only walk when path is under (or equal to) repo_root. A path outside the
+    # root means the root is misconfigured; defaulting is the safe choice.
+    try:
+        start.relative_to(root)
+    except ValueError:
+        return "2021"
+    # Walk from the file's directory up through repo_root, consulting each
+    # directory's Cargo.toml. Innermost (nearest) manifest wins.
     chain: list[Path] = []
     cur = start.parent if start.is_file() else start
     while cur not in chain:
         chain.append(cur)
-        if cur == root or cur.parent == cur:
+        if cur == root:
             break
         cur = cur.parent
+        if cur in chain:
+            break
     for d in chain:
         manifest = d / "Cargo.toml"
         if not manifest.is_file():
@@ -1674,17 +1684,20 @@ def _locate_shadow_test(path: str, repo_root: str) -> tuple[str, str] | None:
     runner, or ``None`` when nothing test-shaped is found:
 
     - **Python** (``src/app.py``): ``tests/test_app.py`` (pytest).
-    - **Rust** (``src/config.rs``): the module path ``config::`` is the cargo
-      test filter target (run as ``cargo test config::``). Rust colocates
-      ``#[test]`` items inside the source module rather than in a separate
-      ``tests/`` file, so there is no file to *locate* — the target is the
-      module-name filter. Returns ``None`` only when the repo has no
-      ``Cargo.toml`` (not a cargo project → no cargo tests to run).
+    - **Rust** (``src/config.rs``): an empty target means "run the whole cargo
+      test suite" via ``cargo test``. Rust colocates ``#[test]`` items inside
+      source modules rather than a separate ``tests/`` file, and a precise
+      per-module filter is unreliable (the test path depends on crate
+      structure: a ``#[cfg(test)] mod tests`` in the crate-root file is just
+      ``tests::``, not ``<stem>::tests::``, so a ``<stem>::`` filter silently
+      filters out every test and exits 0). Since shadow tests are an advisory
+      sanity check (warning severity, never hard-reject), running the full
+      suite is the correct, robust choice — a regression anywhere is worth
+      surfacing before continuing a rebase. Returns ``None`` only when the repo
+      has no ``Cargo.toml`` (not a cargo project → no cargo tests).
 
     The Rust case never touches the filesystem for a test file (cargo resolves
-    the module), so it returns a target string even though no ``tests/`` entry
-    exists; ``_run_rust_shadow_test`` handles a module with zero tests
-    gracefully (cargo reports "0 ran", rc 0).
+    modules), so it returns a target even though no ``tests/`` entry exists.
     """
     from pathlib import Path
 
@@ -1697,46 +1710,23 @@ def _locate_shadow_test(path: str, repo_root: str) -> tuple[str, str] | None:
     if p.suffix == ".rs":
         # Only meaningful inside a cargo project; otherwise no test runner.
         if (Path(repo_root) / "Cargo.toml").is_file():
-            return (_rust_module_filter(p), "rust")
+            return ("", "rust")  # "" → run the whole cargo test suite
         return None
     return None
-
-
-def _rust_module_filter(path: Path) -> str:
-    """The ``cargo test`` module-path filter for a Rust source file.
-
-    ``src/config.rs`` → ``config::``, ``src/net/conn.rs`` → ``net::conn::``.
-    cargo's test filter matches the fully-qualified module path of each test
-    function, so scoping to ``<module>::`` runs only that module's ``#[test]``
-    items (and its submodules). Dropping the ``src/`` prefix and slashes→``::``
-    yields the crate-relative module path.
-
-    The crate root files ``lib.rs`` and ``main.rs`` have no module qualifier of
-    their own (their tests live at the crate top level), so they return "" —
-    meaning "run all tests" (the only sensible scope for a root file).
-    """
-    parts = list(path.with_suffix("").parts)
-    # Strip a leading "src" (the conventional crate root) so the filter is the
-    # module path, not the filesystem path.
-    if parts and parts[0] == "src":
-        parts = parts[1:]
-    # Crate roots (lib.rs / main.rs) have no module qualifier → run all tests.
-    if not parts or parts[-1] in ("lib", "main"):
-        return ""
-    return "::".join(parts) + "::"
 
 
 def _run_rust_shadow_test(
     target: str, repo_root: str, *, timeout: int = 180
 ) -> tuple[bool | None, int, str]:
-    """Run ``cargo test <target>`` and return ``(passed, returncode, target)``.
+    """Run ``cargo test`` and return ``(passed, returncode, target)``.
 
-    ``passed`` is None when cargo is absent or the project can't be tested
-    (e.g. no Cargo.toml, compile error in unrelated code) — the caller treats
-    that as "not run" rather than a failure, mirroring the Python path's
-    tolerance for missing pytest. An empty ``target`` runs the whole test
-    suite (for a crate-root file like ``lib.rs``). A non-zero return code from
-    cargo (failed compile or a failed ``#[test]``) is a failure.
+    ``target`` is currently always "" (run the whole suite); the parameter is
+    kept for a future per-module filter once a reliable one is available.
+    ``passed`` is None when cargo is absent or the invocation fails (e.g. a
+    compile error in unrelated code) — the caller treats that as "not run"
+    rather than a failure, mirroring the Python path's tolerance for missing
+    pytest. A non-zero return code from cargo (a failed ``#[test]`` assertion
+    or a compile error in the merged code) is a failure.
     """
     from shutil import which
 
@@ -1756,6 +1746,6 @@ def _run_rust_shadow_test(
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return (None, -1, target)
-    # cargo test exits 0 when tests pass (including "0 ran" — no tests in the
-    # module), non-zero on a failed assertion or a compile error.
+    # cargo test exits 0 when tests pass, non-zero on a failed assertion or a
+    # compile error in the merged code.
     return (proc.returncode == 0, proc.returncode, target)

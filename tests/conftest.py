@@ -192,3 +192,132 @@ def multi_unit_conflicted_repo(repo: Path) -> dict:
 @pytest.fixture
 def git_backend(repo: Path) -> GitBackend:
     return GitBackend(repo)
+
+
+@pytest.fixture
+def rust_conflicted_repo(repo: Path) -> dict:
+    """A repo stopped at a UU rebase conflict over ``src/config.rs``.
+
+    Mirrors the live ``rust-uu`` fixture: a Rust ``impl Config`` block where
+    the replayed branch adds a ``timeout_ms`` field (struct def + ``new()``
+    initializer + ``label()`` format string) while upstream changes the retry
+    count and brackets the name. Replaying ``feat`` onto ``main`` yields a
+    both-modified conflict with multiple hunks landing inside one ``impl``,
+    exercising the tree-sitter Rust grammar, the ``rustc`` compile floor, and
+    multi-unit splice validation.
+
+    Returns paths + the expected correct merged file content.
+    """
+    base = (
+        "pub struct Config {\n"
+        '    pub name: String,\n'
+        "    pub max_retries: u32,\n"
+        "}\n"
+        "\n"
+        "impl Config {\n"
+        "    pub fn new() -> Self {\n"
+        "        Config {\n"
+        '            name: "capybase".to_string(),\n'
+        "            max_retries: 3,\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    pub fn label(&self) -> String {\n"
+        '        format!("{} (retries={})", self.name, self.max_retries)\n'
+        "    }\n"
+        "}\n"
+    )
+    # Upstream (CURRENT): bump retries to 5, bracket the name in label().
+    upstream = (
+        "pub struct Config {\n"
+        '    pub name: String,\n'
+        "    pub max_retries: u32,\n"
+        "}\n"
+        "\n"
+        "impl Config {\n"
+        "    pub fn new() -> Self {\n"
+        "        Config {\n"
+        '            name: "capybase".to_string(),\n'
+        "            max_retries: 5,\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    pub fn label(&self) -> String {\n"
+        '        format!("[{}] retries={}", self.name, self.max_retries)\n'
+        "    }\n"
+        "}\n"
+    )
+    # Replayed: add timeout_ms field (struct + init + label format).
+    replayed = (
+        "pub struct Config {\n"
+        '    pub name: String,\n'
+        "    pub max_retries: u32,\n"
+        "    pub timeout_ms: u32,\n"
+        "}\n"
+        "\n"
+        "impl Config {\n"
+        "    pub fn new() -> Self {\n"
+        "        Config {\n"
+        '            name: "capybase".to_string(),\n'
+        "            max_retries: 3,\n"
+        "            timeout_ms: 10000,\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    pub fn label(&self) -> String {\n"
+        '        format!("{} (retries={}, timeout={})", self.name, '
+        "self.max_retries, self.timeout_ms)\n"
+        "    }\n"
+        "}\n"
+    )
+    # The correct merge: keep retries=5, add timeout_ms everywhere.
+    correct = (
+        "pub struct Config {\n"
+        '    pub name: String,\n'
+        "    pub max_retries: u32,\n"
+        "    pub timeout_ms: u32,\n"
+        "}\n"
+        "\n"
+        "impl Config {\n"
+        "    pub fn new() -> Self {\n"
+        "        Config {\n"
+        '            name: "capybase".to_string(),\n'
+        "            max_retries: 5,\n"
+        "            timeout_ms: 10000,\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    pub fn label(&self) -> String {\n"
+        '        format!("[{}] (retries={}, timeout={})", self.name, '
+        "self.max_retries, self.timeout_ms)\n"
+        "    }\n"
+        "}\n"
+    )
+
+    (repo / "src").mkdir()
+    (repo / "src" / "config.rs").write_text(base)
+    git(repo, "add", "src/config.rs")
+    git(repo, "commit", "-q", "-m", "base")
+
+    git(repo, "branch", "feat")
+    git(repo, "checkout", "-q", "feat")
+    (repo / "src" / "config.rs").write_text(replayed)
+    git(repo, "add", "src/config.rs")
+    git(repo, "commit", "-q", "-m", "replayed: add timeout_ms")
+
+    git(repo, "checkout", "-q", "main")
+    (repo / "src" / "config.rs").write_text(upstream)
+    git(repo, "add", "src/config.rs")
+    git(repo, "commit", "-q", "-m", "upstream: raise retries")
+
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected a rebase conflict"
+    return {
+        "repo": repo,
+        "path": "src/config.rs",
+        "base": base,
+        "current": upstream,
+        "replayed": replayed,
+        "correct": correct,
+    }
