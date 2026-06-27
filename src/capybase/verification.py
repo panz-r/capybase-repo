@@ -1586,9 +1586,12 @@ class VerificationEngine:
         Uses the same baseline/new-error logic as ``_run_lsp_diagnostics``: a
         merge fails ONLY on errors it introduces, not on pre-existing crate
         errors (a repo that already doesn't compile is the developer's problem).
-        The baseline is the pre-conflict ``original`` with markers blanked to
-        comments so it parses; we compare error *messages* between baseline and
-        the resolved file.
+        The baseline is the pre-conflict ``original`` with conflict markers
+        blanked to ONE side (keeping both sides, as ``_blank_markers`` does,
+        produces a spurious duplicate-definition error for an add-add conflict
+        — two ``pub const DEFAULT`` / two ``fn new()`` — that then masks the
+        very error a duplicate-merge would introduce). We compare error
+        *messages* between baseline and the resolved file.
 
         Records into the ``syntax_*`` features (this IS the default syntax check
         for Rust in a cargo project) and returns True when cargo actually ran
@@ -1604,8 +1607,10 @@ class VerificationEngine:
             cargo_path=self.config.cargo_path,
             rust_analyzer_path=self.config.rust_analyzer_path,
         )
-        # Baseline: the original file with conflict markers blanked so it parses.
-        baseline_src = _blank_markers(original, "rust")
+        # Baseline: the original file with conflict markers blanked to ONE side
+        # so it parses as valid Rust (no duplicate-definition noise from the
+        # second conflict side). See _blank_markers_one_side.
+        baseline_src = _blank_markers_one_side(original, "rust")
         baseline = runner.check(baseline_src, path=path, repo_root=repo_root)
         after = runner.check(whole, path=path, repo_root=repo_root)
         if not after.checked:
