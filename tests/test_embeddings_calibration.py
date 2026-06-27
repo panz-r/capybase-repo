@@ -53,6 +53,29 @@ def test_corpus_related_differs_from_unrelated():
         assert p.related != p.unrelated
 
 
+def test_corpus_size_in_target_band():
+    """Enough probes to fit a stable isotonic transform and yield well-separated
+    related/unrelated distributions. Target band is 24-32 (breadth over depth)."""
+    n = len(SIMILARITY_PROBES)
+    assert 24 <= n <= 32, f"corpus has {n} probes; expected 24-32"
+
+
+def test_corpus_labels_unique():
+    """Labels are report tags — they must be unique so a calibration report can
+    attribute each probe without ambiguity."""
+    labels = [p.label for p in SIMILARITY_PROBES]
+    assert len(set(labels)) == len(labels)
+
+
+def test_corpus_balanced_language_coverage():
+    """Both languages carry enough probes to measure per-language drift later."""
+    from collections import Counter
+
+    counts = Counter(p.language for p in SIMILARITY_PROBES)
+    assert counts["python"] >= 8
+    assert counts["rust"] >= 5
+
+
 # ---------------------------------------------------------------------------
 # Statistical helpers
 # ---------------------------------------------------------------------------
