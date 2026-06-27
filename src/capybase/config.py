@@ -181,6 +181,18 @@ class ValidationConfig(BaseModel):
     rust_analyzer_path: str = "rust-analyzer"
     cargo_path: str = "cargo"
     lsp_baseline_strict: bool = True
+    # Rust compile floor (survey: parity with Python's py_compile). Rust files
+    # are compiled with ``rustc --emit=metadata`` in Phase B — the exact analog
+    # of ``py_compile``: a dependency-free syntax/parse check that rejects a
+    # non-compiling merge (dropped ``;``, unbalanced braces, duplicate field)
+    # the same way Python rejects a syntax error. Runs whenever
+    # ``require_syntax_if_supported`` is on (the default) and ``rustc`` is on
+    # PATH; degrades to "not checked" (never crashes) when the tool is absent.
+    # ``rust_edition`` overrides the edition ("2015"/"2018"/"2021"); empty
+    # (default) means infer from the nearest ``Cargo.toml``'s ``edition``
+    # field, falling back to "2021".
+    rustc_path: str = "rustc"
+    rust_edition: str = ""
     # Shadow tests: if a tests/test_<module>.py exists for the modified file,
     # run it before declaring success (best-effort, Phase B).
     enable_shadow_tests: bool = False

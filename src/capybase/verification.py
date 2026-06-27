@@ -87,6 +87,9 @@ class ValidationConfig:
     pyright_path: str = "pyright"
     rust_analyzer_path: str = "rust-analyzer"
     cargo_path: str = "cargo"
+    # Rust compile floor (mirrors config.ValidationConfig; the live flags).
+    rustc_path: str = "rustc"
+    rust_edition: str = ""
     lsp_baseline_strict: bool = True
     enable_shadow_tests: bool = False
     # Verifier-model critic (mirrors config.ValidationConfig; the live flags).
@@ -1133,6 +1136,115 @@ def _compile_python(source: str) -> tuple[bool, str]:
         Path(tmp_path).unlink(missing_ok=True)
 
 
+def _compile_rust(
+    source: str, *, rustc_path: str = "rustc", edition: str = "2021"
+) -> tuple[bool, str]:
+    """Syntax/parse-check Rust source via ``rustc --emit=metadata``.
+
+    The ``py_compile`` analog for Rust: writes the source to a temp ``.rs`` file
+    and asks ``rustc`` to emit *only* metadata (``--emit=metadata``), which runs
+    parsing + macro expansion + name resolution far enough to catch syntax and
+    obvious semantic errors WITHOUT producing an object file or needing a
+    ``Cargo.toml``. Compiled as ``--crate-type lib`` so a fragment with top-level
+    items type-checks. Returns ``(True, "rustc ok")`` on success or
+    ``(False, first_error_line)`` on failure — the first ``error``-prefixed line
+    of stderr is the actionable diagnostic the CEGIS repair loop wants, more
+    useful than rustc's trailing "aborting due to N previous errors".
+
+    Any invocation failure (missing binary, crash) maps to
+    ``(False, message)``; the caller gates hard-rejection on the tool actually
+    being available (``_resolve``), so a missing ``rustc`` is reported as
+    "not checked" rather than a false syntax failure.
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".rs", delete=False, encoding="utf-8"
+    ) as tf:
+        tf.write(source)
+        tmp_path = tf.name
+    # Emit metadata to a temp path alongside the source (rustc needs write
+    # access to the output dir; a throwaway path in the same tempdir is safe).
+    out_path = tmp_path + ".rmeta"
+    try:
+        proc = subprocess.run(
+            [
+                rustc_path,
+                "--edition",
+                edition,
+                "--emit=metadata",
+                "--crate-type",
+                "lib",
+                tmp_path,
+                "-o",
+                out_path,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode == 0:
+            return True, "rustc ok"
+        err = (proc.stderr or "").strip()
+        if not err:
+            return False, "rustc failed"
+        # Prefer the first real diagnostic line (starts with "error"); it names
+        # the actual problem. Fall back to the last non-empty line.
+        for line in err.splitlines():
+            if line.startswith("error"):
+                return False, line
+        return False, err.splitlines()[-1]
+    except FileNotFoundError:
+        # rustc absent — caller treats this as "not checked", not a failure.
+        raise
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+        Path(out_path).unlink(missing_ok=True)
+
+
+def _infer_rust_edition(repo_root: str, path: str) -> str:
+    """Infer the Rust edition from the nearest ``Cargo.toml``.
+
+    Walks upward from ``path`` toward ``repo_root`` looking for a
+    ``Cargo.toml`` with an ``edition = "X"`` field (the conventional place a
+    crate declares its edition). Returns the edition string ("2015"/"2018"/
+    "2021") when found, else "2021" (the modern default for new code). This
+    matters because edition changes parsing rules (e.g. 2015 vs 2018 module
+    paths, ``async``, ``dyn``); checking with the wrong edition can produce
+    spurious errors. Pure TOML-field grep — no dependency on a TOML parser,
+    tolerant of comments/whitespace.
+    """
+    import os
+
+    # Build the directory chain from the file's dir up to (and including)
+    # repo_root. Anchor the search so a misconfigured repo_root can't escape
+    # upward indefinitely.
+    start = Path(path).resolve()
+    root = Path(repo_root).resolve()
+    chain: list[Path] = []
+    cur = start.parent if start.is_file() else start
+    while cur not in chain:
+        chain.append(cur)
+        if cur == root or cur.parent == cur:
+            break
+        cur = cur.parent
+    for d in chain:
+        manifest = d / "Cargo.toml"
+        if not manifest.is_file():
+            continue
+        try:
+            for line in manifest.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                # "edition = \"2021\"" or edition='2018'; ignore commented lines.
+                if stripped.startswith("#"):
+                    continue
+                if stripped.startswith("edition"):
+                    _, _, rest = stripped.partition("=")
+                    val = rest.strip().strip("'\"")
+                    if val in ("2015", "2018", "2021"):
+                        return val
+        except OSError:
+            continue
+    return "2021"
+
+
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
@@ -1319,6 +1431,37 @@ class VerificationEngine:
                         detail={},
                     )
                 )
+        elif language == "rust":
+            # Rust compile floor (parity with Python's py_compile): parse-check
+            # the fully-spliced file with ``rustc --emit=metadata``. Edition is
+            # taken from config (rust_edition) or inferred from the nearest
+            # Cargo.toml. A missing rustc → "not checked" (never a false fail);
+            # use _resolve so absence is detected cheaply before _compile_rust.
+            from capybase.adapters.lsp import _resolve
+
+            rustc = _resolve(self.config.rustc_path)
+            if rustc is not None:
+                syntax_checked = True
+                edition = self.config.rust_edition or _infer_rust_edition(
+                    repo_root, path
+                )
+                try:
+                    ok, msg = _compile_rust(
+                        whole, rustc_path=rustc, edition=edition
+                    )
+                except FileNotFoundError:
+                    ok = True  # tool vanished between resolve & run → skip
+                    msg = "rustc not available; syntax not checked"
+                syntax_ok = ok
+                if not ok and self.config.require_syntax_if_supported:
+                    hard.append(
+                        VerificationFailure(
+                            validator="syntax",
+                            severity="error",
+                            message=msg,
+                            detail={"edition": edition},
+                        )
+                    )
         features["syntax_checked"] = syntax_checked
         features["syntax_passed"] = syntax_ok
 
