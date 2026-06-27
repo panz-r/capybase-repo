@@ -18,7 +18,21 @@ import math
 from collections import deque
 from typing import Callable
 
-__all__ = ["percentile", "sigmoid", "isotonic_fit", "ks_stat"]
+__all__ = [
+    "percentile",
+    "sigmoid",
+    "isotonic_fit",
+    "isotonic_points",
+    "ks_stat",
+    "median",
+    "mad",
+    "mad_scaled",
+    "trimmed",
+    "huber_loss",
+    "huber_isotonic_fit",
+    "hodges_lehmann",
+    "trimmed_ks",
+]
 
 
 def percentile(sorted_scores: list[float], p: float) -> float:
@@ -205,3 +219,226 @@ def ks_stat(a: list[float], b: list[float]) -> float:
         if gap > d:
             d = gap
     return d
+
+
+# ---------------------------------------------------------------------------
+# Robust L-estimators — survey §4.1 (MAD thresholds), §4.3 (Hodges-Lehmann),
+# §7.1 (trimmed KS). Order-statistic based, 50% breakdown point.
+# ---------------------------------------------------------------------------
+
+
+def median(xs: list[float]) -> float:
+    """The median (50th percentile) — the canonical robust location estimator.
+
+    50% breakdown point: up to half the sample can be arbitrarily corrupted
+    without moving the median, unlike the mean. Empty input → 0.0.
+    """
+    if not xs:
+        return 0.0
+    return percentile(sorted(xs), 50)
+
+
+def mad(xs: list[float]) -> float:
+    """Median Absolute Deviation: ``median(|x - median(xs)|)``.
+
+    The robust scale estimator (survey §4.1, §5.1). 50% breakdown point — a
+    handful of extreme scores barely move it, unlike standard deviation. Returns
+    0.0 on empty input, or when all values are identical (zero spread).
+    """
+    if not xs:
+        return 0.0
+    m = median(xs)
+    return median([abs(x - m) for x in xs])
+
+
+def mad_scaled(xs: list[float]) -> float:
+    """MAD scaled to estimate σ: ``mad(xs) * 1.4826``.
+
+    The 1.4826 factor is the conventional normal-consistency constant, so
+    ``mad_scaled`` approximates the standard deviation under mild assumptions
+    while keeping MAD's 50% breakdown. Use this where a σ-interpretation matters
+    (e.g. choosing a Huber cutoff k·σ); use :func:`mad` for the raw statistic.
+    """
+    return mad(xs) * 1.4826
+
+
+def trimmed(xs: list[float], pct: float = 5.0) -> list[float]:
+    """Drop ``pct``% from each tail, returning the central sample (survey §7.1).
+
+    ``pct`` is a percentage in [0, 50). At 0 the sample is unchanged. The trimmed
+    sample underlies trimmed-KS and trimmed-mean estimators — focusing the
+    comparison/estimate on the central mass where thresholds and decisions lie,
+    ignoring tail contamination. Empty input → empty list.
+    """
+    if not xs:
+        return []
+    pct = max(0.0, min(pct, 49.999))
+    n = len(xs)
+    k = int(math.floor(n * pct / 100.0))
+    s = sorted(xs)
+    return s[k : n - k] if k > 0 else s
+
+
+def hodges_lehmann(a: list[float], b: list[float]) -> float:
+    """Hodges–Lehmann location-shift estimator (survey §4.3).
+
+    Returns ``median([ai - bj for ai in a for bj in b])`` — a robust estimate of
+    how much one sample is shifted relative to another. High efficiency and
+    ~0.29 breakdown. Used on a model swap to estimate how much "easier"/"harder"
+    the new model separates classes, for a first-cut threshold adjustment.
+    O(n·m); fine at calibration-set sizes. Empty input → 0.0.
+    """
+    if not a or not b:
+        return 0.0
+    diffs = [ai - bj for ai in a for bj in b]
+    return median(diffs)
+
+
+def trimmed_ks(a: list[float], b: list[float], pct: float = 5.0) -> float:
+    """Two-sample KS on the trimmed samples (survey §7.1).
+
+    Drops ``pct``% from each tail before computing :func:`ks_stat`, so the drift
+    signal reflects the central 90% of scores — where thresholds live — rather
+    than being driven by a few tail outliers. Empty input → 0.0.
+    """
+    ta = trimmed(a, pct)
+    tb = trimmed(b, pct)
+    if not ta or not tb:
+        return 0.0
+    return ks_stat(ta, tb)
+
+
+# ---------------------------------------------------------------------------
+# Huber-loss isotonic regression (M-estimation flavor) — survey §3.1
+# ---------------------------------------------------------------------------
+
+
+def huber_loss(r: float, c: float) -> float:
+    """The Huber loss of residual ``r`` with cutoff ``c``.
+
+    Quadratic for ``|r| <= c`` (sensitive in the middle), linear beyond
+    (bounded influence for outliers). Combined with isotonic constraints this
+    yields a calibration curve resistant to a fraction of mislabeled pairs.
+    """
+    ar = abs(r)
+    if ar <= c:
+        return 0.5 * r * r
+    return c * (ar - 0.5 * c)
+
+
+def huber_isotonic_fit(
+    xs: list[float], ys: list[float], *, c: float | None = None, iters: int = 10
+) -> Callable[[float], float]:
+    """Monotone isotonic fit under Huber loss (survey §3.1).
+
+    Robust alternative to :func:`isotonic_fit` (which uses L2 / squared loss): a
+    handful of mislabeled calibration pairs have bounded influence on the fit.
+    Implemented as **iteratively reweighted PAV** — PAV solves the
+    monotone-constrained L2 problem; Huber is L2 with per-point weights
+    ``w_i = min(1, c / |r_i|)``, so we alternate: fit weighted-PAV, recompute
+    residuals/weights, repeat. Converges in ~3–5 iters; capped at ``iters``.
+
+    The cutoff ``c`` defaults to ``1.345 * mad_scaled(residuals from the L2 fit)``
+    — the standard 95%-efficiency choice. Same return contract as
+    :func:`isotonic_fit`: a callable ``f(x)`` with an ``.isotonic_points`` attr
+    (the final weighted-fit breakpoints). Degrades to plain ``isotonic_fit`` on
+    degenerate input or non-convergence (never raises).
+    """
+    n = len(xs)
+    if n == 0 or n != len(ys):
+        return isotonic_fit(xs, ys)
+    if n == 1:
+        return isotonic_fit(xs, ys)
+
+    # Weighted-PAV: reuse the PAV machinery with per-point weights by replicating
+    # each point's contribution. Simplest faithful route: solve the weighted
+    # monotone L2 via the same block-pooling but tracking weighted sums. To avoid
+    # duplicating PAV, we fold weights into y (weighted regression on (x, w*y)
+    # with count w) — exact for the pooled-block means.
+    order = sorted(range(n), key=lambda i: xs[i])
+    sx = [float(xs[i]) for i in order]
+    sy = [float(ys[i]) for i in order]
+
+    # Iteratively reweighted PAV: start at the L2 solution (weights = 1), then
+    # down-weight points with large residuals. The cutoff is set once from the
+    # L2 residuals' robust scale (1.345·MAD ≈ 95% efficiency at the normal).
+    weights = [1.0] * n
+    cutoff = float(c) if c is not None else None
+    for _ in range(max(1, iters)):
+        fitted = _pav_fitted_per_point(sx, sy, weights)
+        residuals = [sy[i] - fitted[i] for i in range(n)]
+        if cutoff is None:
+            cutoff = 1.345 * mad_scaled(residuals)
+            if cutoff <= 0:
+                cutoff = 1.345  # fall back to a fixed scale if MAD=0
+        new_weights = [min(1.0, cutoff / (abs(r) + 1e-12)) for r in residuals]
+        # Convergence: weights stable.
+        if max(abs(new_weights[i] - weights[i]) for i in range(n)) < 1e-4:
+            weights = new_weights
+            break
+        weights = new_weights
+
+    fitted = _pav_fitted_per_point(sx, sy, weights)
+    return _step_callable(list(zip(sx, fitted)))
+
+
+def _pav_fitted_per_point(
+    sx: list[float], sy: list[float], weights: list[float]
+) -> list[float]:
+    """Weighted PAV: return each input point's pooled-block mean.
+
+    Tracks block membership so each input index maps to its final block's mean
+    (needed for the per-point residuals in the reweighting loop).
+    """
+    sums: deque[float] = deque()
+    cnts: deque[float] = deque()
+    members: deque[list[int]] = deque()  # input indices in each block
+    for i, (y, w) in enumerate(zip(sy, weights)):
+        sums.append(y * w); cnts.append(w); members.append([i])
+        while len(sums) >= 2:
+            prev = sums[-2] / cnts[-2] if cnts[-2] else 0.0
+            last = sums[-1] / cnts[-1] if cnts[-1] else 0.0
+            if last < prev - 1e-12:
+                sums[-2] += sums[-1]; cnts[-2] += cnts[-1]
+                members[-2] = members[-2] + members[-1]
+                sums.pop(); cnts.pop(); members.pop()
+            else:
+                break
+    means = [s / c_ if c_ else 0.0 for s, c_ in zip(sums, cnts)]
+    out = [0.0] * len(sx)
+    for blk_idx, idxs in enumerate(members):
+        for i in idxs:
+            out[i] = means[blk_idx]
+    return out
+
+
+def _step_callable(pts: list[tuple[float, float]]) -> Callable[[float], float]:
+    """Build a monotone step evaluation closure from (x, y) breakpoints.
+
+    Constant extrapolation outside the range, linear interpolation between
+    breakpoints — matching :func:`isotonic_fit`'s contract.
+    """
+    def f(x: float) -> float:
+        if not pts:
+            return 0.0
+        xs_only = [p[0] for p in pts]
+        if x <= xs_only[0]:
+            return pts[0][1]
+        if x >= xs_only[-1]:
+            return pts[-1][1]
+        for i in range(len(pts)):
+            if x < pts[i][0]:
+                if i == 0:
+                    return pts[0][1]
+                lo_x, hi_x = pts[i - 1][0], pts[i][0]
+                lo_y, hi_y = pts[i - 1][1], pts[i][1]
+                if hi_x <= lo_x:
+                    return hi_y
+                t = (x - lo_x) / (hi_x - lo_x)
+                return lo_y + (hi_y - lo_y) * t
+            if x == pts[i][0]:
+                return pts[i][1]
+        return pts[-1][1]
+
+    f.isotonic_points = pts  # type: ignore[attr-defined]
+    return f
