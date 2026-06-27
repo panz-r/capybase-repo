@@ -180,6 +180,26 @@ class RustAnalyzerRunner:
             if original is not None:
                 target_path.write_bytes(original)
         diags = _parse_cargo_messages(proc.stdout, path)
+        # Cargo emits most errors on the JSON stream, but a fatal failure it
+        # can't structurally report — notably an unparseable Cargo.toml ("newlines
+        # are unsupported in inline tables"), a missing manifest, or a build-script
+        # abort — short-circuits before any JSON and lands on STDERR. Without this
+        # a malformed-manifest merge would look clean (zero diagnostics) and slip
+        # through the syntax floor. When cargo exited non-zero yet produced no
+        # JSON diagnostics, surface the first ``error:`` line of stderr as one.
+        if proc.returncode != 0 and not diags:
+            err_line = _first_error_line(proc.stderr or "")
+            if err_line:
+                diags.append(
+                    Diagnostic(
+                        severity="error",
+                        message=err_line,
+                        line=0,
+                        column=0,
+                        code="",
+                        source="cargo",
+                    )
+                )
         return Diagnostics(checked=True, tool="cargo", diagnostics=diags)
 
     def _check_rust_analyzer(
@@ -248,6 +268,26 @@ def _parse_cargo_messages(stdout: str, path: str) -> list[Diagnostic]:
             )
         )
     return diags
+
+
+def _first_error_line(stderr: str) -> str:
+    """Return the first actionable ``error:`` line of cargo's stderr.
+
+    When cargo aborts before emitting any JSON (an unparseable manifest, a
+    missing manifest, a build-script crash), the diagnostic lands on stderr in
+    the human-readable form ``error: <message>`` followed by a ``--> file:line``
+    caret block. The first ``error:`` line is the actionable message (the caret
+    block is just location noise). Falls back to the first non-empty line.
+    """
+    for line in stderr.splitlines():
+        s = line.strip()
+        if s.startswith("error"):
+            # Drop a trailing ``;``/``.`` and normalize whitespace.
+            return s
+    for line in stderr.splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
 
 
 def _parse_rust_analyzer_output(stdout: str, tmp_path: str) -> list[Diagnostic]:

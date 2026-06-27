@@ -253,3 +253,120 @@ def test_cargo_project_without_cargo_binary_uses_rustc(monkeypatch, tmp_path):
     )
     # cargo didn't run (checked=False) → standalone rustc fallback engaged.
     assert res.features["syntax_checked"] is True
+
+
+# ---------------------------------------------------------------------------
+# Cargo.toml manifest verification (closes the manifest-verification gap)
+# ---------------------------------------------------------------------------
+#
+# Cargo.toml is classified ``"toml"`` by detect_language (not ``"rust"``), so a
+# dependency/manifest conflict never reached the rust syntax branch and was
+# previously text-only verified. The new ``language == "toml"`` branch in
+# verify_file runs a crate-aware manifest check. These tests drive a real
+# Cargo.toml conflict through verify_file with language="toml".
+
+
+def _manifest_crate(tmp_path: Path) -> Path:
+    """A minimal cargo crate: a Cargo.toml with one dependency + a src/lib.rs."""
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / "lib.rs").write_text("pub fn ping() -> u32 { 1 }\n")
+    return tmp_path
+
+
+def _manifest_conflict() -> str:
+    """A dependency-version conflict in Cargo.toml.
+
+    Both sides edit the same ``version = "..."`` line (a genuine conflict),
+    using a path dependency on a sibling dir so the resolved manifest resolves
+    offline (no registry/network). The correct merge keeps the higher version.
+    """
+    return (
+        '[package]\n'
+        'name = "manifesttest"\n'
+        'version = "0.1.0"\n'
+        'edition = "2021"\n'
+        '\n'
+        '[dependencies]\n'
+        '<<<<<<< H\n'
+        'sibling = { path = "../sibling", version = "1.0.0" }\n'
+        '=======\n'
+        'sibling = { path = "../sibling", version = "2.0.0" }\n'
+        '>>>>>>> b\n'
+    )
+
+
+@skip_no_cargo
+def test_cargo_toml_valid_manifest_passes(tmp_path):
+    """A valid resolved Cargo.toml conflict passes the manifest check.
+
+    The merge resolves the dependency to a single coherent version; cargo sees
+    a well-formed manifest → syntax_passed is True via the cargo tool.
+    """
+    crate = _manifest_crate(tmp_path)
+    # Provide the sibling dependency the manifest references (offline resolve).
+    sibling = tmp_path.parent / "sibling"
+    sibling.mkdir(exist_ok=True)
+    (sibling / "Cargo.toml").write_text(
+        '[package]\nname = "sibling"\nversion = "2.0.0"\nedition = "2021"\n'
+    )
+    (sibling / "src").mkdir(exist_ok=True)
+    (sibling / "src" / "lib.rs").write_text("pub fn sib() -> u32 { 2 }\n")
+    correct = 'sibling = { path = "../sibling", version = "2.0.0" }'
+    eng = VerificationEngine.default(ValidationConfig())
+    res = eng.verify_file(
+        "Cargo.toml", "toml", _manifest_conflict(),
+        [(_span(_manifest_conflict()), correct)], repo_root=str(crate),
+    )
+    assert res.features["syntax_checked"] is True, res.features
+    assert res.features["syntax_tool"] == "cargo"
+    assert res.passed, [f.message for f in res.hard_failures]
+
+
+@skip_no_cargo
+def test_cargo_toml_malformed_manifest_caught(tmp_path):
+    """A resolved manifest that's invalid TOML (a botched merge) is caught.
+
+    The merge drops a closing quote → malformed TOML. cargo fails to parse it
+    synchronously (offline, deterministic). This is the correctness gap the
+    manifest check closes: previously this was accepted as text-only.
+    """
+    crate = _manifest_crate(tmp_path)
+    # A botched merge: missing closing quote on the version value.
+    broken = 'sibling = { path = "../sibling", version = "2.0.0 }'
+    eng = VerificationEngine.default(ValidationConfig())
+    res = eng.verify_file(
+        "Cargo.toml", "toml", _manifest_conflict(),
+        [(_span(_manifest_conflict()), broken)], repo_root=str(crate),
+    )
+    assert res.features["syntax_checked"] is True
+    assert res.features["syntax_tool"] == "cargo"
+    assert not res.passed
+    syntax_fails = [f for f in res.hard_failures if f.validator == "syntax"]
+    assert len(syntax_fails) == 1, [f.message for f in syntax_fails]
+
+
+def test_cargo_toml_no_cargo_is_text_only(tmp_path, monkeypatch):
+    """With cargo absent, a Cargo.toml conflict stays text-only — no false fail.
+
+    The manifest check fires only when cargo resolves. Without a toolchain the
+    manifest can't be validated, so it's reported as not-checked (consistent
+    with the rustc-absent graceful-degrade path) — never a false failure.
+    """
+    import capybase.adapters.lsp as lsp_mod
+
+    monkeypatch.setattr(lsp_mod, "_resolve", lambda cmd: None)
+    (tmp_path / "Cargo.toml").write_text(
+        '<<<<<<< H\nversion = "1"\n=======\nversion = "2"\n>>>>>>> b\n'
+    )
+    conflict = (
+        '<<<<<<< H\nversion = "1"\n=======\nversion = "2"\n>>>>>>> b\n'
+    )
+    eng = VerificationEngine.default(ValidationConfig())
+    res = eng.verify_file(
+        "Cargo.toml", "toml", conflict, [(_span(conflict), 'version = "2"')],
+        repo_root=str(tmp_path),
+    )
+    # No cargo → manifest check skipped → not checked.
+    assert res.features.get("syntax_checked") is not True
+    assert not any(f.validator == "syntax" for f in res.hard_failures)
+

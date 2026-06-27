@@ -1513,6 +1513,26 @@ class VerificationEngine:
                         )
                 features["syntax_checked"] = syntax_checked
                 features["syntax_passed"] = syntax_ok
+        elif language == "toml" and Path(path).name == "Cargo.toml":
+            # A dependency/manifest conflict in Cargo.toml. ``detect_language``
+            # classifies it as ``"toml"`` (not ``"rust"``), so it never reached
+            # the rust branch above and was previously text-only verified. But a
+            # resolved manifest can introduce real errors (an absent/ambiguous
+            # version, a feature/dep mismatch, malformed TOML) that only
+            # ``cargo`` catches. Run a crate-aware manifest check when this path
+            # is the Cargo manifest AND cargo is available. Note we can't gate on
+            # ``_has_cargo_manifest`` (a pre-existing on-disk Cargo.toml): the
+            # manifest under resolution IS Cargo.toml — it exists in memory
+            # (``original``/``whole``) and is written to disk only inside the
+            # check. ``_run_cargo_manifest_check`` does the save/write/restore.
+            from capybase.adapters.lsp import _resolve
+
+            if _resolve(self.config.cargo_path):
+                syntax_checked, syntax_ok = self._run_cargo_manifest_check(
+                    path, original, whole, repo_root, hard, features
+                )
+            # No cargo available → text-only (a generic ``.toml`` config file or
+            # a manifest conflict without a toolchain stays unverifiable).
         features["syntax_checked"] = features.get("syntax_checked", syntax_checked)
         features["syntax_passed"] = features.get("syntax_passed", syntax_ok)
 
@@ -1615,6 +1635,96 @@ class VerificationEngine:
                 )
             )
         return True
+
+    def _run_cargo_manifest_check(
+        self,
+        path: str,
+        original: str,
+        whole: str,
+        repo_root: str,
+        hard: list[VerificationFailure],
+        features: dict[str, float | int | str | bool],
+    ) -> tuple[bool, bool]:
+        """Run ``cargo check`` against a resolved ``Cargo.toml`` conflict.
+
+        Closes the manifest-verification gap: ``Cargo.toml`` is classified
+        ``"toml"`` by ``detect_language``, so it never reached the rust syntax
+        branch and was previously text-only verified. A resolved manifest can
+        introduce real errors (a typo'd or absent version, a feature/dep
+        mismatch, an invalid table) that only ``cargo`` sees.
+
+        Mirrors ``_run_clippy_check``'s proven save/write/restore dance:
+        ``whole`` is the in-memory resolved manifest (not yet on disk —
+        ``verify_file`` runs before the orchestrator writes), so we write it for
+        the "after" run and the marker-blanked ``original`` for the baseline,
+        restoring the saved worktree bytes each time. The baseline/new-error
+        comparison is the same message-set logic as ``_run_cargo_syntax_check``:
+        a merge fails ONLY on manifest errors it introduces, not pre-existing
+        ones. Records into ``syntax_*`` with ``syntax_tool="cargo"``.
+
+        Returns ``(syntax_checked, syntax_passed)``. Never a false failure: if
+        cargo is absent or the check doesn't run, returns ``(False, True)`` —
+        consistent with the rustc-absent path (text-only fallback).
+        """
+        try:
+            from capybase.adapters import lsp as lsp_mod
+        except Exception:  # noqa: BLE001
+            return False, True
+        runner = lsp_mod.RustAnalyzerRunner(
+            cargo_path=self.config.cargo_path,
+            rust_analyzer_path=self.config.rust_analyzer_path,
+        )
+        target_path = Path(repo_root) / path
+        saved = target_path.read_bytes() if target_path.exists() else None
+        # After state: write the resolved manifest, run cargo check.
+        try:
+            target_path.write_text(whole, encoding="utf-8")
+            after = runner._check_cargo(whole, path, repo_root)
+        finally:
+            if saved is not None:
+                target_path.write_bytes(saved)
+            elif target_path.exists():
+                target_path.unlink(missing_ok=True)
+        if not after.checked:
+            # cargo absent / failed → not checked (never a false fail).
+            features["syntax_checked"] = False
+            features["syntax_passed"] = True
+            return False, True
+        # Baseline: marker-blanked original (one side kept so it's valid TOML),
+        # cargo-checked, then restored. TOML comments use ``#``, which is the
+        # default blanking prefix.
+        try:
+            target_path.write_text(
+                _blank_markers_one_side(original), encoding="utf-8"
+            )
+            baseline = runner._check_cargo(_blank_markers_one_side(original), path, repo_root)
+        finally:
+            if saved is not None:
+                target_path.write_bytes(saved)
+            elif target_path.exists():
+                target_path.unlink(missing_ok=True)
+        features["syntax_checked"] = True
+        baseline_msgs = {d.message for d in baseline.errors}
+        new_errors = [d for d in after.errors if d.message not in baseline_msgs]
+        syntax_ok = len(new_errors) == 0
+        features["syntax_passed"] = syntax_ok
+        features["syntax_tool"] = "cargo"
+        features["syntax_new_error_count"] = len(new_errors)
+        if new_errors and self.config.require_syntax_if_supported:
+            msg = "; ".join(d.message[:80] for d in new_errors[:3])
+            hard.append(
+                VerificationFailure(
+                    validator="syntax",
+                    severity="error",
+                    message=f"cargo check: {len(new_errors)} new error(s): {msg}",
+                    detail={
+                        "new_errors": [d.message for d in new_errors[:5]],
+                        "tool": "cargo",
+                        "manifest": True,
+                    },
+                )
+            )
+        return True, syntax_ok
 
     def _run_clippy_check(
         self,
