@@ -13,9 +13,12 @@ from capybase.adapters.llm_openai import LLMResponse
 from capybase.config import ModelConfig
 from capybase.probes import (
     _DEFAULT_MAX_TOKENS,
+    _LATENCY_HEADROOM,
     _MAX_TOKENS_CEIL,
+    _MAX_TOKENS_TIMEOUT_SCALE,
     _MIN_GEN_TIMEOUT,
     _apply_max_tokens_headroom,
+    _gen_timeout_from_latency,
     probe_context_window,
     probe_end_to_end,
     probe_json_mode,
@@ -131,9 +134,10 @@ def test_max_tokens_returns_smallest_sufficient_budget():
     # UP to the next ladder rung, 16384, so the stored budget has room for a
     # longer-than-average <think> chain on a reasoning model.
     client = CalibClient(truncate_below=8192)
-    result, budget, latencies = probe_max_tokens(client, _cfg())
+    result, budget, latencies, first_success = probe_max_tokens(client, _cfg())
     assert result.ok
     assert budget == 16384  # 8192 first success -> 12288 target -> snap up to 16384
+    assert first_success == 8192  # the rung at which latency was measured
     assert len(latencies) == 1  # latency recorded only on the successful rung
     # Tried every rung at and below the first-success 8192.
     tried = [c["max_tokens"] for c in client.calls]
@@ -143,22 +147,24 @@ def test_max_tokens_returns_smallest_sufficient_budget():
 def test_max_tokens_succeeds_at_first_rung_when_no_truncation():
     # First success at 1024. Headroom 1.5x = 1536 → snap up to 2048.
     client = CalibClient()
-    result, budget, _ = probe_max_tokens(client, _cfg())
+    result, budget, _, first_success = probe_max_tokens(client, _cfg())
     assert result.ok and budget == 2048
+    assert first_success == 1024
 
 
 def test_max_tokens_falls_back_to_default_when_never_parses():
     # Garbage output never parses → no rung succeeds.
     client = CalibClient(text="not json at all")
-    result, budget, _ = probe_max_tokens(client, _cfg())
+    result, budget, _, first_success = probe_max_tokens(client, _cfg())
     assert not result.ok
     assert budget == _DEFAULT_MAX_TOKENS
+    assert first_success == 0  # nothing succeeded → no probe budget
 
 
 def test_max_tokens_falls_back_when_all_rungs_truncate():
     # A huge truncate threshold (beyond the ladder) → every rung truncates.
     client = CalibClient(truncate_below=10**9)
-    result, budget, _ = probe_max_tokens(client, _cfg())
+    result, budget, _, first_success = probe_max_tokens(client, _cfg())
     assert not result.ok
     assert budget == _DEFAULT_MAX_TOKENS
 
@@ -329,6 +335,53 @@ def test_run_calibration_generation_timeout_respects_floor():
     # Impossibly fast (0 latency) → timeout should still hit the floor.
     report = run_calibration(CalibClient(), _cfg())
     assert report.profile.generation_timeout_seconds == _MIN_GEN_TIMEOUT
+
+
+# ---------------------------------------------------------------------------
+# generation-timeout derivation: latency × headroom × max_tokens-scaling
+# ---------------------------------------------------------------------------
+
+
+def test_gen_timeout_no_latencies_returns_default():
+    from capybase.probes import _DEFAULT_GEN_TIMEOUT
+    assert _gen_timeout_from_latency([]) == _DEFAULT_GEN_TIMEOUT
+
+
+def test_gen_timeout_respects_floor_even_for_fast_model():
+    # A 5s-average model: 5 × 3 headroom = 15s, floored at _MIN_GEN_TIMEOUT.
+    t = _gen_timeout_from_latency([5000.0])
+    assert t == _MIN_GEN_TIMEOUT
+
+
+def test_gen_timeout_scales_by_max_tokens_ratio():
+    # Probe measured 20s latency at a 2048-token budget; real budget is 16384.
+    # Base: 20 × 3 headroom = 60s. Scale: 16384/2048 = 8× → 480s (×8 = the cap).
+    t = _gen_timeout_from_latency([20000.0], max_tokens=16384, probed_budget=2048)
+    assert t == 480, t
+    # Above the floor, so the floor doesn't clamp it.
+
+
+def test_gen_timeout_scaling_capped():
+    # Pathological: real budget 1000000, probed 1024 → ratio ~977, capped at 8×.
+    # Base: 30 × 3 = 90s. × 8 cap = 720s.
+    t = _gen_timeout_from_latency([30000.0], max_tokens=1_000_000, probed_budget=1024)
+    assert t == 720, t
+
+
+def test_gen_timeout_no_scaling_when_budgets_equal():
+    # max_tokens == probed_budget → ratio 1 → no scaling, just headroom × floor.
+    # 40s × 3 = 120s, floored at 180.
+    t = _gen_timeout_from_latency([40000.0], max_tokens=2048, probed_budget=2048)
+    assert t == _MIN_GEN_TIMEOUT
+
+
+def test_gen_timeout_scaling_matches_real_rebase_scenario():
+    # The bug: 30s probe latency, calibrated max_tokens 16384, probed at 2048.
+    # Old derivation: 30 × 2 = 60s (floored 60) → killed real 4146-token conflict.
+    # New: 30 × 3 = 90s base × (16384/2048 = 8, capped) = 720s. Real conflict
+    # now gets ample time. Floor (180) is well below, so the scaled value wins.
+    t = _gen_timeout_from_latency([30000.0], max_tokens=16384, probed_budget=2048)
+    assert t == 720, t  # the real-rebase scenario now gets 720s, not 60s
 
 
 def test_run_calibration_uses_tuned_budget_for_capability_probes():

@@ -55,9 +55,25 @@ _DEFAULT_JSON_MODE = True
 _DEFAULT_LOGPROBS = False
 
 # Latency→timeout headroom: observed mean latency multiplied by this, so a model
-# averaging 60s/answer gets a 120s generation deadline (with the floor applied).
-_LATENCY_HEADROOM = 2.0
-_MIN_GEN_TIMEOUT = 60  # never tune below this regardless of observed latency
+# averaging 60s/answer gets a 180s generation deadline (with the floor applied).
+# 3.0 (raised from 2.0): reasoning models' <think> chain length varies
+# call-to-call far more than 2× covers, and real conflicts are larger than the
+# tiny calibration probe. 3× errs toward waiting longer — the safe direction
+# (a too-short deadline kills real generations mid-stream and fails silently).
+_LATENCY_HEADROOM = 3.0
+# Never tune below this regardless of observed latency. 180s matches the
+# built-in ModelConfig default (generation_timeout_seconds) and _DEFAULT_GEN_TIMEOUT,
+# so calibration never produces a WORSE timeout than the out-of-box default. The
+# old floor of 60s was below what any non-trivial real conflict needs on a
+# reasoning model and caused real rebases to time out (the calibration probe is
+# tiny; its measured latency underestimates real conflicts by 10-100×).
+_MIN_GEN_TIMEOUT = 180
+# Cap on the max_tokens-scaling multiplier so a huge output budget doesn't
+# produce a multi-hour timeout. The timeout scales latency by
+# (real_max_tokens / probed_budget), capped here (×8): a 30s probe calibrated to
+# a large budget → 30s × 3 headroom × 8 = 720s max, floored at 180s — enough for
+# any real conflict without making a stuck rebase take indefinitely.
+_MAX_TOKENS_TIMEOUT_SCALE = 8
 
 # max_tokens safety margin. The binary search finds the smallest budget at which
 # ONE call completed. But reasoning models emit a <think> chain whose length
@@ -254,13 +270,18 @@ def probe_context_window(model_cfg: ModelConfig) -> tuple[ProbeResult, int]:
     ), 0
 
 
-def probe_max_tokens(client: Any, model_cfg: ModelConfig) -> tuple[ProbeResult, int, list[float]]:
-    """Walk the max_tokens ladder and return (result, best_max_tokens, latencies).
+def probe_max_tokens(client: Any, model_cfg: ModelConfig) -> tuple[ProbeResult, int, list[float], int]:
+    """Walk the max_tokens ladder and return (result, best_max_tokens, latencies, first_success_budget).
 
     Success at a rung = ``finish_reason != "length"`` AND the output parses to a
     candidate dict. Stops at the first success (smallest sufficient budget).
     Records wall-clock latency for each successful rung. If no rung succeeds,
     falls back to the built-in default and marks the probe not-ok.
+
+    Returns ``first_success_budget`` (the smallest rung that succeeded, BEFORE
+    headroom) so the timeout derivation can scale latency by the ratio of the
+    real ``best_max_tokens`` to the budget at which latency was actually
+    measured. 0 when no rung succeeded (latency wasn't measured).
     """
     messages = _resolve_probe_messages()
     latencies: list[float] = []
@@ -310,6 +331,7 @@ def probe_max_tokens(client: Any, model_cfg: ModelConfig) -> tuple[ProbeResult, 
             ),
             recommended,
             latencies,
+            first_success,
         )
     return (
         ProbeResult(
@@ -321,6 +343,7 @@ def probe_max_tokens(client: Any, model_cfg: ModelConfig) -> tuple[ProbeResult, 
         ),
         _DEFAULT_MAX_TOKENS,
         latencies,
+        0,
     )
 
 
@@ -629,16 +652,37 @@ def probe_mechanisms(
 # ---------------------------------------------------------------------------
 
 
-def _gen_timeout_from_latency(latencies_ms: list[float]) -> int:
+def _gen_timeout_from_latency(
+    latencies_ms: list[float],
+    *,
+    max_tokens: int = 0,
+    probed_budget: int = 0,
+) -> int:
     """Derive a generation timeout (seconds) from observed latencies.
 
-    Uses the mean successful latency × headroom, floored at ``_MIN_GEN_TIMEOUT``
-    so a very fast model doesn't get an impractically tiny deadline. Returns the
-    default when no latencies were observed."""
+    The probe's mean latency was measured at a SMALL output budget (the smallest
+    ladder rung that succeeded, ``probed_budget`` — often 1024-2048). The real
+    resolve uses the calibrated ``max_tokens`` (e.g. 16384 after headroom), and a
+    larger output budget takes proportionally longer to generate. So the timeout
+    scales latency by ``(max_tokens / probed_budget)``, capped by
+    :data:`_MAX_TOKENS_TIMEOUT_SCALE` so a huge budget doesn't produce a
+    multi-hour deadline.
+
+    Floored at :data:`_MIN_GEN_TIMEOUT` (180s) so calibration never produces a
+    worse timeout than the out-of-box default, and headroom-multiplied
+    (:data:`_LATENCY_HEADROOM`) for reasoning-chain variance. Returns
+    :data:`_DEFAULT_GEN_TIMEOUT` when no latencies were observed.
+    """
     if not latencies_ms:
         return _DEFAULT_GEN_TIMEOUT
     mean_ms = sum(latencies_ms) / len(latencies_ms)
     timeout = (mean_ms / 1000.0) * _LATENCY_HEADROOM
+    # Scale by the output-budget ratio: real generations use max_tokens, the
+    # probe measured latency at probed_budget. A 16384-token answer takes far
+    # longer than the 2048-token probe that timed it.
+    if max_tokens > 0 and probed_budget > 0 and max_tokens > probed_budget:
+        scale = min(_MAX_TOKENS_TIMEOUT_SCALE, max_tokens / probed_budget)
+        timeout = timeout * scale
     return max(_MIN_GEN_TIMEOUT, int(round(timeout)))
 
 
@@ -702,7 +746,7 @@ def run_calibration(
         )
         return CalibrationReport(profile=profile, results=results, ok=False)
 
-    mt_result, max_tokens, latencies = probe_max_tokens(client, model_cfg)
+    mt_result, max_tokens, latencies, first_success = probe_max_tokens(client, model_cfg)
     results.append(mt_result)
 
     # Context window discovery (cheap GET to /v1/models). 0 = unknown/disabled;
@@ -770,7 +814,9 @@ def run_calibration(
         max_tokens=max_tokens,
         json_mode=jm_result.ok,
         capture_token_entropy=lp_result.ok,
-        generation_timeout_seconds=_gen_timeout_from_latency(latencies),
+        generation_timeout_seconds=_gen_timeout_from_latency(
+            latencies, max_tokens=max_tokens, probed_budget=first_success,
+        ),
         context_window=context_window,
         samples=choices.samples,
         two_pass=choices.two_pass,
