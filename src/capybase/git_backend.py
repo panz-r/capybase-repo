@@ -115,9 +115,17 @@ class GitBackend:
         return self._run_ok(["rev-parse", "HEAD"], what="rev-parse HEAD").strip()
 
     def worktree_is_clean(self) -> bool:
-        """True if `git status --porcelain` is empty."""
+        """True if the worktree has no user changes.
+
+        capybase's own artifact tree (``.rebase-agent/``) is excluded — it's
+        capybase's bookkeeping (journal, session dir), not the developer's
+        uncommitted work, and the Orchestrator writes it before ``rebase`` runs
+        its clean check. A pathspec exclusion (not ``.gitignore``) is used so we
+        don't assume the user has gitignored it.
+        """
         out = self._run_ok(
-            ["status", "--porcelain"], what="status --porcelain"
+            ["status", "--porcelain", "--", ":(exclude).rebase-agent"],
+            what="status --porcelain",
         )
         return out.strip() == ""
 
@@ -165,11 +173,13 @@ class GitBackend:
 
     # ------------------------------------------------------------------ rebase control
 
-    def start_rebase(self, target: str) -> GitResult:
-        # --no-autostash: never silently move uncommitted work.
-        return self._run(
-            ["rebase", "--no-autostash", target], what=f"rebase {target}"
-        )
+    def start_rebase(self, target: str, *, autostash: bool = False) -> GitResult:
+        # ``--no-autostash`` is the safe default: capybase must never silently
+        # move a developer's uncommitted work into a stash it might lose. The
+        # ``autostash`` opt-in (``capybase rebase --autostash``) mirrors ``git
+        # rebase --autostash`` for users who explicitly accept the stash dance.
+        args = ["rebase", "--autostash" if autostash else "--no-autostash", target]
+        return self._run(args, what=f"rebase {target}")
 
     def continue_rebase(self) -> GitResult:
         return self._run(

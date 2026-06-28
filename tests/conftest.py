@@ -472,3 +472,85 @@ def rust_test_gated_repo(repo: Path) -> dict:
         "correct": correct,
         "wrong": wrong,
     }
+
+
+# ---------------------------------------------------------------------------
+# ``rebase``-command fixtures: repos BEFORE the rebase, ready for capybase to
+# start it itself. These mirror conflicted_repo / rust_conflicted_repo but stop
+# short of running ``git rebase main`` — the repo is left on the feature branch
+# with a clean worktree, so ``orch.rebase("main")`` owns the start.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def py_repo_before_rebase(repo: Path) -> dict:
+    """A repo on ``feat`` ready to rebase onto ``main`` (clean, no rebase yet).
+
+    Layout (mirrors ``conflicted_repo`` minus the final rebase):
+      main  : BASE content (``return 'hello'``)
+      feat  : diverged (``return 'howdy'``) — the REPLAYED side
+      main  : also diverged (``return 'hi'``) — the CURRENT side
+    Replaying ``feat`` onto ``main`` WILL conflict, but capybase starts it.
+
+    Returns the repo, the conflicted path, the three sides, and the resolving
+    merge text the test's fake LLM returns.
+    """
+    base = "def greet():\n    return 'hello'\n"
+    upstream = "def greet():\n    return 'hi'\n"          # CURRENT_UPSTREAM_SIDE
+    replayed = "def greet():\n    return 'howdy'\n"        # REPLAYED_COMMIT_SIDE
+    merged = "def greet():\n    return 'hi' + 'howdy'\n"   # a resolving merge
+
+    (repo / "app.py").write_text(base)
+    git(repo, "add", "app.py")
+    git(repo, "commit", "-q", "-m", "base")
+
+    git(repo, "branch", "feat")
+    git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text(replayed)
+    git(repo, "add", "app.py")
+    git(repo, "commit", "-q", "-m", "replayed change")
+
+    git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text(upstream)
+    git(repo, "add", "app.py")
+    git(repo, "commit", "-q", "-m", "upstream change")
+
+    # Back on feat, clean — capybase will rebase onto main.
+    git(repo, "checkout", "-q", "feat")
+    return {
+        "repo": repo,
+        "path": "app.py",
+        "base": base,
+        "current": upstream,
+        "replayed": replayed,
+        "merged": merged,
+        "merged_block": "    return 'hi' + 'howdy'",
+    }
+
+
+@pytest.fixture
+def py_repo_clean_rebase(repo: Path) -> Path:
+    """A repo where rebasing ``feat`` onto ``main`` is CLEAN (no conflict).
+
+    feat and main touch disjoint files, so ``git rebase main`` succeeds without
+    stopping. Used to exercise capybase's "rebase started, no conflict, finished
+    immediately" happy path.
+    """
+    (repo / "a.txt").write_text("a\n")
+    git(repo, "add", "a.txt")
+    git(repo, "commit", "-q", "-m", "base")
+
+    git(repo, "branch", "feat")
+    git(repo, "checkout", "-q", "feat")
+    (repo / "b.txt").write_text("b\n")
+    git(repo, "add", "b.txt")
+    git(repo, "commit", "-q", "-m", "feat: add b")
+
+    git(repo, "checkout", "-q", "main")
+    (repo / "c.txt").write_text("c\n")
+    git(repo, "add", "c.txt")
+    git(repo, "commit", "-q", "-m", "main: add c")
+
+    git(repo, "checkout", "-q", "feat")
+    return repo
+

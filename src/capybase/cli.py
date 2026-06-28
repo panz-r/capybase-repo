@@ -54,6 +54,36 @@ def build_parser() -> argparse.ArgumentParser:
     run_p = sub.add_parser("run", help="full auto loop: resolve, test, continue")
     run_p.add_argument("--resume", default=None, help="resume an existing session id")
 
+    rb_p = sub.add_parser(
+        "rebase",
+        help="own the entire rebase: start it, resolve conflicts, finish",
+    )
+    rb_p.add_argument(
+        "target",
+        help="the upstream/branch to rebase onto (passed to `git rebase <target>`)",
+    )
+    rb_p.add_argument(
+        "--autostash",
+        action="store_true",
+        help="autostash dirty changes before rebasing (like git rebase --autostash)",
+    )
+    abort_group = rb_p.add_mutually_exclusive_group()
+    abort_group.add_argument(
+        "--abort-on-escalation",
+        dest="abort_on_escalation",
+        action="store_true",
+        help="abort the rebase if a conflict can't be auto-resolved (the default, "
+             "since rebase owns the process)",
+    )
+    abort_group.add_argument(
+        "--no-abort-on-escalation",
+        dest="abort_on_escalation",
+        action="store_false",
+        help="leave the rebase stopped at an unresolvable conflict (inspect the "
+             "review bundle and finish manually)",
+    )
+    rb_p.set_defaults(abort_on_escalation=True)
+
     cal_p = sub.add_parser(
         "calibrate",
         help="probe the model endpoint and store a tuned runtime profile",
@@ -433,6 +463,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if result.escalated else 0
     if args.command == "run":
         result = orch.run()
+        return 1 if result.escalated else 0
+    if args.command == "rebase":
+        result = orch.rebase(
+            args.target,
+            autostash=args.autostash,
+            abort_on_escalation=args.abort_on_escalation,
+        )
         return 1 if result.escalated else 0
     parser.error(f"unknown command: {args.command}")
     return 2

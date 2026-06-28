@@ -33,7 +33,7 @@ from capybase.conflict_model import (
 )
 from capybase.context_builder import ContextBuilder
 from capybase.escalation import write_review_bundle
-from capybase.git_backend import GitBackend, GitResult
+from capybase.git_backend import GitBackend, GitError, GitResult
 from capybase.journal import Journal
 from capybase.policy import Policy
 from capybase.resolution_engine import ResolutionEngine
@@ -709,6 +709,98 @@ class Orchestrator:
     # ==================================================================
     # M3: full run
     # ==================================================================
+
+    def rebase(
+        self,
+        target: str,
+        *,
+        autostash: bool = False,
+        abort_on_escalation: bool = True,
+    ) -> StepResult:
+        """Own the entire rebase: start it, drive the resolution loop, finish.
+
+        Unlike :meth:`run` (which assumes the user already started the rebase
+        and stopped on a conflict), ``rebase`` starts the rebase itself and then
+        hands off to the existing :meth:`run` loop — so a single invocation
+        carries the rebase from clean tree to completion (or escalation).
+
+        Flow:
+        1. Preflight the worktree (clean, unless ``autostash``).
+        2. Record the pre-rebase HEAD as a recovery ref
+           (``refs/rebase-agent/<session>/start``) and in the journal.
+        3. Start the rebase.
+        4. If the rebase is clean (no conflict), finish immediately with a
+           ``session_completed`` event — :meth:`run` is never called.
+        5. Otherwise drive :meth:`run` — the proven resolve → test → continue
+           loop.
+        6. On escalation with ``abort_on_escalation`` (the default, since
+           ``rebase`` owns the process), ``git rebase --abort`` returns the repo
+           to its original HEAD. Without it the rebase is left stopped, matching
+           :meth:`run`'s behavior, so the user can inspect the review bundle and
+           finish manually.
+
+        ``autostash`` mirrors ``git rebase --autostash`` (stashes dirty changes
+        and re-applies them after). Without it, a dirty worktree raises
+        :class:`GitError` before any rebase starts — the CLI's top-level guard
+        reports it cleanly.
+        """
+        self.journal.emit(
+            "rebase_requested",
+            {"target": target, "autostash": autostash,
+             "abort_on_escalation": abort_on_escalation},
+        )
+        # 1. Worktree must be clean unless the user opted into autostash.
+        if not autostash:
+            self.git.require_clean_worktree()  # raises GitError if dirty
+        # 2. Recovery ref + journal: the original HEAD, so an aborted rebase
+        #    (step 5) returns here and the run is auditable end-to-end.
+        start_oid = self.git.head_oid()
+        self.git.create_session_refs(self.session_id, start_oid)
+        self.journal.emit(
+            "rebase_started", {"target": target, "start_oid": start_oid}
+        )
+        # 3. Start the rebase. A conflict stop has rc != 0 but leaves the rebase
+        #    in progress; a genuine failure (bad target, etc.) has rc != 0 and
+        #    NO rebase in progress. A clean rebase has rc == 0.
+        res = self.git.start_rebase(target, autostash=autostash)
+        if not res.ok and not self.git.rebase_in_progress():
+            self.journal.emit(
+                "rebase_start_failed", {"stderr": res.stderr[:500]}
+            )
+            raise GitError(
+                f"git rebase {target} failed: {res.stderr.strip()}"
+            )
+        # 4a. A clean rebase (no conflict) finishes here: the rebase is no longer
+        #     in progress and there's nothing for run()'s loop to resolve. Emit
+        #     the completion event and return success directly — run()'s preflight
+        #     would otherwise escalate on "no rebase in progress".
+        if not self.git.rebase_in_progress():
+            head_after = self.git.head_oid()
+            self.journal.emit(
+                "session_completed",
+                {"head_after": head_after, "clean": True},
+                git_head_after=head_after,
+            )
+            self.git.record_step_ref(self.session_id, self.step, head_after)
+            self.out(f"✓ rebase complete, no conflicts (session {self.session_id})")
+            return StepResult(step_index=self.step, escalated=False, continued=True)
+        # 4b. The rebase stopped on a conflict: drive the resolution loop.
+        result = self.run()
+        # 5. Abort-on-escalation: return the repo to start_oid if we couldn't
+        #    finish. run() sets escalated and leaves the rebase stopped; abort
+        #    rolls it all back so the developer is back where they started.
+        if result.escalated and abort_on_escalation and self.git.rebase_in_progress():
+            self.git.abort_rebase()
+            self.journal.emit(
+                "rebase_aborted",
+                {"reason": result.reason, "start_oid": start_oid},
+                git_head_after=self.git.head_oid(),
+            )
+            self.out(
+                f"! escalated and aborted rebase — repo back at {start_oid[:8]}; "
+                f"review bundle: {self.paths.final / 'review-bundle.md'}"
+            )
+        return result
 
     def run(self) -> StepResult:
         """Full auto loop: resolve → stage → test → continue, with retries."""
