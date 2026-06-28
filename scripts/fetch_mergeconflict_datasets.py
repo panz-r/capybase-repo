@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import shutil
 import subprocess
@@ -73,19 +74,37 @@ TESTDATA = DATA_ROOT / "extracted-testdata" / "realworld"
 
 @dataclass(frozen=True)
 class Dataset:
+    """A harvestable conflict source. Two kinds:
+
+    - ``"archive"``: a downloadable tarball of pre-collected conflicts (e.g. the
+      Zenodo hdiff dataset). Fields: url, md5, archive_name, extract_subdir,
+      extractor.
+    - ``"git-history"``: a git repo whose resolved MERGE commits are mined for
+      real-world conflicts (e.g. serde/tokio/clap). Fields: url (clone url),
+      extract_subdir (clone dir), extractor, merge_limit (how many merges to
+      scan). No md5 (history grows); no archive.
+    """
+
     id: str
+    kind: str  # "archive" | "git-history"
     url: str
-    md5: str
-    archive_name: str
-    extract_subdir: str  # dir under external-datasets/ after extraction
-    extractor: str       # name of the extractor function in EXTRACTORS
     license: str
     source_url: str
+    # archive-kind fields:
+    md5: str = ""
+    archive_name: str = ""
+    # shared: where the extractor reads from under external-datasets/
+    extract_subdir: str = ""
+    # extractor function name in EXTRACTORS
+    extractor: str = ""
+    # git-history-kind fields:
+    merge_limit: int = 200  # cap merge commits scanned (history can be huge)
 
 
 DATASETS: dict[str, Dataset] = {
     "zenodo-hdiff": Dataset(
         id="zenodo-hdiff",
+        kind="archive",
         url="https://zenodo.org/records/3751038/files/dataset-hdiff.tar.gz",
         md5="da8436fb47726c5d5a93c040183fbb84",
         archive_name="dataset-hdiff.tar.gz",
@@ -93,6 +112,16 @@ DATASETS: dict[str, Dataset] = {
         extractor="hdiff_aobm",
         license="CC-BY-4.0",
         source_url="https://zenodo.org/records/3751038",
+    ),
+    "serde-history": Dataset(
+        id="serde-history",
+        kind="git-history",
+        url="https://github.com/serde-rs/serde.git",
+        extract_subdir="serde",
+        extractor="git_history",
+        license="MIT",
+        source_url="https://github.com/serde-rs/serde",
+        merge_limit=200,
     ),
 }
 
@@ -160,7 +189,46 @@ def extract(dataset: Dataset) -> Path:
     return dest
 
 
-def _human_size(dataset: Dataset) -> str:
+def clone_repo(dataset: Dataset) -> Path:
+    """Clone a git-history dataset (blob-filtered, no checkout) for mining.
+
+    Uses ``--filter=blob:none`` so only the blobs the extractor reads (via
+    ``git show <commit>:<path>``) are fetched on demand — a full serde clone is
+    under a second vs. hundreds of MB for a full checkout. Idempotent: skips an
+    already-cloned repo.
+    """
+    dest = EXTERNAL / dataset.extract_subdir
+    if dest.exists() and (dest / ".git").exists():
+        print(f"  [skip] {dest} already cloned")
+        return dest
+    EXTERNAL.mkdir(parents=True, exist_ok=True)
+    print(f"  [clone] {dataset.url}")
+    print(f"          -> {dest} (blob-filtered, no checkout)")
+    subprocess.run(
+        ["git", "clone", "--quiet", "--filter=blob:none", "--no-checkout",
+         dataset.url, str(dest)],
+        check=True, capture_output=True,
+    )
+    print(f"  [done] cloned to {dest}")
+    return dest
+
+
+def fetch(dataset: Dataset) -> Path:
+    """Acquire a dataset's raw data, dispatching by kind.
+
+    archive       -> download() + extract()
+    git-history   -> clone_repo()
+    Returns the path the extractor should read from.
+    """
+    if dataset.kind == "archive":
+        download(dataset)
+        return extract(dataset)
+    if dataset.kind == "git-history":
+        return clone_repo(dataset)
+    raise ValueError(f"unknown dataset kind: {dataset.kind}")
+
+
+
     # We don't know the size without a HEAD; hint from known datasets.
     return "~325MB" if "hdiff" in dataset.archive_name else "(unknown size)"
 
@@ -306,7 +374,106 @@ _LANG_FROM_CATEGORY = {
 
 EXTRACTORS = {
     "hdiff_aobm": iter_hdiff_conflicts,
+    "git_history": None,  # set below (needs the function defined first)
 }
+
+
+# ---------------------------------------------------------------------------
+# Extractor: git-history mining (serde / tokio / clap ...). Reconstructs real
+# conflicts from resolved merge commits — the path revealed by the
+# jinu-jang/conflict-collection toolkit. No dependency: reuses git plumbing
+# (git show <commit>:<path>, git merge-base, git merge-tree) + our build_markers.
+# ---------------------------------------------------------------------------
+
+
+def _git(repo: Path, *args: str, binary: bool = False) -> subprocess.CompletedProcess:
+    """Run a git command in ``repo``, returning the CompletedProcess.
+
+    ``check=False``: callers interpret per-command exit codes (e.g. merge-tree
+    exits 1 on conflict, which is the success case here).
+    """
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True, text=not binary,
+    )
+
+
+def _show_blob(repo: Path, ref: str, path: str) -> str | None:
+    """``git show <ref>:<path>`` content, or None if the path is absent at ref.
+
+    Absent = added or deleted on one side (a delete/modify conflict); we skip
+    those for round 1 (they need delete-aware handling) and only mine
+    modify/modify conflicts where all three of O/P1/P2 exist.
+    """
+    proc = _git(repo, "show", f"{ref}:{path}", binary=False)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout
+
+
+def _conflicted_files(repo: Path, p1: str, p2: str) -> list[str]:
+    """The files that genuinely conflict when merging P1 and P2.
+
+    Uses ``git merge-tree --write-tree --name-only``: exits 0 on a clean merge,
+    1 on conflict. On conflict, stdout's first line is the would-be tree sha;
+    subsequent lines name conflicted files (and some informational lines). We
+    extract the actual file paths from ``CONFLICT (content): Merge conflict in
+    <path>`` lines — the unambiguous, real conflict markers.
+    """
+    proc = _git(repo, "merge-tree", "--write-tree", "--name-only", p1, p2)
+    if proc.returncode == 0:
+        return []  # clean merge, no conflict
+    files: list[str] = []
+    for line in (proc.stdout or "").splitlines():
+        # "CONFLICT (content): Merge conflict in <path>"
+        if line.startswith("CONFLICT") and "Merge conflict in " in line:
+            path = line.split("Merge conflict in ", 1)[1].strip()
+            if path:
+                files.append(path)
+    return files
+
+
+def iter_git_history_conflicts(root: Path, *, merge_limit: int = 200):
+    """Yield ConflictTuples mined from a repo's resolved merge commits.
+
+    Walks merge commits (``git rev-list --merges``), and for each, runs
+    ``git merge-tree`` to find files that genuinely conflicted. For each
+    conflicting file present in all three of O(merge-base)/P1/P2 (modify/modify),
+    reconstructs the four versions via ``git show`` and yields a ConflictTuple
+    with the human merge (M) as ``merged`` and language classified by extension.
+
+    ``merge_limit`` caps how many merges we scan (history can be huge). Real
+    merge conflicts over real code are the point: the markers are regenerated by
+    ``build_markers`` downstream from O/P1/P2.
+    """
+    proc = _git(root, "rev-list", "--merges", f"--max-count={merge_limit}", "HEAD")
+    merges = [m for m in proc.stdout.splitlines() if m.strip()]
+    for m in merges:
+        p1 = _git(root, "rev-parse", f"{m}^1").stdout.strip()
+        p2 = _git(root, "rev-parse", f"{m}^2").stdout.strip()
+        if not p1 or not p2:
+            continue  # not a 2-parent merge (octopus / root)
+        base = _git(root, "merge-base", p1, p2).stdout.strip()
+        if not base:
+            continue  # no common ancestor (unrelated histories)
+        for path in _conflicted_files(root, p1, p2):
+            # Only modify/modify: all three of base/P1/P2 must have the file.
+            o = _show_blob(root, base, path)
+            a = _show_blob(root, p1, path)
+            b = _show_blob(root, p2, path)
+            merged = _show_blob(root, m, path)
+            if o is None or a is None or b is None or merged is None:
+                continue  # add/delete/modify — skip for round 1
+            lang = classify_language(merged, hint_path=path)
+            yield ConflictTuple(
+                folder=root,
+                base=o, current=a, replayed=b, merged=merged,
+                language=lang,
+            )
+
+
+# Register now that it's defined.
+EXTRACTORS["git_history"] = iter_git_history_conflicts
 
 
 # ---------------------------------------------------------------------------
@@ -363,11 +530,15 @@ def process(dataset: Dataset, *, language: str | None = "rust", limit: int | Non
         print(f"  [error] {root} not extracted; run --dataset {dataset.id} first")
         return 0
     extractor = EXTRACTORS[dataset.extractor]
+    # git-history extractors take a merge_limit kwarg; archive extractors don't.
+    kwargs: dict = {}
+    if "merge_limit" in inspect.signature(extractor).parameters:
+        kwargs["merge_limit"] = dataset.merge_limit
 
     lang_hist: Counter[str] = Counter()
     cases: list[dict] = []
     n = 0
-    for ct in extractor(root):
+    for ct in extractor(root, **kwargs):
         n += 1
         # The extractor already classified the language (extension → category-dir
         # → content heuristics). Fall back to "unknown" only if it couldn't.
@@ -469,9 +640,8 @@ def main(argv: list[str] | None = None) -> int:
     selected = list(DATASETS.values()) if args.dataset == "all" else [DATASETS[args.dataset]]
     total_cases = 0
     for ds in selected:
-        print(f"==> dataset: {ds.id} ({ds.license})")
-        download(ds)
-        extract(ds)
+        print(f"==> dataset: {ds.id} ({ds.kind}, {ds.license})")
+        fetch(ds)
         total_cases += process(ds, language=language, limit=args.limit)
         print()
     print(f"==> done. {total_cases} case(s) written to {TESTDATA}")
