@@ -20,9 +20,11 @@ The script's DATASETS registry selects the language and caps the case count
 zenodo-hdiff dataset has 4,298 Python conflicts (and JS/Java/Clojure/Lua/Shell)
 but no Rust; the Python cases run here against the always-on py_compile floor
 (no toolchain gate). The serde-history dataset mines real Rust merge conflicts
-from serde's git history; those Rust cases run an AUTHENTIC cargo check — the
-cloned repo is checked out at the merge commit M and ``cargo check`` runs the
-whole crate with real deps/edition/sibling files.
+from serde's git history; those Rust cases run an AUTHENTIC cargo check — M is
+checked out in a disposable git worktree of the cloned repo and ``cargo check``
+runs the whole crate with real deps/edition/sibling files. The shared clone is
+read-only (never checked out), so the Rust cases are interrupt- and xdist-safe
+(orphaned worktrees from a Ctrl-C'd run are pruned by the session fixture).
 
 Why not ``verify_file`` for Rust? Standalone ``rustc`` (and ``verify_file``
 against a bare tmp_path) can't resolve ``crate::``/``super::`` paths, so they
@@ -30,7 +32,8 @@ FALSE-POSITIVE on virtually every serde file (E0432). And ``verify_file``'s
 baseline/new-error model degenerates at M: the file is already the marker-free
 human merge, so baseline == after and it reports ``syntax_passed=True``
 regardless. The only honest check is the whole crate at the committed resolved
-state, which is what checking out M gives us.
+state, which is what checking out M in a worktree gives us. See
+``tests/_realworld_cargo.py`` for the worktree harness.
 
 Oracle policy: real-world M is the human merge, but it may NOT compile under our
 floor if the original repo had pre-existing errors or used a different toolchain.
@@ -44,9 +47,6 @@ flags real-world rough edges.
 from __future__ import annotations
 
 import shutil
-import subprocess
-import threading
-from pathlib import Path
 
 import pytest
 
@@ -56,6 +56,10 @@ from capybase.adapters.parsers import (
 )
 from capybase.verification import ValidationConfig, VerificationEngine
 
+from tests._realworld_cargo import (
+    cargo_check_at_worktree,
+    cleanup_orphan_worktrees,
+)
 from tests.realworld_loader import (
     RealWorldCase,
     git_history_repo_path,
@@ -77,81 +81,35 @@ CARGO = shutil.which("cargo")
 # Load once at import (cheap — a directory scan). Parametrization is stable.
 CASES = load_realworld_cases()
 
-# Serialize clone worktree mutations across parametrized Rust cases. Each Rust
-# case checks the shared serde clone out at its own merge commit; two cases
-# checking out different commits concurrently would race on the one worktree.
-# This lock makes the cases safe under threads / ``pytest -p no:xdist``. They
-# are NOT safe under ``pytest-xdist`` (separate processes don't share the lock)
-# — run this module without xdist, or set ``-p no:cacheprovider`` isolation.
-# That's acceptable: these cases are few (the miner caps conflicts) and each
-# checkout+check is I/O-bound, not CPU-bound, so parallelism wouldn't help.
-_CLONE_LOCK = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Session setup: prune any worktrees orphaned by an interrupted previous run.
+# ---------------------------------------------------------------------------
 
 
-def _cargo_check_at_merge(
-    clone: Path, merge_sha: str, *, timeout: int = 600
-) -> tuple[bool, list[str]]:
-    """Check out ``merge_sha`` in ``clone`` and run ``cargo check``.
+@pytest.fixture(autouse=True, scope="session")
+def _prune_orphan_worktrees():
+    """Remove git worktrees left behind by a Ctrl-C'd previous run.
 
-    This is the authentic compile signal for a real-world Rust conflict: at the
-    resolved merge commit M, the file IS the human merge, so checking the crate
-    out at M and running ``cargo check`` validates the committed resolution with
-    real deps, the real edition, and real sibling files — exactly the context
-    standalone ``rustc`` (and ``verify_file`` on a bare tmp_path) lack.
-
-    Restores the clone to its prior branch/HEAD in a ``finally`` so the shared
-    clone is left clean for the next case. Returns ``(ran, error_messages)``:
-    ``ran`` is False iff ``cargo`` couldn't engage (absent/timeout/crash) — the
-    infrastructure-invariant the caller asserts. ``error_messages`` (the cargo
-    error lines) are returned for honest reporting, NOT asserted: a real-world
-    merge that doesn't compile on our toolchain is an informative flag, not a
-    test failure (the original repo may carry pre-existing errors, a newer
-    edition, or platform-specific code).
+    Each Rust case checks out its merge commit in a disposable worktree of the
+    shared clone (see :func:`tests._realworld_cargo.cargo_check_at_worktree`).
+    The worktree is removed in a ``finally``, but an interrupt between creation
+    and cleanup orphans it. This fixture prunes those once per session before
+    the cases run, so leftover worktrees (and their build artifacts) don't
+    accumulate. Idempotent and safe: an already-clean clone is a no-op, and the
+    main clone itself is never touched.
     """
-    cargo = shutil.which("cargo")
-    if cargo is None:
-        return False, []
-
-    def _git(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(
-            ["git", "-C", str(clone), *args],
-            capture_output=True, text=True,
-        )
-
-    # Remember where the clone was so we can restore it (it may be on a branch
-    # or detached-HEAD from a prior case).
-    head_ref = _git("symbolic-ref", "-q", "HEAD")
-    prior = head_ref.stdout.strip() if head_ref.returncode == 0 else ""
-    if not prior:
-        # Detached HEAD: record the commit so we can return to it.
-        prior = _git("rev-parse", "HEAD").stdout.strip()
-
-    try:
-        # Check out the merge commit M (detached). The worktree now reflects the
-        # committed resolved state — the human merge is already on disk.
-        co = _git("checkout", "--quiet", merge_sha)
-        if co.returncode != 0:
-            return False, [co.stderr.strip()]
-        try:
-            proc = subprocess.run(
-                [cargo, "check", "--quiet", "--message-format=short"],
-                capture_output=True, text=True,
-                timeout=timeout, cwd=str(clone),
-            )
-        except subprocess.TimeoutExpired:
-            return False, [f"cargo check timed out after {timeout}s"]
-        ran = True
-        # ``--message-format=short`` emits ``error: ...`` lines on stderr.
-        errors = [
-            line for line in (proc.stderr or "").splitlines()
-            if line.lstrip().startswith("error")
-        ]
-        return ran, errors
-    finally:
-        if prior.startswith("refs/heads/"):
-            _git("checkout", "--quiet", prior[len("refs/heads/"):])
-        elif prior:
-            _git("checkout", "--quiet", prior)
+    # Only the datasets actually present have a clone to clean; missing clones
+    # (no data downloaded) are skipped — nothing to prune.
+    seen: set[str] = set()
+    for case in CASES:
+        if case.language != "rust" or case.dataset in seen:
+            continue
+        seen.add(case.dataset)
+        clone = git_history_repo_path(case.dataset)
+        if (clone / ".git").exists():
+            cleanup_orphan_worktrees(clone)
+    yield
 
 
 # ---------------------------------------------------------------------------
@@ -183,14 +141,16 @@ def test_realworld_human_merge_is_marker_free(case: RealWorldCase):
 # - **Python**: ``verify_file`` with the always-on ``py_compile`` floor. No
 #   toolchain gate (py_compile is always available). M is the whole resolved
 #   file, verified directly (no splice).
-# - **Rust**: ``cargo check`` checked out at the merge commit M in the cloned
-#   repo. This is the authentic signal: standalone ``rustc`` (and
+# - **Rust**: ``cargo check`` run in a disposable git worktree checked out at
+#   the merge commit M. This is the authentic signal: standalone ``rustc`` (and
 #   ``verify_file`` against a bare tmp_path) can't resolve ``crate::``/``super::``
 #   paths, so they FALSE-POSITIVE on virtually every serde file (E0432). Worse,
 #   ``verify_file``'s baseline/new-error model degenerates at M — the file is
 #   already the marker-free human merge, so baseline == after and it reports
 #   ``syntax_passed=True`` regardless. The only honest check is the whole crate
-#   at the committed resolved state, which is what checking out M gives us.
+#   at the committed resolved state, which is what checking out M (in a
+#   read-only-clone worktree) gives us. The worktree is removed afterward, so
+#   the shared clone is never mutated — interrupt- and xdist-safe.
 #
 # Neither path forces ``passed``. The oracle policy: a real-world merge that
 # compiles is a pass signal; one that doesn't is an informative flag (the
@@ -247,35 +207,39 @@ def test_realworld_python_merge_verifier_verdict(case: RealWorldCase, tmp_path):
 def test_realworld_rust_merge_cargo_verdict(case: RealWorldCase):
     """Rust: does the crate at merge commit M compile? (record honestly).
 
-    Checks out the cloned repo at M and runs ``cargo check`` — the authentic
-    whole-crate signal. ``verify_file``/standalone ``rustc`` can't do this: they
-    can't resolve ``crate::`` paths (E0432), and ``verify_file``'s baseline model
-    degenerates at M (the file is already marker-free). See the section comment.
+    Checks out M in a disposable worktree of the cloned repo and runs
+    ``cargo check`` — the authentic whole-crate signal. The shared clone is
+    read-only (never checked out), so this is interrupt- and xdist-safe: each
+    case builds in its own worktree that's removed afterward.
+    ``verify_file``/standalone ``rustc`` can't do this: they can't resolve
+    ``crate::`` paths (E0432), and ``verify_file``'s baseline model degenerates
+    at M (the file is already marker-free). See the section comment.
 
-    Asserts only that cargo ENGAGED (``ran``); the compile verdict is recorded,
-    not asserted — a real-world merge that doesn't build on our toolchain is an
-    informative flag, not a failure.
+    Asserts only that cargo ENGAGED (``verdict.ran``); the compile verdict is
+    recorded, not asserted — a real-world merge that doesn't build on our
+    toolchain is an informative flag, not a failure.
     """
     if case.language != "rust":
         pytest.skip("Rust-only cargo verdict (Python uses py_compile separately)")
     _rust_clone_or_skip(case)
     clone = git_history_repo_path(case.dataset)
-    # One worktree, many cases: serialize the checkout/check/restore so cases
-    # don't race on the clone's working tree.
-    with _CLONE_LOCK:
-        ran, errors = _cargo_check_at_merge(clone, case.merge_sha)
+    # A disposable worktree at M: the clone stays read-only, so no lock is
+    # needed and concurrent cases/workers can't race it.
+    verdict = cargo_check_at_worktree(clone, case.merge_sha)
     # Infrastructure invariant: cargo must have engaged. ``ran=False`` means it
-    # couldn't run (absent/timeout/crash) — that's an infra regression, not a
-    # real finding about the merge.
-    assert ran, (
+    # couldn't run (absent/timeout/worktree failed) — that's an infra regression,
+    # not a real finding about the merge.
+    assert verdict.ran, (
         f"{case.id}: cargo check did not engage at {case.merge_sha[:12]} "
-        f"(checkout failed, timeout, or cargo absent) — infrastructure "
-        f"regression, not a real finding."
+        f"(worktree materialization failed, timeout, or cargo absent) — "
+        f"infrastructure regression, not a real finding. errors={verdict.errors}"
     )
     # Record the verdict honestly (not asserted). A serde merge that compiles on
     # our toolchain is a strong pass signal; one that doesn't is an honest flag
     # (newer edition, platform-specific deps, pre-existing errors).
-    verdict = "PASS" if not errors else f"FAIL ({len(errors)} error(s))"
-    print(f"  {case.id}: cargo check at {case.merge_sha[:12]} ({case.conflict_path}): {verdict}")
-    for e in errors[:3]:
+    print(
+        f"  {case.id}: cargo check at {case.merge_sha[:12]} "
+        f"({case.conflict_path}): {verdict.verdict}"
+    )
+    for e in verdict.errors[:3]:
         print(f"    {e.strip()[:120]}")
