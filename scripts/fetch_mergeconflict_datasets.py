@@ -228,7 +228,14 @@ def fetch(dataset: Dataset) -> Path:
     raise ValueError(f"unknown dataset kind: {dataset.kind}")
 
 
+def _human_size(dataset: Dataset) -> str:
+    """A best-effort size hint for the download progress line.
 
+    We don't know an archive's size without a HEAD request (and a HEAD would
+    itself fetch headers per run), so we hint from the known datasets. Only
+    ``"archive"`` datasets are downloaded (git-history datasets clone), so this
+    is consulted solely from :func:`download` for archive-kind entries.
+    """
     # We don't know the size without a HEAD; hint from known datasets.
     return "~325MB" if "hdiff" in dataset.archive_name else "(unknown size)"
 
@@ -292,6 +299,12 @@ class ConflictTuple:
     replayed: str  # B
     merged: str    # M (human resolution)
     language: str | None  # classified from folder/extension/content
+    # git-history provenance (empty for archive datasets). ``merge_sha`` is the
+    # resolved merge commit M; ``conflict_path`` is the repo-relative path of
+    # the conflicting file. Together they let a test check the repo out at M and
+    # run the real toolchain against the committed human merge.
+    merge_sha: str = ""
+    conflict_path: str = ""
 
 
 def _match_aobm(folder: Path) -> tuple[Path, Path, Path, Path] | None:
@@ -469,6 +482,8 @@ def iter_git_history_conflicts(root: Path, *, merge_limit: int = 200):
                 folder=root,
                 base=o, current=a, replayed=b, merged=merged,
                 language=lang,
+                merge_sha=m,
+                conflict_path=path,
             )
 
 
@@ -566,6 +581,10 @@ def process(dataset: Dataset, *, language: str | None = "rust", limit: int | Non
             "marker_original": marker_original,
             "license": dataset.license,
             "source_url": dataset.source_url,
+            # git-history provenance (empty for archive datasets like hdiff).
+            # Lets a test check the repo out at M and run the real toolchain.
+            "merge_sha": ct.merge_sha,
+            "conflict_path": ct.conflict_path,
         })
 
     # Histogram report (the key diagnostic: what does this dataset contain?).

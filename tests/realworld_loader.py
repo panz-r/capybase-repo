@@ -24,9 +24,19 @@ from pathlib import Path
 # The gitignored generated-data root (DATA_ROOT-overridable in the fetch script;
 # here we resolve relative to the repo root regardless).
 REPO_ROOT = Path(__file__).resolve().parent.parent
-TESTDATA_DIR = Path(__import__("os").environ.get(
-    "DATA_ROOT", str(REPO_ROOT),
-)) / "extracted-testdata" / "realworld"
+_DATA_ROOT = Path(__import__("os").environ.get("DATA_ROOT", str(REPO_ROOT)))
+TESTDATA_DIR = _DATA_ROOT / "extracted-testdata" / "realworld"
+# Where the fetch script clones git-history datasets (e.g. serde) — mirrors
+# fetch_mergeconflict_datasets.EXTERNAL. A git-history dataset's clone lives at
+# ``EXTERNAL / <extract_subdir>``; see :func:`git_history_repo_path`.
+EXTERNAL_DIR = _DATA_ROOT / "external-datasets"
+
+# git-history dataset id -> the clone subdir name (matches the DATASETS registry
+# ``extract_subdir`` in the fetch script). Kept here so the test layer can find
+# a dataset's clone without importing the (side-effecting) fetch script.
+_GIT_HISTORY_CLONE_SUBDIR = {
+    "serde-history": "serde",
+}
 
 
 @dataclass(frozen=True)
@@ -51,11 +61,31 @@ class RealWorldCase:
     dataset: str
     license: str
     source_url: str
+    # git-history provenance (empty for archive datasets like zenodo-hdiff).
+    # ``merge_sha`` is the resolved merge commit M; ``conflict_path`` is the
+    # repo-relative path of the conflicting file. Together they let a test
+    # check the cloned repo out at M and run the real toolchain against the
+    # committed human merge — the authentic compile signal for Rust cases.
+    merge_sha: str = ""
+    conflict_path: str = ""
 
 
 def testdata_dir() -> Path:
     """The directory the fetch script writes JSON cases to."""
     return TESTDATA_DIR
+
+
+def git_history_repo_path(dataset_id: str) -> Path:
+    """The clone dir of a git-history dataset, or its (possibly-absent) path.
+
+    Mirrors :func:`fetch_mergeconflict_datasets.clone_repo`: a git-history
+    dataset's clone lives at ``external-datasets/<extract_subdir>``. Returns that
+    path whether or not the clone exists — callers test ``.exists()`` (or
+    ``(.git).exists()``) to decide whether the authentic toolchain check can
+    run. Returns the clone subdir for known git-history datasets; raises
+    ``KeyError`` for an unknown id (a programming error, not a runtime skip).
+    """
+    return EXTERNAL_DIR / _GIT_HISTORY_CLONE_SUBDIR[dataset_id]
 
 
 def load_realworld_cases() -> list[RealWorldCase]:
@@ -90,6 +120,8 @@ def load_realworld_cases() -> list[RealWorldCase]:
                 dataset=d.get("dataset", ""),
                 license=d.get("license", ""),
                 source_url=d.get("source_url", ""),
+                merge_sha=d.get("merge_sha", ""),
+                conflict_path=d.get("conflict_path", ""),
             )
         )
     return cases
