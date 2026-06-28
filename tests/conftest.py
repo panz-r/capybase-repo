@@ -44,8 +44,8 @@ def repo(tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_model_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the unit suite hermetic w.r.t. the model profile.
+def _isolate_model_profile(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep the unit suite hermetic w.r.t. the model profile AND the config dir.
 
     "Profile wins" overlays a saved profile onto every Orchestrator whose model
     name matches. A profile saved on a developer's machine (``capybase
@@ -58,8 +58,22 @@ def _isolate_model_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     loader is stashed on the class so tests that EXERCISE the overlay can opt
     back in via the ``real_profile_loader`` fixture below. The real ``capybase
     run``/``inspect``/``manual`` commands are unaffected (they don't import here).
+
+    Also redirects the capybase config dir (``XDG_CONFIG_HOME``) to a per-test
+    tmp path, so any test that calls the CLI without ``--config`` writes its
+    calibration/profile artifacts to an isolated dir, never the developer's real
+    ``~/.config/capybase``. Tests that assert on a specific config dir still pass
+    an explicit ``--config`` (which takes precedence over this env default).
     """
     import capybase.calibration_profile as cp
+
+    # Redirect the config dir to an isolated per-test temp dir, so a CLI call
+    # without --config writes calibration/profile artifacts there, never to the
+    # developer's real ~/.config/capybase. default_config_dir() reads
+    # XDG_CONFIG_HOME live, so this env override is sufficient.
+    xdg = tmp_path / "xdg-config"
+    xdg.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
 
     if not getattr(cp.ModelProfile, "_real_load", None):
         cp.ModelProfile._real_load = cp.ModelProfile.load

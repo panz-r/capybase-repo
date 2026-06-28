@@ -8,11 +8,38 @@ intentionally inert in the MVP.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+
+# The default artifacts filename each calibration artifact uses in the config
+# dir. Used to rewrite the repo-relative defaults (``.rebase-agent/memory/...``)
+# to config-dir-absolute paths at load time (see ``Config.load``).
+_PROFILE_FILENAME = "model_profile.json"
+_CALIBRATION_FILENAME = "calibration.json"
+# The repo-relative defaults from CalibrationConfig; ``Config.load`` rewrites
+# these (and only these) to live in the config dir so the user repo need not
+# duplicate calibration artifacts. An explicit value in the toml is always
+# respected.
+_REPO_DEFAULT_PROFILE_PATH = ".rebase-agent/memory/model_profile.json"
+_REPO_DEFAULT_CALIBRATION_PATH = ".rebase-agent/memory/calibration.json"
+
+
+def default_config_dir() -> Path:
+    """The shared capybase config dir, per the XDG Base Directory spec.
+
+    ``$XDG_CONFIG_HOME/capybase`` if ``XDG_CONFIG_HOME`` is set, else
+    ``~/.config/capybase``. capybase reads ``capybase.toml`` and the calibration
+    artifacts (``model_profile.json``, ``calibration.json``) from here, so the
+    user repo need not carry any capybase config. Override with ``--config DIR``.
+    """
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "capybase"
 
 
 class ModelConfig(BaseModel):
@@ -438,28 +465,81 @@ class Config(BaseModel):
     source_path: str | None = None
 
     @classmethod
-    def load(cls, path: str | Path | None = None) -> "Config":
-        """Load config from ``path``. If ``path`` is None, search for
-        ``capybase.toml`` in the current directory, then fall back to built-in
-        defaults."""
-        resolved = _resolve_config_path(path)
+    def load(
+        cls,
+        path: str | Path | None = None,
+        *,
+        config_dir: str | Path | None = None,
+    ) -> "Config":
+        """Load config from a toml file, the config dir, or built-in defaults.
+
+        Resolution (highest precedence first):
+        1. ``path`` — an explicit ``capybase.toml`` *file* (direct/test use).
+        2. Repo-local ``./capybase.toml`` (or ``capybase.local.toml``) in cwd —
+           per-repo overrides.
+        3. ``<config_dir>/capybase.toml`` — the user-global config dir (default
+           ``~/.config/capybase``; override with the CLI ``--config DIR``).
+        4. Built-in defaults.
+
+        After loading, the calibration artifacts' paths
+        (``model_profile.json``, ``calibration.json``) are rewritten to live in
+        ``config_dir`` — these are machine/user-specific, shared across repos,
+        so the user repo need not duplicate them. An explicit absolute path set
+        in the toml is always respected (a deliberate override). The RAG
+        experience store stays repo-relative (repo-specific merge patterns).
+        """
+        cdir = Path(config_dir).expanduser() if config_dir else default_config_dir()
+        resolved = _resolve_config_path(path, cdir)
         if resolved is None:
             cfg = cls()
-            return cfg
-        with open(resolved, "rb") as fh:
-            data = tomllib.load(fh)
-        cfg = cls.model_validate(data)
-        cfg.source_path = str(resolved)
+        else:
+            with open(resolved, "rb") as fh:
+                data = tomllib.load(fh)
+            cfg = cls.model_validate(data)
+            cfg.source_path = str(resolved)
+        # Rewrite the calibration artifacts to the config dir. A user repo has
+        # no business carrying calibration data — it's the model endpoint's
+        # capability profile, shared across every repo on this machine. Only the
+        # repo-relative defaults are rewritten; an explicit path in the toml is a
+        # deliberate override and is left alone.
+        _relocate_calibration_paths(cfg, cdir)
         return cfg
 
 
-def _resolve_config_path(path: str | Path | None) -> Path | None:
+def _resolve_config_path(
+    path: str | Path | None, config_dir: Path | None = None
+) -> Path | None:
+    """Find the toml to load: explicit file → repo-local → config dir → None."""
     if path is not None:
         p = Path(path)
         if not p.is_file():
             raise FileNotFoundError(f"config file not found: {p}")
         return p
-    for candidate in (Path("capybase.toml"), Path("capybase.local.toml")):
+    # Repo-local overrides (backward compat: a repo with its own toml wins).
+    # Resolve to absolute so ``source_path`` is stable regardless of cwd.
+    for name in ("capybase.toml", "capybase.local.toml"):
+        candidate = Path(name)
+        if candidate.is_file():
+            return candidate.resolve()
+    # User-global config dir (the default source for a repo with no toml).
+    if config_dir is not None:
+        candidate = config_dir / "capybase.toml"
         if candidate.is_file():
             return candidate
     return None
+
+
+def _relocate_calibration_paths(cfg: "Config", config_dir: Path) -> None:
+    """Rewrite the calibration artifact paths to the config dir.
+
+    ``model_profile.json`` and ``calibration.json`` are machine/user-specific
+    (the model endpoint's capability profile + fitted risk model), shared across
+    repos — so they live in the config dir, not each user repo. Only the
+    repo-relative *defaults* (``.rebase-agent/memory/...``) are rewritten; any
+    other value (an absolute path, or a different relative path) is a deliberate
+    override and is left untouched.
+    """
+    if cfg.calibration.model_profile_path == _REPO_DEFAULT_PROFILE_PATH:
+        cfg.calibration.model_profile_path = str(config_dir / _PROFILE_FILENAME)
+    if cfg.calibration.model_path == _REPO_DEFAULT_CALIBRATION_PATH:
+        cfg.calibration.model_path = str(config_dir / _CALIBRATION_FILENAME)

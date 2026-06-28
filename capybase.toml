@@ -1,7 +1,16 @@
 # capybase.toml — runtime configuration for the capybase rebase agent.
 #
-# Copy this file into your repo (or pass --config PATH) and adjust as needed.
-# Packaging metadata lives in pyproject.toml; this file is runtime only.
+# This file is a TEMPLATE / reference. The canonical place for it is the shared
+# config dir, so a user repo need NOT carry any capybase config:
+#
+#   ~/.config/capybase/capybase.toml      (or $XDG_CONFIG_HOME/capybase/)
+#   ~/.config/capybase/model_profile.json (written by `capybase calibrate`)
+#   ~/.config/capybase/calibration.json   (written by scripts/fit_calibration.py)
+#
+# capybase reads config + calibration from that dir by default; override with
+# `capybase --config <dir> ...`. A repo-local ./capybase.toml still takes
+# precedence (per-repo overrides), but the calibration/profile always default to
+# the config dir. Packaging metadata lives in pyproject.toml; this is runtime.
 
 [model]
 # OpenAI-compatible local endpoint (e.g. llama-server).

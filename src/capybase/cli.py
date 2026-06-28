@@ -34,7 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--version", action="version", version=f"capybase {__version__}")
     p.add_argument(
-        "--config", "-c", default=None, help="path to capybase.toml (default: ./capybase.toml)"
+        "--config", "-c", default=None,
+        help="path to the capybase config directory (reads capybase.toml, "
+             "model_profile.json, calibration.json from it; default: "
+             "~/.config/capybase). A repo-local ./capybase.toml still takes "
+             "precedence over the dir's.",
     )
     p.add_argument("--repo", default=".", help="path to the git repository (default: .)")
     p.add_argument("--session", default=None, help="explicit session id (default: generated)")
@@ -419,7 +423,11 @@ def _run_calibrate_embeddings(
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    config = Config.load(args.config)
+    # --config is a DIRECTORY (the shared config dir), not a file. capybase reads
+    # capybase.toml + calibration artifacts from it, so the user repo need not
+    # carry any capybase config. A repo-local ./capybase.toml still wins (per-repo
+    # overrides); see Config.load for the full precedence.
+    config = Config.load(config_dir=args.config)
 
     # The global --profile overrides the profile location for BOTH reading
     # (run/inspect/manual: the orchestrator overlay loads it from here) and

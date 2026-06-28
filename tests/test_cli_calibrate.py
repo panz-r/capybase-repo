@@ -210,17 +210,25 @@ def test_calibrate_overwrites_existing_profile(tmp_path: Path, monkeypatch):
 
 def test_recalibrate_subcommand_uses_default_profile_path(tmp_path: Path, monkeypatch):
     """``recalibrate`` is a bare alias for ``calibrate`` with the default path.
-    Verify the CLI routes it through ``_run_calibrate`` and writes the profile."""
+    Verify the CLI routes it through ``_run_calibrate`` and writes the profile.
+
+    The default profile path now lives in the config dir (not the repo), so we
+    point ``--config`` at an isolated dir and assert the profile lands there.
+    """
     from capybase.cli import main
 
-    # Run from inside the repo dir so the relative default path lands here.
-    monkeypatch.chdir(tmp_path)
+    cdir = tmp_path / "cfg"
+    cdir.mkdir()
+    # Run from inside a clean repo dir so no repo-local toml interferes.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
     monkeypatch.setattr(
         "capybase.cli._real_client", lambda _cfg: CalibClient(entropy=0.5)
     )
-    rc = main(["--repo", str(tmp_path), "recalibrate"])
+    rc = main(["--config", str(cdir), "--repo", str(repo), "recalibrate"])
     assert rc == 0
-    assert (tmp_path / DEFAULT_PROFILE_PATH).is_file()
+    assert (cdir / "model_profile.json").is_file()
 
 
 # ---------------------------------------------------------------------------
@@ -244,14 +252,18 @@ def test_global_profile_flag_directs_calibrate_write(tmp_path: Path, monkeypatch
 
 
 def test_global_profile_flag_default_unchanged(tmp_path: Path, monkeypatch):
-    """Without --profile, calibrate writes to the default memory path."""
+    """Without --profile, calibrate writes to the default path in the config dir."""
     from capybase.cli import main
 
-    monkeypatch.chdir(tmp_path)
+    cdir = tmp_path / "cfg"
+    cdir.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
     monkeypatch.setattr("capybase.cli._real_client", lambda _cfg: CalibClient(entropy=0.5))
-    rc = main(["--repo", str(tmp_path), "calibrate"])
+    rc = main(["--config", str(cdir), "--repo", str(repo), "calibrate"])
     assert rc == 0
-    assert (tmp_path / DEFAULT_PROFILE_PATH).is_file()
+    assert (cdir / "model_profile.json").is_file()
 
 
 # ---------------------------------------------------------------------------

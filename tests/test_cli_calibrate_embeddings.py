@@ -472,16 +472,23 @@ def test_calibrate_embeddings_first_run_shows_default_prior(tmp_path: Path):
 
 def test_calibrate_embeddings_subcommand_writes_default_path(tmp_path: Path, monkeypatch):
     """The ``calibrate-embeddings`` subcommand routes through the real client
-    builder; inject a fake so no network is touched and the default path is used."""
+    builder; inject a fake so no network is touched and the default path is used.
+
+    The default path now lives in the config dir, so we isolate it via --config.
+    """
     from capybase.cli import main
 
-    monkeypatch.chdir(tmp_path)
+    cdir = tmp_path / "cfg"
+    cdir.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.chdir(repo)
     monkeypatch.setattr(
         "capybase.cli._real_embeddings_client", lambda _cfg, _emb: _DomainFakeClient()
     )
-    rc = main(["--repo", str(tmp_path), "calibrate-embeddings"])
+    rc = main(["--config", str(cdir), "--repo", str(repo), "calibrate-embeddings"])
     assert rc == 0
-    assert (tmp_path / DEFAULT_PROFILE_PATH).is_file()
+    assert (cdir / "model_profile.json").is_file()
 
 
 def test_calibrate_embeddings_global_profile_flag_directs_write(tmp_path: Path, monkeypatch):
