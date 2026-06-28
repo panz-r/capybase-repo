@@ -166,6 +166,27 @@ def rehearse_rebase(
 
     worktree_path: Path | None = None
     dryrun_branch: str | None = None
+    # Install a SIGTERM/SIGHUP handler so a killed dry-run (e.g. `timeout`,
+    # closing the terminal) still runs the `finally` cleanup below. Python's
+    # default SIGTERM terminates immediately WITHOUT running finally, which
+    # would orphan the worktree + throwaway branch. SIGINT (Ctrl-C) already
+    # raises KeyboardInterrupt (so finally runs) — we only need to convert the
+    # terminate-style signals. Restored in finally so we don't leak the handler.
+    import signal
+
+    _signals = (signal.SIGTERM, getattr(signal, "SIGHUP", signal.SIGTERM))
+    _prev_handlers: dict[int, object] = {}
+
+    def _interrupt(signum, _frame):
+        from capybase.adapters.llm_openai import Interrupted
+        raise Interrupted(f"capybase interrupted by signal {signum}")
+
+    for _sig in _signals:
+        try:
+            _prev_handlers[_sig] = signal.signal(_sig, _interrupt)
+        except (ValueError, OSError):
+            pass  # not in main thread / unsupported — best effort
+
     try:
         # 2. Linked worktree at HEAD on a throwaway branch. Shares the object
         #    store (cheap), so the replayed commits/conflicts are genuine.
@@ -208,19 +229,38 @@ def rehearse_rebase(
         report.head_after = git.head_oid()  # real repo HEAD — must be unchanged
         return report
     finally:
-        # 6. Tear down the worktree + throwaway branch. Idempotent: a failed
-        #    worktree add leaves nothing to remove.
+        # 6. Tear down the worktree + throwaway branches. Idempotent: a failed
+        #    worktree add leaves nothing to remove. Runs even on a SIGTERM (the
+        #    handler above converts it to an exception that flows here). The
+        #    dry-run's rebase also creates backup branches (capybase/backup/...)
+        #    in the shared object store — those are pointless for a dry-run (the
+        #    real branch never moved), so prune any backups tagged with this
+        #    session's dryrun branch id.
         if worktree_path is not None and worktree_path.exists():
             git.remove_worktree(worktree_path, force=True)
         git.prune_worktrees()
         if dryrun_branch is not None:
+            # Delete the throwaway dry-run branch AND any backup branches the
+            # orchestrator created during the rehearsal (they carry the dryrun
+            # branch id in their name, e.g. capybase/backup/capybase-dryrun-<id>@...).
+            dryrun_id = dryrun_branch.split("/")[-1]
+            for ref in list(git.list_backup_refs()) + [dryrun_branch]:
+                if dryrun_id in ref:
+                    try:
+                        # Backup refs use the namespace guard; the dryrun branch
+                        # doesn't, so try both delete paths.
+                        if ref.startswith("capybase/backup/"):
+                            git.delete_ref(ref)
+                        else:
+                            git._run(["branch", "-D", ref], what="delete dryrun branch")
+                    except Exception:  # noqa: BLE001 - best-effort cleanup
+                        _log.debug("dry-run branch %s already gone", ref, exc_info=True)
+        # Restore the prior signal handlers so we don't leak the interrupt hook.
+        for _sig, _prev in _prev_handlers.items():
             try:
-                # delete via update-ref through the namespace-guarded path? No:
-                # dry-run branches live under a different namespace, so use the
-                # raw branch delete (we created it, we own it).
-                git._run(["branch", "-D", dryrun_branch], what="delete dryrun branch")
-            except Exception:  # noqa: BLE001 - best-effort cleanup
-                _log.debug("dry-run branch %s already gone", dryrun_branch, exc_info=True)
+                signal.signal(_sig, _prev)  # type: ignore[arg-type]
+            except (ValueError, OSError, TypeError):
+                pass
         _log.info(
             "dry-run complete: target=%s would_succeed=%s steps=%d llm_calls=%d",
             target, report.would_succeed, len(report.steps), report.llm_calls,

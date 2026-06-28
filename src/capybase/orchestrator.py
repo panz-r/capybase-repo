@@ -829,7 +829,56 @@ class Orchestrator:
             )
             return StepResult(step_index=self.step, escalated=False, continued=True)
         # 4b. The rebase stopped on a conflict: drive the resolution loop.
-        result = self.run()
+        # Install a SIGTERM/SIGHUP handler so a killed rebase aborts cleanly
+        # (returning the repo to start_oid via the backup) instead of leaving a
+        # stopped rebase in the user's repo. SIGINT (Ctrl-C) already raises
+        # KeyboardInterrupt; only the terminate-style signals need converting.
+        # Restored after the run so the handler doesn't leak.
+        import signal
+
+        _sigs = (signal.SIGTERM, getattr(signal, "SIGHUP", signal.SIGTERM))
+        _prev: dict[int, object] = {}
+
+        def _interrupt(signum, _frame):
+            from capybase.adapters.llm_openai import Interrupted
+            raise Interrupted(f"capybase interrupted by signal {signum}")
+
+        for _sig in _sigs:
+            try:
+                _prev[_sig] = signal.signal(_sig, _interrupt)
+            except (ValueError, OSError):
+                pass
+        try:
+            result = self.run()
+        except BaseException as exc:
+            # On ANY interruption (signal, KeyboardInterrupt, unexpected error)
+            # while a rebase is in progress, abort it so the repo isn't left
+            # stopped. The backup branch + start_oid let the user recover fully.
+            if self.git.rebase_in_progress():
+                self.git.abort_rebase()
+                self.journal.emit(
+                    "rebase_aborted",
+                    {"reason": f"interrupted: {exc}", "start_oid": start_oid,
+                     "backup_ref": backup_ref},
+                    git_head_after=self.git.head_oid(),
+                )
+                self.log.warning(
+                    "rebase interrupted and aborted: session=%s reason=%s "
+                    "restored_to=%s backup=%s",
+                    self.session_id, exc, start_oid[:8], backup_ref,
+                )
+                self.out(
+                    f"! rebase interrupted ({exc}) — aborted, repo back at "
+                    f"{start_oid[:8]}; backup branch {backup_ref} preserved. "
+                    f"Re-run `capybase rebase {target}` to retry."
+                )
+            raise
+        finally:
+            for _sig, _h in _prev.items():
+                try:
+                    signal.signal(_sig, _h)  # type: ignore[arg-type]
+                except (ValueError, OSError, TypeError):
+                    pass
         # 5. On a successful finish (conflicts resolved and replayed), surface
         #    the backup branch so the user can reclaim it after confirming.
         if not result.escalated:

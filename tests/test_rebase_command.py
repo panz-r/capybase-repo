@@ -208,6 +208,85 @@ def test_rebase_no_abort_preserves_stop(py_repo_before_rebase):
 
 
 # ---------------------------------------------------------------------------
+# Interruption safety: a SIGTERM mid-rebase aborts cleanly (no orphaned rebase).
+# ---------------------------------------------------------------------------
+
+
+def test_rebase_interrupt_aborts_cleanly(py_repo_before_rebase):
+    """An interruption during run() aborts the in-progress rebase and returns
+    the repo to its start, rather than leaving a stopped rebase behind.
+
+    The interrupt is a RuntimeError raised from run() itself (as the SIGTERM
+    handler produces — it raises between bytecodes in the main thread, NOT from
+    inside complete(), so the resolution engine's request-failure catch doesn't
+    swallow it). We monkeypatch run() to raise, exercising the real
+    abort-on-interrupt try/except.
+    """
+    repo = py_repo_before_rebase["repo"]
+    start_head = git(repo, "rev-parse", "HEAD").stdout.strip()
+    engine = ResolutionEngine(_config(repo).model, client=CyclingClient([]))
+    orch = Orchestrator(
+        _config(repo), repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    # Force run() to raise mid-rebase, as the SIGTERM handler would (Interrupted
+    # is a BaseException so the LLM retry wrapper can't swallow it).
+    def boom():
+        from capybase.adapters.llm_openai import Interrupted
+        raise Interrupted("capybase interrupted by signal 15")
+    orch.run = boom  # type: ignore[method-assign]
+    # The interrupt propagates; the rebase path catches it, aborts the
+    # in-progress rebase, journals the abort, and re-raises. Interrupted is a
+    # BaseException, so assert on BaseException.
+    with pytest.raises(BaseException, match="interrupted by signal"):
+        orch.rebase("main")
+    # CRITICAL: the rebase was aborted, not left stopped.
+    assert not _rebase_in_progress(repo), "rebase should have been aborted on interrupt"
+    # The repo is back at its original HEAD (the abort rolled back).
+    assert git(repo, "rev-parse", "HEAD").stdout.strip() == start_head
+    # The abort was journaled.
+    types = [e["event_type"] for e in _journal_events(orch)]
+    assert "rebase_aborted" in types
+    aborted = next(e for e in _journal_events(orch) if e["event_type"] == "rebase_aborted")
+    assert "interrupted" in aborted["payload"]["reason"]
+
+
+def test_rebase_sigterm_handler_converts_signal(py_repo_before_rebase, monkeypatch):
+    """The SIGTERM handler installed by rebase() converts the signal into a
+    RuntimeError that flows to the abort path. Verified by capturing the handler
+    registration rather than timing a real signal (racy with the fast fake)."""
+    import signal as _sig
+
+    repo = py_repo_before_rebase["repo"]
+    installed: list[object] = []
+    real_signal = _sig.signal
+
+    def spy_signal(sig, handler):
+        # Store the handler ARGUMENT (the callable we installed), not the
+        # return value (Python 3.14 returns a Handlers enum, not callable).
+        if int(sig) in (int(_sig.SIGTERM), int(getattr(_sig, "SIGHUP", _sig.SIGTERM))):
+            installed.append(handler)
+        return real_signal(sig, handler)
+
+    monkeypatch.setattr(_sig, "signal", spy_signal)
+    # run() raises so the handler is observed before rebase() restores defaults.
+    engine = ResolutionEngine(_config(repo).model, client=CyclingClient([]))
+    orch = Orchestrator(
+        _config(repo), repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    orch.run = lambda: (_ for _ in ()).throw(RuntimeError("boom"))  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        orch.rebase("main")
+    assert installed, "rebase() must install a SIGTERM/SIGHUP handler"
+    # The handler raises Interrupted (a BaseException) — converts the signal to
+    # an exception that the LLM retry wrapper can't swallow.
+    from capybase.adapters.llm_openai import Interrupted
+    with pytest.raises(Interrupted, match="interrupted by signal"):
+        installed[0](_sig.SIGTERM, None)
+
+
+# ---------------------------------------------------------------------------
 # Worktree preflight + autostash.
 # ---------------------------------------------------------------------------
 

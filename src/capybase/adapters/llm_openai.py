@@ -85,6 +85,10 @@ def _with_retry(
     ``max_delay``. A non-retryable exception propagates immediately on the first
     occurrence; a retryable one is retried up to ``attempts`` times, after which
     the final exception propagates.
+
+    :class:`Interrupted` (raised by the rebase/dry-run SIGTERM handler) is a
+    BaseException, so it bypasses the ``except Exception`` here and propagates
+    immediately — an interrupt must never be retried or swallowed.
     """
     last_exc: BaseException | None = None
     for i in range(max(1, attempts)):
@@ -106,6 +110,13 @@ def _with_retry(
             time.sleep(delay)
     assert last_exc is not None  # unreachable: loop runs >=1 and either returns or raises
     raise last_exc
+
+
+class Interrupted(BaseException):
+    """Raised when capybase is interrupted by a terminate signal (SIGTERM/SIGHUP)
+    during a rebase/dry-run. Subclasses BaseException (NOT Exception) so the LLM
+    retry wrapper's ``except Exception`` can't swallow it — an interrupt must
+    propagate to the rebase path's abort handler immediately."""
 
 
 class LLMResponse:
