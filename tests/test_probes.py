@@ -16,6 +16,7 @@ from capybase.probes import (
     _MAX_TOKENS_CEIL,
     _MIN_GEN_TIMEOUT,
     _apply_max_tokens_headroom,
+    probe_context_window,
     probe_end_to_end,
     probe_json_mode,
     probe_logprobs,
@@ -197,6 +198,61 @@ def test_logprobs_absent_when_no_entropy():
 
 
 # ---------------------------------------------------------------------------
+# context window discovery (/v1/models GET)
+# ---------------------------------------------------------------------------
+
+
+def _models_resp(body: bytes):
+    from unittest.mock import MagicMock
+    resp = MagicMock()
+    resp.__enter__ = lambda self: self
+    resp.__exit__ = MagicMock(return_value=False)
+    resp.read.return_value = body
+    return resp
+
+
+def test_context_window_discovered_from_models_endpoint():
+    from unittest.mock import patch
+    body = b'{"data":[{"id":"vibethink","context_length":32768},{"id":"other","context_length":4096}]}'
+    with patch("urllib.request.urlopen", return_value=_models_resp(body)):
+        r, window = probe_context_window(_cfg())
+    assert r.ok and window == 32768
+
+
+def test_context_window_accepts_alias_field_names():
+    from unittest.mock import patch
+    for field in ("context_length", "max_context_length", "context_window"):
+        body = f'{{"data":[{{"id":"vibethink","{field}":16384}}]}}'.encode()
+        with patch("urllib.request.urlopen", return_value=_models_resp(body)):
+            r, window = probe_context_window(_cfg())
+        assert r.ok and window == 16384, (field, window)
+
+
+def test_context_window_model_not_listed_returns_zero():
+    from unittest.mock import patch
+    body = b'{"data":[{"id":"other","context_length":4096}]}'
+    with patch("urllib.request.urlopen", return_value=_models_resp(body)):
+        r, window = probe_context_window(_cfg())
+    assert not r.ok and window == 0
+    assert "not found" in r.detail
+
+
+def test_context_window_endpoint_error_returns_zero():
+    from unittest.mock import patch
+    with patch("urllib.request.urlopen", side_effect=ConnectionError("boom")):
+        r, window = probe_context_window(_cfg())
+    assert not r.ok and window == 0
+
+
+def test_context_window_no_data_list_returns_zero():
+    from unittest.mock import patch
+    body = b'{"data":[]}'
+    with patch("urllib.request.urlopen", return_value=_models_resp(body)):
+        r, window = probe_context_window(_cfg())
+    assert not r.ok and window == 0
+
+
+# ---------------------------------------------------------------------------
 # end-to-end
 # ---------------------------------------------------------------------------
 
@@ -232,16 +288,20 @@ def test_run_calibration_assembles_profile_for_healthy_server():
     assert p.json_mode is True           # supported
     assert p.capture_token_entropy is True
     assert p.generation_timeout_seconds >= _MIN_GEN_TIMEOUT
-    # All seven probes ran (embeddings capability + mechanisms empirical A/B).
+    # All eight probes ran (context_window discovery + embeddings capability +
+    # mechanisms empirical A/B). context_window is 0 because the test's fake
+    # server doesn't serve /v1/models, so the probe reports not-ok (disabled).
     assert [r.name for r in report.results] == [
         "reachability",
         "max_tokens",
+        "context_window",
         "json_mode",
         "logprobs",
         "embeddings",
         "end_to_end",
         "mechanisms",
     ]
+    assert p.context_window == 0  # /v1/models not served in the fake harness
     assert p.enable_embedding_rag is False  # CalibClient doesn't serve embeddings
 
 

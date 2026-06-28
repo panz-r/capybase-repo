@@ -137,12 +137,54 @@ class ConflictUnit(BaseModel):
 
 
 class TokenBudget(BaseModel):
-    total: int = 4096
+    """The input-token budget for one LLM resolve prompt.
+
+    ``total`` is the model's context window (0 = disabled → no enforcement,
+    the historical default). ``reserved_for_completion`` is held back for the
+    model's answer. :attr:`available` is what the prompt's INPUT must fit in;
+    the prompt builder trims augmentation sections (few-shot, deps, surrounding
+    context) to stay within it, always protecting the conflict sides + JSON
+    contract.
+
+    Built via :meth:`from_config` from a ``ModelConfig`` (whose
+    ``context_window``/``completion_reserve`` fields), or constructed directly
+    for tests.
+    """
+
+    total: int = 0
     reserved_for_completion: int = 1024
 
     @property
     def available(self) -> int:
+        # total == 0 means "no window configured" → available 0 signals "do not
+        # enforce" to the prompt builder (it short-circuits, current behavior).
+        if self.total <= 0:
+            return 0
         return max(0, self.total - self.reserved_for_completion)
+
+    @property
+    def enabled(self) -> bool:
+        """True iff a context window is configured and enforcement is active."""
+        return self.total > 0
+
+    @classmethod
+    def from_config(cls, model_cfg: Any) -> "TokenBudget":
+        """Build a budget from a ``ModelConfig``'s window/reserve fields."""
+        return cls(
+            total=int(getattr(model_cfg, "context_window", 0) or 0),
+            reserved_for_completion=int(getattr(model_cfg, "completion_reserve", 1024) or 1024),
+        )
+
+
+def estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars/token, minimum 1 for any non-empty text.
+
+    A conservative heuristic (real tokenizers vary 3-4 chars/token by language).
+    Erring slightly high means we trim a touch more than strictly necessary,
+    which is the safe direction (an over-long prompt truncates silently on the
+    server side; a slightly-trimmed prompt just loses a little augmentation).
+    """
+    return max(1, len(text) // 4) if text else 0
 
 
 class ContextBundle(BaseModel):
@@ -216,6 +258,11 @@ class CandidateResolution(BaseModel):
     failure_kind: Literal[
         "", "model_refusal", "request_failed", "parse_failed", "truncated", "lsp_failed"
     ] = ""
+    # Token-window trims applied to the prompt that produced this candidate
+    # (e.g. few-shot/deps/anchor dropped to fit the context window). Empty when
+    # no budget was configured or nothing was trimmed. Carried on the candidate
+    # so the orchestrator can journal per-resolution trimming (observability).
+    prompt_trims: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

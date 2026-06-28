@@ -46,6 +46,12 @@ class ModelProfile:
     json_mode: bool
     capture_token_entropy: bool
     generation_timeout_seconds: int
+    # Model context window (input token budget), discovered from the server's
+    # /v1/models endpoint (its ``context_length``). 0 = unknown/disabled → the
+    # resolve prompt is sent unbounded (no trimming), the backward-compatible
+    # default. When set, the prompt is capped to this window (see
+    # resolution_engine token-window enforcement).
+    context_window: int = 0
     # Mechanism choices (empirically A/B-selected by probe_mechanisms against
     # the blessed corpus). Defaults below = current built-in behavior (samples=1,
     # all mechanisms off), so a profile that omits them (or an older profile) is
@@ -95,6 +101,7 @@ class ModelProfile:
             json_mode=bool(d.get("json_mode", True)),
             capture_token_entropy=bool(d.get("capture_token_entropy", False)),
             generation_timeout_seconds=int(d.get("generation_timeout_seconds", 60)),
+            context_window=int(d.get("context_window", 0)),
             samples=int(d.get("samples", 1)),
             two_pass=bool(d.get("two_pass", False)),
             plan_search=bool(d.get("plan_search", False)),
@@ -155,6 +162,7 @@ PROFILE_KNOBS = (
     "json_mode",
     "capture_token_entropy",
     "generation_timeout_seconds",
+    "context_window",
     "samples",
     "two_pass",
     "plan_search",
@@ -194,6 +202,7 @@ def apply_profile(
         "json_mode": profile.json_mode,
         "capture_token_entropy": profile.capture_token_entropy,
         "generation_timeout_seconds": profile.generation_timeout_seconds,
+        "context_window": profile.context_window,
         "samples": profile.samples,
         "two_pass": profile.two_pass,
         "plan_search": profile.plan_search,

@@ -184,6 +184,76 @@ def probe_reachability(client: Any, model_cfg: ModelConfig) -> ProbeResult:
     return ProbeResult("reachability", ok=True, detail=f"replied: {(resp.text or '')[:40]!r}")
 
 
+def probe_context_window(model_cfg: ModelConfig) -> tuple[ProbeResult, int]:
+    """Discover the model's context window from the server's ``/v1/models`` list.
+
+    llama-server (and other OpenAI-compatible servers) expose each model's
+    ``context_length`` via ``GET /v1/models``. We find the entry whose ``id``
+    matches ``model_cfg.model`` and read its size, accepting the common field
+    aliases (``context_length``, ``max_context_length``, ``context_window``).
+
+    Returns ``(ProbeResult, context_window_tokens)``. On any failure — endpoint
+    missing, the field absent, the model not listed, a network error — returns
+    ``(ok=False, 0)``. A 0 window means "unknown/disabled": the resolve prompt
+    is sent unbounded (no trimming), the backward-compatible default. Never
+    raises; mirrors :func:`probe_embeddings`'s report-don't-abort contract.
+
+    Direct urllib GET (not a chat completion), so this doesn't consume a
+    generation slot and is cheap enough to always run during calibration.
+    """
+    import json
+    import urllib.request
+
+    url = model_cfg.base_url.rstrip("/") + "/models"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {model_cfg.api_key}",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 - report, never abort calibrate
+        return ProbeResult(
+            "context_window", ok=False,
+            detail=f"/v1/models unreachable: {exc}",
+        ), 0
+
+    # The OpenAI shape is {"data": [{"id": ..., "context_length": N}, ...]}.
+    # Some servers use a top-level list; tolerate both.
+    models = raw.get("data") if isinstance(raw, dict) else raw
+    if not isinstance(models, list):
+        return ProbeResult(
+            "context_window", ok=False,
+            detail="/v1/models returned no model list",
+        ), 0
+    for entry in models:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("id") != model_cfg.model:
+            continue
+        # Accept the common aliases; servers are inconsistent here.
+        for field in ("context_length", "max_context_length", "context_window"):
+            val = entry.get(field)
+            if isinstance(val, (int, float)) and val > 0:
+                window = int(val)
+                return ProbeResult(
+                    "context_window", ok=True,
+                    detail=f"{model_cfg.model!r} context_length={window} ({field})",
+                ), window
+        return ProbeResult(
+            "context_window", ok=False,
+            detail=f"{model_cfg.model!r} listed but no context_length field; set [model] context_window manually",
+        ), 0
+    return ProbeResult(
+        "context_window", ok=False,
+        detail=f"{model_cfg.model!r} not found in /v1/models; set [model] context_window manually",
+    ), 0
+
+
 def probe_max_tokens(client: Any, model_cfg: ModelConfig) -> tuple[ProbeResult, int, list[float]]:
     """Walk the max_tokens ladder and return (result, best_max_tokens, latencies).
 
@@ -624,6 +694,7 @@ def run_calibration(
             json_mode=_DEFAULT_JSON_MODE,
             capture_token_entropy=_DEFAULT_LOGPROBS,
             generation_timeout_seconds=_DEFAULT_GEN_TIMEOUT,
+            context_window=0,
             avg_latency_ms=0.0,
             probed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             capybase_version=getattr(capybase, "__version__", ""),
@@ -633,6 +704,11 @@ def run_calibration(
 
     mt_result, max_tokens, latencies = probe_max_tokens(client, model_cfg)
     results.append(mt_result)
+
+    # Context window discovery (cheap GET to /v1/models). 0 = unknown/disabled;
+    # never aborts calibration. Done early so the profile carries it.
+    cw_result, context_window = probe_context_window(model_cfg)
+    results.append(cw_result)
 
     # Use the tuned budget for the remaining probes so they reflect reality.
     tuned_cfg = model_cfg.model_copy(update={"max_tokens": max_tokens})
@@ -675,6 +751,10 @@ def run_calibration(
         notes.append("json_mode disabled (server rejected or mishandled response_format)")
     if not lp_result.ok:
         notes.append("logprobs unavailable; capture_token_entropy off")
+    if not cw_result.ok:
+        notes.append(f"context window not discovered: {cw_result.detail}")
+    else:
+        notes.append(f"context window {context_window} tokens; prompt trimming enabled")
     if not emb_result.ok:
         notes.append("embeddings unavailable; RAG stays lexical (BM25)")
     else:
@@ -691,6 +771,7 @@ def run_calibration(
         json_mode=jm_result.ok,
         capture_token_entropy=lp_result.ok,
         generation_timeout_seconds=_gen_timeout_from_latency(latencies),
+        context_window=context_window,
         samples=choices.samples,
         two_pass=choices.two_pass,
         plan_search=choices.plan_search,

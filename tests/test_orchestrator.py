@@ -156,6 +156,55 @@ def test_run_resolves_and_continues(conflicted_repo):
     assert "replayed change" in log
 
 
+def test_run_journals_prompt_trims_when_context_window_is_tight(conflicted_repo):
+    """With context_window set, an over-large prompt is trimmed and the trims
+    are journaled on the candidate_generated event."""
+    repo = conflicted_repo["repo"]
+    cfg = _config(repo)
+    # A very tight window: the boilerplate (intro+contract+rules) is ~300 tokens,
+    # so even this small conflict's full prompt exceeds it → augmentations trimmed.
+    cfg.model.context_window = 350
+    cfg.model.completion_reserve = 10
+    payload = _make_resolved_payload("    return 'hi' + 'howdy'")
+    engine = ResolutionEngine(cfg.model, client=CyclingClient([payload]))
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    orch.run()
+    # Read the journal and find a candidate_generated event with prompt_trims.
+    events = []
+    for line in orch.paths.journal.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            d = json.loads(line)
+            if d["event_type"] == "candidate_generated":
+                events.append(d.get("payload", {}))
+    trimmed = [e for e in events if e.get("prompt_trims")]
+    assert trimmed, "expected a candidate_generated event carrying prompt_trims"
+    assert any(t["section"] for t in trimmed[0]["prompt_trims"])
+
+
+def test_run_no_prompt_trims_when_context_window_disabled(conflicted_repo):
+    """context_window=0 (default) → no trimming, no prompt_trims in the journal."""
+    repo = conflicted_repo["repo"]
+    cfg = _config(repo)
+    assert cfg.model.context_window == 0  # disabled by default
+    payload = _make_resolved_payload("    return 'hi' + 'howdy'")
+    engine = ResolutionEngine(cfg.model, client=CyclingClient([payload]))
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    orch.run()
+    for line in orch.paths.journal.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            d = json.loads(line)
+            if d["event_type"] == "candidate_generated":
+                assert not d.get("prompt_trims"), "no trims when window disabled"
+
+
 def test_run_escalates_when_model_returns_markers(conflicted_repo):
     repo = conflicted_repo["repo"]
     # model keeps returning a leaked marker across all retries -> escalate

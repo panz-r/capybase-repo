@@ -136,6 +136,17 @@ capybase calibrate --dry-run     # fast: capabilities only, no mechanism sweep
 capybase calibrate               # full: capabilities + mechanism A/B selection
 ```
 
+Calibration also discovers the model's **context window** from the server's
+`/v1/models` endpoint (its `context_length`) and stores it in the profile. When
+set, capybase caps each resolve prompt to that window: the three conflict sides
+and the JSON contract are always sent intact, and the augmentation sections
+(few-shot examples, cross-file deps, surrounding context) are trimmed
+lowest-value-first to fit. A unit whose conflict alone exceeds the window is
+still sent (the model must see the conflict). Set `[model] context_window`
+manually in `capybase.toml` if your server doesn't expose the endpoint; `0`
+(the default) disables trimming entirely. Any trimming is recorded on the
+session journal's `candidate_generated` events (`prompt_trims`).
+
 **Run against a specific profile** with the global `--profile PATH` flag. It sets
 the profile location for *every* command — where `calibrate` writes it and where
 `run`/`inspect`/`manual` read it back from:

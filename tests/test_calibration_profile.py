@@ -38,6 +38,7 @@ def _profile(**over) -> ModelProfile:
         json_mode=False,
         capture_token_entropy=True,
         generation_timeout_seconds=240,
+        context_window=32768,
         samples=3,
         two_pass=True,
         plan_search=False,
@@ -156,6 +157,7 @@ def test_apply_profile_overlays_tuned_knobs_when_names_match():
     assert new_cfg.json_mode is False
     assert new_cfg.capture_token_entropy is True
     assert new_cfg.generation_timeout_seconds == 240
+    assert new_cfg.context_window == 32768
     # Mechanism choices overlaid too.
     assert new_cfg.samples == 3
     assert new_cfg.two_pass is True
@@ -210,6 +212,7 @@ def test_apply_profile_reports_only_changed_knobs():
         json_mode=cfg.json_mode,
         capture_token_entropy=cfg.capture_token_entropy,
         generation_timeout_seconds=cfg.generation_timeout_seconds,
+        context_window=cfg.context_window,
         samples=cfg.samples,
         two_pass=cfg.two_pass,
         plan_search=cfg.plan_search,

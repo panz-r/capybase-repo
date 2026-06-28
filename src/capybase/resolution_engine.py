@@ -28,7 +28,9 @@ from capybase.conflict_model import (
     CandidateResolution,
     ConflictUnit,
     ContextBundle,
+    TokenBudget,
     VerificationFailure,
+    estimate_tokens,
 )
 from capybase.config import ModelConfig
 from capybase.consensus import ConsensusReport, rank_by_consensus
@@ -60,7 +62,119 @@ def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
     return unit.current.text, unit.base.text, unit.replayed.text
 
 
-def _resolve_prompt_parts(unit: ConflictUnit, context: ContextBundle):
+def _fit_to_budget(
+    *,
+    budget: TokenBudget | None,
+    intro: str,
+    contract: str,
+    rules: str,
+    sides_text: str,
+    structural_anchor: str,
+    siblings_block: str,
+    deps: str,
+    few_shot: str,
+    primary_text: str,
+) -> tuple[str, str, str, str, str, list[dict]]:
+    """Trim the prompt's AUGMENTATION sections to fit ``budget``, protecting the
+    essential conflict sides + the JSON contract.
+
+    The essential content (``intro``, ``contract``, ``rules`` — the fixed JSON
+    schema boilerplate — and ``sides_text`` — the three conflict sides) is NEVER
+    trimmed. The augmentations are trimmed in priority order (lowest-value
+    first) until the assembled prompt fits the budget's ``available`` tokens, or
+    all augmentations are exhausted:
+
+    1. ``few_shot`` (similar-past-merge examples) — dropped wholesale.
+    2. ``deps`` (cross-file dependency snippets) — dropped wholesale.
+    3. ``structural_anchor`` (the enclosing AST node text) — dropped, keeping
+       nothing (the sides still carry the actual code).
+    4. ``siblings_block`` — dropped.
+    5. ``primary_text`` (surrounding file context) — truncated to the lines
+       nearest the conflict, never below a 1-line floor.
+
+    Returns ``(anchor, siblings, deps, few_shot, primary_text, trims)`` where
+    ``trims`` is a list of ``{section, detail}`` dicts for journalling. When
+    ``budget`` is None or disabled (total <= 0), this is a no-op: all sections
+    pass through unchanged and ``trims`` is empty (current behavior).
+
+    If the essential content ALONE exceeds the budget, the augmentations are all
+    dropped and the prompt is returned with a ``context_budget_exceeded`` trim
+    note (per the "protect the conflict" policy — the model always sees the
+    conflict; we never trim the sides).
+    """
+    trims: list[dict] = []
+    # No budget / disabled → unbounded (current behavior).
+    if budget is None or not budget.enabled:
+        return structural_anchor, siblings_block, deps, few_shot, primary_text, trims
+
+    # System message is a fixed ~12 tokens; account for it once.
+    system_tokens = 12
+    overhead = estimate_tokens(intro + contract + rules) + system_tokens
+    essential = estimate_tokens(sides_text)
+    available_for_augmentation = budget.available - overhead - essential
+
+    # If the essential content alone blows the window, drop ALL augmentations
+    # and flag it. The sides still go (protect-the-conflict policy).
+    if available_for_augmentation <= 0:
+        if structural_anchor or siblings_block or deps or few_shot or primary_text:
+            trims.append({
+                "section": "all_augmentations",
+                "detail": (
+                    f"essential content ({essential}t) + overhead ({overhead}t) "
+                    f"already meets/exceeds window {budget.total}t; dropped all "
+                    f"augmentation sections (sides protected)"
+                ),
+            })
+        return "", "", "", "", "", trims
+
+    # Otherwise fit the augmentations in. We measure the running token total of
+    # the augmentation sections and trim lowest-value-first until it fits.
+    anchor = structural_anchor
+    siblings = siblings_block
+    dep_block = deps
+    shot = few_shot
+    primary = primary_text
+
+    def _aug_tokens() -> int:
+        return estimate_tokens(anchor + siblings + dep_block + shot + primary)
+
+    # 1. Drop few-shot examples.
+    if _aug_tokens() > available_for_augmentation and shot:
+        shot = ""
+        trims.append({"section": "few_shot", "detail": "dropped similar-past-merge examples"})
+    # 2. Drop cross-file deps.
+    if _aug_tokens() > available_for_augmentation and dep_block:
+        dep_block = ""
+        trims.append({"section": "deps", "detail": "dropped cross-file dependency snippets"})
+    # 3. Drop the enclosing-node text of the structural anchor.
+    if _aug_tokens() > available_for_augmentation and anchor:
+        anchor = ""
+        trims.append({"section": "structural_anchor", "detail": "dropped enclosing AST node text"})
+    # 4. Drop sibling entities.
+    if _aug_tokens() > available_for_augmentation and siblings:
+        siblings = ""
+        trims.append({"section": "siblings", "detail": "dropped sibling entity signatures"})
+    # 5. Truncate surrounding context (primary_text) to the lines nearest the
+    #    conflict. Keep at least 1 line so the model has SOME surrounding frame.
+    if _aug_tokens() > available_for_augmentation and primary:
+        plines = primary.split("\n")
+        kept = len(plines)
+        while kept > 1 and estimate_tokens(anchor + siblings + dep_block + shot + "\n".join(plines[:kept])) > available_for_augmentation:
+            kept -= 1
+        primary = "\n".join(plines[:kept])
+        trims.append({
+            "section": "primary_text",
+            "detail": f"truncated surrounding context to {kept}/{len(plines)} lines",
+        })
+
+    return anchor, siblings, dep_block, shot, primary, trims
+
+
+def _resolve_prompt_parts(
+    unit: ConflictUnit,
+    context: ContextBundle,
+    budget: TokenBudget | None = None,
+):
     """Build the reusable building blocks of the resolve prompt.
 
     The resolve prompt is composed of stable parts (intro, sides, contract,
@@ -68,6 +182,12 @@ def _resolve_prompt_parts(unit: ConflictUnit, context: ContextBundle):
     re-order or re-frame them without re-deriving the data — guaranteeing the
     spliced-resolved_text contract is invariant across variants. Returns a dict
     of named string fragments plus the already-rendered baseline sections.
+
+    ``budget`` (when enabled) caps the prompt to the model's context window:
+    augmentation sections (few-shot, deps, anchor, surrounding context) are
+    trimmed to fit, protecting the three sides + JSON contract. The trims are
+    returned as ``trims`` for the caller to journal. When ``budget`` is None or
+    disabled, this is a no-op (current behavior).
     """
     cur_lines, base_lines, rep_lines = _prompt_sides(unit)
     sv = context.structural_view
@@ -118,17 +238,6 @@ def _resolve_prompt_parts(unit: ConflictUnit, context: ContextBundle):
         f"file: {unit.path}\n"
         f"language: {unit.language or 'unknown'}\n\n"
     )
-    # The non-instruction sections (anchor, siblings, deps, few-shot, three
-    # sides, context) form one contiguous block that variants keep together —
-    # re-ordering *within* it would risk disturbing the anchor/few-shot coupling
-    # to the sides.
-    data_block = (
-        f"{structural_anchor}{siblings_block}{deps}{few_shot}"
-        f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
-        f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
-        f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
-        f"Surrounding file context:\n{context.primary_text}\n\n"
-    )
     contract = (
         "Your resolved_text REPLACES the whole conflict marker block (``<<<<<<<``\n"
         "through ``>>>>>>>``) and is spliced in verbatim. End with ONE ```json fenced\n"
@@ -160,18 +269,56 @@ def _resolve_prompt_parts(unit: ConflictUnit, context: ContextBundle):
         "- Output the ```json block last; nothing after it.\n"
         "- If you cannot merge safely, set needs_human=true and explain.\n"
     )
-    return {"intro": intro, "data": data_block, "contract": contract, "rules": rules}
+    # Token-window enforcement: the three sides + boilerplate (intro/contract/
+    # rules) are ESSENTIAL and never trimmed; the augmentation sections (anchor,
+    # siblings, deps, few-shot, surrounding context) are trimmed to fit. The
+    # sides_text mirrors exactly what the data_block renders for the sides so
+    # _fit_to_budget's "essential" accounting is accurate.
+    sides_text = (
+        f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
+        f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
+        f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
+    )
+    anchor_t, siblings_t, deps_t, few_shot_t, primary_t, trims = _fit_to_budget(
+        budget=budget,
+        intro=intro,
+        contract=contract,
+        rules=rules,
+        sides_text=sides_text,
+        structural_anchor=structural_anchor,
+        siblings_block=siblings_block,
+        deps=deps,
+        few_shot=few_shot,
+        primary_text=context.primary_text,
+    )
+    # The non-instruction sections (anchor, siblings, deps, few-shot, three
+    # sides, context) form one contiguous block that variants keep together —
+    # re-ordering *within* it would risk disturbing the anchor/few-shot coupling
+    # to the sides.
+    data_block = (
+        f"{anchor_t}{siblings_t}{deps_t}{few_shot_t}"
+        f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
+        f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
+        f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
+        f"Surrounding file context:\n{primary_t}\n\n"
+    )
+    return {"intro": intro, "data": data_block, "contract": contract, "rules": rules, "trims": trims}
 
 
-def build_resolve_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
+def build_resolve_prompt(
+    unit: ConflictUnit,
+    context: ContextBundle,
+    budget: TokenBudget | None = None,
+) -> str:
     """The baseline resolve prompt.
 
     Composes the canonical part ordering (intro → data → contract → rules) from
     ``_resolve_prompt_parts``. Prompt variants (``build_resolve_prompt_variants``)
     re-use these exact parts so the spliced-output contract is identical across
-    phrasings.
+    phrasings. ``budget`` (when enabled) trims augmentation sections to fit the
+    model's context window; disabled/None is a no-op (current behavior).
     """
-    p = _resolve_prompt_parts(unit, context)
+    p = _resolve_prompt_parts(unit, context, budget=budget)
     return p["intro"] + p["data"] + p["contract"] + p["rules"]
 
 
@@ -182,7 +329,10 @@ PROMPT_VARIANT_TAGS: tuple[str, ...] = ("", "#v1", "#v2")
 
 
 def build_resolve_prompt_variants(
-    unit: ConflictUnit, context: ContextBundle, k: int = 3
+    unit: ConflictUnit,
+    context: ContextBundle,
+    k: int = 3,
+    budget: TokenBudget | None = None,
 ) -> list[tuple[str, str]]:
     """Return up to ``k`` semantically-equivalent resolve prompts (survey §4).
 
@@ -206,8 +356,10 @@ def build_resolve_prompt_variants(
     robustness lever: correct merges tend to be stable across these phrasings,
     while incorrect logic is brittle, so the consensus cluster that survives
     multiple variants is a stronger correctness signal than any single sample.
+    ``budget`` (when enabled) trims augmentation sections; disabled/None is a
+    no-op.
     """
-    p = _resolve_prompt_parts(unit, context)
+    p = _resolve_prompt_parts(unit, context, budget=budget)
     intro, data, contract, rules = p["intro"], p["data"], p["contract"], p["rules"]
     variants: list[tuple[str, str]] = [
         (intro + data + contract + rules, ""),                      # v0 baseline
@@ -229,11 +381,13 @@ def build_retry_prompt(
     unit: ConflictUnit,
     context: ContextBundle,
     failures: Iterable[VerificationFailure],
+    budget: TokenBudget | None = None,
 ) -> str:
     feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
+    inner = build_resolve_prompt(unit, context, budget=budget)
     return f"""Your previous merge attempt was rejected. Fix it.
 
-{build_resolve_prompt(unit, context)}
+{inner}
 
 ### validator feedback (previous attempt failed these checks)
 {feedback}
@@ -248,6 +402,7 @@ def build_repair_prompt(
     context: ContextBundle,
     candidate: CandidateResolution,
     failures: Iterable[VerificationFailure],
+    budget: TokenBudget | None = None,
 ) -> str:
     """Targeted repair: send the broken candidate back for surgical fixing.
 
@@ -256,6 +411,11 @@ def build_repair_prompt(
     fix the specific error locally rather than re-deriving the whole merge. A
     3B model is highly capable of fixing its own minor errors (missing bracket,
     wrong indentation) when shown the exact code + the exact error.
+
+    The repair prompt carries only the two sides + the candidate + feedback (no
+    few-shot/deps/anchor), so ``budget`` is largely a no-op here — the sides
+    and candidate are protected and never trimmed. Accepted for signature
+    symmetry with the other prompt builders.
     """
     feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
     cur_lines, _base_lines, rep_lines = _prompt_sides(unit)
@@ -535,6 +695,11 @@ class ResolutionEngine:
     ) -> None:
         self.config = config
         self.client = client or OpenAICompatibleClient(config)
+        # Token-window budget for the resolve prompt (0/disabled → no trimming).
+        # Built once from the config so every propose() call shares it; the
+        # profile overlay (which sets context_window) is applied before the
+        # engine is constructed, so this reflects the calibrated window.
+        self.token_budget = TokenBudget.from_config(config)
 
     def propose(
         self,
@@ -558,15 +723,33 @@ class ResolutionEngine:
         orchestrator to allocate more samples to "complex" units, survey §4
         UAB-lite). ``None`` (default) uses ``self.config.samples`` unchanged.
         """
+        prompt_trims: list[dict] = []
         if failures and prev_candidate and prev_candidate.resolved_text:
             prompt_version = PROMPT_REPAIR
+            # The repair prompt carries sides+candidate+feedback only; build it
+            # via the public builder (string). Trims stay empty (sides protected).
             prompt = build_repair_prompt(unit, context, prev_candidate, failures)
         elif failures:
             prompt_version = PROMPT_RETRY
-            prompt = build_retry_prompt(unit, context, failures)
+            # Retry: resolve-parts (budget-trimmed) + feedback. Read the trims
+            # from _resolve_prompt_parts directly so we can journal them.
+            parts = _resolve_prompt_parts(unit, context, budget=self.token_budget)
+            prompt_trims = parts["trims"]
+            inner = parts["intro"] + parts["data"] + parts["contract"] + parts["rules"]
+            feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
+            prompt = (
+                "Your previous merge attempt was rejected. Fix it.\n\n"
+                f"{inner}\n\n"
+                "### validator feedback (previous attempt failed these checks)\n"
+                f"{feedback}\n\n"
+                "Address every failure above; do not repeat the mistake. End with the "
+                "```json\nfenced answer as instructed.\n"
+            )
         else:
             prompt_version = PROMPT_RESOLVE
-            prompt = build_resolve_prompt(unit, context)
+            parts = _resolve_prompt_parts(unit, context, budget=self.token_budget)
+            prompt_trims = parts["trims"]
+            prompt = parts["intro"] + parts["data"] + parts["contract"] + parts["rules"]
         candidates: list[CandidateResolution] = []
         n = max(1, self.config.samples if n_samples is None else n_samples)
         # Prompt-variant sampling (survey §4): on a FRESH resolve only (retries/
@@ -580,12 +763,20 @@ class ResolutionEngine:
             and self.config.parallel_samples
             and getattr(self.config, "prompt_variants", False)
         ):
-            variants = build_resolve_prompt_variants(unit, context, k=n)
-            return self._sample_variants(unit, context, prompt_version, variants)
+            variants = build_resolve_prompt_variants(unit, context, k=n, budget=self.token_budget)
+            cands = self._sample_variants(unit, context, prompt_version, variants)
+            # Attach the prompt-window trims to each variant candidate so the
+            # orchestrator can journal them (observability of trimming).
+            if prompt_trims:
+                for c in cands:
+                    c.prompt_trims = list(prompt_trims)
+            return cands
         # Single sample or no parallelism: sequential (fast path, no overhead).
         if n == 1 or not self.config.parallel_samples:
             for _ in range(n):
                 cand = self._one(unit, context, prompt, prompt_version)
+                if prompt_trims:
+                    cand.prompt_trims = list(prompt_trims)
                 candidates.append(cand)
         else:
             # Draw samples concurrently in a thread pool. Each _one() call is a
@@ -595,6 +786,9 @@ class ResolutionEngine:
                 unit, context, prompt, prompt_version, n,
                 temperature_override=self.config.sampling_temperature,
             )
+            if prompt_trims:
+                for c in candidates:
+                    c.prompt_trims = list(prompt_trims)
         return candidates
 
     def _sample_variants(

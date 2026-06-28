@@ -63,6 +63,20 @@ generation_timeout_seconds = 180
 retry_attempts = 3
 retry_base_delay_seconds = 1.0   # exponential backoff base; full jitter applied
 retry_max_delay_seconds = 30.0   # backoff cap per sleep
+# Model context window (input token budget). 0 = DISABLED: the resolve prompt is
+# sent unbounded (the default, backward-compatible). When set (or auto-discovered
+# by `capybase calibrate` from the server's /v1/models `context_length`), the
+# prompt is capped to this window: the three conflict sides + the JSON contract
+# are ALWAYS sent intact, and the augmentation sections (few-shot examples,
+# cross-file deps, surrounding context) are trimmed — lowest-value first — to
+# fit. A unit whose sides + boilerplate alone exceed the window is sent anyway
+# (the model must see the actual conflict) with a logged warning + a
+# context_budget_exceeded note in the journal. Trimming is journaled per
+# resolution on the candidate_generated event's prompt_trims field.
+context_window = 0
+# Tokens held back for the completion when sizing the input budget:
+# available_input = context_window - completion_reserve.
+completion_reserve = 1024
 
 # --- Model calibration -----------------------------------------------------
 # Run `capybase calibrate` once per model. It probes the endpoint and writes a

@@ -156,6 +156,22 @@ class ModelConfig(BaseModel):
     retry_attempts: int = 3
     retry_base_delay_seconds: float = 1.0
     retry_max_delay_seconds: float = 30.0
+    # Model context window (input budget), in tokens. 0 = DISABLED: capybase
+    # sends the prompt unbounded (the historical default, fully backward-
+    # compatible). When set, the resolve prompt is capped to this window: the
+    # three conflict sides + the JSON contract are ALWAYS sent intact, and the
+    # augmentation sections (few-shot examples, cross-file deps, surrounding
+    # context) are trimmed — lowest-value first — to fit. ``capybase calibrate``
+    # auto-discovers this from the server's /v1/models endpoint (its
+    # ``context_length``) and stores it in the model profile; it can also be set
+    # manually here. Never trim the conflict sides themselves: a unit whose sides
+    # + boilerplate alone exceed the window is sent anyway (the model must see
+    # the actual conflict) with a logged warning.
+    context_window: int = 0
+    # Tokens to reserve for the completion when computing the usable input
+    # budget: available_input = context_window - completion_reserve. Kept modest
+    # relative to context_window so trimming only triggers when genuinely needed.
+    completion_reserve: int = 1024
 
 
 class PolicyConfig(BaseModel):

@@ -1311,6 +1311,12 @@ class Orchestrator:
                 "needs_human": winner.needs_human,
                 "confidence": winner.self_reported_confidence,
             }
+            # Token-window trims (empty when no budget configured or nothing
+            # trimmed): surfaces that the prompt was capped (few-shot/deps/etc.
+            # dropped) so the resolution is auditable against the context window.
+            prompt_trims = getattr(winner, "prompt_trims", None)
+            if prompt_trims:
+                emit_payload["prompt_trims"] = prompt_trims
             if consensus_report is not None:
                 emit_payload["consensus_agreement"] = consensus_report.agreement_score
                 emit_payload["consensus_clusters"] = consensus_report.cluster_count
