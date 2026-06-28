@@ -2,14 +2,22 @@
 
 Usage::
 
-    capybase inspect              # M1: detect + journal + review bundle, no mutation
-    capybase manual               # M2: interactive manual resolver, stage (no continue)
-    capybase run [--resume ID]    # M3: full auto loop with tests + continue
-    capybase calibrate            # probe the model and store a tuned profile
-    capybase recalibrate          # redo calibration, overwriting the stored profile
+    # Safety-first workflow (recommended for a first real run):
+    capybase check                    # git + LLM + tools ready? (no mutation)
+    capybase rebase --dry-run <tgt>   # rehearse in a throwaway worktree
+    capybase rebase <tgt>             # own the entire rebase, start → finish
+    capybase status                   # read-only: latest session + backups
+
+    # Stepping through conflicts manually:
+    capybase inspect                  # detect + journal + review bundle, no mutation
+    capybase manual                   # interactive manual resolver, stage (no continue)
+    capybase run [--resume ID]        # full auto loop with tests + continue
+    capybase calibrate                # probe the model and store a tuned profile
+    capybase recalibrate              # redo calibration, overwriting the stored profile
     capybase --version
 
-All commands honor --config PATH, --repo, and --profile PATH.
+Global flags (before the subcommand): --config DIR, --repo, --profile PATH,
+-v/--verbose, -q/--quiet.
 """
 
 from __future__ import annotations
@@ -33,6 +41,17 @@ def build_parser() -> argparse.ArgumentParser:
         description="A rebase-conflict resolution agent with research-grade seams.",
     )
     p.add_argument("--version", action="version", version=f"capybase {__version__}")
+    # Verbose mirrors the capybase logger to stderr at DEBUG so a first-time
+    # user can watch the pipeline; quiet suppresses the console handler (the
+    # rotating file log at <data_dir>/logs/capybase.log always runs).
+    p.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="verbose: mirror debug logs to stderr while running",
+    )
+    p.add_argument(
+        "-q", "--quiet", action="store_true",
+        help="quiet: suppress console log output (the file log still runs)",
+    )
     p.add_argument(
         "--config", "-c", default=None,
         help="path to the capybase config directory (reads capybase.toml, "
@@ -58,6 +77,19 @@ def build_parser() -> argparse.ArgumentParser:
     run_p = sub.add_parser("run", help="full auto loop: resolve, test, continue")
     run_p.add_argument("--resume", default=None, help="resume an existing session id")
 
+    sub.add_parser(
+        "check",
+        help="sanity-check config, git, tools, and the LLM endpoint before a rebase",
+    )
+
+    status_p = sub.add_parser(
+        "status",
+        help="show the current/latest session state and any backup branches",
+    )
+    status_p.add_argument(
+        "--session", default=None, help="show a specific session id (default: latest)",
+    )
+
     rb_p = sub.add_parser(
         "rebase",
         help="own the entire rebase: start it, resolve conflicts, finish",
@@ -70,6 +102,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--autostash",
         action="store_true",
         help="autostash dirty changes before rebasing (like git rebase --autostash)",
+    )
+    rb_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        dest="dry_run",
+        help="rehearse the entire rebase in a throwaway worktree; report whether "
+             "it would succeed WITHOUT moving the branch pointer. Real LLM calls "
+             "are made — this proves the real pipeline, it doesn't simulate it.",
     )
     abort_group = rb_p.add_mutually_exclusive_group()
     abort_group.add_argument(
@@ -420,9 +460,186 @@ def _run_calibrate_embeddings(
     return 0 if cal.ok else 1
 
 
+def _run_check(
+    config: Config,
+    repo: str,
+    *,
+    out=sys.stdout,
+    client_factory: Callable[[ModelConfig], object] | None = None,
+) -> int:
+    """Pre-flight confidence check: is this repo ready to ``capybase rebase``?
+
+    Runs the full rebase preflight (including an LLM ping — the highest-value
+    check), plus calibration-presence and tooling availability. Prints a
+    readable report and exits 0 ("ready to rebase") or non-zero (blocking
+    failure, or warnings only with ``--strict``). ``client_factory`` lets tests
+    inject a fake LLM client; when None the real client is built.
+    """
+    import shutil
+    from pathlib import Path
+
+    from capybase.git_backend import GitBackend
+    from capybase.preflight import run_rebase_preflight
+
+    lines: list[str] = ["capybase check", "=" * 40]
+
+    # Config source (informational).
+    src = getattr(config, "source_path", None) or "<built-in defaults>"
+    lines.append(f"config source : {src}")
+    lines.append(f"model         : {config.model.model!r} @ {config.model.base_url}")
+
+    # Calibration presence (warn, not block).
+    profile_p = Path(config.calibration.model_profile_path)
+    if profile_p.exists():
+        lines.append(f"profile       : {profile_p} (present)")
+    else:
+        lines.append(f"profile       : {profile_p} (absent — run `capybase calibrate` to tune; resolution still works with built-in defaults)")
+
+    # Tools (informational; a missing optional tool never blocks).
+    tools = []
+    for name in ("pyright", "rust-analyzer", "cargo", "rustc", "pytest"):
+        tools.append((name, shutil.which(name) is not None))
+    tool_line = ", ".join(f"{n}: {'yes' if ok else 'no'}" for n, ok in tools)
+    lines.append(f"tools         : {tool_line}")
+
+    # Git-state preflight (no target, no LLM — those are handled separately
+    # below). The target-dependent checks (target-resolves, not-self-rebase,
+    # rebase-shape) are meaningless for `check` since there's no target yet, so
+    # we run only the git-state checks.
+    git = GitBackend(repo)
+    report = run_rebase_preflight(git, config, "HEAD", autostash=False, llm_ping=False)
+    lines.append("-" * 40)
+    lines.append("preflight:")
+    blocking_fail = False
+    # Skip target-dependent checks for `check` (there's no target yet).
+    skip_for_check = {"target-resolves", "not-self-rebase", "rebase-shape"}
+    for c in report.checks:
+        if c.name in skip_for_check:
+            continue
+        tag = "ok  " if c.ok else ("WARN " if not c.blocking else "FAIL ")
+        lines.append(f"  [{tag}] {c.name}: {c.detail}")
+        if c.blocking and not c.ok:
+            blocking_fail = True
+
+    # LLM ping — honor client_factory so tests can fake reachability without a
+    # server. Done here (not in preflight) so we control the client exactly.
+    from capybase.probes import probe_reachability
+    try:
+        client = (
+            client_factory(config.model)
+            if client_factory is not None
+            else _real_client(config.model)
+        )
+        result = probe_reachability(client, config.model)
+        if result.ok:
+            lines.append(f"  [ok  ] llm-reachable: {result.detail}")
+        else:
+            lines.append(f"  [FAIL ] llm-reachable: {result.detail}")
+            blocking_fail = True
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"  [FAIL ] llm-reachable: {exc}")
+        blocking_fail = True
+
+    lines.append("=" * 40)
+    if blocking_fail:
+        lines.append("NOT ready to rebase — fix the FAIL items above.")
+    else:
+        lines.append("ready to rebase (warnings are informational).")
+    print("\n".join(lines), file=out)
+    return 1 if blocking_fail else 0
+
+
+def _run_status(
+    config: Config,
+    repo: str,
+    session_id: str | None = None,
+    *,
+    out=sys.stdout,
+) -> int:
+    """Read-only report of the current repo's rebase state.
+
+    Shows whether a git operation is in progress, the latest (or ``--session``)
+    capybase session's outcome, and any leftover backup branches with delete
+    hints. Never mutates anything.
+    """
+    from capybase.git_backend import GitBackend
+    from capybase.session import SESSIONS_DIR, SessionPaths
+    from capybase.journal import Journal
+
+    git = GitBackend(repo)
+    lines: list[str] = ["capybase status", "=" * 40]
+
+    # Live repo state.
+    op = git.operation_in_progress()
+    branch = git.current_branch()
+    lines.append(f"branch        : {branch or '<detached HEAD>'}")
+    lines.append(f"op in progress: {op or 'none'}")
+    lines.append(f"head          : {git.head_oid()[:8]}")
+
+    # Session: explicit --session, else the latest under .rebase-agent/sessions.
+    repo_root = git.repo
+    sessions_dir = repo_root / SESSIONS_DIR
+    sid = session_id
+    if sid is None:
+        sids = sorted(
+            (p.name for p in sessions_dir.iterdir() if p.is_dir()),
+            key=lambda s: (sessions_dir / s).stat().st_mtime,
+        ) if sessions_dir.exists() else []
+        sid = sids[-1] if sids else None
+    if sid is None:
+        lines.append("session       : <none> (no capybase sessions in this repo)")
+    else:
+        paths = SessionPaths(sid, repo_root)
+        events = Journal(paths).read_events()
+        lines.append(f"session       : {sid} ({len(events)} events)")
+        if events:
+            # Pull key facts from the journal events.
+            target = ""
+            backup_ref = ""
+            escalated_reason = ""
+            completed = False
+            for ev in events:
+                if ev.event_type == "rebase_started":
+                    target = ev.payload.get("target", target)
+                    backup_ref = ev.payload.get("backup_ref", backup_ref)
+                elif ev.event_type == "session_completed":
+                    completed = True
+                elif ev.event_type == "escalated":
+                    escalated_reason = ev.payload.get("reason", escalated_reason)
+                elif ev.event_type == "rebase_aborted":
+                    backup_ref = ev.payload.get("backup_ref", backup_ref or "")
+            status = "completed" if completed else ("escalated" if escalated_reason else "stopped/unknown")
+            lines.append(f"  target      : {target or '(n/a)'}")
+            lines.append(f"  status      : {status}")
+            if escalated_reason:
+                lines.append(f"  reason      : {escalated_reason}")
+            if backup_ref:
+                lines.append(f"  backup      : {backup_ref}")
+            last = events[-1]
+            lines.append(f"  last event  : {last.event_type}")
+            bundle = paths.final / "review-bundle.md"
+            if bundle.exists():
+                lines.append(f"  review bundle: {bundle}")
+
+    # Backup branches.
+    backups = git.list_backup_refs()
+    if backups:
+        lines.append("-" * 40)
+        lines.append(f"backup branches ({len(backups)}):")
+        for b in backups:
+            lines.append(f"  {b}  (delete: git branch -D {b})")
+    print("\n".join(lines), file=out)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Configure the cross-session operational logger early. Verbose mirrors
+    # debug output to stderr; quiet mutes the console. The rotating file log
+    # (always on) is best-effort and never breaks a run.
+    from capybase.logging_setup import configure_logging
+    configure_logging(verbose=args.verbose, quiet=args.quiet)
     # --config is a DIRECTORY (the shared config dir), not a file. capybase reads
     # capybase.toml + calibration artifacts from it, so the user repo need not
     # carry any capybase config. A repo-local ./capybase.toml still wins (per-repo
@@ -456,6 +673,13 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=getattr(args, "dry_run", False),
         )
 
+    # check / status don't need an orchestrator (they use the git backend
+    # directly and never drive a resolution loop).
+    if args.command == "check":
+        return _run_check(config, repo=args.repo)
+    if args.command == "status":
+        return _run_status(config, repo=args.repo, session_id=args.session)
+
     try:
         session = getattr(args, "session", None) or getattr(args, "resume", None)
         orch = Orchestrator(config, repo=args.repo, session_id=session)
@@ -473,6 +697,16 @@ def main(argv: list[str] | None = None) -> int:
         result = orch.run()
         return 1 if result.escalated else 0
     if args.command == "rebase":
+        if getattr(args, "dry_run", False):
+            # Rehearse in a throwaway worktree: never moves the branch pointer.
+            # Uses real LLM calls (the point of a rehearsal); no orchestrator
+            # against the real repo is constructed.
+            from capybase.dryrun import rehearse_rebase
+            report = rehearse_rebase(
+                config, repo=args.repo, target=args.target, autostash=args.autostash,
+            )
+            print(report.summary())
+            return 0 if report.would_succeed else 1
         result = orch.rebase(
             args.target,
             autostash=args.autostash,

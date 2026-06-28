@@ -42,6 +42,20 @@ def default_config_dir() -> Path:
     return base / "capybase"
 
 
+def default_data_dir() -> Path:
+    """The shared capybase data dir, per the XDG Base Directory spec.
+
+    ``$XDG_DATA_HOME/capybase`` if ``XDG_DATA_HOME`` is set, else
+    ``~/.local/share/capybase``. Used for cross-session operational logs
+    (``logs/capybase.log``) that span runs and repos — distinct from the
+    per-session, repo-relative ``.rebase-agent/`` artifact tree (which holds
+    the authoritative per-run journal).
+    """
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    return base / "capybase"
+
+
 class ModelConfig(BaseModel):
     provider: Literal["openai_compatible"] = "openai_compatible"
     base_url: str = "http://127.0.0.1:8080/v1"
@@ -129,6 +143,19 @@ class ModelConfig(BaseModel):
     # need it pay no request-shape cost and see no behavior change; the API
     # simply omits ``logprobs`` from the request body when off.
     capture_token_entropy: bool = False
+    # Transport-layer retry for transient LLM failures (connection reset, socket
+    # timeout, HTTP 5xx, or the stalled-connection hard-deadline RuntimeError the
+    # adapter raises). This sits BELOW the application-level CEGIS re-prompt loop
+    # (policy.max_retries_per_unit, which re-prompts with feedback): a single
+    # generation gets up to retry_attempts transport retries, then CEGIS takes
+    # over. Does NOT retry HTTP 4xx (caller errors) or the "unexpected response
+    # shape" error (malformed — a retry would just fail identically). 1 = no
+    # retries. 3 (default) favors first-use resilience over latency on a flaky
+    # local endpoint. Exponential backoff with full jitter is applied between
+    # attempts (see llm_openai._with_retry), capped by retry_max_delay_seconds.
+    retry_attempts: int = 3
+    retry_base_delay_seconds: float = 1.0
+    retry_max_delay_seconds: float = 30.0
 
 
 class PolicyConfig(BaseModel):

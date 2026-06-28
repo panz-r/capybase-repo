@@ -63,6 +63,35 @@ generation_timeout_seconds = 180  # HARD wall-clock cap on one attempt
 
 ## Use
 
+### Safety-first first run (recommended)
+
+```bash
+capybase check                       # is git + the LLM + tools ready? (no mutation)
+capybase rebase --dry-run <target>   # rehearse the WHOLE rebase in a throwaway
+                                     #   worktree; never moves your branch
+capybase rebase <target>             # do the real rebase, owning start → finish
+capybase status                      # read-only: latest session + backup branches
+```
+
+`capybase rebase` owns the entire process the way `git rebase` would: it
+pre-flights the repo (clean tree, on a branch, no in-progress op, target
+resolves), records a **user-visible backup branch** `capybase/backup/<branch>@<ts>`
+at the pre-rebase HEAD, starts the rebase, drives the resolve → test → continue
+loop, and — by default — **aborts on escalation** so the repo returns to its
+original HEAD. The backup branch remains so you can `git reset --hard` to it or
+`git branch -D` it once you've confirmed the result.
+
+`--dry-run` runs that whole pipeline in a temporary linked worktree (real LLM
+calls, genuine conflicts) and reports whether it would succeed — without ever
+moving your branch pointer. It's the single most confidence-building step before
+a first real run.
+
+Global flags: `-v/--verbose` (mirror debug logs to stderr), `-q/--quiet`, and
+`--config <dir>` (default `~/.config/capybase`). Cross-session logs rotate at
+`~/.local/share/capybase/logs/capybase.log`.
+
+### Stepping through conflicts manually
+
 ```bash
 # Start your rebase; when git stops on a conflict:
 capybase inspect            # detect, journal, write review bundle (no mutation)

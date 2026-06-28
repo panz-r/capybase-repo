@@ -19,6 +19,7 @@ Three modes share the same inspection core:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -43,6 +44,7 @@ from capybase.verification import ValidationConfig, VerificationEngine
 from capybase.adapters.tests import TestRunner
 from capybase.config import Config
 from capybase.consensus import rank_by_consensus
+from capybase.preflight import run_rebase_preflight
 
 
 # A unit is "resolved" once a candidate is accepted.
@@ -263,6 +265,12 @@ class Orchestrator:
         self.paths = SessionPaths(self.session_id, repo)
         self.paths.mkdirs()
         self.journal = Journal(self.paths)
+        # Cross-session operational log (vs the per-session journal, which is
+        # the authoritative audit of THIS run). Logging is configured by the CLI
+        # via logging_setup.configure_logging; if a test constructs an
+        # orchestrator without configuring logging, this still works (the
+        # capybase logger simply has no handlers → messages go nowhere).
+        self.log = logging.getLogger("capybase")
         # Model profile overlay ("Profile wins"): rebind the local ``config`` so
         # the profile's tuned knobs flow into EVERY consumer below (resolution
         # engine, verifier) — not just ``self.config``. Done after the journal is
@@ -749,15 +757,42 @@ class Orchestrator:
             {"target": target, "autostash": autostash,
              "abort_on_escalation": abort_on_escalation},
         )
+        # 0. Pre-flight: refuse to touch the repo on a bad starting state.
+        #    Runs git-only checks (no network) so the rebase path stays fast.
+        #    A blocking failure raises GitError here; the CLI guard prints it.
+        preflight = run_rebase_preflight(
+            self.git, self.config, target, autostash=autostash, llm_ping=False
+        )
+        self.journal.emit("preflight_check", {"checks": preflight.as_payload()})
+        if not preflight.passed:
+            fail = preflight.first_blocking_failure
+            msg = fail.detail if fail else "pre-flight checks failed"
+            self.journal.emit(
+                "rebase_start_failed", {"reason": "preflight", "detail": msg}
+            )
+            raise GitError(f"refusing to rebase: {msg}")
         # 1. Worktree must be clean unless the user opted into autostash.
+        #    (Preflight already checked this, but keep the explicit guard so
+        #    the invariant is visible at the call site.)
         if not autostash:
             self.git.require_clean_worktree()  # raises GitError if dirty
-        # 2. Recovery ref + journal: the original HEAD, so an aborted rebase
-        #    (step 5) returns here and the run is auditable end-to-end.
+        # 2. Recovery ref + backup branch + journal: the original HEAD is
+        #    recorded two ways. The internal ``refs/rebase-agent/<id>/start`` is
+        #    capybase's audit ref (read by `status`, used by abort). The
+        #    user-visible ``capybase/backup/<branch>@<ts>`` branch is the safety
+        #    net: a real branch the developer can see in `git branch`, reset to,
+        #    or delete once they've confirmed the rebase result.
         start_oid = self.git.head_oid()
         self.git.create_session_refs(self.session_id, start_oid)
+        backup_branch = self.git.current_branch() or "head"
+        backup_ref = self.git.create_backup_ref(start_oid, label=backup_branch)
         self.journal.emit(
-            "rebase_started", {"target": target, "start_oid": start_oid}
+            "rebase_started",
+            {"target": target, "start_oid": start_oid, "backup_ref": backup_ref},
+        )
+        self.log.info(
+            "rebase started: session=%s target=%s branch=%s start=%s backup=%s",
+            self.session_id, target, backup_branch, start_oid[:8], backup_ref,
         )
         # 3. Start the rebase. A conflict stop has rc != 0 but leaves the rebase
         #    in progress; a genuine failure (bad target, etc.) has rc != 0 and
@@ -782,23 +817,54 @@ class Orchestrator:
                 git_head_after=head_after,
             )
             self.git.record_step_ref(self.session_id, self.step, head_after)
-            self.out(f"✓ rebase complete, no conflicts (session {self.session_id})")
+            self.log.info(
+                "rebase completed (clean, no conflicts): session=%s steps=%d "
+                "head_after=%s", self.session_id, self.step, head_after[:8],
+            )
+            self.out(
+                f"✓ rebase complete, no conflicts (session {self.session_id})\n"
+                f"  backup branch {backup_ref} points at the pre-rebase HEAD "
+                f"{start_oid[:8]}; delete it once you've confirmed the result:\n"
+                f"    git branch -D {backup_ref}"
+            )
             return StepResult(step_index=self.step, escalated=False, continued=True)
         # 4b. The rebase stopped on a conflict: drive the resolution loop.
         result = self.run()
-        # 5. Abort-on-escalation: return the repo to start_oid if we couldn't
+        # 5. On a successful finish (conflicts resolved and replayed), surface
+        #    the backup branch so the user can reclaim it after confirming.
+        if not result.escalated:
+            self.log.info(
+                "rebase completed (conflicts resolved): session=%s steps=%d "
+                "head_after=%s", self.session_id, self.step,
+                self.git.head_oid()[:8],
+            )
+            self.out(
+                f"  backup branch {backup_ref} points at the pre-rebase HEAD "
+                f"{start_oid[:8]}; delete it once you've confirmed the result:\n"
+                f"    git branch -D {backup_ref}"
+            )
+        # 6. Abort-on-escalation: return the repo to start_oid if we couldn't
         #    finish. run() sets escalated and leaves the rebase stopped; abort
         #    rolls it all back so the developer is back where they started.
         if result.escalated and abort_on_escalation and self.git.rebase_in_progress():
             self.git.abort_rebase()
             self.journal.emit(
                 "rebase_aborted",
-                {"reason": result.reason, "start_oid": start_oid},
+                {"reason": result.reason, "start_oid": start_oid,
+                 "backup_ref": backup_ref},
                 git_head_after=self.git.head_oid(),
             )
+            self.log.warning(
+                "rebase escalated and aborted: session=%s steps=%d reason=%s "
+                "restored_to=%s", self.session_id, self.step, result.reason,
+                start_oid[:8],
+            )
             self.out(
-                f"! escalated and aborted rebase — repo back at {start_oid[:8]}; "
-                f"review bundle: {self.paths.final / 'review-bundle.md'}"
+                f"! escalated and aborted rebase — repo back at {start_oid[:8]}\n"
+                f"  review bundle: {self.paths.final / 'review-bundle.md'}\n"
+                f"  backup branch {backup_ref} still points at the pre-rebase "
+                f"HEAD; reset to it with `git reset --hard {backup_ref}`, or "
+                f"delete it with `git branch -D {backup_ref}`"
             )
         return result
 

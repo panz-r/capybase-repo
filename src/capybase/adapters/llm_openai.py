@@ -10,14 +10,102 @@ into the orchestrator, so a flaky model degrades to escalation, not a crash.
 from __future__ import annotations
 
 import json
+import logging
+import random
 import socket
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol, TypeVar
 
 from capybase.adapters.parsers import parse_resolution_json
 from capybase.config import ModelConfig
+
+_log = logging.getLogger("capybase.llm")
+
+T = TypeVar("T")
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Should this raised exception trigger a transport retry?
+
+    Retryable (transient): connection errors, socket timeouts, HTTP 5xx (server
+    errors / overloaded / gateway timeouts), and the adapter's own
+    stalled-connection / timed-out RuntimeErrors. NOT retryable: HTTP 4xx
+    (caller errors — a retry fails identically), and the "unexpected response
+    shape" RuntimeError (malformed non-error response — not a transport fault).
+    """
+    # Inspect the cause chain: the worker wraps the original network exception
+    # in a RuntimeError via `raise RuntimeError(...) from got`, so the real
+    # HTTPError/URLError/socket.timeout is on __cause__.
+    chain: list[BaseException] = [exc]
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None:
+        chain.append(cause)
+
+    for e in chain:
+        # HTTP 5xx is retryable; HTTP 4xx is not.
+        if isinstance(e, urllib.error.HTTPError):
+            return e.code >= 500
+        # Connection refused, DNS failure, reset, etc.
+        if isinstance(e, urllib.error.URLError):
+            return True
+        # Per-read socket timeout.
+        if isinstance(e, socket.timeout):
+            return True
+
+    # Fall back to the adapter's own RuntimeError classification. The worker
+    # raises these for stalled connections and timed-out reads (retryable) but
+    # also for malformed responses (not retryable).
+    if isinstance(exc, RuntimeError):
+        msg = str(exc).lower()
+        if "unexpected llm response shape" in msg:
+            return False  # malformed non-error response — a retry won't help
+        if (
+            "request failed" in msg
+            or "exceeded hard deadline" in msg
+            or "timed out" in msg
+        ):
+            return True
+    return False
+
+
+def _with_retry(
+    fn: Callable[[], T],
+    *,
+    attempts: int,
+    base_delay: float,
+    max_delay: float,
+) -> T:
+    """Call ``fn`` with exponential-backoff retries on transient failures.
+
+    ``attempts`` is the total number of tries (1 = no retries). Between attempts
+    we sleep ``random.uniform(0, min(max_delay, base_delay * 2**i))`` — full
+    jitter, which spreads concurrent retries and bounds the worst-case delay by
+    ``max_delay``. A non-retryable exception propagates immediately on the first
+    occurrence; a retryable one is retried up to ``attempts`` times, after which
+    the final exception propagates.
+    """
+    last_exc: BaseException | None = None
+    for i in range(max(1, attempts)):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - classified below
+            last_exc = exc
+            if not _is_retryable(exc):
+                raise
+            remaining = attempts - i - 1
+            if remaining <= 0:
+                _log.warning("LLM call failed after %d attempt(s): %s", attempts, exc)
+                raise
+            delay = random.uniform(0, min(max_delay, base_delay * (2 ** i)))
+            _log.info(
+                "LLM call failed (attempt %d/%d), retrying in %.1fs: %s",
+                i + 1, attempts, delay, exc,
+            )
+            time.sleep(delay)
+    assert last_exc is not None  # unreachable: loop runs >=1 and either returns or raises
+    raise last_exc
 
 
 class LLMResponse:
@@ -93,15 +181,43 @@ class OpenAICompatibleClient:
         # half-open state where neither socket.timeout nor our in-loop deadline
         # fires. The thread is abandoned (daemon) if it doesn't return in time;
         # the partial connection leaks but the orchestrator never hangs.
+        #
+        # The whole attempt (build request → launch worker → fetch result) is
+        # wrapped in _with_retry so a transient failure (connection reset,
+        # 5xx, hard-deadline stall) re-runs with a fresh request and worker
+        # thread. Each retry is a brand-new connection; a stalled daemon thread
+        # from a failed attempt is simply abandoned.
+        return _with_retry(
+            lambda: self._attempt(req, url, self._read_stream),
+            attempts=self.config.retry_attempts,
+            base_delay=self.config.retry_base_delay_seconds,
+            max_delay=self.config.retry_max_delay_seconds,
+        )
+
+    def _attempt(
+        self,
+        req: urllib.request.Request,
+        url: str,
+        reader: Callable[[urllib.request.Request, str], Any],
+    ) -> Any:
+        """One generation attempt: launch a daemon-thread reader with a hard
+        deadline and re-raise its result/exception. Shared by complete and
+        complete_many so both get identical retry semantics.
+
+        ``reader`` is ``_read_stream`` (single) or ``_read_many`` (batch); both
+        take ``(req, url)``. The wall-clock deadline
+        (``generation_timeout_seconds``) caps this single attempt; the caller's
+        :func:`_with_retry` adds retries on top, each as a fresh connection.
+        """
         import queue
         import threading
 
         result_q: queue.Queue = queue.Queue()
 
-        def _worker():
+        def _worker() -> None:
             try:
-                result_q.put(self._read_stream(req, url))
-            except Exception as exc:  # noqa: BLE001
+                result_q.put(reader(req, url))
+            except Exception as exc:  # noqa: BLE001 - tunnel to main thread
                 result_q.put(exc)
 
         worker = threading.Thread(target=_worker, daemon=True)
@@ -114,8 +230,6 @@ class OpenAICompatibleClient:
                 f"({self.config.generation_timeout_seconds}s); aborting stalled connection"
             )
         if isinstance(got, Exception):
-            if isinstance(got, urllib.error.URLError):
-                raise RuntimeError(f"LLM request failed: {got}") from got
             raise RuntimeError(f"LLM request failed: {got}") from got
         return got
 
@@ -167,32 +281,21 @@ class OpenAICompatibleClient:
             },
             method="POST",
         )
-        import queue
-        import threading
+        # Same deadline + retry wrapping as complete(). _read_many doesn't need
+        # the url, but _attempt normalizes the call arity, so pass it anyway.
+        return _with_retry(
+            lambda: self._attempt(req, url, self._read_many),
+            attempts=self.config.retry_attempts,
+            base_delay=self.config.retry_base_delay_seconds,
+            max_delay=self.config.retry_max_delay_seconds,
+        )
 
-        result_q: queue.Queue = queue.Queue()
+    def _read_many(self, req: urllib.request.Request, url: str = "") -> list[LLMResponse]:
+        """Non-streaming read returning one ``LLMResponse`` per choice.
 
-        def _worker():
-            try:
-                result_q.put(self._read_many(req))
-            except Exception as exc:  # noqa: BLE001
-                result_q.put(exc)
-
-        worker = threading.Thread(target=_worker, daemon=True)
-        worker.start()
-        try:
-            got = result_q.get(timeout=self.config.generation_timeout_seconds)
-        except queue.Empty:
-            raise RuntimeError(
-                f"LLM request exceeded hard deadline "
-                f"({self.config.generation_timeout_seconds}s); aborting stalled connection"
-            )
-        if isinstance(got, Exception):
-            raise RuntimeError(f"LLM request failed: {got}") from got
-        return got
-
-    def _read_many(self, req: urllib.request.Request) -> list[LLMResponse]:
-        """Non-streaming read returning one ``LLMResponse`` per choice."""
+        ``url`` is accepted for signature parity with :meth:`_read_stream` so a
+        single :meth:`_attempt` path can call either reader; it is unused here.
+        """
         try:
             with urllib.request.urlopen(
                 req, timeout=self.config.generation_timeout_seconds

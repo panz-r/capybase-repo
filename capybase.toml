@@ -55,6 +55,14 @@ request_timeout_seconds = 600
 # Hard wall-clock cap on one generation attempt. A stalled stream aborts and
 # becomes a retryable failure rather than hanging indefinitely.
 generation_timeout_seconds = 180
+# Transport-layer retry on transient LLM failures (connection reset, socket
+# timeout, HTTP 5xx, the stalled-connection hard-deadline above). Sits BELOW the
+# application-level CEGIS re-prompt loop (policy.max_retries_per_unit): a single
+# generation gets up to retry_attempts transport tries, then CEGIS re-prompts
+# with feedback. Does NOT retry HTTP 4xx (caller errors). 1 = no retries.
+retry_attempts = 3
+retry_base_delay_seconds = 1.0   # exponential backoff base; full jitter applied
+retry_max_delay_seconds = 30.0   # backoff cap per sleep
 
 # --- Model calibration -----------------------------------------------------
 # Run `capybase calibrate` once per model. It probes the endpoint and writes a
@@ -251,3 +259,25 @@ enable_structural_resolver = true
 # candidate is validated before acceptance; an invalid combination (e.g.
 # contradictory lines concatenated) is rejected and falls through to the model.
 enable_combination_search = true
+
+
+# ---------------------------------------------------------------------------
+# First-use workflow (the safety-first commands)
+# ---------------------------------------------------------------------------
+#
+#   capybase check                      # git + LLM + tools ready? (no mutation)
+#   capybase rebase --dry-run <target>  # rehearse the WHOLE rebase in a throwaway
+#                                       #   worktree; never moves your branch
+#   capybase rebase <target>            # do the real rebase (own start→finish)
+#   capybase status                     # read-only: latest session + backup branches
+#
+# Global flags (before the subcommand):
+#   -v / --verbose    mirror debug logs to stderr while running
+#   -q / --quiet      suppress console log output (the file log always runs)
+#   --config <dir>    capybase config dir (default ~/.config/capybase)
+#
+# Every `rebase` creates a user-visible backup branch
+# `capybase/backup/<branch>@<timestamp>` at the pre-rebase HEAD. On escalation
+# (default) the rebase is aborted back to that HEAD and the backup remains so
+# you can `git reset --hard <backup>` or `git branch -D <backup>` once satisfied.
+# Cross-session logs rotate at ~/.local/share/capybase/logs/capybase.log.

@@ -116,6 +116,15 @@ def test_rebase_resolves_and_finishes(py_repo_before_rebase):
     assert "rebase_requested" in types
     assert "rebase_started" in types
     assert "session_completed" in types
+    # A user-visible backup branch was created at the pre-rebase HEAD, so the
+    # result can be rolled back. It carries the pre-rebase OID. (The journal
+    # stores the full refname; list_backup_refs returns short names.)
+    backups = orch.git.list_backup_refs()
+    assert backups, "expected a backup branch after rebase"
+    started = next(e for e in _journal_events(orch) if e["event_type"] == "rebase_started")
+    backup_short = started["payload"]["backup_ref"][len("refs/heads/"):]
+    assert backup_short in backups
+    assert git(repo, "rev-parse", backups[0]).stdout.strip() == start_head
 
 
 def test_rebase_clean_no_conflict(py_repo_clean_rebase):
@@ -164,6 +173,12 @@ def test_rebase_aborts_on_escalation(py_repo_before_rebase):
     # The abort was journaled.
     types = [e["event_type"] for e in _journal_events(orch)]
     assert "rebase_aborted" in types
+    # The backup branch still exists (not auto-deleted) and points at the
+    # pre-rebase HEAD, so the user can reset to it.
+    aborted = next(e for e in _journal_events(orch) if e["event_type"] == "rebase_aborted")
+    backup_short = aborted["payload"]["backup_ref"][len("refs/heads/"):]
+    assert backup_short in orch.git.list_backup_refs()
+    assert git(repo, "rev-parse", backup_short).stdout.strip() == start_head
 
 
 def test_rebase_no_abort_preserves_stop(py_repo_before_rebase):
@@ -208,7 +223,7 @@ def test_rebase_refuses_dirty_worktree(py_repo_before_rebase):
         _config(repo), repo=str(repo), resolution_engine=engine,
         out=lambda *_a, **_k: None,
     )
-    with pytest.raises(GitError, match="worktree is not clean"):
+    with pytest.raises(GitError, match="working tree is dirty"):
         orch.rebase("main")
     # Nothing happened: no rebase started, HEAD unchanged.
     assert not _rebase_in_progress(repo)

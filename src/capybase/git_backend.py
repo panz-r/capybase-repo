@@ -114,6 +114,95 @@ class GitBackend:
     def head_oid(self) -> str:
         return self._run_ok(["rev-parse", "HEAD"], what="rev-parse HEAD").strip()
 
+    def current_branch(self) -> str | None:
+        """The checked-out branch name, or ``None`` if HEAD is detached.
+
+        ``git symbolic-ref --quiet HEAD`` returns the branch ref
+        (``refs/heads/<name>``) on success and exits non-zero on detached HEAD.
+        """
+        res = self._run(["symbolic-ref", "--quiet", "HEAD"])
+        if not res.ok:
+            return None
+        ref = res.stdout.strip()
+        # symbolic-ref prints the full refname; strip the heads/ prefix.
+        prefix = "refs/heads/"
+        return ref[len(prefix):] if ref.startswith(prefix) else ref
+
+    def resolve_ref(self, ref: str) -> str | None:
+        """Resolve ``ref`` to an object id, or ``None`` if it doesn't exist.
+
+        Unlike :meth:`ref_exists` (bool), this returns the actual oid. Accepts
+        anything ``git rev-parse`` does: branch names, tags, oids, ``HEAD``,
+        ``HEAD~3``, etc.
+        """
+        res = self._run(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])
+        if not res.ok:
+            return None
+        oid = res.stdout.strip()
+        return oid or None
+
+    def is_ancestor(self, maybe_ancestor: str, descendant: str) -> bool:
+        """True if ``maybe_ancestor`` is an ancestor of ``descendant``.
+
+        Used for fast-forward / up-to-date detection. Wraps
+        ``git merge-base --is-ancestor``. Never raises: an unresolvable ref is
+        treated as "not an ancestor" (returns False), matching git's own exit.
+        """
+        res = self._run(["merge-base", "--is-ancestor", maybe_ancestor, descendant])
+        return res.ok
+
+    def operation_in_progress(self) -> str | None:
+        """The kind of in-progress git operation, or ``None`` if the repo is idle.
+
+        Broader than :meth:`rebase_in_progress` (rebase-only): detects an
+        ongoing rebase, merge, cherry-pick, revert, or bisect so the rebase
+        preflight can refuse to run on top of a half-finished operation.
+
+        Returns a stable short label (``"rebase"``, ``"merge"``,
+        ``"cherry-pick"``, ``"revert"``, ``"bisect"``) suitable for messaging.
+        """
+        # Each in-progress op leaves a sentinel file under .git. Resolve them via
+        # rev-parse --git-path so a worktree-linked repo (common .git elsewhere)
+        # is handled correctly.
+        for label, sentinel in (
+            ("rebase", "rebase-merge"),
+            ("rebase", "rebase-apply"),
+            ("merge", "MERGE_HEAD"),
+            ("cherry-pick", "CHERRY_PICK_HEAD"),
+            ("revert", "REVERT_HEAD"),
+            ("bisect", "BISECT_LOG"),
+        ):
+            r = self._run(["rev-parse", "--git-path", sentinel])
+            if not r.ok:
+                continue
+            rel = r.stdout.strip()
+            if not rel:
+                continue
+            p = Path(rel) if Path(rel).is_absolute() else (self.repo / rel)
+            if p.exists():
+                return label
+        return None
+
+    def git_version(self) -> tuple[int, int]:
+        """The installed git version as a ``(major, minor)`` tuple.
+
+        ``(0, 0)`` if git can't be queried or its output can't be parsed — the
+        preflight then warns rather than crashing.
+        """
+        res = self._run(["--version"])
+        if not res.ok:
+            return (0, 0)
+        out = res.stdout.strip()
+        # "git version 2.43.0" -> parse the first major.minor.
+        for tok in out.split():
+            if tok and tok[0].isdigit():
+                parts = tok.split(".")
+                try:
+                    return (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+                except ValueError:
+                    continue
+        return (0, 0)
+
     def worktree_is_clean(self) -> bool:
         """True if the worktree has no user changes.
 
@@ -170,6 +259,92 @@ class GitBackend:
     def record_step_ref(self, session_id: str, step: int, oid: str) -> None:
         ref = f"refs/rebase-agent/{session_id}/step-{step}"
         self.create_ref(ref, oid)
+
+    # ------------------------------------------------------------------ user-visible backup branches
+
+    #: The namespace under which user-visible backup branches live. These are
+    #: real branches (not refs/rebase-agent/...) so they show up in
+    #: ``git branch`` and the user can ``git reset --hard`` or delete them with
+    #: ordinary commands. The internal recovery refs (above) are capybase's
+    #: own audit trail; this is the safety net the user is meant to see.
+    BACKUP_NAMESPACE = "refs/heads/capybase/backup"
+
+    def create_backup_ref(self, source_oid: str, label: str) -> str:
+        """Create a user-visible backup branch at ``source_oid`` and return its ref.
+
+        The branch is named ``capybase/backup/<label>@<timestamp>`` so it sorts
+        by time and is self-describing in ``git branch`` output. ``label`` is
+        sanitised to a branch-name-safe slug (typically the current branch).
+        """
+        import time
+
+        slug = _branch_slug(label)
+        ts = time.strftime("%Y%m%d-%H%M%S")
+        ref = f"{self.BACKUP_NAMESPACE}/{slug}@{ts}"
+        self._run_ok(["update-ref", ref, source_oid], what=f"create backup {ref}")
+        return ref
+
+    def list_backup_refs(self) -> list[str]:
+        """All backup branch short-names (e.g. ``capybase/backup/main@20260101-000000``)."""
+        out = self._run_ok(
+            ["for-each-ref", "--format=%(refname:short)", self.BACKUP_NAMESPACE],
+            what="for-each-ref backups",
+        )
+        return [r for r in out.splitlines() if r.strip()]
+
+    def delete_ref(self, ref: str) -> None:
+        """Delete a ref, restricted to the backup namespace as a safety rail.
+
+        Refuses anything outside ``refs/heads/capybase/backup/`` (short or full
+        form) so a stray call can never delete the user's real branches or
+        capybase's recovery refs. Raises :class:`GitError` on a namespace
+        violation.
+        """
+        short = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+        full = ref if ref.startswith("refs/") else f"refs/heads/{short}"
+        if not full.startswith(self.BACKUP_NAMESPACE + "/"):
+            raise GitError(
+                f"delete_ref refuses to delete {ref!r}: only refs under "
+                f"{self.BACKUP_NAMESPACE}/ may be deleted via this method"
+            )
+        self._run_ok(["update-ref", "-d", full], what=f"delete ref {full}")
+
+    # ------------------------------------------------------------------ worktrees (dry-run)
+
+    def add_worktree(
+        self, path: str | Path, *, new_branch: str | None = None, detach: bool = False
+    ) -> GitResult:
+        """Create a linked worktree at ``path``.
+
+        Either create it on ``new_branch`` starting at the current HEAD (used by
+        dry-run so the rehearsal has its own throwaway branch and never moves the
+        user's branch) or ``--detach`` at HEAD. Shares the object store, so this
+        is cheap even for large repos.
+        """
+        # Exactly one mode: a new throwaway branch, or a detached HEAD. Reject
+        # both-set (ambiguous) and neither-set (would check out HEAD on the
+        # current branch inside the worktree, which can't be what a dry-run wants).
+        if (new_branch is not None) == detach:
+            raise ValueError("add_worktree: pass exactly one of new_branch / detach")
+        args = ["worktree", "add"]
+        if new_branch is not None:
+            args += ["-b", new_branch]
+        elif detach:
+            args += ["--detach"]
+        args += [str(path), "HEAD"]
+        return self._run(args, what="worktree add")
+
+    def remove_worktree(self, path: str | Path, *, force: bool = True) -> GitResult:
+        """Remove a linked worktree. ``force`` (default) discards a dirty tree."""
+        args = ["worktree", "remove"]
+        if force:
+            args.append("--force")
+        args.append(str(path))
+        return self._run(args, what="worktree remove")
+
+    def prune_worktrees(self) -> GitResult:
+        """Prune stale worktree administrative entries (after a forced removal)."""
+        return self._run(["worktree", "prune"], what="worktree prune")
 
     # ------------------------------------------------------------------ rebase control
 
@@ -323,6 +498,19 @@ class GitBackend:
 
     def rerere_enabled(self) -> bool:
         return self._run(["config", "--bool", "rerere.enabled"]).stdout.strip() == "true"
+
+
+def _branch_slug(label: str) -> str:
+    """Sanitise ``label`` to a branch-name-safe slug for backup branch names.
+
+    Keeps alphanumerics, ``-`` and ``_``; replaces anything else (notably ``/``)
+    with ``-`` so a feature branch like ``feature/foo`` becomes ``feature-foo``.
+    Empty input becomes ``head``.
+    """
+    import re
+
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", label or "").strip("-")
+    return slug or "head"
 
 
 def _synthesize_mode(stages: dict[int, str]) -> str:
