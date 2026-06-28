@@ -536,9 +536,25 @@ class Config(BaseModel):
         if resolved is None:
             cfg = cls()
         else:
-            with open(resolved, "rb") as fh:
-                data = tomllib.load(fh)
-            cfg = cls.model_validate(data)
+            # If the resolved source is a REPO-LOCAL override, merge it on top of
+            # the config-dir toml (when one exists) rather than replacing it
+            # wholesale. A partial override (e.g. just [tests]) must not drop the
+            # global [model]/[validation]/... sections — otherwise a repo that
+            # only wants to tweak its test gate silently loses its model config.
+            # An explicit ``path`` file or the config-dir file itself is loaded
+            # standalone (no merge): the merge is only for repo-local overrides.
+            repo_local = _repo_local_config_path(path)
+            dir_toml = cdir / "capybase.toml"
+            if repo_local is not None and dir_toml.is_file() and resolved != dir_toml:
+                with open(dir_toml, "rb") as fh:
+                    base_data = tomllib.load(fh)
+                with open(resolved, "rb") as fh:
+                    override_data = tomllib.load(fh)
+                cfg = cls.model_validate(_deep_merge_toml(base_data, override_data))
+            else:
+                with open(resolved, "rb") as fh:
+                    data = tomllib.load(fh)
+                cfg = cls.model_validate(data)
             cfg.source_path = str(resolved)
         # Rewrite the calibration artifacts to the config dir. A user repo has
         # no business carrying calibration data — it's the model endpoint's
@@ -570,6 +586,41 @@ def _resolve_config_path(
         if candidate.is_file():
             return candidate
     return None
+
+
+def _repo_local_config_path(path: str | Path | None) -> Path | None:
+    """The repo-local override toml (``./capybase.toml`` or ``capybase.local.toml``),
+    or None. An explicit ``path`` is NOT a repo-local override (it's a direct
+    file for test use)."""
+    if path is not None:
+        return None
+    for name in ("capybase.toml", "capybase.local.toml"):
+        candidate = Path(name)
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _deep_merge_toml(base: dict, override: dict) -> dict:
+    """Recursively merge ``override`` onto ``base`` (both parsed-toml dicts).
+
+    ``override`` wins at the leaf; nested tables are merged section-by-section so
+    a partial override (e.g. just ``[tests]``) inherits the rest of ``base``.
+    Lists are replaced wholesale (no list-merging heuristic — last writer wins,
+    matching how toml config is normally understood). Returns a new dict; inputs
+    are not mutated.
+    """
+    out = dict(base)
+    for key, val in override.items():
+        if (
+            key in out
+            and isinstance(out[key], dict)
+            and isinstance(val, dict)
+        ):
+            out[key] = _deep_merge_toml(out[key], val)
+        else:
+            out[key] = val
+    return out
 
 
 def _relocate_calibration_paths(cfg: "Config", config_dir: Path) -> None:

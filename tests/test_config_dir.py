@@ -159,3 +159,58 @@ def test_config_dir_relative_path_expanded(tmp_path, monkeypatch):
     assert cfg.calibration.model_profile_path == str(
         (tmp_path / "myconfig" / "model_profile.json")
     )
+
+
+# ---------------------------------------------------------------------------
+# Repo-local override merged ONTO config-dir config (not replacing it)
+# ---------------------------------------------------------------------------
+
+
+def test_repo_local_override_merges_onto_config_dir(tmp_path, monkeypatch):
+    """A repo-local override that sets ONLY one section must NOT drop the other
+    sections from the config-dir toml.
+
+    Regression: a repo with only ``[tests]`` in ``capybase.local.toml`` used to
+    shadow the entire config-dir toml, falling back to the built-in [model]
+    defaults (wrong endpoint/model). The override is now deep-merged onto the
+    config-dir config so unspecified sections inherit from it.
+    """
+    cdir = tmp_path / "cfg"
+    cdir.mkdir()
+    (cdir / "capybase.toml").write_text(
+        '[model]\nmodel = "chat"\nbase_url = "http://desktop:8085/v1"\n'
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # The repo override sets ONLY [tests]; it must not clobber [model].
+    (repo / "capybase.local.toml").write_text(
+        '[tests]\npre_continue = "true"\nrequired = false\n'
+    )
+    monkeypatch.chdir(repo)
+    cfg = Config.load(config_dir=cdir)
+    # [tests] from the override wins.
+    assert cfg.tests.pre_continue == "true"
+    assert cfg.tests.required is False
+    # [model] is INHERITED from the config-dir toml (NOT the built-in default).
+    assert cfg.model.model == "chat"
+    assert cfg.model.base_url == "http://desktop:8085/v1"
+    # source_path is the override (the file that was loaded last / wins).
+    assert cfg.source_path == str((repo / "capybase.local.toml").resolve())
+
+
+def test_repo_local_override_deep_merges_nested_section(tmp_path, monkeypatch):
+    """A nested-table override merges field-by-field, not section-by-section."""
+    cdir = tmp_path / "cfg"
+    cdir.mkdir()
+    (cdir / "capybase.toml").write_text(
+        '[model]\nmodel = "chat"\ntemperature = 0.2\nmax_tokens = 8192\n'
+    )
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # Override only `temperature` within [model]; `model` and `max_tokens` inherit.
+    (repo / "capybase.local.toml").write_text('[model]\ntemperature = 0.5\n')
+    monkeypatch.chdir(repo)
+    cfg = Config.load(config_dir=cdir)
+    assert cfg.model.temperature == 0.5  # override wins
+    assert cfg.model.model == "chat"      # inherited
+    assert cfg.model.max_tokens == 8192   # inherited
