@@ -1227,17 +1227,19 @@ class Orchestrator:
         if last and last.escalated:
             # Enrich the summary bundle from the step's outcomes so the human
             # sees the model's best attempt + the validation failure — not just
-            # the bare reason. _resolve_step already wrote a rich bundle for its
-            # own escalation path; this covers the run() summary fallback (and
-            # avoids clobbering a richer bundle with a sparse one by carrying the
-            # same context _resolve_step had).
+            # the bare reason. Prefer an unaccepted (escalated) outcome; on a
+            # whole-FILE failure every unit was accepted per-unit but the file
+            # failed cargo, so fall back to the last outcome (its candidate is
+            # what got spliced and failed the whole-file check).
             _esc = next((o for o in last.outcomes if o.accepted is None), None)
+            if _esc is None and last.outcomes:
+                _esc = last.outcomes[-1]
             write_review_bundle(
                 self.paths,
                 reason=last.reason or "escalated",
                 step_index=last.step_index,
                 unit=_esc.unit if _esc else None,
-                candidate=_esc.attempts[-1] if _esc and _esc.attempts else None,
+                candidate=(_esc.accepted or (_esc.attempts[-1] if _esc.attempts else None)) if _esc else None,
                 validation=_esc.validation if _esc else None,
             )
         return last  # type: ignore[return-value]
