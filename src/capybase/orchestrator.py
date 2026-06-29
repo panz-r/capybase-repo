@@ -1225,10 +1225,20 @@ class Orchestrator:
             )
         self._summarize(last)
         if last and last.escalated:
+            # Enrich the summary bundle from the step's outcomes so the human
+            # sees the model's best attempt + the validation failure — not just
+            # the bare reason. _resolve_step already wrote a rich bundle for its
+            # own escalation path; this covers the run() summary fallback (and
+            # avoids clobbering a richer bundle with a sparse one by carrying the
+            # same context _resolve_step had).
+            _esc = next((o for o in last.outcomes if o.accepted is None), None)
             write_review_bundle(
                 self.paths,
                 reason=last.reason or "escalated",
                 step_index=last.step_index,
+                unit=_esc.unit if _esc else None,
+                candidate=_esc.attempts[-1] if _esc and _esc.attempts else None,
+                validation=_esc.validation if _esc else None,
             )
         return last  # type: ignore[return-value]
 
