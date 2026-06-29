@@ -6,6 +6,10 @@ Usage::
     capybase check                    # git + LLM + tools ready? (no mutation)
     capybase rebase --dry-run <tgt>   # rehearse in a throwaway worktree
     capybase rebase <tgt>             # own the entire rebase, start → finish
+                                     #   (on escalation with a terminal attached,
+                                     #    drops into an interactive fallback:
+                                     #    paste a resolution, edit the file, skip,
+                                     #    or abort — then continues)
     capybase status                   # read-only: latest session + backups
 
     # Stepping through conflicts manually:
@@ -110,6 +114,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="rehearse the entire rebase in a throwaway worktree; report whether "
              "it would succeed WITHOUT moving the branch pointer. Real LLM calls "
              "are made — this proves the real pipeline, it doesn't simulate it.",
+    )
+    inter_group = rb_p.add_mutually_exclusive_group()
+    inter_group.add_argument(
+        "-i", "--interactive",
+        dest="interactive", action="store_true", default=True,
+        help="on escalation, drop into an interactive fallback to let you resolve "
+             "the conflict capybase couldn't (paste a resolution or edit the file "
+             "directly), then continue. The default when a terminal is attached.",
+    )
+    inter_group.add_argument(
+        "--no-interactive",
+        dest="interactive", action="store_false",
+        help="never prompt; on escalation just leave the rebase stopped (or abort, "
+             "per --abort-on-escalation). For CI / scripted runs.",
     )
     abort_group = rb_p.add_mutually_exclusive_group()
     abort_group.add_argument(
@@ -711,6 +729,7 @@ def main(argv: list[str] | None = None) -> int:
             args.target,
             autostash=args.autostash,
             abort_on_escalation=args.abort_on_escalation,
+            interactive=args.interactive,
         )
         return 1 if result.escalated else 0
     parser.error(f"unknown command: {args.command}")

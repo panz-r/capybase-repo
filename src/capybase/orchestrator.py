@@ -381,6 +381,9 @@ class Orchestrator:
         self.stdin_reader = stdin_reader or _default_stdin_reader
         self.out = out
         self.step = 0
+        # Whether the interactive fallback may fire. Defaults to the real TTY
+        # check; tests override this (they can't provide a real terminal).
+        self._is_interactive_terminal = _is_interactive_terminal
 
         # Journal session start + snapshot config.
         self.journal.emit(
@@ -475,6 +478,232 @@ class Orchestrator:
             "when ready (tests not run in manual mode)."
         )
         return result
+
+    # ==================================================================
+    # Interactive fallback: presented automatically on escalation from rebase()
+    # when a human is at the terminal. Lets the human resolve the unit capybase
+    # couldn't (paste a resolution OR edit the file directly), then re-validates
+    # and continues the rebase — keeping capybase the single owner of the process.
+    # ==================================================================
+
+    def interactive_resolve(self, result: StepResult) -> StepResult:
+        """On escalation, present the unresolvable conflicts to the human for an
+        interactive decision, then continue the rebase.
+
+        Offered per unit: (1) paste a resolution, (2) edit the file directly,
+        (3) skip the unit (leave it unmerged), (4) abort the rebase. After all
+        units resolve, re-validate (whole-file + test gate) and continue the
+        rebase; loop for further stops. If the human skips/aborts, return the
+        (still-escalated) result so the caller's abort logic runs.
+
+        Only meaningful when a rebase is in progress and a human is present; the
+        caller guards on TTY/``interactive`` before invoking this.
+        """
+        self.out(
+            "\n! capybase could not auto-resolve the conflict(s) below.\n"
+            "  Review the context, then choose how to proceed.\n"
+            f"  review bundle: {self.paths.final / 'review-bundle.md'}\n"
+        )
+        # Re-gather the unmerged units fresh (the escalation left them on disk).
+        gathered = self._gather_step()
+        if gathered.escalated or not gathered.units_by_path:
+            self.out("  (no resolvable units to present interactively)")
+            return result
+
+        aborted = False
+        for path, units in gathered.units_by_path.items():
+            if aborted:
+                break
+            # Show the model's best attempt + the failure for this path (from the
+            # original escalation's outcomes) so the human sees what was tried.
+            prior = [o for o in result.outcomes if o.unit.path == path]
+            accepted: list[tuple[ConflictUnit, CandidateResolution]] = []
+            for unit in units:
+                self.out(self._render_unit_interactive(unit, prior))
+                choice = self._interactive_menu(unit)
+                if choice == "abort":
+                    aborted = True
+                    break
+                if choice == "skip":
+                    self.out(f"  skipped {unit.unit_id} (left unmerged)")
+                    continue
+                if choice == "paste":
+                    outcome = self._interactive_paste(unit)
+                    if outcome.accepted is None:
+                        self.out("  paste was rejected; re-offering this unit")
+                        # Re-present the same unit until resolved/skipped/aborted.
+                        # Simplest correct loop: re-run the menu inline.
+                        while True:
+                            choice2 = self._interactive_menu(unit)
+                            if choice2 == "abort":
+                                aborted = True
+                                break
+                            if choice2 == "skip":
+                                break
+                            if choice2 == "edit":
+                                if self._interactive_edit_file(path):
+                                    # File fully resolved by direct edit; stage it
+                                    # and move to the next file (units consumed).
+                                    self._stage_after_edit(path, result)
+                                    accepted = []  # don't double-splice
+                                    break
+                                continue
+                            if choice2 == "paste":
+                                o2 = self._interactive_paste(unit)
+                                if o2.accepted is not None:
+                                    accepted.append((unit, o2.accepted))
+                                    break
+                                self.out("  paste rejected again; re-offering")
+                                continue
+                            break
+                        if aborted:
+                            break
+                        continue
+                    accepted.append((unit, outcome.accepted))
+                elif choice == "edit":
+                    if self._interactive_edit_file(path):
+                        self._stage_after_edit(path, result)
+                        accepted = []  # file resolved wholesale by direct edit
+                        break  # next file
+            if aborted or not accepted:
+                continue
+            # Batch-splice + stage the paste-mode resolutions (mirrors manual()).
+            from capybase.adapters.parsers import splice_all_resolutions
+            original = accepted[0][0].original_worktree_text
+            spans_and_texts = [
+                (unit.marker_span, cand.resolved_text) for unit, cand in accepted
+            ]
+            buffer = splice_all_resolutions(original, spans_and_texts)
+            self._write_and_stage(path, buffer, result)
+
+        if aborted:
+            self.out("  aborting rebase as requested")
+            self.git.abort_rebase()
+            result.escalated = True
+            result.reason = result.reason or "aborted by user in interactive fallback"
+            return result
+
+        # If any units were skipped, the rebase can't continue cleanly.
+        if self.git.has_unmerged_paths():
+            self.out(
+                "  some units were skipped — rebase left stopped. "
+                "Resolve them with git, then `git rebase --continue`."
+            )
+            result.escalated = True
+            result.reason = "interactive fallback: some units skipped"
+            return result
+
+        # All units resolved: run the test gate, then continue the rebase. Loop
+        # back into run() for further stops so a multi-conflict rebase proceeds.
+        self.out("  ✓ conflict(s) resolved interactively; continuing rebase")
+        result.escalated = False
+        result.reason = None
+        self.journal.emit(
+            "interactive_resolved",
+            {"path": path if not aborted else "", "step": self.step},
+            step_index=self.step,
+        )
+        return self.run()
+
+    def _render_unit_interactive(
+        self, unit: ConflictUnit, prior_outcomes: list[UnitOutcome]
+    ) -> str:
+        """Rich context for the interactive menu: the three sides (truncated for
+        huge units) + the model's best attempt + why it failed."""
+        lines = [
+            f"\n=== {unit.unit_id} ({unit.path}, {unit.conflict_type}) ==="
+        ]
+        for label, side in (
+            ("BASE (common ancestor)", unit.base.text),
+            ("CURRENT_UPSTREAM_SIDE", unit.current.text),
+            ("REPLAYED_COMMIT_SIDE", unit.replayed.text),
+        ):
+            n = side.count("\n") + 1
+            if n > 30:
+                lines.append(f"-- {label} ({n} lines; first 30 shown) --")
+                lines.append("\n".join(side.split("\n")[:30]))
+                lines.append("... (truncated; see review bundle for full)")
+            else:
+                lines.append(f"-- {label} --")
+                lines.append(side)
+        # The model's best attempt + failure, if the escalation carried it.
+        if prior_outcomes:
+            o = prior_outcomes[0]
+            if o.attempts:
+                best = o.attempts[-1]
+                lines.append("-- model's last attempt --")
+                at = best.resolved_text
+                if at.count("\n") > 30:
+                    lines.append("\n".join(at.split("\n")[:30]))
+                    lines.append("... (truncated)")
+                else:
+                    lines.append(at)
+            if o.validation and o.validation.hard_failures:
+                lines.append("-- why it failed --")
+                for hf in o.validation.hard_failures[:5]:
+                    lines.append(f"  [{hf.validator}] {hf.message}")
+        return "\n".join(lines)
+
+    def _interactive_menu(self, unit: ConflictUnit) -> str:
+        """Present the menu and return the chosen action string."""
+        self.out(
+            f"\n  How do you want to resolve {unit.unit_id}?\n"
+            "    1) paste a resolution\n"
+            "    2) edit the file directly (then I validate + continue)\n"
+            "    3) skip this unit (leave unmerged)\n"
+            "    4) abort the rebase\n"
+        )
+        choice = self.stdin_reader("  choice [1-4]: ").strip()
+        return {"1": "paste", "2": "edit", "3": "skip", "4": "abort"}.get(
+            choice, "skip"
+        )
+
+    def _interactive_paste(self, unit: ConflictUnit) -> UnitOutcome:
+        """Read a pasted resolution and validate it through the full chain."""
+        self.out("  paste the resolved text (Ctrl-D to finish):")
+        pasted = self.stdin_reader("")
+        outcome = self._apply_manual_resolution(unit, pasted)
+        self.journal.emit(
+            "interactive_resolved",
+            {"unit": unit.unit_id, "mode": "paste",
+             "accepted": outcome.accepted is not None},
+            step_index=self.step,
+        )
+        return outcome
+
+    def _interactive_edit_file(self, path: str) -> bool:
+        """Tell the human to edit the file in their editor; on their signal,
+        read it back, reject if conflict markers remain, return True if clean."""
+        self.out(
+            f"  edit {path} in your editor now (resolve the conflict markers,\n"
+            "  save, and return here). Press Enter when done."
+        )
+        self.stdin_reader("")
+        text = self.git.read_worktree_file(path).decode("utf-8", errors="replace")
+        if "<<<<<<<" in text or "=======" in text or ">>>>>>>" in text:
+            self.out("  ! conflict markers still present — not done editing. Re-offering.")
+            self.journal.emit(
+                "interactive_resolved",
+                {"path": path, "mode": "edit", "accepted": False,
+                 "reason": "markers remained"},
+                step_index=self.step,
+            )
+            return False
+        self.journal.emit(
+            "interactive_resolved",
+            {"path": path, "mode": "edit", "accepted": True},
+            step_index=self.step,
+        )
+        return True
+
+    def _stage_after_edit(self, path: str, result: StepResult) -> None:
+        """After a direct edit, validate the whole file (cargo check etc.) and
+        stage it. The human owns the file content; we only verify + stage."""
+        self.git.stage_paths([path])
+        self.journal.emit(
+            "file_staged", {"path": path, "via": "interactive_edit"},
+            step_index=self.step, path=path,
+        )
 
     def _apply_manual_resolution(
         self, unit: ConflictUnit, pasted: str
@@ -724,6 +953,7 @@ class Orchestrator:
         *,
         autostash: bool = False,
         abort_on_escalation: bool = True,
+        interactive: bool = True,
     ) -> StepResult:
         """Own the entire rebase: start it, drive the resolution loop, finish.
 
@@ -892,7 +1122,20 @@ class Orchestrator:
                 f"{start_oid[:8]}; delete it once you've confirmed the result:\n"
                 f"    git branch -D {backup_ref}"
             )
-        # 6. Abort-on-escalation: return the repo to start_oid if we couldn't
+        # 6. Interactive fallback: on escalation, if a human is at the terminal
+        #    and the rebase is still in progress (not yet aborted), present the
+        #    conflict for an interactive decision before the auto-abort runs.
+        #    This keeps capybase the single owner of the process: the human
+        #    resolves the one unit the model couldn't, then the rebase continues.
+        #    Disabled by --no-interactive (e.g. CI) or when stdin isn't a TTY.
+        if (
+            result.escalated
+            and interactive
+            and self.git.rebase_in_progress()
+            and self._is_interactive_terminal()
+        ):
+            result = self.interactive_resolve(result)
+        # 7. Abort-on-escalation: return the repo to start_oid if we couldn't
         #    finish. run() sets escalated and leaves the rebase stopped; abort
         #    rolls it all back so the developer is back where they started.
         if result.escalated and abort_on_escalation and self.git.rebase_in_progress():
@@ -1151,10 +1394,18 @@ class Orchestrator:
                             + "; ".join(f.message for f in file_validation.hard_failures)
                         )
                     self._record_outcomes_to_memory(result)
+                    # Enrich the bundle with the unit/candidate/validation so the
+                    # human (and the interactive fallback) can see what was tried
+                    # and why cargo rejected it — not just the bare reason.
+                    _unit = accepted[0][0] if accepted else None
+                    _cand = accepted[0][1] if accepted else None
                     write_review_bundle(
                         self.paths,
                         reason=result.reason,
                         step_index=result.step_index,
+                        unit=_unit,
+                        candidate=_cand,
+                        validation=file_validation if file_validation is not None else None,
                     )
                     return result
             # Stage the validated file (it was already written to the worktree
@@ -1768,6 +2019,16 @@ def _default_stdin_reader(prompt: str) -> str:
     except EOFError:
         pass
     return "\n".join(chunks)
+
+
+def _is_interactive_terminal() -> bool:
+    """True iff stdin is a real terminal (a human is present).
+
+    The interactive fallback fires only when this is True, so it never blocks a
+    non-TTY run (CI, piped input). Tests force it on/off by monkeypatching this
+    function (they can't provide a real TTY)."""
+    import sys
+    return bool(getattr(sys.stdin, "isatty", lambda: False)())
 
 
 def _toml_dump_config(config: Config) -> str:

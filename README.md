@@ -86,6 +86,15 @@ calls, genuine conflicts) and reports whether it would succeed — without ever
 moving your branch pointer. It's the single most confidence-building step before
 a first real run.
 
+**Interactive fallback.** When `capybase rebase` can't auto-resolve a conflict
+and you're at a terminal, it drops into an interactive menu instead of just
+giving up: you can (1) **paste** a resolution, (2) **edit the file directly**
+in your editor then have capybase validate + continue, (3) **skip** the unit,
+or (4) **abort**. After you resolve, capybase re-validates (cargo check / the
+full chain) and continues the rebase — so capybase stays the single owner of the
+process even on the conflicts the model can't handle. Use `--no-interactive`
+for CI / scripted runs; it's also auto-suppressed when stdin isn't a TTY.
+
 Global flags: `-v/--verbose` (mirror debug logs to stderr), `-q/--quiet`, and
 `--config <dir>` (default `~/.config/capybase`). Cross-session logs rotate at
 `~/.local/share/capybase/logs/capybase.log`.
