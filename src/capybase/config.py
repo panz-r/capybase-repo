@@ -504,8 +504,11 @@ class CalibrationConfig(BaseModel):
     # (0.8) because even a 2-of-3 majority produces non-trivial entropy; we
     # only want to escalate when samples are *maximally* split.
     entropy_escalate_threshold: float = 0.8
-    # Conformal prediction coverage (1-alpha). When a conformal model is fitted,
-    # the p-value threshold guarantees this coverage of accepted merges.
+    # Conformal escalation strictness (1-alpha). When a conformal model is
+    # fitted, candidates with a p-value below this are escalated. This is an
+    # empirical guardrail tuned on capybase's own accepted/escalated outcomes
+    # (a correctness proxy), NOT a proven coverage guarantee — see
+    # ConformalRiskModel's caveat. Lower = escalate more.
     conformal_alpha: float = 0.1
 
 

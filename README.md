@@ -76,6 +76,13 @@ Every session writes a journal and artifacts under `.rebase-agent/sessions/`.
 On any escalation capybase writes `final/review-bundle.md` explaining why it
 stopped and how to resume.
 
+> **`.rebase-agent/` is sensitive.** It stores prompts, conflict snippets,
+> candidate resolutions, file snapshots, and review bundles — i.e. your source
+> code and its diff history. Treat it as potentially containing proprietary
+> code. It is listed in this repo's `.gitignore`; when running capybase against
+> *other* repos, confirm that repo ignores `.rebase-agent/` too (or run it
+> outside any tracked tree) so merged code isn't committed by accident.
+
 ## Calibrate for your model
 
 `max_tokens`, JSON-mode support, logprobs, and the generation timeout all

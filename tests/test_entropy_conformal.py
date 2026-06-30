@@ -151,11 +151,12 @@ def test_conformal_model_accepts_safe_features():
 
 
 def test_conformal_pvalue_ranks_success_above_failure():
-    """Coverage-guarantee direction: a candidate the model predicts will
-    SUCCEED (low P(fail), low nonconformity) must get a HIGHER p-value than one
-    it predicts will FAIL (high P(fail), high nonconformity), given the same
-    calibration set. This pins the conformal convention — it would fail against
-    the prior inverted scorer."""
+    """Guardrail direction: a candidate the model predicts will SUCCEED (low
+    P(fail), low nonconformity) must get a HIGHER p-value than one it predicts
+    will FAIL (high P(fail), high nonconformity), given the same calibration
+    set. This pins the conformal convention — it would fail against the prior
+    inverted scorer. (This tests the p-value ordering the guardrail relies on,
+    not a proven coverage bound — see ConformalRiskModel's label caveat.)"""
     from capybase.calibration import ConformalRiskModel
     from capybase.calibration import _FEATURE_KEYS
 
@@ -290,7 +291,7 @@ def test_conformal_tecp_ignores_missing_entropy():
 
 def test_conformal_tecp_threshold_boundary_is_strict():
     """Entropy equal to the threshold does NOT escalate (strict >). This pins
-    the boundary so the (1-alpha) coverage quantile is itself accepted."""
+    the boundary so the (1-alpha) quantile threshold itself is accepted."""
     from capybase.calibration import ConformalRiskModel, _FEATURE_KEYS
 
     m = ConformalRiskModel(

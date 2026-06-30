@@ -196,23 +196,30 @@ def _sigmoid(z: float) -> float:
 
 @dataclass
 class ConformalRiskModel:
-    """A split-conformal predictor with a coverage guarantee.
+    """A split-conformal-calibrated escalation guardrail.
 
     Unlike ``CalibrationModel`` (fixed threshold), this derives the escalation
-    threshold from a calibration set with a statistical coverage guarantee:
-    with probability ≥ 1−α, a merge the model accepts will indeed be correct.
-    The nonconformity score is 1−P(correct label). At runtime, ``predict_proba``
-    returns the conformal p-value — the fraction of calibration examples with
-    a higher nonconformity score. If p-value < α, the candidate is escalated.
+    threshold from a calibration set: ``predict_proba`` returns the conformal
+    p-value — the fraction of calibration examples with a higher nonconformity
+    score (the nonconformity score is 1−P(correct label); high = atypical). If
+    p-value < α, the candidate is escalated. All inference is pure-Python
+    (dot-product + lookup); sklearn is only needed offline for fitting. When the
+    calibration scores are empty (no data yet), this falls back to the logistic
+    model's threshold.
 
-    All inference is pure-Python (dot-product + lookup); sklearn is only needed
-    offline for fitting. When the calibration scores are empty (no data yet),
-    this falls back to the logistic model's threshold.
+    Caveat — this is an EMPIRICAL calibrated guardrail, not a formal coverage
+    guarantee. A true split-conformal coverage statement ("with probability
+    ≥ 1−α an accepted merge is correct") requires exchangeability AND labels
+    that are ground-truth correctness. The labels fit here are capybase's
+    accepted/escalated *outcomes* — a proxy for correctness (an escalated merge
+    may be correct; an accepted one may be subtly wrong). Treat α as a tuned
+    escalation strictness knob, not a proven false-accept bound, until the
+    labels are validated against human/blessed correctness.
     """
 
     coefficients: list[float]
     intercept: float
-    alpha: float  # coverage = 1 - alpha
+    alpha: float  # escalation strictness (lower = escalate more); NOT a proven coverage bound
     calibration_scores: list[float] = field(default_factory=list)
     feature_keys: tuple[str, ...] = _FEATURE_KEYS
     # TECP entropy threshold (survey §4.1): the (1-alpha) quantile of mean
