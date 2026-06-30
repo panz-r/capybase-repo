@@ -43,6 +43,12 @@ from capybase.merge_intent import classify_side, direction
 Rule = Literal[
     "identical_sides", "one_sided_change", "disjoint_edits", "zealous_merge",
     "entity_disjoint", "token_disjoint", "delete_side",
+    # Easy-merge union rules (the gap every prior rule declines): both sides
+    # append distinct items to a collection, or insert distinct lines at the
+    # same anchor. An opinionated, deterministic ordering (current-appends
+    # before replayed-appends) resolves them; a wrong guess still fails the
+    # validation pipeline and falls through to the LLM, so the policy is safe.
+    "list_union", "dict_union", "insertion_union",
 ]
 
 
@@ -178,6 +184,23 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         merged = _try_token_disjoint(base, current, replayed)
         if merged is not None:
             return StructuralResolution(rule="token_disjoint", text=merged)
+
+        # Rules 8-10: easy-merge unions. Every rule above DELIBERATELY declines
+        # pure insertions/appends (their relative order is ambiguous). These
+        # rules resolve the common "both sides appended distinct items" shapes
+        # with an opinionated, deterministic ordering (current-appends first,
+        # then replayed-appends). The merge is still validated before it's
+        # applied, so an ordering that produces invalid code falls through to
+        # the LLM — the policy can be opinionated without being unsafe.
+        merged = _try_list_union(base, current, replayed)
+        if merged is not None:
+            return StructuralResolution(rule="list_union", text=merged)
+        merged = _try_dict_union(base, current, replayed)
+        if merged is not None:
+            return StructuralResolution(rule="dict_union", text=merged)
+        merged = _try_insertion_union(base, current, replayed)
+        if merged is not None:
+            return StructuralResolution(rule="insertion_union", text=merged)
 
     return StructuralResolution(rule=None, text=None)
 
@@ -410,6 +433,270 @@ def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
         _, repl = merged_ops[n]
         out.extend(repl)
     return _detokenize(out)
+
+
+# ---------------------------------------------------------------------------
+# Easy-merge union rules (the insertion-union gap every prior rule declines)
+# ---------------------------------------------------------------------------
+#
+# These resolve the common "both sides appended distinct items to a collection"
+# shapes with a deterministic ordering (current-appends, then replayed-appends).
+# A wrong guess still fails the validation pipeline and falls through, so the
+# opinionated ordering is safe. Each rule is a pure ``str | None`` function.
+
+
+def _try_list_union(base: str, current: str, replayed: str) -> str | None:
+    """Merge two sides that each APPEND distinct items to a ``[...]`` list.
+
+    Fires when each side is ``base`` with extra items appended inside the SAME
+    list literal, the appended item-sets are disjoint, and neither side removed
+    or reordered base items. The merge is base-items + current-appends +
+    replayed-appends (current first — a deterministic, documented choice).
+
+    Declines (→ None) when: there's no single list literal; a side changed the
+    list's non-item structure (e.g. the assignment target, or removed an item);
+    the two sides appended the SAME item; or either side touched base items.
+    Handles a list that spans multiple lines (indentation preserved) or one line.
+    """
+    import re
+
+    b = _find_single_list(base)
+    if b is None:
+        return None
+    _, base_inner, base_open_off, base_close_off = b
+    base_items = _split_list_items(base_inner)
+    cur = _find_single_list(current)
+    rep = _find_single_list(replayed)
+    if cur is None or rep is None:
+        return None
+    # Each side must preserve base items verbatim (same order, no removal) and
+    # differ only by appending. Compute the appended tail.
+    cur_items = _split_list_items(cur[1])
+    rep_items = _split_list_items(rep[1])
+    cur_appended = _appended_tail(base_items, cur_items)
+    rep_appended = _appended_tail(base_items, rep_items)
+    if cur_appended is None or rep_appended is None:
+        return None  # a side reordered/removed/edited base items
+    # Disjoint appends (no shared new item). A shared item means both sides made
+    # the same addition — let identical_sides/zealous handle it, not us.
+    if set(cur_appended) & set(rep_appended):
+        return None
+    merged_items = base_items + cur_appended + rep_appended
+    return (
+        base[:base_open_off]
+        + "["
+        + ", ".join(merged_items)
+        + "]"
+        + base[base_close_off:]
+    )
+
+
+def _try_dict_union(base: str, current: str, replayed: str) -> str | None:
+    """Merge two sides that each ADD distinct keys to a ``{...}`` dict.
+
+    Fires when each side is ``base`` with extra key entries inside the SAME dict
+    literal, the added key-sets are disjoint, and neither side changed a value
+    of a shared base key. The merge is base-keys + current-keys + replayed-keys.
+
+    Declines when: there's no single dict literal; the dict spans multiple lines
+    (reconstructing multi-line indentation is fiddly and error-prone — leave
+    those to the LLM); a side removed/reordered base keys; both sides added the
+    SAME key; or a side changed the value of a key the other side also touched.
+    Handles inline (single-line) dicts.
+    """
+    b = _find_single_dict(base)
+    if b is None:
+        return None
+    base_inner = b[1]
+    # Only inline (single-line) dicts: multi-line reconstruction would mangle
+    # indentation. The base dict literal must not contain a newline.
+    if "\n" in base_inner:
+        return None
+    base_entries = _split_dict_entries(base_inner)
+    cur = _find_single_dict(current)
+    rep = _find_single_dict(replayed)
+    if cur is None or rep is None:
+        return None
+    cur_entries = _split_dict_entries(cur[1])
+    rep_entries = _split_dict_entries(rep[1])
+    # Each side must preserve base entries (same keys, same values, same order)
+    # and differ only by appending new entries.
+    cur_added = _appended_tail(base_entries, cur_entries)
+    rep_added = _appended_tail(base_entries, rep_entries)
+    if cur_added is None or rep_added is None:
+        return None
+    base_keys = {e.split(":", 1)[0].strip() for e in base_entries if ":" in e}
+    cur_added_keys = {e.split(":", 1)[0].strip() for e in cur_added if ":" in e}
+    rep_added_keys = {e.split(":", 1)[0].strip() for e in rep_added if ":" in e}
+    # No key added by both, and no added key collides with a base key.
+    if cur_added_keys & rep_added_keys:
+        return None
+    if cur_added_keys & base_keys or rep_added_keys & base_keys:
+        return None
+    merged = base_entries + cur_added + rep_added
+    return _rebuild_dict(base, b, merged)
+
+
+def _try_insertion_union(base: str, current: str, replayed: str) -> str | None:
+    """Merge two sides that each INSERT distinct whole lines after base anchors.
+
+    The line-granular analog of the list/dict union: both sides added whole new
+    lines (no base line modified), and the added line-sets are disjoint. The
+    merge interleaves both sides' insertion RUNS at their base anchors (current's
+    run before replayed's run at a shared anchor). Unlike the pure-insertion
+    DECLINE in disjoint/zealous/token (which treat ordering at a single shared
+    anchor as ambiguous), this rule accepts distinct-line insertions.
+
+    Declines when either side MODIFIED or DELETED a base line (only pure
+    insertions qualify), or the inserted line-sets overlap.
+    """
+    base_lines = base.split("\n")
+    cur_lines = current.split("\n")
+    rep_lines = replayed.split("\n")
+    cur_ins = _pure_insertion_runs(base_lines, cur_lines)
+    rep_ins = _pure_insertion_runs(base_lines, rep_lines)
+    if cur_ins is None or rep_ins is None:
+        return None  # a side modified/deleted a base line
+    # Disjoint inserted lines (a line both sides added → ambiguous, decline).
+    # Blank lines are ignored in the overlap check: a blank separator inserted
+    # by both sides is not meaningful shared content (it carries no semantic
+    # weight and re-appears naturally between two inserted blocks).
+    cur_flat = [ln for run in cur_ins.values() for ln in run if ln.strip()]
+    rep_flat = [ln for run in rep_ins.values() for ln in run if ln.strip()]
+    if set(cur_flat) & set(rep_flat):
+        return None
+    # Merge: walk base, emitting each base line preceded by any insertion runs
+    # anchored before it (current's run first, then replayed's). Trailing runs
+    # (anchored after the last base line) append at the end.
+    out: list[str] = []
+    for i, bl in enumerate(base_lines):
+        out.extend(cur_ins.get(i, []))
+        out.extend(rep_ins.get(i, []))
+        out.append(bl)
+    out.extend(cur_ins.get(len(base_lines), []))
+    out.extend(rep_ins.get(len(base_lines), []))
+    return "\n".join(out)
+
+
+# Helpers for the union rules (pure, regex-based — no AST needed).
+
+
+def _find_single_list(text: str):
+    """The ``(before_unused, inner, open_offset, close_offset)`` of the SOLE
+    ``[...]`` list in text, or None.
+
+    ``inner`` is the text between the brackets; ``open_offset``/``close_offset``
+    are the char offsets of the ``[`` and ``]`` (so the caller can splice).
+    Rejects nested/extra brackets (a single list with no inner ``[``).
+    """
+    import re
+
+    m = re.search(r"\[(.*)\]", text, re.DOTALL)
+    if m is None:
+        return None
+    inner = m.group(1)
+    if "[" in inner or "]" in inner:
+        return None
+    open_off = m.start()  # offset of '['
+    close_off = m.end()   # offset just after ']'
+    return (None, inner, open_off, close_off)
+
+
+def _split_list_items(inner: str) -> list[str]:
+    """Split a list literal's interior into stripped items (no surrounding [])."""
+    if not inner.strip():
+        return []
+    return [it.strip() for it in inner.split(",") if it.strip()]
+
+
+def _find_single_dict(text: str):
+    """The (before, inner, after-unused) of the SOLE ``{...}`` dict in text.
+
+    Returns None if there's not exactly one brace-delimited dict. ``inner`` is
+    the text between the braces.
+    """
+    import re
+
+    m = re.search(r"\{(.*)\}", text, re.DOTALL)
+    if m is None:
+        return None
+    inner = m.group(1)
+    if "{" in inner or "}" in inner:
+        return None
+    return (None, inner, None, None)
+
+
+def _split_dict_entries(inner: str) -> list[str]:
+    """Split a dict interior into entries (``key: value``), preserving text.
+
+    Splits on top-level commas (the regex form ``key: value`` is assumed; nested
+    commas inside values — e.g. a function call — are NOT handled, which keeps
+    the rule conservative: a dict with complex values declines rather than
+    mis-splitting).
+    """
+    if not inner.strip():
+        return []
+    # Conservative: split on commas only when every segment looks like `key: val`.
+    parts = [p.strip() for p in inner.split(",") if p.strip()]
+    if not all(":" in p for p in parts):
+        return []  # ambiguous (nested commas) → decline via empty
+    return parts
+
+
+def _appended_tail(base_items: list, side_items: list):
+    """The items ``side`` appended after ``base``, or None if it didn't.
+
+    Returns the suffix of ``side_items`` following a verbatim copy of
+    ``base_items`` as a prefix (base preserved in order, unchanged). None means
+    the side reordered, removed, or edited base items — not a pure append.
+    """
+    n = len(base_items)
+    if len(side_items) < n:
+        return None
+    if side_items[:n] != base_items:
+        return None
+    tail = side_items[n:]
+    return tail if tail else None  # no append → not our shape (let other rules)
+
+
+def _rebuild_dict(base: str, found, entries: list[str]) -> str:
+    """Rebuild ``base``'s dict literal with the given ``entries`` (comma-joined)."""
+    import re
+
+    m = re.search(r"\{.*\}", base, re.DOTALL)
+    if m is None:
+        return base  # defensive; _find_single_dict already validated this
+    inner = ", ".join(entries)
+    return base[: m.start()] + "{" + inner + "}" + base[m.end():]
+
+
+def _pure_insertion_runs(
+    base_lines: list[str], side_lines: list[str]
+) -> dict[int, list[str]] | None:
+    """Map each base-line index to the RUN of lines ``side`` inserted before it.
+
+    Returns None if ``side`` is not a pure insertion (it modified or deleted a
+    base line). Uses difflib to align ``side_lines`` against ``base_lines``:
+    every base line must appear unchanged and in order; the only allowed
+    difference is ``insert`` opcodes, each recorded as a run keyed by the base
+    index it precedes. A run anchored at ``len(base_lines)`` is a trailing
+    insertion (after the last base line). This run-based model (vs. per-line
+    keys) correctly handles multi-line insertion blocks.
+    """
+    import difflib
+
+    sm = difflib.SequenceMatcher(a=base_lines, b=side_lines, autojunk=False)
+    runs: dict[int, list[str]] = {}
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "insert":
+            # replace/delete → the side touched a base line, not a pure insert.
+            return None
+        # An insert at base range [i1, i2) (i1 == i2 for a pure insert) precedes
+        # base line i1; the inserted side-lines [j1, j2) are the run.
+        runs.setdefault(i1, []).extend(side_lines[j1:j2])
+    return runs
 
 
 def _try_zealous_merge(base: str, current: str, replayed: str) -> str | None:

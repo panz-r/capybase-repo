@@ -11,7 +11,11 @@ from __future__ import annotations
 import pytest
 
 from capybase.conflict_model import ConflictSide, ConflictUnit
-from capybase.structural_resolver import StructuralResolution, resolve_structurally
+from capybase.structural_resolver import (
+    StructuralResolution,
+    _try_zealous_merge,
+    resolve_structurally,
+)
 
 
 def _unit(base: str, current: str, replayed: str) -> ConflictUnit:
@@ -261,15 +265,21 @@ def test_zealous_bails_on_genuine_two_sided_overlapping_span():
         assert r.rule in ("disjoint_edits", "zealous_merge")
 
 
-def test_zealous_bails_on_pure_insertion():
-    # A pure insertion (line with no base anchor) has ambiguous ordering relative
-    # to the other side → zealous refuses, defers to the LLM. Never guess order.
+def test_zealous_bails_on_pure_insertion_but_union_resolves_it():
+    # Zealous itself still refuses a pure insertion (ordering is ambiguous at
+    # the per-line merge granularity)...
     base = "A"
     current = "A\nB"      # current inserts B
     replayed = "A\nC"     # replayed inserts C
+    assert _try_zealous_merge(base, current, replayed) is None
+    # ...but the insertion_union rule (which runs after zealous in the pipeline)
+    # DOES resolve it with a deterministic ordering (current's insert before
+    # replayed's). This is the easy-merge gap #1 fills: pure insertions of
+    # distinct lines no longer defer to the LLM.
     r = resolve_structurally(_unit(base, current, replayed))
-    assert not r.resolved
-    assert r.rule is None
+    assert r.resolved
+    assert r.rule == "insertion_union"
+    assert r.text == "A\nB\nC"
 
 
 def test_zealous_never_emits_garbage_on_partial_overlap():
@@ -364,3 +374,132 @@ def test_delete_side_takes_priority_and_records_rule():
     base = "def a():\n    pass\n\ndef b():\n    pass\n"
     r = resolve_structurally(_unit(base, "", base))
     assert r.rule == "delete_side"
+
+
+# ---------------------------------------------------------------------------
+# Easy-merge union rules (#1): list_union, dict_union, insertion_union.
+# These resolve the "both sides appended distinct items" shapes every prior
+# rule declines, with a deterministic ordering (current-appends first).
+# ---------------------------------------------------------------------------
+
+
+def test_list_union_merges_distinct_appends():
+    """Both sides append distinct items to a list → base + current + replayed."""
+    base = 'SERVICES = ["core"]'
+    current = 'SERVICES = ["core", "scheduler"]'
+    replayed = 'SERVICES = ["core", "reloader"]'
+    r = resolve_structurally(_unit(base, current, replayed))
+    assert r.rule == "list_union"
+    assert r.text == 'SERVICES = ["core", "scheduler", "reloader"]'
+
+
+def test_list_union_declines_on_shared_append():
+    """Both sides appending the SAME item is ambiguous → decline (let other rules)."""
+    base = 'S = ["a"]'
+    current = 'S = ["a", "b"]'
+    replayed = 'S = ["a", "b"]'  # same append
+    r = resolve_structurally(_unit(base, current, replayed))
+    # identical_sides handles the same-append case; list_union declines.
+    assert r.rule != "list_union"
+
+
+def test_list_union_declines_when_a_side_edits_a_base_item():
+    """A side that modifies a base item (not a pure append) → decline."""
+    base = 'S = ["a", "b"]'
+    current = 'S = ["A", "b"]'  # edited base item "a" → "A"
+    replayed = 'S = ["a", "b", "c"]'
+    r = resolve_structurally(_unit(base, current, replayed))
+    assert r.rule != "list_union"
+
+
+def test_dict_union_merges_distinct_inline_keys():
+    """Both sides add distinct keys to an inline dict → base + current + replayed."""
+    base = 'CFG = {"a": 1}'
+    current = 'CFG = {"a": 1, "b": 2}'
+    replayed = 'CFG = {"a": 1, "c": 3}'
+    r = resolve_structurally(_unit(base, current, replayed))
+    assert r.rule == "dict_union"
+    assert '"a": 1' in r.text and '"b": 2' in r.text and '"c": 3' in r.text
+
+
+def test_dict_union_declines_on_multiline_dict():
+    """A multi-line dict declines (reconstructing indentation is fiddly → LLM)."""
+    base = 'CFG = {\n    "a": 1,\n}'
+    current = 'CFG = {\n    "a": 1,\n    "b": 2,\n}'
+    replayed = 'CFG = {\n    "a": 1,\n    "c": 3,\n}'
+    r = resolve_structurally(_unit(base, current, replayed))
+    assert r.rule != "dict_union"  # multi-line → deferred
+
+
+def test_dict_union_declines_on_shared_key():
+    """Both sides adding the SAME key → decline (value conflict)."""
+    base = 'CFG = {"a": 1}'
+    current = 'CFG = {"a": 1, "b": 2}'
+    replayed = 'CFG = {"a": 1, "b": 9}'  # same key, different value
+    r = resolve_structurally(_unit(base, current, replayed))
+    assert r.rule != "dict_union"
+
+
+def test_insertion_union_merges_distinct_inserted_lines():
+    """Both sides insert distinct lines after base anchors → interleaved.
+    (token_disjoint may also handle this; what matters is a correct resolve.)"""
+    base = "a = 1\nb = 2\nc = 3"
+    current = "a = 1\nx = 9\nb = 2\nc = 3"      # insert x after a
+    replayed = "a = 1\nb = 2\nc = 3\ny = 8"     # insert y after c
+    r = resolve_structurally(_unit(base, current, replayed))
+    assert r.resolved
+    assert r.text == "a = 1\nx = 9\nb = 2\nc = 3\ny = 8"
+
+
+def test_insertion_union_merges_multi_line_blocks():
+    """Multi-line insertion BLOCKS (e.g. a new function) merge correctly, even
+    when both sides share a blank-line separator (ignored in the overlap check)."""
+    base = "def base():\n    return 0"
+    current = "def base():\n    return 0\n\ndef add(x, y):\n    return x + y"
+    replayed = "def base():\n    return 0\n\ndef sub(x, y):\n    return x - y"
+    r = resolve_structurally(_unit(base, current, replayed))
+    assert r.rule == "insertion_union"
+    assert "def add" in r.text and "def sub" in r.text
+    assert r.text.count("def base") == 1  # base not duplicated
+
+
+def test_insertion_union_declines_when_a_side_modifies_a_base_line():
+    """A side that modifies (not just inserts) a base line → decline."""
+    base = "a = 1\nb = 2"
+    current = "a = 99\nb = 2"  # modified a, not inserted
+    replayed = "a = 1\nb = 2\nc = 3"
+    r = resolve_structurally(_unit(base, current, replayed))
+    assert r.rule != "insertion_union"
+
+
+def test_insertion_union_declines_on_shared_inserted_line():
+    """Both sides inserting the SAME line → ambiguous → decline."""
+    base = "a = 1"
+    current = "a = 1\nb = 2"
+    replayed = "a = 1\nb = 2"  # same inserted line
+    r = resolve_structurally(_unit(base, current, replayed))
+    assert r.rule != "insertion_union"
+
+
+# ---------------------------------------------------------------------------
+# Blessed-corpus: the union/combine shapes now resolve with ZERO LLM calls
+# (the reviewer's "Done when" criterion for #1).
+# ---------------------------------------------------------------------------
+
+
+def test_blessed_corpus_combine_shapes_resolve_deterministically():
+    """The calibration corpus's combine shapes resolve via the deterministic
+    resolver — no LLM judgment needed. list/dict/text/import combines."""
+    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
+    from capybase.quality import _is_correct
+
+    must_resolve = {
+        "list-combine", "both-sides-add", "text-combine", "import-combine",
+    }
+    for title in must_resolve:
+        conflict = next(c for c in CALIBRATION_CONFLICTS if c.title == title)
+        r = resolve_structurally(conflict.unit)
+        assert r.resolved, f"{title} did not resolve deterministically (rule={r.rule})"
+        assert _is_correct(r.text, conflict.expected_text), (
+            f"{title} resolved to wrong text: {r.text!r} vs {conflict.expected_text!r}"
+        )
