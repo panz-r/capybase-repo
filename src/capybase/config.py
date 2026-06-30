@@ -184,6 +184,24 @@ class PolicyConfig(BaseModel):
     allow_delete_conflicted_file: bool = False
     stage_only_validated_paths: bool = True
     context_lines: int = 15
+    # Acceptance strictness (#10): how boldly capybase auto-accepts a merge.
+    #   "interactive" (default) — bold: a passing candidate is accepted; the
+    #     human is at the terminal to catch a bad one via the fallback.
+    #   "dry_run"        — bold (the run is a rehearsal; no real cost to accept).
+    #   "ci"             — cautious: escalate anything not deterministic-or-
+    #     high-confidence (a CI run has no human in the loop mid-step).
+    #   "unattended"     — most cautious: accept ONLY a deterministic merge or a
+    #     high-confidence candidate with no dropped obligations, no new
+    #     diagnostics, tests passing, and no low-confidence/needs-human signal.
+    policy_mode: Literal["interactive", "dry_run", "ci", "unattended"] = "interactive"
+    # Below the unattended path: require the candidate's self-reported
+    # confidence ≥ this to accept (else escalate). 0.0 disables the floor.
+    unattended_min_confidence: float = 0.6
+    # In unattended mode, escalate any conflict whose classification band is in
+    # this set (default: hard conflicts need a human). Empty disables the gate.
+    unattended_escalate_bands: list[str] = Field(
+        default_factory=lambda: ["hard"]
+    )
 
 
 class TestsConfig(BaseModel):

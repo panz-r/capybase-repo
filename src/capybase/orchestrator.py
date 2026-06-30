@@ -37,6 +37,7 @@ from capybase.escalation import write_review_bundle
 from capybase.git_backend import GitBackend, GitError, GitResult
 from capybase.journal import Journal
 from capybase.policy import Policy
+from capybase.policy_strictness import StrictnessPolicy
 from capybase.resolution_engine import ResolutionEngine
 from capybase.risk import RiskEngine
 from capybase.session import SessionPaths, new_session_id
@@ -426,6 +427,15 @@ class Orchestrator:
                 entropy_escalate_threshold=config.calibration.entropy_escalate_threshold,
                 min_agreement=config.model.consensus_min_agreement,
             )
+        # Acceptance-strictness policy (#10): tightens the accept branch per the
+        # configured mode (interactive/dry_run/ci/unattended). Inert in the
+        # default interactive mode. Rebound per-run when rebase() learns whether
+        # a human is present (CI / --no-interactive can tighten to ci/unattended).
+        self.strictness = StrictnessPolicy(
+            mode=config.policy.policy_mode,
+            min_confidence=config.policy.unattended_min_confidence,
+            escalate_bands=tuple(config.policy.unattended_escalate_bands),
+        )
         self.policy = Policy(
             self.git,
             supported_conflict_types=set(config.policy.supported_conflict_types),
@@ -954,6 +964,45 @@ class Orchestrator:
         )
         return outcome
 
+    def _strictness_blocks_pre_llm(
+        self, unit: ConflictUnit, cand: CandidateResolution,
+        validation: VerificationResult, via: str,
+    ) -> str:
+        """The strictness-policy gate for a DETERMINISTIC pre-LLM resolution.
+
+        Returns a non-empty reason when the configured mode (#10) refuses to
+        auto-accept this resolution even though it passed validation (e.g. it
+        dropped a side obligation or introduced a diagnostic in ci/unattended
+        mode). Empty string ⇒ accept. The resolution is then discarded (returns
+        None from its caller), falling through to the LLM — strictness never
+        applies an invalid merge, it just declines to auto-accept a borderline
+        one without a human.
+        """
+        if not self.strictness.strict:
+            return ""
+        band = self._classification_band(unit)
+        ok, reason = self.strictness.accept_pre_llm(
+            unit, cand, validation, band=band
+        )
+        if ok:
+            return ""
+        self.journal.emit(
+            "strictness_declined",
+            {"via": via, "reason": reason, "mode": self.strictness.mode},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        return reason
+
+    def _classification_band(self, unit: ConflictUnit) -> str | None:
+        """The unit's classification band (#2), computed if routing is on."""
+        if not self.config.routing.enabled:
+            return None
+        try:
+            from capybase.classifier import classify
+            return classify(unit).band  # type: ignore[arg-type]
+        except Exception:  # noqa: BLE001 - advisory for the strictness gate
+            return None
+
     def _try_structural_resolve(self, unit: ConflictUnit) -> UnitOutcome | None:
         """Attempt a deterministic, model-free resolution; accept only if it
         passes the full validation pipeline, else return None (fall through to
@@ -996,6 +1045,8 @@ class Orchestrator:
             # model handle it. This is the safety net: structural resolution can
             # only help, never apply an invalid merge.
             return None
+        if self._strictness_blocks_pre_llm(unit, cand, validation, "structural"):
+            return None  # strict mode declines to auto-accept; fall through to LLM
         outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
         outcome.accepted = cand
         self.journal.emit(
@@ -1081,6 +1132,8 @@ class Orchestrator:
             # concatenated into invalid code). Discard and let the model handle
             # it. This is why SBCR is safe despite a heuristic fitness function.
             return None
+        if self._strictness_blocks_pre_llm(unit, cand, validation, "sbcr"):
+            return None  # strict mode declines to auto-accept; fall through to LLM
         outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
         outcome.accepted = cand
         self.journal.emit(
@@ -1208,6 +1261,8 @@ class Orchestrator:
                 unit_id=unit.unit_id,
             )
             return None
+        if self._strictness_blocks_pre_llm(unit, cand, validation, "block_capture"):
+            return None  # strict mode declines to auto-accept; fall through to LLM
         outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
         outcome.accepted = cand
         self.journal.emit(
@@ -1545,6 +1600,13 @@ class Orchestrator:
                 pass
         try:
             self._start_spinner()
+            # Bridge the interactive flag to the strictness policy (#10): a
+            # non-interactive run (CI / --no-interactive) has no human in the
+            # loop mid-step, so tighten acceptance unless the user explicitly
+            # configured a stricter (or equal) mode. Never LOOSEN an explicit
+            # ci/unattended setting back to interactive.
+            if not interactive and self.strictness.mode == "interactive":
+                self.strictness.mode = "ci"
             result = self.run()
         except BaseException as exc:
             # On ANY interruption (signal, KeyboardInterrupt, unexpected error)
@@ -2372,6 +2434,28 @@ class Orchestrator:
                 unit_id=unit.unit_id,
             )
             if decision.action == "accept":
+                # Strictness gate (#10): in ci/unattended mode, the policy may
+                # override an accept to escalate (e.g. low confidence, a dropped
+                # obligation, or a hard-band conflict). It never relaxes a
+                # retry/escalate, only tightens accept.
+                ok, why = self.strictness.should_accept(
+                    unit, cand, validation,
+                    band=self._classification_band(unit),
+                    deterministic=False,
+                )
+                if not ok:
+                    # Strictness escalated: leave outcome.accepted=None so the
+                    # caller treats it as an escalation, mirroring the risk
+                    # engine's own escalate branch.
+                    outcome.retry_count = retry_count
+                    self.journal.emit(
+                        "candidate_rejected",
+                        {"candidate_id": cand.candidate_id,
+                         "action": "escalate", "via": "strictness",
+                         "reason": why, "mode": self.strictness.mode},
+                        step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                    )
+                    return outcome
                 outcome.accepted = cand
                 outcome.retry_count = retry_count
                 self.journal.emit(
