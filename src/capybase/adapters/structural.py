@@ -104,24 +104,15 @@ _CONTAINER_TYPES = {
 def _language_for(language: str):
     """Build a tree-sitter Language for ``language`` or return ``None``.
 
-    Imports are deferred so capybase works without the ``structural`` extra.
+    Delegates to the language adapter (#5) for grammar loading so the
+    python/rust branch lives in one place; imports stay deferred so capybase
+    works without the ``structural`` extra.
     """
     try:
-        from tree_sitter import Language
+        from capybase.adapters.language import adapter_for
+        return adapter_for(language).tree_sitter_language()
     except Exception:  # noqa: BLE001
         return None
-    try:
-        if language == "python":
-            import tree_sitter_python
-
-            return Language(tree_sitter_python.language())
-        if language == "rust":
-            import tree_sitter_rust
-
-            return Language(tree_sitter_rust.language())
-    except Exception:  # noqa: BLE001
-        return None
-    return None
 
 
 def _make_parser(language: str):
@@ -612,8 +603,9 @@ def find_symbol_definitions(
     """
     import glob as globmod
     import os
+    from capybase.adapters.language import adapter_for
 
-    ext = {"python": ".py", "rust": ".rs"}.get(language, "")
+    ext = adapter_for(language).source_extension
     if not ext or not names:
         return []
     snippets: list[RelatedSnippet] = []
@@ -649,23 +641,12 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
     """Find the line span of a definition of ``name`` in ``source``.
 
     Returns the (start, end) row of the first line that looks like a definition
-    of ``name``. Coarse: matches ``def name``/``class name`` (Python) or
-    ``fn name``/``struct name``/``enum name``/``trait name``/``mod name``
-    (Rust) at line start (after optional whitespace).
+    of ``name``. The keyword patterns (``def name``/``class name`` for Python,
+    ``fn name``/``struct name``/... for Rust) come from the language adapter
+    (#5) so adding a language is a new adapter, not an edit here.
     """
-    patterns: dict[str, tuple[str, ...]] = {
-        "python": (f"def {name}", f"class {name}", f"{name} ="),
-        "rust": (
-            f"fn {name}",
-            f"struct {name}",
-            f"enum {name}",
-            f"trait {name}",
-            f"mod {name}",
-            f"const {name}",
-            f"static {name}",
-        ),
-    }
-    pats = patterns.get(language, ())
+    from capybase.adapters.language import adapter_for
+    pats = tuple(pat.replace("{name}", name) for pat in adapter_for(language).definition_patterns())
     lines = source.split("\n")
     for i, line in enumerate(lines):
         stripped = line.lstrip()

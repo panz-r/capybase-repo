@@ -2246,7 +2246,8 @@ def _blank_markers(text: str, language: str | None = None) -> str:
     ``#`` otherwise (Python). When ``language`` is None, defaults to ``#``
     (the original behavior, kept for any direct callers).
     """
-    comment = "//" if language == "rust" else "#"
+    from capybase.adapters.language import adapter_for
+    comment = adapter_for(language).comment_prefix
     out = []
     for line in text.split("\n"):
         if line.startswith(("<<<<<<<", "=======", ">>>>>>>")):

@@ -321,11 +321,13 @@ def canonicalize_context(text: str, language: str | None = None) -> str:
 
 
 def _is_context_comment(stripped: str, language: str | None) -> bool:
-    """True if a stripped line is entirely a comment (not code)."""
+    """True if a stripped line is entirely a comment (not code).
+
+    Delegates to the language adapter (#5) so the comment-prefix decision has a
+    single home. (The prior rust set already included ``*/``; the adapter
+    preserves that superset.)
+    """
     if not stripped:
         return False
-    if language == "python":
-        return stripped.startswith("#")
-    if language == "rust":
-        return stripped.startswith(("//", "/*", "*", "*/"))
-    return stripped.startswith(("#", "//"))
+    from capybase.adapters.language import adapter_for
+    return stripped.startswith(adapter_for(language).comment_line_prefixes)

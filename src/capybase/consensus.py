@@ -62,15 +62,16 @@ def normalize(text: str, language: str | None = None) -> str:
 
 
 def _is_comment_line(stripped: str, language: str | None) -> bool:
-    """True if a line is entirely a comment (after stripping leading ws)."""
+    """True if a line is entirely a comment (after stripping leading ws).
+
+    Delegates to the language adapter (#5) so the comment-prefix decision has a
+    single home; the registry's NullAdapter handles unknown languages with the
+    conservative `#`/`//` prefixes (matching the prior language-agnostic fallthrough).
+    """
     if not stripped:
         return False
-    if language == "python":
-        return stripped.startswith("#")
-    if language == "rust":
-        return stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*")
-    # Language-agnostic: treat # and // comment prefixes as comments.
-    return stripped.startswith("#") or stripped.startswith("//")
+    from capybase.adapters.language import adapter_for
+    return stripped.startswith(adapter_for(language).comment_line_prefixes)
 
 
 # ---------------------------------------------------------------------------
