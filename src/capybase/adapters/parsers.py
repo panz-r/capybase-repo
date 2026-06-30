@@ -18,14 +18,18 @@ class MarkerBlock:
     ``<<<<<<<``; ``current_start..current_end`` spans the CURRENT side
     (between ``<<<<<<<`` and ``=======``); ``replayed_start..replayed_end``
     spans the REPLAYED side (between ``=======`` and ``>>>>>>>``).
+
+    ``base_text`` holds the merged-base content from a diff3/zdiff3 style
+    conflict (the ``|||||||`` section). Empty for the default (merge) style.
     """
 
     start: int  # line index of <<<<<<<
     divider: int  # line index of =======
     end: int  # line index of >>>>>>>
 
-    current_text: str  # text between <<<<<<< and =======
+    current_text: str  # text between <<<<<<< and (||||||| or =======)
     replayed_text: str  # text between ======= and >>>>>>>
+    base_text: str = ""  # text between ||||||| and ======= (diff3/zdiff3 only)
 
     @property
     def span(self) -> tuple[int, int]:
@@ -33,15 +37,57 @@ class MarkerBlock:
         return (self.start, self.end)
 
 
-# The three canonical markers. We match prefixes so trailing labels (branch
-# names, commit summaries) on the ``<<<<<<<``/``>>>>>>>`` lines are tolerated.
+# The conflict markers. We match prefixes so trailing labels (branch names,
+# commit summaries) on the ``<<<<<<<``/``>>>>>>>`` lines are tolerated.
 _MARK_CURRENT = "<<<<<<<"
+_MARK_BASE = "|||||||"  # diff3/zdiff3 base section (optional)
 _MARK_DIVIDER = "======="
 _MARK_REPLAYED = ">>>>>>>"
 
 
+def _is_marker(line: str) -> str | None:
+    """Return which marker a line is (column-0 prefix), or None.
+
+    Strips a trailing ``\\r`` first so CRLF files match cleanly (a marker line
+    ``<<<<<<< HEAD\\r`` would otherwise miss ``startswith`` and leak ``\\r`` into
+    parsed text). The returned marker is the canonical prefix, not the raw line.
+    """
+    stripped = line[:-1] if line.endswith("\r") else line
+    if stripped.startswith(_MARK_CURRENT):
+        return _MARK_CURRENT
+    if stripped.startswith(_MARK_BASE):
+        return _MARK_BASE
+    if stripped.startswith(_MARK_DIVIDER):
+        return _MARK_DIVIDER
+    if stripped.startswith(_MARK_REPLAYED):
+        return _MARK_REPLAYED
+    return None
+
+
 def parse_marker_blocks(text: str) -> list[MarkerBlock]:
     """Parse all conflict-marker blocks in ``text``.
+
+    Handles both the default (merge) style::
+
+        <<<<<<< label
+        current
+        =======
+        replayed
+        >>>>>>> label
+
+    and the diff3/zdiff3 style, which adds an optional merged-base section::
+
+        <<<<<<< label
+        current
+        ||||||| label
+        base
+        =======
+        replayed
+        >>>>>>> label
+
+    Without diff3-aware parsing, the ``||||||| base`` section would be silently
+    appended to ``current_text`` — corrupting the model's input. CRLF line
+    endings are normalized (trailing ``\\r`` stripped) so parsed text is clean.
 
     Lines outside any block are ignored. Malformed nesting is reported by
     raising ``ValueError`` with the offending line number so callers can
@@ -52,54 +98,79 @@ def parse_marker_blocks(text: str) -> list[MarkerBlock]:
     i = 0
     n = len(lines)
     while i < n:
-        line = lines[i]
-        if line.startswith(_MARK_CURRENT):
-            start = i
-            current_lines: list[str] = []
-            j = i + 1
-            while j < n and not lines[j].startswith(_MARK_DIVIDER):
-                current_lines.append(lines[j])
-                j += 1
-            if j >= n:
-                raise ValueError(
-                    f"unterminated conflict block: '<<<<<<<' at line {start} "
-                    f"with no matching '======='"
-                )
-            divider = j
-            replayed_lines: list[str] = []
-            k = j + 1
-            while k < n and not lines[k].startswith(_MARK_REPLAYED):
-                replayed_lines.append(lines[k])
-                k += 1
-            if k >= n:
-                raise ValueError(
-                    f"unterminated conflict block: '<<<<<<<' at line {start} "
-                    f"with no matching '>>>>>>>'"
-                )
-            end = k
-            blocks.append(
-                MarkerBlock(
-                    start=start,
-                    divider=divider,
-                    end=end,
-                    current_text="\n".join(current_lines),
-                    replayed_text="\n".join(replayed_lines),
-                )
-            )
-            i = end + 1
-        else:
+        if _is_marker(lines[i]) != _MARK_CURRENT:
             i += 1
+            continue
+        start = i
+        # Collect the CURRENT side until we hit ||||||| (diff3 base) or =======.
+        current_lines: list[str] = []
+        j = i + 1
+        base_marker_line: int | None = None
+        while j < n:
+            m = _is_marker(lines[j])
+            if m == _MARK_BASE:
+                base_marker_line = j
+                break
+            if m == _MARK_DIVIDER:
+                break
+            current_lines.append(lines[j])
+            j += 1
+        # If a diff3 base section was found, collect base lines until =======.
+        base_lines: list[str] = []
+        if base_marker_line is not None:
+            j = base_marker_line + 1
+            while j < n and _is_marker(lines[j]) != _MARK_DIVIDER:
+                base_lines.append(lines[j])
+                j += 1
+        if j >= n or _is_marker(lines[j]) != _MARK_DIVIDER:
+            raise ValueError(
+                f"unterminated conflict block: '<<<<<<<' at line {start} "
+                f"with no matching '======='"
+            )
+        divider = j
+        replayed_lines: list[str] = []
+        k = j + 1
+        while k < n and _is_marker(lines[k]) != _MARK_REPLAYED:
+            replayed_lines.append(lines[k])
+            k += 1
+        if k >= n:
+            raise ValueError(
+                f"unterminated conflict block: '<<<<<<<' at line {start} "
+                f"with no matching '>>>>>>>'"
+            )
+        end = k
+        blocks.append(
+            MarkerBlock(
+                start=start,
+                divider=divider,
+                end=end,
+                current_text=_normalize(current_lines),
+                replayed_text=_normalize(replayed_lines),
+                base_text=_normalize(base_lines),
+            )
+        )
+        i = end + 1
     return blocks
 
 
+def _normalize(lines: list[str]) -> str:
+    """Join lines, stripping trailing ``\\r`` (CRLF normalization).
+
+    Git marker lines on Windows-style files carry ``\\r``; without stripping,
+    the parsed text would carry ``\\r`` at every line end, polluting the model
+    input and breaking splice comparisons.
+    """
+    return "\n".join(ln[:-1] if ln.endswith("\r") else ln for ln in lines)
+
+
 def contains_markers(text: str) -> bool:
-    """True if ``text`` contains any conflict marker prefix."""
+    """True if ``text`` contains any conflict marker prefix (column-0).
+
+    Uses line-start matching so ``// =====`` comment banners, indented rules,
+    and marker-shaped strings inside content are NOT flagged. Handles CRLF.
+    """
     for line in text.split("\n"):
-        if (
-            line.startswith(_MARK_CURRENT)
-            or line.startswith(_MARK_DIVIDER)
-            or line.startswith(_MARK_REPLAYED)
-        ):
+        if _is_marker(line) is not None:
             return True
     return False
 

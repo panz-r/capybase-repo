@@ -38,10 +38,11 @@ from dataclasses import dataclass
 from typing import Literal
 
 from capybase.conflict_model import ConflictUnit
+from capybase.merge_intent import classify_side, direction
 
 Rule = Literal[
     "identical_sides", "one_sided_change", "disjoint_edits", "zealous_merge",
-    "entity_disjoint", "token_disjoint",
+    "entity_disjoint", "token_disjoint", "delete_side",
 ]
 
 
@@ -105,13 +106,25 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
     replayed = unit.replayed.text or ""
     base = unit.base.text or ""
 
-    # Rule 1: identical sides (modulo whitespace) → that side is the merge.
+    # Rule 1: modify/delete — one side deliberately deleted the block and the
+    # other side did NOT add anything that the deletion would clobber. The safe
+    # resolution is to ACCEPT THE DELETION (emit the deleting side's text, which
+    # is empty or near-empty). This is the disambiguation the survey's "silent
+    # loss of intent" failure mode calls out: without it, a modify/delete can be
+    # wrongly merged to keep dead code the deleting branch cleaned up. Guarded
+    # by merge_intent.direction so it fires ONLY on a proven clean deletion
+    # (the other side unchanged, or modified-without-additions).
+    deleted = _accept_deletion(base, current, replayed)
+    if deleted is not None:
+        return StructuralResolution(rule="delete_side", text=deleted)
+
+    # Rule 2: identical sides (modulo whitespace) → that side is the merge.
     if _normalize(current) == _normalize(replayed):
         # Prefer the non-empty side; if both empty, empty is the resolution.
         text = current if current.strip() else replayed
         return StructuralResolution(rule="identical_sides", text=text)
 
-    # Rule 2: one-sided change. Only one side diverged from base → take it.
+    # Rule 3: one-sided change. Only one side diverged from base → take it.
     cur_changed = _normalize(current) != _normalize(base)
     rep_changed = _normalize(replayed) != _normalize(base)
     if cur_changed and not rep_changed:
@@ -121,7 +134,7 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
     if rep_changed and not cur_changed:
         return StructuralResolution(rule="one_sided_change", text=replayed)
 
-    # Rule 3: both changed, but on disjoint line ranges → merge both edits.
+    # Rule 4: both changed, but on disjoint line ranges → merge both edits.
     # If the changed-line sets (vs base) don't intersect, the edits don't
     # conflict at line granularity and we can combine them safely.
     if cur_changed and rep_changed:
@@ -129,7 +142,7 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if merged is not None:
             return StructuralResolution(rule="disjoint_edits", text=merged)
 
-        # Rule 4: zealous per-base-line 3-way merge (survey §1.4). Stronger than
+        # Rule 5: zealous per-base-line 3-way merge (survey §1.4). Stronger than
         # disjoint_edits — also resolves overlaps that are agreed (both made the
         # same change) or one-sided (one side conceded a sub-region the other
         # touched). Returns None on any genuine two-sided disagreement or
@@ -138,7 +151,7 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if merged is not None:
             return StructuralResolution(rule="zealous_merge", text=merged)
 
-        # Rule 5: entity-level disjoint resolution (survey §3.2/§5.2 Weave/Aura).
+        # Rule 6: entity-level disjoint resolution (survey §3.2/§5.2 Weave/Aura).
         # The line-granular rules above correctly DECLINE when both sides insert
         # DISTINCT entities at the same base line (git sees two insertions at one
         # point → conflict; zealous sees a two-sided insertion → ambiguous → give
@@ -152,7 +165,7 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if merged is not None:
             return StructuralResolution(rule="entity_disjoint", text=merged)
 
-        # Rule 6: token-level disjoint resolution (survey §4.2 Summer, layer 3).
+        # Rule 7: token-level disjoint resolution (survey §4.2 Summer, layer 3).
         # Runs AFTER entity resolution so multi-entity conflicts (renames, adds)
         # are handled at the coarser, identity-aware entity granularity first.
         # Token-disjoint then catches the intra-line case the line/entity rules
@@ -167,6 +180,42 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
             return StructuralResolution(rule="token_disjoint", text=merged)
 
     return StructuralResolution(rule=None, text=None)
+
+
+def _accept_deletion(base: str, current: str, replayed: str) -> str | None:
+    """Accept a deliberate deletion when one side cleanly deleted the block.
+
+    Returns the deleting side's text (empty or near-empty) when:
+    - one side is classified ``deleted`` (removed base content, added nothing), and
+    - the OTHER side added nothing that the deletion would clobber — i.e. it is
+      ``unchanged`` (kept base verbatim) OR ``deleted`` (both deleted, no
+      ambiguity) OR a ``modified`` side whose changes are pure deletions too.
+
+    Returns None (decline → next rule) when the non-deleting side ADDED or
+    modified-with-additions content: in that case accepting the deletion could
+    drop a real change the other branch introduced, so the LLM must judge.
+
+    This is the survey's "silent loss of intent" guard: without it, a
+    modify/delete can be wrongly merged to keep dead code the deleting branch
+    cleaned up. Like every structural rule the result still runs the full
+    validation pipeline before acceptance, so a wrong guess is discarded.
+    """
+    d = direction(base, current, replayed)
+    who = d.deleting_side
+    if who is None:
+        return None
+    deleter = current if who == "current" else replayed
+    keeper = replayed if who == "current" else current
+    # The keeper must not have added anything. ``unchanged`` and ``deleted``
+    # both qualify (kept base, or also deleted). A ``modified`` keeper qualifies
+    # only if its diff vs base is net-deletional (it dropped lines too, added
+    # none) — checked via classify_side's contract: 'deleted' is the only pure-
+    # net-deletion classification; 'modified' adds content, so it does NOT
+    # qualify. 'added' never qualifies.
+    keeper_kind = classify_side(base, keeper)
+    if keeper_kind in ("unchanged", "deleted"):
+        return deleter
+    return None
 
 
 def _try_disjoint_merge(base: str, current: str, replayed: str) -> str | None:

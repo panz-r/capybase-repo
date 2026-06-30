@@ -198,6 +198,58 @@ def test_loose_rust_file_rejects_noncompiling(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Workspace layout: no root Cargo.toml, the crate lives in a subdirectory
+# (the di-rac-rebase-test shape). Without nearest-manifest detection this falls
+# back to standalone rustc, which false-positives on ``crate::`` paths.
+# ---------------------------------------------------------------------------
+
+
+@skip_no_cargo
+def test_workspace_subdir_crate_uses_cargo_not_rustc(tmp_path):
+    """A crate in a subdirectory (no root Cargo.toml) still uses cargo check.
+
+    Regression for the workspace false-positive: ``_has_cargo_manifest(repo_root)``
+    alone returns False when the Cargo.toml is in a member crate's subdir, so the
+    cargo check was skipped and standalone rustc rejected every ``crate::``-using
+    leaf with E0433. The fix walks to the nearest manifest from the file's path.
+    """
+    from capybase.adapters.lsp import (
+        _has_cargo_manifest,
+        nearest_cargo_manifest_dir,
+    )
+
+    # Repo root has NO Cargo.toml; the crate lives in member/.
+    member = tmp_path / "member"
+    (member / "src").mkdir(parents=True)
+    (member / "Cargo.toml").write_text(
+        '[package]\nname = "wsmember"\nversion = "0.1.0"\nedition = "2021"\n'
+    )
+    (member / "src" / "lib.rs").write_text("pub mod config;\npub mod leaf;\n")
+    (member / "src" / "config.rs").write_text(_CRATE_CONFIG)
+    leaf_path = "member/src/leaf.rs"
+
+    # Root has no manifest — the old check would miss this and use rustc.
+    assert not _has_cargo_manifest(str(tmp_path))
+    # nearest-manifest walk finds member/Cargo.toml.
+    assert nearest_cargo_manifest_dir(str(tmp_path), leaf_path) == member.resolve()
+
+    # A valid leaf using crate::config — standalone rustc would reject this.
+    correct = (
+        "use crate::config::Config;\n"
+        "pub fn leaf(c: Config) -> u16 { c.port }\n"
+    )
+    eng = VerificationEngine.default(ValidationConfig())
+    res = eng.verify_file(
+        leaf_path, "rust", correct, [],  # no conflict; whole file is the resolved text
+        repo_root=str(tmp_path),
+    )
+    assert res.passed, [f.message for f in res.hard_failures]
+    # Cargo ran (crate-aware), not standalone rustc.
+    assert res.features.get("syntax_tool") == "cargo"
+    assert res.features.get("syntax_checked") is True
+
+
+# ---------------------------------------------------------------------------
 # Graceful degrade: no toolchain at all
 # ---------------------------------------------------------------------------
 

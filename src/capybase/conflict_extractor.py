@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from capybase.adapters.parsers import MarkerBlock, parse_marker_blocks
 from capybase.conflict_model import ConflictSide, ConflictUnit
+from capybase.merge_intent import direction
 from capybase.git_backend import (
     STAGE_BASE,
     STAGE_CURRENT,
@@ -96,7 +97,21 @@ class ConflictExtractor:
         Reads stages 1/2/3 and the worktree text. If the file has no marker
         blocks but is unmerged (e.g. add/add handled by content merge), an
         empty list is returned and the caller escalates.
+
+        Modify/delete (mode ``AU``/``UA``) is the whole-file variant: one side
+        deleted the path, the other modified it. There are no ``<<<<<<<``
+        markers, and the deleting side has *no* stage blob (so the unconditional
+        three-stage read below would raise). We detect it first and emit a
+        single ``whole_file`` unit whose deleting side is empty text; the
+        downstream pipeline (structural → block-capture) decides keep vs.
+        delete. ``marker_span`` is ``None`` — the resolved text IS the file.
         """
+        mode = unmerged.mode if unmerged is not None else "UU"
+        if mode in ("AU", "UA"):
+            return self._extract_whole_file_units(
+                path, step_index, session_id, mode, unmerged
+            )
+
         base_bytes = self.git.read_stage_blob(path, STAGE_BASE)
         current_bytes = self.git.read_stage_blob(path, STAGE_CURRENT)
         replayed_bytes = self.git.read_stage_blob(path, STAGE_REPLAYED)
@@ -223,6 +238,124 @@ class ConflictExtractor:
                 u.structural_metadata["conflict_features"] = conflict_features(u)
             except Exception:  # noqa: BLE001 - features are advisory
                 pass
+        # Merge-intent classification (modify/delete disambiguation): label what
+        # each side DID relative to base — so the bundle/interactive view never
+        # presents a deliberate deletion as if it were an addition, and the
+        # ``delete_side`` structural rule can act on a proven modify/delete. The
+        # full SideDirections is stashed on structural_metadata (kind + a
+        # ready-to-render summary + which side deleted); the kind is also folded
+        # into the feature spine above for calibration. Advisory — pure, cheap.
+        self._enrich_merge_direction(units)
+        return units
+
+    def _enrich_merge_direction(self, units: list[ConflictUnit]) -> None:
+        """Stash the ``direction()`` classification on each unit's metadata.
+
+        Shared by the marker-block and whole-file extraction paths so the
+        structural resolver's ``delete_side`` rule and block-capture see a
+        consistent ``kind``/``deleting_side`` regardless of unit shape.
+        Advisory — never blocks extraction.
+        """
+        for u in units:
+            try:
+                d = direction(
+                    u.base.text or "", u.current.text or "", u.replayed.text or ""
+                )
+                u.structural_metadata["merge_direction"] = {
+                    "kind": d.kind,
+                    "current": d.current,
+                    "replayed": d.replayed,
+                    "summary": d.summary,
+                    "deleting_side": d.deleting_side,
+                }
+            except Exception:  # noqa: BLE001 - classification is advisory
+                pass
+
+    def _extract_whole_file_units(
+        self,
+        path: str,
+        step_index: int,
+        session_id: str,
+        mode: str,
+        unmerged: UnmergedPath | None,
+    ) -> list[ConflictUnit]:
+        """Extract a single ``whole_file`` unit from a modify/delete conflict.
+
+        ``mode`` is ``AU`` (stage 2 absent → upstream/current deleted; replayed
+        modified) or ``UA`` (stage 3 absent → replayed deleted; upstream
+        modified). The deleting side has no stage blob, so it is represented as
+        empty ``text``; the keeper side is read from its stage. The worktree
+        carries git's "version of <modified side> left in tree" — that is the
+        keeper's full text and becomes ``original_worktree_text``.
+
+        ``marker_span`` is ``None`` (the resolution IS the whole file); the
+        resolved-text-as-whole-file path in the orchestrator/verifier handles
+        the absent span. ``merge_direction`` is populated so block-capture's
+        modify/delete gate fires.
+        """
+        stages = unmerged.stages if unmerged is not None else {}
+        base_oid = stages.get(STAGE_BASE)
+        current_oid = stages.get(STAGE_CURRENT)
+        replayed_oid = stages.get(STAGE_REPLAYED)
+
+        # base (stage 1) is present for both AU/UA; the modified stage carries
+        # the keeper. read_stage_blob raises on a missing stage, so only read
+        # the ones we know exist.
+        base_text = self.git.read_stage_blob(path, STAGE_BASE).decode(
+            "utf-8", errors="replace"
+        )
+        if mode == "AU":
+            # current (upstream) deleted → empty; replayed modified → keeper.
+            current_text = ""
+            replayed_text = (
+                self.git.read_stage_blob(path, STAGE_REPLAYED)
+                .decode("utf-8", errors="replace")
+            )
+        else:  # UA: replayed deleted → empty; current (upstream) modified → keeper.
+            current_text = (
+                self.git.read_stage_blob(path, STAGE_CURRENT)
+                .decode("utf-8", errors="replace")
+            )
+            replayed_text = ""
+
+        worktree_text = self.git.read_worktree_file(path).decode(
+            "utf-8", errors="replace"
+        )
+
+        unit = ConflictUnit(
+            session_id=session_id,
+            step_index=step_index,
+            path=path,
+            language=detect_language(path),
+            conflict_type=mode,
+            unit_id=_unit_id(path, step_index, 0),
+            unit_kind="whole_file",
+            base=ConflictSide(label="BASE", text=base_text, blob_oid=base_oid),
+            current=ConflictSide(
+                label="CURRENT_UPSTREAM_SIDE", text=current_text, blob_oid=current_oid
+            ),
+            replayed=ConflictSide(
+                label="REPLAYED_COMMIT_SIDE", text=replayed_text, blob_oid=replayed_oid
+            ),
+            original_worktree_text=worktree_text,
+            marker_span=None,
+            enclosing_symbol=None,
+            risk_tags=[],
+        )
+        units = [unit]
+        # Provenance (the marker path does the same): the deleter's blob_oid is
+        # None (no stage blob), so its provenance is empty; the keeper's carries
+        # the commit that introduced it. Advisory — block-capture's "deleting
+        # commit" context degrades gracefully when absent.
+        try:
+            unit.structural_metadata["provenance"] = {
+                "base": _blob_provenance(self.git, base_oid),
+                "current": _blob_provenance(self.git, current_oid),
+                "replayed": _blob_provenance(self.git, replayed_oid),
+            }
+        except Exception:  # noqa: BLE001 - provenance is advisory
+            pass
+        self._enrich_merge_direction(units)
         return units
 
     # Convenience: extract across every unmerged path, classifying along the
@@ -406,6 +539,12 @@ def conflict_features(unit: ConflictUnit) -> dict[str, float | int | str | bool]
         "sibling_count": int(unit.structural_metadata.get("sibling_count", 0) or 0),
         "severity": unit.severity,
         "language": unit.language or "unknown",
+        # Merge-intent classification (modify/delete disambiguation): the conflict
+        # shape from :func:`merge_intent.direction`. Read off structural_metadata
+        # when already computed at extraction (avoids re-diffing); fall back to a
+        # live computation so this stays a pure function of the unit.
+        "merge_kind": _merge_kind_of(unit),
+        "modify_delete": _merge_kind_of(unit) == "modify_delete",
     }
 
 
@@ -428,6 +567,26 @@ def _same_line_overlap(base, cur, rep) -> bool:
         return changed
 
     return bool(_base_changed(base, cur) & _base_changed(base, rep))
+
+
+def _merge_kind_of(unit: ConflictUnit) -> str:
+    """The merge-intent ``kind`` for ``unit`` (e.g. ``modify_delete``).
+
+    Reads the classification off ``structural_metadata["merge_direction"]`` when
+    :func:`direction` already computed it at extraction; otherwise computes it
+    live so :func:`conflict_features` stays a pure function of the unit. Returns
+    ``"both_modify"`` (a safe default) if anything goes wrong — the feature is
+    advisory and must never crash the feature-spine computation.
+    """
+    cached = unit.structural_metadata.get("merge_direction")
+    if isinstance(cached, dict) and cached.get("kind"):
+        return str(cached["kind"])
+    try:
+        return direction(
+            unit.base.text or "", unit.current.text or "", unit.replayed.text or ""
+        ).kind
+    except Exception:  # noqa: BLE001 - advisory feature
+        return "both_modify"
 
 
 def _enclosing_symbol(worktree_text: str, block: MarkerBlock) -> str | None:

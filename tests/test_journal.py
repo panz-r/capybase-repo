@@ -30,7 +30,7 @@ def test_journal_artifacts(tmp_path):
 def test_config_load_defaults():
     cfg = Config()
     assert cfg.model.model == "vibethink"
-    assert cfg.policy.supported_conflict_types == ["UU"]
+    assert cfg.policy.supported_conflict_types == ["UU", "AU", "UA"]
     assert cfg.tests.pre_continue == "pytest"
     assert cfg.journal.enabled is True
 

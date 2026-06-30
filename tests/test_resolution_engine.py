@@ -82,6 +82,62 @@ def test_resolve_prompt_contains_sides():
     assert "BASE" in prompt
 
 
+# --- modify/delete disambiguation in the prompt (survey "silent loss of intent") ---
+
+
+def _modify_delete_unit():
+    """A unit whose upstream side DELETED the block (the edit_file.rs shape).
+
+    Carries the merge_direction metadata the extractor stamps, so the prompt
+    builder can surface the disambiguation the model needs to accept a deletion
+    instead of bailing with needs_human on an 'absent' side.
+    """
+    base = "    #[test]\n    fn brace_balance_passes() {\n        assert!(true);\n    }\n"
+    u = ConflictUnit(
+        session_id="s", step_index=1, path="edit_file.rs", language="rust",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=""),  # deleted
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=base),  # kept
+        original_worktree_text="",
+        marker_span=(0, 0),
+        structural_metadata={
+            "merge_direction": {
+                "kind": "modify_delete",
+                "current": "deleted",
+                "replayed": "unchanged",
+                "summary": "modify/delete: CURRENT_UPSTREAM_SIDE DELETED this block; "
+                           "REPLAYED_COMMIT_SIDE kept/changed it",
+                "deleting_side": "current",
+            }
+        },
+    )
+    return u
+
+
+def test_resolve_prompt_surfaces_modify_delete_disambiguation():
+    """The prompt must tell the model the empty current side is a DELIBERATE
+    DELETION — otherwise it reads the side as merely 'absent' and bails with
+    needs_human instead of accepting the deletion (the loop we hit on the real
+    edit_file.rs conflict)."""
+    u = _modify_delete_unit()
+    prompt = build_resolve_prompt(u, ContextBuilder().build(u))
+    assert "CURRENT_UPSTREAM_SIDE DELETED this block" in prompt
+    # The intent annotation precedes the raw sides so the model reads the
+    # conflict shape before the (empty) current side body.
+    intent_idx = prompt.find("DELETED this block")
+    sides_idx = prompt.find("CURRENT_UPSTREAM_SIDE body")
+    assert 0 < intent_idx < sides_idx
+
+
+def test_resolve_prompt_has_no_intent_block_when_unclassified():
+    """An un-enriched unit (no merge_direction metadata) renders no intent block
+    — the prompt is unchanged for the common case."""
+    u = _unit()  # no structural_metadata["merge_direction"]
+    prompt = build_resolve_prompt(u, ContextBuilder().build(u))
+    assert "Conflict shape" not in prompt
+
+
 # --- prompt-variant generation (survey §4 Code Roulette robustness) ---
 
 

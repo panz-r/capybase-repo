@@ -102,7 +102,7 @@ def test_manual_mode_resolves(conflicted_repo):
     inputs = ["    return 'merged'"]
     orch = Orchestrator(
         _config(repo), repo=str(repo),
-        stdin_reader=lambda _prompt: inputs.pop(0),
+        stdin_reader=lambda _prompt, **_kw: inputs.pop(0),
         out=lambda *_a, **_k: None,
     )
     result = orch.manual()
@@ -122,7 +122,7 @@ def test_manual_mode_rejects_bad_resolution(conflicted_repo):
     inputs = ["    x\n<<<<<<< leaked\n"]
     orch = Orchestrator(
         _config(repo), repo=str(repo),
-        stdin_reader=lambda _prompt: inputs.pop(0),
+        stdin_reader=lambda _prompt, **_kw: inputs.pop(0),
         out=lambda *_a, **_k: None,
     )
     result = orch.manual()
@@ -409,7 +409,7 @@ def test_manual_mode_resolves_multi_unit(multi_unit_conflicted_repo):
     ]
     orch = Orchestrator(
         _config(repo), repo=str(repo),
-        stdin_reader=lambda _prompt: inputs.pop(0),
+        stdin_reader=lambda _prompt, **_kw: inputs.pop(0),
         out=lambda *_a, **_k: None,
     )
     result = orch.manual()

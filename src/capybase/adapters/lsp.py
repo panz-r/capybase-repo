@@ -149,17 +149,27 @@ class RustAnalyzerRunner:
         self.timeout = timeout
 
     def check(self, source: str, *, path: str, repo_root: str) -> Diagnostics:
-        # Prefer cargo check if this is part of a cargo project.
-        if _has_cargo_manifest(repo_root):
-            return self._check_cargo(source, path, repo_root)
+        # Prefer cargo check if this is part of a cargo project. Use the NEAREST
+        # manifest (handles workspaces where each crate lives in a subdir, not
+        # just a root manifest) — falling back to _has_cargo_manifest for the
+        # simple single-crate-at-root layout.
+        crate_dir = nearest_cargo_manifest_dir(repo_root, path)
+        if crate_dir is not None or _has_cargo_manifest(repo_root):
+            return self._check_cargo(source, path, repo_root, crate_dir)
         return self._check_rust_analyzer(source, path, repo_root)
 
     def _check_cargo(
-        self, source: str, path: str, repo_root: str
+        self, source: str, path: str, repo_root: str,
+        crate_dir: Path | None = None,
     ) -> Diagnostics:
         cargo = _resolve(self.cargo_path)
         if cargo is None:
             return Diagnostics(checked=False, tool="cargo")
+        # The directory to run ``cargo check`` from: the crate's own directory
+        # (nearest manifest) when known, else the repo root. This matters for
+        # workspaces — cargo must run from the member crate's dir (or with the
+        # right manifest) to resolve ``crate::`` paths in that crate's files.
+        run_cwd = str(crate_dir) if crate_dir is not None else repo_root
         # Write the resolved source into the actual file path so cargo sees it.
         target_path = Path(repo_root) / path
         original: bytes | None = None
@@ -172,7 +182,7 @@ class RustAnalyzerRunner:
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
-                cwd=repo_root,
+                cwd=run_cwd,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired):
             return Diagnostics(checked=False, tool="cargo")
@@ -369,6 +379,43 @@ def _resolve(cmd: str) -> str | None:
 
 def _has_cargo_manifest(repo_root: str) -> bool:
     return (Path(repo_root) / "Cargo.toml").exists()
+
+
+def nearest_cargo_manifest_dir(repo_root: str, path: str) -> Path | None:
+    """The directory of the nearest ``Cargo.toml`` enclosing ``path``.
+
+    Walks upward from ``path`` toward ``repo_root``, returning the innermost
+    directory that contains a ``Cargo.toml``. Handles Cargo WORKSPACES (multiple
+    crates each in a subdirectory, no root manifest) — the common layout where
+    ``_has_cargo_manifest(repo_root)`` wrongly returns False. Returns None when
+    there's no manifest between the file and the root (a loose ``.rs``).
+
+    Bounded by ``repo_root``: never consults a manifest above the project root
+    (an outer workspace can't leak in). Used by the Rust syntax check to decide
+    whether to run crate-aware ``cargo check`` (and from which directory) instead
+    of the standalone-rustc fallback that false-positives on ``crate::`` paths.
+    """
+    root = Path(repo_root).resolve()
+    # ``path`` is repo-relative (e.g. "member/src/leaf.rs"); join onto repo_root
+    # before resolving so it doesn't get anchored to the process cwd. An absolute
+    # path is also accepted (used as-is).
+    p = Path(path)
+    start = (root / p) if not p.is_absolute() else p
+    start = start.resolve()
+    try:
+        start.relative_to(root)
+    except ValueError:
+        return None  # path not under root → no walk
+    cur = start.parent if start.is_file() else start
+    chain: list[Path] = []
+    while cur not in chain:
+        chain.append(cur)
+        if (cur / "Cargo.toml").is_file():
+            return cur
+        if cur == root:
+            break
+        cur = cur.parent
+    return None
 
 
 def run_clippy(

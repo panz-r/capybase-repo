@@ -145,6 +145,20 @@ def build_parser() -> argparse.ArgumentParser:
              "review bundle and finish manually)",
     )
     rb_p.set_defaults(abort_on_escalation=True)
+    color_group = rb_p.add_mutually_exclusive_group()
+    color_group.add_argument(
+        "--no-color",
+        dest="color", action="store_false", default=None,
+        help="disable ANSI color in the terminal output (the conflict sides, "
+             "side-analysis, and status markers). Default: auto-detect — color "
+             "when stdout is a TTY and NO_COLOR is unset; see also FORCE_COLOR.",
+    )
+    color_group.add_argument(
+        "--color",
+        dest="color", action="store_true",
+        help="force ANSI color even when stdout is not a TTY (e.g. piped to a "
+             "pager that renders escapes).",
+    )
 
     cal_p = sub.add_parser(
         "calibrate",
@@ -700,7 +714,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         session = getattr(args, "session", None) or getattr(args, "resume", None)
-        orch = Orchestrator(config, repo=args.repo, session_id=session)
+        # Color: --color forces on, --no-color forces off, default auto-detects
+        # via color_enabled(stdout) honoring NO_COLOR/FORCE_COLOR/isatty.
+        from capybase.color import color_enabled
+
+        color = getattr(args, "color", None)
+        if color is None:
+            color = color_enabled(sys.stdout)
+        orch = Orchestrator(config, repo=args.repo, session_id=session, color=color)
     except Exception as exc:  # noqa: BLE001 - top-level CLI guard
         print(f"capybase: error: {exc}", file=sys.stderr)
         return 2

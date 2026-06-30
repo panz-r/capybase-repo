@@ -45,6 +45,10 @@ PROMPT_CODE = "code_from_intent.v1"
 PROMPT_PLAN = "plan_search.v1"
 # Targeted repair (Step 4): send back the broken candidate for surgical fixing.
 PROMPT_REPAIR = "cegis_repair.v1"
+# Block-capture (large modify/delete): the model picks keep/accept_deletion/
+# needs_human; the chosen side's text is spliced mechanically — the model never
+# reproduces the (large) block, eliminating escaping + placeholder-collapse.
+PROMPT_BLOCK_CAPTURE = "block_capture.v1"
 
 
 def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
@@ -60,6 +64,28 @@ def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
     if refined is not None:
         return refined
     return unit.current.text, unit.base.text, unit.replayed.text
+
+
+def _side_intent_block(unit: ConflictUnit) -> str:
+    """A short 'what each side DID' annotation for the prompt.
+
+    Modify/delete disambiguation (survey "silent loss of intent"): without this,
+    a side that's empty because it DELETED base content reads as merely 'absent',
+    and the model can't tell a deliberate deletion from a missing side — so it
+    bails with needs_human instead of confidently accepting the deletion. This
+    surfaces the merge_intent.direction classification right above the sides so
+    the model knows the conflict shape (e.g. 'CURRENT_UPSTREAM_SIDE DELETED this
+    block; the replayed side kept it').
+
+    Returns "" when no classification is recorded (un-enriched units), so the
+    prompt is unchanged for the common case. Pure; reads only the metadata the
+    extractor already stamps onto structural_metadata.
+    """
+    md = unit.structural_metadata.get("merge_direction") or {}
+    summary = md.get("summary")
+    if not summary:
+        return ""
+    return f"Conflict shape (what each side did vs BASE):\n{summary}\n\n"
 
 
 def _fit_to_budget(
@@ -273,8 +299,13 @@ def _resolve_prompt_parts(
     # rules) are ESSENTIAL and never trimmed; the augmentation sections (anchor,
     # siblings, deps, few-shot, surrounding context) are trimmed to fit. The
     # sides_text mirrors exactly what the data_block renders for the sides so
-    # _fit_to_budget's "essential" accounting is accurate.
+    # _fit_to_budget's "essential" accounting is accurate. The side-intent
+    # annotation is also essential (it disambiguates a deletion from a missing
+    # side — the model needs it to read the sides correctly), so it's folded
+    # into sides_text for the budget accounting.
+    side_intent = _side_intent_block(unit)
     sides_text = (
+        f"{side_intent}"
         f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
         f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
         f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
@@ -294,9 +325,10 @@ def _resolve_prompt_parts(
     # The non-instruction sections (anchor, siblings, deps, few-shot, three
     # sides, context) form one contiguous block that variants keep together —
     # re-ordering *within* it would risk disturbing the anchor/few-shot coupling
-    # to the sides.
+    # to the sides. The side-intent annotation leads the block so the model
+    # reads the conflict shape before the raw sides.
     data_block = (
-        f"{anchor_t}{siblings_t}{deps_t}{few_shot_t}"
+        f"{anchor_t}{siblings_t}{deps_t}{few_shot_t}{side_intent}"
         f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
         f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
         f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
@@ -320,6 +352,193 @@ def build_resolve_prompt(
     """
     p = _resolve_prompt_parts(unit, context, budget=budget)
     return p["intro"] + p["data"] + p["contract"] + p["rules"]
+
+
+def build_block_capture_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
+    """The block-capture decision prompt for a large modify/delete conflict.
+
+    Instead of asking the model to REPRODUCE the (large) kept block as an escaped
+    JSON string — which fails on big blocks (placeholder collapse: the model writes
+    '// ... unchanged ...' instead of the real content; and escaping corruption:
+    mixed real/literal ``\\n`` that breaks the splice) — this asks a small
+    DECISION question. The model picks one of:
+
+      - ``accept_deletion`` — the deletion should stand (the deleting side wins).
+        capybase splices the deleting side's text (usually empty).
+      - ``keep_block`` — the kept block should survive. capybase splices the
+        keeper side's text VERBATIM, taken directly from the conflict side (never
+        reproduced by the model — so no escaping, no truncation).
+      - ``needs_human`` — escalate; neither option is clearly right.
+
+    The prompt shows the disambiguation + a rich SUMMARY of the keeper (entity
+    signatures — test/function names — plus first/last lines), not the full text.
+    The entity names are the signal the model needs to judge "is this dead code
+    or live": a block of ``#[test] fn brace_balance_*`` tests deleted by a
+    "consolidate(tests)" commit reads very differently from dead ``fn old_impl``
+    helpers. The actual block text always comes from the real conflict sides, so
+    escaping and truncation are structurally impossible.
+    """
+    md = unit.structural_metadata.get("merge_direction") or {}
+    summary = md.get("summary", "a modify/delete conflict")
+    who = md.get("deleting_side")  # "current" | "replayed" | None
+    # The keeper side = the side that did NOT delete. Its text is what we'd splice
+    # on "keep_block"; we show a summary, never the full block.
+    if who == "current":
+        keeper_text = unit.replayed.text or ""
+        keeper_label = "REPLAYED_COMMIT_SIDE"
+    else:
+        keeper_text = unit.current.text or ""
+        keeper_label = "CURRENT_UPSTREAM_SIDE"
+    keeper_lines = keeper_text.split("\n")
+    keeper_n = len(keeper_lines)
+
+    # Entity signatures: the test/function/struct names in the block. These are
+    # the load-bearing signal for a keep-vs-delete decision — far more useful than
+    # first/last lines for a 400-line block. Extracted cheaply by regex (no parser
+    # needed): test names, fn defs, struct/enum/trait/impl headers.
+    sigs = _extract_signatures(keeper_text)
+
+    # The deleting commit's subject (why the block was removed). This is critical
+    # context: "consolidate(tests): remove 44 verbose tests" tells the model the
+    # deletion was a deliberate cleanup (the tests may be redundant); "remove dead
+    # fn old_impl" tells it the block was dead. Sourced from provenance metadata.
+    deleting_commit = ""
+    prov = unit.structural_metadata.get("provenance") or {}
+    deleter_key = who  # "current" | "replayed"
+    deleter_prov = prov.get(deleter_key) or {}
+    deleting_commit = deleter_prov.get("subject") or ""
+
+    # Summary = signatures + first/last lines. Signatures lead because they're the
+    # decision signal; the line window adds surrounding context.
+    def _summarize(lines: list[str], head: int = 4, tail: int = 4) -> str:
+        nonblank = [ln for ln in lines if ln.strip()]
+        if len(nonblank) <= head + tail:
+            return "\n".join(nonblank) or "(empty)"
+        shown = nonblank[:head] + ["    ... [{} lines elided] ...".format(
+            len(nonblank) - head - tail
+        )] + nonblank[-tail:]
+        return "\n".join(shown)
+    keeper_window = _summarize(keeper_lines)
+
+    sig_block = ""
+    if sigs:
+        sig_list = "\n".join(f"  - {s}" for s in sigs[:40])
+        sig_block = (
+            f"Entities in the KEPT block ({len(sigs)} total — these are what the "
+            f"block IS; judge keep-vs-delete from them):\n{sig_list}\n\n"
+        )
+    commit_block = ""
+    if deleting_commit:
+        commit_block = (
+            f"The DELETING commit (why the block was removed): "
+            f"`{deleting_commit}`\n\n"
+        )
+
+    return f"""You are resolving a git merge conflict. Do NOT rewrite or reproduce the
+code — you are making a DECISION, and capybase splices the chosen text verbatim.
+
+file: {unit.path}
+language: {unit.language or 'unknown'}
+
+Conflict shape:
+{summary}
+
+This is a modify/delete: one side DELETED a block of {keeper_n} lines, the other
+side ({keeper_label}) KEPT it. You must decide which intent wins. Do not attempt
+to merge line-by-line — choose one of the three options below.
+
+{commit_block}{sig_block}Window into the KEPT block ({keeper_label}, {keeper_n} lines — first/last
+non-blank lines; capybase has the full text):
+```
+{keeper_window}
+```
+
+Decide ONE:
+- "accept_deletion" — the deletion should stand. Use this when the removed code
+  is dead/obsolete/superseded, OR when the deleting commit is a deliberate
+  consolidation (e.g. the same coverage now lives in parameterized tests). capybase
+  splices the deleting side's text.
+- "keep_block" — the kept block must survive. Use this when the block is live
+  coverage/functionality not duplicated elsewhere. capybase splices the kept block
+  VERBATIM from the conflict side.
+- "needs_human" — genuinely ambiguous (you can't tell if the coverage is
+  duplicated); escalate.
+
+Answer with a single ```json fenced object, nothing else:
+```json
+{{
+  "decision": "accept_deletion" | "keep_block" | "needs_human",
+  "reason": "one short sentence referencing the entities/commit"
+}}
+```
+"""
+
+
+# ---------------------------------------------------------------------------
+# Signature extraction for the block-capture summary
+# ---------------------------------------------------------------------------
+
+
+def _extract_signatures(text: str) -> list[str]:
+    """The named entities (tests/functions/structs) in ``text``, in order.
+
+    Used to summarize a large block for the keep-vs-delete decision: the entity
+    names are the signal (``brace_balance_passes`` vs ``old_dead_helper``). Each
+    match returns a labeled name like ``test: brace_balance_passes`` so the model
+    sees what kind of entity it is. Deduplicated, order-preserving. Empty for a
+    block with no recognizable definitions (e.g. a config/data block).
+    """
+    import re
+
+    seen: set[str] = set()
+    out: list[str] = []
+    # Run test patterns first so a test fn is labeled "test:" not "fn:".
+    lines = text.split("\n")
+    n = len(lines)
+    for i, line in enumerate(lines):
+        # Test attributes span two lines: ``#[test]\n    fn NAME``.
+        if re.match(r"#\[\s*(test|tokio::test)\s*\]", line.strip()) and i + 1 < n:
+            m = re.search(r"fn\s+(\w+)", lines[i + 1])
+            if m and m.group(1) not in seen:
+                seen.add(m.group(1))
+                out.append(f"test: {m.group(1)}")
+                continue
+        # Plain definitions.
+        for pat, label in (
+            (r"^\s*(?:pub\s+)?fn\s+(\w+)", "fn"),
+            (r"^\s*(?:pub\s+)?struct\s+(\w+)", "struct"),
+            (r"^\s*(?:pub\s+)?enum\s+(\w+)", "enum"),
+            (r"^\s*(?:pub\s+)?trait\s+(\w+)", "trait"),
+            (r"^\s*(?:async\s+)?def\s+(\w+)", "def"),
+            (r"^\s*class\s+(\w+)", "class"),
+        ):
+            m = re.match(pat, line)
+            if m and m.group(1) not in seen:
+                seen.add(m.group(1))
+                out.append(f"{label}: {m.group(1)}")
+                break
+    return out
+
+
+def parse_block_capture_decision(raw: str) -> tuple[str, str]:
+    """Parse the block-capture model response into ``(decision, reason)``.
+
+    ``decision`` is normalized to one of ``accept_deletion`` / ``keep_block`` /
+    ``needs_human``. Any unparseable / unrecognized response defaults to
+    ``needs_human`` (the safe fallback — block-capture never guesses; on any
+    doubt it escalates). ``reason`` is the model's explanation, or "" .
+    """
+    # Reuse the JSON parser (tolerant of prose + fenced blocks) rather than the
+    # candidate-dict aliaser (which targets resolved_text etc.).
+    from capybase.adapters.parsers import parse_resolution_json
+
+    data, _w = parse_resolution_json(raw)
+    if not isinstance(data, dict):
+        return "needs_human", ""
+    decision = str(data.get("decision", "")).strip().lower().replace("-", "_")
+    if decision not in ("accept_deletion", "keep_block", "needs_human"):
+        return "needs_human", str(data.get("reason", "") or "")
+    return decision, str(data.get("reason", "") or "")
 
 
 # Variant tags are appended to the base prompt_version (e.g. "resolve_text_block.v5#v1")
@@ -419,13 +638,14 @@ def build_repair_prompt(
     """
     feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
     cur_lines, _base_lines, rep_lines = _prompt_sides(unit)
+    side_intent = _side_intent_block(unit)
     return f"""Your previous merge attempt had errors. Fix the SPECIFIC errors in
 your code below — do not rewrite from scratch unless necessary. Keep all parts
 that were correct; change only what the validator flagged.
 
 file: {unit.path}
 language: {unit.language or 'unknown'}
-
+{side_intent}
 CURRENT_UPSTREAM_SIDE body:
 {cur_lines}
 
@@ -700,6 +920,28 @@ class ResolutionEngine:
         # profile overlay (which sets context_window) is applied before the
         # engine is constructed, so this reflects the calibrated window.
         self.token_budget = TokenBudget.from_config(config)
+
+    def raw_complete(self, prompt: str, *, json_mode: bool = False) -> LLMResponse:
+        """One-shot completion: send ``prompt`` and return the raw response.
+
+        Used by the block-capture layer (and any future decision-style prompt)
+        where the model is NOT producing a candidate's resolved_text but a small
+        structured decision. Mirrors :meth:`_one`'s message construction and
+        client call, but returns the raw :class:`LLMResponse` for the caller to
+        parse with the decision-specific parser (not the candidate coercer).
+        Raises on a request failure — the caller decides retry/fall-through.
+        """
+        messages = [
+            {"role": "system", "content": "You are a careful merge-resolution assistant."},
+            {"role": "user", "content": prompt},
+        ]
+        return self.client.complete(
+            messages,
+            model=self.config.model,
+            temperature=self.config.temperature,
+            max_tokens=self.config.max_tokens,
+            json_mode=json_mode,
+        )
 
     def propose(
         self,

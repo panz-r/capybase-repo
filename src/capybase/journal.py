@@ -25,6 +25,22 @@ class Journal:
     def __init__(self, paths: SessionPaths) -> None:
         self.paths = paths
         self._seq = 0
+        # In-process event listeners (e.g. the progress spinner), invoked after
+        # the event is appended. A listener raising is non-fatal (logged, not
+        # propagated) so a UI glitch never breaks a rebase.
+        self._listeners: list = []
+
+    # ------------------------------------------------------------- subscribe
+
+    def subscribe(self, callback) -> None:
+        """Register an in-process listener invoked with each emitted event.
+
+        The callback receives the :class:`JournalEvent`. Used by the progress
+        spinner to map state transitions to a status message without the
+        orchestrator scattering spinner calls across every code path. Exceptions
+        in a listener are swallowed (a UI issue must not break a rebase).
+        """
+        self._listeners.append(callback)
 
     # ------------------------------------------------------------------ emit
 
@@ -41,6 +57,12 @@ class Journal:
             **fields,
         )
         self._append(event)
+        # Notify in-process listeners (after the event is durably appended).
+        for cb in list(self._listeners):
+            try:
+                cb(event)
+            except Exception:  # noqa: BLE001 - a UI listener must not break a rebase
+                pass
         return event
 
     def _append(self, event: JournalEvent) -> None:

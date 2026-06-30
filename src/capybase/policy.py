@@ -39,6 +39,10 @@ class Policy:
                     SkippedPath(entry.path, f"unsupported conflict mode {entry.mode}")
                 )
                 continue
+            # AU/UA are whole-file modify/delete conflicts: one side deleted the
+            # path, the other modified it. Git leaves the modified version in the
+            # worktree, so the text check still works — the absent (deleting) side
+            # has no stage blob and is represented as empty text by the extractor.
             if "text" in self.supported_file_kinds and not self._is_text(entry.path):
                 decision.skipped.append(SkippedPath(entry.path, "non-text file"))
                 continue

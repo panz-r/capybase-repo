@@ -25,6 +25,7 @@ def write_review_bundle(
     test_output: str | None = None,
     resume_hint: str | None = None,
     consensus: dict | None = None,
+    resurrections: list | None = None,
 ) -> Path:
     """Write ``final/review-bundle.md`` and return its path.
 
@@ -32,6 +33,11 @@ def write_review_bundle(
     when present they're rendered as a side-by-side comparison so the developer
     can pick between the top-K variations. ``consensus`` carries the entropy/
     agreement stats for display.
+
+    ``resurrections`` is a list of :class:`resurrection.ResurrectionFinding`
+    (deliberately-deleted content the merge result brought back). When present a
+    ``## suspected resurrections`` section lists each finding so the developer
+    can decide whether the reanimation was intentional or an undo of a cleanup.
     """
     paths.final.mkdir(parents=True, exist_ok=True)
     out = paths.final / "review-bundle.md"
@@ -57,15 +63,25 @@ def write_review_bundle(
         lines.append("```")
         lines.append(unit.base.text)
         lines.append("```")
-        lines.append("### CURRENT_UPSTREAM_SIDE")
+        lines.append(_annotated_side_header(unit, "CURRENT_UPSTREAM_SIDE", "current"))
         lines.append("```")
         lines.append(unit.current.text)
         lines.append("```")
-        lines.append("### REPLAYED_COMMIT_SIDE")
+        lines.append(_annotated_side_header(unit, "REPLAYED_COMMIT_SIDE", "replayed"))
         lines.append("```")
         lines.append(unit.replayed.text)
         lines.append("```")
         lines.append("")
+        # Side analysis: one line stating the conflict shape (e.g. "modify/delete:
+        # CURRENT_UPSTREAM_SIDE DELETED this block"). Computed at extraction via
+        # merge_intent.direction and stashed on structural_metadata. This is the
+        # disambiguation that prevents a deliberate deletion from being read as an
+        # addition. Omitted when no classification was recorded.
+        md = unit.structural_metadata.get("merge_direction") or {}
+        summary = md.get("summary")
+        if summary:
+            lines.append(f"> **side analysis:** {summary}")
+            lines.append("")
 
     if candidate is not None:
         lines.append("## best candidate")
@@ -120,5 +136,80 @@ def write_review_bundle(
         lines.append("```")
         lines.append("")
 
+    if resurrections:
+        lines.append("## suspected resurrections")
+        lines.append(
+            "The rebase result brought back content the target branch deliberately "
+            "deleted (a cleanup predating the replayed commits). Review whether each "
+            "reanimation was intentional or an accidental undo of the deletion."
+        )
+        lines.append("")
+        for finding in resurrections:
+            commit = getattr(finding, "deleting_commit", "") or "(unknown commit)"
+            n = getattr(finding, "resurrected_line_count", 0) or 0
+            lines.append(
+                f"### `{finding.path}` — {n} lines back (removed by `{commit}`)"
+            )
+            for blk in finding.blocks[:3]:
+                cov = getattr(blk, "coverage", 0.0)
+                lines.append(f"- block ({cov:.0%} coverage):")
+                lines.append("```")
+                shown = blk.text.split("\n")
+                if len(shown) > 20:
+                    lines.extend(shown[:20])
+                    lines.append(f"... ({len(shown) - 20} more lines)")
+                else:
+                    lines.extend(shown)
+                lines.append("```")
+            lines.append("")
+
     out.write_text("\n".join(lines), encoding="utf-8")
     return out
+
+
+# ---------------------------------------------------------------------------
+# Side classification + provenance rendering (modify/delete disambiguation)
+#
+# A conflict unit's three sides are raw text; without a label saying what each
+# side *did*, a deliberate deletion (current side empty, base full) can look
+# like an addition in the non-empty replayed side. These helpers annotate each
+# side header with its classification (DELETED / ADDED / MODIFIED / unchanged)
+# and the commit that introduced it (already-collected provenance), and render
+# a one-line side-analysis stating the conflict shape. This is the single fix
+# that would have made the edit_file.rs modify/delete conflict unambiguous.
+
+
+# Human-readable label for a side's classification, appended to its header.
+_SIDE_LABEL = {
+    "added": "ADDED this content",
+    "deleted": "DELETED this block",
+    "modified": "MODIFIED this block",
+    "unchanged": "unchanged from base",
+}
+
+
+def _annotated_side_header(unit: ConflictUnit, display_label: str, side_key: str) -> str:
+    """Render ``### <label> — <classification> (<N lines>; <provenance>)``.
+
+    ``side_key`` is the key into ``structural_metadata["merge_direction"]`` and
+    ``["provenance"]`` (``"current"`` or ``"replayed"``). Falls back to the bare
+    header when no classification is recorded, so older units still render fine.
+    """
+    md = unit.structural_metadata.get("merge_direction") or {}
+    kind = md.get(side_key)
+    annotation = _SIDE_LABEL.get(kind, "")
+    parts = [display_label]
+    if annotation:
+        parts.append(f"— {annotation}")
+    n = (getattr(_side(unit, side_key), "text", "") or "").count("\n") + 1
+    parts.append(f"({n} lines)")
+    prov = (unit.structural_metadata.get("provenance") or {}).get(side_key) or {}
+    subject = prov.get("subject")
+    if subject:
+        parts.append(f"introduced by `{subject}`")
+    return f"### {' '.join(parts)}"
+
+
+def _side(unit: ConflictUnit, side_key: str) -> ConflictSide:
+    """The ConflictSide object for ``side_key`` ('current' | 'replayed' | 'base')."""
+    return getattr(unit, side_key)

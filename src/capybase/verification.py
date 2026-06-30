@@ -1120,6 +1120,21 @@ class AstPreservationValidator:
         )
 
 
+def _has_whole_file_span(
+    resolutions: list[tuple[tuple[int, int] | None, str]]
+) -> bool:
+    """True iff ``resolutions`` carries a whole-file unit (``marker_span`` None).
+
+    A modify/delete unit has no marker span — its resolved text IS the file.
+    ``splice_all_resolutions`` cannot represent that (it unpacks each span),
+    so the caller routes whole-file units around splicing and uses the
+    resolved text directly. A single such unit is the only supported shape;
+    mixing it with marker spans would be ambiguous and is treated as
+    whole-file here (the first resolution wins).
+    """
+    return any(span is None for span, _ in resolutions)
+
+
 def _compile_python(source: str) -> tuple[bool, str]:
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", delete=False, encoding="utf-8"
@@ -1427,6 +1442,13 @@ class VerificationEngine:
 
         if not resolutions:
             whole = original
+        elif _has_whole_file_span(resolutions):
+            # A whole-file unit (modify/delete) has marker_span=None: the
+            # resolved text IS the file, there is nothing to splice. An empty
+            # text means the resolution accepts the deletion (the file goes
+            # away); a non-empty text is the keeper's full content. Splicing
+            # would crash on the None span, so use the resolved text directly.
+            whole = resolutions[0][1]
         else:
             whole = splice_all_resolutions(original, resolutions)
 
@@ -1475,10 +1497,26 @@ class VerificationEngine:
             # rust-uu fixture). A missing tool → "not checked" (never a false
             # failure). This mirrors Python's always-on py_compile but uses the
             # crate context Rust requires.
-            from capybase.adapters.lsp import _has_cargo_manifest, _resolve
+            from capybase.adapters.lsp import (
+                _has_cargo_manifest,
+                _resolve,
+                nearest_cargo_manifest_dir,
+            )
 
+            # A Rust file is "in a cargo project" when EITHER the repo root has a
+            # manifest (single-crate layout) OR the file sits under a member
+            # crate's manifest (workspace layout, where each crate lives in a
+            # subdir). The latter is the common case `_has_cargo_manifest` alone
+            # misses — without it, a workspace leaf (``di-core/src/.../foo.rs``
+            # doing ``use crate::tools::...``) falls back to standalone rustc,
+            # which false-positives on ``crate::`` paths (E0433) and triggers a
+            # phantom repair loop on a correct merge.
             used_cargo = False
-            if _has_cargo_manifest(repo_root) and _resolve(self.config.cargo_path):
+            in_cargo = (
+                _has_cargo_manifest(repo_root)
+                or nearest_cargo_manifest_dir(repo_root, path) is not None
+            )
+            if in_cargo and _resolve(self.config.cargo_path):
                 used_cargo = self._run_cargo_syntax_check(
                     path, original, whole, repo_root, hard, features
                 )

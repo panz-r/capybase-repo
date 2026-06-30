@@ -76,13 +76,16 @@ def test_one_sided_replayed_changed_only():
 
 
 def test_one_sided_when_other_side_concedes_to_empty():
-    # Current deleted (empty), replayed kept base → replayed is the only change? No:
-    # current="" differs from base, replayed==base → current changed (to empty),
-    # replayed didn't → take current (the deletion). This is a legitimate one-sided
-    # change (one side chose to delete).
+    # Current deleted (empty), replayed kept base. This is the modify/delete shape:
+    # one side deliberately removed the block, the other conceded to base. The
+    # delete_side rule now owns it (it's the rule specifically built to ACCEPT a
+    # clean deletion), emitting the deleting side's empty text. Previously this
+    # resolved via one_sided_change with the identical result; delete_side
+    # attributes the resolution to the real intent so the bundle/journal can
+    # surface "deliberate deletion accepted".
     u = _unit("x = 1", "", "x = 1")
     r = resolve_structurally(u)
-    assert r.rule == "one_sided_change"
+    assert r.rule == "delete_side"
     assert r.text == ""
 
 
@@ -291,3 +294,73 @@ def test_zealous_resolved_text_has_no_markers():
     r = resolve_structurally(_unit(base, current, replayed))
     assert r.resolved and r.rule == "zealous_merge"
     assert "<<<" not in r.text and "===" not in r.text and ">>>" not in r.text
+
+
+# ---------------------------------------------------------------------------
+# Rule 1: delete_side — accept a deliberate deletion (modify/delete disambiguation)
+#
+# When one side cleanly deleted the block and the other side added nothing that
+# the deletion would clobber, the safe resolution is to ACCEPT THE DELETION.
+# This is the guard against the "silent loss of intent" failure mode where a
+# modify/delete is wrongly merged to keep dead code. Declines when the non-
+# deleting side added/modified-with-additions content (a real change the LLM
+# must judge).
+# ---------------------------------------------------------------------------
+
+
+def test_delete_side_accepts_current_deletion_replayed_unchanged():
+    # The edit_file.rs shape: upstream (current) deleted a test block, replayed
+    # kept it verbatim. delete_side accepts the deletion → empty text.
+    base = (
+        "    #[test]\n    fn brace_balance_passes() {\n"
+        "        assert!(check_brace_balance(...).is_ok());\n    }\n"
+    )
+    r = resolve_structurally(_unit(base, "", base))
+    assert r.resolved and r.rule == "delete_side"
+    assert r.text == ""
+
+
+def test_delete_side_accepts_replayed_deletion_current_unchanged():
+    # Symmetric: replayed deleted, current kept base.
+    base = "def dead():\n    return 1\n"
+    r = resolve_structurally(_unit(base, base, ""))
+    assert r.resolved and r.rule == "delete_side"
+    assert r.text == ""
+
+
+def test_delete_side_both_deleted_resolves_via_identical_sides():
+    # Both sides deleted (both empty) → not a modify/delete, so delete_side
+    # declines (direction sets deleting_side=None when both deleted). The
+    # identical_sides rule then resolves it: both sides are empty → empty merge.
+    # Either attribution is correct; the result (accept the deletion) is the same.
+    base = "def dead():\n    return 1\n"
+    r = resolve_structurally(_unit(base, "", ""))
+    assert r.resolved
+    assert r.text == ""
+
+
+def test_delete_side_declines_when_other_side_added_content():
+    # Current deleted, but replayed ADDED new content that the deletion would
+    # drop → decline so the LLM judges whether the addition or the deletion wins.
+    base = "def dead():\n    return 1\n"
+    replayed = "def new_thing():\n    return 2\n"  # an addition, not base
+    r = resolve_structurally(_unit(base, "", replayed))
+    assert not r.resolved
+
+
+def test_delete_side_declines_when_other_side_modified_with_additions():
+    # Current deleted, replayed rewrote the block (modified: removed + added) →
+    # the keeper introduced new content; decline, don't silently drop it.
+    base = "def dead():\n    return 1\n"
+    replayed = "def dead():\n    return 1\n    cleanup()\n"  # modified: kept + added
+    r = resolve_structurally(_unit(base, "", replayed))
+    assert not r.resolved
+
+
+def test_delete_side_takes_priority_and_records_rule():
+    # A modify/delete where current deleted and replayed == base would otherwise
+    # resolve via identical_sides/one_sided_change; delete_side owns it so the
+    # journal/bundle can attribute the resolution to a deliberate deletion.
+    base = "def a():\n    pass\n\ndef b():\n    pass\n"
+    r = resolve_structurally(_unit(base, "", base))
+    assert r.rule == "delete_side"

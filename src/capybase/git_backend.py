@@ -433,6 +433,18 @@ class GitBackend:
             return
         self._run_ok(["add", "--", *paths], what="git add")
 
+    def remove_file_stage(self, path: str) -> None:
+        """Stage the removal of ``path`` and drop it from the worktree.
+
+        Used to resolve a whole-file modify/delete by accepting the deletion:
+        ``git rm`` both records the removal in the index (so ``rebase
+        --continue`` commits it) and deletes the worktree file. ``-f`` is
+        required because the path is staged-unmerged at this point; plain
+        ``git rm`` would refuse it. Raises ``GitError`` on failure, matching
+        the other mutation methods.
+        """
+        self._run_ok(["rm", "-f", "--", path], what="git rm")
+
     def staged_paths(self) -> list[str]:
         out = self._run_ok(
             ["diff", "--cached", "--name-only", "-z"],
@@ -484,6 +496,107 @@ class GitBackend:
             return "", ""
         sha, _, subject = out.partition("\t")
         return sha, subject
+
+    def merge_base(self, a: str, b: str) -> str | None:
+        """The best common ancestor of ``a`` and ``b``, or ``None``.
+
+        The base for silent-resurrection detection: the deletion intent lives in
+        ``merge_base(start, onto)..onto`` (what the ``onto`` branch removed since
+        the branches diverged), and we check whether the merge result brought any
+        of it back. Wraps ``git merge-base``. Never raises — an unresolvable ref
+        or unrelated histories returns None, matching the "advisory, never
+        blocks" discipline of the other history-query methods.
+        """
+        res = self._run(["merge-base", a, b])
+        if not res.ok:
+            return None
+        oid = res.stdout.strip()
+        return oid or None
+
+    def files_changed_between(self, old: str, new: str) -> list[str]:
+        """Paths that differ between ``old`` and ``new`` revisions.
+
+        Used to scope the resurrection scan to just the files the deletion (or
+        the merge) touched, rather than diffing the whole tree. Wraps
+        ``git diff --name-only``. Returns ``[]`` on any error (advisory).
+        """
+        res = self._run(
+            ["diff", "--name-only", "-z", old, new], what="diff --name-only"
+        )
+        if not res.ok:
+            return []
+        return [p for p in res.stdout.split("\0") if p]
+
+    def blob_at(self, rev: str, path: str) -> bytes | None:
+        """The raw content of ``path`` at ``rev``, or ``None`` if absent.
+
+        Wraps ``git show <rev>:<path>``. Returns None (not raise) when the path
+        doesn't exist at that revision — the caller treats a missing blob as
+        "deleted", which is the correct signal for the resurrection scan.
+        """
+        res = self._run(["show", f"{rev}:{path}"])
+        if not res.ok:
+            return None
+        return res.stdout.encode("utf-8", errors="replace") if isinstance(
+            res.stdout, str
+        ) else res.stdout
+
+    # ------------------------------------------------------------------ rebase state
+
+    def rebase_onto_oid(self) -> str | None:
+        """The commit being rebased onto (``.git/rebase-merge/onto``).
+
+        During a rebase this is the tip of the upstream/``onto`` branch — the side
+        that may have expressed deletions (cleanups) the replayed branch predates.
+        Returns None when no rebase is in progress. Resolved via
+        ``rev-parse --git-path`` so a worktree-linked repo is handled.
+        """
+        return self._read_rebase_ref("onto")
+
+    def rebase_orig_head_oid(self) -> str | None:
+        """The HEAD at rebase start (``.git/rebase-merge/orig-head``).
+
+        The pre-rebase tip of the branch being replayed; its merge-base with
+        ``onto`` bounds the window of upstream history the replayed branch
+        predates. None when no rebase is in progress.
+        """
+        return self._read_rebase_ref("orig-head")
+
+    def rebase_head_name(self) -> str | None:
+        """The name the rebase was started on (``.git/rebase-merge/head-name``).
+
+        The full refname of the original branch (e.g. ``refs/heads/feat``). Used
+        to resolve the original branch tip for the end-of-rebase scan when the
+        rebase has already finished (the rebase-merge dir is gone). None when no
+        rebase is in progress.
+        """
+        name = self._read_rebase_ref("head-name")
+        if name is None:
+            return None
+        return name.strip() or None
+
+    def _read_rebase_ref(self, key: str) -> str | None:
+        """Read a SHA / ref from ``.git/rebase-merge/<key>``, or None.
+
+        ``key`` is one of the rebase state files (``onto``, ``orig-head``,
+        ``head-name``, ...). Resolved via ``rev-parse --git-path`` so a
+        worktree-linked repo (common .git elsewhere) is handled. None when no
+        rebase is in progress or the file is absent/empty.
+        """
+        r = self._run(["rev-parse", "--git-path", f"rebase-merge/{key}"])
+        if not r.ok:
+            return None
+        rel = r.stdout.strip()
+        if not rel:
+            return None
+        p = Path(rel) if Path(rel).is_absolute() else (self.repo / rel)
+        if not p.exists():
+            return None
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        return content or None
 
     def has_unmerged_paths(self) -> bool:
         return any(True for _ in self._iter_unmerged_quick())

@@ -79,6 +79,45 @@ class StepResult:
     continued: bool = False
 
 
+def _resolved_buffer(
+    original: str, accepted: list[tuple[ConflictUnit, CandidateResolution]]
+) -> str:
+    """Build the resolved file buffer for one path's accepted units.
+
+    Marker-block units splice their resolution into the span within
+    ``original`` (the marker-laden worktree text). A ``whole_file`` unit
+    (modify/delete) has ``marker_span=None``: its resolved text IS the file —
+    empty for an accepted deletion, the keeper's full text for keep_block — so
+    there is nothing to splice. Mixing the two in one path isn't meaningful;
+    when any unit is whole-file we take the (single) accepted resolution's
+    text verbatim.
+    """
+    from capybase.adapters.parsers import splice_all_resolutions
+
+    if any(unit.marker_span is None for unit, _ in accepted):
+        return accepted[0][1].resolved_text
+    spans_and_texts = [
+        (unit.marker_span, cand.resolved_text) for unit, cand in accepted
+    ]
+    return splice_all_resolutions(original, spans_and_texts)
+
+
+def _is_whole_file_delete(
+    accepted: list[tuple[ConflictUnit, CandidateResolution]]
+) -> bool:
+    """True iff a path's single accepted resolution means ``delete the file``.
+
+    A whole-file modify/delete accepted via block-capture's ``accept_deletion``
+    yields empty resolved text — the file should be ``git rm``'d, not written.
+    Any non-whole-file unit, or a non-empty whole-file resolution (keep_block),
+    returns False so the normal write+add path runs.
+    """
+    if len(accepted) != 1:
+        return False
+    unit, cand = accepted[0]
+    return unit.marker_span is None and not cand.resolved_text.strip()
+
+
 def _attribute_whole_file_failure(
     failures: list, units: list[ConflictUnit]
 ) -> int:
@@ -257,11 +296,19 @@ class Orchestrator:
         repo: str = ".",
         session_id: str | None = None,
         resolution_engine: ResolutionEngine | None = None,
-        stdin_reader: Callable[[str], str] | None = None,
+        stdin_reader: Callable[..., str] | None = None,
         out: Callable[[str], None] = print,
+        color: bool = False,
     ) -> None:
+        from capybase.color import make_styler
+
+        self.style = make_styler(color)
         self.git = GitBackend(repo)
         self.session_id = session_id or new_session_id()
+        # Paths resolved as a deliberate modify/delete keep_block this session.
+        # Excluded from the end-of-rebase silent-resurrection scan: such a keep
+        # is an explicit, reviewed resurrection (not a silent undo).
+        self._explicitly_kept_paths: set[str] = set()
         self.paths = SessionPaths(self.session_id, repo)
         self.paths.mkdirs()
         self.journal = Journal(self.paths)
@@ -412,7 +459,7 @@ class Orchestrator:
             reason = "no rebase in progress; nothing to inspect"
             self.journal.emit("escalated", {"reason": reason})
             bundle = write_review_bundle(self.paths, reason=reason)
-            self.out(f"! {reason}\n  review bundle: {bundle}")
+            self.out(self._warn(f"! {reason}") + f"\n  review bundle: {bundle}")
             return StepResult(step_index=self.step, escalated=True, reason=reason)
         self.journal.emit("preflight_passed", {})
         result = self._gather_step()
@@ -446,7 +493,8 @@ class Orchestrator:
             for unit in units:
                 self.out(self._render_unit(unit))
                 pasted = self.stdin_reader(
-                    "paste the resolved text for this block (Ctrl-D to finish):"
+                    "paste the resolved text for this block (Ctrl-D to finish):",
+                    multiline=True,
                 )
                 outcome = self._apply_manual_resolution(unit, pasted)
                 result.outcomes.append(outcome)
@@ -463,15 +511,10 @@ class Orchestrator:
                     self._summarize(result)
                     return result
                 accepted.append((unit, outcome.accepted))
-            from capybase.adapters.parsers import splice_all_resolutions
-
             original = accepted[0][0].original_worktree_text
-            spans_and_texts = [
-                (unit.marker_span, cand.resolved_text) for unit, cand in accepted
-            ]
-            buffer = splice_all_resolutions(original, spans_and_texts)
+            buffer = _resolved_buffer(original, accepted)
             # Write + stage the file.
-            self._write_and_stage(path, buffer, result)
+            self._write_and_stage(path, buffer, result, accepted=accepted)
         self._summarize(result)
         self.out(
             "manual mode done; files staged. Run `git rebase --continue` "
@@ -504,16 +547,58 @@ class Orchestrator:
             "  Review the context, then choose how to proceed.\n"
             f"  review bundle: {self.paths.final / 'review-bundle.md'}\n"
         )
-        # Re-gather the unmerged units fresh (the escalation left them on disk).
-        gathered = self._gather_step()
-        if gathered.escalated or not gathered.units_by_path:
-            self.out("  (no resolvable units to present interactively)")
-            return result
+        # Decide which units to present. The escalation's own ``units_by_path``
+        # (carried from _resolve_step) is authoritative when present: for a
+        # WHOLE-FILE-VALIDATION failure the worktree is already marker-free
+        # (Phase 1 wrote the resolved buffer before Phase 2 validated it), so
+        # re-gathering from the worktree finds NO markers and NO units — bailing
+        # the human out of the very fallback meant to help them. Prefer the
+        # escalation's units; only re-gather when they're absent (a pre-extraction
+        # escalation, or the user re-running ``run`` on a stopped rebase).
+        units_by_path = result.units_by_path
+        whole_file_failure = bool(
+            result.reason and "whole-file" in result.reason
+        )
+        if not units_by_path:
+            gathered = self._gather_step()
+            if gathered.escalated or not gathered.units_by_path:
+                self.out("  (no resolvable units to present interactively)")
+                self.journal.emit(
+                    "interactive_bail",
+                    {
+                        "why": "no resolvable units",
+                        "gathered_escalated": gathered.escalated,
+                        "gathered_units": list(gathered.units_by_path),
+                    },
+                    step_index=self.step,
+                )
+                return result
+            units_by_path = gathered.units_by_path
 
         aborted = False
-        for path, units in gathered.units_by_path.items():
+        for path, units in units_by_path.items():
             if aborted:
                 break
+            # A whole-file failure (cross-unit error after splice) is best handled
+            # by editing the whole file directly — the per-unit splice menu can't
+            # fix a combination error. BUT the worktree currently holds the
+            # MODEL'S BROKEN SPLICE (marker-free, written by Phase 1 before Phase
+            # 2 validated) — so edit mode must first RESTORE the raw conflict
+            # markers, letting the human resolve the real conflict from scratch
+            # rather than repair an already-broken resolution. Lead with the
+            # file-edit path; paste/skip/abort remain as fallback.
+            raw_conflict = units[0].original_worktree_text if units else None
+            if whole_file_failure:
+                self.out(
+                    f"\n  {path}: the individual resolutions are valid, but their "
+                    f"combination fails whole-file validation:\n    "
+                    + (result.reason or "").replace("\n", "\n    ")
+                )
+                self.out(
+                    "  The fastest fix is to edit the file directly (option 2): "
+                    "capybase will restore the raw conflict markers and you "
+                    "resolve it fresh."
+                )
             # Show the model's best attempt + the failure for this path (from the
             # original escalation's outcomes) so the human sees what was tried.
             prior = [o for o in result.outcomes if o.unit.path == path]
@@ -541,7 +626,11 @@ class Orchestrator:
                             if choice2 == "skip":
                                 break
                             if choice2 == "edit":
-                                if self._interactive_edit_file(path):
+                                if self._interactive_edit_file(
+                                    path, restore_conflict=(
+                                        raw_conflict if whole_file_failure else None
+                                    )
+                                ):
                                     # File fully resolved by direct edit; stage it
                                     # and move to the next file (units consumed).
                                     self._stage_after_edit(path, result)
@@ -561,20 +650,21 @@ class Orchestrator:
                         continue
                     accepted.append((unit, outcome.accepted))
                 elif choice == "edit":
-                    if self._interactive_edit_file(path):
+                    # On a whole-file failure, restore the raw conflict markers
+                    # so the human resolves the real conflict (not the model's
+                    # broken splice). On a plain escalation the markers are
+                    # already in the worktree, so no restore is needed.
+                    restore = raw_conflict if whole_file_failure else None
+                    if self._interactive_edit_file(path, restore_conflict=restore):
                         self._stage_after_edit(path, result)
                         accepted = []  # file resolved wholesale by direct edit
                         break  # next file
             if aborted or not accepted:
                 continue
             # Batch-splice + stage the paste-mode resolutions (mirrors manual()).
-            from capybase.adapters.parsers import splice_all_resolutions
             original = accepted[0][0].original_worktree_text
-            spans_and_texts = [
-                (unit.marker_span, cand.resolved_text) for unit, cand in accepted
-            ]
-            buffer = splice_all_resolutions(original, spans_and_texts)
-            self._write_and_stage(path, buffer, result)
+            buffer = _resolved_buffer(original, accepted)
+            self._write_and_stage(path, buffer, result, accepted=accepted)
 
         if aborted:
             self.out("  aborting rebase as requested")
@@ -595,7 +685,7 @@ class Orchestrator:
 
         # All units resolved: run the test gate, then continue the rebase. Loop
         # back into run() for further stops so a multi-conflict rebase proceeds.
-        self.out("  ✓ conflict(s) resolved interactively; continuing rebase")
+        self.out("  " + self._ok("✓ conflict(s) resolved interactively; continuing rebase"))
         result.escalated = False
         result.reason = None
         self.journal.emit(
@@ -609,40 +699,103 @@ class Orchestrator:
         self, unit: ConflictUnit, prior_outcomes: list[UnitOutcome]
     ) -> str:
         """Rich context for the interactive menu: the three sides (truncated for
-        huge units) + the model's best attempt + why it failed."""
+        huge units) + the model's best attempt + why it failed.
+
+        Color (when enabled via ``self.style``) is applied to the structural
+        elements — the unit header, side headers, the side-analysis line, and
+        failure markers — NOT to the conflict-side *content* itself, so the body
+        text stays readable and substring assertions on it hold. Color is a
+        passthrough when disabled (default), so this output is byte-identical to
+        the un-colored baseline unless color is explicitly turned on.
+        """
+        from capybase.color import BOLD, CYAN, DIM, MAGENTA, RED, YELLOW
+
+        s = self.style
         lines = [
-            f"\n=== {unit.unit_id} ({unit.path}, {unit.conflict_type}) ==="
+            s(f"\n=== {unit.unit_id} ({unit.path}, {unit.conflict_type}) ===", BOLD)
         ]
-        for label, side in (
-            ("BASE (common ancestor)", unit.base.text),
-            ("CURRENT_UPSTREAM_SIDE", unit.current.text),
-            ("REPLAYED_COMMIT_SIDE", unit.replayed.text),
+        # Side classification (modify/delete disambiguation): annotate each side
+        # header with what it DID (DELETED/ADDED/MODIFIED/unchanged) so a side
+        # that's empty because it deleted base content isn't read as "absent".
+        # Reads the merge_intent.direction result stashed at extraction.
+        md = unit.structural_metadata.get("merge_direction") or {}
+        prov = unit.structural_metadata.get("provenance") or {}
+        # Per-side header color: BASE dim (reference), CURRENT cyan, REPLAYED magenta.
+        side_header_color = {None: DIM, "current": CYAN, "replayed": MAGENTA}
+        for label, side, key in (
+            ("BASE (common ancestor)", unit.base.text, None),
+            ("CURRENT_UPSTREAM_SIDE", unit.current.text, "current"),
+            ("REPLAYED_COMMIT_SIDE", unit.replayed.text, "replayed"),
         ):
+            ann = self._side_annotation(md, prov, key) if key else ""
             n = side.count("\n") + 1
+            header_color = side_header_color[key]
             if n > 30:
-                lines.append(f"-- {label} ({n} lines; first 30 shown) --")
+                lines.append(s(f"-- {label} ({n} lines; first 30 shown)", header_color)
+                             + f"{ann}" + s(" --", header_color))
                 lines.append("\n".join(side.split("\n")[:30]))
-                lines.append("... (truncated; see review bundle for full)")
+                lines.append(s("... (truncated; see review bundle for full)", DIM))
             else:
-                lines.append(f"-- {label} --")
+                lines.append(s(f"-- {label} --", header_color) + f"{ann}")
                 lines.append(side)
+        # One-line side-analysis summary (e.g. "modify/delete: ... DELETED this
+        # block") so the conflict shape is explicit, not inferred from the text.
+        summary = md.get("summary")
+        if summary:
+            lines.append(s(f"-- side analysis: {summary} --", YELLOW))
         # The model's best attempt + failure, if the escalation carried it.
         if prior_outcomes:
             o = prior_outcomes[0]
             if o.attempts:
                 best = o.attempts[-1]
-                lines.append("-- model's last attempt --")
+                lines.append(s("-- model's last attempt --", DIM))
                 at = best.resolved_text
                 if at.count("\n") > 30:
                     lines.append("\n".join(at.split("\n")[:30]))
-                    lines.append("... (truncated)")
+                    lines.append(s("... (truncated)", DIM))
                 else:
                     lines.append(at)
             if o.validation and o.validation.hard_failures:
-                lines.append("-- why it failed --")
+                lines.append(s("-- why it failed --", RED))
                 for hf in o.validation.hard_failures[:5]:
-                    lines.append(f"  [{hf.validator}] {hf.message}")
+                    lines.append(f"  {s(f'[{hf.validator}]', RED)} {hf.message}")
         return "\n".join(lines)
+
+    def _side_annotation(
+        self, md: dict, prov: dict, key: str | None
+    ) -> str:
+        """A short `` — DELETED (introduced by <commit>)`` tag for a side header.
+
+        ``md`` is the unit's ``merge_direction`` metadata, ``prov`` its
+        ``provenance`` metadata, ``key`` the side (``"current"``/``"replayed"``).
+        Returns ``""`` when nothing is recorded, so unenriched units render as
+        before. Mirrors :func:`escalation._annotated_side_header` but inline. The
+        classification tag is colored semantically (DELETED red, ADDED green,
+        MODIFIED yellow, unchanged dim) when color is enabled.
+        """
+        if not key:
+            return ""
+        from capybase.color import DIM, GREEN, RED, YELLOW
+
+        s = self.style
+        parts: list[str] = []
+        kind = (md or {}).get(key)
+        # Semantic color per classification: red=removed, green=added, yellow=changed.
+        tag_color = {
+            "added": GREEN, "deleted": RED, "modified": YELLOW, "unchanged": DIM,
+        }.get(kind)
+        label = {
+            "added": "ADDED", "deleted": "DELETED",
+            "modified": "MODIFIED", "unchanged": "unchanged",
+        }.get(kind)
+        if label and tag_color is not None:
+            parts.append(s(f" — {label}", tag_color))
+        elif label:
+            parts.append(f" — {label}")
+        subject = ((prov or {}).get(key) or {}).get("subject")
+        if subject:
+            parts.append(s(f" (introduced by `{subject}`)", DIM))
+        return "".join(parts)
 
     def _interactive_menu(self, unit: ConflictUnit) -> str:
         """Present the menu and return the chosen action string."""
@@ -661,7 +814,7 @@ class Orchestrator:
     def _interactive_paste(self, unit: ConflictUnit) -> UnitOutcome:
         """Read a pasted resolution and validate it through the full chain."""
         self.out("  paste the resolved text (Ctrl-D to finish):")
-        pasted = self.stdin_reader("")
+        pasted = self.stdin_reader("", multiline=True)
         outcome = self._apply_manual_resolution(unit, pasted)
         self.journal.emit(
             "interactive_resolved",
@@ -671,30 +824,79 @@ class Orchestrator:
         )
         return outcome
 
-    def _interactive_edit_file(self, path: str) -> bool:
+    def _interactive_edit_file(
+        self, path: str, *, restore_conflict: str | None = None
+    ) -> bool:
         """Tell the human to edit the file in their editor; on their signal,
-        read it back, reject if conflict markers remain, return True if clean."""
+        read it back, and LOOP until no conflict markers remain (returning True)
+        or the human gives up (returning False).
+
+        ``restore_conflict``: when set (a whole-file escalation), the worktree
+        currently holds the MODEL'S BROKEN SPLICE (marker-free) — Phase 1 wrote
+        it before Phase 2 validated. Offering edit mode on that is wrong: the
+        human would edit an already-resolved-but-broken file with no markers to
+        resolve, and the prompt ("resolve the conflict markers") wouldn't match.
+        So we FIRST write back the raw conflict buffer (with markers), so the
+        human resolves the REAL conflict from scratch.
+
+        On each Enter, if markers remain we tell the human and re-prompt (NOT
+        return — a prior version printed "Re-offering" then returned False, which
+        the caller treated as a skip, aborting the rebase on a single Enter
+        before the human had resolved anything). The loop is bounded so a runaway
+        can't spin forever; after the cap, return False (the caller skips the
+        unit rather than silently aborting the whole rebase).
+        """
+        if restore_conflict is not None:
+            self._write_worktree_only(path, restore_conflict)
+            self.out(
+                f"  (restored the raw conflict markers to {path} — the previous "
+                "resolution attempt was broken; resolve the conflict fresh.)"
+            )
         self.out(
             f"  edit {path} in your editor now (resolve the conflict markers,\n"
             "  save, and return here). Press Enter when done."
         )
-        self.stdin_reader("")
-        text = self.git.read_worktree_file(path).decode("utf-8", errors="replace")
-        if "<<<<<<<" in text or "=======" in text or ">>>>>>>" in text:
-            self.out("  ! conflict markers still present — not done editing. Re-offering.")
+        max_reprompts = 50  # generous; a human genuinely working won't hit this
+        for _ in range(max_reprompts):
+            self.stdin_reader("")
+            text = self.git.read_worktree_file(path).decode("utf-8", errors="replace")
+            # Use line-anchored marker detection (contains_markers), NOT loose
+            # substring matching: a file with ``// =====`` comment banners would
+            # false-positive on ``"=======" in text`` and loop forever claiming
+            # "markers still present" when none are. Real git conflict markers
+            # start at column 0.
+            from capybase.adapters.parsers import contains_markers
+
+            if not contains_markers(text):
+                self.journal.emit(
+                    "interactive_resolved",
+                    {"path": path, "mode": "edit", "accepted": True},
+                    step_index=self.step,
+                )
+                return True
+            # Markers still present: re-prompt (the message says "re-offer" — now
+            # it actually does). The human presses Enter again after editing more.
+            self.out(
+                self._warn(
+                    "! conflict markers still present in "
+                    + path
+                    + " — not done editing."
+                )
+            )
+            self.out("  Edit the file, remove all markers, save, and Press Enter again.")
             self.journal.emit(
                 "interactive_resolved",
                 {"path": path, "mode": "edit", "accepted": False,
-                 "reason": "markers remained"},
+                 "reason": "markers remained (re-prompting)"},
                 step_index=self.step,
             )
-            return False
-        self.journal.emit(
-            "interactive_resolved",
-            {"path": path, "mode": "edit", "accepted": True},
-            step_index=self.step,
+        # Cap hit: the human couldn't clear the markers. Return False so the
+        # caller skips this unit (the rebase stays stopped), rather than aborting.
+        self.out(
+            f"  giving up on {path} after repeated attempts — markers still "
+            f"present. This unit will be skipped."
         )
-        return True
+        return False
 
     def _stage_after_edit(self, path: str, result: StepResult) -> None:
         """After a direct edit, validate the whole file (cargo check etc.) and
@@ -883,6 +1085,134 @@ class Orchestrator:
         )
         return outcome
 
+    def _try_block_capture(self, unit: ConflictUnit) -> UnitOutcome | None:
+        """Block-capture resolution for large modify/delete conflicts.
+
+        When one side DELETED a large block and the other KEPT it (and the
+        structural ``delete_side`` rule declined — e.g. the keeper MODIFIED the
+        block, so it's not a clean auto-accept), asking the model to REPRODUCE
+        the block as an escaped JSON string fails: it collapses to placeholders
+        (``// ... unchanged ...``) and corrupts the escaping (mixed real/literal
+        ``\\n``). The CEGIS loop then chases those self-inflicted errors forever.
+
+        Block-capture sidesteps this entirely: the model makes a small DECISION
+        (accept_deletion / keep_block / needs_human), and capybase splices the
+        chosen conflict side's text VERBATIM. The model never reproduces the
+        block, so truncation and escaping errors are structurally impossible.
+
+        Runs AFTER structural + combination search decline and BEFORE the LLM
+        loop, only on a FRESH resolve. Gated by ``[future] enable_block_capture``
+        and a minimum block size (``block_capture_min_lines``): the full-LLM path
+        is fine for small blocks, so this only engages where reproduction is the
+        problem. Like the other pre-LLM layers, the spliced candidate still runs
+        the full validation pipeline; an invalid splice (e.g. keep_block on a
+        block that doesn't fit the file) falls through to the LLM.
+        """
+        from capybase.merge_intent import direction
+        from capybase.resolution_engine import (
+            PROMPT_BLOCK_CAPTURE,
+            build_block_capture_prompt,
+            parse_block_capture_decision,
+        )
+
+        # Self-gate: the caller (_resolve_unit) already checks the flag, but
+        # _try_block_capture must be correct when called directly too.
+        if not self.config.future.enable_block_capture:
+            return None
+        # Gate 1: must be a modify/delete with a known deleting side.
+        md = unit.structural_metadata.get("merge_direction") or {}
+        if md.get("kind") != "modify_delete" or not md.get("deleting_side"):
+            return None
+        who = md["deleting_side"]  # "current" | "replayed"
+        # Gate 2: the kept block must be large enough that reproduction is the
+        # problem. Small modify/deletes go through the normal LLM path.
+        keeper = unit.replayed if who == "current" else unit.current
+        deleter = unit.current if who == "current" else unit.replayed
+        keeper_n = sum(1 for ln in (keeper.text or "").splitlines() if ln.strip())
+        if keeper_n < self.config.future.block_capture_min_lines:
+            return None
+
+        # Ask the model for a decision (not a reproduction). The prompt shows a
+        # summary of the keeper, never the full text.
+        context = self.context_builder.build(unit)
+        prompt = build_block_capture_prompt(unit, context)
+        if self.config.journal.enabled and self.config.journal.store_prompts:
+            self.journal.store_prompt(unit.unit_id, 0, prompt)
+        try:
+            resp = self.resolution_engine.raw_complete(prompt, json_mode=False)
+        except Exception as exc:  # noqa: BLE001 - request failed → fall through
+            self.journal.emit(
+                "block_capture_request_failed",
+                {"error": str(exc)[:200]},
+                step_index=self.step,
+                path=unit.path,
+                unit_id=unit.unit_id,
+            )
+            return None
+        decision, reason = parse_block_capture_decision(resp.text)
+        self.journal.emit(
+            "block_capture_decision",
+            {
+                "decision": decision,
+                "reason": reason,
+                "keeper_lines": keeper_n,
+            },
+            step_index=self.step,
+            path=unit.path,
+            unit_id=unit.unit_id,
+        )
+        # Map the decision to the text to splice, taken VERBATIM from the
+        # conflict side — never reproduced by the model.
+        if decision == "accept_deletion":
+            resolved_text = deleter.text or ""
+            expl = f"block-capture: accepted deletion ({reason})"
+        elif decision == "keep_block":
+            resolved_text = keeper.text or ""
+            expl = f"block-capture: kept block verbatim ({reason})"
+            # A whole-file keep_block deliberately resurrects content upstream
+            # deleted (it was a modify/delete the keeper won). The end-of-rebase
+            # silent-resurrection scan would otherwise flag it — but this keep
+            # was an explicit, reviewed decision, not a silent undo, so suppress
+            # the finding for this path.
+            if unit.marker_span is None:
+                self._explicitly_kept_paths.add(unit.path)
+        else:
+            # needs_human (or unparseable): decline; the LLM loop / escalation
+            # handles it. Never guess.
+            return None
+        cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:block_capture",
+            unit_id=unit.unit_id,
+            model_name=self.config.model.model,
+            prompt_version=PROMPT_BLOCK_CAPTURE,
+            resolved_text=resolved_text,
+            explanation=expl,
+        )
+        validation = self.verification.verify(unit, cand)
+        if not validation.passed:
+            # The chosen side's text didn't validate when spliced (rare, but
+            # possible if e.g. keep_block's text needs the deleted context).
+            # Fall through to the full LLM loop rather than accept an invalid splice.
+            self.journal.emit(
+                "block_capture_failed_validation",
+                {"decision": decision, "failures": [f.message for f in validation.hard_failures]},
+                step_index=self.step,
+                path=unit.path,
+                unit_id=unit.unit_id,
+            )
+            return None
+        outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+        outcome.accepted = cand
+        self.journal.emit(
+            "candidate_accepted",
+            {"candidate_id": cand.candidate_id, "via": "block_capture",
+             "decision": decision},
+            step_index=self.step,
+            path=unit.path,
+            unit_id=unit.unit_id,
+        )
+        return outcome
+
     def _build_retriever(self, config: Config) -> object:
         """Construct the configured RAG retriever over ``self.memory_store``.
 
@@ -946,6 +1276,96 @@ class Orchestrator:
     # ==================================================================
     # M3: full run
     # ==================================================================
+    # Progress spinner (rebase only). A non-scrolling bottom line with an
+    # animated blue spinner, driven by journal events. Only active when stdout
+    # is a real TTY — a no-op in tests (no TTY) and CI (piped), so existing
+    # tests pass unchanged.
+
+    def _start_spinner(self) -> None:
+        """Start the progress spinner if stdout is a TTY.
+
+        Builds a :class:`Spinner`, redirects ``self.out`` through its
+        ``flush_line`` (so scrolling colored lines never garble the sticky
+        spinner), and subscribes to the journal so every state transition maps to
+        a status message — no per-call-site spinner wiring needed. A no-op (the
+        spinner stays ``None``) when stdout isn't a TTY.
+        """
+        if not self._is_interactive_terminal():
+            self.spinner = None
+            return
+        from capybase.spinner import Spinner
+
+        self.spinner = Spinner()
+        self._orig_out = self.out
+        self.out = self.spinner.flush_line
+        self.journal.subscribe(self._spinner_on_event)
+        self.spinner.start("starting rebase…")
+
+    def _stop_spinner(self, final_msg: str | None = None) -> None:
+        """Stop the spinner, restore ``self.out``, clear the bottom line."""
+        sp = getattr(self, "spinner", None)
+        if sp is None or not sp.active:
+            # Restore out even if the spinner never started (defensive).
+            if hasattr(self, "_orig_out"):
+                self.out = self._orig_out
+                del self._orig_out
+            self.spinner = None
+            return
+        sp.stop(final_msg=final_msg)
+        if hasattr(self, "_orig_out"):
+            self.out = self._orig_out
+            del self._orig_out
+        self.spinner = None
+
+    # event_type → human status. The spinner shows the latest one, animating
+    # while the operation it describes is in flight.
+    _SPINNER_STATUS = {
+        "rebase_started": "rebase started",
+        "step_started": "step {step}: resolving conflicts…",
+        "context_built": "step {step}: generating merge (LLM)…",
+        "candidate_generated": "step {step}: validating candidate…",
+        "block_capture_decision": "step {step}: block-capture → {decision}",
+        "tests_started": "step {step}: running {command}…",
+        "tests_finished": "step {step}: tests {summary}",
+        "candidate_accepted": "step {step}: accepted",
+        "step_continued": "step {step}: continuing…",
+        "interactive_guard": "awaiting human input…",
+        "session_completed": "rebase complete",
+        "rebase_aborted": "rebase aborted",
+    }
+
+    def _spinner_on_event(self, event) -> None:
+        """Journal listener: map an event to a spinner status message."""
+        sp = getattr(self, "spinner", None)
+        if sp is None:
+            return
+        tmpl = self._SPINNER_STATUS.get(event.event_type)
+        if tmpl is None:
+            return
+        step = event.step_index or ""
+        # Build the message from the event's payload/fields.
+        payload = event.payload or {}
+        try:
+            msg = tmpl.format(
+                step=step,
+                decision=payload.get("decision", ""),
+                command=payload.get("command", ""),
+                summary=payload.get("verdict_summary") or (
+                    "passed" if payload.get("passed") else "failed"
+                ),
+            )
+        except (KeyError, IndexError):
+            msg = tmpl
+        sp.set(msg)
+        # Pause the spinner when handing control to the human — the terminal
+        # belongs to them during the interactive prompt.
+        if event.event_type == "interactive_guard" and payload.get("will_fire"):
+            sp.pause()
+        # Resume after the human is done: the next operational event means the
+        # rebase is progressing again (step started, context built, etc.).
+        if event.event_type in ("step_started", "step_continued", "session_completed"):
+            if getattr(sp, "_paused", False):
+                sp.resume()
 
     def rebase(
         self,
@@ -1016,6 +1436,12 @@ class Orchestrator:
         self.git.create_session_refs(self.session_id, start_oid)
         backup_branch = self.git.current_branch() or "head"
         backup_ref = self.git.create_backup_ref(start_oid, label=backup_branch)
+        # Stash onto/start/backup on the instance so run()'s per-step + completion
+        # resurrection scans can reconstruct the window without the rebase-merge
+        # state files (which vanish once the rebase finishes).
+        self._rebase_start_oid = start_oid
+        self._rebase_target = target
+        self._rebase_backup_ref = backup_ref
         self.journal.emit(
             "rebase_started",
             {"target": target, "start_oid": start_oid, "backup_ref": backup_ref},
@@ -1041,6 +1467,38 @@ class Orchestrator:
         #     would otherwise escalate on "no rebase in progress".
         if not self.git.rebase_in_progress():
             head_after = self.git.head_oid()
+            # Silent-resurrection scan: a clean rebase is exactly where a silent
+            # undo hides (git resolved it with no conflict). Check the result
+            # against what the target branch deleted before declaring success.
+            findings = self._resurrection_scan(
+                start_oid=start_oid, onto_oid=target, result_oid=head_after,
+                backup_ref=backup_ref,
+            )
+            if findings:
+                outcome = self._handle_resurrections(
+                    findings, start_oid=start_oid, backup_ref=backup_ref
+                )
+                if outcome.escalated:
+                    # stop policy: a clean rebase already finished (git is no
+                    # longer in-progress), so abort-on-escalation can't roll it
+                    # back. We reset to the backup ref ourselves to restore the
+                    # repo to start_oid and leave the review bundle for review.
+                    outcome.continued = False
+                    self.git._run(  # noqa: SLF001
+                        ["reset", "--hard", backup_ref]
+                    )
+                    self.journal.emit(
+                        "rebase_aborted",
+                        {"reason": outcome.reason, "start_oid": start_oid,
+                         "backup_ref": backup_ref, "resurrection": True},
+                        git_head_after=self.git.head_oid(),
+                    )
+                    self.out(
+                        f"  rolled back to pre-rebase HEAD {start_oid[:8]} "
+                        f"(backup branch {backup_ref})."
+                    )
+                    return outcome
+                # warn policy: fall through to declare success.
             self.journal.emit(
                 "session_completed",
                 {"head_after": head_after, "clean": True},
@@ -1052,7 +1510,7 @@ class Orchestrator:
                 "head_after=%s", self.session_id, self.step, head_after[:8],
             )
             self.out(
-                f"✓ rebase complete, no conflicts (session {self.session_id})\n"
+                f"{self._ok('✓ rebase complete, no conflicts (session ' + self.session_id + ')')}\n"
                 f"  backup branch {backup_ref} points at the pre-rebase HEAD "
                 f"{start_oid[:8]}; delete it once you've confirmed the result:\n"
                 f"    git branch -D {backup_ref}"
@@ -1079,6 +1537,7 @@ class Orchestrator:
             except (ValueError, OSError):
                 pass
         try:
+            self._start_spinner()
             result = self.run()
         except BaseException as exc:
             # On ANY interruption (signal, KeyboardInterrupt, unexpected error)
@@ -1109,6 +1568,7 @@ class Orchestrator:
                     signal.signal(_sig, _h)  # type: ignore[arg-type]
                 except (ValueError, OSError, TypeError):
                     pass
+            self._stop_spinner()
         # 5. On a successful finish (conflicts resolved and replayed), surface
         #    the backup branch so the user can reclaim it after confirming.
         if not result.escalated:
@@ -1122,19 +1582,54 @@ class Orchestrator:
                 f"{start_oid[:8]}; delete it once you've confirmed the result:\n"
                 f"    git branch -D {backup_ref}"
             )
-        # 6. Interactive fallback: on escalation, if a human is at the terminal
-        #    and the rebase is still in progress (not yet aborted), present the
-        #    conflict for an interactive decision before the auto-abort runs.
-        #    This keeps capybase the single owner of the process: the human
-        #    resolves the one unit the model couldn't, then the rebase continues.
+        # 6. Interactive fallback (LOOP): on escalation, if a human is at the
+        #    terminal and the rebase is still in progress, present the conflict
+        #    for an interactive decision before the auto-abort runs. After the
+        #    human resolves and the rebase continues, run() may hit ANOTHER stop
+        #    that escalates — so this re-offers the fallback on each escalation,
+        #    not just the first. (A prior version fired the guard once: the second
+        #    escalation, returned by the re-entered run(), fell straight through
+        #    to abort without ever offering the menu — the human got an abort
+        #    instead of a prompt.)
         #    Disabled by --no-interactive (e.g. CI) or when stdin isn't a TTY.
-        if (
-            result.escalated
-            and interactive
-            and self.git.rebase_in_progress()
-            and self._is_interactive_terminal()
-        ):
-            result = self.interactive_resolve(result)
+        prev_step = -1  # track the step we last offered the fallback for, so a
+                        # same-step re-escalation (no progress: skip/abort/bail)
+                        # doesn't spin the loop forever.
+        while result.escalated:
+            rip = self.git.rebase_in_progress()
+            tty = self._is_interactive_terminal()
+            self.journal.emit(
+                "interactive_guard",
+                {
+                    "escalated": result.escalated,
+                    "interactive": interactive,
+                    "rebase_in_progress": rip,
+                    "is_interactive_terminal": tty,
+                    "units_by_path": list(result.units_by_path),
+                    "reason": result.reason or "",
+                    "will_fire": bool(result.escalated and interactive and rip and tty),
+                },
+                step_index=self.step,
+            )
+            if not (interactive and rip and tty):
+                break  # fallback disabled (CI, --no-interactive, not a TTY, or
+                       # the rebase finished) → fall through to abort-on-escalation
+            # Bail-safety: if the last fallback returned escalated at the SAME
+            # step (the human skipped/aborted, or the menu bailed on no-units),
+            # don't re-offer — that would spin forever. Only re-offer when the
+            # rebase has advanced to a new step (a genuine new escalation).
+            if self.step == prev_step:
+                break
+            prev_step = self.step
+            resolved = self.interactive_resolve(result)
+            if not resolved.escalated:
+                # The human resolved everything and run() continued to completion
+                # (or a clean step). Done.
+                result = resolved
+                break
+            # The rebase continued after the human's resolution but hit a NEW
+            # escalation at a later step. Loop: re-offer the interactive fallback.
+            result = resolved
         # 7. Abort-on-escalation: return the repo to start_oid if we couldn't
         #    finish. run() sets escalated and leaves the rebase stopped; abort
         #    rolls it all back so the developer is back where they started.
@@ -1152,13 +1647,170 @@ class Orchestrator:
                 start_oid[:8],
             )
             self.out(
-                f"! escalated and aborted rebase — repo back at {start_oid[:8]}\n"
+                self._warn(
+                    f"! escalated and aborted rebase — repo back at {start_oid[:8]}"
+                ) + "\n"
                 f"  review bundle: {self.paths.final / 'review-bundle.md'}\n"
                 f"  backup branch {backup_ref} still points at the pre-rebase "
                 f"HEAD; reset to it with `git reset --hard {backup_ref}`, or "
                 f"delete it with `git branch -D {backup_ref}`"
             )
         return result
+
+    # ------------------------------------------------------------------ resurrection
+    #
+    # Silent-resurrection detection (survey "silent loss of intent"). After a
+    # clean rebase — and per replayed step — compare the result against content
+    # the target branch deliberately deleted since the merge-base. If the result
+    # brought any of it back, the replayed commits (which predate the cleanup)
+    # silently undid a deliberate deletion. Git sees no conflict; without this
+    # scan capybase sees none either, and the cleanup is lost. On detection the
+    # ``stop`` policy halts before the bad completion is left as final (the
+    # backup branch keeps the repo recoverable); ``warn`` journals + continues.
+
+    def _resurrection_scan(
+        self, *, start_oid: str, onto_oid: str, result_oid: str, backup_ref: str
+    ) -> list:
+        """Run the end-of-rebase resurrection scan; return findings (maybe empty).
+
+        The merge-base of ``start_oid`` (the original branch tip) and ``onto_oid``
+        bounds the window of upstream history the replayed branch predates. Any
+        content ``onto`` deleted since that base that reappears in ``result_oid``
+        is a suspected silent undo. Advisory: any git error is swallowed and
+        reported as no findings — resurrection detection must never break a
+        rebase that would otherwise succeed. Disabled entirely by
+        ``[validation] enable_resurrection_detection = false``.
+
+        Paths this session EXPLICITLY resolved as a modify/delete ``keep_block``
+        (``self._explicitly_kept_paths``) are excluded: such a keep is a
+        deliberate, reviewed resurrection of content upstream deleted, not a
+        silent undo — flagging it would double-report an already-judged decision.
+        """
+        cfg = self.config.validation
+        if not cfg.enable_resurrection_detection:
+            return []
+        try:
+            from capybase.resurrection import scan_resurrections
+
+            mb = self.git.merge_base(start_oid, onto_oid)
+            if mb is None:
+                return []
+            return scan_resurrections(
+                self.git,
+                base_oid=mb,
+                onto_oid=onto_oid,
+                result_oid=result_oid,
+                min_block_lines=cfg.resurrection_min_block_lines,
+                min_coverage=cfg.resurrection_min_similarity,
+                exclude_paths=set(getattr(self, "_explicitly_kept_paths", set())),
+            )
+        except Exception as exc:  # noqa: BLE001 - advisory, never break the rebase
+            self.log.warning(
+                "resurrection scan failed (ignored): session=%s %s",
+                self.session_id, exc,
+            )
+            return []
+
+    def _handle_resurrections(
+        self,
+        findings: list,
+        *,
+        start_oid: str,
+        backup_ref: str,
+    ) -> StepResult:
+        """Act on resurrection findings per the configured policy.
+
+        Returns an escalated StepResult on ``stop`` (the caller leaves the rebase
+        stopped; the backup branch keeps the repo recoverable), or a non-
+        escalated result on ``warn`` (the rebase is allowed to complete). Writes
+        a review bundle with a ``## suspected resurrections`` section either way
+        so the developer can review the suspected undos.
+        """
+        cfg = self.config.validation
+        n_paths = len(findings)
+        n_lines = sum(f.resurrected_line_count for f in findings)
+        self.journal.emit(
+            "resurrections_detected",
+            {
+                "paths": [f.path for f in findings],
+                "line_count": n_lines,
+                "policy": cfg.resurrection_policy,
+            },
+            step_index=self.step,
+        )
+        write_review_bundle(
+            self.paths,
+            reason=(
+                f"suspected silent resurrection of deleted content "
+                f"({n_paths} path(s), {n_lines} line(s) back)"
+            ),
+            step_index=self.step,
+            resurrections=findings,
+            resume_hint=f"git rebase --continue  # after reviewing {backup_ref}",
+        )
+        if cfg.resurrection_policy == "stop":
+            self.log.warning(
+                "resurrection detection stopped the rebase: session=%s paths=%d "
+                "lines=%d backup=%s",
+                self.session_id, n_paths, n_lines, backup_ref,
+            )
+            self.out(
+                self._warn(
+                    f"! suspected silent resurrection — {n_paths} path(s) brought "
+                    f"back {n_lines} line(s) the target branch deleted."
+                ) + "\n"
+                f"  review bundle: {self.paths.final / 'review-bundle.md'}\n"
+                f"  backup branch {backup_ref} points at the pre-rebase HEAD "
+                f"{start_oid[:8]}; the rebase is left stopped. Resolve the "
+                f"resurrections (or set [validation] resurrection_policy = "
+                f"\"warn\" to proceed), then `git rebase --continue`."
+            )
+            return StepResult(
+                step_index=self.step,
+                escalated=True,
+                reason="suspected silent resurrection of deleted content",
+            )
+        # warn policy: surface but continue.
+        self.log.info(
+            "resurrection detection warned (continuing): session=%s paths=%d lines=%d",
+            self.session_id, n_paths, n_lines,
+        )
+        self.out(
+            f"  warning: suspected silent resurrection — {n_paths} path(s) "
+            f"brought back {n_lines} line(s) the target branch deleted "
+            f"(see review bundle). Continuing per resurrection_policy = \"warn\"."
+        )
+        return StepResult(step_index=self.step, escalated=False, continued=True)
+
+    def _run_resurrection_on_completion(self) -> StepResult | None:
+        """Resurrection scan for run()'s completion point; returns None if clean.
+
+        Called from run()'s loop when the rebase finishes cleanly (conflicts
+        resolved and replayed). Reconstructs onto/start from the instance attrs
+        ``rebase()`` stashed (the rebase-merge state files are gone by now). On a
+        detection with the ``stop`` policy, returns an ESCALATED StepResult so
+        run() breaks and rebase()'s escalation handling (interactive fallback /
+        abort) runs — the rebase is still in-progress at this point, so the
+        existing abort-on-escalation restores the repo to start_oid. On ``warn``,
+        emits the warning and returns a non-escalated result (caller proceeds).
+        Returns None when there are no findings (nothing to do).
+        """
+        start_oid = getattr(self, "_rebase_start_oid", None)
+        target = getattr(self, "_rebase_target", None)
+        backup_ref = getattr(self, "_rebase_backup_ref", "capybase/backup")
+        if not start_oid or not target:
+            return None  # not a rebase()-driven session; nothing to scan
+        head_after = self.git.head_oid()
+        findings = self._resurrection_scan(
+            start_oid=start_oid, onto_oid=target, result_oid=head_after,
+            backup_ref=backup_ref,
+        )
+        if not findings:
+            return None
+        outcome = self._handle_resurrections(
+            findings, start_oid=start_oid, backup_ref=backup_ref
+        )
+        return outcome
 
     def run(self) -> StepResult:
         """Full auto loop: resolve → stage → test → continue, with retries."""
@@ -1170,7 +1822,7 @@ class Orchestrator:
             reason = "no rebase in progress; start your rebase, then run capybase when it stops on a conflict"
             self.journal.emit("escalated", {"reason": reason})
             bundle = write_review_bundle(self.paths, reason=reason)
-            self.out(f"! {reason}\n  review bundle: {bundle}")
+            self.out(self._warn(f"! {reason}") + f"\n  review bundle: {bundle}")
             return StepResult(step_index=self.step, escalated=True, reason=reason)
         self.journal.emit("preflight_passed", {})
 
@@ -1205,7 +1857,15 @@ class Orchestrator:
             )
             result.continued = True
             if not self.git.rebase_in_progress():
-                # Rebase finished cleanly.
+                # Rebase finished cleanly. Run the resurrection scan: the rebase
+                # is done, so we reconstruct onto/start from the rebase-merge
+                # state files (these survive until the rebase fully completes).
+                # On ``stop`` the scan escalates and we break so the rebase()'s
+                # escalation handling (interactive fallback / abort) runs.
+                _res = self._run_resurrection_on_completion()
+                if _res is not None and _res.escalated:
+                    last = _res
+                    break
                 head_after = self.git.head_oid()
                 self.journal.emit(
                     "session_completed",
@@ -1213,7 +1873,7 @@ class Orchestrator:
                     git_head_after=head_after,
                 )
                 self.git.record_step_ref(self.session_id, self.step, head_after)
-                self.out(f"✓ rebase complete (session {self.session_id})")
+                self.out(self._ok(f"✓ rebase complete (session {self.session_id})"))
                 break
             head_after = self.git.head_oid()
             self.git.record_step_ref(self.session_id, self.step, head_after)
@@ -1270,8 +1930,6 @@ class Orchestrator:
         # Phase 2: with all files written, run the per-file Phase-B validation
         # (markers/splice/syntax/cargo) + CEGIS repair loop, then stage. Each
         # file's cargo check now sees a clean crate.
-        from capybase.adapters.parsers import splice_all_resolutions
-
         resolved_files: dict[str, str] = {}  # path -> spliced buffer (all units)
         accepted_by_path: dict[str, list] = {}  # path -> [(unit, candidate), ...]
         # Snapshot the original worktree text per path so Phase 2 can re-splice.
@@ -1310,17 +1968,17 @@ class Orchestrator:
                 )
                 return result
             # Splice every accepted resolution in one offset-correct batch.
-            spans_and_texts = [
-                (unit.marker_span, cand.resolved_text) for unit, cand in accepted
-            ]
+            # (For a whole_file unit the resolved text IS the file —
+            # ``_resolved_buffer`` returns it verbatim, no splicing.)
             original = accepted[0][0].original_worktree_text
-            buffer = splice_all_resolutions(original, spans_and_texts)
+            buffer = _resolved_buffer(original, accepted)
             resolved_files[path] = buffer
             accepted_by_path[path] = accepted
             originals[path] = original
             # Write the resolved file to the worktree NOW (no staging yet) so
             # sibling files' cargo checks in Phase 2 see a marker-free crate.
-            self._write_worktree_only(path, buffer)
+            # An accepted whole-file deletion removes the worktree file instead.
+            self._write_worktree_only(path, buffer, accepted=accepted)
 
         # ---- Phase 2: per-file Phase-B validation + CEGIS repair + stage ----
         for path, units in result.units_by_path.items():
@@ -1349,7 +2007,10 @@ class Orchestrator:
                     spans_and_texts = [
                         (unit.marker_span, cand.resolved_text) for unit, cand in accepted
                     ]
-                    buffer = splice_all_resolutions(original, spans_and_texts)
+                    # verify_file tolerates a whole-file (None) span via its own
+                    # _has_whole_file_span guard; the buffer is the resolved
+                    # text directly for such units.
+                    buffer = _resolved_buffer(original, accepted)
                     file_validation = self.verification.verify_file(
                         path, language, original, spans_and_texts,
                         repo_root=str(self.git.repo),
@@ -1422,7 +2083,7 @@ class Orchestrator:
                     return result
             # Stage the validated file (it was already written to the worktree
             # in Phase 1; re-write in case the CEGIS loop changed it, then stage).
-            self._write_and_stage(path, buffer, result)
+            self._write_and_stage(path, buffer, result, accepted=accepted)
         # After staging: assert no unmerged paths remain for our files.
         if self.git.has_unmerged_paths():
             result.escalated = True
@@ -1504,6 +2165,17 @@ class Orchestrator:
             early = self._try_combination_search(unit)
             if early is not None:
                 return early  # accepted via combination search; LLM loop skipped
+
+        # Block-capture resolution (large modify/delete): when one side deleted a
+        # large block and the structural rule declined (the keeper modified it),
+        # the model can't reliably reproduce the block (placeholder collapse +
+        # escaping corruption). Instead it makes a keep/accept_deletion/needs_human
+        # decision and capybase splices the chosen side verbatim. AFTER the other
+        # pre-LLM layers decline and BEFORE the LLM loop, on a FRESH resolve only.
+        if failures is None and self.config.future.enable_block_capture:
+            early = self._try_block_capture(unit)
+            if early is not None:
+                return early  # accepted via block-capture; LLM loop skipped
 
         while True:
             context = self.context_builder.build(unit)
@@ -1921,7 +2593,31 @@ class Orchestrator:
             except Exception:  # noqa: BLE001 - memory is best-effort
                 pass
 
-    def _write_and_stage(self, path: str, buffer: str, result: StepResult) -> None:
+    def _write_and_stage(
+        self,
+        path: str,
+        buffer: str,
+        result: StepResult,
+        *,
+        accepted: list[tuple[ConflictUnit, CandidateResolution]] | None = None,
+    ) -> None:
+        """Write the resolved file to the worktree and stage it.
+
+        A whole-file modify/delete accepted as a deletion (empty resolved text)
+        is staged as a removal via ``git rm`` instead of write+add: the file
+        goes away. ``accepted`` is the path's accepted resolutions so the delete
+        case can be detected; callers without a resolution list (e.g. writing a
+        pre-computed buffer) pass nothing and get the write+add path.
+        """
+        if accepted is not None and _is_whole_file_delete(accepted):
+            self.git.remove_file_stage(path)
+            self.journal.emit(
+                "file_removed",
+                {"path": path, "decision": "accept_deletion"},
+                step_index=self.step,
+                path=path,
+            )
+            return
         if self.config.journal.enabled and self.config.journal.store_snapshots:
             self.journal.store_snapshot(
                 f"{path.replace('/', '__')}.before", buffer
@@ -1942,7 +2638,13 @@ class Orchestrator:
                 path=path,
             )
 
-    def _write_worktree_only(self, path: str, buffer: str) -> None:
+    def _write_worktree_only(
+        self,
+        path: str,
+        buffer: str,
+        *,
+        accepted: list[tuple[ConflictUnit, CandidateResolution]] | None = None,
+    ) -> None:
         """Write a resolved file to the worktree WITHOUT staging it.
 
         Used by Phase 1 of cross-file resolution: every conflicted file is
@@ -1951,7 +2653,17 @@ class Orchestrator:
         (called in Phase 2 after validation passes) so an escalatable failure
         never leaves staged-but-invalid state. The journal snapshot is skipped
         here (Phase 2's ``_write_and_stage`` records the final staged buffer).
+
+        A whole-file deletion (empty resolved text) removes the worktree file
+        instead of writing it, so Phase-2 validation sees the crate without it.
+        Staging the removal still happens in ``_write_and_stage`` (Phase 2).
         """
+        if accepted is not None and _is_whole_file_delete(accepted):
+            # Remove the worktree file only (no staging yet — that's Phase 2).
+            full = self.git.repo / path
+            if full.exists():
+                full.unlink()
+            return
         self.git.write_worktree_file(path, buffer.encode("utf-8"))
 
     def _run_tests(self, label: str, result: StepResult) -> bool:
@@ -1960,7 +2672,12 @@ class Orchestrator:
             return True
         cmd = self._resolve_test_command(cmd)
         self.journal.emit("tests_started", {"label": label, "command": cmd}, step_index=self.step)
-        run = self.tests.run(cmd)
+        # For ``cargo test`` in a workspace (no root Cargo.toml), cargo must run
+        # from a member crate's directory — it can't discover the project from the
+        # workspace root. Anchor on the first conflicted file's nearest crate dir
+        # (the same nearest-manifest logic the cargo syntax check uses).
+        test_cwd = self._cargo_test_cwd(result, cmd)
+        run = self._run_test_command(cmd, cwd=test_cwd)
         self.journal.emit(
             "tests_finished",
             {
@@ -1968,6 +2685,9 @@ class Orchestrator:
                 "passed": run.passed,
                 "returncode": run.returncode,
                 "timed_out": run.timed_out,
+                "verdict": run.verdict.kind,
+                "verdict_summary": run.verdict.summary,
+                "diagnostics": run.verdict.diagnostics[:5],
                 "stdout_tail": run.stdout[-1000:],
                 "stderr_tail": run.stderr[-1000:],
             },
@@ -1975,8 +2695,49 @@ class Orchestrator:
         )
         result.tests_passed = run.passed
         if not run.passed:
-            self.out(f"  ! {label} tests failed (rc={run.returncode})")
+            # Surface the parsed verdict so the human sees *why* the tests failed
+            # (compile error vs. test failure vs. timeout vs. lock contention),
+            # not just the return code.
+            self.out(
+                "  " + self._warn(
+                    f"! {label} tests failed (rc={run.returncode}): "
+                    f"{run.verdict.summary or 'unknown'}"
+                )
+            )
+            for d in run.verdict.diagnostics[:3]:
+                self.out(f"      {d}")
         return run.passed
+
+    def _run_test_command(self, cmd: str, *, cwd: str | None = None):
+        """Run the test command, retrying on transient lock contention.
+
+        cargo emits ``Blocking waiting for file lock on build directory`` when
+        another cargo process holds the target/ lock — a transient condition
+        unrelated to the merge. Aborting on it would reject a correct rebase;
+        retrying (with a short backoff) is correct. Other verdicts are returned
+        as-is for the caller to act on. Bounded to a few retries so a genuinely
+        stuck lock still terminates.
+        """
+        import time
+
+        max_lock_retries = 3
+        backoff_seconds = 5.0
+        for attempt in range(max_lock_retries + 1):
+            run = self.tests.run(cmd, cwd=cwd)
+            if not run.verdict.is_transient or attempt == max_lock_retries:
+                return run
+            self.journal.emit(
+                "tests_lock_retry",
+                {"attempt": attempt + 1, "verdict": run.verdict.kind,
+                 "summary": run.verdict.summary},
+                step_index=self.step,
+            )
+            self.out(
+                f"  ... {run.verdict.summary}; retrying in {backoff_seconds:.0f}s "
+                f"(attempt {attempt + 1}/{max_lock_retries})"
+            )
+            time.sleep(backoff_seconds)
+        return run
 
     def _resolve_test_command(self, cmd: str) -> str:
         """Resolve a (possibly language-default) test command to a real one.
@@ -1992,14 +2753,85 @@ class Orchestrator:
         """
         if cmd.strip() != "pytest":
             return cmd
-        has_cargo = (self.git.repo / "Cargo.toml").is_file()
-        if not has_cargo:
+        # A repo "has cargo" when the root OR any top-level subdir has a
+        # Cargo.toml (workspaces: each crate lives in a subdir, no root
+        # manifest). Without this, a workspace Rust repo stays on pytest and
+        # fails the gate with "No such file or directory: 'pytest'".
+        if not _repo_has_cargo(self.git.repo):
             return cmd
-        from shutil import which
-
-        if which("pytest") is not None:
-            return cmd  # mixed repo with pytest installed → honor the default
+        # It's a cargo repo. Prefer ``cargo test`` UNLESS this is also a real
+        # Python project (has a pyproject.toml/setup.py) — then it's a genuine
+        # mixed repo and we honor the configured pytest default. The presence of
+        # ``pytest`` on PATH alone is NOT enough: it may be a *different*
+        # project's venv (e.g. capybase's own dev venv), not this repo's. A cargo
+        # repo with stray ``.py`` utility scripts but no Python project manifest
+        # is Rust-dominant → cargo test.
+        if _has_python_project(self.git.repo):
+            return cmd
         return "cargo test"
+
+    def _cargo_test_cwd(self, result: StepResult, cmd: str) -> str | None:
+        """The directory to run ``cargo test`` from, or None to use the repo root.
+
+        For a ``cargo test`` invocation in a workspace (no root Cargo.toml), cargo
+        can't discover the project from the workspace root — it needs to run from
+        a member crate's directory. We anchor on the first conflicted file's
+        nearest crate dir (the same nearest-manifest logic the cargo syntax check
+        uses), so the test gate runs the crate the conflict actually touches. For
+        a single-crate-at-root layout (root Cargo.toml), cargo runs fine from the
+        repo root → None (the runner's default cwd).
+        """
+        if not cmd.strip().startswith("cargo"):
+            return None
+        from capybase.adapters.lsp import _has_cargo_manifest, nearest_cargo_manifest_dir
+
+        # Root manifest → cargo discovers from the repo root; no override needed.
+        if _has_cargo_manifest(str(self.git.repo)):
+            return None
+        # Workspace: find the crate dir to run cargo from. Anchor on the
+        # conflict paths first, then the staged files (an edit-resolved step has
+        # staged the resolution but has no units_by_path), then any member crate.
+        # Without this fallback, a step with NO conflicts (clean apply, or a step
+        # fully resolved by direct edit) leaves units_by_path empty → no path to
+        # anchor on → cargo runs from the workspace root, which has no
+        # Cargo.toml → ``could not find Cargo.toml`` aborts a correct rebase.
+        anchor_paths: list[str] = list(result.units_by_path)
+        if not anchor_paths:
+            try:
+                anchor_paths = self.git.staged_paths()
+            except Exception:  # noqa: BLE001 - advisory
+                anchor_paths = []
+        for path in anchor_paths:
+            crate_dir = nearest_cargo_manifest_dir(str(self.git.repo), path)
+            if crate_dir is not None:
+                return str(crate_dir)
+        # Last resort: scan top-level subdirs for any member crate. cargo must
+        # run from SOME crate dir; the workspace root has no manifest.
+        try:
+            for entry in self.git.repo.iterdir():
+                if entry.is_dir() and (entry / "Cargo.toml").is_file():
+                    return str(entry)
+        except OSError:  # noqa: BLE001
+            pass
+        return None
+
+    def _ok(self, text: str) -> str:
+        """A success line with its ``✓`` marker green when color is enabled.
+
+        Only the marker is colored; the message stays plain for readability.
+        Passthrough (no codes) when color is disabled.
+        """
+        from capybase.color import GREEN
+        return self.style("✓", GREEN) + text.lstrip("✓").lstrip()
+
+    def _warn(self, text: str) -> str:
+        """A warning/error line with its ``!`` marker red when color is enabled.
+
+        Only the marker is colored; the message stays plain for readability.
+        Passthrough (no codes) when color is disabled.
+        """
+        from capybase.color import RED
+        return self.style("!", RED) + text.lstrip("!").lstrip()
 
     def _summarize(self, result: StepResult | None) -> None:
         if result is None:
@@ -2013,16 +2845,81 @@ class Orchestrator:
         self.out(f"  journal: {self.paths.journal}")
 
     def _render_unit(self, unit: ConflictUnit) -> str:
+        """Manual-mode unit render. Headers colored like the interactive variant
+        (BASE dim, CURRENT cyan, REPLAYED magenta, unit header bold); content
+        stays plain. A passthrough when color is disabled."""
+        from capybase.color import BOLD, CYAN, DIM, MAGENTA
+
+        s = self.style
         return (
-            f"\n=== {unit.unit_id} ({unit.path}, {unit.conflict_type}) ===\n"
-            f"-- BASE --\n{unit.base.text}\n"
-            f"-- CURRENT_UPSTREAM_SIDE --\n{unit.current.text}\n"
-            f"-- REPLAYED_COMMIT_SIDE --\n{unit.replayed.text}\n"
+            f"{s(f'\\n=== {unit.unit_id} ({unit.path}, {unit.conflict_type}) ===', BOLD)}\n"
+            f"{s('-- BASE --', DIM)}\n{unit.base.text}\n"
+            f"{s('-- CURRENT_UPSTREAM_SIDE --', CYAN)}\n{unit.current.text}\n"
+            f"{s('-- REPLAYED_COMMIT_SIDE --', MAGENTA)}\n{unit.replayed.text}\n"
         )
 
 
-def _default_stdin_reader(prompt: str) -> str:
-    print(prompt, flush=True)
+def _repo_has_cargo(repo_root: Path) -> bool:
+    """Whether ``repo_root`` is (part of) a Cargo project.
+
+    True when the root OR any immediate top-level subdirectory contains a
+    ``Cargo.toml``. The subdir check handles Cargo WORKSPACES, where each member
+    crate lives in its own subdirectory and there's no root manifest — the common
+    layout (di-rac-rebase-test: di-core/, divrr/, wasm-runner/). Only one level
+    deep is scanned: a workspace's member crates sit directly under the root, and
+    a deeper scan risks matching an unrelated vendored crate. Used by the
+    auto-substitution of ``cargo test`` for the default ``pytest`` test gate.
+    """
+    if (repo_root / "Cargo.toml").is_file():
+        return True
+    try:
+        for entry in repo_root.iterdir():
+            if entry.is_dir() and (entry / "Cargo.toml").is_file():
+                return True
+    except OSError:  # noqa: BLE001 - unreadable dir → treat as no cargo
+        return False
+    return False
+
+
+def _has_python_project(repo_root: Path) -> bool:
+    """Whether ``repo_root`` is a real Python project (vs stray ``.py`` scripts).
+
+    True when a Python project manifest is present at the root (``pyproject.toml``
+    or ``setup.py``). These are the conventional markers a Python project declares
+    its build/test setup; their absence means stray ``.py`` utility scripts don't
+    constitute a Python project. Used to distinguish a genuine mixed repo (cargo +
+    Python → honor the configured pytest) from a Rust-dominant repo with incidental
+    ``.py`` files (→ cargo test).
+    """
+    return (repo_root / "pyproject.toml").is_file() or (
+        repo_root / "setup.py"
+    ).is_file()
+
+
+def _default_stdin_reader(prompt: str, *, multiline: bool = False) -> str:
+    """Read input from the terminal.
+
+    Single-line mode (the default): the prompt is printed (no trailing newline)
+    and ONE line is read — this is what the menu choice and "press Enter when
+    done" prompts need, so typing ``4`` + Enter returns immediately.
+
+    Multi-line mode (``multiline=True``): used for pasted resolutions. Reads
+    lines until EOF (Ctrl-D) and joins them — a pasted block has no natural
+    terminator, so the human signals the end explicitly.
+
+    The split is load-bearing: the old implementation always read until EOF,
+    which meant a menu choice like ``4`` was swallowed and never returned — the
+    program blocked until Ctrl-C, ignoring the choice. Single-line callers must
+    pass the default; only paste callers opt into multiline.
+    """
+    # print(end=...) so the prompt sits on the same line as the typed input
+    # (print(prompt) would push the user's response onto the next line).
+    print(prompt, end="", flush=True)
+    if not multiline:
+        try:
+            return input()
+        except EOFError:
+            return ""
     chunks: list[str] = []
     try:
         while True:

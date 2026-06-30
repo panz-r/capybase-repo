@@ -33,14 +33,16 @@ class ScriptedReader:
     """Returns scripted responses in order (menu choices + pasted text).
 
     Each call to the reader pops the next response. Empty string entries are
-    valid (e.g. the 'press Enter when done' prompt after editing a file).
+    valid (e.g. the 'press Enter when done' prompt after editing a file). Accepts
+    ``multiline`` (and any other kwargs) for signature parity with the real
+    reader, ignoring them — the scripted response is returned whole either way.
     """
 
     def __init__(self, responses: list[str]):
         self.responses = list(responses)
         self.calls = 0
 
-    def __call__(self, prompt: str) -> str:
+    def __call__(self, prompt: str, **_kwargs) -> str:
         self.calls += 1
         if self.responses:
             return self.responses.pop(0)
@@ -121,6 +123,44 @@ def test_interactive_edit_file_resolves(py_repo_before_rebase):
     assert not result.escalated, result.reason
     assert "<<<<<<<" not in (repo / "app.py").read_text()
     assert not _rebase_in_progress(repo)
+
+
+def test_interactive_edit_reprompts_when_markers_remain(py_repo_before_rebase):
+    """Edit mode must RE-PROMPT (not abort) when the human presses Enter before
+    resolving. Regression: a prior version printed "Re-offering" then returned
+    False, which the caller treated as a skip — so a single premature Enter
+    aborted the whole rebase. It must loop until the markers are gone."""
+    repo = py_repo_before_rebase["repo"]
+    engine = ResolutionEngine(_config(repo).model, client=FailingClient())
+    enter_count = {"n": 0}
+    # Menu: "2" (edit). Then Enter is read multiple times: the FIRST Enter
+    # leaves markers (human hasn't resolved yet); the SECOND Enter follows a fix.
+    responses = ["2"]
+
+    def reader(prompt: str) -> str:
+        if "Press Enter" in prompt or prompt == "":
+            enter_count["n"] += 1
+            if enter_count["n"] == 1:
+                # First Enter: human pressed Enter WITHOUT resolving. Leave the
+                # file marker-laden (the conflict is still on disk).
+                return ""
+            # Second Enter: human has now resolved. Write the clean version.
+            (repo / "app.py").write_text(
+                "def greet():\n    return 'hi' + 'howdy'\n"
+            )
+            return ""
+        return responses.pop(0)
+
+    orch = Orchestrator(
+        _config(repo), repo=str(repo), resolution_engine=engine,
+        stdin_reader=reader, out=lambda *_a, **_k: None,
+    )
+    _force_interactive(orch)
+    result = orch.rebase("main")
+    # The rebase completed (the second Enter cleared the markers), not aborted.
+    assert not result.escalated, result.reason
+    # The reader was called at least twice for Enter (the re-prompt happened).
+    assert enter_count["n"] >= 2, "edit mode must re-prompt when markers remain"
 
 
 # ---------------------------------------------------------------------------
@@ -228,8 +268,61 @@ def test_review_bundle_carries_candidate_and_error(py_repo_before_rebase):
 
 
 # ---------------------------------------------------------------------------
-# helpers
+# Regression: the default stdin reader must return a single line for the menu
+# (the old impl read until EOF, so typing "4" + Enter blocked forever and the
+# choice was swallowed — the program ignored the user until Ctrl-C).
 # ---------------------------------------------------------------------------
+
+
+def test_default_reader_single_line_returns_after_one_line(monkeypatch):
+    """A menu choice (one line) returns immediately, not at EOF.
+
+    This is the core of the bug report: typing ``4`` + Enter had no effect
+    because the reader looped on ``input()`` until EOF. Single-line mode must
+    read exactly one line and return.
+    """
+    from capybase.orchestrator import _default_stdin_reader
+
+    # Simulate a terminal: input() yields "4" then, if called again, more lines
+    # (which should NEVER be consumed in single-line mode).
+    remaining = iter(["4", "should-not-be-read", "nor-this"])
+
+    def fake_input(prompt=""):  # noqa: ANN001
+        return next(remaining)
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    result = _default_stdin_reader("  choice [1-4]: ")
+    assert result == "4"
+    # Single-line mode must NOT have drained the remaining lines.
+    assert next(remaining) == "should-not-be-read"
+
+
+def test_default_reader_multiline_reads_until_eof(monkeypatch):
+    """Paste mode (multiline=True) reads all lines until EOF, as before."""
+    from capybase.orchestrator import _default_stdin_reader
+
+    lines = iter(["line one", "line two", "line three"])
+
+    def fake_input(prompt=""):  # noqa: ANN001
+        try:
+            return next(lines)
+        except StopIteration:
+            raise EOFError
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    result = _default_stdin_reader("paste (Ctrl-D to finish): ", multiline=True)
+    assert result == "line one\nline two\nline three"
+
+
+def test_default_reader_single_line_eof_returns_empty(monkeypatch):
+    """EOF on a single-line read (no input) returns "" instead of raising."""
+    from capybase.orchestrator import _default_stdin_reader
+
+    def fake_input(prompt=""):  # noqa: ANN001
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    assert _default_stdin_reader("press Enter: ") == ""
 
 
 def _rebase_in_progress(repo: Path) -> bool:

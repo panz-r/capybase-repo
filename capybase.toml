@@ -173,6 +173,24 @@ enable_code_smell_checks = false
 # "error" (treat a smelly patch as a hard failure).
 code_smell_severity = "warning"
 
+# Silent-resurrection detection: git's 3-way merge can resolve CLEANLY (no
+# conflict) while resurrecting dead code the target branch deliberately deleted
+# (the replayed branch predates the cleanup). After a clean rebase, capybase
+# compares the result against content the target removed and flags any that came
+# back. On by default; set enable_resurrection_detection = false to disable.
+enable_resurrection_detection = true
+# What to do on detection: "stop" (default — halt before completing, write a
+# review bundle, route to the interactive fallback when a TTY is present; the
+# backup branch keeps the repo recoverable) or "warn" (continue, but surface the
+# findings in the summary + journal — useful in CI).
+resurrection_policy = "stop"
+# Minimum non-blank lines in a deleted block to count as a resurrection. Small
+# reappearances are usually coincidental, not a revival of removed code.
+resurrection_min_block_lines = 3
+# Minimum line-coverage for a deleted block to count as "back" in the result
+# (1.0 = whole block; 0.85 tolerates minor edits).
+resurrection_min_similarity = 0.85
+
 [journal]
 enabled = true
 store_prompts = true

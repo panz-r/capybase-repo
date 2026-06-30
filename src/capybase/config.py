@@ -175,7 +175,9 @@ class ModelConfig(BaseModel):
 
 
 class PolicyConfig(BaseModel):
-    supported_conflict_types: list[str] = Field(default_factory=lambda: ["UU"])
+    supported_conflict_types: list[str] = Field(
+        default_factory=lambda: ["UU", "AU", "UA"]
+    )
     supported_file_kinds: list[str] = Field(default_factory=lambda: ["text"])
     max_retries_per_unit: int = 2
     allow_skip: bool = False
@@ -308,6 +310,32 @@ class ValidationConfig(BaseModel):
     # analysis and are deferred. When off (default) the checker is inert.
     enable_code_smell_checks: bool = False
     code_smell_severity: str = "warning"
+    # Silent-resurrection detection (survey "silent loss of intent"): git's
+    # 3-way merge can resolve CLEANLY (no conflict markers) while resurrecting
+    # dead code the ``onto`` branch deliberately deleted — because the replayed
+    # branch predates the cleanup. Git sees no conflict; without this scan,
+    # capybase sees none either and the cleanup is silently undone. After a clean
+    # rebase (and per replayed step), capybase compares the result against the
+    # content ``onto`` removed since the merge-base and reports any that came
+    # back. Advisory detection — never breaks a rebase that would otherwise
+    # succeed, even when ``resurrection_policy`` is "stop" (it halts BEFORE the
+    # bad completion is left as final, keeping the backup ref recoverable).
+    enable_resurrection_detection: bool = True
+    # What to do when a resurrection is detected: "stop" (default — halt before
+    # completing, write a review bundle with the suspected resurrections, and
+    # route to the interactive fallback when a TTY is present; the existing
+    # abort-on-escalation keeps the repo recoverable via the backup branch) or
+    # "warn" (continue to completion, but surface the findings in the summary +
+    # journal for post-hoc review — useful in CI where a hard stop is undesired).
+    resurrection_policy: Literal["warn", "stop"] = "stop"
+    # Minimum non-blank lines in a deleted block for it to count as a
+    # resurrection. Tiny reappearances (a lone blank line, a one-line import) are
+    # usually coincidental, not a revival of deliberately-removed code.
+    resurrection_min_block_lines: int = 3
+    # Minimum line-coverage for a deleted block to count as "back" in the result
+    # (1.0 = whole block returned; 0.85 default tolerates minor edits). Higher =
+    # fewer false positives but may miss a partially-resurrected block.
+    resurrection_min_similarity: float = 0.85
 
 
 class JournalConfig(BaseModel):
@@ -346,6 +374,20 @@ class FutureConfig(BaseModel):
     # and falls through to the LLM. Default ON; only fires when the structural
     # resolver declined, so the cheap provably-safe rules always run first.
     enable_combination_search: bool = True
+    # Block-capture resolution (large modify/delete): when one side deleted a
+    # large block and the keeper side kept/modified it, the model can't reliably
+    # reproduce the block as an escaped JSON string (placeholder collapse +
+    # escaping corruption). Instead it makes a keep/accept_deletion/needs_human
+    # DECISION and capybase splices the chosen conflict side verbatim — the model
+    # never reproduces the text, so truncation and escaping errors are
+    # structurally impossible. Default ON; only engages on modify/delete conflicts
+    # whose kept block exceeds block_capture_min_lines, so small conflicts still
+    # use the full-LLM path.
+    enable_block_capture: bool = True
+    # Minimum non-blank lines in the kept block for block-capture to engage.
+    # Below this the full-LLM path reproduces the block fine; above it
+    # reproduction becomes unreliable and the decision-style prompt takes over.
+    block_capture_min_lines: int = 50
 
 
 class StructuralConfig(BaseModel):
