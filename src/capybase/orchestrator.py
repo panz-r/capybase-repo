@@ -313,6 +313,9 @@ class Orchestrator:
         # Excluded from the end-of-rebase silent-resurrection scan: such a keep
         # is an explicit, reviewed resurrection (not a silent undo).
         self._explicitly_kept_paths: set[str] = set()
+        # The most recent test-gate verdict (human-readable), stashed by
+        # _run_tests for the accept report written after the gate.
+        self._last_test_verdict: str | None = None
         self.paths = SessionPaths(self.session_id, repo)
         self.paths.mkdirs()
         self.journal = Journal(self.paths)
@@ -1852,6 +1855,9 @@ class Orchestrator:
                 result.escalated = True
                 result.reason = "pre-continue tests failed"
                 break
+            # Accept report (#4): both per-unit outcomes and the test verdict
+            # exist here — write the "why we accepted" summary before continuing.
+            self._write_accept_report(result)
             # Continue rebase.
             cont = self.git.continue_rebase()
             self.journal.emit(
@@ -2740,6 +2746,10 @@ class Orchestrator:
             step_index=self.step,
         )
         result.tests_passed = run.passed
+        # Stash the parsed verdict for the accept report (the report is written
+        # after this call returns, in run()'s loop, and needs the human-readable
+        # verdict like "1 test failed" / "compile error").
+        self._last_test_verdict = run.verdict.summary or None
         if not run.passed:
             # Surface the parsed verdict so the human sees *why* the tests failed
             # (compile error vs. test failure vs. timeout vs. lock contention),
@@ -2878,6 +2888,46 @@ class Orchestrator:
         """
         from capybase.color import RED
         return self.style("!", RED) + text.lstrip("!").lstrip()
+
+    def _write_accept_report(self, result: StepResult) -> None:
+        """Append a semantic accept report for the step's accepted units (#4).
+
+        Composes the per-unit obligations/validation/classification with the
+        step-level test verdict into a human-readable "why we accepted" summary,
+        appended to ``final/accept-report.md``. Run after the test gate, when
+        both per-unit outcomes (``result.outcomes``) and the test verdict
+        (``result.tests_passed``) exist. A no-op when no unit was accepted (an
+        escalation step) or when report-writing is disabled. Advisory: a failure
+        to write never breaks the rebase.
+        """
+        if not getattr(self.config.journal, "write_accept_reports", True):
+            return
+        try:
+            from capybase.accept_report import build_accept_report
+
+            body = build_accept_report(
+                result.outcomes,
+                tests_passed=result.tests_passed,
+                test_verdict=self._last_test_verdict,
+            )
+            if not body:
+                return
+            report = self.paths.final / "accept-report.md"
+            header = f"## step {result.step_index}\n\n"
+            # Append (one section per step); create on first write.
+            if report.exists():
+                existing = report.read_text(encoding="utf-8")
+                report.write_text(existing.rstrip("\n") + "\n\n" + header + body, encoding="utf-8")
+            else:
+                report.write_text("# capybase accept report\n\n" + header + body, encoding="utf-8")
+            self.journal.emit(
+                "accept_report_written",
+                {"path": str(report.relative_to(self.paths.repo_root)),
+                 "units": sum(1 for o in result.outcomes if o.accepted is not None)},
+                step_index=result.step_index,
+            )
+        except Exception as exc:  # noqa: BLE001 - advisory report; never block the rebase
+            self.log.debug("accept report not written: %s", exc)
 
     def _summarize(self, result: StepResult | None) -> None:
         if result is None:

@@ -351,6 +351,10 @@ class JournalConfig(BaseModel):
     store_snapshots: bool = True
     store_candidates: bool = True
     store_validations: bool = True
+    # Semantic accept report (#4): append a "why we accepted this merge" summary
+    # (preserved obligations, validation, test verdict) per step to
+    # final/accept-report.md. Advisory; never blocks the rebase.
+    write_accept_reports: bool = True
 
 
 class FutureConfig(BaseModel):
