@@ -340,8 +340,19 @@ def test_save_load_preserves_calibration_envelope(tmp_path: Path):
 
 
 def _valid_dict(**over) -> dict:
+    """A valid profile dict with overrides applied to BOTH the nested sections
+    and the flat keys, so an override (e.g. context_window=-1) is honored
+    regardless of which form ``from_dict`` prefers."""
     d = _profile().to_dict()
     d.update(over)
+    # Mirror flat overrides into the nested sections so the two forms agree
+    # (from_dict prefers nested when present; a test override must reach it).
+    for section in ("capability", "quality", "retrieval"):
+        sec = d.get(section)
+        if isinstance(sec, dict):
+            for k, v in over.items():
+                if k in sec:
+                    sec[k] = v
     return d
 
 
@@ -354,9 +365,14 @@ def test_from_dict_rejects_zero_max_tokens():
 
 
 def test_from_dict_rejects_missing_max_tokens():
-    """A partial dict omitting max_tokens entirely → defaulted to 0 → rejected."""
+    """A dict omitting max_tokens entirely (both forms) → defaulted to 0 → rejected."""
     d = _valid_dict()
-    del d["max_tokens"]
+    # Remove max_tokens from BOTH the flat key and the nested capability section
+    # so neither form supplies it (a genuinely-omitted knob defaults to 0).
+    d.pop("max_tokens", None)
+    cap = d.get("capability")
+    if isinstance(cap, dict):
+        cap.pop("max_tokens", None)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         p = ModelProfile.from_dict(d)
@@ -414,3 +430,102 @@ def test_apply_profile_noops_when_load_returned_none(tmp_path: Path):
     new_cfg, overridden = apply_profile(cfg, profile)
     assert overridden == []  # nothing overlaid
     assert new_cfg.max_tokens == 8192  # TOML value preserved
+
+
+# ---------------------------------------------------------------------------
+# Profile separation (#9): capability/quality/retrieval are independent sections.
+# ---------------------------------------------------------------------------
+
+
+def test_profile_has_three_sections():
+    """A profile carries capability, quality, and retrieval as distinct objects."""
+    p = _profile()
+    from capybase.calibration_profile import (
+        CapabilityProfile, QualityProfile, RetrievalProfile,
+    )
+    assert isinstance(p.capability, CapabilityProfile)
+    assert isinstance(p.quality, QualityProfile)
+    assert isinstance(p.retrieval, RetrievalProfile)
+
+
+def test_to_dict_writes_nested_sections_and_flat_keys():
+    """The serialized form carries BOTH nested sections and flat keys (backward
+    compat for flat-key readers)."""
+    d = _profile().to_dict()
+    assert "capability" in d and "max_tokens" in d["capability"]
+    assert "quality" in d and "samples" in d["quality"]
+    assert "retrieval" in d and "embedding_min_similarity" in d["retrieval"]
+    # Flat keys still present (legacy readers).
+    assert "max_tokens" in d and "samples" in d and "embedding_min_similarity" in d
+
+
+def test_from_dict_loads_legacy_flat_format():
+    """A legacy flat-only dict (no nested sections) still loads — backward compat."""
+    p = ModelProfile.from_dict({
+        "model": "legacy",
+        "max_tokens": 4096, "json_mode": True, "capture_token_entropy": False,
+        "generation_timeout_seconds": 60, "samples": 2,
+        "embedding_min_similarity": 0.42,
+    })
+    assert p is not None
+    assert p.max_tokens == 4096
+    assert p.samples == 2
+    assert p.embedding_min_similarity == 0.42
+
+
+def test_from_dict_prefers_nested_when_both_present():
+    """When nested and flat disagree, the nested (canonical) value wins."""
+    d = _profile().to_dict()
+    d["max_tokens"] = 111  # flat says 111
+    d["capability"]["max_tokens"] = 222  # nested says 222
+    p = ModelProfile.from_dict(d)
+    assert p is not None
+    assert p.max_tokens == 222
+
+
+def test_retrieval_section_independent_of_capability_validation():
+    """The retrieval section's embedding calibration survives even when the
+    capability section is invalid — independent invalidation means a bad
+    max_tokens doesn't discard a good retrieval calibration. (The whole-profile
+    loader rejects on ANY problem, but the SECTIONS validate independently,
+    so a future per-section loader can keep the good parts.)"""
+    from capybase.calibration_profile import RetrievalProfile
+    ret = RetrievalProfile(embedding_min_similarity=0.7,
+                           embedding_calibration={"threshold": 0.7})
+    assert ret.problems() == []  # retrieval has no load-bearing knobs
+
+
+def test_quality_section_validates_samples_independently():
+    from capybase.calibration_profile import QualityProfile
+    assert QualityProfile(samples=0).problems() == ["samples=0 (must be >= 1)"]
+    assert QualityProfile(samples=3).problems() == []
+
+
+def test_capability_section_validates_load_bearing_knobs():
+    from capybase.calibration_profile import CapabilityProfile
+    bad = CapabilityProfile(max_tokens=0, json_mode=True,
+                            capture_token_entropy=False,
+                            generation_timeout_seconds=60)
+    assert any("max_tokens" in p for p in bad.problems())
+
+
+def test_merging_retrieval_into_a_capability_profile_preserves_capability():
+    """The decoupling win (#9): updating only the retrieval section (e.g. a
+    calibrate-embeddings re-run) leaves the capability/quality knobs untouched.
+    Simulated by constructing from a prior profile's dict with only the
+    retrieval section changed."""
+    prior = _profile()  # has capability + quality + retrieval
+    # A new retrieval calibration (calibrate-embeddings re-run).
+    new_ret = {"embedding_min_similarity": 0.99, "embedding_calibration": {"x": 1}, "fusion_method": "dbsf"}
+    # The on-disk merge: prior sections + new retrieval.
+    d = prior.to_dict()
+    d["retrieval"] = new_ret
+    d.update(new_ret)  # flat mirror
+    merged = ModelProfile.from_dict(d)
+    assert merged is not None
+    # Capability/quality preserved from prior.
+    assert merged.max_tokens == prior.max_tokens
+    assert merged.samples == prior.samples
+    # Retrieval updated.
+    assert merged.embedding_min_similarity == 0.99
+    assert merged.fusion_method == "dbsf"
