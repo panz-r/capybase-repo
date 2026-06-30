@@ -451,7 +451,17 @@ def _run_calibrate_embeddings(
         # under --dry-run (the user runs it precisely to see what would change).
         profile = ModelProfile.load(resolved)
         if profile is None:
-            profile = ModelProfile.from_dict({"model": config.model.model})
+            # Construct a placeholder directly (not via from_dict, which now
+            # validates load-bearing knobs and would reject a max_tokens of 0).
+            # This placeholder only carries the model name + the embedding-floor
+            # defaults the code below reads; the resolution knobs are inert here.
+            profile = ModelProfile(
+                model=config.model.model,
+                max_tokens=1,
+                json_mode=True,
+                capture_token_entropy=False,
+                generation_timeout_seconds=60,
+            )
         if profile.model == config.model.model:
             prev_floor = profile.embedding_min_similarity
             # Offline drift detection: compare against the prior run's envelope

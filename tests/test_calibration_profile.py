@@ -330,3 +330,87 @@ def test_save_load_preserves_calibration_envelope(tmp_path: Path):
     assert loaded.embedding_min_similarity == 0.66
     assert loaded.embedding_calibration["estimates"]["quantile_gap"] == 0.71
     assert loaded.embedding_calibration["related"]["mean"] == 0.88
+
+
+# ---------------------------------------------------------------------------
+# Profile validation: a partial/hand-edited profile with an invalid load-bearing
+# knob is rejected (returns None) so apply_profile can't overlay an unsafe value.
+# Regression: from_dict defaulted max_tokens to 0, which would overlay max_tokens=0.
+# ---------------------------------------------------------------------------
+
+
+def _valid_dict(**over) -> dict:
+    d = _profile().to_dict()
+    d.update(over)
+    return d
+
+
+def test_from_dict_rejects_zero_max_tokens():
+    """max_tokens<=0 (the from_dict default when missing) → None, not an unsafe profile."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        p = ModelProfile.from_dict(_valid_dict(max_tokens=0))
+    assert p is None
+
+
+def test_from_dict_rejects_missing_max_tokens():
+    """A partial dict omitting max_tokens entirely → defaulted to 0 → rejected."""
+    d = _valid_dict()
+    del d["max_tokens"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        p = ModelProfile.from_dict(d)
+    assert p is None
+
+
+def test_from_dict_rejects_zero_samples():
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        p = ModelProfile.from_dict(_valid_dict(samples=0))
+    assert p is None
+
+
+def test_from_dict_rejects_zero_generation_timeout():
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        p = ModelProfile.from_dict(_valid_dict(generation_timeout_seconds=0))
+    assert p is None
+
+
+def test_from_dict_rejects_negative_context_window():
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        p = ModelProfile.from_dict(_valid_dict(context_window=-1))
+    assert p is None
+
+
+def test_from_dict_accepts_valid_profile():
+    """A fully-valid profile loads unchanged (sanity check the gate isn't too strict)."""
+    p = ModelProfile.from_dict(_valid_dict())
+    assert p is not None
+    assert p.max_tokens == _profile().max_tokens
+
+
+def test_load_rejects_invalid_profile_on_disk(tmp_path: Path):
+    """A profile file on disk with an invalid knob loads as None (no overlay)."""
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(_valid_dict(max_tokens=0)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        p = ModelProfile.load(path)
+    assert p is None
+
+
+def test_apply_profile_noops_when_load_returned_none(tmp_path: Path):
+    """End-to-end: an invalid profile must not change the ModelConfig knobs."""
+    from capybase.config import ModelConfig
+
+    path = tmp_path / "profile.json"
+    path.write_text(json.dumps(_valid_dict(max_tokens=0)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        profile = ModelProfile.load(path)
+    cfg = ModelConfig(model="vibethink", max_tokens=8192)
+    new_cfg, overridden = apply_profile(cfg, profile)
+    assert overridden == []  # nothing overlaid
+    assert new_cfg.max_tokens == 8192  # TOML value preserved

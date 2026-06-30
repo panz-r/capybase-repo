@@ -90,12 +90,45 @@ class ModelProfile:
         d["embedding_calibration"] = _coerce_calibration(d.get("embedding_calibration"))
         return d
 
+    def problems(self) -> list[str]:
+        """Load-bearing knob validations. Empty list ⇒ profile is safe to apply.
+
+        A partial/hand-edited profile with an invalid knob (e.g. ``max_tokens``
+        defaulting to 0) would overlay an unsafe value via ``apply_profile``.
+        ``load``/``from_dict`` reject the whole profile when any problem is
+        present — matching the "corrupt profile is a no-op" contract (a partial
+        profile is already suspicious, so dropping it wholesale is safer than a
+        half-applied overlay). The checks are the knobs whose unsafe value
+        breaks resolution: ``max_tokens``/``generation_timeout_seconds`` ≤ 0,
+        ``samples`` < 1, a negative ``context_window``.
+        """
+        probs: list[str] = []
+        if self.max_tokens <= 0:
+            probs.append(f"max_tokens={self.max_tokens} (must be > 0)")
+        if self.generation_timeout_seconds <= 0:
+            probs.append(
+                f"generation_timeout_seconds={self.generation_timeout_seconds} "
+                f"(must be > 0)"
+            )
+        if self.samples < 1:
+            probs.append(f"samples={self.samples} (must be >= 1)")
+        if self.context_window < 0:
+            probs.append(f"context_window={self.context_window} (must be >= 0)")
+        return probs
+
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "ModelProfile":
+    def from_dict(cls, d: dict[str, Any]) -> "ModelProfile | None":
+        """Build a profile from a dict, or return None if it fails validation.
+
+        A partial/hand-edited dict (e.g. ``max_tokens`` missing → defaulted to
+        0) is rejected: an invalid load-bearing knob would overlay an unsafe
+        value. The ``None`` return keeps the existing "bad profile is a no-op"
+        contract — callers fall back to pure-TOML values.
+        """
         notes = d.get("notes") or []
         if not isinstance(notes, list):
             notes = [str(notes)]
-        return cls(
+        profile = cls(
             model=str(d.get("model", "")),
             max_tokens=int(d.get("max_tokens", 0)),
             json_mode=bool(d.get("json_mode", True)),
@@ -117,14 +150,24 @@ class ModelProfile:
             capybase_version=str(d.get("capybase_version", "")),
             notes=[str(n) for n in notes],
         )
+        probs = profile.problems()
+        if probs:
+            warnings.warn(
+                f"Model profile for {profile.model!r} is invalid and will be "
+                f"ignored ({'; '.join(probs)}); run `capybase recalibrate`.",
+                stacklevel=2,
+            )
+            return None
+        return profile
 
     @classmethod
     def load(cls, path: str | Path) -> "ModelProfile | None":
-        """Load a profile from JSON, or return None if absent/corrupt.
+        """Load a profile from JSON, or return None if absent/corrupt/invalid.
 
-        A corrupt or partial file is treated as "no profile": resolution must
-        never crash on a bad artifact. The CLI's ``calibrate`` command is the
-        way to (re)write a valid one.
+        A corrupt, partial, or invalid file is treated as "no profile":
+        resolution must never crash on a bad artifact, and must never overlay
+        an unsafe knob from one. The CLI's ``calibrate`` command is the way to
+        (re)write a valid one.
         """
         p = Path(path)
         if not p.is_file():
