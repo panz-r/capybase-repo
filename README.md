@@ -1,10 +1,12 @@
-# capybase
+# capybase (MVP, in progress)
 
-A rebase-conflict resolution agent using a (local) OpenAI-compatible endpoint.
+A rebase-conflict resolution agent using a (probably local) OpenAI-compatible endpoint. (such as e.g. llama-server)
 
 It runs the entire rebase the way `git rebase` would: preflight, backup branch,
 start, resolve → test → continue, and abort-on-escalation so your branch returns
 to its original HEAD.
+
+Licensed under Apache-2.0.
 
 ## Configure
 
@@ -171,3 +173,4 @@ errors not present in the pre-conflict baseline.
 MVP (M1+M2+M3). **Python and Rust are both fully supported** end to end.
 Some `[future]` features (RAG, self-consistency) are wired but off by default;
 others (verifier model, mutation testing) are interface stubs.
+
