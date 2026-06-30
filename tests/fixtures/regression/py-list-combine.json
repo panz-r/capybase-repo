@@ -1,0 +1,12 @@
+{
+  "id": "py-list-combine",
+  "title": "both sides append distinct items to a Python list (deterministic union)",
+  "path": "services.py",
+  "language": "python",
+  "base": "SERVICES = [\"core\"]\n",
+  "current": "SERVICES = [\"core\", \"scheduler\"]\n",
+  "replayed": "SERVICES = [\"core\", \"reloader\"]\n",
+  "expected_resolved": "SERVICES = [\"core\", \"scheduler\", \"reloader\"]\n",
+  "expected_via": "deterministic",
+  "notes": "The list_union structural rule resolves this with zero LLM calls. A real both-sides-append that must NOT drop either side's addition."
+}

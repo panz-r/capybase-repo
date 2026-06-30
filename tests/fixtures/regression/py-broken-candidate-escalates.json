@@ -1,0 +1,11 @@
+{
+  "id": "py-broken-candidate-escalates",
+  "title": "a candidate the model cannot fix (leaked markers) escalates rather than guessing",
+  "path": "app.py",
+  "language": "python",
+  "base": "def f():\n    return 1\n",
+  "current": "def f():\n    return 2\n",
+  "replayed": "def f():\n    return 3\n",
+  "expected_escalated": true,
+  "notes": "Outcome regression: when the model emits leaked conflict markers every retry, capybase must ESCALATE (never guess a broken merge). The runner injects a client returning a marker-leaking candidate and asserts the step escalates. The expected outcome is escalation, not a resolved text; the top-level reason is generic ('could not resolve <unit>'), so no reason substring is asserted — the escalation itself is the contract."
+}

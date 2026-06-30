@@ -1,0 +1,12 @@
+{
+  "id": "py-modify-delete-keeper-wins",
+  "title": "upstream deleted a helper; replayed kept and adapted it (modify/delete, keeper wins)",
+  "path": "utils.py",
+  "language": "python",
+  "base": "def helper():\n    return 1\n",
+  "current": "",
+  "replayed": "def helper():\n    return 1  # adapted: documented\n",
+  "expected_resolved": "def helper():\n    return 1  # adapted: documented\n",
+  "conflict_type": "AU",
+  "notes": "Whole-file modify/delete (mode AU): upstream deleted utils.py, replayed modified it. The keeper's adaptation is load-bearing, so the keeper wins. Exercises the modify/delete extraction + block-capture/LLM path."
+}

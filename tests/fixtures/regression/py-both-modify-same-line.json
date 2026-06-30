@@ -1,0 +1,11 @@
+{
+  "id": "py-both-modify-same-line",
+  "title": "both sides change the same return line (genuine conflict, needs the model)",
+  "path": "app.py",
+  "language": "python",
+  "base": "def greet():\n    return 'hello'\n",
+  "current": "def greet():\n    return 'hi'\n",
+  "replayed": "def greet():\n    return 'howdy'\n",
+  "expected_resolved": "def greet():\n    return 'hi' + 'howdy'\n",
+  "notes": "A genuine both-modify conflict the structural resolver declines (same-line). The model must synthesize both edits; the expected merge concatenates both return values. Exercises the LLM path + obligation preservation."
+}

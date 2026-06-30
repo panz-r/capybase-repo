@@ -1,0 +1,12 @@
+{
+  "id": "rust-struct-fields",
+  "title": "both sides add a distinct field to a Rust struct",
+  "path": "src/config.rs",
+  "language": "rust",
+  "base": "pub struct Config {\n    pub name: String,\n}\n",
+  "current": "pub struct Config {\n    pub name: String,\n    pub max_retries: u32,\n}\n",
+  "replayed": "pub struct Config {\n    pub name: String,\n    pub timeout_ms: u32,\n}\n",
+  "expected_resolved": "pub struct Config {\n    pub name: String,\n    pub max_retries: u32,\n    pub timeout_ms: u32,\n}\n",
+  "expected_via": "deterministic",
+  "notes": "Both sides append distinct struct fields. The insertion_union rule merges both. Rust indentation/trailing-comma conventions matter."
+}
