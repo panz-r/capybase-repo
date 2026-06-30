@@ -222,6 +222,12 @@ class ValidationConfig(BaseModel):
     # candidate that drops a side's additions entirely — a tweaked-but-still-
     # one-sided merge the copy heuristic misses. Advisory warning.
     reject_if_drops_a_side: bool = True
+    # Side-obligation contract (#3): flag a candidate that reverts a side's
+    # MODIFICATION of an existing line back to base (a silent undo the token-set
+    # both-sides-represented check misses — a same-line edit often adds no
+    # distinctive token), or drops a side's added line entirely. Derived from a
+    # line-level diff of each side vs base. Advisory warning (feeds retry).
+    reject_if_drops_obligation: bool = True
     # Dependency preservation (survey §2.2 SafeMerge necessary condition): warn
     # when a merge drops a base-referenced symbol that has an in-repo definition
     # and neither side removed. Companion to both-sides-represented — that

@@ -67,25 +67,41 @@ def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
 
 
 def _side_intent_block(unit: ConflictUnit) -> str:
-    """A short 'what each side DID' annotation for the prompt.
+    """A short 'what each side DID' annotation + obligations contract for the prompt.
 
-    Modify/delete disambiguation (survey "silent loss of intent"): without this,
-    a side that's empty because it DELETED base content reads as merely 'absent',
-    and the model can't tell a deliberate deletion from a missing side — so it
-    bails with needs_human instead of confidently accepting the deletion. This
-    surfaces the merge_intent.direction classification right above the sides so
-    the model knows the conflict shape (e.g. 'CURRENT_UPSTREAM_SIDE DELETED this
-    block; the replayed side kept it').
+    Two parts, both pure and folded into the budget-protected ``sides_text``:
 
-    Returns "" when no classification is recorded (un-enriched units), so the
-    prompt is unchanged for the common case. Pure; reads only the metadata the
-    extractor already stamps onto structural_metadata.
+    1. The conflict-shape label (survey "silent loss of intent"): without it, a
+       side that's empty because it DELETED base content reads as merely
+       'absent', and the model can't tell a deliberate deletion from a missing
+       side. Surfaces :func:`merge_intent.direction`'s summary right above the
+       sides (e.g. 'CURRENT_UPSTREAM_SIDE DELETED this block; the replayed side
+       kept it').
+    2. The side-obligation contract (#3): a compact "must preserve" block per
+       side (the load-bearing added/changed content) so the model knows exactly
+       what each side's edit IS. Grounds the model in the diff-derived
+       obligations rather than just the raw side text.
+
+    Returns "" when neither is available (un-enriched unit, no obligations), so
+    the prompt is unchanged. Pure; reads only metadata + the side texts.
     """
+    parts: list[str] = []
     md = unit.structural_metadata.get("merge_direction") or {}
     summary = md.get("summary")
-    if not summary:
+    if summary:
+        parts.append(f"Conflict shape (what each side did vs BASE):\n{summary}")
+    # Obligation contract: derive per-side load-bearing edits. Wrapped so a
+    # failure degrades to "no block" (the prompt must never crash on obligations).
+    try:
+        from capybase.obligations import extract_obligations, render_obligation_block
+
+        parts.append(render_obligation_block(extract_obligations(unit)).rstrip("\n"))
+    except Exception:  # noqa: BLE001 - obligations are advisory, never break the prompt
+        pass
+    parts = [p for p in parts if p]
+    if not parts:
         return ""
-    return f"Conflict shape (what each side did vs BASE):\n{summary}\n\n"
+    return "\n\n".join(parts) + "\n\n"
 
 
 def _fit_to_budget(

@@ -73,6 +73,11 @@ class ValidationConfig:
     # reject_if_copies_one_side — that catches verbatim copies; this catches
     # tweaked-but-still-one-sided merges. Advisory warning (feeds risk/retry).
     reject_if_drops_a_side: bool = True
+    # Side-obligation contract (#3): flag a candidate that reverts a side's
+    # MODIFICATION of an existing line back to base, or drops a side's added line.
+    # Advisory warning (feeds retry). Kept in sync with config.py's pydantic
+    # ValidationConfig.reject_if_drops_obligation.
+    reject_if_drops_obligation: bool = True
     # Dependency preservation (survey §2.2 SafeMerge necessary condition): warn
     # when a merge drops a base-referenced symbol that has an in-repo definition
     # and neither side removed. Companion to both-sides-represented — that
@@ -297,6 +302,70 @@ class BothSidesRepresentedValidator:
                 "dropped_a_side": dropped,
                 "dropped_current_additions": cur_missing,
                 "dropped_replayed_additions": rep_missing,
+            },
+        )
+
+
+class ObligationValidator:
+    """Side-obligation contract (#3): a candidate must preserve each side's edits.
+
+    Derives per-side obligations (what each side added/changed/removed vs base)
+    via :func:`capybase.obligations.extract_obligations` and checks the candidate
+    carries them. This is the additive layer the token-set/verbatim heuristics
+    structurally miss:
+
+    - a side **modified an existing line** (no new distinctive token) —
+      :class:`BothSidesRepresentedValidator` (token-set) sees no "addition" and
+      passes; this validator flags a resolution that **reverted** the edit to base;
+    - a side **added a whole line** that the merge dropped — caught here at line
+      granularity (complements the token-set check, which a reformatting can
+      defeat).
+
+    A deliberate deletion (a side's ``removed`` obligation) is HONORED, not
+    required — flagging a clean delete would conflict with the modify/delete
+    machinery. Pure line-diff logic (no I/O, no parser). Severity ``warning``
+    (a necessary-not-sufficient signal → feeds retry, like the copy heuristic).
+
+    Gated by ``config.reject_if_drops_obligation`` (default on).
+    """
+
+    name = "obligation"
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        from capybase.obligations import (
+            extract_obligations,
+            obligations_satisfied,
+        )
+
+        obligations = extract_obligations(ctx.unit)
+        # An unchanged-on-both-sides conflict (or one with no load-bearing edits)
+        # imposes no obligation — pass cleanly so the validator is a no-op there.
+        if obligations.current.empty and obligations.replayed.empty:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="no side obligations (both sides unchanged)",
+                features={"obligation_checked": False},
+            )
+        satisfied, dropped = obligations_satisfied(
+            obligations, ctx.candidate.resolved_text or ""
+        )
+        cur_drops = [d for d in dropped if d.startswith("CURRENT")]
+        rep_drops = [d for d in dropped if d.startswith("REPLAYED")]
+        return VerificationCheckResult(
+            name=self.name,
+            passed=satisfied,
+            severity="warning",
+            message=(
+                "resolved text drops a side obligation"
+                if dropped
+                else "resolved text preserves both sides' obligations"
+            ),
+            detail={"dropped_obligations": dropped[:8]},
+            features={
+                "obligation_checked": True,
+                "dropped_obligation": bool(dropped),
+                "dropped_current_obligation": bool(cur_drops),
+                "dropped_replayed_obligation": bool(rep_drops),
             },
         )
 
@@ -1317,6 +1386,7 @@ class VerificationEngine:
             AstPreservationValidator(),
             PreservationHeuristicValidator(),
             BothSidesRepresentedValidator(),
+            ObligationValidator(),
             NeedsHumanValidator(),
         ]
         # Extra validators (e.g. the opt-in VerifierModelValidator) are appended
@@ -2052,6 +2122,7 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
         "ast_preservation": cfg.require_ast_preservation,
         "preservation_heuristic": cfg.reject_if_copies_one_side,
         "both_sides_represented": cfg.reject_if_drops_a_side,
+        "obligation": cfg.reject_if_drops_obligation,
         "referenced_symbol_dropped": cfg.reject_if_drops_referenced_symbol,
         "needs_human": cfg.reject_if_model_needs_human,
         "syntax": cfg.require_syntax_if_supported,
