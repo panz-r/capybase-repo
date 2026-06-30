@@ -2623,9 +2623,20 @@ class Orchestrator:
             )
             return
         if self.config.journal.enabled and self.config.journal.store_snapshots:
-            self.journal.store_snapshot(
-                f"{path.replace('/', '__')}.before", buffer
-            )
+            # Snapshot the ACTUAL pre-write worktree content — the on-disk file
+            # before this resolution overwrites it — so the audit trail shows
+            # what changed, not the resolved buffer being written (a prior bug
+            # snapshotted `buffer`, making the ".before" name a lie). A missing
+            # file (new path) has no prior content to snapshot.
+            try:
+                prior = self.git.read_worktree_file(path).decode(
+                    "utf-8", errors="replace"
+                )
+                self.journal.store_snapshot(
+                    f"{path.replace('/', '__')}.before", prior
+                )
+            except (FileNotFoundError, OSError):
+                pass  # new file: nothing pre-existed to snapshot
         self.git.write_worktree_file(path, buffer.encode("utf-8"))
         self.journal.emit(
             "file_written",
@@ -2674,14 +2685,42 @@ class Orchestrator:
         cmd = getattr(self.config.tests, label) if hasattr(self.config.tests, label) else None
         if not cmd:
             return True
+        # Whether the configured command is the shipped default (vs an explicit
+        # user choice). The default is Python-centric ("pytest"); for a repo it
+        # doesn't fit (Go/JS/etc. with no pytest and no cargo), a "command not
+        # found" must NOT block the rebase — that's the absence of a test gate
+        # for this repo, not a failing test. An explicit user command that's
+        # missing still fails (it was a deliberate choice).
+        is_default_cmd = cmd.strip() == "pytest"
         cmd = self._resolve_test_command(cmd)
         self.journal.emit("tests_started", {"label": label, "command": cmd}, step_index=self.step)
         # For ``cargo test`` in a workspace (no root Cargo.toml), cargo must run
-        # from a member crate's directory — it can't discover the project from the
-        # workspace root. Anchor on the first conflicted file's nearest crate dir
-        # (the same nearest-manifest logic the cargo syntax check uses).
+        # from a member crate's directory — it can't discover the project from
+        # the workspace root. Anchor on the first conflicted file's nearest crate
+        # dir (the same nearest-manifest logic the cargo syntax check uses).
         test_cwd = self._cargo_test_cwd(result, cmd)
         run = self._run_test_command(cmd, cwd=test_cwd)
+        # The shipped-default command wasn't found and couldn't be auto-resolved
+        # to one that exists (e.g. a Go/JS repo with no pytest and no cargo).
+        # Treat it as "no test gate for this repo" rather than a hard failure:
+        # warn and continue. Never applies to an explicit user-configured command.
+        if (
+            is_default_cmd
+            and not run.passed
+            and run.verdict.kind == "unknown"
+            and "not found" in (run.verdict.summary or "")
+        ):
+            self.journal.emit(
+                "tests_default_unresolved",
+                {"label": label, "command": cmd, "summary": run.verdict.summary},
+                step_index=self.step,
+            )
+            self.out(
+                f"  no test command for this repo (default `{cmd}` not found, "
+                f"no cargo detected); skipping the {label} test gate. Set "
+                f"[tests] {label} to your suite's command to enable it."
+            )
+            return True
         self.journal.emit(
             "tests_finished",
             {

@@ -14,7 +14,7 @@ import pytest
 
 from capybase.adapters.llm_openai import LLMResponse
 from capybase.config import Config
-from capybase.orchestrator import Orchestrator
+from capybase.orchestrator import Orchestrator, StepResult
 from capybase.resolution_engine import ResolutionEngine
 
 from tests.conftest import git
@@ -831,3 +831,50 @@ def test_simple_routing_uses_one_sample_even_when_samples_is_three(conflicted_re
         f"simple conflict generated {client.calls} candidates, expected 1 "
         f"(a calibrated samples>1 leaked into the fast path)"
     )
+
+
+# ---------------------------------------------------------------------------
+# Snapshot correctness: the ".before" snapshot must capture the PRE-WRITE
+# worktree content (what's on disk before the resolution overwrites it), not
+# the resolved buffer being written. Regression: it snapshotted `buffer`, making
+# the ".before" name misleading and the audit trail useless.
+# ---------------------------------------------------------------------------
+
+
+def test_before_snapshot_captures_pre_write_worktree_content(repo):
+    """The .before snapshot is the on-disk file BEFORE mutation, not the buffer."""
+    cfg = _config(repo)
+    cfg.journal.enabled = True
+    cfg.journal.store_snapshots = True
+    engine = ResolutionEngine(cfg.model, client=CyclingClient(["{}"]))
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    # Put a known PRE-EXISTING file on disk, then write a DIFFERENT buffer.
+    (repo / "existing.py").write_text("# OLD CONTENT ON DISK\nold = 1\n")
+    new_buffer = "# NEW RESOLVED BUFFER\nnew = 2\n"
+    orch._write_and_stage("existing.py", new_buffer, StepResult(step_index=1))
+    snap = orch.paths.snapshots / "existing.py.before"
+    assert snap.exists(), "no .before snapshot was written"
+    snap_text = snap.read_text()
+    # The snapshot is the PRE-WRITE worktree content, not the resolved buffer.
+    assert "OLD CONTENT ON DISK" in snap_text
+    assert "new = 2" not in snap_text  # the buffer must NOT have been snapshotted
+
+
+def test_before_snapshot_absent_for_new_file(repo):
+    """A brand-new file (nothing pre-existing on disk) has no .before snapshot."""
+    cfg = _config(repo)
+    cfg.journal.enabled = True
+    cfg.journal.store_snapshots = True
+    engine = ResolutionEngine(cfg.model, client=CyclingClient(["{}"]))
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    orch._write_and_stage(
+        "brand_new.py", "# fresh file\n", StepResult(step_index=1)
+    )
+    # No prior content existed → no .before snapshot (no crash, no empty file).
+    assert not (orch.paths.snapshots / "brand_new.py.before").exists()

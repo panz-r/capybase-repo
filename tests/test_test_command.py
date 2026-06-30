@@ -166,3 +166,67 @@ def test_cargo_test_cwd_none_for_non_cargo_command(repo: Path):
     """A non-cargo command → no cwd override (None)."""
     orch = _orch(repo)
     assert orch._cargo_test_cwd(_step_result_with({"a.py": []}), "pytest") is None
+
+
+# ---------------------------------------------------------------------------
+# Default-command-not-found: a repo the default "pytest" doesn't fit (no cargo,
+# no pytest — e.g. a Go/JS repo) must NOT block the rebase. The shipped default
+# resolving to a missing command is "no test gate for this repo", not a failure.
+# An explicit user-configured command that's missing still fails (deliberate).
+# ---------------------------------------------------------------------------
+
+
+def _not_found_run():
+    """A TestRunResult shaped like a missing-command run."""
+    from capybase.adapters.tests import TestRunResult, TestVerdict
+
+    return TestRunResult(
+        passed=False, returncode=-1, stdout="", stderr="'pytest' not found",
+        command="pytest",
+        verdict=TestVerdict(
+            kind="unknown", tool="",
+            summary="test command not found: 'pytest'",
+        ),
+    )
+
+
+def test_default_command_not_found_skips_gate(repo: Path, monkeypatch):
+    """The default pytest, missing on a non-Python/non-Rust repo → gate skipped."""
+    from capybase.orchestrator import StepResult
+
+    orch = _orch(repo)  # default config: pre_continue="pytest", no cargo here
+    # Force the runner to report "command not found" (no pytest installed).
+    monkeypatch.setattr(orch.tests, "run", lambda cmd, cwd=None: _not_found_run())
+    ok = orch._run_tests("pre_continue", StepResult(step_index=1))
+    assert ok is True  # the gate was skipped, not failed
+
+
+def test_explicit_command_not_found_fails_gate(repo: Path, monkeypatch):
+    """An explicit user command (not the default) that's missing → hard fail."""
+    from capybase.orchestrator import StepResult
+
+    cfg = Config()
+    cfg.tests.pre_continue = "my-custom-suite"  # explicit, not the default
+    orch = Orchestrator(cfg, repo=str(repo), out=lambda *_a, **_k: None)
+    monkeypatch.setattr(orch.tests, "run", lambda cmd, cwd=None: _not_found_run())
+    ok = orch._run_tests("pre_continue", StepResult(step_index=1))
+    assert ok is False  # a deliberate command that's missing still fails
+
+
+def test_default_command_failing_tests_still_fail_gate(repo: Path, monkeypatch):
+    """The skip only applies to 'command not found', NOT to genuinely failing
+    tests. A default-pytest run that exits non-zero (tests fail) must still
+    fail the gate — the skip is about a missing tool, not a red suite."""
+    from capybase.adapters.tests import TestRunResult, TestVerdict
+    from capybase.orchestrator import StepResult
+
+    orch = _orch(repo)
+    failing = TestRunResult(
+        passed=False, returncode=1, stdout="1 failed", stderr="",
+        command="pytest",
+        verdict=TestVerdict(kind="test_failure", tool="pytest",
+                            summary="1 test failed"),
+    )
+    monkeypatch.setattr(orch.tests, "run", lambda cmd, cwd=None: failing)
+    ok = orch._run_tests("pre_continue", StepResult(step_index=1))
+    assert ok is False
