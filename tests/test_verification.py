@@ -671,3 +671,93 @@ def test_smell_validator_handles_fragment():
 
 
 from capybase.verification import CodeSmellValidator  # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# No-worse-than-before diagnostics (#7): compute_diagnostic_delta + the Python
+# syntax delta + the unified introduced_diagnostics rollup.
+# ---------------------------------------------------------------------------
+
+
+def test_compute_diagnostic_delta_returns_only_new_messages():
+    """The shared delta returns after-errors absent from baseline, deduplicated."""
+    from capybase.verification import compute_diagnostic_delta
+    baseline = ["missing sep", "old error"]
+    after = ["missing sep", "old error", "NEW error", "NEW error"]
+    assert compute_diagnostic_delta(baseline, after) == ["NEW error"]
+
+
+def test_compute_diagnostic_delta_empty_when_nothing_new():
+    from capybase.verification import compute_diagnostic_delta
+    assert compute_diagnostic_delta(["a", "b"], ["a", "b"]) == []
+    assert compute_diagnostic_delta([], []) == []
+
+
+def test_py_compile_syntax_delta_catches_a_new_error():
+    """A merge that introduces a syntax error the clean baseline didn't have is
+    flagged with the new error count (not just a bare fail)."""
+    # Baseline: valid. Candidate: an introduced unclosed paren.
+    worktree = "<<<<<<< H\nx = 1\n=======\nx = 2\n>>>>>>> b\n"
+    fres = _engine().verify_file(
+        "app.py", "python", worktree, [((0, 4), "x = (unclosed")]
+    )
+    assert not fres.passed
+    assert any(f.validator == "syntax" for f in fres.hard_failures)
+    assert fres.features["syntax_new_error_count"] >= 1
+
+
+def test_py_compile_delta_strict_when_baseline_also_broken():
+    """When the blanked baseline ALSO has a syntax error (e.g. a pre-existing
+    bare return outside the conflict), the delta can't distinguish pre-existing
+    from merge-introduced → strict floor applies (any candidate error fails).
+    The conservative choice: the delta is trusted ONLY when the baseline
+    compiles cleanly. A candidate sharing a pre-existing error is held to the
+    strict floor (never silently accepted with a syntax error)."""
+    worktree = "return 999\n<<<<<<< H\nx = 1\n=======\nx = 2\n>>>>>>> b\n"
+    fres = _engine().verify_file(
+        "app.py", "python", worktree, [((1, 5), "x = 1")]
+    )
+    # Baseline has `return 999` → broken → strict floor → fails.
+    assert not fres.passed
+
+
+def test_py_compile_delta_falls_back_to_strict_when_baseline_broken():
+    """When the blanked conflict ITSELF has a syntax error (the cross-unit
+    juxtaposition case), the delta can't tell pre-existing from introduced →
+    fall back to the strict floor (any candidate error fails). Regression guard
+    for test_verify_file_catches_cross_unit_syntax_error."""
+    worktree = (
+        "<<<<<<< H\nreturn 1\n=======\nreturn 2\n>>>>>>> b\n"
+        "<<<<<<< H\nreturn 3\n=======\nreturn 4\n>>>>>>> b\n"
+    )
+    fres = _engine().verify_file(
+        "app.py", "python", worktree, [((0, 4), "return 1"), ((5, 9), "return 3")]
+    )
+    assert not fres.passed  # baseline-broken → strict floor catches it
+
+
+def test_introduced_diagnostics_rollup_is_summed():
+    """The unified introduced_diagnostics feature sums the per-check new counts."""
+    # A Python file with an introduced syntax error → syntax_new_error_count >= 1
+    # → introduced_diagnostics >= 1.
+    worktree = "<<<<<<< H\nx = 1\n=======\nx = 2\n>>>>>>> b\n"
+    fres = _engine().verify_file(
+        "app.py", "python", worktree, [((0, 4), "x = (unclosed")]
+    )
+    assert (
+        fres.features["introduced_diagnostics"]
+        == int(fres.features.get("syntax_new_error_count", 0))
+        + int(fres.features.get("lsp_new_error_count", 0))
+        + int(fres.features.get("clippy_new_finding_count", 0))
+    )
+    assert fres.features["introduced_diagnostics"] >= 1
+
+
+def test_introduced_diagnostics_zero_on_clean_merge():
+    """A clean merge introduces no diagnostics."""
+    worktree = "<<<<<<< H\na = 1\n=======\nb = 2\n>>>>>>> b\n"
+    fres = _engine().verify_file(
+        "app.py", "python", worktree, [((0, 4), "a = 1\nb = 2")]
+    )
+    assert fres.passed
+    assert fres.features["introduced_diagnostics"] == 0

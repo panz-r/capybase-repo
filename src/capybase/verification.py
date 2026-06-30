@@ -1223,6 +1223,71 @@ def _compile_python(source: str) -> tuple[bool, str]:
         Path(tmp_path).unlink(missing_ok=True)
 
 
+def _py_compile_errors(source: str) -> list[str]:
+    """The list of py_compile error messages (one per diagnostic line).
+
+    Unlike :func:`_compile_python` (which returns only the LAST error line for
+    the syntax floor), this returns every ``<file>:<line>: <msg>`` line so a
+    diagnostic DELTA (#7) can distinguish a NEW error from a pre-existing one.
+    Empty when the source compiles. Used by the no-worse-than-before delta for
+    Python: the merge is rejected only when it introduces a syntax error the
+    blanked baseline didn't have, not for a pre-existing one in the conflict.
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".py", delete=False, encoding="utf-8"
+    ) as tf:
+        tf.write(source)
+        tmp_path = tf.name
+    try:
+        proc = subprocess.run(
+            ["python3", "-m", "py_compile", tmp_path],
+            capture_output=True, text=True,
+        )
+        if proc.returncode == 0:
+            return []
+        # py_compile emits lines like '  File "...", line N' + 'SyntaxError: ...'.
+        # Keep the diagnostic-bearing lines (the SyntaxError/IndentationError/etc.
+        # messages), stripping the temp-file path prefix for a stable delta key.
+        errs: list[str] = []
+        for ln in (proc.stderr or "").splitlines():
+            s = ln.strip()
+            if s and (s.startswith(tmp_path) or "Error" in s or "Warning" in s):
+                # Normalize the temp path out so the message is path-independent.
+                errs.append(s.replace(tmp_path, "<file>"))
+        return errs or [(proc.stderr or "py_compile failed").strip()]
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+def compute_diagnostic_delta(
+    baseline_errors: list[str], after_errors: list[str]
+) -> list[str]:
+    """The errors in ``after`` that were NOT in ``baseline`` (#7).
+
+    The shared no-worse-than-before primitive: every diagnostic check that can
+    delta-compare (LSP, cargo, py_compile) reduces to a message-set difference —
+    "what errors does the candidate introduce that the blanked-baseline didn't
+    already have?". This centralizes that set-difference so the four independent
+    helpers stop re-implementing it and a unified ``introduced_diagnostics``
+    feature can be derived consistently.
+
+    Errors are compared by message string (normalized: stripped). Position
+    (line/column) is intentionally NOT part of the key — a merge that moves a
+    pre-existing error to a new line is not "new", but a genuinely new message
+    is. Returns the new messages (order preserved, deduplicated).
+    """
+    baseline = {str(m).strip() for m in baseline_errors if str(m).strip()}
+    seen: set[str] = set()
+    new_errors: list[str] = []
+    for m in after_errors:
+        key = str(m).strip()
+        if key and key not in baseline and key not in seen:
+            seen.add(key)
+            new_errors.append(key)
+    return new_errors
+
+
+
 def _compile_rust(
     source: str, *, rustc_path: str = "rustc", edition: str = "2021"
 ) -> tuple[bool, str]:
@@ -1540,15 +1605,34 @@ class VerificationEngine:
         syntax_ok = True
         if language == "python":
             syntax_checked = True
-            ok, msg = _compile_python(whole)
-            syntax_ok = ok
-            if not ok and self.config.require_syntax_if_supported:
+            # No-worse-than-before delta (#7): compare the candidate's py_compile
+            # errors against the blanked-baseline's, so a merge is rejected only
+            # for a syntax error IT introduces — not a pre-existing one outside
+            # the conflict region. The delta is ONLY trusted when the baseline
+            # compiles cleanly: if the blanked conflict itself has errors (e.g.
+            # two top-level ``return`` statements from juxtaposed sides — the
+            # cross-unit case), we can't tell pre-existing from merge-introduced,
+            # so we fall back to the strict floor (any candidate error fails).
+            after_errs = _py_compile_errors(whole)
+            baseline_errs = (
+                _py_compile_errors(_blank_markers(original, "python"))
+                if contains_markers(original) else []
+            )
+            if baseline_errs:
+                # Baseline itself is broken → can't delta safely → strict floor.
+                new_errs = after_errs
+            else:
+                new_errs = compute_diagnostic_delta(baseline_errs, after_errs)
+            syntax_ok = not new_errs
+            features["syntax_new_error_count"] = len(new_errs)
+            if new_errs and self.config.require_syntax_if_supported:
                 hard.append(
                     VerificationFailure(
                         validator="syntax",
                         severity="error",
-                        message=msg,
-                        detail={},
+                        message=f"py_compile: {len(new_errs)} new error(s): "
+                        + "; ".join(new_errs[:3]),
+                        detail={"new_errors": new_errs[:5]},
                     )
                 )
         elif language == "rust":
@@ -1665,6 +1749,15 @@ class VerificationEngine:
         passed = len(hard) == 0
         features["hard_failure_count"] = len(hard)
         features["warning_count"] = 0
+        # Unified no-worse-than-before rollup (#7): the total NEW diagnostics the
+        # candidate introduced across every delta-aware check (syntax/lsp/clippy).
+        # Each check records its own ``<check>_new_error_count``; this is the
+        # single number a future unattended-accept policy (#10) can gate on.
+        features["introduced_diagnostics"] = (
+            int(features.get("syntax_new_error_count", 0) or 0)
+            + int(features.get("lsp_new_error_count", 0) or 0)
+            + int(features.get("clippy_new_finding_count", 0) or 0)
+        )
         return VerificationResult(
             candidate_id=file_id,
             unit_id=file_id,
@@ -1730,22 +1823,25 @@ class VerificationEngine:
             features["syntax_passed"] = True
             return False
         features["syntax_checked"] = True
-        # New errors = after errors absent from the baseline (by message).
-        baseline_msgs = {d.message for d in baseline.errors}
-        new_errors = [d for d in after.errors if d.message not in baseline_msgs]
+        # New errors = after errors absent from the baseline (by message), via the
+        # shared no-worse-than-before delta (#7).
+        new_errors = compute_diagnostic_delta(
+            [d.message for d in baseline.errors],
+            [d.message for d in after.errors],
+        )
         syntax_ok = len(new_errors) == 0
         features["syntax_passed"] = syntax_ok
         features["syntax_tool"] = "cargo"
         features["syntax_new_error_count"] = len(new_errors)
         if new_errors and self.config.require_syntax_if_supported:
-            msg = "; ".join(d.message[:80] for d in new_errors[:3])
+            msg = "; ".join(m[:80] for m in new_errors[:3])
             hard.append(
                 VerificationFailure(
                     validator="syntax",
                     severity="error",
                     message=f"cargo check: {len(new_errors)} new error(s): {msg}",
                     detail={
-                        "new_errors": [d.message for d in new_errors[:5]],
+                        "new_errors": new_errors[:5],
                         "tool": "cargo",
                     },
                 )
@@ -1820,21 +1916,23 @@ class VerificationEngine:
             elif target_path.exists():
                 target_path.unlink(missing_ok=True)
         features["syntax_checked"] = True
-        baseline_msgs = {d.message for d in baseline.errors}
-        new_errors = [d for d in after.errors if d.message not in baseline_msgs]
+        new_errors = compute_diagnostic_delta(
+            [d.message for d in baseline.errors],
+            [d.message for d in after.errors],
+        )
         syntax_ok = len(new_errors) == 0
         features["syntax_passed"] = syntax_ok
         features["syntax_tool"] = "cargo"
         features["syntax_new_error_count"] = len(new_errors)
         if new_errors and self.config.require_syntax_if_supported:
-            msg = "; ".join(d.message[:80] for d in new_errors[:3])
+            msg = "; ".join(m[:80] for m in new_errors[:3])
             hard.append(
                 VerificationFailure(
                     validator="syntax",
                     severity="error",
                     message=f"cargo check: {len(new_errors)} new error(s): {msg}",
                     detail={
-                        "new_errors": [d.message for d in new_errors[:5]],
+                        "new_errors": new_errors[:5],
                         "tool": "cargo",
                         "manifest": True,
                     },
@@ -1914,21 +2012,21 @@ class VerificationEngine:
             elif target_path.exists():
                 target_path.unlink(missing_ok=True)
         baseline_msgs = (
-            {d.message for d in baseline.diagnostics} if baseline.checked else set()
+            [d.message for d in baseline.diagnostics] if baseline.checked else []
         )
-        new_findings = [
-            d for d in after.diagnostics if d.message not in baseline_msgs
-        ]
+        new_findings = compute_diagnostic_delta(
+            baseline_msgs, [d.message for d in after.diagnostics]
+        )
         features["clippy_new_finding_count"] = len(new_findings)
         if new_findings:
             severity = self.config.clippy_severity
-            msg = "; ".join(d.message[:80] for d in new_findings[:3])
+            msg = "; ".join(m[:80] for m in new_findings[:3])
             check = VerificationCheckResult(
                 name="clippy",
                 passed=severity != "error",
                 severity=severity,
                 message=f"clippy: {len(new_findings)} new finding(s): {msg}",
-                detail={"findings": [d.message for d in new_findings[:5]]},
+                detail={"findings": new_findings[:5]},
                 features={"clippy_new_findings": True},
             )
             # Reuse the hard/warning classification: error severity → hard fail.
@@ -2002,19 +2100,22 @@ class VerificationEngine:
             return
         features["lsp_checked"] = True
         features["lsp_error_count"] = after.error_count
-        # New errors = after errors not present in baseline (by message).
-        baseline_msgs = {d.message for d in baseline.errors}
-        new_errors = [d for d in after.errors if d.message not in baseline_msgs]
+        # New errors = after errors not present in baseline (by message), via the
+        # shared no-worse-than-before delta (#7).
+        new_errors = compute_diagnostic_delta(
+            [d.message for d in baseline.errors],
+            [d.message for d in after.errors],
+        )
         features["lsp_new_error_count"] = len(new_errors)
         if new_errors:
-            msg = "; ".join(d.message[:80] for d in new_errors[:3])
+            msg = "; ".join(m[:80] for m in new_errors[:3])
             hard.append(
                 VerificationFailure(
                     validator="lsp_diagnostics",
                     severity="error",
                     message=f"LSP introduced {len(new_errors)} new error(s): {msg}",
                     detail={
-                        "new_errors": [d.message for d in new_errors[:5]],
+                        "new_errors": new_errors[:5],
                         "tool": after.tool,
                     },
                 )
