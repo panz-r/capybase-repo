@@ -563,6 +563,13 @@ _CANDIDATE_MECHANISMS: tuple[tuple[str, Any], ...] = (
 # enough that self-consistency/variants have samples to agree over.
 _MECHANISM_EVAL_SAMPLES = 3
 
+# Minimum corpus size below which mechanism A/B selection is refused. With a
+# small corpus a single noisy case can flip a mechanism on/off (n_correct is an
+# integer in [0, len(corpus)]), so below this floor ``probe_mechanisms`` leaves
+# ALL multi-sample mechanisms off (samples=1) and records why — it does not
+# guess. Bumping the corpus past this floor re-enables selection automatically.
+_MIN_CORPUS_FOR_MECHANISM_SELECTION = 15
+
 
 def probe_mechanisms(
     client: Any, model_cfg: ModelConfig, *, base_cfg: ModelConfig
@@ -578,9 +585,33 @@ def probe_mechanisms(
     Every eval resolves the full corpus; a mechanism that errors during its eval
     is treated as "off" (graceful — never aborts calibration). Returns the
     winning choices + a ProbeResult summarizing the decisions.
+
+    Below ``_MIN_CORPUS_FOR_MECHANISM_SELECTION`` the corpus is too small to
+    A/B-select confidently (a single noisy case can flip a mechanism on/off), so
+    all mechanisms are left off (samples=1) and the refusal is recorded — it
+    never guesses.
     """
+    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
+
     choices = MechanismChoices()
     decisions: list[str] = []
+
+    if len(CALIBRATION_CONFLICTS) < _MIN_CORPUS_FOR_MECHANISM_SELECTION:
+        # Too few cases to trust a one-case correctness difference. Leave every
+        # multi-sample mechanism off and report the refusal so the user knows
+        # selection was skipped for this reason (not that nothing helped).
+        n = len(CALIBRATION_CONFLICTS)
+        decisions.append(
+            f"corpus too small for confident selection ({n} < "
+            f"{_MIN_CORPUS_FOR_MECHANISM_SELECTION} min); leaving all mechanisms off"
+        )
+        return (
+            ProbeResult(
+                "mechanisms", ok=False,
+                detail="; ".join(decisions),
+            ),
+            choices,
+        )
 
     # Base resolution config: all mechanisms off, samples=1.
     off_base = base_cfg.model_copy(update={

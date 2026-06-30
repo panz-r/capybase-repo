@@ -9,6 +9,18 @@ blessed text. This is the only non-self-referential quality signal: it is
 checked against merges authored here, not against the model's self-report or
 capybase's own accept/reject decision.
 
+Coverage spans the shapes that stress *engine-level* mechanisms (the ones
+calibration A/B-selects): union-combines, Rust syntax (struct fields + impl
+methods), multi-hunk same-file, import/dependency combine, duplicate-symbol
+tension, semantically-incompatible same-line edits, and modify/delete
+keeper-wins. NOTE: this corpus is broad on conflict *shape* but not yet
+statistically robust — ``probe_mechanisms`` refuses to A/B-select expensive
+mechanisms below a minimum corpus size (see ``_MIN_CORPUS_FOR_MECHANISM_SELECTION``),
+so a too-small corpus leaves mechanisms off rather than flipping them on noise.
+The orchestrator-level mechanisms (structural resolution, block-capture) are NOT
+exercised here — calibration resolves through the engine, not the orchestrator —
+so they are always on by default and not subject to this selection.
+
 Conventions (mirror ``tests/conftest.py::multi_unit_conflicted_repo``):
 - Each ``CalibrationConflict`` carries ONE ``ConflictUnit`` (single-hunk; the
   corpus favors breadth of conflict *shape* over multi-hunk files, since
@@ -132,6 +144,135 @@ CALIBRATION_CONFLICTS: list[CalibrationConflict] = [
         replayed="- feature A\n- feature C",
         original="- feature A",
         expected="- feature A\n- feature B\n- feature C",
+    ),
+    # 6. Rust struct-field merge: both sides add a distinct field to a struct
+    #    body. Correct merge keeps both fields. Exercises Rust indentation/
+    #    trailing-comma conventions (a naive merge drops a comma or a field).
+    _conflict(
+        title="rust-struct-fields",
+        unit_id="rust-struct-0", path="config.rs", language="rust",
+        base="pub struct Config {\n    pub name: String,\n}",
+        current="pub struct Config {\n    pub name: String,\n    pub max_retries: u32,\n}",
+        replayed="pub struct Config {\n    pub name: String,\n    pub timeout_ms: u32,\n}",
+        original="pub struct Config {\n    pub name: String,\n}",
+        expected="pub struct Config {\n    pub name: String,\n    pub max_retries: u32,\n    pub timeout_ms: u32,\n}",
+    ),
+    # 7. Rust impl-block conflict: both sides add a distinct method to the same
+    #    impl. Correct merge keeps both methods (order-respecting).
+    _conflict(
+        title="rust-impl-methods",
+        unit_id="rust-impl-0", path="service.rs", language="rust",
+        base="impl Service {\n    pub fn start(&self) {}\n}",
+        current="impl Service {\n    pub fn start(&self) {}\n    pub fn stop(&self) {}\n}",
+        replayed="impl Service {\n    pub fn start(&self) {}\n    pub fn restart(&self) {}\n}",
+        original="impl Service {\n    pub fn start(&self) {}\n}",
+        expected="impl Service {\n    pub fn start(&self) {}\n    pub fn stop(&self) {}\n    pub fn restart(&self) {}\n}",
+    ),
+    # 8. Multi-hunk same file: two well-separated regions each edited by both
+    #    sides. Correct merge applies BOTH hunks. Stresses keeping regions
+    #    distinct (a naive single-region merge drops one hunk).
+    _conflict(
+        title="multi-hunk",
+        unit_id="multi-0", path="tuning.py", language="python",
+        base='HOST = "localhost"\nPORT = 8000\n\nDEBUG = False\nLOG_LEVEL = "info"',
+        current='HOST = "0.0.0.0"\nPORT = 8000\n\nDEBUG = False\nLOG_LEVEL = "debug"',
+        replayed='HOST = "localhost"\nPORT = 9000\n\nDEBUG = True\nLOG_LEVEL = "info"',
+        original='HOST = "localhost"\nPORT = 8000\n\nDEBUG = False\nLOG_LEVEL = "info"',
+        expected='HOST = "0.0.0.0"\nPORT = 9000\n\nDEBUG = True\nLOG_LEVEL = "debug"',
+    ),
+    # 9. Import/dependency combine: both sides add a distinct import. Correct
+    #    merge keeps both imports. A naive merge that copies one side drops the
+    #    other's dependency (a real breakage at runtime).
+    _conflict(
+        title="import-combine",
+        unit_id="import-0", path="app.py", language="python",
+        base="import os",
+        current="import os\nimport json",
+        replayed="import os\nimport sys",
+        original="import os",
+        expected="import os\nimport json\nimport sys",
+    ),
+    # 10. Duplicate-symbol tension: both sides add a function whose body extends
+    #     a shared base helper in DIFFERENT ways. Correct merge keeps both
+    #     additions (distinct names), not two copies of one or a clobbering.
+    _conflict(
+        title="distinct-functions",
+        unit_id="dup-0", path="calc.py", language="python",
+        base="def base():\n    return 0",
+        current="def base():\n    return 0\n\ndef add(x, y):\n    return x + y",
+        replayed="def base():\n    return 0\n\ndef mul(x, y):\n    return x * y",
+        original="def base():\n    return 0",
+        expected="def base():\n    return 0\n\ndef add(x, y):\n    return x + y\n\ndef mul(x, y):\n    return x * y",
+    ),
+    # 11. Semantically-incompatible same-line edit: both sides change the SAME
+    #     line to different values. There is no clean union; the correct merge
+    #     takes ONE canonical value (here the upstream/higher value). This is
+    #     the shape where a model that "compromises" (e.g. emits both values)
+    #     is WRONG — it must pick.
+    _conflict(
+        title="same-line-pick",
+        unit_id="pick-0", path="config.py", language="python",
+        base='VERSION = 1',
+        current='VERSION = 2',
+        replayed='VERSION = 3',
+        original='VERSION = 1',
+        expected='VERSION = 3',
+    ),
+    # 12. Config/dict-key combine (mirrors dict-combine but with assignment
+    #     context): both sides add a distinct key to a settings dict. Correct
+    #     merge keeps both keys.
+    _conflict(
+        title="config-keys",
+        unit_id="cfg-0", path="settings.py", language="python",
+        base='OPTIONS = {\n    "verbose": True,\n}',
+        current='OPTIONS = {\n    "verbose": True,\n    "dry_run": False,\n}',
+        replayed='OPTIONS = {\n    "verbose": True,\n    "strict": True,\n}',
+        original='OPTIONS = {\n    "verbose": True,\n}',
+        expected='OPTIONS = {\n    "verbose": True,\n    "dry_run": False,\n    "strict": True,\n}',
+    ),
+    # 13. Modify/delete where the KEEPER wins: upstream deleted a helper block;
+    #     replayed kept AND adapted it. The correct merge keeps the adapted
+    #     keeper (its change is load-bearing). Exercises producing the full
+    #     keeper text (deletion must NOT win here). NOTE: calibration resolves
+    #     through the engine, so this scores the model's ability to reproduce
+    #     the keeper; block-capture (the orchestrator mechanism that would
+    #     splice it verbatim) is not exercised here.
+    _conflict(
+        title="modify-delete-keeper-wins",
+        unit_id="md-keep-0", path="utils.py", language="python",
+        base="def helper():\n    return 1",
+        current="",  # upstream deleted
+        replayed="def helper():\n    return 1  # adapted: documented",
+        original="def helper():\n    return 1",
+        expected="def helper():\n    return 1  # adapted: documented",
+    ),
+    # 14. Long-context combine: a larger block (>40 lines) where both sides
+    #     append distinct constant definitions. Exercises prompt-window handling
+    #     and reliable reproduction of a non-trivial block (the failure mode
+    #     block-capture exists for, here at the engine level).
+    _conflict(
+        title="long-block-combine",
+        unit_id="long-0", path="constants.py", language="python",
+        base="\n".join(f"C{i} = {i}" for i in range(40)),
+        current="\n".join(f"C{i} = {i}" for i in range(40)) + "\n" + "\n".join(f"D{i} = {i}" for i in range(8)),
+        replayed="\n".join(f"C{i} = {i}" for i in range(40)) + "\n" + "\n".join(f"E{i} = {i}" for i in range(8)),
+        original="\n".join(f"C{i} = {i}" for i in range(40)),
+        expected="\n".join(f"C{i} = {i}" for i in range(40))
+        + "\n" + "\n".join(f"D{i} = {i}" for i in range(8))
+        + "\n" + "\n".join(f"E{i} = {i}" for i in range(8)),
+    ),
+    # 15. Rename-with-adaptation flavor: one side renames a symbol's value
+    #     (replayed), the other adds an independent field (current). Correct
+    #     merge takes the rename AND keeps the addition — testing that the model
+    #     doesn't revert a rename while keeping an addition.
+    _conflict(
+        title="rename-plus-add",
+        unit_id="rn-0", path="meta.py", language="python",
+        base='NAME = "old"\nTAG = "v1"',
+        current='NAME = "old"\nTAG = "v1"\nDESC = "service"',
+        replayed='NAME = "new"\nTAG = "v1"',
+        original='NAME = "old"\nTAG = "v1"',
+        expected='NAME = "new"\nTAG = "v1"\nDESC = "service"',
     ),
 ]
 

@@ -500,3 +500,48 @@ def test_probe_mechanisms_degrades_gracefully_on_eval_error():
     assert not result.ok
     assert choices.samples == 1
     assert "off" in result.detail.lower() or "failed" in result.detail.lower()
+
+
+# ---------------------------------------------------------------------------
+# Min-corpus gate: below the floor, probe_mechanisms refuses to A/B-select and
+# leaves all mechanisms off (a too-small corpus can't support a confident
+# one-case correctness difference). Regression guard: as the corpus grows past
+# the floor, selection re-enables automatically.
+# ---------------------------------------------------------------------------
+
+
+def test_probe_mechanisms_refuses_to_select_below_min_corpus(monkeypatch):
+    """With the corpus shrunk below _MIN_CORPUS_FOR_MECHANISM_SELECTION, the
+    probe must leave all mechanisms off and report the refusal — never guess."""
+    from capybase import probes
+    from capybase import calibration_corpus
+    from capybase.probes import probe_mechanisms
+
+    # Shrink the corpus the probe reads below the floor (keep the first 3).
+    small = calibration_corpus.CALIBRATION_CONFLICTS[:3]
+    monkeypatch.setattr(calibration_corpus, "CALIBRATION_CONFLICTS", small)
+    monkeypatch.setattr(probes, "_MIN_CORPUS_FOR_MECHANISM_SELECTION", 15)
+
+    client = CorpusAwareClient()
+    base = ModelConfig(model="vibethink")
+    result, choices = probe_mechanisms(client, base, base_cfg=base)
+    assert choices.samples == 1
+    assert not choices.two_pass
+    assert not choices.enable_self_consistency
+    assert "too small" in result.detail
+
+
+def test_probe_mechanisms_selects_at_or_above_min_corpus():
+    """At the floor the gate passes and the probe runs its normal A/B (here the
+    always-correct client leaves everything off — selection ran, just found no
+    improvement)."""
+    from capybase.probes import _MIN_CORPUS_FOR_MECHANISM_SELECTION, probe_mechanisms
+    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
+
+    # The shipped corpus must be at/above the floor so selection is active.
+    assert len(CALIBRATION_CONFLICTS) >= _MIN_CORPUS_FOR_MECHANISM_SELECTION
+    client = CorpusAwareClient()
+    base = ModelConfig(model="vibethink")
+    result, choices = probe_mechanisms(client, base, base_cfg=base)
+    # The gate did NOT fire (no "too small" refusal).
+    assert "too small" not in result.detail
