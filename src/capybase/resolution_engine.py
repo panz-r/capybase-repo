@@ -1193,6 +1193,7 @@ class ResolutionEngine:
         context: ContextBundle,
         *,
         failures: list[VerificationFailure] | None = None,
+        prev_candidate: CandidateResolution | None = None,
         n_samples: int | None = None,
     ) -> tuple[list[CandidateResolution], ConsensusReport | None]:
         """Generate N samples and reorder so the majority winner is first.
@@ -1207,8 +1208,15 @@ class ResolutionEngine:
 
         ``n_samples`` overrides the config sample count (forwarded to
         ``propose``); used by the orchestrator for difficulty-aware allocation.
+        ``prev_candidate`` (with ``failures``) selects the targeted *repair*
+        prompt on a retry instead of the generic retry prompt — forwarded to
+        ``propose`` so self-consistency retries keep the CEGIS counterexample
+        feedback instead of degrading to a from-scratch retry.
         """
-        candidates = self.propose(unit, context, failures=failures, n_samples=n_samples)
+        candidates = self.propose(
+            unit, context,
+            failures=failures, prev_candidate=prev_candidate, n_samples=n_samples,
+        )
         if len(candidates) <= 1:
             return candidates, None
         ordered, report = rank_by_consensus(candidates, unit.language)

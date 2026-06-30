@@ -428,3 +428,72 @@ def test_tie_break_prefers_higher_consistency_candidate():
     # fact-consistency and loses the tie-break regardless of its confidence.
     assert rep.winner.candidate_id != "c"
     assert rep.winner.candidate_id in ("a", "b")
+
+
+def test_propose_with_consensus_forwards_prev_candidate_to_repair_prompt():
+    """A self-consistency RETRY (failures + prev_candidate) must use the targeted
+    repair prompt, not the generic retry prompt.
+
+    Regression: propose_with_consensus did not accept/forward prev_candidate, so
+    retries under self-consistency dropped the CEGIS counterexample feedback and
+    degraded to a from-scratch retry. For a small local model the targeted repair
+    (show the broken candidate + the specific error) is more valuable than
+    another vote.
+    """
+    from capybase.config import ModelConfig
+    from capybase.conflict_extractor import ConflictUnit
+    from capybase.conflict_model import (
+        CandidateResolution, ConflictSide, VerificationFailure,
+    )
+    from capybase.context_builder import ContextBuilder
+    from capybase.resolution_engine import ResolutionEngine
+
+    captured_prompts: list[str] = []
+
+    class CaptureClient:
+        def __init__(self, text: str):
+            self._text = text
+
+        def complete(self, messages, **kw):
+            from capybase.adapters.llm_openai import LLMResponse
+            # The prompt is the last user message content.
+            captured_prompts.append(messages[-1].get("content", ""))
+            return LLMResponse(
+                text=self._text,
+                raw={"_accumulated": {"finish_reason": "stop"}},
+            )
+
+    cfg = ModelConfig(samples=3)
+    client = CaptureClient('{"resolved_text": "    return 1"}')
+    engine = ResolutionEngine(cfg, client=client)
+    worktree = (
+        "def f():\n<<<<<<< H\n    return 0\n=======\n    return 9\n>>>>>>> b\n"
+    )
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="f.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="def f():\n    pass"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="    return 0"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="    return 9"),
+        original_worktree_text=worktree, marker_span=(1, 5),
+    )
+    prev = CandidateResolution(
+        candidate_id="u:c0", unit_id="u", model_name="fake",
+        prompt_version="cegis_repair.v1", resolved_text="    return BROKEN_ATTEMPT",
+    )
+    failures = [VerificationFailure(validator="syntax", severity="error",
+                                   message="invalid syntax (return BROKEN_ATTEMPT)")]
+
+    engine.propose_with_consensus(
+        unit, ContextBuilder().build(unit),
+        failures=failures, prev_candidate=prev, n_samples=3,
+    )
+    # Every captured prompt must be the targeted REPAIR prompt (carries the
+    # broken candidate verbatim), never the generic retry prompt.
+    assert captured_prompts, "no prompt was sent"
+    for p in captured_prompts:
+        assert "YOUR PREVIOUS ATTEMPT (needs fixing):" in p, (
+            "self-consistency retry used the generic retry prompt instead of the "
+            "targeted repair prompt — prev_candidate was not forwarded"
+        )
+        assert "BROKEN_ATTEMPT" in p  # the broken candidate is shown to the model

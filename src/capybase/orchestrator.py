@@ -2257,9 +2257,12 @@ class Orchestrator:
 
             if difficulty == "simple":
                 # Fast path: one low-temperature sample, no intent pass, no
-                # consensus. Simple isolated hunks resolve trivially.
+                # consensus. Simple isolated hunks resolve trivially. Force
+                # n_samples=1 so a calibrated samples>1 never leaks into the
+                # cheap path (it would otherwise fall back to config.samples).
                 candidates = self.resolution_engine.propose(
-                    unit, context, failures=failures, prev_candidate=prev_candidate
+                    unit, context, failures=failures, prev_candidate=prev_candidate,
+                    n_samples=1,
                 )
             elif failures is None and self.config.model.two_pass and n_complex > 1:
                 # Two-pass prompting + consensus: extract intents, then sample
@@ -2276,7 +2279,8 @@ class Orchestrator:
             elif self_consistency:
                 candidates, consensus_report = (
                     self.resolution_engine.propose_with_consensus(
-                        unit, context, failures=failures, n_samples=n_complex
+                        unit, context, failures=failures,
+                        prev_candidate=prev_candidate, n_samples=n_complex,
                     )
                 )
             else:

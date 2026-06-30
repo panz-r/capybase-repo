@@ -533,3 +533,85 @@ def test_merge_resolution_features_entropy_none_passthrough():
     assert vec[_FEATURE_KEYS.index("mean_token_entropy")] == 0.0
 
 
+
+
+# ---------------------------------------------------------------------------
+# Model-scoped feature keys (regression: vectorization must use the model's
+# serialized feature_keys, not the global _FEATURE_KEYS, so coefficients align
+# against the features the model was fit on — old/reordered models would
+# otherwise silently misalign).
+# ---------------------------------------------------------------------------
+
+
+def test_features_to_vector_honors_explicit_keys():
+    """features_to_vector must extract in the order of the passed keys, not the
+    global _FEATURE_KEYS."""
+    feats = {"a": 1, "b": True, "c": 2.5}
+    vec = features_to_vector(feats, keys=("a", "b", "c", "missing"))
+    assert vec == [1.0, 1.0, 2.5, 0.0]
+
+
+def test_features_to_vector_default_uses_global_keys_with_conflict_severity():
+    """The global _FEATURE_KEYS now includes conflict_severity (it was recorded
+    by the orchestrator but absent from the vector — the calibrated model
+    couldn't learn from it)."""
+    assert "conflict_severity" in _FEATURE_KEYS
+    vec = features_to_vector({"conflict_severity": 2})
+    idx = _FEATURE_KEYS.index("conflict_severity")
+    assert vec[idx] == 2.0
+
+
+def test_calibration_model_vectorizes_against_its_own_feature_keys():
+    """A model fit with a custom (reordered/subset) feature order must align
+    its coefficients against THAT order, not the global one.
+
+    Two models with swapped key order and swapped coefficients must give the
+    SAME prediction on the same features — proving the coefficients track the
+    model's keys, not a fixed global order.
+    """
+    keys_ab = ("feat_a", "feat_b")
+    keys_ba = ("feat_b", "feat_a")
+    feats = {"feat_a": 1.0, "feat_b": 0.0}
+    # model1: weight 5 on feat_a, 0 on feat_b → z = 5*1 = 5
+    m1 = CalibrationModel(
+        coefficients=[5.0, 0.0], intercept=0.0, threshold=0.5,
+        feature_keys=keys_ab,
+    )
+    # model2: SAME fit but keys recorded in swapped order → coefficients swap
+    # too. predict_proba must be identical (it's the same model).
+    m2 = CalibrationModel(
+        coefficients=[0.0, 5.0], intercept=0.0, threshold=0.5,
+        feature_keys=keys_ba,
+    )
+    assert m1.predict_proba(feats) == m2.predict_proba(feats)
+
+
+def test_calibration_model_with_mismatched_lengths_degrades_neutrally():
+    """A corrupt model (coefficients != feature_keys length) must return a
+    neutral 0.5 prediction — never crash, never silently misalign."""
+    import warnings
+
+    bad = CalibrationModel(
+        coefficients=[1.0, 2.0, 3.0], intercept=0.0, threshold=0.5,
+        feature_keys=("only_one_key",),  # 3 coefs, 1 key → mismatch
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        proba = bad.predict_proba({"only_one_key": 5.0})
+    assert proba == 0.5
+
+
+def test_conformal_risk_model_with_mismatched_lengths_degrades_neutrally():
+    """Same guard for ConformalRiskModel."""
+    import warnings
+
+    from capybase.calibration import ConformalRiskModel
+
+    bad = ConformalRiskModel(
+        coefficients=[1.0, 2.0], intercept=0.0, alpha=0.1,
+        feature_keys=("only_one_key",),  # 2 coefs, 1 key → mismatch
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        proba = bad.predict_proba({"only_one_key": 5.0})
+    assert proba == 0.5

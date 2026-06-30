@@ -22,6 +22,7 @@ script (an optional dep), not in the runtime path.
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,13 @@ _FEATURE_KEYS: tuple[str, ...] = (
     "conflict_side_chars",
     "enclosing_node_lines",
     "self_reported_confidence",
+    # Pre-resolution conflict severity (survey §3.3): low=0/medium=1/high=2,
+    # computed at extraction from hunk size + definition-touching + same-line
+    # overlap. Recorded onto the feature spine by the orchestrator; the rules
+    # risk engine already consumes it, so it belongs in the calibrated model's
+    # vector too. Old stored models carry their own (shorter) feature_keys, so
+    # adding this key here never breaks a loaded model.
+    "conflict_severity",
     # TECP token-entropy (survey §4.1): the model-side uncertainty signal,
     # reduced from the API's per-token logprobs at the adapter seam and carried
     # onto each candidate. Unlike the process-side signals above, this is a
@@ -90,13 +98,19 @@ _FEATURE_KEYS: tuple[str, ...] = (
 )
 
 
-def features_to_vector(features: dict[str, Any]) -> list[float]:
+def features_to_vector(
+    features: dict[str, Any], keys: tuple[str, ...] = _FEATURE_KEYS
+) -> list[float]:
     """Extract a fixed-order numeric feature vector from a features dict.
 
     Booleans become 0.0/1.0; ints/floats pass through; missing keys are 0.0.
+    ``keys`` selects the feature order; a loaded model MUST pass its own
+    serialized ``feature_keys`` so coefficients line up against the features
+    the model was fit on. The default is the current ``_FEATURE_KEYS`` (used
+    only when fitting a new model or when a caller has no serialized keys).
     """
     out: list[float] = []
-    for key in _FEATURE_KEYS:
+    for key in keys:
         val = features.get(key, 0)
         if isinstance(val, bool):
             out.append(1.0 if val else 0.0)
@@ -122,7 +136,19 @@ class CalibrationModel:
     feature_keys: tuple[str, ...] = _FEATURE_KEYS
 
     def predict_proba(self, features: dict[str, Any]) -> float:
-        vec = features_to_vector(features)
+        # Vectorize against THIS model's serialized feature_keys (not the
+        # global _FEATURE_KEYS) so coefficients line up against the features
+        # the model was fit on. A length mismatch (corrupt/hand-edited model)
+        # degrades to a neutral prediction rather than silently misaligning.
+        if len(self.coefficients) != len(self.feature_keys):
+            warnings.warn(
+                f"CalibrationModel has {len(self.coefficients)} coefficients but "
+                f"{len(self.feature_keys)} feature_keys; returning a neutral "
+                f"prediction (the model is corrupt/unsupported).",
+                stacklevel=2,
+            )
+            return 0.5
+        vec = features_to_vector(features, self.feature_keys)
         z = self.intercept
         for w, x in zip(self.coefficients, vec):
             z += w * x
@@ -217,7 +243,16 @@ class ConformalRiskModel:
         candidate that is MORE atypical than the bulk gets a LOW p-value
         (outlier → escalate via ``should_escalate`` when ``< alpha``).
         """
-        vec = features_to_vector(features)
+        # Vectorize against THIS model's feature_keys (see CalibrationModel).
+        if len(self.coefficients) != len(self.feature_keys):
+            warnings.warn(
+                f"ConformalRiskModel has {len(self.coefficients)} coefficients but "
+                f"{len(self.feature_keys)} feature_keys; returning a neutral "
+                f"prediction (the model is corrupt/unsupported).",
+                stacklevel=2,
+            )
+            return 0.5
+        vec = features_to_vector(features, self.feature_keys)
         z = self.intercept
         for w, x in zip(self.coefficients, vec):
             z += w * x

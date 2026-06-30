@@ -275,7 +275,8 @@ class FakeConsensusEngine:
             entropy=0.0,
         )
 
-    def propose_with_consensus(self, unit, context, *, failures=None, n_samples=None):
+    def propose_with_consensus(self, unit, context, *, failures=None,
+                               prev_candidate=None, n_samples=None):
         return list(self._candidates), self._report
 
 
@@ -786,3 +787,47 @@ def test_context_built_event_has_empty_scores_when_rag_disabled(conflicted_repo)
     assert built
     assert built[0].payload["retrieval_scores"] == []
 
+
+
+# ---------------------------------------------------------------------------
+# Difficulty-aware routing: the "simple" fast path must use exactly ONE sample
+# even when config.model.samples > 1 (a calibrated profile must not leak into
+# the cheap path). Regression: the simple branch called propose() with no
+# n_samples, falling back to config.samples (3 if calibrated).
+# ---------------------------------------------------------------------------
+
+
+class CountingClient:
+    """FakeClient that counts complete() calls and returns one fixed payload."""
+
+    def __init__(self, payload: str):
+        self.payload = payload
+        self.calls = 0
+
+    def complete(self, messages, *, model, temperature, max_tokens, json_mode):
+        self.calls += 1
+        return LLMResponse(text=self.payload)
+
+
+def test_simple_routing_uses_one_sample_even_when_samples_is_three(conflicted_repo):
+    """A simple conflict must generate exactly ONE candidate regardless of
+    config.model.samples — the fast path forces n_samples=1."""
+    repo = conflicted_repo["repo"]
+    cfg = _config(repo)
+    cfg.routing.enabled = True  # classify difficulty; small conflict → "simple"
+    cfg.model.samples = 3  # would cost 3 generations if the simple path leaked
+    payload = _make_resolved_payload("    return 'hi' + 'howdy'")
+    client = CountingClient(payload)
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert not result.escalated, result.reason
+    # Exactly one LLM call — NOT three. (self-consistency is off here, so no
+    # extra samples; the structural pre-LLM layers don't fire for this shape.)
+    assert client.calls == 1, (
+        f"simple conflict generated {client.calls} candidates, expected 1 "
+        f"(a calibrated samples>1 leaked into the fast path)"
+    )
