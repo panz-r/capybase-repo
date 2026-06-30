@@ -1,28 +1,33 @@
 """Tests for difficulty-aware routing (survey §6.1).
 
-classify_difficulty is a pure function of a ConflictUnit's structural metadata
-and side texts. Simple conflicts (single isolated hunk, small node, short
-sides) take a fast path; complex ones (multi-hunk, large node, large sides)
-get the full test-time pipeline. Disabled by default — opt-in via config.
+The legacy ``classify_difficulty`` now delegates to the first-class
+:class:`capybase.classifier.ConflictClassification` (band + reasons); this file
+covers the routing CONTRACT — the simple/complex label that drives the
+orchestrator's fast path vs full pipeline — plus the orchestrator integration.
+Band/reason detail coverage lives in ``test_classifier.py``.
+
+Under the classifier:
+- a same-line both-modify conflict is ``medium`` → complex (a real conflict
+  needing judgment, not "easy");
+- disjoint/one-sided/deterministically-mergeable conflicts are ``trivial`` →
+  simple;
+- multi-hunk, definition-touching, large, or same-symbol-overlap conflicts are
+  ``medium``/``hard`` → complex.
 """
 
 from __future__ import annotations
 
+from capybase.classifier import classify
 from capybase.conflict_model import ConflictSide, ConflictUnit
-from capybase.routing import RoutingConfig, classify_difficulty
 
 
 def _unit(
     *,
-    sibling_count: int = 0,
-    node_span: tuple[int, int] | None = None,
     base: str = "def f():\n    return 1",
     current: str = "    return 2",
     replayed: str = "    return 3",
+    sibling_count: int = 0,
 ) -> ConflictUnit:
-    meta: dict = {"sibling_count": sibling_count}
-    if node_span is not None:
-        meta["enclosing_node_span"] = list(node_span)
     return ConflictUnit(
         session_id="s", step_index=1, path="app.py", language="python",
         conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
@@ -31,84 +36,58 @@ def _unit(
         replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=replayed),
         original_worktree_text="def f():\n<<<<<<<\n    return 2\n=======\n    return 3\n>>>>>>>\n",
         marker_span=(1, 5),
-        structural_metadata=meta,
+        structural_metadata={"sibling_count": sibling_count},
+    )
+
+
+def _disjoint_unit() -> ConflictUnit:
+    """Both sides add a DISTINCT non-overlapping line → trivial (det-mergeable)."""
+    base = "a = 1\nb = 2\nc = 3\n"
+    current = "a = 1\nx = 9\nb = 2\nc = 3\n"  # add x after a
+    replayed = "a = 1\nb = 2\nc = 3\ny = 8\n"  # add y after c
+    return ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=current),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=replayed),
+        original_worktree_text=base, marker_span=(1, 1),
+        structural_metadata={"sibling_count": 0},
     )
 
 
 # ---------------------------------------------------------------------------
-# Classifier: all signal combinations
+# Label contract: simple vs complex (drives the orchestrator fast path)
 # ---------------------------------------------------------------------------
 
 
-def test_simple_isolated_hunk():
-    """Single hunk, small node, short sides → simple."""
-    u = _unit(node_span=(1, 5))  # 5-line node
-    assert classify_difficulty(u) == "simple"
+def test_same_line_both_modify_is_complex():
+    """A same-line both-modify conflict is medium → complex (needs judgment)."""
+    assert classify(_unit()).difficulty == "complex"
+    assert classify(_unit()).band == "medium"
 
 
-def test_multi_hunk_file_is_complex():
-    """sibling_count > 0 → complex (the documented multi-hunk failure mode)."""
-    u = _unit(sibling_count=1, node_span=(1, 5))
-    assert classify_difficulty(u) == "complex"
+def test_disjoint_insertions_are_simple():
+    """Disjoint non-overlapping edits are trivial → simple (deterministically
+    mergeable, zero LLM judgment needed)."""
+    c = classify(_disjoint_unit())
+    assert c.difficulty == "simple"
+    assert c.band == "trivial"
 
 
-def test_large_enclosing_node_is_complex():
-    """Node larger than max_simple_node_lines → complex."""
-    u = _unit(node_span=(1, 50))  # 50-line node, default threshold 40
-    assert classify_difficulty(u) == "complex"
+def test_one_sided_change_is_simple():
+    """One side changed, the other conceded → trivial → simple."""
+    base = "def f():\n    return 1\n"
+    u = _unit(base=base, current="def f():\n    return 2\n", replayed=base)
+    c = classify(u)
+    assert c.difficulty == "simple"
+    assert c.band == "trivial"
 
 
-def test_node_at_threshold_is_simple():
-    """Node exactly at the threshold (inclusive) → simple (>, not >=)."""
-    u = _unit(node_span=(1, 40))  # 40 lines == threshold 40
-    assert classify_difficulty(u) == "simple"
-
-
-def test_large_side_text_is_complex():
-    """Combined side text above max_simple_side_chars → complex."""
-    big = "x" * 500
-    u = _unit(base=big, current=big, replayed=big)  # 1500 chars > 1200
-    assert classify_difficulty(u) == "complex"
-
-
-def test_no_node_metadata_uses_other_signals():
-    """Missing enclosing_node_span falls through to side-text/sibling checks."""
-    u = _unit()  # no node_span, short sides, no siblings
-    assert classify_difficulty(u) == "simple"
-
-
-def test_disabled_thresholds_make_everything_simple():
-    """Custom config that relaxes thresholds → a large hunk becomes simple."""
-    u = _unit(sibling_count=0, node_span=(1, 200))
-    cfg = RoutingConfig(
-        enabled=True,
-        complex_if_sibling_count_gt=0,
-        max_simple_node_lines=500,  # very lenient
-        max_simple_side_chars=10_000,
-    )
-    assert classify_difficulty(u, cfg) == "simple"
-
-
-def test_sibling_threshold_respects_config():
-    """complex_if_sibling_count_gt=2 → 1 sibling is still simple."""
-    u = _unit(sibling_count=1, node_span=(1, 5))
-    cfg = RoutingConfig(
-        enabled=True, complex_if_sibling_count_gt=2,
-        max_simple_node_lines=40, max_simple_side_chars=1200,
-    )
-    assert classify_difficulty(u, cfg) == "simple"
-
-
-def test_non_numeric_sibling_count_treated_as_zero():
-    u = _unit()
-    u.structural_metadata["sibling_count"] = "garbage"
-    assert classify_difficulty(u) == "simple"
-
-
-def test_malformed_node_span_ignored():
-    u = _unit()
-    u.structural_metadata["enclosing_node_span"] = ["not", "numeric"]
-    assert classify_difficulty(u) == "simple"
+def test_classification_carries_reasons():
+    """Every classification carries human-readable reasons for the band."""
+    c = classify(_unit())
+    assert c.reasons, "expected non-empty reasons for a medium conflict"
 
 
 # ---------------------------------------------------------------------------
@@ -116,19 +95,16 @@ def test_malformed_node_span_ignored():
 # ---------------------------------------------------------------------------
 
 
-def test_orchestrator_simple_unit_uses_fast_path(conflicted_repo):
-    """A simple conflict (single hunk, short) takes the fast path: one sample,
-    no two-pass, no consensus — when routing is enabled."""
+def test_orchestrator_disjoint_unit_uses_fast_path(repo):
+    """A deterministically-mergeable conflict routes to the fast path: the
+    structural resolver merges it with ZERO LLM calls (the trivial band)."""
     import json
 
     from capybase.config import Config
     from capybase.orchestrator import Orchestrator
-
-    repo = conflicted_repo["repo"]
+    from capybase.resolution_engine import ResolutionEngine
 
     class CountingClient:
-        """Records how many complete() calls were made."""
-
         def __init__(self, payload):
             self.calls = 0
             self._payload = payload
@@ -136,31 +112,43 @@ def test_orchestrator_simple_unit_uses_fast_path(conflicted_repo):
         def complete(self, messages, **kw):
             self.calls += 1
             from capybase.adapters.llm_openai import LLMResponse
-
             return LLMResponse(text=self._payload)
 
-    payload = json.dumps(
-        {"resolved_text": "    return 'hi' + 'howdy'", "explanation": "m"}
-    )
+    payload = json.dumps({"resolved_text": "x = 9", "explanation": "m"})
     client = CountingClient(payload)
-    from capybase.resolution_engine import ResolutionEngine
-
     cfg = Config()
     cfg.model.model = "fake"
     cfg.tests.required = False
     cfg.tests.pre_continue = "true"
     cfg.tests.final = "true"
-    # Enable routing; the single-hunk short conflict is simple → ONE call.
     cfg.routing.enabled = True
+    cfg.model.samples = 3  # would cost 3 if the path weren't trivial
     engine = ResolutionEngine(cfg.model, client=client)
     orch = Orchestrator(
         cfg, repo=str(repo), resolution_engine=engine,
         out=lambda *_a, **_k: None,
     )
-    result = orch.run()
+    # Build a real disjoint conflict in the repo so capybase rebases into it.
+    from tests.conftest import git
+    (repo / "app.py").write_text("a = 1\nb = 2\nc = 3\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
+    git(repo, "branch", "feat")
+    git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text("a = 1\nb = 2\nc = 3\ny = 8\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "feat: add y")
+    git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text("a = 1\nx = 9\nb = 2\nc = 3\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "main: add x")
+    git(repo, "checkout", "-q", "feat")
+
+    result = orch.rebase("main")
     assert not result.escalated, result.reason
-    # Simple fast path: exactly one LLM call (no intent pass, no N samples).
-    assert client.calls == 1
+    # Trivial/deterministically-mergeable → the structural resolver handled it
+    # with ZERO LLM calls (the cheap path won).
+    assert client.calls == 0, (
+        f"disjoint conflict made {client.calls} LLM calls, expected 0 "
+        f"(should be deterministically merged)"
+    )
 
 
 def test_orchestrator_routing_disabled_unchanged(conflicted_repo):
@@ -170,14 +158,13 @@ def test_orchestrator_routing_disabled_unchanged(conflicted_repo):
 
     from capybase.config import Config
     from capybase.orchestrator import Orchestrator
+    from tests.test_orchestrator import CyclingClient
+    from capybase.resolution_engine import ResolutionEngine
 
     repo = conflicted_repo["repo"]
     payload = json.dumps(
         {"resolved_text": "    return 'hi' + 'howdy'", "explanation": "m"}
     )
-    from tests.test_orchestrator import CyclingClient
-    from capybase.resolution_engine import ResolutionEngine
-
     cfg = Config()
     cfg.model.model = "fake"
     cfg.tests.required = False
@@ -221,9 +208,7 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
             self.calls += 1
             return LLMResponse(text=self._payload)
 
-    payload = json.dumps(
-        {"resolved_text": '    "merged"', "explanation": "m"}
-    )
+    payload = json.dumps({"resolved_text": '    "merged"', "explanation": "m"})
     client = CountingClient(payload)
     cfg = Config()
     cfg.model.model = "fake"
@@ -235,11 +220,8 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
     cfg.model.samples_complex = 3    # complex units draw 3
     # The multi-unit file has two DISTINCT hunks needing different resolutions;
     # a single canned payload can't satisfy both. This test measures the SAMPLE
-    # COUNT (the allocation lever), not merge validity, so skip whole-file
-    # syntax validation and the both-sides-represented warning (the canned
-    # payload is deliberately not a real two-sided merge). The dependency-
-    # preservation check (P3) is likewise relaxed — it would flag the same
-    # dropped-content pattern and double the sample count via retries.
+    # COUNT (the allocation lever), not merge validity, so relax the checks that
+    # would otherwise retry and inflate the count.
     cfg.validation.require_whole_file_validation = False
     cfg.validation.reject_if_drops_a_side = False
     cfg.validation.reject_if_drops_referenced_symbol = False
@@ -253,47 +235,3 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
     # Two complex units × 3 samples each = 6 calls. (Without samples_complex it
     # would be 2 × 1 = 2.)
     assert client.calls == 6, client.calls
-
-
-def test_samples_complex_zero_falls_back_to_base(conflicted_repo):
-    """samples_complex = 0 (default) → complex units use the base samples, i.e.
-    behavior is unchanged when the feature is off. A simple unit draws 1."""
-    import json
-
-    from capybase.adapters.llm_openai import LLMResponse
-    from capybase.config import Config
-    from capybase.orchestrator import Orchestrator
-    from capybase.resolution_engine import ResolutionEngine
-
-    repo = conflicted_repo["repo"]  # single hunk → simple
-
-    class CountingClient:
-        def __init__(self, payload):
-            self.calls = 0
-            self._payload = payload
-
-        def complete(self, messages, **kw):
-            self.calls += 1
-            return LLMResponse(text=self._payload)
-
-    payload = json.dumps(
-        {"resolved_text": "    return 'hi' + 'howdy'", "explanation": "m"}
-    )
-    client = CountingClient(payload)
-    cfg = Config()
-    cfg.model.model = "fake"
-    cfg.tests.required = False
-    cfg.tests.pre_continue = "true"
-    cfg.tests.final = "true"
-    cfg.routing.enabled = True
-    cfg.model.samples = 1
-    cfg.model.samples_complex = 0  # disabled
-    engine = ResolutionEngine(cfg.model, client=client)
-    orch = Orchestrator(
-        cfg, repo=str(repo), resolution_engine=engine,
-        out=lambda *_a, **_k: None,
-    )
-    result = orch.run()
-    assert not result.escalated, result.reason
-    # Simple unit fast path → exactly 1 call (samples_complex doesn't apply).
-    assert client.calls == 1

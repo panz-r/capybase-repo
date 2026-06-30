@@ -182,6 +182,18 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
     return StructuralResolution(rule=None, text=None)
 
 
+def deterministically_mergeable(unit: ConflictUnit) -> bool:
+    """Whether the structural resolver can merge ``unit`` with zero LLM calls.
+
+    A pure feasibility probe: runs :func:`resolve_structurally` and reports
+    whether it produced a resolution, WITHOUT committing to it. Used by
+    :mod:`classifier` to mark union-combine / one-sided / identical conflicts
+    ``trivial`` (they need no model judgment) and available to any caller that
+    wants to ask "can this skip the LLM?" cheaply.
+    """
+    return resolve_structurally(unit).resolved
+
+
 def _accept_deletion(base: str, current: str, replayed: str) -> str | None:
     """Accept a deliberate deletion when one side cleanly deleted the block.
 
@@ -366,7 +378,11 @@ def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
         return None
 
     # Disjoint: walk base tokens, applying both sides' replacements at their
-    # spans. An edit at base index i replaces tokens [i, end) with `repl`.
+    # spans. An edit at base index i replaces tokens [i, end) with `repl`. A
+    # PURE INSERTION (i1 == i2) is anchored BEFORE base token i: emit the
+    # insertion, then ALSO emit base[i] and advance (i += 1) — otherwise the
+    # walk sets i=end=i and loops forever. (Two disjoint pure insertions at
+    # different anchors are unambiguous: each lands before its own anchor.)
     merged_ops: dict[int, tuple[int, list[str]]] = {}
     for i1, i2, repl in cur_ops + rep_ops:
         merged_ops[i1] = (i2, repl)
@@ -377,10 +393,22 @@ def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
         if i in merged_ops:
             end, repl = merged_ops[i]
             out.extend(repl)
-            i = end
+            if end > i:
+                # A replace/delete: jump past the consumed base span.
+                i = end
+            else:
+                # A pure insertion: keep base[i] and advance (the insertion
+                # lands before it). Guards against the i=end=i infinite loop.
+                out.append(bt[i])
+                i += 1
         else:
             out.append(bt[i])
             i += 1
+    # Trailing pure insertions anchored AT n (after the last base token) are
+    # recorded at index n, which the loop above (i < n) never reaches. Emit them.
+    if n in merged_ops:
+        _, repl = merged_ops[n]
+        out.extend(repl)
     return _detokenize(out)
 
 

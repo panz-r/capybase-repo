@@ -78,26 +78,15 @@ def _node_lines(unit: "ConflictUnit") -> int | None:
 def classify_difficulty(
     unit: "ConflictUnit", config: RoutingConfig | None = None
 ) -> Difficulty:
-    """Classify a conflict unit as ``simple`` or ``complex``.
+    """Classify a conflict unit as ``simple`` or ``complex`` (legacy label).
 
-    Pure function of the unit's structural metadata and side texts; no I/O, no
-    model call. See module docstring for the decision rules. When ``config`` is
-    None, :class:`RoutingConfig` defaults are used.
+    **Deprecated:** delegates to :func:`capybase.classifier.classify`, which
+    returns the richer band + reasons. This shim keeps the old two-way label
+    (``complex`` ⟺ band ∈ {medium, hard}) for backward compatibility. Prefer
+    ``classify`` directly for new callers that want the band or the reasons. The
+    ``config`` argument is accepted for signature parity and currently unused
+    (the classifier's thresholds are module constants).
     """
-    cfg = config or RoutingConfig()
-    meta = unit.structural_metadata
-    # 1. Multi-hunk file → complex.
-    try:
-        sibling_count = int(meta.get("sibling_count", 0) or 0)
-    except (TypeError, ValueError):
-        sibling_count = 0
-    if sibling_count > cfg.complex_if_sibling_count_gt:
-        return "complex"
-    # 2. Large enclosing node → complex.
-    lines = _node_lines(unit)
-    if lines is not None and lines > cfg.max_simple_node_lines:
-        return "complex"
-    # 3. Large combined side text → complex.
-    if _side_chars(unit) > cfg.max_simple_side_chars:
-        return "complex"
-    return "simple"
+    from capybase.classifier import classify
+
+    return classify(unit).difficulty

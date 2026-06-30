@@ -61,6 +61,10 @@ class UnitOutcome:
     # Difficulty class assigned by the router ("simple" | "complex"), recorded
     # so the calibration model can learn that complex conflicts fail more often.
     difficulty: str | None = None
+    # The full ConflictClassification (band + reasons) when routing ran. Typed
+    # loosely to avoid an import cycle; it's a capybase.classifier.ConflictClassification.
+    # None when routing is disabled (difficulty defaults to "complex").
+    classification: object | None = None
     # Number of attempts made (0 on first-pass accept). Recorded so calibration
     # learns that retries correlate with risk. (= len(attempts) - 1 on accept,
     # or the count at escalation.)
@@ -2207,33 +2211,32 @@ class Orchestrator:
 
             consensus_report = None
             # Difficulty-aware routing (survey §6.1): classify the conflict
-            # before any LLM call. Simple conflicts take a fast path (one
-            # low-temp sample, no two-pass, no consensus); complex ones get the
-            # full test-time pipeline. Disabled (complex=full path for all)
-            # until config.routing.enabled is set.
+            # before any LLM call. The ConflictClassifier returns a richer band
+            # + explainable reasons; the legacy ``simple``/``complex`` label
+            # (band ∈ {medium, hard} ⇒ complex) drives the existing fast path
+            # (one low-temp sample, no two-pass, no consensus) vs the full
+            # pipeline. Disabled (complex=full path for all) until
+            # config.routing.enabled is set.
             difficulty = "complex"
+            classification = None
             if self.config.routing.enabled:
-                from capybase.routing import RoutingConfig as _RC, classify_difficulty
+                from capybase.classifier import classify
 
-                difficulty = classify_difficulty(
-                    unit,
-                    _RC(
-                        enabled=True,
-                        complex_if_sibling_count_gt=(
-                            self.config.routing.complex_if_sibling_count_gt
-                        ),
-                        max_simple_node_lines=self.config.routing.max_simple_node_lines,
-                        max_simple_side_chars=self.config.routing.max_simple_side_chars,
-                    ),
-                )
+                classification = classify(unit)
+                difficulty = classification.difficulty
                 self.journal.emit(
                     "difficulty_classified",
-                    {"difficulty": difficulty},
+                    {
+                        "difficulty": difficulty,
+                        "band": classification.band,
+                        "reasons": classification.reasons,
+                    },
                     step_index=self.step,
                     path=unit.path,
                     unit_id=unit.unit_id,
                 )
             outcome.difficulty = difficulty
+            outcome.classification = classification
 
             # Difficulty-aware sample allocation (survey §4 UAB-lite): complex
             # units draw samples_complex (falling back to the base samples when

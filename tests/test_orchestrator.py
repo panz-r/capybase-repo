@@ -810,26 +810,64 @@ class CountingClient:
 
 
 def test_simple_routing_uses_one_sample_even_when_samples_is_three(conflicted_repo):
-    """A simple conflict must generate exactly ONE candidate regardless of
-    config.model.samples — the fast path forces n_samples=1."""
+    """The simple fast path must force n_samples=1 even when
+    config.model.samples > 1 (a calibrated profile must not leak into the cheap
+    path). Regression: the simple branch called propose() with no n_samples,
+    falling back to config.samples (3 if calibrated).
+
+    Verified by spying on the n_samples argument the engine receives, not by
+    counting complete() calls (those conflate with retry behavior). The pre-LLM
+    layers are disabled so the conflict reaches the LLM simple path directly."""
     repo = conflicted_repo["repo"]
     cfg = _config(repo)
-    cfg.routing.enabled = True  # classify difficulty; small conflict → "simple"
-    cfg.model.samples = 3  # would cost 3 generations if the simple path leaked
-    payload = _make_resolved_payload("    return 'hi' + 'howdy'")
+    cfg.routing.enabled = True  # classify difficulty
+    cfg.future.enable_structural_resolver = False  # reach the LLM path
+    cfg.future.enable_combination_search = False  # isolate the simple LLM path
+    cfg.future.enable_block_capture = False
+    cfg.model.samples = 3  # the value that must NOT leak into the simple path
+    payload = _make_resolved_payload("a = 1\nx = 9\nb = 2\nc = 3")
     client = CountingClient(payload)
     engine = ResolutionEngine(cfg.model, client=client)
     orch = Orchestrator(
         cfg, repo=str(repo), resolution_engine=engine,
         out=lambda *_a, **_k: None,
     )
-    result = orch.run()
-    assert not result.escalated, result.reason
-    # Exactly one LLM call — NOT three. (self-consistency is off here, so no
-    # extra samples; the structural pre-LLM layers don't fire for this shape.)
-    assert client.calls == 1, (
-        f"simple conflict generated {client.calls} candidates, expected 1 "
-        f"(a calibrated samples>1 leaked into the fast path)"
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+    # Disjoint insertion: trivial band (deterministically mergeable) → simple.
+    base = "a = 1\nb = 2\nc = 3\n"
+    worktree = "a = 1\n<<<<<<<\nb = 2\n=======\nx = 9\nb = 2\n>>>>>>>\nc = 3\n"
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE",
+                             text="a = 1\nb = 2\nc = 3\n"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE",
+                              text="a = 1\nx = 9\nb = 2\nc = 3\n"),
+        original_worktree_text=worktree,
+        marker_span=(1, 5),
+        structural_metadata={"sibling_count": 0},
+    )
+    from capybase.classifier import classify
+    assert classify(unit).difficulty == "simple"
+
+    # Spy on propose's n_samples argument.
+    seen_n_samples: list = []
+    real_propose = engine.propose
+
+    def spying_propose(*args, **kwargs):
+        seen_n_samples.append(kwargs.get("n_samples"))
+        return real_propose(*args, **kwargs)
+
+    engine.propose = spying_propose  # type: ignore[method-assign]
+    orch.step = 1
+    orch._resolve_unit(unit)
+    # Every propose() call from the simple path carried n_samples=1, NEVER 3 (or
+    # None, which would fall back to config.samples=3).
+    assert seen_n_samples, "the simple path never called propose()"
+    assert all(n == 1 for n in seen_n_samples), (
+        f"simple path proposed with n_samples={seen_n_samples}, expected all 1 "
+        f"(a calibrated samples>1 leaked into the cheap path)"
     )
 
 
