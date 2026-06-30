@@ -2,11 +2,19 @@
 
 A rebase-conflict resolution agent with research-grade seams.
 
-capybase auto-resolves ordinary UTF-8 text-file `UU` (both-modified) git
-rebase conflicts using a single local OpenAI-compatible language model. It is
-deliberately narrow in what it auto-resolves but designed so that structural
-merge, RAG, verifier models, and calibrated risk can be added later without
-rewriting the orchestrator.
+capybase auto-resolves UTF-8 text-file git rebase conflicts using a single
+local OpenAI-compatible language model:
+
+- **`UU`** — both-modified content conflicts (the common case).
+- **`AU` / `UA`** — whole-file modify/delete conflicts, where one side deleted a
+  file/module and the other modified it (handled via a keep-vs-delete decision,
+  never by guessing).
+
+It owns the entire rebase the way `git rebase` would: preflight, backup branch,
+start, resolve → test → continue, and abort-on-escalation so your branch returns
+to its original HEAD. It is deliberately narrow in what it auto-resolves but
+designed so that verifier models, LoRA, conformal risk, and mutation testing can
+be added later without rewriting the orchestrator.
 
 ## Core invariant
 
@@ -173,17 +181,32 @@ candidate profile without overwriting the default.
 silently reverts to your TOML values (run `recalibrate` for the new one). Delete
 the file to revert entirely. A missing or corrupt profile is a silent no-op.
 
-### Semantic RAG (optional embeddings)
+### RAG few-shot (off by default)
 
-By default, RAG few-shot retrieval is **lexical** (BM25, dependency-free). For
-"same intent, different identifiers" matches that lexical search misses, capybase
-also supports **semantic retrieval** via the `/v1/embeddings` endpoint. Enable it
-by starting your llama-server with an embedding model (`--embeddings`) and running
-`capybase recalibrate` — the probe detects support and records
-`enable_embedding_rag` in the profile; at runtime capybase switches to the
-embedding retriever automatically (falling back to BM25 if the endpoint ever
-fails). Configure the embedding model name separately in `[memory] embeddings_model`
-when your server serves completion + embedding as distinct models.
+RAG experience replay is gated by `[memory] enabled = false` (default). When
+enabled, capybase distills each session's accepted resolutions into a labeled
+corpus and retrieves the most similar past merges as dynamic few-shot examples
+in the next resolve prompt. Three retrievers, selected by `[memory] retriever`:
+
+- **`lexical`** (default) — dependency-free BM25. Good for exact-identifier
+  matches.
+- **`embedding`** — semantic retrieval via the `/v1/embeddings` endpoint. Catches
+  "same intent, different identifiers" that lexical search misses; falls back to
+  BM25 if the endpoint is unavailable.
+- **`hybrid`** — fuses BM25 + embedding ranks (RRF by default, or DBSF).
+
+Set `[memory] embeddings_model` separately when your server serves completion
+and embedding as distinct models. The cosine-similarity floor
+(`[memory] embedding_min_similarity`, default 0.35) gates which embedding
+matches surface; calibrate it for your model:
+
+```bash
+capybase calibrate-embeddings   # sweep the similarity floor, store in the profile
+capybase calibrate-embeddings --dry-run   # print results, write nothing
+```
+
+The calibrated floor + isotonic score transform override the TOML defaults at
+runtime ("profile wins"), like the completion-model profile.
 
 Small local embedding models that pair well with llama.cpp (run as a separate
 `llama-server --embeddings --port 8086` process):
@@ -201,13 +224,17 @@ Small local embedding models that pair well with llama.cpp (run as a separate
 
 The `fixtures/` submodule is a small sample repo with branches that stop on a
 genuine **UU** (both-modified, content) conflict during `git rebase`. It's how
-you exercise capybase end to end without crafting conflicts by hand.
+you exercise capybase end to end without crafting conflicts by hand. (Whole-file
+modify/delete `AU`/`UA` conflicts are exercised by the unit + integration test
+suite in `tests/`, which builds synthetic repos — no modify/delete fixture ships
+here yet.)
 
-| Replayed branch   | Rebase onto         | Conflicts in   | Notes                          |
-|-------------------|---------------------|----------------|--------------------------------|
-| `text-uu-simple`  | `text-uu-upstream`  | `story.txt`    | plain text, single line        |
-| `python-uu`       | `python-uu-upstream`| `app.py`       | Python, indent-sensitive       |
-| `rust-uu`         | `rust-uu-upstream`  | `src/config.rs`| Rust, `impl`-block + struct field merge |
+| Replayed branch   | Rebase onto           | Conflicts in     | Notes                                  |
+|-------------------|-----------------------|------------------|----------------------------------------|
+| `text-uu-simple`  | `text-uu-upstream`    | `story.txt`      | plain text, single line                |
+| `python-uu`       | `python-uu-upstream`  | `app.py`         | Python, indent-sensitive               |
+| `rust-uu`         | `rust-uu-upstream`    | `src/config.rs`  | Rust, `impl`-block + struct field merge |
+| `settings-uu`     | `settings-uu-upstream`| `settings.py`    | multi-hunk: services list + banner + flags |
 
 ```bash
 # 0. one-time checkout (and after a fresh clone)
@@ -215,16 +242,19 @@ git submodule update --init
 
 cd fixtures/
 # 1. create the local tracking branches (clone only checks out `base`)
-git branch text-uu-upstream origin/text-uu-upstream
-git branch python-uu      origin/python-uu
+git branch text-uu-upstream   origin/text-uu-upstream
+git branch python-uu          origin/python-uu
 git branch python-uu-upstream origin/python-uu-upstream
-git branch rust-uu          origin/rust-uu
-git branch rust-uu-upstream origin/rust-uu-upstream
+git branch rust-uu            origin/rust-uu
+git branch rust-uu-upstream   origin/rust-uu-upstream
+git branch settings-uu          origin/settings-uu
+git branch settings-uu-upstream origin/settings-uu-upstream
 
 # 2. land on a conflict
 git checkout python-uu
 git rebase python-uu-upstream      # -> CONFLICT (content) in app.py
 # (or: git checkout rust-uu && git rebase rust-uu-upstream  -> src/config.rs)
+# (or: git checkout settings-uu && git rebase settings-uu-upstream  -> settings.py, multi-hunk)
 
 # 3. resolve it with capybase (from the repo root)
 cd ..
@@ -305,44 +335,84 @@ cases test that the verifier *hooks* fire, not that a standalone file compiles
 
 ```
 src/capybase/
-  cli.py             inspect / manual / run / calibrate / recalibrate
+  cli.py             inspect / manual / run / check / status / rebase /
+                     calibrate / recalibrate / calibrate-embeddings
   orchestrator.py    the state machine; sole Git mutator
   git_backend.py     subprocess git only
-  conflict_model.py  ConflictUnit (+severity), CandidateResolution, VerificationResult, RiskDecision
-  conflict_extractor.py  (+ compute_severity, per-side provenance)
-  context_builder.py
-  resolution_engine.py
-  structural_resolver.py  deterministic pre-LLM resolution (survey §6.4 layer 1)
-  verification.py    validators as plugins
+  conflict_model.py  ConflictUnit (+severity), CandidateResolution,
+                     VerificationResult, RiskDecision
+  conflict_extractor.py  (+ compute_severity, per-side provenance,
+                     modify/delete → whole_file unit, merge-direction labels)
+  merge_intent.py    pure per-side intent labels + silent-resurrection detection
+  resurrection.py    end-of-rebase + per-step resurrection scans (git layer)
+  context_builder.py conflict context windowing + token budgeting
+  resolution_engine.py  LLM prompting, multi-sample, block-capture prompt/parser
+  structural_resolver.py  deterministic pre-LLM resolution (layer 1)
+  sbcr.py            search-based combination resolution (layer 2)
+  consensus.py       self-consistency ranking of sampled resolutions
+  verification.py    validators as plugins + per-file (Phase-B) validation
   risk.py            rules engine -> RiskDecision (consumes severity)
-  probes.py + quality.py + calibration_corpus.py + calibration_profile.py
-                     the calibrate command's probe + scoring + blessed corpus
-  journal.py         JSONL event sourcing + artifacts
+  test_output.py     parse cargo/pytest output into a structured verdict
+  dryrun.py          temp-worktree rebase rehearsal (--dry-run)
+  preflight.py       pre-rebase sanity checks (fail fast before git rebase)
+  color.py           stdlib-only ANSI styling (NO_COLOR/FORCE_COLOR/TTY aware)
+  spinner.py         sticky progress spinner for capybase rebase
+  logging_setup.py   cross-session rotating operational log
   escalation.py      review bundles
-  policy.py          supported/skipped classification
+  policy.py          supported/skipped conflict classification
   session.py         session id + artifact paths
+  stats.py           aggregation helpers
   config.py          capybase.toml -> typed Config
+  probes.py + quality.py + calibration.py +
+    calibration_corpus.py + calibration_profile.py
+                     the calibrate command's probe + scoring + blessed corpus
+  embeddings_calibration.py + embeddings_corpus.py
+                     the calibrate-embeddings command (similarity-floor sweep)
+  routing.py         per-conflict difficulty routing / sample allocation
+  memory/
+    store.py         experience store (journal-derived RAG index)
+    retriever.py     lexical (BM25), embedding, and hybrid retrievers
+    embeddings.py    /v1/embeddings client
   adapters/
-    llm_openai.py    OpenAI-compatible client
-    parsers.py       marker blocks + JSON response parsing
+    llm_openai.py    OpenAI-compatible client (streaming + logprobs)
+    parsers.py       marker blocks + JSON response parsing + splice
     tests.py         test-command runner
+    lsp.py           tree-sitter grammars + rust-analyzer diagnostics
+    structural.py    AST fingerprinting / entity resolution
+    git_diff3.py     git merge-file diff3 marker refinement
+    separator_projection.py  projected-conflict separator heuristic
 ```
 
 ## Resolution layers
 
-A conflict is resolved through a layered pipeline (cheapest/safest first):
+A conflict is resolved through a layered pipeline (cheapest/safest first). Each
+non-LLM layer declines to the next on any doubt, and every accepted result runs
+the full validation pipeline before it's applied — so the earlier layers can
+only cut LLM load, never produce a worse merge.
 
 1. **Deterministic structural resolution** (`[future] enable_structural_resolver`,
    default on) — a model-free pass over base+sides. Provably-safe rules
    (identical sides, one-sided change, disjoint line edits, entity-level and
-   token-level disjoint merge) handle trivial conflicts with **zero LLM calls**.
-   Every result still runs the full validation pipeline; a guess that fails
-   validation falls through, so this can only cut cost/latency, never produce a
-   worse merge.
-2. **LLM resolution** — the model resolves conflicts the structural pass
-   declined, grounded in base + both sides + AST context + RAG few-shot examples.
+   token-level disjoint merge, and a `delete_side` rule that accepts a clean
+   deletion when the other side added nothing) handle trivial conflicts with
+   **zero LLM calls**.
+2. **Combination search** (`[future] enable_combination_search`, default on) —
+   search-based resolution (SBCR): enumerates order-preserving interleavings of
+   the two sides to find a valid combination the structural rules missed. The
+   candidate is validated before acceptance; an invalid combination falls through.
+3. **Block-capture** (`[future] enable_block_capture`, default on) — for large
+   modify/delete conflicts (kept block ≥ `block_capture_min_lines`, default 50)
+   where the model can't reliably reproduce the block. Instead it makes a small
+   **decision** — `accept_deletion` / `keep_block` / `needs_human` — and capybase
+   splices the chosen conflict side **verbatim**. For a whole-file modify/delete,
+   `accept_deletion` runs `git rm`; `keep_block` stages the keeper's content. The
+   model never reproduces the text, so truncation and escaping errors are
+   structurally impossible. `needs_human` (or an unparseable answer) declines —
+   it never guesses.
+4. **LLM resolution** — the model resolves conflicts the pre-LLM layers declined,
+   grounded in base + both sides + AST context + RAG few-shot examples.
    Multi-sample / consensus / two-pass mechanisms are available (see calibrate).
-3. **CEGIS repair** — failures (syntax/AST/splice/LSP/compile) feed back as
+5. **CEGIS repair** — failures (syntax/AST/splice/LSP/compile) feed back as
    counterexamples; the model re-resolves with the broken output + the specific
    failure, bounded by retry policy. A whole-file variant attributes file-level
    errors to the unit at fault.
@@ -356,10 +426,9 @@ engine and the review bundle.
 *did* (added / deleted / modified / unchanged relative to base), so a deliberate
 deletion is never presented as an addition. The review bundle and interactive
 view annotate each side (`CURRENT_UPSTREAM_SIDE — DELETED (was N lines; removed
-by <commit>)`) and the structural resolver has a `delete_side` rule that
-auto-accepts a clean deletion when the other side added nothing — preventing the
-common auto-rebase failure where dead code a branch cleaned up gets merged back
-in.
+by <commit>)`) and the structural resolver's `delete_side` rule auto-accepts a
+clean deletion when the other side added nothing — preventing the common
+auto-rebase failure where dead code a branch cleaned up gets merged back in.
 
 **Silent-resurrection detection.** Git's 3-way merge can resolve *cleanly* (no
 conflict) while resurrecting dead code the target branch deliberately deleted,
@@ -370,7 +439,9 @@ merge-base) and flags any that came back (`validation.enable_resurrection_detect
 default on). On detection, `resurrection_policy = "stop"` (default) halts before
 completing, writes a review bundle with the suspected resurrections, and routes
 to the interactive fallback when a TTY is present; set it to `"warn"` to continue
-but surface the findings (useful in CI).
+but surface the findings (useful in CI). A path that was explicitly kept via a
+modify/delete `keep_block` decision is excluded from this scan — that keep is a
+reviewed resurrection, not a silent undo.
 
 ### Language support
 
@@ -404,8 +475,15 @@ baseline.
 ## Status
 
 MVP (M1+M2+M3). **Python and Rust are both fully supported** end to end —
-structural resolution, AST context, compile-checked verification, and an
-end-to-end fixture (`rust-uu`) for each. Deferred by design but interface-ready:
-AST three-way merge, LoRA, verifier model, conformal risk, mutation testing,
-multi-model ensemble. The `[future]` config section documents these seams and is
-inert.
+structural resolution, combination search, block-capture, AST context,
+compile-checked verification, silent-resurrection detection, and an end-to-end
+fixture (`rust-uu`, `python-uu`, `settings-uu`) for each language.
+
+The `[future]` config section mixes active and interface-only seams. **On by
+default:** `enable_structural_resolver`, `enable_combination_search`,
+`enable_block_capture` (the first three resolution layers). **Off by default
+but wired** (the orchestrator consumes the flag): `enable_rag`,
+`enable_self_consistency`. **Interface-only keys (defined but not yet read):**
+`enable_structural_context`, `enable_verifier_model`, `enable_mutation_testing`.
+**Not yet implemented:** AST three-way merge, LoRA, conformal risk, multi-model
+ensemble.
