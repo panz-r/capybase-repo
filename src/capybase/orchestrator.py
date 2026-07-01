@@ -1820,7 +1820,9 @@ class Orchestrator:
         if plan is None:
             return HistoryQueryService.empty()
         recent_target = self._recent_target_commits(plan)
-        return HistoryQueryService(plan, recent_target_commits=recent_target)
+        return HistoryQueryService(
+            plan, recent_target_commits=recent_target, git=self.git,
+        )
 
     def _recent_target_commits(self, plan, *, max_commits: int = 5) -> list:
         """Recent target-branch commits touching the same files as the source.

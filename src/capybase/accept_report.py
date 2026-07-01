@@ -67,6 +67,8 @@ def build_accept_report(
         lines.extend(_validation_lines(outcome.validation))
         # Consensus, when self-consistency ran (a confidence signal).
         lines.extend(_consensus_lines(outcome))
+        # History-aware evidence (#history step 4): compact history features.
+        lines.extend(_history_lines(outcome))
         lines.append("")
 
     # Step-level test verdict (applies to the whole staged resolution).
@@ -184,3 +186,28 @@ def _test_line(tests_passed: bool | None, test_verdict: str | None) -> str:
     if tests_passed:
         return f"passed{f' ({test_verdict})' if test_verdict else ''}"
     return f"FAILED{f' ({test_verdict})' if test_verdict else ''}"
+
+
+def _history_lines(outcome: "UnitOutcome") -> list[str]:
+    """History-aware evidence (#history step 4): compact replay-position +
+    future-touch signals from the merged features dict. Empty when no history
+    was active."""
+    validation = getattr(outcome, "validation", None)
+    if validation is None:
+        return []
+    feats = getattr(validation, "features", {}) or {}
+    has_ctx = feats.get("history_has_context")
+    if not has_ctx:
+        return []
+    parts: list[str] = []
+    idx = feats.get("history_source_commit_index", -1)
+    total = feats.get("history_source_commit_count", 0)
+    if total and idx >= 0:
+        parts.append(f"replay {idx + 1}/{total}")
+    file_touches = feats.get("history_future_file_touch_count", 0)
+    region_touches = feats.get("history_future_region_touch_count", 0)
+    if region_touches:
+        parts.append(f"{region_touches} future region touch(es)")
+    elif file_touches:
+        parts.append(f"{file_touches} future file touch(es)")
+    return [f"- history: {', '.join(parts)}"] if parts else []

@@ -151,3 +151,250 @@ def test_future_apply_probe_never_raises(repo: Path):
     # applies=True (no patch to fail). Or if the worktree failed → probed=False.
     # Either way, no exception.
     assert isinstance(result, FutureApplyResult)
+
+
+# ---------------------------------------------------------------------------
+# Step 1: Regression tests for the fixed future-probe gating control flow.
+# The bug: run() called continue_rebase() after _run_future_apply_probe without
+# checking result.escalated. Fix: break before continuing when the probe escalates.
+# These test the _run_future_apply_probe method directly (not the full run() loop)
+# since the gating is inside that method + the break in run().
+# ---------------------------------------------------------------------------
+
+
+def test_future_probe_passes_in_unattended_no_escalation(repo, monkeypatch):
+    """A passing probe does NOT escalate, even in unattended mode."""
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator, StepResult, UnitOutcome
+    from capybase.conflict_model import CandidateResolution, ConflictSide, ConflictUnit
+    from capybase.history import FutureApplyResult
+    from capybase.policy_strictness import StrictnessPolicy
+
+    cfg = Config()
+    cfg.policy.policy_mode = "unattended"
+    orch = Orchestrator(cfg, repo=str(repo), out=lambda *_a, **_k: None)
+    orch.strictness = StrictnessPolicy(mode="unattended")
+
+    # A unit with an accepted candidate + future touches.
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="cfg.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="x"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="y"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="z"),
+        original_worktree_text="x", marker_span=(0, 0),
+        structural_metadata={"replayed_commit_oid": "c1"},
+    )
+    cand = CandidateResolution(
+        candidate_id="u:c", unit_id="u", model_name="fake",
+        prompt_version="v", resolved_text="resolved",
+    )
+    outcome = UnitOutcome(unit=unit, validation=None, attempts=[cand])
+    outcome.accepted = cand
+    result = StepResult(step_index=1)
+    result.outcomes = [outcome]
+
+    # Stub: history context with future region touches + a passing probe.
+    from capybase.history import HistoryContext, ReplayCommit
+    good_ctx = HistoryContext(
+        current_replay_commit=ReplayCommit(
+            oid="c1", parent_oid="b", subject="cur", body_summary="",
+            touched_files=["cfg.py"], diffstat={}, patch_id="", index=0,
+        ),
+        source_commit_index=0, source_commit_count=2,
+        previous_source_commits_touching_file=[],
+        future_source_commits_touching_file=[
+            ReplayCommit(oid="c2", parent_oid="c1", subject="future",
+                         body_summary="", touched_files=["cfg.py"],
+                         diffstat={}, patch_id="", index=1),
+        ],
+        future_source_commits_touching_region=[
+            ReplayCommit(oid="c2", parent_oid="c1", subject="future",
+                         body_summary="", touched_files=["cfg.py"],
+                         diffstat={}, patch_id="", index=1),
+        ],
+        recent_target_commits_touching_file=[],
+    )
+    monkeypatch.setattr(orch, "_history_context_for", lambda u: good_ctx)
+    monkeypatch.setattr(orch, "strictness", StrictnessPolicy(mode="unattended"))
+    # Stub the probe to return "passes".
+    import capybase.history as hist_mod
+    monkeypatch.setattr(hist_mod, "future_apply_probe", lambda *a, **kw: FutureApplyResult(
+        probed=True, applies=True, future_commit_subject="future",
+        reason="applies cleanly",
+    ))
+    # Stub read_worktree_file (no actual file).
+    monkeypatch.setattr(orch.git, "read_worktree_file", lambda p: b"resolved")
+
+    orch._history_service = True  # truthy so the method doesn't bail early
+    orch._history_plan = True
+    orch._run_future_apply_probe(result)
+    assert not result.escalated, "passing probe should NOT escalate"
+
+
+def test_future_probe_fails_in_unattended_escalates(repo, monkeypatch):
+    """A failing probe in unattended mode sets result.escalated = True."""
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator, StepResult, UnitOutcome
+    from capybase.conflict_model import CandidateResolution, ConflictSide, ConflictUnit
+    from capybase.history import FutureApplyResult, HistoryContext, ReplayCommit
+    from capybase.policy_strictness import StrictnessPolicy
+
+    cfg = Config()
+    orch = Orchestrator(cfg, repo=str(repo), out=lambda *_a, **_k: None)
+
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="cfg.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="x"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="y"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="z"),
+        original_worktree_text="x", marker_span=(0, 0),
+        structural_metadata={"replayed_commit_oid": "c1"},
+    )
+    cand = CandidateResolution(
+        candidate_id="u:c", unit_id="u", model_name="fake",
+        prompt_version="v", resolved_text="resolved",
+    )
+    outcome = UnitOutcome(unit=unit, validation=None, attempts=[cand])
+    outcome.accepted = cand
+    result = StepResult(step_index=1)
+    result.outcomes = [outcome]
+
+    future_commit = ReplayCommit(
+        oid="c2", parent_oid="c1", subject="future", body_summary="",
+        touched_files=["cfg.py"], diffstat={}, patch_id="", index=1,
+    )
+    good_ctx = HistoryContext(
+        current_replay_commit=future_commit, source_commit_index=0,
+        source_commit_count=2,
+        previous_source_commits_touching_file=[],
+        future_source_commits_touching_file=[future_commit],
+        future_source_commits_touching_region=[future_commit],
+        recent_target_commits_touching_file=[],
+    )
+    monkeypatch.setattr(orch, "_history_context_for", lambda u: good_ctx)
+    monkeypatch.setattr(orch, "strictness", StrictnessPolicy(mode="unattended"))
+    import capybase.history as hist_mod
+    monkeypatch.setattr(hist_mod, "future_apply_probe", lambda *a, **kw: FutureApplyResult(
+        probed=True, applies=False, future_commit_subject="future",
+        reason="does NOT apply cleanly",
+    ))
+    monkeypatch.setattr(orch.git, "read_worktree_file", lambda p: b"resolved")
+    orch._history_service = True
+    orch._history_plan = True
+
+    orch._run_future_apply_probe(result)
+    assert result.escalated, "failing probe in unattended mode MUST escalate"
+    assert "future-apply" in (result.reason or "")
+
+
+def test_future_probe_fails_in_interactive_does_not_escalate(repo, monkeypatch):
+    """A failing probe in interactive mode journals but does NOT escalate."""
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator, StepResult, UnitOutcome
+    from capybase.conflict_model import CandidateResolution, ConflictSide, ConflictUnit
+    from capybase.history import FutureApplyResult, HistoryContext, ReplayCommit
+    from capybase.policy_strictness import StrictnessPolicy
+
+    cfg = Config()
+    orch = Orchestrator(cfg, repo=str(repo), out=lambda *_a, **_k: None)
+
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="cfg.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="x"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="y"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="z"),
+        original_worktree_text="x", marker_span=(0, 0),
+        structural_metadata={"replayed_commit_oid": "c1"},
+    )
+    cand = CandidateResolution(
+        candidate_id="u:c", unit_id="u", model_name="fake",
+        prompt_version="v", resolved_text="resolved",
+    )
+    outcome = UnitOutcome(unit=unit, validation=None, attempts=[cand])
+    outcome.accepted = cand
+    result = StepResult(step_index=1)
+    result.outcomes = [outcome]
+
+    future_commit = ReplayCommit(
+        oid="c2", parent_oid="c1", subject="future", body_summary="",
+        touched_files=["cfg.py"], diffstat={}, patch_id="", index=1,
+    )
+    good_ctx = HistoryContext(
+        current_replay_commit=future_commit, source_commit_index=0,
+        source_commit_count=2,
+        previous_source_commits_touching_file=[],
+        future_source_commits_touching_file=[future_commit],
+        future_source_commits_touching_region=[future_commit],
+        recent_target_commits_touching_file=[],
+    )
+    monkeypatch.setattr(orch, "_history_context_for", lambda u: good_ctx)
+    monkeypatch.setattr(orch, "strictness", StrictnessPolicy(mode="interactive"))
+    import capybase.history as hist_mod
+    monkeypatch.setattr(hist_mod, "future_apply_probe", lambda *a, **kw: FutureApplyResult(
+        probed=True, applies=False, future_commit_subject="future",
+        reason="does NOT apply cleanly",
+    ))
+    monkeypatch.setattr(orch.git, "read_worktree_file", lambda p: b"resolved")
+    orch._history_service = True
+    orch._history_plan = True
+
+    orch._run_future_apply_probe(result)
+    assert not result.escalated, "failing probe in interactive mode should NOT escalate"
+
+
+def test_future_probe_throw_does_not_crash(repo, monkeypatch):
+    """A probe exception is swallowed (no signal, no crash)."""
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator, StepResult, UnitOutcome
+    from capybase.conflict_model import CandidateResolution, ConflictSide, ConflictUnit
+    from capybase.history import HistoryContext, ReplayCommit
+
+    cfg = Config()
+    orch = Orchestrator(cfg, repo=str(repo), out=lambda *_a, **_k: None)
+
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="cfg.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="x"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="y"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="z"),
+        original_worktree_text="x", marker_span=(0, 0),
+        structural_metadata={"replayed_commit_oid": "c1"},
+    )
+    cand = CandidateResolution(
+        candidate_id="u:c", unit_id="u", model_name="fake",
+        prompt_version="v", resolved_text="resolved",
+    )
+    outcome = UnitOutcome(unit=unit, validation=None, attempts=[cand])
+    outcome.accepted = cand
+    result = StepResult(step_index=1)
+    result.outcomes = [outcome]
+
+    future_commit = ReplayCommit(
+        oid="c2", parent_oid="c1", subject="future", body_summary="",
+        touched_files=["cfg.py"], diffstat={}, patch_id="", index=1,
+    )
+    good_ctx = HistoryContext(
+        current_replay_commit=future_commit, source_commit_index=0,
+        source_commit_count=2,
+        previous_source_commits_touching_file=[],
+        future_source_commits_touching_file=[future_commit],
+        future_source_commits_touching_region=[future_commit],
+        recent_target_commits_touching_file=[],
+    )
+    monkeypatch.setattr(orch, "_history_context_for", lambda u: good_ctx)
+    from capybase.policy_strictness import StrictnessPolicy
+    monkeypatch.setattr(orch, "strictness", StrictnessPolicy(mode="unattended"))
+
+    def _boom(*a, **kw):
+        raise RuntimeError("probe crashed")
+    monkeypatch.setattr(orch.git, "read_worktree_file", _boom)
+    orch._history_service = True
+    orch._history_plan = True
+
+    # Should not raise.
+    orch._run_future_apply_probe(result)
+    assert not result.escalated  # no signal → no escalation

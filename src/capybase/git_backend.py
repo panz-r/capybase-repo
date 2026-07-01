@@ -358,16 +358,23 @@ class GitBackend:
         except Exception:  # noqa: BLE001 - advisory
             return b""
 
-    def check_apply(self, patch: bytes) -> bool:
+    def check_apply(self, patch: bytes, *, path_filter: str | None = None) -> bool:
         """Whether ``patch`` applies cleanly to THIS repo/worktree (``git apply --check``).
 
         Stateless: ``--check`` tests the patch without modifying any files or the
         index. Runs via ``git -C <self.repo> apply --check``, so call this on a
         :class:`GitBackend` constructed for the target worktree path. Returns
         False on any apply failure or error (advisory).
+
+        ``path_filter`` (step 3): when set, applies ``--include=<path_filter>`` so
+        only the patch hunks for that file are tested. This eliminates false
+        failures from unrelated files in the same multi-file future commit.
         """
+        args = ["apply", "--check"]
+        if path_filter:
+            args.append(f"--include={path_filter}")
         res = self._run(
-            ["apply", "--check"], what="apply --check",
+            args, what="apply --check",
             input_bytes=patch,
         )
         return res.ok
