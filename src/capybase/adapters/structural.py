@@ -609,9 +609,32 @@ def find_symbol_definitions(
     if not ext or not names:
         return []
     snippets: list[RelatedSnippet] = []
+    # #13: hard caps to prevent resource exhaustion on large/hostile repos.
+    _SKIP_DIRS = {".git", "node_modules", "target", "dist", ".venv", "venv",
+                  "__pycache__", "build", ".mypy_cache", ".pytest_cache"}
+    _MAX_FILES = 50
+    _MAX_FILE_BYTES = 100_000
+    files_scanned = 0
     for pat in search_paths:
         for path in globmod.glob(pat, recursive=True):
+            # Skip files in generated/vendor directories.
+            path_parts = path.replace("\\", "/").split("/")
+            if any(d in _SKIP_DIRS for d in path_parts):
+                continue
+            # Skip symlinks (security + avoids loops).
+            if os.path.islink(path):
+                continue
             if not os.path.isfile(path) or not path.endswith(ext):
+                continue
+            # Cap files scanned.
+            if files_scanned >= _MAX_FILES:
+                break
+            files_scanned += 1
+            # Skip overly large files.
+            try:
+                if os.path.getsize(path) > _MAX_FILE_BYTES:
+                    continue
+            except OSError:
                 continue
             try:
                 with open(path, encoding="utf-8") as fh:
