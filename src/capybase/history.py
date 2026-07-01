@@ -565,7 +565,15 @@ def future_apply_probe(
     worktree_git = None
     is_worktree = False
     try:
-        # 1. Create a throwaway worktree at the current HEAD.
+        # 1. Validate the path is safe (relative, no .. traversal) before writing.
+        rel = Path(resolved_path)
+        if rel.is_absolute() or ".." in rel.parts:
+            return FutureApplyResult(
+                probed=False, applies=True, future_commit_subject="",
+                reason=f"unsafe resolved_path: {resolved_path}",
+            )
+
+        # 2. Create a throwaway worktree at the current HEAD.
         worktree_path = tempfile.mkdtemp(prefix="capybase-futureprobe-")
         try:
             git.add_worktree(worktree_path, detach=True)

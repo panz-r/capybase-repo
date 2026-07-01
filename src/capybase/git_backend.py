@@ -61,8 +61,13 @@ STAGE_REPLAYED = 3
 
 
 class GitBackend:
-    def __init__(self, repo: str | Path = ".", *, check_git: bool = True) -> None:
+    def __init__(self, repo: str | Path = ".", *, check_git: bool = True,
+                 timeout_seconds: float = 0) -> None:
         self.repo = Path(repo).resolve()
+        # #14: optional per-command timeout (0 = disabled, the default for
+        # backward compat). When > 0, subprocess.run gets timeout= and a
+        # TimeoutExpired is caught → GitResult(ok=False, stderr="timed out").
+        self.timeout_seconds = timeout_seconds
         if check_git:
             self._run_ok(["rev-parse", "--git-dir"], what="rev-parse")
 
@@ -86,12 +91,18 @@ class GitBackend:
         if env:
             full_env.update(env)
         cmd = ["git", "-C", str(self.repo), *args]
-        proc = subprocess.run(
-            cmd,
-            input=input_bytes,
-            env=full_env,
-            capture_output=capture,
-        )
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=input_bytes,
+                env=full_env,
+                capture_output=capture,
+                timeout=self.timeout_seconds or None,
+            )
+        except subprocess.TimeoutExpired:
+            return GitResult(
+                ok=False, returncode=-1, stdout="", stderr="git command timed out",
+            )
         res = GitResult(
             ok=proc.returncode == 0,
             returncode=proc.returncode,

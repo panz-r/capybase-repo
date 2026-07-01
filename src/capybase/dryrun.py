@@ -173,12 +173,12 @@ def rehearse_rebase(
     # raises KeyboardInterrupt (so finally runs) — we only need to convert the
     # terminate-style signals. Restored in finally so we don't leak the handler.
     import signal
+    from capybase.adapters.llm_openai import Interrupted
 
     _signals = (signal.SIGTERM, getattr(signal, "SIGHUP", signal.SIGTERM))
     _prev_handlers: dict[int, object] = {}
 
     def _interrupt(signum, _frame):
-        from capybase.adapters.llm_openai import Interrupted
         raise Interrupted(f"capybase interrupted by signal {signum}")
 
     for _sig in _signals:

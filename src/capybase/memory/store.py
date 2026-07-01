@@ -77,8 +77,10 @@ class ExperienceStore:
 
     Records are written under ``store_path`` (default
     ``.rebase-agent/memory/experiences.jsonl``). The store is intentionally
-    simple — one JSON object per line — so it can be grepped, appended to by
-    concurrent processes, and consumed by offline tooling without a database.
+    simple — one JSON object per line — so it can be grepped and consumed by
+    offline tooling without a database. **Not safe for concurrent writes from
+    multiple processes** (no file lock); each capybase session should use its
+    own store path, or the store should be written by a single process.
     """
 
     def __init__(self, store_path: str | Path) -> None:

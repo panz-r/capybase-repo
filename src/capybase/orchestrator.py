@@ -1606,12 +1606,14 @@ class Orchestrator:
         # KeyboardInterrupt; only the terminate-style signals need converting.
         # Restored after the run so the handler doesn't leak.
         import signal
+        # Import once before installing the handler (#15): importing inside a
+        # signal handler can interact badly with import locks.
+        from capybase.adapters.llm_openai import Interrupted
 
         _sigs = (signal.SIGTERM, getattr(signal, "SIGHUP", signal.SIGTERM))
         _prev: dict[int, object] = {}
 
         def _interrupt(signum, _frame):
-            from capybase.adapters.llm_openai import Interrupted
             raise Interrupted(f"capybase interrupted by signal {signum}")
 
         for _sig in _sigs:
@@ -1976,7 +1978,7 @@ class Orchestrator:
                 step_index=self.step, path=unit.path, unit_id=unit.unit_id,
             )
             # Unattended mode gate: a failed probe escalates.
-            if probe_result.probed and not probe_result.applies and self.strictness.unattended:
+            if probe_result.probed and not probe_result.applies and self.strictness.strict:
                 result.escalated = True
                 result.reason = (
                     f"future-apply probe failed: {probe_result.reason}"
@@ -2971,6 +2973,15 @@ class Orchestrator:
                         history_features=self._history_features_for(unit),
                     )
                 )
+                # #11: refresh the retriever so step N+1 sees step N's accepted
+                # example within the same rebase session (without this the
+                # retriever cache is stale until the next process restart).
+                retriever = getattr(self.context_builder, "retriever", None)
+                if retriever is not None and hasattr(retriever, "refresh"):
+                    try:
+                        retriever.refresh()
+                    except Exception:  # noqa: BLE001 - best-effort
+                        pass
             except Exception:  # noqa: BLE001 - memory is best-effort
                 pass
 
