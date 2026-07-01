@@ -636,8 +636,8 @@ class GitBackend:
         try:
             out = self._run_ok(
                 [
-                    "log", "--reverse",
-                    "--format=%H%x09%P%x09%s%x09%b%x00",
+                    "log", "--reverse", "-z",
+                    "--format=%H%x09%P%x09%s%x09%b",
                     "--name-status", f"{base_oid}..{tip_oid}",
                 ],
                 what="log (replayed sequence)",
@@ -647,48 +647,83 @@ class GitBackend:
         return self._parse_replayed_sequence(out)
 
     def _parse_replayed_sequence(self, raw: str) -> list[dict[str, "Any"]]:
-        """Parse ``git log --reverse --format=... --name-status`` output.
+        """Parse ``git log --reverse -z --format=... --name-status`` output.
 
-        The format emits, per commit: a tab-delimited metadata line (oid, parent,
-        subject, body) terminated by NUL, then a blank line, then name-status
-        file lines. No ``commit <oid>`` prefix (``--format`` not ``--pretty``).
-        Returns one dict per commit with the RebasePlan fields (sans ``index``,
-        added by the caller).
+        With ``-z``, git replaces ALL field/record/newline separators with NUL.
+        This means: the metadata body and the name-status entries are ALL
+        NUL-delimited within one commit record, with no newlines. The structure
+        for each commit is: ``<meta_fields_NUL_separated><NUL>status<NUL>path...<NUL>``
+        followed by the next commit's metadata (also NUL-start).
 
-        Parsed as a line-by-line state machine: a line with 4+ tab fields (after
-        stripping NUL) is a metadata line that starts a new commit; name-status
-        lines (2+ tab fields, first is a status code) accumulate into the current
-        commit's touched_files.
+        We split on NUL, then walk the tokens: a token with 4+ tab-separated
+        fields (first is a 40-hex SHA) starts a new commit; subsequent tokens
+        alternate ``status<NUL>path`` for name-status entries. For renames/copies
+        the pattern is ``status<NUL>old_path<NUL>new_path``.
+
+        Returns one dict per commit with the RebasePlan fields (sans ``index``).
+        Rename/copy records (#7) record BOTH old and new paths.
         """
         commits: list[dict[str, "Any"]] = []
-        current: dict[str, "Any"] | None = None
-        for line in raw.splitlines():
-            line = line.replace("\x00", "").rstrip("\r")
-            if not line:
+        tokens = raw.split("\x00")
+        i = 0
+        while i < len(tokens):
+            tok = tokens[i]
+            if not tok or not tok.strip():
+                i += 1
                 continue
-            fields = line.split("\t")
-            # A metadata line has exactly the format fields (oid, parent, subject, body)
-            # → 4+ tab-separated fields where the first looks like a 40-hex SHA.
-            if len(fields) >= 4 and len(fields[0]) == 40 and all(
+            # Strip leading newline (git -z keeps the newline between format
+            # output and name-status) but NOT trailing tabs (which delimit
+            # the empty body field).
+            tok = tok.lstrip("\n")
+            fields = tok.split("\t")
+            # Metadata line: 4+ tab-separated fields, first is a 40-hex SHA.
+            if len(fields) < 4 or len(fields[0]) != 40 or not all(
                 c in "0123456789abcdef" for c in fields[0]
             ):
-                # Start a new commit.
-                if current is not None:
-                    commits.append(current)
-                current = {
-                    "oid": fields[0], "parent_oid": fields[1],
-                    "subject": fields[2].strip(),
-                    "body_summary": " ".join(fields[3].split())[:200],
-                    "touched_files": [], "diffstat": {},
-                    "patch_id": self._patch_id(fields[0]),
-                }
-            elif current is not None and len(fields) >= 2:
-                # A name-status line: "M\tpath" or "R100\told\tnew".
-                path = fields[-1]
-                current["touched_files"].append(path)
-                current["diffstat"][path] = current["diffstat"].get(path, 0) + 1
-        if current is not None:
-            commits.append(current)
+                i += 1
+                continue
+            oid, parent_oid, subject, body = fields[0], fields[1], fields[2], fields[3]
+            touched: list[str] = []
+            diffstat: dict[str, int] = {}
+            i += 1
+            # Consume name-status tokens until the next metadata line or end.
+            while i < len(tokens):
+                status_tok = tokens[i].lstrip("\n")
+                if not status_tok or not status_tok.strip():
+                    i += 1
+                    continue
+                # Check if this is actually the next commit's metadata.
+                # Don't strip trailing tabs — they delimit the empty body field.
+                meta_check = status_tok.rstrip("\n").split("\t")
+                if len(meta_check) >= 4 and len(meta_check[0]) == 40 and all(
+                    c in "0123456789abcdef" for c in meta_check[0]
+                ):
+                    break  # next commit
+                # This is a status code (M, A, D, R100, C75, ...). The path(s)
+                # follow in the next NUL-delimited token(s).
+                status = status_tok
+                i += 1
+                if i >= len(tokens):
+                    break
+                path1 = tokens[i].strip()
+                i += 1
+                if status.startswith(("R", "C")) and i < len(tokens):
+                    # Rename/copy: old path is path1, new path is the next token.
+                    path2 = tokens[i].strip()
+                    i += 1
+                    touched.extend([path1, path2])
+                    diffstat[path1] = diffstat.get(path1, 0) + 1
+                    diffstat[path2] = diffstat.get(path2, 0) + 1
+                else:
+                    touched.append(path1)
+                    diffstat[path1] = diffstat.get(path1, 0) + 1
+            commits.append({
+                "oid": oid, "parent_oid": parent_oid,
+                "subject": subject.strip(),
+                "body_summary": " ".join(body.split())[:200],
+                "touched_files": touched, "diffstat": diffstat,
+                "patch_id": self._patch_id(oid),
+            })
         return commits
 
     def _patch_id(self, oid: str) -> str:

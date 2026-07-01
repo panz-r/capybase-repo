@@ -1515,7 +1515,12 @@ class Orchestrator:
         # the replay, and what later commits touch the same region?" Advisory —
         # a failure to build the plan never blocks the rebase (degrades to the
         # no-history behavior).
-        self._history_plan = self._build_rebase_plan(start_oid, target)
+        # 3. Resolve the target ONCE and use the OID for both the history plan
+        #    and the rebase itself (#5: avoid a race where the target ref moves
+        #    between plan creation and rebase start). Fall back to the string if
+        #    resolution fails (advisory).
+        resolved_target = self.git.resolve_ref(target) or target
+        self._history_plan = self._build_rebase_plan(start_oid, resolved_target)
         self._history_service = self._build_history_service(self._history_plan)
         # Wire the history service into the context builder so prompt-generation
         # sees the history-context block (#history step 7). The builder was
@@ -1531,10 +1536,7 @@ class Orchestrator:
             "rebase started: session=%s target=%s branch=%s start=%s backup=%s",
             self.session_id, target, backup_branch, start_oid[:8], backup_ref,
         )
-        # 3. Start the rebase. A conflict stop has rc != 0 but leaves the rebase
-        #    in progress; a genuine failure (bad target, etc.) has rc != 0 and
-        #    NO rebase in progress. A clean rebase has rc == 0.
-        res = self.git.start_rebase(target, autostash=autostash)
+        res = self.git.start_rebase(resolved_target, autostash=autostash)
         if not res.ok and not self.git.rebase_in_progress():
             self.journal.emit(
                 "rebase_start_failed", {"stderr": res.stderr[:500]}
@@ -1867,6 +1869,35 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 - advisory
             return None
 
+    def _lazy_build_history_from_rebase_state(self) -> None:
+        """Build a RebasePlan from git's rebase-merge state when run() is used
+        without a prior rebase() call (#4).
+
+        Reads ``rebase-merge/orig-head`` (the pre-rebase HEAD = source tip) and
+        ``rebase-merge/onto`` (the target). If both are available, builds a plan
+        + service the same way ``rebase()`` does. Journals ``history_unavailable``
+        when the metadata is insufficient.
+        """
+        try:
+            source_tip = self.git.rebase_orig_head_oid()
+            target = self.git.rebase_onto_oid()
+            if not source_tip or not target:
+                self.journal.emit(
+                    "history_unavailable",
+                    {"reason": "rebase state (orig-head/onto) not readable"},
+                )
+                return
+            start_oid = source_tip
+            self._rebase_start_oid = start_oid
+            self._rebase_target = target
+            self._history_plan = self._build_rebase_plan(start_oid, target)
+            self._history_service = self._build_history_service(self._history_plan)
+            self.context_builder.history_service = self._history_service
+        except Exception as exc:  # noqa: BLE001 - advisory
+            self.journal.emit(
+                "history_unavailable", {"reason": f"lazy build failed: {exc}"},
+            )
+
     def _history_context_for(self, unit: ConflictUnit):
         """The :class:`history.HistoryContext` for a unit, or None.
 
@@ -2115,6 +2146,12 @@ class Orchestrator:
             self.out(self._warn(f"! {reason}") + f"\n  review bundle: {bundle}")
             return StepResult(step_index=self.step, escalated=True, reason=reason)
         self.journal.emit("preflight_passed", {})
+
+        # History-awareness for the run() workflow (#4): if the rebase was started
+        # externally (git rebase ... && capybase run), lazily build a history plan
+        # from the rebase-merge state so the same history features apply.
+        if self._history_plan is None:
+            self._lazy_build_history_from_rebase_state()
 
         # Loop over rebase stops until clean or escalated.
         last: StepResult | None = None
