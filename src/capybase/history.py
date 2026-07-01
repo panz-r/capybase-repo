@@ -179,6 +179,14 @@ class RegionKey:
         return " :: ".join(parts[:1]) + ((" > " + " > ".join(parts[1:])) if len(parts) > 1 else "")
 
 
+def _safe_int(value: Any) -> int | None:
+    """Parse an int defensively — None on TypeError/ValueError."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def region_key_from_unit(unit: Any) -> RegionKey:
     """Build a :class:`RegionKey` from a ConflictUnit's existing metadata.
 
@@ -199,12 +207,13 @@ def region_key_from_unit(unit: Any) -> RegionKey:
     kind = _coarse_kind(node_type, signature)
 
     # Span: prefer the enclosing-node span (the whole logical block); fall back
-    # to the marker span (the conflict region itself).
+    # to the marker span (the conflict region itself). Use _safe_int to handle
+    # malformed/corrupted metadata without crashing.
     start_line = end_line = None
     if isinstance(span, (list, tuple)) and len(span) == 2:
-        start_line, end_line = int(span[0]), int(span[1])
+        start_line, end_line = _safe_int(span[0]), _safe_int(span[1])
     elif isinstance(marker_span, (list, tuple)) and len(marker_span) == 2:
-        start_line, end_line = int(marker_span[0]), int(marker_span[1])
+        start_line, end_line = _safe_int(marker_span[0]), _safe_int(marker_span[1])
 
     return RegionKey(
         path=getattr(unit, "path", ""),
@@ -554,11 +563,13 @@ def future_apply_probe(
 
     worktree_path: str | None = None
     worktree_git = None
+    is_worktree = False
     try:
         # 1. Create a throwaway worktree at the current HEAD.
         worktree_path = tempfile.mkdtemp(prefix="capybase-futureprobe-")
         try:
             git.add_worktree(worktree_path, detach=True)
+            is_worktree = True
         except Exception as exc:  # noqa: BLE001
             return FutureApplyResult(
                 probed=False, applies=True, future_commit_subject="",
@@ -566,11 +577,19 @@ def future_apply_probe(
             )
 
         # 2. Write the resolved file content into the worktree.
+        # If resolved_content is None, the resolution DELETED the file — remove
+        # it from the worktree so the future-commit patch will fail to apply
+        # (testing whether the deletion breaks a later source commit).
         from capybase.git_backend import GitBackend
         worktree_git = GitBackend(worktree_path)
         full_path = Path(worktree_path) / resolved_path
-        full_path.parent.mkdir(parents=True, exist_ok=True)
-        full_path.write_bytes(resolved_content)
+        if resolved_content is None:
+            # The resolution deleted this file — remove it from the probe worktree.
+            if full_path.exists():
+                full_path.unlink()
+        else:
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_bytes(resolved_content)
 
         # 2b. Sequence mode: apply intervening source commits touching the same
         # path before testing the future commit. This eliminates false positives
@@ -588,10 +607,12 @@ def future_apply_probe(
                 )
 
         # 3. Test each future commit's patch (up to max_probes).
+        tested_any = False
         for commit in future_commits[:max_probes]:
             patch = git.commit_patch(commit.oid)
             if not patch:
                 continue  # skip commits with no patch (advisory)
+            tested_any = True
             applies = worktree_git.check_apply(patch, path_filter=resolved_path)
             if not applies:
                 return FutureApplyResult(
@@ -603,6 +624,12 @@ def future_apply_probe(
                         f"later commit depending on the same region)"
                     ),
                 )
+        if not tested_any:
+            # No patch could be extracted — don't report false success.
+            return FutureApplyResult(
+                probed=False, applies=True, future_commit_subject="",
+                reason="no future commit patch could be tested",
+            )
         # All probed patches applied cleanly.
         subj = future_commits[0].subject if future_commits else ""
         return FutureApplyResult(
@@ -617,8 +644,14 @@ def future_apply_probe(
     finally:
         # 4. Clean up the throwaway worktree (always, even on error).
         if worktree_path:
-            try:
-                git.remove_worktree(worktree_path, force=True)
-                git.prune_worktrees()
-            except Exception:  # noqa: BLE001
-                pass
+            if is_worktree:
+                try:
+                    git.remove_worktree(worktree_path, force=True)
+                    git.prune_worktrees()
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                # add_worktree failed — the path is a plain temp dir, not a
+                # registered worktree. Remove it directly to avoid leaking.
+                import shutil
+                shutil.rmtree(worktree_path, ignore_errors=True)

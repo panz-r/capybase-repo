@@ -1882,11 +1882,17 @@ class Orchestrator:
         return self._history_service.for_conflict(unit, replayed_commit_oid=replayed_oid)
 
     def _history_features_for(self, unit: ConflictUnit) -> dict:
-        """Compact history features for the experience store / risk spine."""
-        ctx = self._history_context_for(unit)
-        if ctx is None:
+        """Compact history features for the experience store / risk spine.
+
+        Exception-safe: any failure (malformed metadata, history service
+        error) returns {} — history is advisory and must never break the
+        rebase or memory-recording path.
+        """
+        try:
+            ctx = self._history_context_for(unit)
+            return ctx.to_features() if ctx is not None else {}
+        except Exception:  # noqa: BLE001 - advisory only
             return {}
-        return ctx.to_features()
 
     def _run_future_apply_probe(self, result: StepResult) -> None:
         """ECC-lite future-compatibility probe (#history step 9).
@@ -1910,8 +1916,14 @@ class Orchestrator:
             if ctx is None or not ctx.has_future_region_touches:
                 continue  # no future region touches → skip the probe
             # The resolved content = the spliced file on disk (written in Phase 1).
+            # If the resolution DELETED the file (accept_deletion), read_worktree_file
+            # will raise FileNotFoundError — pass None to the probe so it tests the
+            # deleted-file state (a later commit that modifies the deleted file should
+            # fail to apply).
             try:
                 resolved_content = self.git.read_worktree_file(unit.path)
+            except FileNotFoundError:
+                resolved_content = None  # file was deleted by the resolution
             except Exception:  # noqa: BLE001
                 continue
             probe_result = future_apply_probe(
