@@ -1851,7 +1851,8 @@ class Orchestrator:
             ]
             # Filter to those touching any source file; newest-first; cap.
             relevant = [c for c in commits if any(f in c.touched_files for f in files)]
-            return relevant[:max_commits]
+            # replayed_commit_sequence is oldest-first; reverse to newest-first.
+            return list(reversed(relevant))[:max_commits]
         except Exception:  # noqa: BLE001 - advisory
             return []
 

@@ -354,7 +354,7 @@ class GitBackend:
         Returns empty on any failure (advisory).
         """
         try:
-            return self._run_raw(["diff-tree", "-p", "--root", "--no-color", oid])
+            return self._run_raw(["diff-tree", "-r", "-p", "--root", "--no-color", oid])
         except Exception:  # noqa: BLE001 - advisory
             return b""
 
@@ -695,7 +695,7 @@ class GitBackend:
         """A stable content hash for a commit's diff (``git patch-id``)."""
         try:
             res = self._run(
-                ["diff-tree", "-p", oid], what="diff-tree (patch-id)",
+                ["diff-tree", "-r", "-p", oid], what="diff-tree (patch-id)",
             )
             if not res.ok:
                 return ""

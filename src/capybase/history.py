@@ -400,11 +400,14 @@ class HistoryQueryService:
         """
         # Strategy 1: diff-based line-range overlap.
         if self._git is not None and key.start_line is not None and key.end_line is not None:
-            if self._diff_touches_span(commit, key):
+            diff_result = self._diff_touches_span(commit, key)
+            if diff_result is True:
                 return True
-            # If the diff was fetchable and showed no overlap, trust it (don't
-            # fall through to the noisy subject heuristic). Only fall through when
-            # the diff couldn't be fetched.
+            if diff_result is False:
+                # Diff fetched OK and showed NO overlap — trust it; do NOT fall
+                # through to the noisy subject heuristic.
+                return False
+            # diff_result is None → fetch failed → fall through to subject heuristic.
         # Strategy 2: subject-name fallback.
         if key.kind == "unknown" or not key.name:
             return False
@@ -415,34 +418,53 @@ class HistoryQueryService:
         haystack = f"{commit.subject} {commit.body_summary}".lower()
         return name.lower() in haystack
 
-    def _diff_touches_span(self, commit: ReplayCommit, key: RegionKey) -> bool:
+    def _diff_touches_span(self, commit: ReplayCommit, key: RegionKey) -> bool | None:
         """Whether the future commit's diff for ``key.path`` overlaps the span.
 
         Fetches ``git diff parent..child -- <path>``, parses the ``@@ ...`` hunk
         headers to extract parent-version line ranges, and checks overlap against
-        ``key.start_line..end_line``. Returns False on any failure (advisory).
+        ``key.start_line..key.end_line`` (0-based, inclusive — the capybase span
+        convention). Git diff hunks are 1-based, so we convert:
+        ``hunk_lo = start - 1; hunk_hi = hunk_lo + max(count, 0)``.
+
+        Returns:
+        - ``True`` if any hunk overlaps the region span.
+        - ``False`` if the diff was fetched OK but NO hunk overlaps.
+        - ``None`` if the diff couldn't be fetched (fetch failed, git unavailable,
+          or empty patch) — the caller falls through to the subject heuristic.
         """
         if self._git is None:
-            return False
+            return None
         try:
             patch = self._git._run_raw(  # noqa: SLF001
                 ["diff", "--no-color", f"{commit.parent_oid}..{commit.oid}", "--", key.path]
             ).decode("utf-8", errors="replace")
         except Exception:  # noqa: BLE001 - advisory
-            return False
-        if not patch:
-            return False
+            return None
+        if not patch or not patch.strip():
+            return None  # empty diff — can't tell (could be binary or fetch issue)
         import re as _re
         region_lo, region_hi = key.start_line, key.end_line
+        found_any_hunk = False
         for m in _re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+", patch, _re.MULTILINE):
+            found_any_hunk = True
             start = int(m.group(1))
             count = int(m.group(2)) if m.group(2) else 1
-            hunk_lo = start
-            hunk_hi = start + count - 1
-            # Overlap: the hunk range intersects the enclosing-node span.
+            # Convert 1-based git diff to 0-based capybase span convention.
+            hunk_lo = start - 1
+            hunk_hi = hunk_lo + max(count - 1, 0)
+            # For insert-only hunks (count=0 in git, meaning pure insertion),
+            # the insertion point is AT `start - 1`. Check if it's inside the region.
+            if count == 0:
+                if region_lo <= hunk_lo <= region_hi:
+                    return True
+                continue
+            # Normal hunk: overlap check.
             if hunk_lo <= region_hi and hunk_hi >= region_lo:
                 return True
-        return False
+        # If we found hunks but none overlapped, that's a definitive "no".
+        # If we found no hunks at all (parse failure), return None (unknown).
+        return False if found_any_hunk else None
 
     def _empty_context(self) -> HistoryContext:
         return HistoryContext(
@@ -483,6 +505,7 @@ def future_apply_probe(
     resolved_content: bytes,
     future_commits: list[ReplayCommit],
     max_probes: int = 1,
+    mode: str = "path_patch",
 ) -> FutureApplyResult:
     """Check whether the next future source commit's patch applies to the resolution.
 
@@ -492,6 +515,20 @@ def future_apply_probe(
     catches the failure mode where a locally valid resolution breaks a *later*
     commit that depends on the same code (e.g. a rename or extension in a later
     replayed commit). Advisory: a failure to probe never blocks the rebase.
+
+    Modes:
+    - ``"path_patch"`` (default): path-filter the future commit's patch to
+      ``resolved_path`` only. Cheap, but can false-positive when intervening
+      source commits touch the same file before the probed future commit (the
+      probe state skips those intervening changes, so the future patch may fail
+      to apply due to a missing intermediate state, not due to a bad resolution).
+      Acceptable as an advisory signal; use cautiously as a hard unattended gate.
+    - ``"sequence_patch"``: before testing the future commit, apply intervening
+      same-path source commits to the worktree. More accurate but slower. This
+      eliminates the false-positive risk from skipped intermediates.
+
+    Args:
+        git: a :class:`GitBackend` for the main repo.
 
     Args:
         git: a :class:`GitBackend` for the main repo.
