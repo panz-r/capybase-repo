@@ -1793,7 +1793,7 @@ class Orchestrator:
             plan = RebasePlan(
                 source_commits=commits,
                 target_base_oid=mb,
-                target_tip_oid=target,
+                target_tip_oid=self.git.resolve_ref(target) or target,
                 source_tip_oid=start_oid,
                 created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
@@ -1811,11 +1811,47 @@ class Orchestrator:
 
         Returns an empty service (all queries yield empty context) when the plan
         is None, so downstream code dispatches unconditionally.
+
+        Populates ``recent_target_commits`` by enumerating the target branch's
+        recent commits touching the same files as the source sequence (capped at
+        N=5). Advisory: any failure yields an empty list.
         """
         from capybase.history import HistoryQueryService
         if plan is None:
             return HistoryQueryService.empty()
-        return HistoryQueryService(plan)
+        recent_target = self._recent_target_commits(plan)
+        return HistoryQueryService(plan, recent_target_commits=recent_target)
+
+    def _recent_target_commits(self, plan, *, max_commits: int = 5) -> list:
+        """Recent target-branch commits touching the same files as the source.
+
+        Enumerates ``target_base..target_tip`` (the onto-side history) filtered
+        to the files the source sequence touches, newest-first, capped at
+        ``max_commits``. Advisory: any failure yields [].
+        """
+        try:
+            # Collect the unique file set from the source sequence.
+            files = sorted({f for c in plan.source_commits for f in c.touched_files})
+            if not files:
+                return []
+            raw = self.git.replayed_commit_sequence(plan.target_base_oid, plan.target_tip_oid)
+            if not raw:
+                return []
+            from capybase.history import ReplayCommit
+            commits = [
+                ReplayCommit(
+                    oid=c["oid"], parent_oid=c["parent_oid"],
+                    subject=c["subject"], body_summary=c["body_summary"],
+                    touched_files=c["touched_files"], diffstat=c["diffstat"],
+                    patch_id=c["patch_id"], index=i,
+                )
+                for i, c in enumerate(raw)
+            ]
+            # Filter to those touching any source file; newest-first; cap.
+            relevant = [c for c in commits if any(f in c.touched_files for f in files)]
+            return relevant[:max_commits]
+        except Exception:  # noqa: BLE001 - advisory
+            return []
 
     def _current_replayed_oid(self) -> str | None:
         """The commit currently being replayed (``stopped-sha``), or None.
@@ -2094,6 +2130,8 @@ class Orchestrator:
             # break the next source commit touching the same region? Advisory
             # (journals the result); in unattended mode, a failed probe escalates.
             self._run_future_apply_probe(result)
+            if result.escalated:
+                break  # the probe escalated (unattended mode) — stop before continue
             # Continue rebase.
             cont = self.git.continue_rebase()
             self.journal.emit(

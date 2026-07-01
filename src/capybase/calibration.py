@@ -95,6 +95,15 @@ _FEATURE_KEYS: tuple[str, ...] = (
     # generated — zero extra LLM calls.
     "intent_agreement",
     "low_consistency_fact_count",
+    # History-aware features (#history step 8): compact signals about the
+    # conflict's replay position and future-commit relevance. Advisory — these
+    # flow from the HistoryQueryService through _merge_resolution_features. Old
+    # models carry their own (shorter) feature_keys, so adding these never
+    # breaks a loaded model.
+    "history_future_file_touch_count",
+    "history_future_region_touch_count",
+    "history_source_commit_index",
+    "history_has_context",
 )
 
 
