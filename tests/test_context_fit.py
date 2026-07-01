@@ -67,26 +67,26 @@ def _ctx(
 
 def test_no_budget_passes_everything_through():
     ctx = _ctx(few_shot=2, deps=2, anchor=True, siblings=True)
-    anchor, siblings, deps_b, shot, primary, trims = _fit_to_budget(
+    anchor, siblings, deps_b, shot, primary, hist, trims = _fit_to_budget(
         budget=None,
         intro="i", contract="c", rules="r",
         sides_text="sides", structural_anchor="A", siblings_block="S",
-        deps="D", few_shot="F", primary_text="P",
+        deps="D", few_shot="F", primary_text="P", history="H",
     )
-    assert (anchor, siblings, deps_b, shot, primary) == ("A", "S", "D", "F", "P")
+    assert (anchor, siblings, deps_b, shot, primary, hist) == ("A", "S", "D", "F", "P", "H")
     assert trims == []
 
 
 def test_disabled_budget_is_noop():
     ctx = _ctx(few_shot=2, deps=2)
     # budget total=0 → disabled
-    anchor, siblings, deps_b, shot, primary, trims = _fit_to_budget(
+    anchor, siblings, deps_b, shot, primary, hist, trims = _fit_to_budget(
         budget=TokenBudget(total=0),
         intro="i", contract="c", rules="r",
         sides_text="sides", structural_anchor="A", siblings_block="S",
-        deps="D", few_shot="F", primary_text="P",
+        deps="D", few_shot="F", primary_text="P", history="H",
     )
-    assert (anchor, siblings, deps_b, shot, primary) == ("A", "S", "D", "F", "P")
+    assert (anchor, siblings, deps_b, shot, primary, hist) == ("A", "S", "D", "F", "P", "H")
     assert trims == []
 
 

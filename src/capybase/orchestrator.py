@@ -1517,6 +1517,11 @@ class Orchestrator:
         # no-history behavior).
         self._history_plan = self._build_rebase_plan(start_oid, target)
         self._history_service = self._build_history_service(self._history_plan)
+        # Wire the history service into the context builder so prompt-generation
+        # sees the history-context block (#history step 7). The builder was
+        # constructed in __init__ without a service; set it now that rebase()
+        # has built the plan.
+        self.context_builder.history_service = self._history_service
         self.journal.emit(
             "rebase_started",
             {"target": target, "start_oid": start_oid, "backup_ref": backup_ref,
@@ -1822,6 +1827,27 @@ class Orchestrator:
             return self.git.rebase_stopped_sha()
         except Exception:  # noqa: BLE001 - advisory
             return None
+
+    def _history_context_for(self, unit: ConflictUnit):
+        """The :class:`history.HistoryContext` for a unit, or None.
+
+        Queries the session's HistoryQueryService (set by rebase()) with the
+        unit's replayed-commit OID. Returns None when no plan is active (the
+        empty-service path degrades to an empty context, which callers treat as
+        no history). Used by the prompt context builder (step 7), the features
+        spine (step 8), and the experience-store record (step 6).
+        """
+        if self._history_service is None:
+            return None
+        replayed_oid = unit.structural_metadata.get("replayed_commit_oid")
+        return self._history_service.for_conflict(unit, replayed_commit_oid=replayed_oid)
+
+    def _history_features_for(self, unit: ConflictUnit) -> dict:
+        """Compact history features for the experience store / risk spine."""
+        ctx = self._history_context_for(unit)
+        if ctx is None:
+            return {}
+        return ctx.to_features()
 
     def _resurrection_scan(
         self, *, start_oid: str, onto_oid: str, result_oid: str, backup_ref: str
@@ -2709,6 +2735,14 @@ class Orchestrator:
             except (TypeError, ValueError):
                 node_lines = 0.0
         out["enclosing_node_lines"] = node_lines
+        # History-aware advisory features (#history step 8): compact signals
+        # about the conflict's replay position + future-commit relevance. These
+        # flow to the experience store (step 6), the accept report (#4), and
+        # (later) the risk/calibration spine. Advisory only — they never gate
+        # acceptance in interactive mode (step 10's strictness policy may use
+        # them in unattended mode). Empty when no RebasePlan is active.
+        hist_feats = self._history_features_for(unit)
+        out.update(hist_feats)
         # Candidate self-reported confidence (model-side); use the accepted one
         # or, for escalations, the last attempt.
         cand = accepted if accepted is not None else (
@@ -2779,6 +2813,10 @@ class Orchestrator:
                         validator_features=features,
                         risk_score=risk_score,
                         retry_count=outcome.retry_count,
+                        # History-aware features (#history step 6): compact signals
+                        # about the conflict's replay position + future-commit
+                        # relevance. Empty when no RebasePlan is active.
+                        history_features=self._history_features_for(unit),
                     )
                 )
             except Exception:  # noqa: BLE001 - memory is best-effort

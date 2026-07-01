@@ -116,7 +116,8 @@ def _fit_to_budget(
     deps: str,
     few_shot: str,
     primary_text: str,
-) -> tuple[str, str, str, str, str, list[dict]]:
+    history: str = "",
+) -> tuple[str, str, str, str, str, str, list[dict]]:
     """Trim the prompt's AUGMENTATION sections to fit ``budget``, protecting the
     essential conflict sides + the JSON contract.
 
@@ -126,28 +127,20 @@ def _fit_to_budget(
     first) until the assembled prompt fits the budget's ``available`` tokens, or
     all augmentations are exhausted:
 
-    1. ``few_shot`` (similar-past-merge examples) — dropped wholesale.
-    2. ``deps`` (cross-file dependency snippets) — dropped wholesale.
-    3. ``structural_anchor`` (the enclosing AST node text) — dropped, keeping
-       nothing (the sides still carry the actual code).
-    4. ``siblings_block`` — dropped.
-    5. ``primary_text`` (surrounding file context) — truncated to the lines
-       nearest the conflict, never below a 1-line floor.
+    1. ``history`` (replay-position + future-commit facts) — dropped wholesale.
+    2. ``few_shot`` (similar-past-merge examples) — dropped wholesale.
+    3. ``deps`` (cross-file dependency snippets) — dropped wholesale.
+    4. ``structural_anchor`` (the enclosing AST node text) — dropped.
+    5. ``siblings_block`` — dropped.
+    6. ``primary_text`` (surrounding file context) — truncated, 1-line floor.
 
-    Returns ``(anchor, siblings, deps, few_shot, primary_text, trims)`` where
-    ``trims`` is a list of ``{section, detail}`` dicts for journalling. When
-    ``budget`` is None or disabled (total <= 0), this is a no-op: all sections
-    pass through unchanged and ``trims`` is empty (current behavior).
-
-    If the essential content ALONE exceeds the budget, the augmentations are all
-    dropped and the prompt is returned with a ``context_budget_exceeded`` trim
-    note (per the "protect the conflict" policy — the model always sees the
-    conflict; we never trim the sides).
+    Returns ``(anchor, siblings, deps, few_shot, primary_text, history, trims)``.
+    When ``budget`` is None/disabled, all sections pass through unchanged.
     """
     trims: list[dict] = []
     # No budget / disabled → unbounded (current behavior).
     if budget is None or not budget.enabled:
-        return structural_anchor, siblings_block, deps, few_shot, primary_text, trims
+        return structural_anchor, siblings_block, deps, few_shot, primary_text, history, trims
 
     # System message is a fixed ~12 tokens; account for it once.
     system_tokens = 12
@@ -167,7 +160,7 @@ def _fit_to_budget(
                     f"augmentation sections (sides protected)"
                 ),
             })
-        return "", "", "", "", "", trims
+        return "", "", "", "", "", "", trims
 
     # Otherwise fit the augmentations in. We measure the running token total of
     # the augmentation sections and trim lowest-value-first until it fits.
@@ -176,32 +169,37 @@ def _fit_to_budget(
     dep_block = deps
     shot = few_shot
     primary = primary_text
+    hist = history
 
     def _aug_tokens() -> int:
-        return estimate_tokens(anchor + siblings + dep_block + shot + primary)
+        return estimate_tokens(anchor + siblings + dep_block + shot + primary + hist)
 
-    # 1. Drop few-shot examples.
+    # 1. Drop history context (lowest value — nice-to-have replay facts).
+    if _aug_tokens() > available_for_augmentation and hist:
+        hist = ""
+        trims.append({"section": "history", "detail": "dropped history context"})
+    # 2. Drop few-shot examples.
     if _aug_tokens() > available_for_augmentation and shot:
         shot = ""
         trims.append({"section": "few_shot", "detail": "dropped similar-past-merge examples"})
-    # 2. Drop cross-file deps.
+    # 3. Drop cross-file deps.
     if _aug_tokens() > available_for_augmentation and dep_block:
         dep_block = ""
         trims.append({"section": "deps", "detail": "dropped cross-file dependency snippets"})
-    # 3. Drop the enclosing-node text of the structural anchor.
+    # 4. Drop the enclosing-node text of the structural anchor.
     if _aug_tokens() > available_for_augmentation and anchor:
         anchor = ""
         trims.append({"section": "structural_anchor", "detail": "dropped enclosing AST node text"})
-    # 4. Drop sibling entities.
+    # 5. Drop sibling entities.
     if _aug_tokens() > available_for_augmentation and siblings:
         siblings = ""
         trims.append({"section": "siblings", "detail": "dropped sibling entity signatures"})
-    # 5. Truncate surrounding context (primary_text) to the lines nearest the
+    # 6. Truncate surrounding context (primary_text) to the lines nearest the
     #    conflict. Keep at least 1 line so the model has SOME surrounding frame.
     if _aug_tokens() > available_for_augmentation and primary:
         plines = primary.split("\n")
         kept = len(plines)
-        while kept > 1 and estimate_tokens(anchor + siblings + dep_block + shot + "\n".join(plines[:kept])) > available_for_augmentation:
+        while kept > 1 and estimate_tokens(anchor + siblings + dep_block + shot + hist + "\n".join(plines[:kept])) > available_for_augmentation:
             kept -= 1
         primary = "\n".join(plines[:kept])
         trims.append({
@@ -209,7 +207,7 @@ def _fit_to_budget(
             "detail": f"truncated surrounding context to {kept}/{len(plines)} lines",
         })
 
-    return anchor, siblings, dep_block, shot, primary, trims
+    return anchor, siblings, dep_block, shot, primary, hist, trims
 
 
 def _resolve_prompt_parts(
@@ -273,6 +271,11 @@ def _resolve_prompt_parts(
         for i, snip in enumerate(context.related_snippets, 1):
             blocks.append(f"[{i}] {snip.path} — {snip.reason}:\n{snip.text}")
         deps = "Definitions this conflict depends on (merged result must be consistent with these):\n" + "\n".join(blocks) + "\n\n"
+    # History-aware context (#history step 7): compact replay-position + future-
+    # commit relevance facts. Empty string when no history (the block is omitted).
+    history = ""
+    if context.history_context:
+        history = f"History context:\n{context.history_context}\n\n"
     intro = (
         "Resolve ONE git merge conflict by merging BOTH sides into one coherent\n"
         "result preserving each side's intent. Be CONCISE: reason in a few sentences,\n"
@@ -326,7 +329,7 @@ def _resolve_prompt_parts(
         f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
         f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
     )
-    anchor_t, siblings_t, deps_t, few_shot_t, primary_t, trims = _fit_to_budget(
+    anchor_t, siblings_t, deps_t, few_shot_t, primary_t, history_t, trims = _fit_to_budget(
         budget=budget,
         intro=intro,
         contract=contract,
@@ -337,14 +340,12 @@ def _resolve_prompt_parts(
         deps=deps,
         few_shot=few_shot,
         primary_text=context.primary_text,
+        history=history,
     )
-    # The non-instruction sections (anchor, siblings, deps, few-shot, three
-    # sides, context) form one contiguous block that variants keep together —
-    # re-ordering *within* it would risk disturbing the anchor/few-shot coupling
-    # to the sides. The side-intent annotation leads the block so the model
-    # reads the conflict shape before the raw sides.
+    # The non-instruction sections (anchor, siblings, deps, history, few-shot,
+    # three sides, context) form one contiguous block that variants keep together.
     data_block = (
-        f"{anchor_t}{siblings_t}{deps_t}{few_shot_t}{side_intent}"
+        f"{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{side_intent}"
         f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
         f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
         f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"

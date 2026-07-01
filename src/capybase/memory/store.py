@@ -35,6 +35,12 @@ class Experience:
     validator_features: dict[str, Any] = field(default_factory=dict)
     risk_score: float | None = None
     retry_count: int = 0
+    # History-aware features (#history step 6): compact signals about the
+    # conflict's position in the replay sequence and future-commit relevance.
+    # Populated by the orchestrator at record time when a RebasePlan is active;
+    # empty for non-rebase sessions. Backward-compatible: old JSONL lines load
+    # with an empty dict.
+    history_features: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -47,6 +53,7 @@ class Experience:
             "validator_features": self.validator_features,
             "risk_score": self.risk_score,
             "retry_count": self.retry_count,
+            "history_features": self.history_features,
         }
 
     @classmethod
@@ -61,6 +68,7 @@ class Experience:
             validator_features=dict(d.get("validator_features", {})),
             risk_score=d.get("risk_score"),
             retry_count=int(d.get("retry_count", 0)),
+            history_features=dict(d.get("history_features", {})),
         )
 
 

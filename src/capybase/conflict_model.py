@@ -206,6 +206,12 @@ class ContextBundle(BaseModel):
     # validating the calibrated min_similarity threshold in production).
     retrieval_scores: list[float] = Field(default_factory=list)
     structural_view: dict[str, Any] = Field(default_factory=dict)
+    # History-aware context (#history step 7): a compact summary of where this
+    # conflict sits in the replay sequence + what later commits touch the same
+    # region. Empty string when no history is available (non-rebase sessions);
+    # populated by the context builder from the HistoryQueryService. Rendered as
+    # a dedicated prompt section (budget-trimmable, lowest priority after deps).
+    history_context: str = ""
     token_estimate: int = 0
 
 

@@ -32,6 +32,7 @@ class ContextBuilder:
         slice_repo_root: str | None = None,
         max_related_snippets: int = 3,
         max_snippet_chars: int = 400,
+        history_service: "HistoryQueryService | None" = None,
     ) -> None:
         self.context_lines = context_lines
         self.retriever = retriever
@@ -51,6 +52,11 @@ class ContextBuilder:
         self.slice_repo_root = slice_repo_root
         self.max_related_snippets = max_related_snippets
         self.max_snippet_chars = max_snippet_chars
+        # History-awareness (#history step 7): a read-only query service that
+        # answers "where is this conflict in the replay, what later commits touch
+        # the same region?" Populates ContextBundle.history_context. None for
+        # non-rebase sessions (the field stays empty — the prompt omits the block).
+        self.history_service = history_service
 
     def build(self, unit: ConflictUnit, budget: TokenBudget | None = None) -> ContextBundle:
         budget = budget or TokenBudget()
@@ -144,6 +150,10 @@ class ContextBuilder:
         # excluded so we surface only genuinely external dependencies. Pure
         # best-effort: any failure yields no snippets rather than a crash.
         related = _slice_dependencies(unit, self)
+        # History-aware context (#history step 7): a compact summary of the
+        # conflict's replay position + future-commit relevance, rendered for the
+        # model. Empty when no history service is set (non-rebase sessions).
+        history_text = self._build_history_context(unit)
         return ContextBundle(
             primary_text=primary,
             side_summaries=side_summaries,
@@ -152,7 +162,43 @@ class ContextBuilder:
             retrieval_scores=retrieval_scores,
             token_estimate=est,
             structural_view=structural_view,
+            history_context=history_text,
         )
+
+    def _build_history_context(self, unit: ConflictUnit) -> str:
+        """Render a compact history-context block for the prompt, or ''.
+
+        Queries the history service (if set) and formats the result as a short,
+        factual section ranked for a small model: the replay position, later
+        commits touching the same file/region, and recent target commits. Returns
+        '' when no service or no useful history (the prompt omits the block).
+        """
+        if self.history_service is None:
+            return ""
+        try:
+            replayed_oid = unit.structural_metadata.get("replayed_commit_oid")
+            ctx = self.history_service.for_conflict(unit, replayed_commit_oid=replayed_oid)
+        except Exception:  # noqa: BLE001 - history is advisory
+            return ""
+        if not ctx.current_replay_commit:
+            return ""
+        lines: list[str] = []
+        idx = ctx.source_commit_index
+        total = ctx.source_commit_count
+        lines.append(f"Replaying commit {idx + 1}/{total}: \"{ctx.current_replay_commit.subject}\"")
+        if ctx.future_source_commits_touching_region:
+            lines.append("Later source commits touching this region:")
+            for c in ctx.future_source_commits_touching_region[:3]:
+                lines.append(f"  - \"{c.subject}\"")
+        elif ctx.future_source_commits_touching_file:
+            lines.append("Later source commits touching this file:")
+            for c in ctx.future_source_commits_touching_file[:3]:
+                lines.append(f"  - \"{c.subject}\"")
+        if ctx.recent_target_commits_touching_file:
+            lines.append("Recent target commits touching this file:")
+            for c in ctx.recent_target_commits_touching_file[:2]:
+                lines.append(f"  - \"{c.subject}\"")
+        return "\n".join(lines)
 
 
 def _sibling_spans(unit: ConflictUnit) -> list[tuple[int, int]]:
