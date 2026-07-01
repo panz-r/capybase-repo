@@ -317,6 +317,11 @@ class Orchestrator:
         # The most recent test-gate verdict (human-readable), stashed by
         # _run_tests for the accept report written after the gate.
         self._last_test_verdict: str | None = None
+        # History-awareness substrate (#history): the rebase plan + query service,
+        # set by rebase() at start. Empty service when not rebase()-driven (the
+        # run()/inspect paths), so all history queries degrade to no-op.
+        self._history_plan = None
+        self._history_service = None
         self.paths = SessionPaths(self.session_id, repo)
         self.paths.mkdirs()
         self.journal = Journal(self.paths)
@@ -1504,9 +1509,18 @@ class Orchestrator:
         self._rebase_start_oid = start_oid
         self._rebase_target = target
         self._rebase_backup_ref = backup_ref
+        # History-awareness substrate (#history-1): capture the source commit
+        # sequence once at rebase start, so every later component (history query,
+        # prompt context, risk features) can answer "where is this conflict in
+        # the replay, and what later commits touch the same region?" Advisory —
+        # a failure to build the plan never blocks the rebase (degrades to the
+        # no-history behavior).
+        self._history_plan = self._build_rebase_plan(start_oid, target)
+        self._history_service = self._build_history_service(self._history_plan)
         self.journal.emit(
             "rebase_started",
-            {"target": target, "start_oid": start_oid, "backup_ref": backup_ref},
+            {"target": target, "start_oid": start_oid, "backup_ref": backup_ref,
+             "history_plan_commits": len(self._history_plan.source_commits) if self._history_plan else 0},
         )
         self.log.info(
             "rebase started: session=%s target=%s branch=%s start=%s backup=%s",
@@ -1736,6 +1750,78 @@ class Orchestrator:
     # scan capybase sees none either, and the cleanup is lost. On detection the
     # ``stop`` policy halts before the bad completion is left as final (the
     # backup branch keeps the repo recoverable); ``warn`` journals + continues.
+
+    # ------------------------------------------------------------------ history
+    #
+    # History-awareness substrate (#history steps 2-5): the source commit
+    # sequence is captured once at rebase start into a RebasePlan, and a read-
+    # only HistoryQueryService answers per-conflict questions ("which commit am
+    # I resolving, what later commits touch the same region?"). Advisory — a
+    # failure to build the plan never blocks the rebase.
+
+    def _build_rebase_plan(self, start_oid: str, target: str):
+        """Build a :class:`history.RebasePlan` for the replayed sequence.
+
+        The sequence is ``merge_base(start_oid, target)..start_oid`` (oldest-
+        first). Written to the session dir as ``rebase_plan.json`` so tests can
+        replay the same history. Returns None on any failure (advisory).
+        """
+        try:
+            from capybase.history import RebasePlan, ReplayCommit
+            from datetime import datetime, timezone
+
+            mb = self.git.merge_base(start_oid, target)
+            if not mb:
+                return None
+            raw = self.git.replayed_commit_sequence(mb, start_oid)
+            if not raw:
+                return None
+            commits = [
+                ReplayCommit(
+                    oid=c["oid"], parent_oid=c["parent_oid"],
+                    subject=c["subject"], body_summary=c["body_summary"],
+                    touched_files=c["touched_files"], diffstat=c["diffstat"],
+                    patch_id=c["patch_id"], index=i,
+                )
+                for i, c in enumerate(raw)
+            ]
+            plan = RebasePlan(
+                source_commits=commits,
+                target_base_oid=mb,
+                target_tip_oid=target,
+                source_tip_oid=start_oid,
+                created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            )
+            # Persist for test replay.
+            import json
+            plan_path = self.paths.root / "rebase_plan.json"
+            plan_path.write_text(json.dumps(plan.to_dict(), indent=2), encoding="utf-8")
+            return plan
+        except Exception as exc:  # noqa: BLE001 - history is advisory
+            self.log.debug("rebase plan not built: %s", exc)
+            return None
+
+    def _build_history_service(self, plan):
+        """Construct the :class:`history.HistoryQueryService` from a plan.
+
+        Returns an empty service (all queries yield empty context) when the plan
+        is None, so downstream code dispatches unconditionally.
+        """
+        from capybase.history import HistoryQueryService
+        if plan is None:
+            return HistoryQueryService.empty()
+        return HistoryQueryService(plan)
+
+    def _current_replayed_oid(self) -> str | None:
+        """The commit currently being replayed (``stopped-sha``), or None.
+
+        Read at conflict-gather time so each ConflictUnit can carry replay
+        identity. None when no rebase is in progress or the file is absent.
+        """
+        try:
+            return self.git.rebase_stopped_sha()
+        except Exception:  # noqa: BLE001 - advisory
+            return None
 
     def _resurrection_scan(
         self, *, start_oid: str, onto_oid: str, result_oid: str, backup_ref: str
@@ -2549,6 +2635,14 @@ class Orchestrator:
                 )
                 continue
             result.units_by_path[entry.path] = units
+            # History-awareness (#history-3): stamp replay identity onto each
+            # unit so history-aware components know which commit they're
+            # resolving. The stopped-sha is read once per gather (cheap; it's a
+            # single file read). Advisory: absent/None degrades to no history.
+            replayed_oid = self._current_replayed_oid()
+            for u in units:
+                if replayed_oid:
+                    u.structural_metadata["replayed_commit_oid"] = replayed_oid
             for u in units:
                 self.journal.emit(
                     "conflict_unit_extracted",

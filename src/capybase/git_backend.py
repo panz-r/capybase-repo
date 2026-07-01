@@ -575,6 +575,109 @@ class GitBackend:
             return None
         return name.strip() or None
 
+    def rebase_stopped_sha(self) -> str | None:
+        """The commit currently being replayed (``.git/rebase-merge/stopped-sha``).
+
+        During a rebase conflict stop, this is the SHA of the replayed commit
+        that produced the conflict. Used to attach replay identity to each
+        ConflictUnit so history-aware components know which commit they're
+        resolving. None when no rebase is in progress or the file is absent
+        (e.g. an apply-only rebase without a merge driver).
+        """
+        sha = self._read_rebase_ref("stopped-sha")
+        return sha.strip() if sha else None
+
+    def replayed_commit_sequence(
+        self, base_oid: str, tip_oid: str
+    ) -> list[dict[str, "Any"]]:
+        """The replayed commit sequence ``base_oid..tip_oid`` (oldest-first).
+
+        Returns one dict per commit with ``oid``, ``parent_oid``, ``subject``,
+        ``body_summary``, ``touched_files``, ``diffstat``, and ``patch_id`` —
+        the raw material for a :class:`history.RebasePlan`. Uses
+        ``git log --reverse`` (oldest-first replay order) +
+        ``--name-status`` + ``--format`` for metadata + ``git patch-id`` for the
+        stable content hash. Empty when the range is empty or git fails (never
+        raises — history is advisory). The ``index`` field is added by the caller.
+        """
+        try:
+            out = self._run_ok(
+                [
+                    "log", "--reverse",
+                    "--format=%H%x09%P%x09%s%x09%b%x00",
+                    "--name-status", f"{base_oid}..{tip_oid}",
+                ],
+                what="log (replayed sequence)",
+            )
+        except Exception:  # noqa: BLE001 - history is advisory
+            return []
+        return self._parse_replayed_sequence(out)
+
+    def _parse_replayed_sequence(self, raw: str) -> list[dict[str, "Any"]]:
+        """Parse ``git log --reverse --format=... --name-status`` output.
+
+        The format emits, per commit: a tab-delimited metadata line (oid, parent,
+        subject, body) terminated by NUL, then a blank line, then name-status
+        file lines. No ``commit <oid>`` prefix (``--format`` not ``--pretty``).
+        Returns one dict per commit with the RebasePlan fields (sans ``index``,
+        added by the caller).
+
+        Parsed as a line-by-line state machine: a line with 4+ tab fields (after
+        stripping NUL) is a metadata line that starts a new commit; name-status
+        lines (2+ tab fields, first is a status code) accumulate into the current
+        commit's touched_files.
+        """
+        commits: list[dict[str, "Any"]] = []
+        current: dict[str, "Any"] | None = None
+        for line in raw.splitlines():
+            line = line.replace("\x00", "").rstrip("\r")
+            if not line:
+                continue
+            fields = line.split("\t")
+            # A metadata line has exactly the format fields (oid, parent, subject, body)
+            # → 4+ tab-separated fields where the first looks like a 40-hex SHA.
+            if len(fields) >= 4 and len(fields[0]) == 40 and all(
+                c in "0123456789abcdef" for c in fields[0]
+            ):
+                # Start a new commit.
+                if current is not None:
+                    commits.append(current)
+                current = {
+                    "oid": fields[0], "parent_oid": fields[1],
+                    "subject": fields[2].strip(),
+                    "body_summary": " ".join(fields[3].split())[:200],
+                    "touched_files": [], "diffstat": {},
+                    "patch_id": self._patch_id(fields[0]),
+                }
+            elif current is not None and len(fields) >= 2:
+                # A name-status line: "M\tpath" or "R100\told\tnew".
+                path = fields[-1]
+                current["touched_files"].append(path)
+                current["diffstat"][path] = current["diffstat"].get(path, 0) + 1
+        if current is not None:
+            commits.append(current)
+        return commits
+
+    def _patch_id(self, oid: str) -> str:
+        """A stable content hash for a commit's diff (``git patch-id``)."""
+        try:
+            res = self._run(
+                ["diff-tree", "-p", oid], what="diff-tree (patch-id)",
+            )
+            if not res.ok:
+                return ""
+            import subprocess
+            pid = subprocess.run(
+                ["git", "patch-id", "--stable"],
+                input=res.stdout, capture_output=True, text=True,
+                cwd=str(self.repo),
+            )
+            if pid.returncode == 0 and pid.stdout.strip():
+                return pid.stdout.strip().split()[0]
+        except Exception:  # noqa: BLE001 - patch-id is advisory
+            pass
+        return ""
+
     def _read_rebase_ref(self, key: str) -> str | None:
         """Read a SHA / ref from ``.git/rebase-merge/<key>``, or None.
 
