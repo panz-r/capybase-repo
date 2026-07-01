@@ -135,7 +135,8 @@ class ContextBuilder:
             query = " ".join([unit.base.text, unit.current.text, unit.replayed.text])
             try:
                 scored = self.retriever.retrieve_scored(
-                    query, k=self.retriever_k, language=unit.language
+                    query, k=self.retriever_k, language=unit.language,
+                    path=unit.path,
                 )
                 if len(scored) >= self.min_examples or scored:
                     retrieval_scores = [round(s, 4) for s, _ in scored]

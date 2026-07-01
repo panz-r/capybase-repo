@@ -437,7 +437,8 @@ class HistoryQueryService:
             return None
         try:
             patch = self._git._run_raw(  # noqa: SLF001
-                ["diff", "--no-color", f"{commit.parent_oid}..{commit.oid}", "--", key.path]
+                ["diff", "--no-color", "--unified=0",
+                 f"{commit.parent_oid}..{commit.oid}", "--", key.path]
             ).decode("utf-8", errors="replace")
         except Exception:  # noqa: BLE001 - advisory
             return None
@@ -506,6 +507,7 @@ def future_apply_probe(
     future_commits: list[ReplayCommit],
     max_probes: int = 1,
     mode: str = "path_patch",
+    intervening_commits: list[ReplayCommit] | None = None,
 ) -> FutureApplyResult:
     """Check whether the next future source commit's patch applies to the resolution.
 
@@ -569,6 +571,21 @@ def future_apply_probe(
         full_path = Path(worktree_path) / resolved_path
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_bytes(resolved_content)
+
+        # 2b. Sequence mode: apply intervening source commits touching the same
+        # path before testing the future commit. This eliminates false positives
+        # from skipped intermediate states.
+        if mode == "sequence_patch" and intervening_commits:
+            for ic in intervening_commits:
+                ic_patch = git.commit_patch(ic.oid)
+                if not ic_patch:
+                    continue
+                # Apply (not --check) to update the worktree state.
+                worktree_git._run(  # noqa: SLF001
+                    ["apply", f"--include={resolved_path}"],
+                    what="apply intervening",
+                    input_bytes=ic_patch,
+                )
 
         # 3. Test each future commit's patch (up to max_probes).
         for commit in future_commits[:max_probes]:

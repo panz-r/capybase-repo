@@ -35,7 +35,8 @@ class Retriever(Protocol):
     """Retrieve similar past merges for a new conflict."""
 
     def retrieve(
-        self, query: str, *, k: int = 3, language: str | None = None
+        self, query: str, *, k: int = 3, language: str | None = None,
+        path: str | None = None,
     ) -> list[HistoricalExample]: ...
 
 
@@ -166,12 +167,17 @@ class LexicalRetriever:
         self._index = _BM25Index(docs) if docs else _BM25Index([])
 
     def retrieve_scored(
-        self, query: str, *, k: int = 3, language: str | None = None
+        self, query: str, *, k: int = 3, language: str | None = None,
+        path: str | None = None,
     ) -> list[tuple[float, HistoricalExample]]:
         """Return ``(bm25_score, example)`` pairs for the top-k matches.
 
         Same ranking as :meth:`retrieve` but keeps the score, so the retrieval-
         score diagnostic can observe lexical-retrieval confidence too.
+
+        ``path`` (#history step 3): when set, adds a small same-path boost to the
+        BM25 score so examples from the same file rank higher among ties — a
+        history-aware tiebreak, not a re-ranking (BM25 dominates).
         """
         if self._index is None:
             self._build()
@@ -190,10 +196,23 @@ class LexicalRetriever:
             ),
             key=lambda t: -t[0],
         )
-        return [(s, exp.example) for s, exp in ranked[:k]]
+        results = [(s, exp.example) for s, exp in ranked[:k]]
+        # Same-path boost: add 10% of the BM25 score for same-file examples.
+        if path and results:
+            boosted: list[tuple[float, HistoricalExample]] = []
+            for score, exp in ranked[:k * 2]:  # over-fetch to allow re-ranking
+                # exp is an Experience; boost if its path matches.
+                exp_score = score
+                if exp.path == path:
+                    exp_score += score * 0.1  # 10% boost for same-file
+                boosted.append((exp_score, exp.example))
+            boosted.sort(key=lambda t: -t[0])
+            results = boosted[:k]
+        return results
 
     def retrieve(
-        self, query: str, *, k: int = 3, language: str | None = None
+        self, query: str, *, k: int = 3, language: str | None = None,
+        path: str | None = None,
     ) -> list[HistoricalExample]:
         """Return the top-k most similar past merges for ``query``.
 
@@ -202,7 +221,7 @@ class LexicalRetriever:
         an empty list if the corpus is too small or no matches score above 0.
         Delegates to :meth:`retrieve_scored` and drops the scores.
         """
-        return [ex for _, ex in self.retrieve_scored(query, k=k, language=language)]
+        return [ex for _, ex in self.retrieve_scored(query, k=k, language=language, path=path)]
 
     def refresh(self) -> None:
         """Force a rebuild of the index (after new experiences are appended)."""
