@@ -346,6 +346,32 @@ class GitBackend:
         """Prune stale worktree administrative entries (after a forced removal)."""
         return self._run(["worktree", "prune"], what="worktree prune")
 
+    def commit_patch(self, oid: str) -> bytes:
+        """The raw patch for commit ``oid`` (``git diff-tree -p --root``), or b''.
+
+        Used by the FutureApplyProbe to get the next source commit's diff for an
+        ``apply --check`` test. ``--root`` handles root commits (no parent).
+        Returns empty on any failure (advisory).
+        """
+        try:
+            return self._run_raw(["diff-tree", "-p", "--root", "--no-color", oid])
+        except Exception:  # noqa: BLE001 - advisory
+            return b""
+
+    def check_apply(self, patch: bytes) -> bool:
+        """Whether ``patch`` applies cleanly to THIS repo/worktree (``git apply --check``).
+
+        Stateless: ``--check`` tests the patch without modifying any files or the
+        index. Runs via ``git -C <self.repo> apply --check``, so call this on a
+        :class:`GitBackend` constructed for the target worktree path. Returns
+        False on any apply failure or error (advisory).
+        """
+        res = self._run(
+            ["apply", "--check"], what="apply --check",
+            input_bytes=patch,
+        )
+        return res.ok
+
     # ------------------------------------------------------------------ rebase control
 
     def start_rebase(self, target: str, *, autostash: bool = False) -> GitResult:

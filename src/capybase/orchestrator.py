@@ -1849,6 +1849,64 @@ class Orchestrator:
             return {}
         return ctx.to_features()
 
+    def _run_future_apply_probe(self, result: StepResult) -> None:
+        """ECC-lite future-compatibility probe (#history step 9).
+
+        For each accepted unit whose history context flags future source commits
+        touching the same region, check (in a throwaway worktree) whether the
+        next future commit's patch applies cleanly to the resolution. Advisory:
+        journals the result for the review bundle + calibration. In unattended
+        mode, a failed probe escalates (the resolution might break a later
+        commit). Skipped when no RebasePlan is active.
+        """
+        if self._history_service is None or self._history_plan is None:
+            return  # no history → no probe
+        from capybase.history import future_apply_probe
+
+        for outcome in result.outcomes:
+            if outcome.accepted is None:
+                continue
+            unit = outcome.unit
+            ctx = self._history_context_for(unit)
+            if ctx is None or not ctx.has_future_region_touches:
+                continue  # no future region touches → skip the probe
+            # The resolved content = the spliced file on disk (written in Phase 1).
+            try:
+                resolved_content = self.git.read_worktree_file(unit.path)
+            except Exception:  # noqa: BLE001
+                continue
+            probe_result = future_apply_probe(
+                self.git,
+                resolved_path=unit.path,
+                resolved_content=resolved_content,
+                future_commits=ctx.future_source_commits_touching_region,
+            )
+            # Journal the result for the review bundle + calibration.
+            self.journal.emit(
+                "future_apply_probe",
+                {
+                    "probed": probe_result.probed,
+                    "applies": probe_result.applies,
+                    "future_commit": probe_result.future_commit_subject,
+                    "reason": probe_result.reason,
+                    "unit_id": unit.unit_id,
+                },
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            # Unattended mode gate: a failed probe escalates.
+            if probe_result.probed and not probe_result.applies and self.strictness.unattended:
+                result.escalated = True
+                result.reason = (
+                    f"future-apply probe failed: {probe_result.reason}"
+                )
+                self.out(
+                    self._warn(
+                        f"! future-apply probe: {probe_result.reason}. "
+                        f"Escalating (unattended mode)."
+                    )
+                )
+                break
+
     def _resurrection_scan(
         self, *, start_oid: str, onto_oid: str, result_oid: str, backup_ref: str
     ) -> list:
@@ -2032,6 +2090,10 @@ class Orchestrator:
             # Accept report (#4): both per-unit outcomes and the test verdict
             # exist here — write the "why we accepted" summary before continuing.
             self._write_accept_report(result)
+            # Future-apply probe (#history step 9): ECC-lite — does the resolution
+            # break the next source commit touching the same region? Advisory
+            # (journals the result); in unattended mode, a failed probe escalates.
+            self._run_future_apply_probe(result)
             # Continue rebase.
             cont = self.git.continue_rebase()
             self.journal.emit(

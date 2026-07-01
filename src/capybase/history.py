@@ -406,3 +406,118 @@ class HistoryQueryService:
             future_source_commits_touching_region=[],
             recent_target_commits_touching_file=[],
         )
+
+
+# ---------------------------------------------------------------------------
+# Step 9: FutureApplyProbe — narrow ECC-lite future-compatibility check
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FutureApplyResult:
+    """The outcome of one future-apply probe.
+
+    ``probed`` is False when the probe didn't run (no future commits, the worktree
+    couldn't be created, or the resolved path has no future touches). ``applies``
+    is True when the next future commit's patch applies cleanly to the resolved
+    file. ``reason`` explains the outcome for the review bundle / journal.
+    """
+
+    probed: bool
+    applies: bool
+    future_commit_subject: str
+    reason: str
+
+
+def future_apply_probe(
+    git: "object",
+    *,
+    resolved_path: str,
+    resolved_content: bytes,
+    future_commits: list[ReplayCommit],
+    max_probes: int = 1,
+) -> FutureApplyResult:
+    """Check whether the next future source commit's patch applies to the resolution.
+
+    The narrow ECC-lite probe (#history step 9): in a throwaway linked worktree,
+    write the resolved file content, then test ``git apply --check`` against the
+    next ``max_probes`` future source commits touching the same region. This
+    catches the failure mode where a locally valid resolution breaks a *later*
+    commit that depends on the same code (e.g. a rename or extension in a later
+    replayed commit). Advisory: a failure to probe never blocks the rebase.
+
+    Args:
+        git: a :class:`GitBackend` for the main repo.
+        resolved_path: the repo-relative path of the resolved file.
+        resolved_content: the resolved file's bytes (the candidate's splice).
+        future_commits: the ``HistoryContext.future_source_commits_touching_*``
+            list (region-preferred, file-fallback), oldest-first.
+        max_probes: how many future commits to test (default 1 — just the next).
+
+    Returns a :class:`FutureApplyResult`. When no future commits touch the region
+    or the probe can't run, returns ``probed=False`` (the pipeline treats it as
+    no-signal).
+    """
+    if not future_commits:
+        return FutureApplyResult(
+            probed=False, applies=True, future_commit_subject="",
+            reason="no future source commits touch this region",
+        )
+    import tempfile
+    from pathlib import Path
+
+    worktree_path: str | None = None
+    worktree_git = None
+    try:
+        # 1. Create a throwaway worktree at the current HEAD.
+        worktree_path = tempfile.mkdtemp(prefix="capybase-futureprobe-")
+        try:
+            git.add_worktree(worktree_path, detach=True)
+        except Exception as exc:  # noqa: BLE001
+            return FutureApplyResult(
+                probed=False, applies=True, future_commit_subject="",
+                reason=f"worktree creation failed: {exc}",
+            )
+
+        # 2. Write the resolved file content into the worktree.
+        from capybase.git_backend import GitBackend
+        worktree_git = GitBackend(worktree_path)
+        full_path = Path(worktree_path) / resolved_path
+        full_path.parent.mkdir(parents=True, exist_ok=True)
+        full_path.write_bytes(resolved_content)
+
+        # 3. Test each future commit's patch (up to max_probes).
+        for commit in future_commits[:max_probes]:
+            patch = git.commit_patch(commit.oid)
+            if not patch:
+                continue  # skip commits with no patch (advisory)
+            applies = worktree_git.check_apply(patch)
+            if not applies:
+                return FutureApplyResult(
+                    probed=True, applies=False,
+                    future_commit_subject=commit.subject,
+                    reason=(
+                        f"future commit \"{commit.subject}\" does NOT apply "
+                        f"cleanly to this resolution (the merge may break a "
+                        f"later commit depending on the same region)"
+                    ),
+                )
+        # All probed patches applied cleanly.
+        subj = future_commits[0].subject if future_commits else ""
+        return FutureApplyResult(
+            probed=True, applies=True, future_commit_subject=subj,
+            reason=f"next future commit (\"{subj}\") applies cleanly",
+        )
+    except Exception as exc:  # noqa: BLE001 - advisory, never break the rebase
+        return FutureApplyResult(
+            probed=False, applies=True, future_commit_subject="",
+            reason=f"future-apply probe failed: {exc}",
+        )
+    finally:
+        # 4. Clean up the throwaway worktree (always, even on error).
+        if worktree_path:
+            try:
+                git.remove_worktree(worktree_path, force=True)
+                git.prune_worktrees()
+            except Exception:  # noqa: BLE001
+                pass
