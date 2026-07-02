@@ -71,6 +71,11 @@ class UnitOutcome:
     # learns that retries correlate with risk. (= len(attempts) - 1 on accept,
     # or the count at escalation.)
     retry_count: int = 0
+    # Explainable-retrieval reasons (#9 step 5): one human-readable string per
+    # retrieved few-shot example used in the prompt, recording WHY each was
+    # chosen (same path/region kind/conflict shape, score, prior outcome). Empty
+    # when no retrieval ran. Surfaced in accept reports for debuggability.
+    retrieval_explanations: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -455,6 +460,10 @@ class Orchestrator:
         self.stdin_reader = stdin_reader or _default_stdin_reader
         self.out = out
         self.step = 0
+        # Conflict-chain observations (#9 step 7): one per resolved conflict,
+        # accumulated across steps so detect_conflict_chains() can find related
+        # conflicts sharing a region coordinate. Reset per rebase()/run().
+        self._conflict_observations: list = []
         # Whether the interactive fallback may fire. Defaults to the real TTY
         # check; tests override this (they can't provide a real terminal).
         self._is_interactive_terminal = _is_interactive_terminal
@@ -1013,6 +1022,90 @@ class Orchestrator:
             return classify(unit).band  # type: ignore[arg-type]
         except Exception:  # noqa: BLE001 - advisory for the strictness gate
             return None
+
+    def _try_exact_reuse(self, unit: ConflictUnit) -> UnitOutcome | None:
+        """Attempt a verbatim replay of a prior accepted resolution (#9 step 4).
+
+        Always on (no flag): when an IDENTICAL prior conflict (same shape,
+        language, region kind, accepted outcome, validation evidence) exists in
+        the memory store, replay its resolution verbatim. The candidate is built
+        and validated exactly as any other — a stale/wrong reuse fails validation
+        and falls through (returns None), so reuse is a speed optimization, never
+        a correctness bypass. Returns None when no store, no match, or the reuse
+        failed validation.
+        """
+        if self.memory_store is None:
+            self.journal.emit(
+                "exact_reuse_skipped", {"reason": "no memory store"},
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            return None
+        from capybase.exact_reuse import find_exact_reuse
+
+        region_kind = self._region_kind_for(unit)
+        reuse = find_exact_reuse(
+            unit=unit, store=self.memory_store,
+            language=unit.language, region_kind=region_kind,
+        )
+        if reuse is None:
+            self.journal.emit(
+                "exact_reuse_skipped", {"reason": "no exact match"},
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            return None
+        cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:exact_reuse",
+            unit_id=unit.unit_id,
+            model_name="exact-reuse",
+            prompt_version="exact_history_reuse.v1",
+            resolved_text=reuse.resolved_text,
+            explanation=(
+                f"verbatim replay of prior accepted resolution "
+                f"(from {reuse.source_summary})"
+            ),
+            provenance="exact_history_reuse",
+        )
+        validation = self.verification.verify(unit, cand)
+        self.journal.emit(
+            "exact_reuse_attempted",
+            {"candidate_id": cand.candidate_id, "source": reuse.source_summary,
+             "passed": validation.passed},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        if not validation.passed:
+            # The stale/wrong reuse failed validation — discard and fall through.
+            # This is the safety net that makes always-on reuse safe: a bad
+            # match is caught here, exactly like a bad structural guess.
+            self.journal.emit(
+                "exact_reuse_skipped",
+                {"reason": "failed validation",
+                 "failures": [f.message for f in validation.hard_failures]},
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            return None
+        # Future-obligations gate (#9 step 3): a reuse that locally passes but
+        # drops a symbol a later commit needs must also fall through (the prior
+        # resolution predates this conflict's history context). The reused text
+        # is re-checked the same way an LLM candidate would be.
+        fo_ok, fo_dropped = self._future_obligations_check(unit, cand)
+        if not fo_ok:
+            self.journal.emit(
+                "exact_reuse_skipped",
+                {"reason": "future obligation", "dropped_symbols": fo_dropped},
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            return None
+        if self._strictness_blocks_pre_llm(unit, cand, validation, "exact_reuse"):
+            return None  # strict mode declines; fall through to structural/LLM
+        outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+        outcome.accepted = cand
+        self.journal.emit(
+            "exact_reuse_applied",
+            {"candidate_id": cand.candidate_id, "source": reuse.source_summary,
+             "source_session": reuse.source_session},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        return outcome
 
     def _try_structural_resolve(self, unit: ConflictUnit) -> UnitOutcome | None:
         """Attempt a deterministic, model-free resolution; accept only if it
@@ -2106,6 +2199,77 @@ class Orchestrator:
 
         return obligations_satisfied(obls, cand.resolved_text or "")
 
+    def _region_kind_for(self, unit: ConflictUnit) -> str:
+        """The coarse region kind (function/class/etc.) for a unit (#9 step 5).
+
+        Used to populate Experience.region_kind for same-kind retrieval reasons.
+        Derived via region_key_from_unit (which reads the structural metadata);
+        empty when no kind is known. Exception-safe.
+        """
+        try:
+            from capybase.history import region_key_from_unit
+
+            return region_key_from_unit(unit).kind or ""
+        except Exception:  # noqa: BLE001 - advisory
+            return ""
+
+    def _conflict_shape_for(self, unit: ConflictUnit) -> str:
+        """The normalized conflict-shape hash for a unit (#9 steps 4/5).
+
+        Used to populate Experience.conflict_shape for same-shape retrieval
+        reasons AND exact-reuse matching (#9 step 4). Exception-safe; empty on
+        failure.
+        """
+        try:
+            from capybase.memory.shape import shape_for_unit
+
+            return shape_for_unit(unit)
+        except Exception:  # noqa: BLE001 - advisory
+            return ""
+
+    def _record_conflict_observation(self, unit: ConflictUnit, escalated: bool) -> None:
+        """Append a ConflictObservation for chain detection (#9 step 7).
+
+        Reads the region coordinate from the unit's structural metadata + the
+        replayed-commit index from the history plan. Exception-safe; a missing
+        coordinate/index yields nothing (the observation is skipped). Called per
+        outcome so detect_conflict_chains() sees every conflict across the replay.
+        """
+        try:
+            from capybase.conflict_chain import ConflictObservation
+            from capybase.history import region_key_from_unit
+
+            key = region_key_from_unit(unit)
+            commit_index = None
+            replayed_oid = unit.structural_metadata.get("replayed_commit_oid")
+            if replayed_oid and self._history_plan is not None:
+                commit_index = self._history_plan.index_of(replayed_oid)
+            self._conflict_observations.append(ConflictObservation(
+                commit_index=commit_index,
+                path=key.path, kind=key.kind or "unknown",
+                name=key.name or "",
+                escalated=escalated,
+            ))
+        except Exception:  # noqa: BLE001 - advisory
+            pass
+
+    def detect_conflict_chains(self):
+        """The conflict chains detected across this rebase (#9 step 7).
+
+        Returns a :class:`capybase.conflict_chain.ConflictChainReport`. Empty
+        when no plan, no observations, or no chain (the common case — isolated
+        conflicts). Consumed by the dry-run report (#9 step 10) + escalation
+        messaging.
+        """
+        try:
+            from capybase.conflict_chain import detect_conflict_chains as detect
+
+            return detect(list(self._conflict_observations))
+        except Exception:  # noqa: BLE001 - advisory
+            from capybase.conflict_chain import ConflictChainReport
+
+            return ConflictChainReport()
+
     def _run_future_apply_probe(self, result: StepResult) -> None:
         """ECC-lite future-compatibility probe (#history step 9, #9 step 2).
 
@@ -2704,6 +2868,19 @@ class Orchestrator:
         failures = list(seed_failures) if seed_failures else None
         prev_candidate = None
 
+        # Exact history reuse (#9 step 4): BEFORE every other mechanism, check
+        # whether an IDENTICAL prior conflict was already accepted. If so, replay
+        # its resolution verbatim. Always on (no flag) — the reused candidate
+        # runs the identical validation gauntlet below, so a stale/wrong reuse
+        # fails and falls through to structural/LLM exactly as if it never
+        # matched. This is a speed/quality optimization, never a correctness
+        # bypass; bugs surface immediately via re-validation. Only on a FRESH
+        # resolve (the CEGIS loop must see counterexamples).
+        if failures is None:
+            early = self._try_exact_reuse(unit)
+            if early is not None:
+                return early  # accepted via verbatim reuse; LLM loop skipped
+
         # Deterministic structural pre-resolution (survey §6.4 layer 1): BEFORE
         # the LLM loop, attempt a safe, model-free resolution from base+sides.
         # Only on a FRESH resolve (not CEGIS retries, where the model must see the
@@ -2742,6 +2919,9 @@ class Orchestrator:
             # building the prompt so the model sees what later commits expect.
             self._set_future_obligations_prompt_block(unit)
             context = self.context_builder.build(unit)
+            # Surface the retrieval explanations onto the outcome (#9 step 5) so
+            # the accept report can show why each few-shot example was chosen.
+            outcome.retrieval_explanations = list(context.retrieval_explanations)
             if self.config.journal.enabled and self.config.journal.store_prompts:
                 from capybase.resolution_engine import (
                     PROMPT_RETRY,
@@ -3201,6 +3381,11 @@ class Orchestrator:
         for outcome in result.outcomes:
             unit = outcome.unit
             accepted = outcome.accepted
+            # Collect a conflict-chain observation (#9 step 7) for every outcome,
+            # so detect_conflict_chains() can find related conflicts across the
+            # replay. Done unconditionally (not just on successful memory append)
+            # so an escalated unit still counts toward its chain.
+            self._record_conflict_observation(unit, accepted is None)
             if accepted is not None:
                 resolved = accepted.resolved_text
                 outcome_label = "accepted"
@@ -3248,6 +3433,12 @@ class Orchestrator:
                         # the dry-run report (#10) slice by mechanism. Empty for
                         # escalated outcomes with no accepted candidate.
                         provenance=getattr(accepted, "provenance", "") or "",
+                        # Explainable-retrieval fields (#9 step 5): the region
+                        # kind + normalized conflict shape, so retrieval can
+                        # surface same-kind/same-shape reasons and exact reuse
+                        # (#9 step 4) can match structurally.
+                        region_kind=self._region_kind_for(unit),
+                        conflict_shape=self._conflict_shape_for(unit),
                     )
                 )
                 # #11: refresh the retriever so step N+1 sees step N's accepted

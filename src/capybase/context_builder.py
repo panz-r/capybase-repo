@@ -141,13 +141,30 @@ class ContextBuilder:
         # diagnostic data for validating the calibrated min_similarity floor.
         retrieved: list = []
         retrieval_scores: list[float] = []
+        retrieval_explanations: list[str] = []
         if self.retriever is not None:
             query = " ".join([unit.base.text, unit.current.text, unit.replayed.text])
             try:
-                scored = self.retriever.retrieve_scored(
-                    query, k=self.retriever_k, language=unit.language,
-                    path=unit.path,
-                )
+                # Prefer the explained retrieval API (#9 step 5) so the reasons
+                # each example was chosen flow into the accept report; fall back
+                # to retrieve_scored for retrievers that don't implement it.
+                region_kind = _unit_region_kind(unit)
+                conflict_shape = _unit_conflict_shape(unit)
+                explained = None
+                if hasattr(self.retriever, "retrieve_explained"):
+                    explained = self.retriever.retrieve_explained(
+                        query, k=self.retriever_k, language=unit.language,
+                        path=unit.path, region_kind=region_kind,
+                        conflict_shape=conflict_shape,
+                    )
+                if explained is not None:
+                    scored = [(e.score, ex) for e, ex in explained]
+                    retrieval_explanations = [e.render() for e, _ in explained]
+                else:
+                    scored = self.retriever.retrieve_scored(
+                        query, k=self.retriever_k, language=unit.language,
+                        path=unit.path,
+                    )
                 if len(scored) >= self.min_examples or scored:
                     retrieval_scores = [round(s, 4) for s, _ in scored]
                     retrieved = [ex for _, ex in scored]
@@ -171,6 +188,7 @@ class ContextBuilder:
             related_snippets=related,
             retrieved_examples=retrieved,
             retrieval_scores=retrieval_scores,
+            retrieval_explanations=retrieval_explanations,
             token_estimate=est,
             structural_view=structural_view,
             history_context=history_text,
@@ -356,6 +374,52 @@ def _enclosing_name(unit: ConflictUnit) -> str | None:
         else:
             break
     return name or None
+
+
+def _unit_region_kind(unit: ConflictUnit) -> str | None:
+    """The coarse region kind (function/class/etc.) for explainable retrieval.
+
+    Reads it from the structural metadata (already computed at extraction time)
+    so we don't re-run the region-key assembler in the hot path. None when the
+    kind isn't known; the retriever treats None as "no same-kind signal".
+    """
+    sv = unit.structural_metadata
+    node_type = sv.get("enclosing_node_type") if sv else None
+    if node_type:
+        # The same coarse mapping history._coarse_kind uses.
+        _MAP = {
+            "function_definition": "function", "function_item": "function",
+            "method_definition": "function",
+            "class_definition": "class", "struct_item": "class",
+            "impl_item": "impl",
+        }
+        if node_type in _MAP:
+            return _MAP[node_type]
+    sig = sv.get("enclosing_node_signature") if sv else None
+    if sig:
+        s = sig.strip()
+        for kw, kind in (
+            ("async def", "function"), ("def", "function"), ("fn", "function"),
+            ("class", "class"), ("struct", "class"), ("impl", "impl"),
+            ("enum", "class"), ("trait", "class"),
+        ):
+            if s.startswith(kw + " "):
+                return kind
+    return None
+
+
+def _unit_conflict_shape(unit: ConflictUnit) -> str | None:
+    """The normalized conflict-shape hash for explainable retrieval (#9 step 5).
+
+    Computes it on demand (cheap; the sides are small). None on failure; the
+    retriever treats None as "no same-shape signal".
+    """
+    try:
+        from capybase.memory.shape import shape_for_unit
+
+        return shape_for_unit(unit) or None
+    except Exception:  # noqa: BLE001 - advisory
+        return None
 
 
 def _clamp_low(lo: int, block_start: int, siblings: list[tuple[int, int]]) -> int:

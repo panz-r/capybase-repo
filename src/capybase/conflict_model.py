@@ -205,6 +205,12 @@ class ContextBundle(BaseModel):
     # the orchestrator can journal retrieval confidence (the diagnostic data for
     # validating the calibrated min_similarity threshold in production).
     retrieval_scores: list[float] = Field(default_factory=list)
+    # Explainable-retrieval reasons (#9 step 5): one human-readable string per
+    # retrieved example, parallel to ``retrieved_examples``/``retrieval_scores``,
+    # recording WHY each was chosen (same path/region kind/conflict shape, score,
+    # prior outcome). Empty when retrieval didn't run. Surfaced in accept reports
+    # so misleading few-shot examples are debuggable.
+    retrieval_explanations: list[str] = Field(default_factory=list)
     structural_view: dict[str, Any] = Field(default_factory=dict)
     # History-aware context (#history step 7): a compact summary of where this
     # conflict sits in the replay sequence + what later commits touch the same

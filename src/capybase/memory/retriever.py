@@ -24,11 +24,43 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from dataclasses import dataclass
 from typing import Protocol
 
 from capybase.conflict_model import HistoricalExample
 from capybase.memory.store import Experience, ExperienceStore
 from capybase.stats import mad as _mad, median as _median
+
+
+@dataclass(frozen=True)
+class RetrievalExplanation:
+    """Why a retrieved example was chosen (#9 step 5).
+
+    Makes retrieval debuggable: for each example returned, records the signals
+    that ranked it (same path, same region kind, same conflict shape) plus the
+    final score and what boosted it. Especially important for small local
+    models, where one misleading few-shot example can dominate the output.
+    """
+
+    score: float
+    same_path: bool = False
+    same_region_kind: bool = False
+    same_conflict_shape: bool = False
+    prior_outcome: str = ""
+    boosted_by: tuple[str, ...] = ()
+
+    def render(self) -> str:
+        """One-line human rendering for accept reports / dry-run."""
+        parts = []
+        if self.same_path:
+            parts.append("same path")
+        if self.same_region_kind:
+            parts.append("same region kind")
+        if self.same_conflict_shape:
+            parts.append("same conflict shape")
+        sig = ", ".join(parts) if parts else "lexical match"
+        boost = f" (+{', '.join(self.boosted_by)})" if self.boosted_by else ""
+        return f"{sig}{boost}, score={self.score:.3f}, prior={self.prior_outcome or 'unknown'}"
 
 
 class Retriever(Protocol):
@@ -179,6 +211,42 @@ class LexicalRetriever:
         BM25 score so examples from the same file rank higher among ties — a
         history-aware tiebreak, not a re-ranking (BM25 dominates).
         """
+        return self._retrieve_explained_impl(
+            query, k=k, language=language, path=path, return_examples=True,
+        )
+
+    def retrieve_explained(
+        self, query: str, *, k: int = 3, language: str | None = None,
+        path: str | None = None, region_kind: str | None = None,
+        conflict_shape: str | None = None,
+    ) -> list[tuple[RetrievalExplanation, HistoricalExample]]:
+        """Return ``(explanation, example)`` pairs for the top-k matches (#9 step 5).
+
+        Like :meth:`retrieve_scored` but each result carries a
+        :class:`RetrievalExplanation` recording WHY it ranked: same path, same
+        region kind, same conflict shape, and what boosted it. ``region_kind``
+        and ``conflict_shape`` (from the new conflict) enable the same-kind /
+        same-shape signals; when omitted, only the lexical + same-path signals
+        apply.
+        """
+        return self._retrieve_explained_impl(
+            query, k=k, language=language, path=path,
+            region_kind=region_kind, conflict_shape=conflict_shape,
+            return_examples=False,
+        )
+
+    def _retrieve_explained_impl(
+        self, query: str, *, k: int = 3, language: str | None = None,
+        path: str | None = None, region_kind: str | None = None,
+        conflict_shape: str | None = None, return_examples: bool = False,
+    ) -> list:
+        """Shared ranking core for retrieve_scored / retrieve_explained.
+
+        Computes the BM25 scores, applies the same-path boost, and builds a
+        RetrievalExplanation per result. ``return_examples=True`` returns
+        ``(score, example)`` (the legacy retrieve_scored contract); False returns
+        ``(explanation, example)``.
+        """
         if self._index is None:
             self._build()
         assert self._index is not None
@@ -196,19 +264,36 @@ class LexicalRetriever:
             ),
             key=lambda t: -t[0],
         )
-        results = [(s, exp.example) for s, exp in ranked[:k]]
-        # Same-path boost: add 10% of the BM25 score for same-file examples.
-        if path and results:
-            boosted: list[tuple[float, HistoricalExample]] = []
-            for score, exp in ranked[:k * 2]:  # over-fetch to allow re-ranking
-                # exp is an Experience; boost if its path matches.
-                exp_score = score
-                if exp.path == path:
-                    exp_score += score * 0.1  # 10% boost for same-file
-                boosted.append((exp_score, exp.example))
-            boosted.sort(key=lambda t: -t[0])
-            results = boosted[:k]
-        return results
+        # Same-path boost: add 10% of the BM25 score for same-file examples,
+        # over-fetching k*2 to allow re-ranking. Build explanations alongside.
+        candidate_pool = ranked[:k * 2] if (path or region_kind or conflict_shape) else ranked[:k]
+        scored_with_expl: list[tuple[float, RetrievalExplanation, Experience]] = []
+        for raw_score, exp in candidate_pool:
+            boosted = raw_score
+            boosted_by: list[str] = []
+            if path and exp.path == path:
+                boosted += raw_score * 0.1
+                boosted_by.append("same-path")
+            expl = RetrievalExplanation(
+                score=boosted,
+                same_path=bool(path and exp.path == path),
+                same_region_kind=bool(
+                    region_kind and exp.region_kind and exp.region_kind == region_kind
+                ),
+                same_conflict_shape=bool(
+                    conflict_shape and exp.conflict_shape
+                    and exp.conflict_shape == conflict_shape
+                ),
+                prior_outcome=exp.outcome,
+                boosted_by=tuple(boosted_by),
+            )
+            scored_with_expl.append((boosted, expl, exp))
+        # Re-sort by the (possibly boosted) score, take top-k.
+        scored_with_expl.sort(key=lambda t: -t[0])
+        top = scored_with_expl[:k]
+        if return_examples:
+            return [(score, exp.example) for score, _expl, exp in top]
+        return [(_expl, exp.example) for _score, _expl, exp in top]
 
     def retrieve(
         self, query: str, *, k: int = 3, language: str | None = None,
@@ -388,6 +473,44 @@ class EmbeddingRetriever:
             ex for _, ex in self.retrieve_scored(query, k=k, language=language)
         ]
 
+    def retrieve_explained(
+        self, query: str, *, k: int = 3, language: str | None = None,
+        path: str | None = None, region_kind: str | None = None,
+        conflict_shape: str | None = None,
+    ) -> list[tuple[RetrievalExplanation, HistoricalExample]]:
+        """Semantic retrieval with explanations (#9 step 5).
+
+        Lighter than the lexical variant: embeddings don't carry path/region
+        metadata at index time, so the explanation records the same-path/
+        same-region-kind/same-shape signals by comparing against the matched
+        Experience's stored fields (when present), plus the cosine score and
+        prior outcome.
+        """
+        scored = self.retrieve_scored(query, k=k, language=language)
+        # Re-derive the matched experiences for their metadata fields.
+        if self._accepted is None:
+            self._build()
+        assert self._accepted is not None
+        by_summary = {e.example.summary: e for e in self._accepted}
+        out: list[tuple[RetrievalExplanation, HistoricalExample]] = []
+        for score, ex in scored:
+            exp = by_summary.get(ex.summary)
+            expl = RetrievalExplanation(
+                score=score,
+                same_path=bool(path and exp and exp.path == path),
+                same_region_kind=bool(
+                    region_kind and exp and exp.region_kind
+                    and exp.region_kind == region_kind
+                ),
+                same_conflict_shape=bool(
+                    conflict_shape and exp and exp.conflict_shape
+                    and exp.conflict_shape == conflict_shape
+                ),
+                prior_outcome=(exp.outcome if exp else ""),
+            )
+            out.append((expl, ex))
+        return out
+
     def refresh(self) -> None:
         """Force a rebuild of the vector cache (after new experiences appended)."""
         self._accepted = None
@@ -547,6 +670,48 @@ class HybridRetriever:
     ) -> list[HistoricalExample]:
         """Top-k past merges by fused rank. Delegates to :meth:`retrieve_scored`."""
         return [ex for _, ex in self.retrieve_scored(query, k=k, language=language)]
+
+    def retrieve_explained(
+        self, query: str, *, k: int = 3, language: str | None = None,
+        path: str | None = None, region_kind: str | None = None,
+        conflict_shape: str | None = None,
+    ) -> list[tuple[RetrievalExplanation, HistoricalExample]]:
+        """Fused retrieval with explanations (#9 step 5).
+
+        Delegates the explanation to the lexical sub-retriever (which carries
+        the path/region/shape metadata) when available, falling back to a basic
+        score-only explanation. The fusion ranking is unchanged.
+        """
+        # Prefer the lexical retriever's explained view (it has the metadata),
+        # but honor the hybrid's fused ordering by re-scoring against fusion.
+        scored = self.retrieve_scored(query, k=k, language=language)
+        # Reuse the lexical retriever to build explanations from metadata.
+        try:
+            lex_explained = dict(
+                (ex.summary, expl)
+                for expl, ex in self.lexical.retrieve_explained(
+                    query, k=k * 2, language=language, path=path,
+                    region_kind=region_kind, conflict_shape=conflict_shape,
+                )
+            )
+        except Exception:  # noqa: BLE001 - degrade to score-only
+            lex_explained = {}
+        out: list[tuple[RetrievalExplanation, HistoricalExample]] = []
+        for score, ex in scored:
+            expl = lex_explained.get(ex.summary)
+            if expl is None:
+                expl = RetrievalExplanation(score=score, prior_outcome="")
+            else:
+                # Override the score with the fused score (the explanation's
+                # score was the lexical-only one).
+                expl = RetrievalExplanation(
+                    score=score, same_path=expl.same_path,
+                    same_region_kind=expl.same_region_kind,
+                    same_conflict_shape=expl.same_conflict_shape,
+                    prior_outcome=expl.prior_outcome, boosted_by=expl.boosted_by,
+                )
+            out.append((expl, ex))
+        return out
 
     def refresh(self) -> None:
         """Force both sub-retrievers to rebuild their indexes/caches."""

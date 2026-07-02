@@ -47,6 +47,12 @@ class Experience:
     # ``accepted.provenance`` at record time; empty for old lines / escalated
     # outcomes with no accepted candidate.
     provenance: str = ""
+    # Explainable-retrieval fields (#9 step 5): the region kind (function/class/
+    # etc.) and a normalized conflict shape hash, so retrieval can surface "same
+    # region kind" / "same conflict shape" reasons and exact reuse (#9 step 4)
+    # can match prior resolutions structurally. Both empty for old lines.
+    region_kind: str = ""
+    conflict_shape: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +67,8 @@ class Experience:
             "retry_count": self.retry_count,
             "history_features": self.history_features,
             "provenance": self.provenance,
+            "region_kind": self.region_kind,
+            "conflict_shape": self.conflict_shape,
         }
 
     @classmethod
@@ -77,6 +85,8 @@ class Experience:
             retry_count=int(d.get("retry_count", 0)),
             history_features=dict(d.get("history_features", {})),
             provenance=str(d.get("provenance", "")),
+            region_kind=str(d.get("region_kind", "")),
+            conflict_shape=str(d.get("conflict_shape", "")),
         )
 
 

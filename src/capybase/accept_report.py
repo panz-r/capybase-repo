@@ -69,6 +69,8 @@ def build_accept_report(
         lines.extend(_consensus_lines(outcome))
         # History-aware evidence (#history step 4): compact history features.
         lines.extend(_history_lines(outcome))
+        # Explainable retrieval (#9 step 5): why each few-shot example was chosen.
+        lines.extend(_retrieval_lines(outcome))
         lines.append("")
 
     # Step-level test verdict (applies to the whole staged resolution).
@@ -235,3 +237,16 @@ def _history_lines(outcome: "UnitOutcome") -> list[str]:
     elif file_touches:
         parts.append(f"{file_touches} future file touch(es)")
     return [f"- history: {', '.join(parts)}"] if parts else []
+
+
+def _retrieval_lines(outcome: "UnitOutcome") -> list[str]:
+    """Explainable-retrieval reasons (#9 step 5): why each few-shot example was
+    chosen (same path/region kind/conflict shape, score, prior outcome). Empty
+    when no retrieval ran or no explanations were recorded."""
+    explanations = getattr(outcome, "retrieval_explanations", None) or []
+    if not explanations:
+        return []
+    out = ["- retrieved examples:"]
+    for expl in explanations[:3]:  # cap for report brevity
+        out.append(f"  - {expl}")
+    return out
