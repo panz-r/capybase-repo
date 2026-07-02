@@ -1085,14 +1085,24 @@ class Orchestrator:
                 step_index=self.step, path=unit.path, unit_id=unit.unit_id,
             )
             return None
-        if reuse is None:
+        if reuse is None or reuse.skip_reason:
+            # No match (None = no store/empty; skip_reason = same-shape priors
+            # existed but none passed all conditions). Journal the near-misses
+            # (#idea 8) so a skip isn't indistinguishable from an empty store.
+            near = list(reuse.near_misses) if reuse is not None else []
+            skip = reuse.skip_reason if reuse is not None else ""
             self.journal.emit(
-                "exact_reuse_skipped", {"reason": "no exact match"},
+                "exact_reuse_skipped",
+                {"reason": skip or "no exact match",
+                 "near_misses": near[:8]},
                 step_index=self.step, path=unit.path, unit_id=unit.unit_id,
             )
+            reason = "no exact match"
+            if near:
+                reason = f"no full match ({len(near)} near-miss(es): {'; '.join(near[:3])})"
             self._record_resolution_attempt(
                 UnitOutcome(unit=unit), mechanism="exact_history_reuse",
-                decision="skip", reason="no exact match",
+                decision="skip", reason=reason,
             )
             return None
         cand = CandidateResolution(
@@ -1164,11 +1174,14 @@ class Orchestrator:
             return None  # strict mode declines; fall through to structural/LLM
         outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
         outcome.accepted = cand
+        # The audit reason names WHICH conditions matched (#idea 8): "verbatim
+        # replay from session X because shape/language/region matched + tests passed."
+        matched = "; ".join(reuse.matched_conditions) if reuse.matched_conditions else "shape matched"
         self._record_resolution_attempt(
             outcome, mechanism="exact_history_reuse",
             candidate=cand, validation=validation,
             decision="accept",
-            reason=f"verbatim replay from {reuse.source_summary}",
+            reason=f"verbatim replay from {reuse.source_summary} (matched: {matched})",
         )
         self.journal.emit(
             "exact_reuse_applied",

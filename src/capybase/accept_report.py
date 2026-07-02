@@ -56,6 +56,11 @@ def build_accept_report(
         via = _via_label(cand)
         if via:
             lines.append(f"- resolved via: {via}")
+        # Exact-reuse auditability (#idea 8): when resolved via verbatim reuse,
+        # surface the source prior + explanation so a human can see WHICH prior
+        # was replayed and why (not just "exact history reuse").
+        if getattr(cand, "provenance", "") == "exact_history_reuse" and cand.explanation:
+            lines.append(f"- reuse source: {cand.explanation}")
         # Classification band (#2), when routing ran (LLM path only).
         classification = getattr(outcome, "classification", None)
         band = _band_line(classification)

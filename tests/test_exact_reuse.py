@@ -108,7 +108,10 @@ def test_different_language_does_not_match(tmp_path):
     unit = _unit(base, cur, rep, language="python")
     reuse = find_exact_reuse(unit=unit, store=store, language="python",
                              region_kind="function")
-    assert reuse is None
+    # Same shape, wrong language → a near-miss skip sentinel (#idea 8), not None.
+    assert reuse is None or reuse.skip_reason
+    if reuse is not None:
+        assert any("wrong language" in nm for nm in reuse.near_misses)
 
 
 def test_different_region_kind_does_not_match(tmp_path):
@@ -117,7 +120,9 @@ def test_different_region_kind_does_not_match(tmp_path):
     unit = _unit(base, cur, rep)
     reuse = find_exact_reuse(unit=unit, store=store, language="python",
                              region_kind="function")
-    assert reuse is None
+    assert reuse is None or reuse.skip_reason
+    if reuse is not None:
+        assert any("wrong region kind" in nm for nm in reuse.near_misses)
 
 
 def test_escalated_outcome_never_reused(tmp_path):
@@ -143,7 +148,10 @@ def test_prior_with_failed_diagnostics_not_reused(tmp_path):
     unit = _unit(base, cur, rep)
     reuse = find_exact_reuse(unit=unit, store=store, language="python",
                              region_kind="function")
-    assert reuse is None
+    # Same shape, failed diagnostics → a near-miss skip sentinel.
+    assert reuse is None or reuse.skip_reason
+    if reuse is not None:
+        assert any("no validation evidence" in nm for nm in reuse.near_misses)
 
 
 def test_prior_with_tests_passed_is_trusted(tmp_path):
@@ -166,7 +174,10 @@ def test_empty_resolved_text_not_reused(tmp_path):
     unit = _unit(base, cur, rep)
     reuse = find_exact_reuse(unit=unit, store=store, language="python",
                              region_kind="function")
-    assert reuse is None
+    # Same shape, empty resolved → a near-miss skip sentinel.
+    assert reuse is None or reuse.skip_reason
+    if reuse is not None:
+        assert any("empty resolved" in nm for nm in reuse.near_misses)
 
 
 # ---------------------------------------------------------------------------
