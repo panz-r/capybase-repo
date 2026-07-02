@@ -92,6 +92,58 @@ class HistoryConfidence:
         )
 
 
+@dataclass(frozen=True)
+class HistoryDecisionContext:
+    """One unit's complete history-decision snapshot (#idea 5 cohesion).
+
+    Built ONCE per unit by the orchestrator and consumed by every downstream
+    mechanism (prompt block, accept gate, future probe, features spine, recording,
+    exact reuse). This replaces the scattered re-queries where ``for_conflict``
+    ran ~4× per unit, the obligation patch-loop ~2×, and features 2×.
+
+    Carries the memoized expensive results: the HistoryContext query, the derived
+    confidence/region-kind/shape, the future obligations (with patches already
+    fetched), the branch-intent excerpt, and the exact-reuse candidate. The
+    non-bulky fields are journaled as one ``history_decision_snapshot`` event per
+    unit — the single per-unit history-decision record.
+    """
+
+    unit_id: str
+    context: "object | None" = None  # HistoryContext | None
+    region_key_kind: str = ""
+    conflict_shape: str = ""
+    confidence: "object | None" = None  # HistoryConfidence | None
+    future_obligations: "object | None" = None  # FutureObligations | None
+    branch_intent_excerpt: str = ""
+    exact_reuse: "object | None" = None  # ReuseCandidate | None
+    reuse_match_reason: str = ""
+
+    def to_journal_payload(self) -> dict:
+        """The non-bulky fields for the ``history_decision_snapshot`` event.
+
+        Excludes the large objects (the 3-way blobs, the full obligation list
+        text) — those live in the candidate/validation artifacts. This is the
+        per-unit audit record of what history decided.
+        """
+        obls = self.future_obligations
+        return {
+            "unit_id": self.unit_id,
+            "region_key_kind": self.region_key_kind,
+            "conflict_shape": self.conflict_shape,
+            "confidence_score": round(self.confidence.score, 4)
+            if self.confidence is not None else None,
+            "is_augmenting": self.confidence.is_augmenting
+            if self.confidence is not None else False,
+            "future_obligation_count": len(obls.obligations)
+            if obls is not None else 0,
+            "future_obligation_required_symbols": sorted(obls.required_symbols)
+            if obls is not None else [],
+            "branch_intent_present": bool(self.branch_intent_excerpt),
+            "exact_reuse_matched": self.exact_reuse is not None,
+            "reuse_match_reason": self.reuse_match_reason,
+        }
+
+
 def _region_key_quality(ctx: "HistoryContext") -> RegionKeyQuality:
     """Derive region-key quality from the detection method + region touch count.
 

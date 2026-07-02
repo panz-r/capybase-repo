@@ -48,6 +48,9 @@ from capybase.config import Config
 from capybase.consensus import rank_by_consensus
 from capybase.preflight import run_rebase_preflight
 
+# Sentinel for "not in cache" (distinguishes a cached None from a cache miss).
+_MISSING = object()
+
 
 # A unit is "resolved" once a candidate is accepted.
 @dataclass
@@ -328,6 +331,13 @@ class Orchestrator:
         # run()/inspect paths), so all history queries degrade to no-op.
         self._history_plan = None
         self._history_service = None
+        # Per-unit history-decision snapshot cache (#idea 5 cohesion): built once
+        # per unit, consumed by every history mechanism. Collapses the repeated
+        # for_conflict (~4×) / obligation-patch-loop (~2×) / features (2×) queries
+        # to 1× each. Cleared per step in _resolve_step.
+        self._history_snapshots: dict[str, "object"] = {}
+        self._history_context_cache: dict[str, "object"] = {}
+        self._future_obligations_cache: dict[str, "object"] = {}
         # Branch final-intent summary (#9 step 6): a compact structural summary
         # of the source branch's net effect per file, computed once at rebase
         # start. None when no plan; rendered into the history prompt block.
@@ -2052,16 +2062,24 @@ class Orchestrator:
     def _history_context_for(self, unit: ConflictUnit):
         """The :class:`history.HistoryContext` for a unit, or None.
 
+        Memoized per unit (#idea 5 cohesion): the expensive ``for_conflict``
+        query (region-key derivation + per-future-commit region matching) ran
+        ~4× per unit before; now it runs once and the result is cached for the
+        unit's resolution duration. The cache is cleared per step.
+
         Queries the session's HistoryQueryService (set by rebase()) with the
-        unit's replayed-commit OID. Returns None when no plan is active (the
-        empty-service path degrades to an empty context, which callers treat as
-        no history). Used by the prompt context builder (step 7), the features
-        spine (step 8), and the experience-store record (step 6).
+        unit's replayed-commit OID. Returns None when no plan is active.
         """
         if self._history_service is None:
             return None
+        key = getattr(unit, "unit_id", None) or id(unit)
+        cached = self._history_context_cache.get(key, _MISSING)
+        if cached is not _MISSING:
+            return cached
         replayed_oid = unit.structural_metadata.get("replayed_commit_oid")
-        return self._history_service.for_conflict(unit, replayed_commit_oid=replayed_oid)
+        ctx = self._history_service.for_conflict(unit, replayed_commit_oid=replayed_oid)
+        self._history_context_cache[key] = ctx
+        return ctx
 
     def _history_features_for(self, unit: ConflictUnit) -> dict:
         """Compact history features for the experience store / risk spine.
@@ -2112,19 +2130,88 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 - advisory only
             return None
 
+    def _history_snapshot_for(self, unit: ConflictUnit):
+        """The per-unit :class:`HistoryDecisionContext` (#idea 5 cohesion).
+
+        Builds ONE memoized snapshot per unit consolidating every history-derived
+        value the mechanisms consume: the HistoryContext, region kind, conflict
+        shape, confidence, future obligations, branch-intent excerpt, and the
+        exact-reuse candidate. Built from the already-memoized per-unit caches
+        (so the expensive queries run once); the snapshot itself is cached for
+        the unit's resolution duration and journaled as the single
+        ``history_decision_snapshot`` event — the per-unit history-decision record.
+        """
+        key = getattr(unit, "unit_id", None) or id(unit)
+        cached = self._history_snapshots.get(key, _MISSING)
+        if cached is not _MISSING:
+            return cached
+        from capybase.history_confidence import HistoryDecisionContext
+
+        try:
+            ctx = self._history_context_for(unit)
+            conf = self._history_confidence_for(unit)
+            obls = self._future_obligations_for(unit)
+            region_kind = self._region_kind_for(unit)
+            shape = self._conflict_shape_for(unit)
+            intent = self._branch_intent_for_file(unit.path) if ctx is not None else ""
+            snapshot = HistoryDecisionContext(
+                unit_id=unit.unit_id,
+                context=ctx,
+                region_key_kind=region_kind,
+                conflict_shape=shape,
+                confidence=conf,
+                future_obligations=obls,
+                branch_intent_excerpt=intent,
+            )
+            # Journal the per-unit snapshot (the exit-criterion record).
+            self.journal.emit(
+                "history_decision_snapshot", snapshot.to_journal_payload(),
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - advisory
+            self.journal.emit_advisory(
+                "history_context_failed", f"snapshot build failed: {exc}",
+                path=unit.path, unit_id=unit.unit_id,
+            )
+            snapshot = HistoryDecisionContext(unit_id=unit.unit_id)
+        self._history_snapshots[key] = snapshot
+        return snapshot
+
+    def _clear_history_caches(self) -> None:
+        """Clear the per-unit history caches (called per step in _resolve_step).
+
+        The caches memoize per unit WITHIN a step; across steps the units differ
+        and the history state may have advanced (a future commit became the
+        current one), so we reset between steps.
+        """
+        self._history_snapshots.clear()
+        self._history_context_cache.clear()
+        self._future_obligations_cache.clear()
+
     def _future_obligations_for(self, unit: ConflictUnit):
-        """The :class:`FutureObligations` a candidate must satisfy (#9 step 3).
+        """The :class:`FutureObligations} a candidate must satisfy (#9 step 3).
+
+        Memoized per unit (#idea 5 cohesion): the git patch-fetch loop (one
+        subprocess per touching future commit) ran ~2× per unit before (once for
+        the prompt block, once for the accept gate); now it runs once and the
+        FutureObligations result is cached. Cleared per step.
 
         Derived structurally from future source commits touching the region:
         symbol survival, imports, key edits. The defined-symbol set comes from
         the conflict SIDES (what the region provides), NOT the candidate — so a
-        candidate that drops a symbol is correctly flagged (a candidate defining
-        nothing would otherwise erase all obligations). Returns None when no
+        candidate that drops a symbol is correctly flagged. Returns None when no
         history plan is active or no future commits touch the region.
-        Exception-safe (history is advisory). The orchestrator (not the
-        verification validators) owns this check because it needs git access to
-        fetch the future patches + the history plan.
         """
+        key = getattr(unit, "unit_id", None) or id(unit)
+        cached = self._future_obligations_cache.get(key, _MISSING)
+        if cached is not _MISSING:
+            return cached
+        result = self._compute_future_obligations(unit)
+        self._future_obligations_cache[key] = result
+        return result
+
+    def _compute_future_obligations(self, unit: ConflictUnit):
+        """The uncached obligation computation (called once per unit)."""
         try:
             if self._history_service is None or self._history_plan is None:
                 return None
@@ -2706,6 +2793,11 @@ class Orchestrator:
         result = self._gather_step()
         if result.escalated:
             return result
+        # Clear the per-unit history caches at the start of each step (#idea 5):
+        # the memoized HistoryContext/obligations/snapshot are valid within a
+        # step, but across steps the history advances (a future commit becomes
+        # the current one), so we reset between steps.
+        self._clear_history_caches()
         if not result.units_by_path:
             # No conflicts at this stop: nothing to resolve (rare).
             self.out("no conflict units at this stop; continuing.")
@@ -2934,6 +3026,13 @@ class Orchestrator:
         self, unit: ConflictUnit, *, seed_failures: list | None = None
     ) -> UnitOutcome:
         outcome = UnitOutcome(unit=unit)
+        # Build the per-unit history snapshot ONCE (#idea 5 cohesion). This
+        # memoizes the HistoryContext/confidence/obligations/etc. so every
+        # downstream mechanism (prompt, gates, probe, features, reuse) reads from
+        # the same per-unit snapshot rather than re-querying 4×/2×/2×. The
+        # snapshot is journaled here as the single history_decision_snapshot event.
+        if self._history_service is not None and self._history_plan is not None:
+            self._history_snapshot_for(unit)
         retry_count = 0
         # seed_failures: when set (whole-file CEGIS), the unit is re-resolved
         # starting from the repair path with the file-level failures pre-seeded,
