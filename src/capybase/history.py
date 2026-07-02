@@ -77,9 +77,15 @@ class ReplayCommit:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ReplayCommit":
+        # Re-enforce the subject/body caps on load too (not just at parse time),
+        # so a corrupted/hand-edited rebase_plan.json with an oversized subject
+        # is truncated before it reaches history features (#idea 3 robustness).
+        from capybase.git_backend import _MAX_BODY_LEN, _MAX_SUBJECT_LEN, _cap_text
+
         return cls(
             oid=str(d.get("oid", "")), parent_oid=str(d.get("parent_oid", "")),
-            subject=str(d.get("subject", "")), body_summary=str(d.get("body_summary", "")),
+            subject=_cap_text(str(d.get("subject", "")), _MAX_SUBJECT_LEN),
+            body_summary=_cap_text(str(d.get("body_summary", "")), _MAX_BODY_LEN),
             touched_files=list(d.get("touched_files", [])),
             diffstat=dict(d.get("diffstat", {})),
             patch_id=str(d.get("patch_id", "")),

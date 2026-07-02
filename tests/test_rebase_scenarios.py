@@ -154,17 +154,22 @@ def test_scenario_source_commits_form_valid_plan(scenario: RebaseScenarioCase):
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=[s.id for s in SCENARIOS])
 def test_scenario_conflict_blobs_match_markers(scenario: RebaseScenarioCase):
-    """Each conflict step's 3-way blobs are consistent with its marker text."""
+    """Each conflict step's 3-way blobs are consistent with its marker text.
+
+    Modify/delete conflicts (one side deleted the file) legitimately have an
+    empty blob for the deleted side — that's not malformed data, it's a real
+    conflict kind. Only the marker text is required to be present + marked."""
     for step in scenario.conflict_steps:
         assert step.marker_text, f"step {step.step} has empty marker text"
         assert "<<<<<<<" in step.marker_text, (
             f"step {step.step} marker text has no conflict markers"
         )
-        # The replayed (source) side's content should appear in the markers.
-        # (The marker text contains both sides; the replayed blob is non-empty.)
-        assert step.replayed, f"step {step.step} has empty replayed blob"
-        assert step.base is not None
-        assert step.current is not None
+        # At least one side must have content (a conflict where BOTH sides are
+        # empty is malformed). base/current/replayed may individually be empty
+        # for add/delete/modify-delete conflicts.
+        assert step.base or step.current or step.replayed, (
+            f"step {step.step} all three blobs empty (malformed)"
+        )
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=[s.id for s in SCENARIOS])

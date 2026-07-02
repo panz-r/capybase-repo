@@ -59,6 +59,30 @@ STAGE_BASE = 1
 STAGE_CURRENT = 2
 STAGE_REPLAYED = 3
 
+#: Caps for commit metadata stored in RebasePlan (#idea 3 robustness). These are
+#: documented constants, not config knobs — history features are always-on. The
+#: subject cap matches _sanitize_subject's 80 (so stored text == prompt text);
+#: the body cap preserves the existing 200-char body_summary behavior.
+_MAX_SUBJECT_LEN = 80
+_MAX_BODY_LEN = 200
+_HEX = frozenset("0123456789abcdef")
+
+
+def _is_oid(s: str) -> bool:
+    """True iff ``s`` looks like a git object id: 40 or 64 lowercase hex chars.
+
+    Accepts both SHA-1 (40) and SHA-256 (64) lengths so the parser works on
+    SHA-256 repos (the earlier ``len == 40`` check rejected them).
+    """
+    return len(s) in (40, 64) and all(c in _HEX for c in s)
+
+
+def _cap_text(s: str, max_len: int) -> str:
+    """Truncate ``s`` to ``max_len`` chars with an ellipsis, preserving the head."""
+    if len(s) <= max_len:
+        return s
+    return s[: max(0, max_len - 1)] + "…"
+
 
 class GitBackend:
     def __init__(self, repo: str | Path = ".", *, check_git: bool = True,
@@ -454,8 +478,21 @@ class GitBackend:
             raise GitError(f"could not read stage {stage} of {path!r}: {exc}") from exc
 
     def _run_raw(self, args: list[str]) -> bytes:
+        """Run git, returning raw bytes; raises GitError on failure or timeout.
+
+        Honors ``self.timeout_seconds`` (unlike the earlier implementation, which
+        ran unbounded). The history layer calls this for ``commit_patch``,
+        ``read_stage_blob``, and the region-diff fetch — all bounded now so a
+        pathological commit/repo can't hang a rebase.
+        """
         cmd = ["git", "-C", str(self.repo), *args]
-        proc = subprocess.run(cmd, capture_output=True)
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True,
+                timeout=self.timeout_seconds or None,
+            )
+        except subprocess.TimeoutExpired:
+            raise GitError(f"git {args[0]} timed out (>{self.timeout_seconds}s)")
         if proc.returncode != 0:
             raise GitError(
                 f"git {args[0]} failed (rc={proc.returncode}): "
@@ -667,9 +704,9 @@ class GitBackend:
         followed by the next commit's metadata (also NUL-start).
 
         We split on NUL, then walk the tokens: a token with 4+ tab-separated
-        fields (first is a 40-hex SHA) starts a new commit; subsequent tokens
-        alternate ``status<NUL>path`` for name-status entries. For renames/copies
-        the pattern is ``status<NUL>old_path<NUL>new_path``.
+        fields (first is a hex SHA — 40 chars for SHA-1, 64 for SHA-256) starts a
+        new commit; subsequent tokens alternate ``status<NUL>path`` for name-status
+        entries. For renames/copies the pattern is ``status<NUL>old_path<NUL>new_path``.
 
         Returns one dict per commit with the RebasePlan fields (sans ``index``).
         Rename/copy records (#7) record BOTH old and new paths.
@@ -687,10 +724,9 @@ class GitBackend:
             # the empty body field).
             tok = tok.lstrip("\n")
             fields = tok.split("\t")
-            # Metadata line: 4+ tab-separated fields, first is a 40-hex SHA.
-            if len(fields) < 4 or len(fields[0]) != 40 or not all(
-                c in "0123456789abcdef" for c in fields[0]
-            ):
+            # Metadata line: 4+ tab-separated fields, first is a hex SHA (40 or
+            # 64 chars — SHA-1 or SHA-256).
+            if len(fields) < 4 or not _is_oid(fields[0]):
                 i += 1
                 continue
             oid, parent_oid, subject, body = fields[0], fields[1], fields[2], fields[3]
@@ -706,9 +742,7 @@ class GitBackend:
                 # Check if this is actually the next commit's metadata.
                 # Don't strip trailing tabs — they delimit the empty body field.
                 meta_check = status_tok.rstrip("\n").split("\t")
-                if len(meta_check) >= 4 and len(meta_check[0]) == 40 and all(
-                    c in "0123456789abcdef" for c in meta_check[0]
-                ):
+                if len(meta_check) >= 4 and _is_oid(meta_check[0]):
                     break  # next commit
                 # This is a status code (M, A, D, R100, C75, ...). The path(s)
                 # follow in the next NUL-delimited token(s).
@@ -716,11 +750,14 @@ class GitBackend:
                 i += 1
                 if i >= len(tokens):
                     break
-                path1 = tokens[i].strip()
+                # Use strip("\n") not strip() — the -z format's only spurious
+                # whitespace is a leading newline; a blanket strip would corrupt
+                # paths whose significant whitespace is meaningful.
+                path1 = tokens[i].strip("\n")
                 i += 1
                 if status.startswith(("R", "C")) and i < len(tokens):
                     # Rename/copy: old path is path1, new path is the next token.
-                    path2 = tokens[i].strip()
+                    path2 = tokens[i].strip("\n")
                     i += 1
                     touched.extend([path1, path2])
                     diffstat[path1] = diffstat.get(path1, 0) + 1
@@ -730,8 +767,8 @@ class GitBackend:
                     diffstat[path1] = diffstat.get(path1, 0) + 1
             commits.append({
                 "oid": oid, "parent_oid": parent_oid,
-                "subject": subject.strip(),
-                "body_summary": " ".join(body.split())[:200],
+                "subject": _cap_text(subject.strip(), _MAX_SUBJECT_LEN),
+                "body_summary": _cap_text(" ".join(body.split()), _MAX_BODY_LEN),
                 "touched_files": touched, "diffstat": diffstat,
                 "patch_id": self._patch_id(oid),
             })
@@ -746,10 +783,13 @@ class GitBackend:
             if not res.ok:
                 return ""
             import subprocess
+            # Bound the patch-id subprocess too (it reads the full diff output);
+            # a pathological commit produces a huge diff that could otherwise stall.
             pid = subprocess.run(
                 ["git", "patch-id", "--stable"],
                 input=res.stdout, capture_output=True, text=True,
                 cwd=str(self.repo),
+                timeout=self.timeout_seconds or None,
             )
             if pid.returncode == 0 and pid.stdout.strip():
                 return pid.stdout.strip().split()[0]
