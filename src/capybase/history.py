@@ -282,6 +282,11 @@ class HistoryContext:
     future_source_commits_touching_file: list[ReplayCommit]
     future_source_commits_touching_region: list[ReplayCommit]
     recent_target_commits_touching_file: list[ReplayCommit]
+    # How the future-region matches were established (#9 step 1, history
+    # confidence). ``"diff"`` = diff-overlap (high trust); ``"heuristic"`` =
+    # subject-name fallback (low trust); ``"none"`` = no region matches or no
+    # region detection ran. The strongest method that yielded a match wins.
+    region_detection_method: str = "none"
 
     @property
     def has_future_touches(self) -> bool:
@@ -302,6 +307,7 @@ class HistoryContext:
             "history_future_region_touch_count": len(self.future_source_commits_touching_region),
             "history_target_recent_file_touch_count": len(self.recent_target_commits_touching_file),
             "history_has_context": self.current_replay_commit is not None,
+            "history_region_detection_method": self.region_detection_method,
         }
 
 
@@ -377,9 +383,18 @@ class HistoryQueryService:
 
         previous_file = [c for c in commits[:idx] if path and path in c.touched_files]
         future_file = [c for c in commits[idx + 1:] if path and path in c.touched_files]
-        future_region = [
-            c for c in future_file if self._touches_region(c, region_key)
-        ]
+        # _touches_region returns (touches, method); we keep the strongest method
+        # that yielded a match so history confidence (#9 step 1) can weight diff
+        # matches above subject-heuristic matches.
+        future_region: list[ReplayCommit] = []
+        method_rank = {"diff": 2, "heuristic": 1, "none": 0}
+        best_method = "none"
+        for c in future_file:
+            touches, method = self._touches_region(c, region_key)
+            if touches:
+                future_region.append(c)
+                if method_rank.get(method, 0) > method_rank.get(best_method, 0):
+                    best_method = method
         return HistoryContext(
             current_replay_commit=current,
             source_commit_index=idx,
@@ -390,10 +405,13 @@ class HistoryQueryService:
             recent_target_commits_touching_file=[
                 c for c in self._recent_target if path and path in c.touched_files
             ],
+            region_detection_method=best_method if future_region else "none",
         )
 
-    def _touches_region(self, commit: ReplayCommit, key: RegionKey) -> bool:
-        """Whether a future commit touches the same region.
+    def _touches_region(
+        self, commit: ReplayCommit, key: RegionKey
+    ) -> tuple[bool, str]:
+        """Whether a future commit touches the same region, and by what method.
 
         Two strategies, diff-based first (step 2), subject heuristic as fallback:
 
@@ -406,26 +424,31 @@ class HistoryQueryService:
         2. **Subject heuristic** (fallback): the commit subject/body mentions the
            region name. Low recall but safe; used when git is unavailable or the
            span is unknown.
+
+        Returns ``(touches, method)`` where ``method`` is ``"diff"``,
+        ``"heuristic"``, or ``"none"`` (no detection ran / no match). The method
+        feeds the history-confidence score (#9 step 1): a diff match is far more
+        trustworthy than a subject-string guess.
         """
         # Strategy 1: diff-based line-range overlap.
         if self._git is not None and key.start_line is not None and key.end_line is not None:
             diff_result = self._diff_touches_span(commit, key)
             if diff_result is True:
-                return True
+                return True, "diff"
             if diff_result is False:
                 # Diff fetched OK and showed NO overlap — trust it; do NOT fall
                 # through to the noisy subject heuristic.
-                return False
+                return False, "diff"
             # diff_result is None → fetch failed → fall through to subject heuristic.
         # Strategy 2: subject-name fallback.
         if key.kind == "unknown" or not key.name:
-            return False
+            return False, "none"
         name = key.name.split("(")[0].split("<")[0].strip().split()[-1] if key.name else ""
         name = name.rstrip(":=(<")
         if not name:
-            return False
+            return False, "none"
         haystack = f"{commit.subject} {commit.body_summary}".lower()
-        return name.lower() in haystack
+        return (name.lower() in haystack, "heuristic")
 
     def _diff_touches_span(self, commit: ReplayCommit, key: RegionKey) -> bool | None:
         """Whether the future commit's diff for ``key.path`` overlaps the span.

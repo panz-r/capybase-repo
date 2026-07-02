@@ -1477,6 +1477,11 @@ class ResolutionEngine:
             parse_warnings=warnings,
             # A genuine model refusal (it answered JSON but said needs_human).
             failure_kind="model_refusal" if needs_human else "",
+            # Default LLM provenance (#9 step 8): plain LLM. The orchestrator
+            # re-stamps this to "history_augmented_llm" when history context
+            # meaningfully augmented the prompt (history_confidence >= threshold
+            # and future/history lines were actually injected).
+            provenance="plain_llm",
         )
 
 

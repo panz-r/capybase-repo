@@ -939,6 +939,7 @@ class Orchestrator:
             prompt_version="manual.v1",
             resolved_text=pasted,
             explanation="provided by human via manual mode",
+            provenance="manual",
         )
         validation = self.verification.verify(unit, cand)
         self.journal.emit(
@@ -1032,6 +1033,7 @@ class Orchestrator:
             prompt_version=f"structural.{result.rule}",
             resolved_text=result.text,
             explanation=f"deterministic resolution via {result.rule} rule",
+            provenance="deterministic_structural",
         )
         validation = self.verification.verify(unit, cand)
         self.journal.emit(
@@ -1118,6 +1120,7 @@ class Orchestrator:
                 f"search-based combination resolution "
                 f"(fitness={result.fitness:.3f}, balance={bal:.2f})"
             ),
+            provenance="combination_search",
         )
         validation = self.verification.verify(unit, cand)
         self.journal.emit(
@@ -1252,6 +1255,7 @@ class Orchestrator:
             prompt_version=PROMPT_BLOCK_CAPTURE,
             resolved_text=resolved_text,
             explanation=expl,
+            provenance="block_capture",
         )
         validation = self.verification.verify(unit, cand)
         if not validation.passed:
@@ -1923,9 +1927,41 @@ class Orchestrator:
         """
         try:
             ctx = self._history_context_for(unit)
-            return ctx.to_features() if ctx is not None else {}
+            if ctx is None:
+                return {}
+            feats = ctx.to_features()
+            # History confidence (#9 step 1): a 0–1 trust score + its components.
+            # Lets calibration/metrics distinguish "history present but weak"
+            # from "history present and trustworthy".
+            try:
+                from capybase.history_confidence import history_confidence_for
+
+                conf = history_confidence_for(ctx)
+                feats["history_confidence_score"] = round(conf.score, 4)
+                feats["history_region_key_quality"] = conf.region_key_quality
+                feats["history_is_augmenting"] = conf.is_augmenting
+            except Exception:  # noqa: BLE001 - advisory only
+                pass
+            return feats
         except Exception:  # noqa: BLE001 - advisory only
             return {}
+
+    def _history_confidence_for(self, unit: ConflictUnit):
+        """The :class:`HistoryConfidence` for a unit, or None.
+
+        Used by the LLM accept path to decide whether to re-stamp a plain-LLM
+        candidate's provenance to ``history_augmented_llm`` (#9 step 8/1).
+        Exception-safe; returns None when no history service is active.
+        """
+        try:
+            ctx = self._history_context_for(unit)
+            if ctx is None:
+                return None
+            from capybase.history_confidence import history_confidence_for
+
+            return history_confidence_for(ctx)
+        except Exception:  # noqa: BLE001 - advisory only
+            return None
 
     def _run_future_apply_probe(self, result: StepResult) -> None:
         """ECC-lite future-compatibility probe (#history step 9).
@@ -2722,11 +2758,32 @@ class Orchestrator:
                         step_index=self.step, path=unit.path, unit_id=unit.unit_id,
                     )
                     return outcome
+                # Re-stamp a plain-LLM candidate to history_augmented_llm when
+                # history context meaningfully augmented the prompt (#9 step 1):
+                # confidence above threshold AND a real future-region signal.
+                # This separates "history changed this resolution" from "plain
+                # LLM" in the metrics/dry-run, so per-mechanism quality (#9) can
+                # tell whether history augmentation actually helps. Only re-stamps
+                # plain_llm — never overrides deterministic/manual/reuse paths.
+                if getattr(cand, "provenance", "") == "plain_llm":
+                    conf = self._history_confidence_for(unit)
+                    if conf is not None and conf.is_augmenting:
+                        cand.provenance = "history_augmented_llm"
+                        self.journal.emit(
+                            "provenance_restamped",
+                            {"candidate_id": cand.candidate_id,
+                             "to": "history_augmented_llm",
+                             "confidence": round(conf.score, 3)},
+                            step_index=self.step, path=unit.path,
+                            unit_id=unit.unit_id,
+                        )
                 outcome.accepted = cand
                 outcome.retry_count = retry_count
                 self.journal.emit(
                     "candidate_accepted",
-                    {"candidate_id": cand.candidate_id},
+                    {"candidate_id": cand.candidate_id,
+                     "via": cand.provenance or "plain_llm",
+                     "provenance": cand.provenance or ""},
                     step_index=self.step,
                     path=unit.path,
                     unit_id=unit.unit_id,
@@ -2971,6 +3028,10 @@ class Orchestrator:
                         # about the conflict's replay position + future-commit
                         # relevance. Empty when no RebasePlan is active.
                         history_features=self._history_features_for(unit),
+                        # Resolution provenance (#9 step 8): lets metrics (#9) +
+                        # the dry-run report (#10) slice by mechanism. Empty for
+                        # escalated outcomes with no accepted candidate.
+                        provenance=getattr(accepted, "provenance", "") or "",
                     )
                 )
                 # #11: refresh the retriever so step N+1 sees step N's accepted

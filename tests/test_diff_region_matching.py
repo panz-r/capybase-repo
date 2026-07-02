@@ -122,7 +122,9 @@ def test_diff_suppresses_subject_fallback_when_no_overlap(repo: Path):
     # future_outside: diff shows no overlap (line 8 vs region 3-5). Even though
     # the subject mentions nothing about "parse", the subject heuristic would
     # return False anyway — but the KEY point is the diff result is trusted.
-    assert qs._touches_region(plan.source_commits[2], key) is False
+    touches, method = qs._touches_region(plan.source_commits[2], key)
+    assert touches is False
+    assert method == "diff"
 
 
 def test_diff_fetch_failure_returns_none(repo: Path):
@@ -157,8 +159,10 @@ def test_diff_fetch_failure_falls_through_to_subject(repo: Path):
     qs = HistoryQueryService(plan, git=gb)
     key = _key(3, 5, name="def parse")
     # Bogus OID → diff fetch fails → None → falls through to subject heuristic.
-    # Subject mentions "parse" → match.
-    assert qs._touches_region(plan.source_commits[0], key) is True
+    # Subject mentions "parse" → match (and the method is recorded as heuristic).
+    touches, method = qs._touches_region(plan.source_commits[0], key)
+    assert touches is True
+    assert method == "heuristic"
 
 
 def test_hunk_at_region_boundary_start(repo: Path):

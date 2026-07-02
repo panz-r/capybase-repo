@@ -82,11 +82,27 @@ def build_accept_report(
 
 
 def _via_label(cand: Any) -> str:
-    """A short 'how was this resolved' label from the candidate's metadata."""
+    """A short 'how was this resolved' label from the candidate.
+
+    Reads the explicit ``provenance`` field first (#9 step 8); falls back to
+    inferring from ``prompt_version``/``model_name`` for candidates serialized
+    before provenance existed (empty string). Never raises.
+    """
+    from capybase.provenance import LEGACY_PROVENANCE, provenance_label
+
+    provenance = getattr(cand, "provenance", LEGACY_PROVENANCE) or LEGACY_PROVENANCE
+    if provenance != LEGACY_PROVENANCE:
+        # Live value: use the human label, enriching the structural rule detail
+        # (e.g. "deterministic structural (insertion_union)") when available.
+        if provenance == "deterministic_structural":
+            rule = _structural_rule(getattr(cand, "prompt_version", ""))
+            if rule:
+                return f"{provenance_label(provenance)} ({rule})"
+        return provenance_label(provenance)
+    # Legacy fallback: a candidate with no provenance — infer the old way so
+    # historical/serialized data still renders a useful label.
     pv = getattr(cand, "prompt_version", "") or ""
     model = getattr(cand, "model_name", "") or ""
-    # Structural/SBCR/block-capture carry their rule in prompt_version; the LLM
-    # path carries the model name. Map the known prefixes to human labels.
     if pv.startswith("structural."):
         return f"deterministic ({pv.split('.', 1)[1]})"
     if pv == "cegis_block_capture.v1":
@@ -95,6 +111,14 @@ def _via_label(cand: Any) -> str:
         return "combination search"
     if model:
         return f"model ({model})"
+    return ""
+
+
+def _structural_rule(prompt_version: str) -> str:
+    """The rule name from a ``structural.<rule>`` prompt_version, or ''."""
+    pv = prompt_version or ""
+    if pv.startswith("structural."):
+        return pv.split(".", 1)[1]
     return ""
 
 

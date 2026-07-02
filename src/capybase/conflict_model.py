@@ -232,6 +232,11 @@ class CandidateResolution(BaseModel):
     unit_id: str
     model_name: str
     prompt_version: str
+    # Explicit "how was this resolved?" enum (#9 step 8). Stamped at every
+    # construction site (structural/sbcr/block_capture/manual/LLM/exact-reuse).
+    # Empty string = a candidate built before provenance existed; consumers fall
+    # back to inferring from prompt_version/model_name. See capybase.provenance.
+    provenance: str = ""
 
     current_side_intent: list[str] = Field(default_factory=list)
     replayed_commit_intent: list[str] = Field(default_factory=list)

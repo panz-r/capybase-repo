@@ -86,6 +86,12 @@ def write_review_bundle(
     if candidate is not None:
         lines.append("## best candidate")
         lines.append(f"- model: `{candidate.model_name}` (prompt `{candidate.prompt_version}`)")
+        # Explicit provenance (#9 step 8), when the candidate carries it.
+        provenance = getattr(candidate, "provenance", "") or ""
+        if provenance:
+            from capybase.provenance import provenance_label
+
+            lines.append(f"- via: {provenance_label(provenance)}")
         lines.append(f"- self-reported confidence: {candidate.self_reported_confidence}")
         lines.append(f"- needs_human: {candidate.needs_human}")
         lines.append("```")

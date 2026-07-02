@@ -41,6 +41,12 @@ class Experience:
     # empty for non-rebase sessions. Backward-compatible: old JSONL lines load
     # with an empty dict.
     history_features: dict[str, Any] = field(default_factory=dict)
+    # Resolution provenance (#9 step 8): the explicit "how was this resolved?"
+    # value stamped on the accepted candidate. Lets the metrics layer (#9) and
+    # dry-run report (#10) slice the corpus by mechanism. Stamped from
+    # ``accepted.provenance`` at record time; empty for old lines / escalated
+    # outcomes with no accepted candidate.
+    provenance: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +60,7 @@ class Experience:
             "risk_score": self.risk_score,
             "retry_count": self.retry_count,
             "history_features": self.history_features,
+            "provenance": self.provenance,
         }
 
     @classmethod
@@ -69,6 +76,7 @@ class Experience:
             risk_score=d.get("risk_score"),
             retry_count=int(d.get("retry_count", 0)),
             history_features=dict(d.get("history_features", {})),
+            provenance=str(d.get("provenance", "")),
         )
 
 
