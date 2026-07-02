@@ -104,44 +104,46 @@ def find_exact_reuse(
     """
     if store is None:
         return None
-    try:
-        base = getattr(getattr(unit, "base", None), "text", "") or ""
-        current = getattr(getattr(unit, "current", None), "text", "") or ""
-        replayed = getattr(getattr(unit, "replayed", None), "text", "") or ""
-        if not current and not replayed:
-            return None  # nothing to reuse from
-        target_shape = conflict_shape_hash(
-            base=base, current=current, replayed=replayed
+    # NOTE: we deliberately do NOT wrap this in try/except. A genuine "no match"
+    # returns None below; an exception (corrupt store, bug in shape comparison)
+    # propagates to the orchestrator, which catches it and emits an
+    # exact_reuse_failed advisory (#idea 4) — so a failure is visible rather than
+    # mislabeled as "no match".
+    base = getattr(getattr(unit, "base", None), "text", "") or ""
+    current = getattr(getattr(unit, "current", None), "text", "") or ""
+    replayed = getattr(getattr(unit, "replayed", None), "text", "") or ""
+    if not current and not replayed:
+        return None  # nothing to reuse from
+    target_shape = conflict_shape_hash(
+        base=base, current=current, replayed=replayed
+    )
+    for exp in store.accepted():
+        # Condition 1: same conflict shape.
+        if not exp.conflict_shape or exp.conflict_shape != target_shape:
+            continue
+        # Condition 2: same language.
+        if language is not None and exp.language and exp.language != language:
+            continue
+        # Condition 3: same region kind (the structural coordinate).
+        if region_kind and exp.region_kind and exp.region_kind != region_kind:
+            continue
+        # Condition 4: prior outcome accepted (store.accepted() already
+        # filters to outcome == "accepted", so this is guaranteed; the check
+        # is documented here for the contract).
+        if exp.outcome != "accepted":
+            continue
+        # Condition 5: validation evidence.
+        if not _validation_evidence(exp):
+            continue
+        # Condition 6 (hook): no recorded human-correction/revert. None are
+        # recorded today → vacuously true. A future correction store would
+        # check it here.
+        resolved = exp.example.resolved or ""
+        if not resolved:
+            continue
+        return ReuseCandidate(
+            resolved_text=resolved,
+            source_summary=exp.example.summary,
+            source_session=exp.session_id,
         )
-        for exp in store.accepted():
-            # Condition 1: same conflict shape.
-            if not exp.conflict_shape or exp.conflict_shape != target_shape:
-                continue
-            # Condition 2: same language.
-            if language is not None and exp.language and exp.language != language:
-                continue
-            # Condition 3: same region kind (the structural coordinate).
-            if region_kind and exp.region_kind and exp.region_kind != region_kind:
-                continue
-            # Condition 4: prior outcome accepted (store.accepted() already
-            # filters to outcome == "accepted", so this is guaranteed; the check
-            # is documented here for the contract).
-            if exp.outcome != "accepted":
-                continue
-            # Condition 5: validation evidence.
-            if not _validation_evidence(exp):
-                continue
-            # Condition 6 (hook): no recorded human-correction/revert. None are
-            # recorded today → vacuously true. A future correction store would
-            # check it here.
-            resolved = exp.example.resolved or ""
-            if not resolved:
-                continue
-            return ReuseCandidate(
-                resolved_text=resolved,
-                source_summary=exp.example.summary,
-                source_session=exp.session_id,
-            )
-        return None
-    except Exception:  # noqa: BLE001 - reuse is best-effort; never break a rebase
-        return None
+    return None

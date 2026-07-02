@@ -89,6 +89,10 @@ class RehearsalReport:
     mechanism_counts: dict[str, int] = field(default_factory=dict)
     conflict_chains: list[str] = field(default_factory=list)
     history_active: bool = False
+    #: Advisory event counts (#idea 4): subsystems that degraded silently.
+    #: Maps event_type → count. Surfaced in summary_history() so a silently-degraded
+    #: history feature is observable in the dry-run report.
+    advisory_counts: dict[str, int] = field(default_factory=dict)
 
     def summary(self) -> str:
         if self.errors and not self.would_succeed:
@@ -147,6 +151,13 @@ class RehearsalReport:
         # Conflict chains.
         for chain in self.conflict_chains:
             lines.append(f"- conflict chain: {chain}")
+        # Advisory events (#idea 4): subsystems that degraded silently. Surfaced
+        # here (not the terminal) so a degraded history feature is observable in
+        # the dry-run report without being noisy.
+        total_advisory = sum(self.advisory_counts.values())
+        if total_advisory:
+            parts = [f"{n} {et}" for et, n in sorted(self.advisory_counts.items())]
+            lines.append(f"- {total_advisory} advisory event(s): {', '.join(parts)}")
         # Rule-based recommended action (not LLM — derived from the data).
         action = self._recommended_action()
         if action:
@@ -228,6 +239,10 @@ def _summarize_journal(journal_path: Path, report: RehearsalReport) -> None:
                 report.steps[-1].detail = reason
             if reason and reason not in report.errors:
                 report.errors.append(reason)
+        elif payload.get("advisory"):
+            # Advisory events (#idea 4): a subsystem degraded silently. Count by
+            # event_type so summary_history() can surface "3 advisory events: ...".
+            report.advisory_counts[et] = report.advisory_counts.get(et, 0) + 1
 
 
 def _via_to_provenance(via: str) -> str:

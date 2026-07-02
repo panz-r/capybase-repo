@@ -26,6 +26,7 @@ def write_review_bundle(
     resume_hint: str | None = None,
     consensus: dict | None = None,
     resurrections: list | None = None,
+    advisories: list[str] | None = None,
 ) -> Path:
     """Write ``final/review-bundle.md`` and return its path.
 
@@ -38,6 +39,12 @@ def write_review_bundle(
     (deliberately-deleted content the merge result brought back). When present a
     ``## suspected resurrections`` section lists each finding so the developer
     can decide whether the reanimation was intentional or an undo of a cleanup.
+
+    ``advisories`` is a list of human-readable strings from advisory journal
+    events (#idea 4): subsystems that degraded silently during the run (e.g.
+    "history unavailable: rebase plan build failed"). When present, a
+    ``## advisories`` section lists them so the human sees WHY a history feature
+    may not have applied, not just that the conflict escalated.
     """
     paths.final.mkdir(parents=True, exist_ok=True)
     out = paths.final / "review-bundle.md"
@@ -167,7 +174,19 @@ def write_review_bundle(
                 else:
                     lines.extend(shown)
                 lines.append("```")
-            lines.append("")
+        lines.append("")
+
+    if advisories:
+        lines.append("## advisories")
+        lines.append(
+            "History-aware subsystems that degraded silently during this run. "
+            "If a feature you expected (future probe, obligations, branch intent) "
+            "didn't apply, the reason is likely here."
+        )
+        lines.append("")
+        for a in advisories:
+            lines.append(f"- {a}")
+        lines.append("")
 
     out.write_text("\n".join(lines), encoding="utf-8")
     return out

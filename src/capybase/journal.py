@@ -65,6 +65,28 @@ class Journal:
                 pass
         return event
 
+    def emit_advisory(
+        self, event_type: str, reason: str, *, path: str | None = None,
+        unit_id: str | None = None, **fields: Any
+    ) -> JournalEvent:
+        """Emit an ADVISORY event: a subsystem degraded silently and wants it
+        recorded without crashing the rebase (#idea 4 — observability).
+
+        The tag lives in ``payload`` (``{"advisory": True, "reason": ...}``) so
+        the flat journal model needs no new field. Advisory events are kept out
+        of normal terminal output (never printed via self.out) but surface in the
+        dry-run report + escalation review bundle, so a silently-degraded history
+        feature is observable rather than invisible. ``**fields`` carries extra
+        detail (e.g. dropped_symbols, the exception message).
+        """
+        payload = {"advisory": True, "reason": reason, **fields}
+        kw: dict[str, Any] = {}
+        if path is not None:
+            kw["path"] = path
+        if unit_id is not None:
+            kw["unit_id"] = unit_id
+        return self.emit(event_type, payload, **kw)
+
     def _append(self, event: JournalEvent) -> None:
         self.paths.journal.parent.mkdir(parents=True, exist_ok=True)
         line = event.model_dump_json()

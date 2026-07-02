@@ -1043,10 +1043,20 @@ class Orchestrator:
         from capybase.exact_reuse import find_exact_reuse
 
         region_kind = self._region_kind_for(unit)
-        reuse = find_exact_reuse(
-            unit=unit, store=self.memory_store,
-            language=unit.language, region_kind=region_kind,
-        )
+        try:
+            reuse = find_exact_reuse(
+                unit=unit, store=self.memory_store,
+                language=unit.language, region_kind=region_kind,
+            )
+        except Exception as exc:  # noqa: BLE001 - distinguish failure from no-match
+            # find_exact_reuse returns None for a genuine no-match but propagates
+            # exceptions; emit a distinct advisory so a real failure isn't
+            # mislabeled "no exact match" (#idea 4 — observability).
+            self.journal.emit_advisory(
+                "exact_reuse_failed", f"reuse matching raised: {exc}",
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            return None
         if reuse is None:
             self.journal.emit(
                 "exact_reuse_skipped", {"reason": "no exact match"},
@@ -1915,6 +1925,9 @@ class Orchestrator:
             return plan
         except Exception as exc:  # noqa: BLE001 - history is advisory
             self.log.debug("rebase plan not built: %s", exc)
+            self.journal.emit_advisory(
+                "history_unavailable", f"rebase plan build failed: {exc}",
+            )
             return None
 
     def _build_history_service(self, plan):
@@ -1954,7 +1967,10 @@ class Orchestrator:
                 except Exception:  # noqa: BLE001 - best-effort
                     patches[c.oid] = b""
             return build_branch_intent(plan, patches)
-        except Exception:  # noqa: BLE001 - advisory
+        except Exception as exc:  # noqa: BLE001 - advisory
+            self.journal.emit_advisory(
+                "branch_intent_failed", f"branch-intent build failed: {exc}",
+            )
             return None
 
     def _recent_target_commits(self, plan, *, max_commits: int = 5) -> list:
@@ -1986,7 +2002,10 @@ class Orchestrator:
             relevant = [c for c in commits if any(f in c.touched_files for f in files)]
             # replayed_commit_sequence is oldest-first; reverse to newest-first.
             return list(reversed(relevant))[:max_commits]
-        except Exception:  # noqa: BLE001 - advisory
+        except Exception as exc:  # noqa: BLE001 - advisory
+            self.journal.emit_advisory(
+                "history_unavailable", f"recent-target-commits fetch failed: {exc}",
+            )
             return []
 
     def _current_replayed_oid(self) -> str | None:
@@ -2069,7 +2088,11 @@ class Orchestrator:
             except Exception:  # noqa: BLE001 - advisory only
                 pass
             return feats
-        except Exception:  # noqa: BLE001 - advisory only
+        except Exception as exc:  # noqa: BLE001 - advisory only
+            self.journal.emit_advisory(
+                "history_context_failed", f"history features failed: {exc}",
+                path=getattr(unit, "path", None), unit_id=getattr(unit, "unit_id", None),
+            )
             return {}
 
     def _history_confidence_for(self, unit: ConflictUnit):
@@ -2131,7 +2154,11 @@ class Orchestrator:
                 future_commits=ctx.future_source_commits_touching_region,
                 patches=patches,
             )
-        except Exception:  # noqa: BLE001 - advisory only
+        except Exception as exc:  # noqa: BLE001 - advisory only
+            self.journal.emit_advisory(
+                "future_obligations_failed", f"obligation extraction failed: {exc}",
+                path=getattr(unit, "path", None), unit_id=getattr(unit, "unit_id", None),
+            )
             return None
 
     def _set_future_obligations_prompt_block(self, unit: ConflictUnit) -> None:
@@ -2158,7 +2185,12 @@ class Orchestrator:
             self.context_builder.branch_intent_block = self._branch_intent_for_file(
                 unit.path
             )
-        except Exception:  # noqa: BLE001 - advisory
+        except Exception as exc:  # noqa: BLE001 - advisory
+            self.journal.emit_advisory(
+                "future_obligations_failed",
+                f"obligation prompt-block failed: {exc}",
+                path=unit.path, unit_id=unit.unit_id,
+            )
             self.context_builder.future_obligations_block = ""
             self.context_builder.branch_intent_block = ""
 
@@ -2179,7 +2211,11 @@ class Orchestrator:
                         return ""
                     return f"Branch final intent for {path}:\n{body}"
             return ""
-        except Exception:  # noqa: BLE001 - advisory
+        except Exception as exc:  # noqa: BLE001 - advisory
+            self.journal.emit_advisory(
+                "branch_intent_failed", f"branch-intent render failed: {exc}",
+                path=path,
+            )
             return ""
 
     def _future_obligations_check(
@@ -2310,7 +2346,15 @@ class Orchestrator:
                 resolved_content = self.git.read_worktree_file(unit.path)
             except FileNotFoundError:
                 resolved_content = None  # file was deleted by the resolution
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                # Couldn't read the resolved file — the probe can't run for this
+                # unit. Emit a distinct advisory so it doesn't silently vanish
+                # (#idea 4 — observability).
+                self.journal.emit_advisory(
+                    "future_probe_unavailable",
+                    f"could not read resolved file for probe: {exc}",
+                    path=unit.path, unit_id=unit.unit_id,
+                )
                 continue
             # Probe mode selection (adaptive, not a policy knob): sequence_patch is
             # STRICTLY more accurate than path_patch — it applies the intervening
@@ -2634,8 +2678,27 @@ class Orchestrator:
                 unit=_esc.unit if _esc else None,
                 candidate=(_esc.accepted or (_esc.attempts[-1] if _esc.attempts else None)) if _esc else None,
                 validation=_esc.validation if _esc else None,
+                advisories=self._recent_advisories(),
             )
         return last  # type: ignore[return-value]
+
+    def _recent_advisories(self) -> list[str]:
+        """Human-readable advisory reasons for the escalation review bundle.
+
+        Collects the advisory events emitted this session (#idea 4) and renders
+        each as ``<event_type>: <reason>`` so the human reviewing an escalation
+        sees WHY a history feature may not have applied. Capped to keep the bundle
+        readable. Empty when no advisories fired (the common, healthy case).
+        """
+        try:
+            adv = [
+                e for e in self.journal.read_events()
+                if getattr(e.payload, "get", lambda *_: None)("advisory")
+            ]
+            out = [f"{e.event_type}: {e.payload.get('reason', '')}" for e in adv]
+            return out[:20]
+        except Exception:  # noqa: BLE001 - the bundle is advisory
+            return []
 
     # ------------------------------------------------------------------ step core
 
@@ -2812,6 +2875,7 @@ class Orchestrator:
                         unit=_unit,
                         candidate=_cand,
                         validation=file_validation if file_validation is not None else None,
+                        advisories=self._recent_advisories(),
                     )
                     return result
             # Stage the validated file (it was already written to the worktree
@@ -2928,6 +2992,14 @@ class Orchestrator:
             # building the prompt so the model sees what later commits expect.
             self._set_future_obligations_prompt_block(unit)
             context = self.context_builder.build(unit)
+            # Surface a retrieval failure as an advisory (#idea 4): the context
+            # builder has no journal, so it stashes the error for us to emit here.
+            if self.context_builder.last_retrieval_error:
+                self.journal.emit_advisory(
+                    "retrieval_explanation_failed",
+                    f"retrieval failed: {self.context_builder.last_retrieval_error}",
+                    path=unit.path, unit_id=unit.unit_id,
+                )
             # Surface the retrieval explanations onto the outcome (#9 step 5) so
             # the accept report can show why each few-shot example was chosen.
             outcome.retrieval_explanations = list(context.retrieval_explanations)

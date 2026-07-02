@@ -67,6 +67,10 @@ class ContextBuilder:
         # source branch's net effect per file. Set once at rebase start by the
         # orchestrator; appended to the history block. Empty when no plan.
         self.branch_intent_block: str = ""
+        # Last retrieval error (#idea 4): set when retrieval throws, so the
+        # orchestrator (which has a journal) can emit an advisory. The context
+        # builder has no journal access, so this is the seam for surfacing it.
+        self.last_retrieval_error: str = ""
 
     def build(self, unit: ConflictUnit, budget: TokenBudget | None = None) -> ContextBundle:
         budget = budget or TokenBudget()
@@ -144,6 +148,7 @@ class ContextBuilder:
         retrieval_explanations: list[str] = []
         if self.retriever is not None:
             query = " ".join([unit.base.text, unit.current.text, unit.replayed.text])
+            self.last_retrieval_error = ""  # reset per build
             try:
                 # Prefer the explained retrieval API (#9 step 5) so the reasons
                 # each example was chosen flow into the accept report; fall back
@@ -168,8 +173,10 @@ class ContextBuilder:
                 if len(scored) >= self.min_examples or scored:
                     retrieval_scores = [round(s, 4) for s, _ in scored]
                     retrieved = [ex for _, ex in scored]
-            except Exception:  # noqa: BLE001 - retrieval is best-effort
-                pass
+            except Exception as exc:  # noqa: BLE001 - retrieval is best-effort
+                # Stash the error so the orchestrator can journal an advisory
+                # (#idea 4); the builder has no journal access itself.
+                self.last_retrieval_error = str(exc)
         # Cross-file dependency slicing (survey §5.3): resolve definitions of
         # symbols referenced in the EDITED sides (current + replayed). These are
         # the dependencies the merged result must stay consistent with — helpers,
