@@ -370,6 +370,81 @@ class ObligationValidator:
         )
 
 
+class FutureObligationValidator:
+    """Future-obligation contract (#idea 7): a candidate must keep symbols later
+    source commits depend on.
+
+    Mirrors :class:`ObligationValidator` (the side-obligations check) but for
+    FUTURE obligations — symbols/imports/keys derived from later replayed commits'
+    patches (what the rest of the source branch expects to still exist). The
+    obligations are derived orchestrator-side (they need git + a history plan, which
+    :class:`VerificationContext` doesn't carry — the :class:`DependencyPreservationValidator`
+    injection pattern) and injected via :meth:`set_obligations` before each verify.
+
+    Severity ``warning`` (the ObligationValidator precedent): feeds retry via the
+    risk engine, like any other validator warning — NOT a hard reject. This makes a
+    candidate that fails future obligations look like any other failed validator
+    result: retryable, explainable, calibratable. The features it emits
+    (``future_obligation_count`` etc.) flow to risk, accept reports, dry-run, and
+    calibration uniformly.
+    """
+
+    name = "future_obligation"
+
+    def __init__(self) -> None:
+        # Per-unit mutable state: the orchestrator sets the obligations before
+        # each verify() call (derived from the unit's snapshot, #idea 5). None
+        # when no future obligations apply (the validator is a no-op).
+        self._obligations = None
+
+    def set_obligations(self, obligations) -> None:
+        """Inject the per-unit FutureObligations (or None for a no-op).
+
+        Called by the orchestrator before verify(); the obligations come from the
+        unit's memoized HistoryDecisionContext snapshot (so the git patch-fetch
+        runs once per unit, not per verify call).
+        """
+        self._obligations = obligations
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        from capybase.future_obligations import obligations_satisfied
+
+        obls = self._obligations
+        if obls is None or obls.empty:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="no future obligations (no later commits depend on this region)",
+                features={"future_obligation_count": 0, "future_obligation_dropped_count": 0},
+            )
+        satisfied, dropped = obligations_satisfied(obls, ctx.candidate.resolved_text or "")
+        # Split the dropped symbols by obligation kind for the feature spine.
+        required = obls.required_symbols
+        expected_keys = obls.expected_keys
+        dropped_imports = [s for s in dropped if s in required]
+        return VerificationCheckResult(
+            name=self.name,
+            passed=satisfied,
+            severity="warning",
+            message=(
+                "resolution drops symbol(s) a later commit needs"
+                if dropped
+                else "resolution preserves all future obligations"
+            ),
+            detail={"dropped_symbols": dropped[:16]},
+            features={
+                "future_obligation_count": len(obls.obligations),
+                "future_obligation_dropped_count": len(dropped),
+                "future_obligation_dropped_symbols": ",".join(sorted(dropped))[:200],
+                "future_obligation_dropped_imports": len(
+                    [o for o in obls.obligations if o.kind == "import" and o.symbol in dropped]
+                ),
+                "future_obligation_dropped_keys": len(
+                    [k for k in expected_keys if not satisfied]
+                ),
+            },
+        )
+
+
 class DependencyPreservationValidator:
     """SafeMerge necessary-condition: don't drop a base dependency (survey §2.2).
 

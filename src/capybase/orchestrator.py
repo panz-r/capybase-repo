@@ -423,6 +423,17 @@ class Orchestrator:
                     slice_repo_root=str(self.git.repo),
                 )
             )
+        # Future-obligation validator (#idea 7): checks a candidate keeps the
+        # symbols/imports/keys later source commits depend on. The obligations
+        # are derived orchestrator-side (git + history needed) and injected per-
+        # unit via _future_obligation_validator.set_obligations before each verify.
+        # Always registered; a no-op (no obligations → pass) when no history plan
+        # is active. Emits features (future_obligation_count etc.) that flow to
+        # risk/accept/dry-run/calibration uniformly.
+        from capybase.verification import FutureObligationValidator
+
+        self._future_obligation_validator = FutureObligationValidator()
+        self.verification.register(self._future_obligation_validator)
         # VeriGuard-style deterministic policy gate (survey §4): auto-registered
         # by VerificationEngine.default() when enable_policy_gate is on AND rules
         # are configured. It inspects WHAT a patch introduces (the only such
@@ -1103,18 +1114,26 @@ class Orchestrator:
                 step_index=self.step, path=unit.path, unit_id=unit.unit_id,
             )
             return None
-        # Future-obligations gate (#9 step 3): a reuse that locally passes but
-        # drops a symbol a later commit needs must also fall through (the prior
-        # resolution predates this conflict's history context). The reused text
-        # is re-checked the same way an LLM candidate would be.
-        fo_ok, fo_dropped = self._future_obligations_check(unit, cand)
-        if not fo_ok:
-            self.journal.emit(
-                "exact_reuse_skipped",
-                {"reason": "future obligation", "dropped_symbols": fo_dropped},
-                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
-            )
-            return None
+        # Future-obligations gate for reuse (#9 step 3 / #idea 7): a reuse that
+        # locally passes but drops a symbol a later commit needs must fall through
+        # (the prior resolution predates this conflict's history context). The
+        # FutureObligationValidator now runs during verify() and emits the
+        # features, but reuse declines on a drop (returns None = fall through)
+        # rather than retrying — the prior text is fixed, so a retry wouldn't help.
+        # Read from the memoized snapshot (the validator was already fed from it).
+        snapshot = self._history_snapshots.get(
+            getattr(unit, "unit_id", None) or id(unit))
+        obls = snapshot.future_obligations if snapshot is not None else None
+        if obls is not None and not obls.empty:
+            from capybase.future_obligations import obligations_satisfied
+            fo_ok, fo_dropped = obligations_satisfied(obls, cand.resolved_text or "")
+            if not fo_ok:
+                self.journal.emit(
+                    "exact_reuse_skipped",
+                    {"reason": "future obligation", "dropped_symbols": fo_dropped},
+                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                )
+                return None
         if self._strictness_blocks_pre_llm(unit, cand, validation, "exact_reuse"):
             return None  # strict mode declines; fall through to structural/LLM
         outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
@@ -3032,7 +3051,16 @@ class Orchestrator:
         # the same per-unit snapshot rather than re-querying 4×/2×/2×. The
         # snapshot is journaled here as the single history_decision_snapshot event.
         if self._history_service is not None and self._history_plan is not None:
-            self._history_snapshot_for(unit)
+            snapshot = self._history_snapshot_for(unit)
+            # Inject the snapshot's future obligations into the verification
+            # validator (#idea 7) so verify() checks them uniformly — a dropped
+            # symbol now produces a warning + features like any other validator,
+            # not an inline orchestrator gate.
+            self._future_obligation_validator.set_obligations(
+                snapshot.future_obligations
+            )
+        else:
+            self._future_obligation_validator.set_obligations(None)
         retry_count = 0
         # seed_failures: when set (whole-file CEGIS), the unit is re-resolved
         # starting from the repair path with the file-level failures pre-seeded,
@@ -3307,33 +3335,13 @@ class Orchestrator:
                         step_index=self.step, path=unit.path, unit_id=unit.unit_id,
                     )
                     return outcome
-                # Future-obligations gate (#9 step 3): a candidate that locally
-                # passes but drops a symbol a later source commit still needs
-                # would break that later commit's replay. Convert into a retry
-                # (the CEGIS loop can repair it, told which symbol it dropped);
-                # if retries are exhausted, the normal exhaustion path escalates.
-                fo_ok, fo_dropped = self._future_obligations_check(unit, cand)
-                if not fo_ok:
-                    self.journal.emit(
-                        "candidate_rejected",
-                        {"candidate_id": cand.candidate_id,
-                         "action": "retry", "via": "future_obligation",
-                         "dropped_symbols": fo_dropped,
-                         "retry_count": retry_count},
-                        step_index=self.step, path=unit.path, unit_id=unit.unit_id,
-                    )
-                    failures = [
-                        VerificationFailure(
-                            validator="future_obligation",
-                            message=(
-                                "resolution drops symbol(s) a later commit "
-                                f"needs: {', '.join(fo_dropped)}"
-                            ),
-                        )
-                    ]
-                    prev_candidate = cand
-                    retry_count += 1
-                    continue
+                # Future obligations are now a VERIFICATION validator (#idea 7):
+                # the FutureObligationValidator (fed from the snapshot) emits a
+                # warning + features like any other validator, and the risk engine
+                # retries on the "future_obligation" warning name. No inline gate
+                # needed here — the candidate already passed verify() (which ran
+                # the future-obligation check) and the risk decision already
+                # accounted for it.
                 # Re-stamp a plain-LLM candidate to history_augmented_llm when
                 # history context meaningfully augmented the prompt (#9 step 1):
                 # confidence above threshold AND a real future-region signal.

@@ -104,6 +104,11 @@ _FEATURE_KEYS: tuple[str, ...] = (
     "history_future_region_touch_count",
     "history_source_commit_index",
     "history_has_context",
+    # Future-obligation evidence (#idea 7): how many obligations applied and how
+    # many the candidate dropped. Lets calibration learn that obligation-dropping
+    # candidates fail downstream. Added in-place; old models carry shorter keys.
+    "future_obligation_count",
+    "future_obligation_dropped_count",
 )
 
 

@@ -127,6 +127,17 @@ class RiskEngine:
                 reasons=soft or ["dropped a base-referenced dependency"],
                 required_followups=soft,
             )
+        # Dropping a symbol a LATER source commit depends on (#idea 7): the
+        # FutureObligationValidator flags this as a warning. Retry so the model
+        # re-includes the symbol; escalate if it persists (same class as the
+        # side-obligation + dependency drops above — "didn't preserve what the
+        # branch needs").
+        if "future_obligation" in warning_names and retry_count < self.max_retries_per_unit:
+            return RiskDecision(
+                action="retry",
+                reasons=soft or ["dropped a symbol a later commit needs"],
+                required_followups=soft,
+            )
 
         # Passed with no hard signals: accept — unless consensus shows no
         # reliable majority. Two complementary signals for small N:
