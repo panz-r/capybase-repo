@@ -689,6 +689,17 @@ def main(argv: list[str] | None = None) -> int:
         help="cap the number of cases emitted per dataset (a large dataset would "
              "explode test parametrization). The full histogram still prints.",
     )
+    ap.add_argument(
+        "--rebase-scenarios", action="store_true",
+        help="also mine MULTI-COMMIT rebase scenarios (a source branch of N commits "
+             "replayed onto a target, with conflicts at specific steps). These are "
+             "what exercise the history-aware mechanisms; delegated to "
+             "scripts/mine_rebase_scenarios.py. Single-file mining still runs.",
+    )
+    ap.add_argument(
+        "--max-scenarios", type=int, default=40,
+        help="cap rebase scenarios per repo when --rebase-scenarios is set (default 40).",
+    )
     args = ap.parse_args(argv)
 
     if args.list:
@@ -708,6 +719,25 @@ def main(argv: list[str] | None = None) -> int:
     print(f"==> done. {total_cases} case(s) written to {TESTDATA}")
     if total_cases == 0:
         print("    (no test data generated; tests/test_realworld_conflicts.py will skip)")
+
+    # Multi-commit rebase scenario mining (the history-aware corpus). Delegated to
+    # the sibling script so the mining logic lives in one place. Only git-history
+    # datasets can yield rebase scenarios (archives have no commit graph).
+    if args.rebase_scenarios:
+        from scripts.mine_rebase_scenarios import process as mine_process
+
+        print("\n==> mining multi-commit rebase scenarios (--rebase-scenarios)")
+        gh = [ds for ds in selected if ds.kind == "git-history"]
+        total_scenarios = 0
+        for ds in gh:
+            print(f"==> scenario mining: {ds.id}")
+            total_scenarios += mine_process(
+                ds, max_scenarios=args.max_scenarios, language=args.language,
+            )
+        print(f"==> done. {total_scenarios} scenario(s) written to "
+              f"extracted-testdata/rebase-scenarios/")
+        if total_scenarios == 0:
+            print("    (no scenarios mined; tests/test_rebase_scenarios.py will skip)")
     return 0
 
 

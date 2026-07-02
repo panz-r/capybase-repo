@@ -115,12 +115,24 @@ These taxonomy cells are **not** covered and are tracked as future work:
 - **Real-world harvesting** (Method D): scraping merged conflicts from public
   Rust repos. **Registered real-world sources** (in
   `scripts/fetch_mergeconflict_datasets.py` `DATASETS` + `realworld_loader.py`
-  `_GIT_HISTORY_CLONE_SUBDIR`): `serde-history` (mined, cases present), plus
-  `sea-orm-history`, `clap-history`, `tokio-history`, and `pydantic-history`
-  (registered, not yet cloned/mined — running the fetch script harvests them as
-  blob-filtered git-history clones). Only serde has mined cases today; the
-  others are registered so a future data-gathering phase clones+mines them
-  without code changes.
+  `_GIT_HISTORY_CLONE_SUBDIR`): `serde-history`, `sea-orm-history`,
+  `clap-history`, `tokio-history` (Rust), and `pydantic-history` (Python).
+  **Two mining modes**, both gitignored + clean-skip-when-empty (CI inert on a
+  fresh clone): (1) **single-file** 3-way conflicts via
+  `fetch_mergeconflict_datasets.py` (mines one merge's conflicted file; what the
+  existing `test_realworld_conflicts.py` consumes); (2) **multi-commit rebase
+  scenarios** via `mine_rebase_scenarios.py` / `fetch_... --rebase-scenarios` —
+  a source branch of N commits replayed onto a target with conflicts at specific
+  steps, the data shape that exercises the history-aware mechanisms (conflict
+  chains, future probes, branch intent). Consumed by
+  `test_rebase_scenarios.py` via `rebase_scenario_loader.py`. Run
+  `python scripts/fetch_mergeconflict_datasets.py --dataset <id>
+  --rebase-scenarios` to clone+mine in one shot.
+- **Multi-commit real-world oracle**: mined scenarios assert *infrastructure
+  invariants + history-mechanism firing* (the HistoryQueryService answers from
+  real source commits; branch intent builds from real patches; the source tip
+  compiles), NOT that capybase's merge matches a known-good outcome — real
+  rebases have no single oracle (mirrors the single-file realworld policy).
 - **Cross-crate / workspace support**: the manifest check targets a single
   repo-root `Cargo.toml`; nested workspace-member manifests aren't handled.
 - **Proc-macro verification** (beyond `#[derive]`): attribute/proc-macro
