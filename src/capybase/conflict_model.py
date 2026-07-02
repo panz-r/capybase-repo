@@ -15,6 +15,7 @@ The cardinal invariant::
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
@@ -280,6 +281,33 @@ class CandidateResolution(BaseModel):
     # no budget was configured or nothing was trimmed. Carried on the candidate
     # so the orchestrator can journal per-resolution trimming (observability).
     prompt_trims: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@dataclass
+class ResolutionAttempt:
+    """One mechanism's attempt to resolve a unit (#idea 6 cohesion).
+
+    Normalizes the 5 resolution mechanisms (exact reuse, structural, combination
+    search, block capture, plain/history-augmented LLM) into a uniform record so
+    reports, metrics, tests, and retry behavior are consistent. Provenance (the
+    mechanism) is assigned by the dispatch, not inferred or restamped afterward
+    except in the clearly-named history-augmentation compat path.
+
+    - ``mechanism``: the provenance value (e.g. ``"deterministic_structural"``).
+    - ``candidate``: the candidate produced (None for a mechanism that declined
+      before producing one, e.g. reuse found no match).
+    - ``validation``: the verification result (None if not yet validated).
+    - ``decision``: ``"accept"`` | ``"retry"`` | ``"escalate"`` | ``"skip"``
+      (skip = the mechanism declined, falling through to the next).
+    - ``reason``: human-readable why (e.g. ``"structural resolver declined:
+      contradictory edits"`` or ``"accepted via insertion_union rule"``).
+    """
+
+    mechanism: str
+    candidate: "CandidateResolution | None" = None
+    validation: "VerificationResult | None" = None
+    decision: str = "skip"
+    reason: str = ""
 
 
 # ---------------------------------------------------------------------------

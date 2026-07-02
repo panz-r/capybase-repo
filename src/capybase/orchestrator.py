@@ -29,6 +29,7 @@ from capybase.conflict_extractor import ConflictExtractor, SkippedPath
 from capybase.conflict_model import (
     CandidateResolution,
     ConflictUnit,
+    ResolutionAttempt,
     RiskDecision,
     VerificationFailure,
     VerificationResult,
@@ -79,6 +80,12 @@ class UnitOutcome:
     # chosen (same path/region kind/conflict shape, score, prior outcome). Empty
     # when no retrieval ran. Surfaced in accept reports for debuggability.
     retrieval_explanations: list[str] = field(default_factory=list)
+    # Uniform resolution-attempt records (#idea 6 cohesion): one per mechanism
+    # tried (exact_reuse, structural, sbcr, block_capture, each LLM iteration),
+    # carrying (mechanism, candidate, validation, decision, reason). Parallel to
+    # ``attempts`` (the bare candidate list, kept for backward compat) — this is
+    # the structured record reports/metrics/dry-run read.
+    resolution_attempts: list = field(default_factory=list)
 
 
 @dataclass
@@ -1083,6 +1090,10 @@ class Orchestrator:
                 "exact_reuse_skipped", {"reason": "no exact match"},
                 step_index=self.step, path=unit.path, unit_id=unit.unit_id,
             )
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="exact_history_reuse",
+                decision="skip", reason="no exact match",
+            )
             return None
         cand = CandidateResolution(
             candidate_id=f"{unit.unit_id}:exact_reuse",
@@ -1113,6 +1124,11 @@ class Orchestrator:
                  "failures": [f.message for f in validation.hard_failures]},
                 step_index=self.step, path=unit.path, unit_id=unit.unit_id,
             )
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="exact_history_reuse",
+                candidate=cand, validation=validation,
+                decision="skip", reason="failed validation",
+            )
             return None
         # Future-obligations gate for reuse (#9 step 3 / #idea 7): a reuse that
         # locally passes but drops a symbol a later commit needs must fall through
@@ -1133,11 +1149,27 @@ class Orchestrator:
                     {"reason": "future obligation", "dropped_symbols": fo_dropped},
                     step_index=self.step, path=unit.path, unit_id=unit.unit_id,
                 )
+                self._record_resolution_attempt(
+                    UnitOutcome(unit=unit), mechanism="exact_history_reuse",
+                    candidate=cand, validation=validation,
+                    decision="skip", reason=f"future obligation: {fo_dropped}",
+                )
                 return None
         if self._strictness_blocks_pre_llm(unit, cand, validation, "exact_reuse"):
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="exact_history_reuse",
+                candidate=cand, validation=validation,
+                decision="skip", reason="strictness declined",
+            )
             return None  # strict mode declines; fall through to structural/LLM
         outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
         outcome.accepted = cand
+        self._record_resolution_attempt(
+            outcome, mechanism="exact_history_reuse",
+            candidate=cand, validation=validation,
+            decision="accept",
+            reason=f"verbatim replay from {reuse.source_summary}",
+        )
         self.journal.emit(
             "exact_reuse_applied",
             {"candidate_id": cand.candidate_id, "source": reuse.source_summary,
@@ -2195,6 +2227,36 @@ class Orchestrator:
             snapshot = HistoryDecisionContext(unit_id=unit.unit_id)
         self._history_snapshots[key] = snapshot
         return snapshot
+
+    def _restamp_for_history_augmentation(
+        self, unit: ConflictUnit, cand: CandidateResolution
+    ) -> str:
+        """The clearly-named history-augmentation compat path (#idea 6).
+
+        A plain-LLM candidate whose history context was augmenting (confidence
+        above threshold + a real future-region signal) gets re-stamped to
+        ``history_augmented_llm``. This is the ONLY restamp — it separates "history
+        changed this resolution" from "plain LLM" in metrics/dry-run. Only re-stamps
+        ``plain_llm``; never overrides deterministic/manual/reuse provenance.
+
+        Returns a reason string (for the ResolutionAttempt) naming the confidence,
+        or "" if no restamp happened.
+        """
+        if getattr(cand, "provenance", "") != "plain_llm":
+            return ""
+        conf = self._history_confidence_for(unit)
+        if conf is None or not conf.is_augmenting:
+            return ""
+        cand.provenance = "history_augmented_llm"
+        self.journal.emit(
+            "provenance_restamped",
+            {"candidate_id": cand.candidate_id,
+             "to": "history_augmented_llm",
+             "confidence": round(conf.score, 3)},
+            step_index=self.step, path=unit.path,
+            unit_id=unit.unit_id,
+        )
+        return f"history-augmented (confidence {conf.score:.2f})"
 
     def _clear_history_caches(self) -> None:
         """Clear the per-unit history caches (called per step in _resolve_step).
@@ -3342,27 +3404,20 @@ class Orchestrator:
                 # needed here — the candidate already passed verify() (which ran
                 # the future-obligation check) and the risk decision already
                 # accounted for it.
-                # Re-stamp a plain-LLM candidate to history_augmented_llm when
-                # history context meaningfully augmented the prompt (#9 step 1):
-                # confidence above threshold AND a real future-region signal.
-                # This separates "history changed this resolution" from "plain
-                # LLM" in the metrics/dry-run, so per-mechanism quality (#9) can
-                # tell whether history augmentation actually helps. Only re-stamps
-                # plain_llm — never overrides deterministic/manual/reuse paths.
-                if getattr(cand, "provenance", "") == "plain_llm":
-                    conf = self._history_confidence_for(unit)
-                    if conf is not None and conf.is_augmenting:
-                        cand.provenance = "history_augmented_llm"
-                        self.journal.emit(
-                            "provenance_restamped",
-                            {"candidate_id": cand.candidate_id,
-                             "to": "history_augmented_llm",
-                             "confidence": round(conf.score, 3)},
-                            step_index=self.step, path=unit.path,
-                            unit_id=unit.unit_id,
-                        )
+                # The clearly-named history-augmentation compat path (#idea 6):
+                # a plain-LLM candidate whose history context was augmenting gets
+                # re-stamped to history_augmented_llm. This is the ONLY restamp,
+                # and it's a named method (not an inline mutation) so the compat
+                # path is explicit and reasoned.
+                restamp_reason = self._restamp_for_history_augmentation(unit, cand)
                 outcome.accepted = cand
                 outcome.retry_count = retry_count
+                self._record_resolution_attempt(
+                    outcome, mechanism=cand.provenance or "plain_llm",
+                    candidate=cand, validation=validation,
+                    decision="accept",
+                    reason=restamp_reason or "LLM candidate accepted",
+                )
                 self.journal.emit(
                     "candidate_accepted",
                     {"candidate_id": cand.candidate_id,
@@ -3552,6 +3607,36 @@ class Orchestrator:
         # "confident / not atypical"), which is the safe default.
         out["mean_token_entropy"] = getattr(cand, "mean_token_entropy", None)
         return out
+
+    def _record_resolution_attempt(
+        self, outcome: UnitOutcome, *, mechanism: str,
+        candidate: CandidateResolution | None = None,
+        validation: VerificationResult | None = None,
+        decision: str = "skip", reason: str = "",
+    ) -> ResolutionAttempt:
+        """Record one mechanism's attempt as a uniform ResolutionAttempt (#idea 6).
+
+        Appends to ``outcome.resolution_attempts`` AND emits a uniform
+        ``resolution_attempt`` journal event (mechanism, decision, reason). This
+        normalizes the 5 mechanisms' ad-hoc event vocabulary into one record so
+        reports/metrics/dry-run consume a single shape. The candidate (if any) is
+        also appended to the legacy ``outcome.attempts`` list for backward compat.
+        """
+        attempt = ResolutionAttempt(
+            mechanism=mechanism, candidate=candidate,
+            validation=validation, decision=decision, reason=reason,
+        )
+        outcome.resolution_attempts.append(attempt)
+        if candidate is not None:
+            outcome.attempts.append(candidate)
+        self.journal.emit(
+            "resolution_attempt",
+            {"mechanism": mechanism, "decision": decision, "reason": reason,
+             "candidate_id": candidate.candidate_id if candidate else None},
+            step_index=self.step, path=outcome.unit.path,
+            unit_id=outcome.unit.unit_id,
+        )
+        return attempt
 
     def _record_outcomes_to_memory(self, result: StepResult) -> None:
         """Append labeled outcomes to the experience store for RAG/calibration.
