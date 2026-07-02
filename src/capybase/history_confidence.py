@@ -52,9 +52,13 @@ _REGION_KEY_SCORE: dict[str, float] = {"low": 0.0, "medium": 0.5, "high": 1.0}
 _DETECTION_SCORE: dict[str, float] = {"none": 0.0, "heuristic": 0.35, "diff": 1.0}
 _PROBE_SCORE: dict[str, float] = {"none": 0.0, "path_patch": 0.6, "sequence_patch": 1.0}
 
-#: Default confidence threshold for re-stamping an LLM candidate's provenance to
+#: Confidence threshold for re-stamping an LLM candidate's provenance to
 #: ``history_augmented_llm``. Below this, history may be present but isn't strong
-#: enough to attribute the resolution to it. Exposed for tests/config.
+#: enough to attribute the resolution to it. This is a DOCUMENTED CONSTANT, not a
+#: config knob: history features are always-on and adaptive, and exposing this as
+#: per-deploy config would invite mis-tuning (the 0.4 weight was chosen so a lone
+#: subject-heuristic match qualifies but scores below a diff match). Tuning is a
+#: one-line change here, surfaced in tests, not a hidden setting.
 DEFAULT_AUGMENT_THRESHOLD = 0.4
 
 

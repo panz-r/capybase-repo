@@ -376,8 +376,16 @@ class JournalConfig(BaseModel):
 
 
 class FutureConfig(BaseModel):
-    """Documents planned seams. Inert in the MVP — parsed, never read by the
-    core loop. Provided so config files written today stay valid tomorrow."""
+    """Resolution-mechanism toggles (the pre-LLM + RAG layers).
+
+    A mix of operational toggles and documented planned seams. NOTE: the
+    history-aware features (future probes, obligations, branch intent, exact
+    reuse, provenance restamping) are NOT config knobs here — they are always-on
+    and ADAPTIVE: they derive their behavior from the conflict's own data (e.g.
+    the probe mode is chosen by whether intervening commits exist, not a setting).
+    Tuning those behaviors is a code change (documented constants in the relevant
+    module), not a per-deploy config, by design — minimal config, no hidden knobs.
+    """
 
     enable_self_consistency: bool = False
     enable_rag: bool = False

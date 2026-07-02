@@ -102,36 +102,64 @@ def _capture_probe_call(repo, *, policy_mode, monkeypatch):
     return captured
 
 
-def test_strict_mode_uses_sequence_patch(repo, monkeypatch):
-    """ci/unattended modes select sequence_patch for the probe."""
-    captured = _capture_probe_call(repo, policy_mode="ci", monkeypatch=monkeypatch)
-    assert captured["mode"] == "sequence_patch"
+def test_intervening_commits_yield_sequence_patch_regardless_of_mode(repo, monkeypatch):
+    """Adaptive mode: when intervening same-path commits exist, sequence_patch is
+    selected regardless of strictness mode (accuracy is a property of the data,
+    not the run mode). Covers ci, unattended, interactive, dry_run."""
+    for mode in ("ci", "unattended", "interactive", "dry_run"):
+        captured = _capture_probe_call(repo, policy_mode=mode, monkeypatch=monkeypatch)
+        assert captured["mode"] == "sequence_patch", (
+            f"mode {mode}: expected sequence_patch (intervening exists), got {captured['mode']}"
+        )
 
 
-def test_unattended_mode_uses_sequence_patch(repo, monkeypatch):
-    captured = _capture_probe_call(repo, policy_mode="unattended", monkeypatch=monkeypatch)
-    assert captured["mode"] == "sequence_patch"
+def test_no_intervening_commits_yield_path_patch_regardless_of_mode(repo, monkeypatch):
+    """Adaptive mode: when there are NO intervening commits, path_patch is
+    selected regardless of strictness mode (sequence_patch would do no extra
+    work anyway — the degenerate case)."""
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator, StepResult
+    from capybase.policy_strictness import StrictnessPolicy
 
+    for mode in ("ci", "unattended", "interactive", "dry_run"):
+        cfg = Config()
+        orch = Orchestrator(cfg, repo=str(repo), out=lambda *_a, **_k: None)
+        orch.strictness = StrictnessPolicy(mode=mode)
+        captured: dict = {}
 
-def test_interactive_mode_uses_path_patch(repo, monkeypatch):
-    """interactive/dry_run modes select the cheaper path_patch (advisory)."""
-    captured = _capture_probe_call(repo, policy_mode="interactive", monkeypatch=monkeypatch)
-    assert captured["mode"] == "path_patch"
-
-
-def test_dry_run_mode_uses_path_patch(repo, monkeypatch):
-    captured = _capture_probe_call(repo, policy_mode="dry_run", monkeypatch=monkeypatch)
-    assert captured["mode"] == "path_patch"
-
-
-# ---------------------------------------------------------------------------
-# intervening-commit derivation
-# ---------------------------------------------------------------------------
+        def fake_probe(git, *, resolved_path, resolved_content, future_commits,
+                       max_probes=1, mode="path_patch", intervening_commits=None):
+            from capybase.history import FutureApplyResult
+            captured["mode"] = mode
+            return FutureApplyResult(probed=True, applies=True,
+                                     future_commit_subject="x", reason="ok")
+        monkeypatch.setattr("capybase.history.future_apply_probe", fake_probe)
+        # region commit is the ONLY file-touching commit → no intervening.
+        region = [_commit("fut1", "c0", "rename", ["cfg.py"], 1)]
+        ctx = _ctx(region, region)
+        unit = SimpleNamespace(path="cfg.py", unit_id="u",
+                               structural_metadata={"replayed_commit_oid": "c0"})
+        outcome = SimpleNamespace(unit=unit, accepted=SimpleNamespace(provenance="plain_llm"),
+                                  validation=None)
+        result = StepResult(step_index=0, units_by_path={}, skipped=[],
+                            outcomes=[outcome], escalated=False, reason="",
+                            tests_passed=None, continued=False)
+        class _Svc:
+            def for_conflict(self, unit, *, replayed_commit_oid=None):
+                return ctx
+        orch._history_service = _Svc()
+        orch._history_plan = SimpleNamespace(source_commits=[_commit("c0", "p", "c", ["cfg.py"], 0)])
+        monkeypatch.setattr(orch.git, "read_worktree_file", lambda p: b"resolved")
+        orch._run_future_apply_probe(result)
+        assert captured["mode"] == "path_patch", (
+            f"mode {mode}: expected path_patch (no intervening), got {captured['mode']}"
+        )
 
 
 def test_intervening_commits_derived_for_sequence_mode(repo, monkeypatch):
-    """In sequence mode, the same-path file-touching commits BEFORE the probed
-    region commit are passed as intervening (so the probe state reflects them)."""
+    """When intervening commits exist, the same-path file-touching commits BEFORE
+    the probed region commit are passed as intervening (so the probe state reflects
+    them) and sequence_patch is selected."""
     captured = _capture_probe_call(repo, policy_mode="unattended", monkeypatch=monkeypatch)
     # file_commits = [fut1 (intermediate), fut2 (probed region)].
     # intervening = [fut1] (the one before fut2).
@@ -185,7 +213,10 @@ def test_no_intervending_when_region_commit_is_first(repo, monkeypatch):
 
 
 def test_failed_probe_escalates_in_strict_mode_with_mode_in_reason(repo, monkeypatch):
-    """A failed probe in ci/unattended escalates, and the reason names the mode."""
+    """A failed probe in ci/unattended escalates, and the reason names the mode.
+
+    With no intervening commits (region commit is the only file-touching commit),
+    the adaptive logic selects path_patch — and that mode appears in the reason."""
     from capybase.config import Config
     from capybase.orchestrator import Orchestrator, StepResult
     from capybase.policy_strictness import StrictnessPolicy
@@ -203,7 +234,7 @@ def test_failed_probe_escalates_in_strict_mode_with_mode_in_reason(repo, monkeyp
     monkeypatch.setattr("capybase.history.future_apply_probe", fail_probe)
 
     region = [_commit("fut1", "c0", "rename", ["cfg.py"], 1)]
-    ctx = _ctx(region, region)
+    ctx = _ctx(region, region)  # no intervening → adaptive mode is path_patch
     unit = SimpleNamespace(path="cfg.py", unit_id="u",
                            structural_metadata={"replayed_commit_oid": "c0"})
     outcome = SimpleNamespace(unit=unit, accepted=SimpleNamespace(provenance="plain_llm"),
@@ -219,7 +250,8 @@ def test_failed_probe_escalates_in_strict_mode_with_mode_in_reason(repo, monkeyp
     monkeypatch.setattr(orch.git, "read_worktree_file", lambda p: b"resolved")
     orch._run_future_apply_probe(result)
     assert result.escalated
-    assert "sequence_patch" in result.reason
+    # No intervening → path_patch; the adaptive mode is named in the reason.
+    assert "path_patch" in result.reason
 
 
 def test_failed_probe_does_not_escalate_in_interactive_mode(repo, monkeypatch):

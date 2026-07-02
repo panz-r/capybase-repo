@@ -2271,22 +2271,24 @@ class Orchestrator:
             return ConflictChainReport()
 
     def _run_future_apply_probe(self, result: StepResult) -> None:
-        """ECC-lite future-compatibility probe (#history step 9, #9 step 2).
+        """ECC-lite future-compatibility probe (#history step 9).
 
         For each accepted unit whose history context flags future source commits
         touching the same region, check (in a throwaway worktree) whether the
-        next future commit's patch applies cleanly to the resolution. Advisory:
-        journals the result for the review bundle + calibration.
+        next future commit's patch applies cleanly to the resolution.
 
-        Probe mode policy (#9 step 2):
-        - strict modes (ci/unattended): ``sequence_patch`` — applies intervening
-          same-path source commits first, then tests the future commit. More
-          accurate (no false-positives from skipped intermediates), so a failure
-          is a meaningful safety signal that escalates.
-        - non-strict modes (interactive/dry_run): ``path_patch`` — cheaper,
-          advisory only; a failure journals a warning but does not escalate.
+        Probe mode is ADAPTIVE (derived from the conflict, not a config knob or a
+        policy guess): ``sequence_patch`` is strictly more accurate than
+        ``path_patch`` — it applies the intervening same-path source commits
+        before testing the future commit, eliminating false-positives from
+        skipped intermediate states. We use it whenever intervening commits
+        exist, and fall back to ``path_patch`` only when there are none (the
+        degenerate case where sequence_patch does no extra work anyway). Accuracy
+        is a property of the data; the cost is a one-time worktree replay.
 
-        Skipped when no RebasePlan is active.
+        Strictness policy only decides ESCALATION: strict modes (ci/unattended,
+        per the documented ``policy_mode``) block on a failed probe; non-strict
+        modes journal-and-continue. Skipped when no RebasePlan is active.
         """
         if self._history_service is None or self._history_plan is None:
             return  # no history → no probe
@@ -2310,13 +2312,20 @@ class Orchestrator:
                 resolved_content = None  # file was deleted by the resolution
             except Exception:  # noqa: BLE001
                 continue
-            # Probe mode selection (#9 step 2): strict modes (ci/unattended) use
-            # the more-accurate sequence_patch (applies intervening same-path
-            # commits first, eliminating false-positives from skipped
-            # intermediates) since a failure there blocks. Non-strict modes
-            # (interactive/dry_run) use the cheaper path_patch advisably.
-            probe_mode = "sequence_patch" if self.strictness.strict else "path_patch"
+            # Probe mode selection (adaptive, not a policy knob): sequence_patch is
+            # STRICTLY more accurate than path_patch — it applies the intervening
+            # same-path source commits before testing the future commit, which
+            # eliminates false-positives from skipped intermediate states. The
+            # only reason not to use it is when there are NO intervening commits
+            # (the degenerate case, where sequence_patch would do no extra work
+            # anyway). So we derive the mode from the conflict's own data: use
+            # the accurate mode whenever the situation calls for it, automatically.
+            # (Previously this was tied to strictness mode — a policy guess that
+            # used the cheaper/less-accurate path_patch in interactive mode even
+            # when accuracy mattered. Accuracy is a property of the data, not the
+            # run mode; the cost is a one-time worktree replay per probe.)
             intervening = self._probe_intervening_commits(ctx)
+            probe_mode = "sequence_patch" if intervening else "path_patch"
             probe_result = future_apply_probe(
                 self.git,
                 resolved_path=unit.path,
