@@ -57,6 +57,16 @@ class ContextBuilder:
         # the same region?" Populates ContextBundle.history_context. None for
         # non-rebase sessions (the field stays empty — the prompt omits the block).
         self.history_service = history_service
+        # Future obligations block (#9 step 3): a pre-rendered string of what
+        # later source commits expect of the resolution (symbol survival/imports/
+        # key edits). Set per-unit by the orchestrator (which has git access to
+        # fetch the future patches); the context builder appends it verbatim to
+        # the history block. Empty string = no obligations (block omitted).
+        self.future_obligations_block: str = ""
+        # Branch final-intent block (#9 step 6): a pre-rendered summary of the
+        # source branch's net effect per file. Set once at rebase start by the
+        # orchestrator; appended to the history block. Empty when no plan.
+        self.branch_intent_block: str = ""
 
     def build(self, unit: ConflictUnit, budget: TokenBudget | None = None) -> ContextBundle:
         budget = budget or TokenBudget()
@@ -192,6 +202,10 @@ class ContextBuilder:
             "developer intent."
         )
         lines.append(f"Replaying commit {idx + 1}/{total}: \"{_sanitize_subject(ctx.current_replay_commit.subject)}\"")
+        # Branch final-intent (#9 step 6): the source branch's net effect per
+        # file. Set once at rebase start; general context for every conflict.
+        if self.branch_intent_block:
+            lines.append(self.branch_intent_block)
         if ctx.future_source_commits_touching_region:
             lines.append("Later source commits touching this region:")
             for c in ctx.future_source_commits_touching_region[:3]:
@@ -204,6 +218,12 @@ class ContextBuilder:
             lines.append("Recent target commits touching this file:")
             for c in ctx.recent_target_commits_touching_file[:2]:
                 lines.append(f"  - \"{_sanitize_subject(c.subject)}\"")
+        # Future obligations (#9 step 3): what later commits expect of the
+        # resolution. Pre-rendered by the orchestrator (it has git access to
+        # fetch the future patches). Appended last; budget-protected like side
+        # obligations so it's never trimmed.
+        if self.future_obligations_block:
+            lines.append(self.future_obligations_block)
         return "\n".join(lines)
 
 

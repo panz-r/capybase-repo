@@ -30,6 +30,7 @@ from capybase.conflict_model import (
     CandidateResolution,
     ConflictUnit,
     RiskDecision,
+    VerificationFailure,
     VerificationResult,
 )
 from capybase.context_builder import ContextBuilder
@@ -322,6 +323,10 @@ class Orchestrator:
         # run()/inspect paths), so all history queries degrade to no-op.
         self._history_plan = None
         self._history_service = None
+        # Branch final-intent summary (#9 step 6): a compact structural summary
+        # of the source branch's net effect per file, computed once at rebase
+        # start. None when no plan; rendered into the history prompt block.
+        self._branch_intent = None
         self.paths = SessionPaths(self.session_id, repo)
         self.paths.mkdirs()
         self.journal = Journal(self.paths)
@@ -1526,10 +1531,15 @@ class Orchestrator:
         resolved_target = self.git.resolve_ref(target) or target
         self._history_plan = self._build_rebase_plan(start_oid, resolved_target)
         self._history_service = self._build_history_service(self._history_plan)
+        # Branch final-intent summary (#9 step 6): compute once per rebase from
+        # the source commits' patches. Rendered into the history prompt block;
+        # trimmed last when the budget is tight.
+        self._branch_intent = self._build_branch_intent(self._history_plan)
         # Wire the history service into the context builder so prompt-generation
         # sees the history-context block (#history step 7). The builder was
         # constructed in __init__ without a service; set it now that rebase()
-        # has built the plan.
+        # has built the plan. The branch-intent block (#9 step 6) is set
+        # per-unit (scoped to the current file) in _set_future_obligations_prompt_block.
         self.context_builder.history_service = self._history_service
         self.journal.emit(
             "rebase_started",
@@ -1832,6 +1842,28 @@ class Orchestrator:
             plan, recent_target_commits=recent_target, git=self.git,
         )
 
+    def _build_branch_intent(self, plan):
+        """Compute the branch final-intent summary (#9 step 6).
+
+        Returns None when no plan; otherwise a :class:`branch_intent.BranchIntent`
+        built from the source commits' patches (fetched via git.commit_patch).
+        Exception-safe — a failure yields None (the block is omitted).
+        """
+        if plan is None or not plan.source_commits:
+            return None
+        try:
+            from capybase.branch_intent import build_branch_intent
+
+            patches = {}
+            for c in plan.source_commits:
+                try:
+                    patches[c.oid] = self.git.commit_patch(c.oid)
+                except Exception:  # noqa: BLE001 - best-effort
+                    patches[c.oid] = b""
+            return build_branch_intent(plan, patches)
+        except Exception:  # noqa: BLE001 - advisory
+            return None
+
     def _recent_target_commits(self, plan, *, max_commits: int = 5) -> list:
         """Recent target-branch commits touching the same files as the source.
 
@@ -1898,6 +1930,7 @@ class Orchestrator:
             self._rebase_target = target
             self._history_plan = self._build_rebase_plan(start_oid, target)
             self._history_service = self._build_history_service(self._history_plan)
+            self._branch_intent = self._build_branch_intent(self._history_plan)
             self.context_builder.history_service = self._history_service
         except Exception as exc:  # noqa: BLE001 - advisory
             self.journal.emit(
@@ -1963,15 +1996,133 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 - advisory only
             return None
 
+    def _future_obligations_for(self, unit: ConflictUnit):
+        """The :class:`FutureObligations` a candidate must satisfy (#9 step 3).
+
+        Derived structurally from future source commits touching the region:
+        symbol survival, imports, key edits. The defined-symbol set comes from
+        the conflict SIDES (what the region provides), NOT the candidate — so a
+        candidate that drops a symbol is correctly flagged (a candidate defining
+        nothing would otherwise erase all obligations). Returns None when no
+        history plan is active or no future commits touch the region.
+        Exception-safe (history is advisory). The orchestrator (not the
+        verification validators) owns this check because it needs git access to
+        fetch the future patches + the history plan.
+        """
+        try:
+            if self._history_service is None or self._history_plan is None:
+                return None
+            ctx = self._history_context_for(unit)
+            if ctx is None or not ctx.future_source_commits_touching_region:
+                return None
+            from capybase.future_obligations import (
+                extract_future_obligations,
+            )
+
+            # The symbols the region PROVIDES = the union of all three sides.
+            # This is independent of the candidate, so the obligation set is
+            # stable across retries and a dropping candidate is correctly caught.
+            region_text = "\n".join(
+                t for t in (
+                    unit.base.text, unit.current.text, unit.replayed.text,
+                ) if t
+            )
+            patches = {}
+            for c in ctx.future_source_commits_touching_region:
+                try:
+                    patches[c.oid] = self.git.commit_patch(c.oid)
+                except Exception:  # noqa: BLE001 - best-effort fetch
+                    patches[c.oid] = b""
+            return extract_future_obligations(
+                resolved_text=region_text,
+                future_commits=ctx.future_source_commits_touching_region,
+                patches=patches,
+            )
+        except Exception:  # noqa: BLE001 - advisory only
+            return None
+
+    def _set_future_obligations_prompt_block(self, unit: ConflictUnit) -> None:
+        """Populate the context builder's future-obligations + branch-intent
+        blocks for a unit.
+
+        Both are scoped to the current unit's file: the future obligations are
+        derived from the conflict sides + future patches, and the branch-intent
+        excerpt shows only THIS file's net effect (listing all files in every
+        prompt is noisy and breaks path-sensitive prompt inspection). Sets the
+        blocks to '' (omitted) when nothing applies.
+        """
+        if self._history_service is None or self._history_plan is None:
+            self.context_builder.future_obligations_block = ""
+            self.context_builder.branch_intent_block = ""
+            return
+        try:
+            obls = self._future_obligations_for(unit)
+            if obls is None or obls.empty:
+                self.context_builder.future_obligations_block = ""
+            else:
+                self.context_builder.future_obligations_block = obls.render_block()
+            # Branch intent scoped to this file only (#9 step 6).
+            self.context_builder.branch_intent_block = self._branch_intent_for_file(
+                unit.path
+            )
+        except Exception:  # noqa: BLE001 - advisory
+            self.context_builder.future_obligations_block = ""
+            self.context_builder.branch_intent_block = ""
+
+    def _branch_intent_for_file(self, path: str) -> str:
+        """Render the branch-intent excerpt for ONE file.
+
+        Scoping to the current file avoids dumping every touched file into every
+        conflict's prompt (noisy + breaks path-sensitive inspection). Returns ''
+        when no branch intent was built or the file isn't in it.
+        """
+        if self._branch_intent is None:
+            return ""
+        try:
+            for f in self._branch_intent.files:
+                if f.path == path:
+                    body = f.render()
+                    if not body:
+                        return ""
+                    return f"Branch final intent for {path}:\n{body}"
+            return ""
+        except Exception:  # noqa: BLE001 - advisory
+            return ""
+
+    def _future_obligations_check(
+        self, unit: ConflictUnit, cand: CandidateResolution
+    ) -> tuple[bool, list[str]]:
+        """Reject a candidate that drops a future-obligation symbol (#9 step 3).
+
+        Returns ``(ok, dropped)``. ``dropped`` lists required symbols the
+        candidate no longer defines (a later commit still needs them). When no
+        future obligations apply (no plan / no future region touches), returns
+        ``(True, [])`` so the candidate proceeds normally.
+        """
+        obls = self._future_obligations_for(unit)
+        if obls is None or obls.empty:
+            return True, []
+        from capybase.future_obligations import obligations_satisfied
+
+        return obligations_satisfied(obls, cand.resolved_text or "")
+
     def _run_future_apply_probe(self, result: StepResult) -> None:
-        """ECC-lite future-compatibility probe (#history step 9).
+        """ECC-lite future-compatibility probe (#history step 9, #9 step 2).
 
         For each accepted unit whose history context flags future source commits
         touching the same region, check (in a throwaway worktree) whether the
         next future commit's patch applies cleanly to the resolution. Advisory:
-        journals the result for the review bundle + calibration. In unattended
-        mode, a failed probe escalates (the resolution might break a later
-        commit). Skipped when no RebasePlan is active.
+        journals the result for the review bundle + calibration.
+
+        Probe mode policy (#9 step 2):
+        - strict modes (ci/unattended): ``sequence_patch`` — applies intervening
+          same-path source commits first, then tests the future commit. More
+          accurate (no false-positives from skipped intermediates), so a failure
+          is a meaningful safety signal that escalates.
+        - non-strict modes (interactive/dry_run): ``path_patch`` — cheaper,
+          advisory only; a failure journals a warning but does not escalate.
+
+        Skipped when no RebasePlan is active.
         """
         if self._history_service is None or self._history_plan is None:
             return  # no history → no probe
@@ -1995,11 +2146,20 @@ class Orchestrator:
                 resolved_content = None  # file was deleted by the resolution
             except Exception:  # noqa: BLE001
                 continue
+            # Probe mode selection (#9 step 2): strict modes (ci/unattended) use
+            # the more-accurate sequence_patch (applies intervening same-path
+            # commits first, eliminating false-positives from skipped
+            # intermediates) since a failure there blocks. Non-strict modes
+            # (interactive/dry_run) use the cheaper path_patch advisably.
+            probe_mode = "sequence_patch" if self.strictness.strict else "path_patch"
+            intervening = self._probe_intervening_commits(ctx)
             probe_result = future_apply_probe(
                 self.git,
                 resolved_path=unit.path,
                 resolved_content=resolved_content,
                 future_commits=ctx.future_source_commits_touching_region,
+                mode=probe_mode,
+                intervening_commits=intervening,
             )
             # Journal the result for the review bundle + calibration.
             self.journal.emit(
@@ -2007,25 +2167,51 @@ class Orchestrator:
                 {
                     "probed": probe_result.probed,
                     "applies": probe_result.applies,
+                    "mode": probe_mode,
+                    "intervening_count": len(intervening),
                     "future_commit": probe_result.future_commit_subject,
                     "reason": probe_result.reason,
                     "unit_id": unit.unit_id,
                 },
                 step_index=self.step, path=unit.path, unit_id=unit.unit_id,
             )
-            # Unattended mode gate: a failed probe escalates.
+            # Strict mode gate: a failed probe escalates. Only strict modes
+            # (ci/unattended) block on a probe failure; interactive/dry_run
+            # journal it advisably and continue.
             if probe_result.probed and not probe_result.applies and self.strictness.strict:
                 result.escalated = True
                 result.reason = (
-                    f"future-apply probe failed: {probe_result.reason}"
+                    f"future-apply probe ({probe_mode}) failed: {probe_result.reason}"
                 )
                 self.out(
                     self._warn(
-                        f"! future-apply probe: {probe_result.reason}. "
-                        f"Escalating (unattended mode)."
+                        f"! future-apply probe ({probe_mode}): {probe_result.reason}. "
+                        f"Escalating ({self.strictness.mode} mode)."
                     )
                 )
                 break
+
+    def _probe_intervening_commits(self, ctx) -> list:
+        """Same-path source commits preceding the first probed region commit.
+
+        For sequence_patch mode (#9 step 2): the probe applies these to the
+        worktree before testing the future commit, so the probe state reflects
+        the intermediate same-path changes that the real rebase would have
+        already applied. Both lists are in replay order (oldest-first); the
+        intervening set is the file-touching commits that come before the first
+        region-touching commit. Empty when there's nothing in between.
+        """
+        region = ctx.future_source_commits_touching_region
+        file_commits = ctx.future_source_commits_touching_file
+        if not region or not file_commits:
+            return []
+        probed_oid = region[0].oid
+        out = []
+        for c in file_commits:
+            if c.oid == probed_oid:
+                break  # reached the probed commit; stop (don't include it)
+            out.append(c)
+        return out
 
     def _resurrection_scan(
         self, *, start_oid: str, onto_oid: str, result_oid: str, backup_ref: str
@@ -2552,6 +2738,9 @@ class Orchestrator:
                 return early  # accepted via block-capture; LLM loop skipped
 
         while True:
+            # Populate the future-obligations prompt block (#9 step 3) before
+            # building the prompt so the model sees what later commits expect.
+            self._set_future_obligations_prompt_block(unit)
             context = self.context_builder.build(unit)
             if self.config.journal.enabled and self.config.journal.store_prompts:
                 from capybase.resolution_engine import (
@@ -2758,6 +2947,33 @@ class Orchestrator:
                         step_index=self.step, path=unit.path, unit_id=unit.unit_id,
                     )
                     return outcome
+                # Future-obligations gate (#9 step 3): a candidate that locally
+                # passes but drops a symbol a later source commit still needs
+                # would break that later commit's replay. Convert into a retry
+                # (the CEGIS loop can repair it, told which symbol it dropped);
+                # if retries are exhausted, the normal exhaustion path escalates.
+                fo_ok, fo_dropped = self._future_obligations_check(unit, cand)
+                if not fo_ok:
+                    self.journal.emit(
+                        "candidate_rejected",
+                        {"candidate_id": cand.candidate_id,
+                         "action": "retry", "via": "future_obligation",
+                         "dropped_symbols": fo_dropped,
+                         "retry_count": retry_count},
+                        step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                    )
+                    failures = [
+                        VerificationFailure(
+                            validator="future_obligation",
+                            message=(
+                                "resolution drops symbol(s) a later commit "
+                                f"needs: {', '.join(fo_dropped)}"
+                            ),
+                        )
+                    ]
+                    prev_candidate = cand
+                    retry_count += 1
+                    continue
                 # Re-stamp a plain-LLM candidate to history_augmented_llm when
                 # history context meaningfully augmented the prompt (#9 step 1):
                 # confidence above threshold AND a real future-region signal.

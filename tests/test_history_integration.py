@@ -122,6 +122,67 @@ def test_context_builder_no_history_without_service():
     assert builder.build(unit).history_context == ""
 
 
+def test_context_builder_appends_branch_intent_block():
+    """When branch_intent_block is set, it appears in the history context."""
+    from capybase.context_builder import ContextBuilder
+    plan = RebasePlan(
+        source_commits=[
+            ReplayCommit(oid="c1", parent_oid="b", subject="base",
+                         body_summary="", touched_files=["cfg.py"],
+                         diffstat={}, patch_id="", index=0),
+        ],
+        target_base_oid="b", target_tip_oid="t", source_tip_oid="c1",
+        created_at="now",
+    )
+    qs = HistoryQueryService(plan)
+    builder = ContextBuilder(history_service=qs)
+    builder.branch_intent_block = "Branch final intent (net effect):\ncfg.py:\n  - parse_config: added in commit(s) 1"
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="cfg.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="x"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="y"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="z"),
+        original_worktree_text="x", marker_span=(0, 0),
+        structural_metadata={"replayed_commit_oid": "c1"},
+    )
+    bundle = builder.build(unit)
+    assert "Branch final intent" in bundle.history_context
+    assert "parse_config" in bundle.history_context
+
+
+def test_context_builder_appends_future_obligations_block():
+    """When future_obligations_block is set, it appears in the history context."""
+    from capybase.context_builder import ContextBuilder
+    plan = RebasePlan(
+        source_commits=[
+            ReplayCommit(oid="c1", parent_oid="b", subject="base",
+                         body_summary="", touched_files=["cfg.py"],
+                         diffstat={}, patch_id="", index=0),
+        ],
+        target_base_oid="b", target_tip_oid="t", source_tip_oid="c1",
+        created_at="now",
+    )
+    qs = HistoryQueryService(plan)
+    builder = ContextBuilder(history_service=qs)
+    builder.future_obligations_block = (
+        "Future obligations (later source commits expect these — preserve them):\n"
+        "  - later commit \"use config\" expects `parse_config` to still exist"
+    )
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="cfg.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="x"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="y"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="z"),
+        original_worktree_text="x", marker_span=(0, 0),
+        structural_metadata={"replayed_commit_oid": "c1"},
+    )
+    bundle = builder.build(unit)
+    assert "Future obligations" in bundle.history_context
+    assert "parse_config" in bundle.history_context
+
+
 def test_resolve_prompt_renders_history_block():
     """The resolve prompt includes a 'History context' section when the bundle
     carries one."""
