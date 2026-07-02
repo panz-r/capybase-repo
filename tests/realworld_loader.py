@@ -36,6 +36,10 @@ EXTERNAL_DIR = _DATA_ROOT / "external-datasets"
 # a dataset's clone without importing the (side-effecting) fetch script.
 _GIT_HISTORY_CLONE_SUBDIR = {
     "serde-history": "serde",
+    "sea-orm-history": "sea-orm",
+    "clap-history": "clap",
+    "tokio-history": "tokio",
+    "pydantic-history": "pydantic",
 }
 
 

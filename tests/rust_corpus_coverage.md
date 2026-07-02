@@ -113,7 +113,14 @@ These taxonomy cells are **not** covered and are tracked as future work:
   but a baseline succeeds") is still deferred — it needs a second resolver to
   compare against, which the test suite lacks (tests use a fake canned client).
 - **Real-world harvesting** (Method D): scraping merged conflicts from public
-  Rust repos (serde, tokio, clap). No real-world cases in the corpus.
+  Rust repos. **Registered real-world sources** (in
+  `scripts/fetch_mergeconflict_datasets.py` `DATASETS` + `realworld_loader.py`
+  `_GIT_HISTORY_CLONE_SUBDIR`): `serde-history` (mined, cases present), plus
+  `sea-orm-history`, `clap-history`, `tokio-history`, and `pydantic-history`
+  (registered, not yet cloned/mined — running the fetch script harvests them as
+  blob-filtered git-history clones). Only serde has mined cases today; the
+  others are registered so a future data-gathering phase clones+mines them
+  without code changes.
 - **Cross-crate / workspace support**: the manifest check targets a single
   repo-root `Cargo.toml`; nested workspace-member manifests aren't handled.
 - **Proc-macro verification** (beyond `#[derive]`): attribute/proc-macro

@@ -123,6 +123,48 @@ DATASETS: dict[str, Dataset] = {
         source_url="https://github.com/serde-rs/serde",
         merge_limit=200,
     ),
+    "sea-orm-history": Dataset(
+        id="sea-orm-history",
+        kind="git-history",
+        url="https://github.com/SeaQL/sea-orm.git",
+        extract_subdir="sea-orm",
+        extractor="git_history",
+        license="MIT",
+        source_url="https://github.com/SeaQL/sea-orm",
+        merge_limit=200,
+    ),
+    "clap-history": Dataset(
+        id="clap-history",
+        kind="git-history",
+        url="https://github.com/clap-rs/clap.git",
+        extract_subdir="clap",
+        extractor="git_history",
+        license="MIT OR Apache-2.0",
+        source_url="https://github.com/clap-rs/clap",
+        merge_limit=200,
+    ),
+    "tokio-history": Dataset(
+        id="tokio-history",
+        kind="git-history",
+        url="https://github.com/tokio-rs/tokio.git",
+        extract_subdir="tokio",
+        extractor="git_history",
+        license="MIT",
+        source_url="https://github.com/tokio-rs/tokio",
+        # tokio's history is very large; cap lower to keep the clone/scan tractable.
+        merge_limit=150,
+    ),
+    "pydantic-history": Dataset(
+        id="pydantic-history",
+        kind="git-history",
+        url="https://github.com/pydantic/pydantic.git",
+        extract_subdir="pydantic",
+        extractor="git_history",
+        license="MIT",
+        source_url="https://github.com/pydantic/pydantic",
+        # Adds Python-language real-world cases to complement the Rust-only corpus.
+        merge_limit=200,
+    ),
 }
 
 
