@@ -180,6 +180,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="redo calibration: overwrites the stored profile (alias for calibrate)",
     )
 
+    sub.add_parser(
+        "metrics",
+        help="show per-mechanism quality metrics from the experience store",
+    )
+
     emb_p = sub.add_parser(
         "calibrate-embeddings",
         help="calibrate the embedding-retrieval similarity floor for this model",
@@ -674,6 +679,29 @@ def _run_status(
     return 0
 
 
+def _run_metrics(config: Config, repo: str, *, out=sys.stdout) -> int:
+    """Per-mechanism quality metrics from the experience store (#9 step 9).
+
+    Aggregates accepted/escalated/later-failure counts by resolution mechanism
+    (deterministic structural, exact reuse, history-augmented LLM, plain LLM,
+    etc.). Read-only; never mutates. Prints "no experience store configured"
+    when memory isn't enabled.
+    """
+    from capybase.git_backend import GitBackend
+    from capybase.memory.store import ExperienceStore
+
+    git = GitBackend(repo)
+    if not (config.memory.enabled and config.future.enable_rag):
+        print("metrics: experience store not configured (memory/rag disabled)", file=out)
+        return 0
+    store = ExperienceStore.for_repo(str(git.repo), config.memory.store_path)
+    from capybase.metrics import compute_metrics
+
+    report = compute_metrics(store)
+    print(report.render_table(), file=out)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -721,6 +749,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_check(config, repo=args.repo)
     if args.command == "status":
         return _run_status(config, repo=args.repo, session_id=args.session)
+    if args.command == "metrics":
+        return _run_metrics(config, repo=args.repo)
 
     try:
         session = getattr(args, "session", None) or getattr(args, "resume", None)
@@ -754,7 +784,9 @@ def main(argv: list[str] | None = None) -> int:
             report = rehearse_rebase(
                 config, repo=args.repo, target=args.target, autostash=args.autostash,
             )
-            print(report.summary())
+            # History-aware report (#9 step 10) when a plan was active; else the
+            # terse summary (summary_history falls back to summary itself).
+            print(report.summary_history())
             return 0 if report.would_succeed else 1
         result = orch.rebase(
             args.target,
