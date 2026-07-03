@@ -195,6 +195,13 @@ class PolicyConfig(BaseModel):
     # when the budget is gone, the conservative default); 0.8 = escalate only
     # when the judge is quite sure the side was dropped.
     critic_confidence_escalate_threshold: float = 0.8
+    # Hard wall-clock budget for resolving ONE unit, across ALL retries
+    # (syntactic CEGIS, critic-driven, and whole-file repair). A unit that
+    # can't converge within this many seconds is escalated rather than looping
+    # indefinitely — bounds latency regardless of how the retry budgets split.
+    # 0 = disabled (retry-count budgets alone govern; the legacy behavior).
+    # Sits ABOVE the per-retry budgets: it's the outermost deadline.
+    max_wall_time_per_unit_seconds: float = 0.0
     allow_skip: bool = False
     allow_delete_conflicted_file: bool = False
     stage_only_validated_paths: bool = True

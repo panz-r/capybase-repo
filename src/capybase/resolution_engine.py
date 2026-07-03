@@ -913,12 +913,17 @@ def build_verifier_prompt(
         structural_anchor = (
             f"Logical block (tree-sitter AST):\n{enc_sig}\n{enc_text}\n\n"
         )
+    # Deterministic per-side preservation evidence (survey §5.1 quantitative):
+    # the specific logical units each side ADDED that are ABSENT from the
+    # resolution. Gives the judge concrete evidence to weigh, beyond eyeballing
+    # the three sides — a unit listed here is very likely a dropped intent.
+    evidence = _dropped_units_evidence(unit, candidate, cur_lines, rep_lines, base_lines)
     return f"""You are a strict code reviewer judging a git merge resolution. A merge
 conflict has three sides and a proposed resolution. Judge ONLY whether the
 resolution preserves the INTENT of BOTH sides — it must not silently drop a
 behavior, guard, or value that either side added.
 
-{structural_anchor}CURRENT_UPSTREAM_SIDE (one branch's change):
+{structural_anchor}{evidence}CURRENT_UPSTREAM_SIDE (one branch's change):
 {cur_lines}
 
 REPLAYED_COMMIT_SIDE (the other branch's change):
@@ -943,6 +948,46 @@ only if a meaningful change it introduced is absent from the resolution
 }}
 ```
 """
+
+
+def _dropped_units_evidence(
+    unit: ConflictUnit,
+    candidate: CandidateResolution,
+    cur_lines: str,
+    rep_lines: str,
+    base_lines: str,
+) -> str:
+    """A deterministic 'units this side appears to have dropped' note for the
+    critic prompt, computed from the three sides + candidate via tree-sitter.
+
+    Empty string when tree-sitter is unavailable or no structural entities were
+    dropped (the judge then falls back to eyeballing the sides). Lists the
+    specific (kind, name) units missing from the resolution so the judge weighs
+    concrete evidence rather than guessing.
+    """
+    lang = unit.language
+    if lang not in ("python", "rust"):
+        return ""
+    try:
+        from capybase.adapters import structural
+    except Exception:  # noqa: BLE001
+        return ""
+    if not structural.is_available(lang):
+        return ""
+    cur_dropped = structural.dropped_entities(base_lines, cur_lines, candidate.resolved_text, lang) or []
+    rep_dropped = structural.dropped_entities(base_lines, rep_lines, candidate.resolved_text, lang) or []
+    if not cur_dropped and not rep_dropped:
+        return ""
+    parts = ["Structural check (deterministic) — entities a side added that are ABSENT from the resolution:"]
+    if cur_dropped:
+        names = ", ".join(f"{e.kind} '{e.name}'" for e in cur_dropped)
+        parts.append(f"  CURRENT side appears to drop: {names}")
+    if rep_dropped:
+        names = ", ".join(f"{e.kind} '{e.name}'" for e in rep_dropped)
+        parts.append(f"  REPLAYED side appears to drop: {names}")
+    parts.append("(Verify these are genuine intent drops, not renames the resolution deliberately made.)")
+    parts.append("")
+    return "\n".join(parts) + "\n"
 
 
 class ResolutionEngine:

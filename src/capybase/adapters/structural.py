@@ -503,6 +503,44 @@ def duplicate_definitions(
     return findings
 
 
+def dropped_entities(
+    base: str, side: str, resolved: str, language: str
+) -> list[Entity] | None:
+    """Entities a ``side`` ADDED that are ABSENT from ``resolved``.
+
+    The quantitative per-side preservation signal for the verifier critic and
+    the CEGIS retry feedback: instead of a boolean "dropped a side", this lists
+    the SPECIFIC logical units (function/method/class/field by name) that the
+    side introduced beyond ``base`` and that the resolution dropped — giving the
+    model exact targets to reintroduce on retry ("reintroduce: function `foo`,
+    class `Bar`") and the LLM judge concrete evidence.
+
+    An entity is "added by the side" if its ``(kind, name)`` identity appears in
+    ``side`` but not ``base``. It's "dropped" if that identity is then absent
+    from ``resolved`` (matched by name — a renamed-but-present entity counts as
+    preserved, since renaming is a legitimate merge, not a drop). Module-level
+    bare assignments (``X = ...``) are NOT enumerated (see _KIND_BY_NODE_TYPE),
+    so this catches structural defs only; the token-set BothSidesRepresented
+    validator remains the backstop for value/assignment drops.
+
+    Returns ``None`` when tree-sitter is unavailable or any of the three texts
+    fail to parse (the critic degrades gracefully). An empty list means the side
+    added nothing that's missing.
+    """
+    base_ents = enumerate_entities(base, language)
+    side_ents = enumerate_entities(side, language)
+    resolved_ents = enumerate_entities(resolved, language)
+    if base_ents is None or side_ents is None or resolved_ents is None:
+        return None
+    base_names = {e.name for e in base_ents}
+    resolved_names = {e.name for e in resolved_ents}
+    # Added by the side (name not in base) AND absent from the resolution.
+    return [
+        e for e in side_ents
+        if e.name not in base_names and e.name not in resolved_names
+    ]
+
+
 def sibling_signatures(
     source: str, language: str, container_span: tuple[int, int], *, exclude: str | None = None, limit: int = 8
 ) -> list[str] | None:

@@ -265,3 +265,60 @@ def test_rust_duplicate_degrades_when_grammar_missing(monkeypatch):
     res = _verify_file(whole, language="rust", path="src/c.rs")
     assert res.features.get("duplicate_definition_checked") is False
     assert [f for f in res.hard_failures if f.validator == "duplicate_definition"] == []
+
+
+# ---------------------------------------------------------------------------
+# dropped_entities: the quantitative per-side preservation signal (surveys §5.1).
+# Used by the verifier critic (as prompt evidence) and the CEGIS retry feedback
+# (as exact "reintroduce: function X" targets).
+# ---------------------------------------------------------------------------
+
+
+def test_dropped_entities_python_flags_missing_function():
+    """A side that adds a function the resolution omits → that function is
+    reported dropped, by (kind, name)."""
+    from capybase.adapters.structural import dropped_entities
+
+    base = "def main():\n    return 1\n"
+    side = "def main():\n    return 1\n\ndef helper():\n    return 2\n"
+    resolved = "def main():\n    return 1\n"  # helper absent
+    out = dropped_entities(base, side, resolved, "python")
+    assert out is not None
+    assert [(e.kind, e.name) for e in out] == [("function", "helper")]
+
+
+def test_dropped_entities_empty_when_nothing_added_or_all_preserved():
+    """Nothing dropped when the side added nothing beyond base, OR the resolution
+    preserves every added entity."""
+    from capybase.adapters.structural import dropped_entities
+
+    base = "def main():\n    return 1\n"
+    side = "def main():\n    return 1\n\ndef helper():\n    return 2\n"
+    # Side added nothing beyond base.
+    assert dropped_entities(base, base, base, "python") == []
+    # Resolution preserves helper.
+    assert dropped_entities(base, side, side, "python") == []
+
+
+@pytest.mark.skipif(
+    not _rust_available(), reason="tree-sitter rust grammar not installed"
+)
+def test_dropped_entities_rust():
+    from capybase.adapters.structural import dropped_entities
+
+    out = dropped_entities("fn main(){}", "fn main(){}\nfn helper(){}", "fn main(){}", "rust")
+    assert out is not None
+    assert [(e.kind, e.name) for e in out] == [("function", "helper")]
+
+
+def test_dropped_entities_degrades_when_grammar_missing(monkeypatch):
+    """When tree-sitter can't parse (grammar unavailable) → None (graceful; the
+    critic falls back to its own qualitative verdict). dropped_entities degrades
+    via enumerate_entities/_parse returning None, not via is_available (which the
+    caller checks before invoking)."""
+    from capybase.adapters import structural
+
+    monkeypatch.setattr(structural, "_make_parser", lambda lang: None)
+    out = structural.dropped_entities("def a():pass", "def a():pass\ndef b():pass", "def a():pass", "python")
+    assert out is None
+

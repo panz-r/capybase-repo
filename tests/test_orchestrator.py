@@ -621,6 +621,122 @@ def test_verifier_seeds_verdict_into_repair_prompt_on_retry(conflicted_repo, ver
     )
 
 
+def test_critic_retry_names_specific_dropped_unit():
+    """The critic-driven retry feedback names the SPECIFIC entity the resolution
+    dropped (quantitative per-side preservation), not just 'you dropped a side'.
+    A conflict where the replayed side ADDS a function and the candidate drops
+    it: the seeded failure must carry "reintroduce: function '<name>'" so the
+    model has an exact target. This converges faster than a vague verdict."""
+    from capybase.orchestrator import _dropped_units_for, _critic_failure
+    from capybase.conflict_model import (
+        CandidateResolution, ConflictSide, ConflictUnit, VerificationWarning,
+    )
+    base = "def main():\n    return 1\n"
+    replayed = "def main():\n    return 1\n\ndef helper():\n    return 2\n"
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=base),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=replayed),
+        original_worktree_text="", marker_span=(1, 5),
+    )
+    # Candidate resolves to base → drops the helper() the replayed side added.
+    cand = CandidateResolution(
+        candidate_id="c", unit_id="u", model_name="m", prompt_version="v",
+        resolved_text=base,
+    )
+    dropped = _dropped_units_for(unit, cand)
+    assert ("function", "helper") in dropped, dropped
+    warning = VerificationWarning(
+        validator="verifier_model",
+        message="verifier: resolution may drop replayed side intent",
+        detail={"reason": "dropped helper"},
+    )
+    failure = _critic_failure(warning, dropped)
+    # The rendered failure names the specific unit to reintroduce.
+    assert "reintroduce: function 'helper'" in failure.message, failure.message
+    assert failure.detail["dropped_units"] == [("function", "helper")]
+    # _render_failure surfaces it in the prompt the model sees on retry.
+    from capybase.resolution_engine import _render_failure
+    rendered = _render_failure(failure)
+    assert "helper" in rendered and "reintroduce" in rendered, rendered
+
+
+def test_dropped_units_no_false_positive_when_entity_present():
+    """An entity the resolution preserves (even renamed) is NOT reported dropped
+    — a rename is a legitimate merge, not a drop. Only genuinely-absent entities
+    surface (matched by name)."""
+    from capybase.orchestrator import _dropped_units_for
+    from capybase.conflict_model import (
+        CandidateResolution, ConflictSide, ConflictUnit,
+    )
+    base = "def main():\n    return 1\n"
+    replayed = "def main():\n    return 1\n\ndef helper():\n    return 2\n"
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=base),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=replayed),
+        original_worktree_text="", marker_span=(1, 5),
+    )
+    # Candidate keeps helper (under its original name) → nothing dropped.
+    cand = CandidateResolution(
+        candidate_id="c", unit_id="u", model_name="m", prompt_version="v",
+        resolved_text="def main():\n    return 1\n\ndef helper():\n    return 2\n",
+    )
+    assert _dropped_units_for(unit, cand) == []
+
+
+def test_wall_time_budget_escalates_non_converging_unit(conflicted_repo, verifier_critic_enabled):
+    """A unit that can't converge within its wall-clock budget escalates instead
+    of looping indefinitely. The critic keeps flagging a dropped-side merge
+    (CyclingClient returns the same one-sided resolution + verdict forever), so
+    retries would normally pile up; the wall-time deadline bounds total latency
+    by escalating once it's exceeded."""
+    repo = conflicted_repo["repo"]
+    # Always returns a one-sided resolution + a critic verdict flagging it.
+    # CyclingClient repeats the final response, so the loop never converges.
+    client = CyclingClient([
+        _make_resolved_payload("    return 'hi'"),  # drops replayed side
+        json.dumps({"preserves_current": True, "preserves_replayed": False,
+                    "reason": "dropped howdy", "confidence": 0.5}),
+    ])
+    cfg = _verifier_config(repo)
+    cfg.validation.verifier_severity = "warning"  # soft → would retry forever
+    # Tiny wall budget so the loop escalates quickly (well under a second). The
+    # retry-count budgets are large enough that they wouldn't trigger first.
+    cfg.policy.max_wall_time_per_unit_seconds = 0.2
+    cfg.policy.max_retries_per_unit = 50
+    cfg.policy.max_critic_retries_per_unit = 50
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    assert result.escalated
+    assert "wall-time" in (result.reason or ""), result.reason
+
+
+def test_wall_time_disabled_does_not_escalate(conflicted_repo, verifier_critic_enabled):
+    """wall budget = 0 (disabled, the default) → the loop is governed only by the
+    retry-count budgets, never by a wall-clock check."""
+    repo = conflicted_repo["repo"]
+    client = SequenceClient([
+        _make_resolved_payload("    return 'hi' + 'howdy'"),  # correct merge
+        json.dumps({"preserves_current": True, "preserves_replayed": True,
+                    "reason": "both preserved", "confidence": 0.9}),
+    ])
+    cfg = _verifier_config(repo)
+    cfg.policy.max_wall_time_per_unit_seconds = 0.0  # disabled
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    # Converges on the first attempt — no escalation, no wall-time trigger.
+    assert not result.escalated, result.reason
+
+
 def test_verifier_not_registered_when_flag_off(conflicted_repo):
     """Flag off → the verifier validator is not in the engine's chain at all,
     so no critic call is ever made (zero-cost default)."""

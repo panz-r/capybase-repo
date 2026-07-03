@@ -76,6 +76,13 @@ class UnitOutcome:
     # learns that retries correlate with risk. (= len(attempts) - 1 on accept,
     # or the count at escalation.)
     retry_count: int = 0
+    # Escalation state for this unit. The run() loop infers escalation from
+    # ``accepted is None``, but carrying the explicit reason lets a specific
+    # escalation path (e.g. the wall-time budget) surface WHY it bailed, instead
+    # of the caller overwriting it with a generic "could not resolve" message.
+    # None/False on accept; set together on an escalation return.
+    escalated: bool = False
+    reason: str | None = None
     # Explainable-retrieval reasons (#9 step 5): one human-readable string per
     # retrieved few-shot example used in the prompt, recording WHY each was
     # chosen (same path/region kind/conflict shape, score, prior outcome). Empty
@@ -155,7 +162,9 @@ def _critic_warning(validation: VerificationResult) -> VerificationWarning | Non
     return None
 
 
-def _critic_failure(warning: VerificationWarning) -> VerificationFailure:
+def _critic_failure(
+    warning: VerificationWarning, dropped_units: list | None = None
+) -> VerificationFailure:
     """Synthesize a hard-failure-shaped object from a critic warning.
 
     The CEGIS repair-prompt renderer (``_render_failure``) consumes
@@ -165,13 +174,57 @@ def _critic_failure(warning: VerificationWarning) -> VerificationFailure:
     concrete counterexample feedback — instead of a feedback-free regeneration.
     Marked ``severity="warning"`` so it's distinguishable from a real hard
     failure in the prompt, and the renderer surfaces it the same way.
+
+    ``dropped_units`` (when non-empty) names the SPECIFIC entities (functions/
+    classes) the resolution dropped, appended to the message so the retry prompt
+    gives the model exact targets ("reintroduce function `foo`") — the
+    quantitative per-side preservation signal that converges faster than a vague
+    "you dropped a side".
     """
+    message = warning.message
+    detail = dict(warning.detail)
+    if dropped_units:
+        names = ", ".join(f"{kind} '{name}'" for kind, name in dropped_units)
+        message = f"{message}; reintroduce: {names}"
+        detail["dropped_units"] = list(dropped_units)
     return VerificationFailure(
         validator=warning.validator,
         severity="warning",
-        message=warning.message,
-        detail=dict(warning.detail),
+        message=message,
+        detail=detail,
     )
+
+
+def _dropped_units_for(
+    unit: ConflictUnit, cand: CandidateResolution
+) -> list[tuple[str, str]]:
+    """The (kind, name) entities the resolution dropped, across both sides.
+
+    Deterministic (tree-sitter) — the quantitative per-side preservation signal.
+    Returns [] when tree-sitter is unavailable, the language isn't supported, or
+    nothing structural was dropped (the critic's own message still carries the
+    qualitative verdict in that case).
+    """
+    lang = getattr(unit, "language", None)
+    if lang not in ("python", "rust"):
+        return []
+    try:
+        from capybase.adapters import structural
+    except Exception:  # noqa: BLE001
+        return []
+    if not structural.is_available(lang):
+        return []
+    base = unit.base.text or ""
+    cur = unit.current.text or ""
+    rep = unit.replayed.text or ""
+    res = cand.resolved_text or ""
+    dropped: list[tuple[str, str]] = []
+    for e in (structural.dropped_entities(base, cur, res, lang) or []):
+        dropped.append((e.kind, e.name))
+    for e in (structural.dropped_entities(base, rep, res, lang) or []):
+        if (e.kind, e.name) not in dropped:
+            dropped.append((e.kind, e.name))
+    return dropped
 
 
 def _attribute_whole_file_failure(
@@ -2986,7 +3039,13 @@ class Orchestrator:
                 accepted.append((unit, outcome.accepted))
             if escalated_unit is not None:
                 result.escalated = True
-                result.reason = f"could not resolve {escalated_unit.unit.unit_id}"
+                # Prefer the outcome's specific reason (e.g. "unit exceeded
+                # wall-time budget") when the escalation path set one; fall back
+                # to the generic per-unit message.
+                result.reason = (
+                    escalated_unit.reason
+                    or f"could not resolve {escalated_unit.unit.unit_id}"
+                )
                 self._record_outcomes_to_memory(result)
                 _alternates, _consensus = _extract_alternates(escalated_unit)
                 write_review_bundle(
@@ -3193,6 +3252,12 @@ class Orchestrator:
         # so a stubborn dropped-intent case can't starve the syntactic-CEGIS
         # retries. Incremented only when the retry was critic-driven.
         critic_retry_count = 0
+        # Wall-clock deadline for this unit (the outermost budget, above the
+        # per-retry counts). 0 = disabled. Checked at the top of each loop
+        # iteration so a non-converging unit escalates instead of looping.
+        import time as _time
+        unit_start = _time.monotonic()
+        wall_budget = self.config.policy.max_wall_time_per_unit_seconds
         # seed_failures: when set (whole-file CEGIS), the unit is re-resolved
         # starting from the repair path with the file-level failures pre-seeded,
         # so the model gets the concrete cross-unit error on its first attempt.
@@ -3246,6 +3311,33 @@ class Orchestrator:
                 return early  # accepted via block-capture; LLM loop skipped
 
         while True:
+            # Wall-clock deadline (outermost budget): if this unit has run past
+            # its time budget across retries, escalate rather than proposing
+            # again. Sits above the per-retry counts so it bounds total latency
+            # regardless of how the syntactic/critic/whole-file budgets split.
+            # The "at least one attempt" guard uses EITHER counter: critic-driven
+            # retries increment critic_retry_count, not retry_count, so checking
+            # only retry_count would let an all-critic retry loop run forever.
+            if (
+                wall_budget > 0.0
+                and (_time.monotonic() - unit_start) >= wall_budget
+                and (retry_count > 0 or critic_retry_count > 0)
+            ):
+                outcome.escalated = True
+                outcome.retry_count = retry_count
+                outcome.reason = (
+                    f"unit exceeded wall-time budget "
+                    f"({wall_budget:.0f}s) after {retry_count} attempt(s)"
+                )
+                self.journal.emit(
+                    "candidate_rejected",
+                    {"candidate_id": cand.candidate_id,
+                     "action": "escalate", "via": "wall_time",
+                     "wall_seconds": round(_time.monotonic() - unit_start, 1),
+                     "retry_count": retry_count},
+                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                )
+                return outcome
             # Populate the future-obligations prompt block (#9 step 3) before
             # building the prompt so the model sees what later commits expect.
             self._set_future_obligations_prompt_block(unit)
@@ -3526,7 +3618,14 @@ class Orchestrator:
             critic_warning = _critic_warning(validation)
             failures = list(validation.hard_failures)
             if critic_warning is not None:
-                failures.append(_critic_failure(critic_warning))
+                # Enrich with the deterministic dropped-units list (survey §5.1
+                # quantitative): name the SPECIFIC functions/classes the side
+                # added that the resolution dropped, so the retry prompt gives
+                # the model exact targets ("reintroduce function `foo`") rather
+                # than a vague "you dropped a side". Falls back to the critic's
+                # plain message when tree-sitter can't enumerate entities.
+                dropped = _dropped_units_for(unit, cand)
+                failures.append(_critic_failure(critic_warning, dropped))
             failures = failures or None
             # Track which budget this retry consumes: critic-driven retries use
             # the separate critic budget, not the syntactic retry_count.

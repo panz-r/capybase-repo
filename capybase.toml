@@ -107,6 +107,11 @@ max_critic_retries_per_unit = 0
 # high-confidence (verifier_confidence >= this threshold); otherwise accept-with-
 # warning. 0.0 = never confidence-escalate (the conservative default).
 critic_confidence_escalate_threshold = 0.8
+# Hard wall-clock budget (seconds) for resolving ONE unit, across ALL retries
+# (syntactic CEGIS, critic-driven, whole-file repair). A non-converging unit
+# escalates once exceeded instead of looping — bounds total latency. 0 =
+# disabled (retry-count budgets alone govern). Sits ABOVE the per-retry budgets.
+max_wall_time_per_unit_seconds = 0.0
 allow_skip = false
 allow_delete_conflicted_file = false
 stage_only_validated_paths = true
