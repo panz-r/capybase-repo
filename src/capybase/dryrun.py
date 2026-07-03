@@ -88,6 +88,11 @@ class RehearsalReport:
     session_id: str = ""
     mechanism_counts: dict[str, int] = field(default_factory=dict)
     conflict_chains: list[str] = field(default_factory=list)
+    #: Structured chain objects (#idea 13): carry ConflictChain instances so
+    #: _recommended_action can access commit_indices + escalated_count for
+    #: specific strategy recommendations (the stringified conflict_chains list
+    #: discards that data).
+    conflict_chain_objects: list = field(default_factory=list)
     history_active: bool = False
     #: Advisory event counts (#idea 4): subsystems that degraded silently.
     #: Maps event_type → count. Surfaced in summary_history() so a silently-degraded
@@ -148,9 +153,14 @@ class RehearsalReport:
         probes_failed = sum(s.future_probes_failed for s in self.steps)
         if probes_passed or probes_failed:
             lines.append(f"- {probes_passed} future probe(s) passed, {probes_failed} failed")
-        # Conflict chains.
-        for chain in self.conflict_chains:
-            lines.append(f"- conflict chain: {chain}")
+        # Conflict chains — render each with its specific strategy recommendation
+        # (#idea 13): "squash commits 3-7", "resolve manually", etc.
+        for i, chain_str in enumerate(self.conflict_chains):
+            lines.append(f"- conflict chain: {chain_str}")
+            if i < len(self.conflict_chain_objects):
+                rec = self.conflict_chain_objects[i].recommendation()
+                if rec:
+                    lines.append(f"  → {rec}")
         # Advisory events (#idea 4): subsystems that degraded silently. Surfaced
         # here (not the terminal) so a degraded history feature is observable in
         # the dry-run report without being noisy.
@@ -167,13 +177,18 @@ class RehearsalReport:
     def _recommended_action(self) -> str:
         """A rule-based action recommendation from the chain/probe/escalation data.
 
-        e.g. an escalated chain → 'squash commits X–Y or resolve <region> manually'.
+        Uses the structured ConflictChain objects (#idea 13) when available so the
+        recommendation names the specific commit range and strategy. Falls back to
+        the string-based path for older reports without structured chains.
         Empty when the rebase would succeed cleanly (no action needed).
         """
         if self.would_succeed and not self.conflict_chains:
             return ""
+        # Prefer the structured chain's recommendation (#idea 13).
+        if self.conflict_chain_objects:
+            return self.conflict_chain_objects[0].recommendation()
+        # Fallback: the pre-stringified chain (older reports).
         if self.conflict_chains:
-            # The first (largest) chain's coordinate + its commit range.
             first = self.conflict_chains[0]
             return f"squash the related commits or resolve the {first.split(' ::')[0]} chain manually"
         if not self.would_succeed and self.errors:
@@ -348,6 +363,7 @@ def rehearse_rebase(
         try:
             chain_report = orch.detect_conflict_chains()
             report.conflict_chains = [c.characterization() for c in chain_report.chains]
+            report.conflict_chain_objects = list(chain_report.chains)
             report.history_active = orch._history_plan is not None
         except Exception:  # noqa: BLE001 - advisory
             pass

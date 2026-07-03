@@ -64,6 +64,58 @@ class ConflictChain:
             f"across commit(s) {commits}{esc}"
         )
 
+    def recommendation(self) -> str:
+        """A specific, actionable strategy recommendation (#idea 13).
+
+        Advisory, never automatic — capybase identifies WHEN repeated conflicts
+        are one logical migration rather than isolated failures, and suggests the
+        human action. The recommendation is driven by the chain's own data:
+        commit range, escalation count, and span.
+
+        Priority order (first match wins):
+        1. Escalated chain → "resolve ... manually" (the conflict couldn't be
+           auto-resolved).
+        2. Wide span (≥4 commits) → "consider holistic branch-level resolution"
+           (isolated per-commit resolution may miss the migration's intent).
+        3. Multi-commit (≥3) → "consider squashing commits X–Y" (the related
+           edits are one logical change; squashing before rebasing avoids the
+           chain entirely).
+        4. Rename-like name → "consider splitting the rename commit before
+           behavior changes" (a heuristic — the name suggests a rename, and
+           renames interleaved with behavior changes cause chains).
+        5. Default → "resolve manually" (generic fallback).
+        """
+        commits_human = [i + 1 for i in self.commit_indices]  # 1-based
+        commit_range = f"{min(commits_human)}-{max(commits_human)}"
+        n = len(self.commit_indices)
+        name = self.name or self.kind
+
+        if self.escalated_count > 0:
+            return (
+                f"resolve the {name} chain in {self.path} manually "
+                f"(conflicts at commit(s) {commit_range} escalated)"
+            )
+        if n >= 4:
+            return (
+                f"consider rerunning as a holistic branch-level resolution "
+                f"(the {name} chain spans {n} commits — isolated per-commit "
+                f"resolution may miss the migration's intent)"
+            )
+        if n >= 3:
+            return (
+                f"consider squashing commits {commit_range} before rebasing "
+                f"(the {name} chain touches {n} commits)"
+            )
+        # Heuristic: a name containing "rename"/"renamed" suggests a rename chain.
+        if self.name and any(
+            kw in self.name.lower() for kw in ("rename", "renamed", "move", "moved")
+        ):
+            return (
+                f"consider splitting the rename commit before behavior changes "
+                f"(the {name} chain suggests a rename interleaved with edits)"
+            )
+        return f"resolve the {name} chain in {self.path} manually"
+
 
 @dataclass(frozen=True)
 class ConflictChainReport:

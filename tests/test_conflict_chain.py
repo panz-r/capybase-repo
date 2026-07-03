@@ -8,6 +8,7 @@ report (#9 step 10) + escalation messaging.
 from __future__ import annotations
 
 from capybase.conflict_chain import (
+    ConflictChain,
     ConflictChainReport,
     ConflictObservation,
     detect_conflict_chains,
@@ -130,3 +131,74 @@ def test_chains_sorted_largest_first():
     ])
     assert report.chains[0].name == "beta"
     assert report.chains[1].name == "alpha"
+
+
+# ---------------------------------------------------------------------------
+# #idea 13: strategy recommendations
+# ---------------------------------------------------------------------------
+
+
+def _chain(commit_indices, *, name="parse", escalated=0, path="cfg.py", kind="function"):
+    return ConflictChain(
+        path=path, kind=kind, name=name,
+        commit_indices=tuple(commit_indices),
+        escalated_count=escalated,
+    )
+
+
+def test_escalated_chain_recommends_manual():
+    """A chain with an escalation recommends resolving manually."""
+    chain = _chain([1, 3], escalated=1)  # 0-based → 1-based commits 2,4
+    rec = chain.recommendation()
+    assert "manually" in rec
+    assert "parse" in rec
+    assert "2-4" in rec  # 1-based range of commits at indices 1,3
+
+
+def test_wide_chain_recommends_holistic():
+    """A chain spanning ≥4 commits recommends holistic branch-level resolution."""
+    chain = _chain([1, 2, 3, 4, 5])  # 5 commits, no escalation
+    rec = chain.recommendation()
+    assert "holistic" in rec.lower()
+    assert "5 commits" in rec
+
+
+def test_multi_commit_chain_recommends_squash():
+    """A 3-commit chain recommends squashing the specific commit range."""
+    chain = _chain([2, 4, 5])  # 3 commits, no escalation
+    rec = chain.recommendation()
+    assert "squash" in rec.lower()
+    assert "3-6" in rec  # 1-based: commits 3,5,6 → range 3-6
+
+
+def test_rename_chain_recommends_split():
+    """A chain whose name suggests a rename recommends splitting."""
+    chain = _chain([1, 2], name="rename parse to load_config")
+    rec = chain.recommendation()
+    assert "split" in rec.lower() or "rename" in rec.lower()
+
+
+def test_default_two_commit_chain_recommends_manual():
+    """A 2-commit chain with no escalation falls through to manual resolve."""
+    chain = _chain([1, 2])
+    rec = chain.recommendation()
+    assert "manually" in rec
+
+
+def test_dryrun_summary_renders_chain_recommendation():
+    """summary_history() shows each chain with its specific recommendation."""
+    from capybase.dryrun import RehearsalReport, RehearsalStep
+
+    chain = _chain([2, 4, 5])  # 3 commits → squash recommendation
+    report = RehearsalReport(
+        would_succeed=True, target="main", head_before="aaa", head_after="bbb",
+        session_id="s", history_active=True,
+    )
+    report.steps = [RehearsalStep(step=1, accepted=True)]
+    report.conflict_chains = [chain.characterization()]
+    report.conflict_chain_objects = [chain]
+    out = report.summary_history()
+    assert "conflict chain" in out
+    assert "squash" in out.lower()
+    # The overall recommended action uses the chain's recommendation too.
+    assert "squash" in report._recommended_action().lower()
