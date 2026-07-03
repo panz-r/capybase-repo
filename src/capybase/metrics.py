@@ -39,6 +39,14 @@ class MechanismStats:
     escalated: int = 0
     later_probe_failures: int = 0
     later_test_failures: int = 0
+    #: Accepted resolutions done by a human (provenance="manual") — the proxy
+    #: for "manual correction" (#idea 11). A manual resolution is one where the
+    #: model couldn't do it and a human did.
+    manual_corrections: int = 0
+    #: Accepted resolutions via exact reuse (#idea 11) — how many conflicts were
+    #: solved by replaying a prior accepted resolution verbatim. Distinct from
+    #: the total accepted count so you can see reuse's hit rate.
+    reuse_hits: int = 0
 
     @property
     def total(self) -> int:
@@ -62,9 +70,17 @@ class MetricsReport:
         )
 
     def render_table(self) -> str:
-        """A human-readable text table (for the CLI + dry-run report)."""
+        """A human-readable text table (for the CLI + dry-run report).
+
+        Answers the question: "Is history-augmented LLM actually better than
+        plain LLM on this repo?" Compare the accept_rate + failure columns
+        between plain_llm and history_augmented_llm rows.
+        """
         lines = ["Per-mechanism quality metrics:"]
-        header = f"  {'mechanism':<24} {'accept':>8} {'esc':>5} {'probe_f':>8} {'test_f':>7} {'rate':>6}"
+        header = (
+            f"  {'mechanism':<24} {'accept':>7} {'esc':>4} {'man':>4} "
+            f"{'reuse':>6} {'probe_f':>8} {'test_f':>7} {'rate':>6}"
+        )
         lines.append(header)
         lines.append("  " + "-" * (len(header) - 2))
         any_row = False
@@ -74,12 +90,13 @@ class MetricsReport:
                 continue
             any_row = True
             lines.append(
-                f"  {provenance_label(prov):<24} {stats.accepted:>8} "
-                f"{stats.escalated:>5} {stats.later_probe_failures:>8} "
+                f"  {provenance_label(prov):<24} {stats.accepted:>7} "
+                f"{stats.escalated:>4} {stats.manual_corrections:>4} "
+                f"{stats.reuse_hits:>6} {stats.later_probe_failures:>8} "
                 f"{stats.later_test_failures:>7} {stats.accept_rate:>5.0%}"
             )
         if self.legacy_count:
-            lines.append(f"  {'(legacy/unknown)':<24} {self.legacy_count:>8}")
+            lines.append(f"  {'(legacy/unknown)':<24} {self.legacy_count:>7}")
         if not any_row and not self.legacy_count:
             lines.append("  (no recorded resolutions yet)")
         return "\n".join(lines)
@@ -133,6 +150,14 @@ def compute_metrics(store: "ExperienceStore | None") -> MetricsReport:
                     cur = _bump(cur, "later_probe_failures")
                 if _is_later_test_failure(feats):
                     cur = _bump(cur, "later_test_failures")
+                # Manual corrections (#idea 11): accepted resolutions done by a
+                # human (provenance="manual") are the proxy for corrections.
+                if prov == "manual":
+                    cur = _bump(cur, "manual_corrections")
+                # Reuse hits (#idea 11): accepted via exact reuse, counted
+                # distinctly so the table shows reuse's hit rate.
+                if prov == "exact_history_reuse":
+                    cur = _bump(cur, "reuse_hits")
             elif exp.outcome == "escalated":
                 cur = _bump(cur, "escalated")
             by_mech[prov] = cur
@@ -149,6 +174,8 @@ def _bump(stats: MechanismStats, field_name: str) -> MechanismStats:
         "escalated": stats.escalated,
         "later_probe_failures": stats.later_probe_failures,
         "later_test_failures": stats.later_test_failures,
+        "manual_corrections": stats.manual_corrections,
+        "reuse_hits": stats.reuse_hits,
     }
     vals[field_name] = vals[field_name] + 1
     return MechanismStats(**vals)

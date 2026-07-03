@@ -125,6 +125,58 @@ def test_mechanism_with_no_data_omitted_from_table(tmp_path):
     assert "deterministic" not in table.lower()  # no data → omitted
 
 
+# ---------------------------------------------------------------------------
+# #idea 11: manual_corrections + reuse_hits
+# ---------------------------------------------------------------------------
+
+
+def test_manual_corrections_counted(tmp_path):
+    """Accepted manual resolutions count as manual_corrections (#idea 11)."""
+    store = _store(tmp_path, [
+        _exp("accepted", "manual"),
+        _exp("accepted", "manual"),
+        _exp("accepted", "plain_llm"),
+    ])
+    report = compute_metrics(store)
+    assert report.get("manual").manual_corrections == 2
+    assert report.get("plain_llm").manual_corrections == 0
+
+
+def test_reuse_hits_counted(tmp_path):
+    """Accepted exact-reuse resolutions count as reuse_hits (#idea 11)."""
+    store = _store(tmp_path, [
+        _exp("accepted", "exact_history_reuse"),
+        _exp("accepted", "exact_history_reuse"),
+        _exp("accepted", "exact_history_reuse"),
+        _exp("accepted", "plain_llm"),
+    ])
+    report = compute_metrics(store)
+    assert report.get("exact_history_reuse").reuse_hits == 3
+    assert report.get("plain_llm").reuse_hits == 0
+
+
+def test_table_shows_new_columns(tmp_path):
+    """The rendered table includes the manual + reuse columns."""
+    store = _store(tmp_path, [
+        _exp("accepted", "manual"),
+        _exp("accepted", "exact_history_reuse"),
+    ])
+    report = compute_metrics(store)
+    table = report.render_table()
+    assert "man" in table  # the manual column header
+    assert "reuse" in table  # the reuse column header
+
+
+def test_escalated_manual_not_counted_as_correction(tmp_path):
+    """An escalated (not accepted) manual outcome isn't a correction."""
+    store = _store(tmp_path, [
+        _exp("escalated", "manual"),
+    ])
+    report = compute_metrics(store)
+    assert report.get("manual").manual_corrections == 0
+    assert report.get("manual").escalated == 1
+
+
 def test_empty_report_table_has_placeholder(tmp_path):
     store = ExperienceStore(tmp_path / "empty.jsonl")
     report = compute_metrics(store)
