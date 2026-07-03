@@ -70,6 +70,50 @@ def test_dropped_a_side_retries():
     assert eng.decide(res, retry_count=0).action == "retry"
 
 
+def test_verifier_critic_disagreement_retries():
+    """The LLM critic flagged the resolution as dropping a side's intent — the
+    one semantic signal no syntactic validator can make. Same retry-then-
+    escalate contract as the deterministic drops: retry while budget remains so
+    the model gets another chance to preserve the dropped intent."""
+    eng = RiskEngine(max_retries_per_unit=2)
+    res = _result(
+        True, {"verifier_checked": True, "verifier_preserves_replayed": False},
+        warnings=[VerificationWarning(
+            validator="verifier_model", message="may drop replayed side intent",
+        )],
+    )
+    assert eng.decide(res, retry_count=0).action == "retry"
+    assert eng.decide(res, retry_count=1).action == "retry"
+
+
+def test_verifier_critic_disagreement_accepts_when_budget_exhausted():
+    """A persistent critic disagreement (retries exhausted) is accepted-with-
+    warning, matching the other soft drops (both_sides_represented etc.): a soft
+    signal biases toward retry but, once the budget is gone, does not hard-block
+    a structurally-valid merge. The critic's value is the retry it provoked, not
+    a guaranteed escalation — the warning is still surfaced for review."""
+    eng = RiskEngine(max_retries_per_unit=2)
+    res = _result(
+        True, {"verifier_checked": True, "verifier_preserves_replayed": False},
+        warnings=[VerificationWarning(
+            validator="verifier_model", message="may drop replayed side intent",
+        )],
+    )
+    # retry_count == max_retries_per_unit → no more retries → accept-with-warning.
+    assert eng.decide(res, retry_count=2).action == "accept"
+
+
+def test_verifier_critic_pass_does_not_retry():
+    """A critic that CONFIRMS both sides preserved is not a retry signal — the
+    candidate is accepted (subject to the other checks)."""
+    eng = RiskEngine(max_retries_per_unit=2)
+    res = _result(
+        True, {"verifier_checked": True, "verifier_preserves_current": True,
+               "verifier_preserves_replayed": True},
+    )
+    assert eng.decide(res, retry_count=0).action == "accept"
+
+
 # --- failure_kind: retry technical failures, escalate genuine refusals ---
 
 

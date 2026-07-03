@@ -205,7 +205,7 @@ def scenario_rust_port_test() -> Scenario:
 # run harness
 # ---------------------------------------------------------------------------
 
-def _config_for(scenario: Scenario) -> Config:
+def _config_for(scenario: Scenario, *, critic_enabled: bool = True) -> Config:
     cfg = Config()
     # Use the live model endpoint from capybase.toml defaults (DESKTOP-NOVA chat).
     cfg.model.base_url = os.environ.get("CAPYBASE_BASE_URL", "http://DESKTOP-NOVA.local:8085/v1")
@@ -226,6 +226,10 @@ def _config_for(scenario: Scenario) -> Config:
     # Structural resolver + combination search: keep ON (production defaults).
     cfg.future.enable_structural_resolver = True
     cfg.future.enable_combination_search = True
+    # Verifier-model critic A/B arm. Default ON (the production default); the
+    # A/B harness toggles this to measure the critic's contribution.
+    cfg.validation.enable_verifier_model = critic_enabled
+    cfg.validation.verifier_severity = "warning"
     return cfg
 
 
@@ -238,13 +242,62 @@ class Result:
     elapsed: float
     final_content_preview: str
     journal_events: list[str]
+    # Critic-utility stats (collected from stored validations + journal). These
+    # measure whether the critic ADDS value beyond the deterministic validators.
+    critic_arm: str = ""            # "on" | "off"
+    critic_calls: int = 0           # verdicts the critic actually produced
+    critic_flagged: int = 0         # verdicts where preserves_* was False (dropped intent)
+    critic_useful_interventions: int = 0  # critic flagged a candidate the syntactic checks PASSED
 
 
-def run_scenario(builder, out_dir: Path) -> Result:
+def _critic_stats(orch) -> tuple[int, int, int]:
+    """Mine the orchestrator's stored validations + journal for critic-utility stats.
+
+    Returns (calls, flagged, useful_interventions):
+    - calls: candidates where verifier_checked=True (the critic produced a verdict)
+    - flagged: candidates where the critic said a side's intent was dropped
+    - useful_interventions: critic-flagged candidates that PASSED every OTHER
+      validator (hard_failures empty) — i.e. the critic caught something the
+      syntactic checks were blind to. This is the critic's discriminating value.
+    """
+    calls = flagged = useful = 0
+    # Stored per-candidate validations (richer than the journal's hard_failures).
+    try:
+        vdir = orch.paths.validations if hasattr(orch.paths, "validations") else None
+        if vdir and Path(vdir).is_dir():
+            for vf in sorted(Path(vdir).glob("*.json")):
+                if vf.name.endswith("-file.json"):
+                    continue  # whole-file validation, not a critic-bearing candidate
+                try:
+                    d = json.loads(vf.read_text())
+                except Exception:
+                    continue
+                feats = d.get("features", {}) or {}
+                if feats.get("verifier_checked") is not True:
+                    continue
+                calls += 1
+                dropped = (
+                    feats.get("verifier_preserves_current") is False
+                    or feats.get("verifier_preserves_replayed") is False
+                )
+                if not dropped:
+                    continue
+                flagged += 1
+                # Useful iff the critic was the ONLY thing wrong: no hard failures
+                # from any other validator on this candidate.
+                if not d.get("hard_failures"):
+                    useful += 1
+    except Exception:
+        pass
+    return calls, flagged, useful
+
+
+def run_scenario(builder, out_dir: Path, *, critic_enabled: bool = True) -> Result:
     scenario = builder()
-    print(f"\n=== {scenario.name} ({scenario.language}) ===", flush=True)
+    arm = "on" if critic_enabled else "off"
+    print(f"\n=== {scenario.name} ({scenario.language}) [critic={arm}] ===", flush=True)
     t0 = time.time()
-    cfg = _config_for(scenario)
+    cfg = _config_for(scenario, critic_enabled=critic_enabled)
     engine = ResolutionEngine(cfg.model, client=OpenAICompatibleClient(cfg.model))
     # Suppress console color noise; route prints to /dev/null to keep timing clean.
     orch = Orchestrator(cfg, repo=str(scenario.repo),
@@ -301,29 +354,23 @@ def run_scenario(builder, out_dir: Path) -> Result:
         pass
 
     status = "PASS" if correct else ("ESCALATED" if escalated else "WRONG_MERGE")
+    c_calls, c_flagged, c_useful = _critic_stats(orch) if critic_enabled else (0, 0, 0)
     print(f"  -> {status}  ({elapsed:.1f}s)  escalated={escalated}", flush=True)
     if escalated:
         print(f"     reason: {reason}", flush=True)
     if not correct:
         print(f"     expect_ok={expect_ok} reject_ok={reject_ok}", flush=True)
         print(f"     preview: {preview}", flush=True)
+    if critic_enabled and c_calls:
+        print(f"     critic: {c_calls} verdict(s), {c_flagged} flagged, "
+              f"{c_useful} useful (beyond syntactic checks)", flush=True)
 
-    return Result(scenario.name, correct, escalated, reason, elapsed, preview, events)
+    return Result(scenario.name, correct, escalated, reason, elapsed, preview, events,
+                  critic_arm=arm, critic_calls=c_calls, critic_flagged=c_flagged,
+                  critic_useful_interventions=c_useful)
 
 
-def main() -> int:
-    all_builders = [
-        scenario_py_simple,
-        scenario_py_multi_unit,
-        scenario_rust_impl,
-        scenario_rust_port_test,
-    ]
-    # --only <name[,name...]> filters which scenarios run (for re-running just
-    # the slow Rust ones without re-paying the fast Python ones).
-    only = os.environ.get("CAPYBASE_LIVE_ONLY", "").split(",")
-    only = [o.strip() for o in only if o.strip()]
-    builders = [b for b in all_builders if not only or b.__name__.replace("scenario_", "") in only]
-    # Smoke-test reachability first.
+def _probe_endpoint() -> bool:
     print("Probing model endpoint...", flush=True)
     try:
         import urllib.request
@@ -336,20 +383,73 @@ def main() -> int:
         print(f"  reachable. loaded models: {loaded}", flush=True)
         if "chat" not in loaded:
             print("  WARNING: 'chat' model not loaded — eval will fail.", flush=True)
+        return "chat" in loaded
     except Exception as e:
         print(f"  UNREACHABLE: {e}", flush=True)
+        return False
+
+
+def _selected_builders() -> list:
+    all_builders = [
+        scenario_py_simple,
+        scenario_py_multi_unit,
+        scenario_rust_impl,
+        scenario_rust_port_test,
+    ]
+    only = os.environ.get("CAPYBASE_LIVE_ONLY", "").split(",")
+    only = [o.strip() for o in only if o.strip()]
+    return [b for b in all_builders if not only or b.__name__.replace("scenario_", "") in only]
+
+
+def main() -> int:
+    builders = _selected_builders()
+    if not _probe_endpoint():
         return 2
 
-    results: list[Result] = []
-    for b in builders:
-        try:
-            results.append(run_scenario(b, Path("/tmp/capybase-live")))
-        except Exception as e:
-            print(f"  SCENARIO SETUP FAILED: {type(e).__name__}: {e}", flush=True)
-            results.append(Result(getattr(b, "__name__", "?"), False, True,
-                                  f"setup error: {e}", 0.0, "", []))
+    # A/B mode: CAPYBASE_AB_RUNS=N runs each scenario N times with critic ON and
+    # N times with critic OFF, then compares. Default (unset/0/1) is the plain
+    # single-run-per-scenario path (critic ON — the production default).
+    try:
+        ab_runs = max(1, int(os.environ.get("CAPYBASE_AB_RUNS", "1")))
+    except ValueError:
+        ab_runs = 1
+    ab_mode = ab_runs > 1
 
-    # Summary.
+    results: list[Result] = []
+    if not ab_mode:
+        for b in builders:
+            try:
+                results.append(run_scenario(b, Path("/tmp/capybase-live")))
+            except Exception as e:
+                print(f"  SCENARIO SETUP FAILED: {type(e).__name__}: {e}", flush=True)
+                results.append(Result(getattr(b, "__name__", "?"), False, True,
+                                      f"setup error: {e}", 0.0, "", []))
+        _print_single_summary(results)
+        _dump_results(results)
+        n_wrong = sum(1 for r in results if not r.correct and not r.escalated)
+        return 0 if n_wrong == 0 else 1
+
+    # --- A/B multi-run: critic ON vs OFF, N runs each, interleaved ---
+    print(f"\n*** A/B MODE: {ab_runs} run(s) per scenario per arm "
+          f"(critic ON vs OFF) ***", flush=True)
+    for b in builders:
+        name = b.__name__.replace("scenario_", "")
+        for i in range(ab_runs):
+            for arm in (True, False):  # alternate arms to spread load/time variance
+                tag = "on" if arm else "off"
+                print(f"\n##### {name} run {i+1}/{ab_runs} critic={tag} #####", flush=True)
+                try:
+                    results.append(run_scenario(b, Path("/tmp/capybase-live"), critic_enabled=arm))
+                except Exception as e:
+                    print(f"  RUN FAILED: {type(e).__name__}: {e}", flush=True)
+                    results.append(Result(name, False, True, f"run error: {e}",
+                                          0.0, "", [], critic_arm=tag))
+    _print_ab_summary(results, ab_runs)
+    _dump_results(results)
+    return 0
+
+
+def _print_single_summary(results: list[Result]) -> None:
     print("\n" + "=" * 64, flush=True)
     print("LIVE EVAL SUMMARY", flush=True)
     print("=" * 64, flush=True)
@@ -365,14 +465,63 @@ def main() -> int:
     print("-" * 64)
     print(f"correct: {n_pass}/{len(results)}   escalated: {n_escal}   wrong-merge: {n_wrong}")
 
-    # Dump full results JSON for the report.
+
+def _print_ab_summary(results: list[Result], runs: int) -> None:
+    """Compare critic ON vs OFF across the multi-run results.
+
+    The model is non-deterministic (temp 0.2), so per-run correctness varies;
+    the A/B aggregates success RATE per arm to separate the critic's signal from
+    variance. Also reports the critic-utility stats: how often the critic flagged
+    a candidate the syntactic checks passed (its discriminating value), and
+    whether those interventions converted a would-be-wrong-merge into a success.
+    """
+    print("\n" + "=" * 72, flush=True)
+    print("A/B SUMMARY: critic ON vs OFF", flush=True)
+    print("=" * 72, flush=True)
+    # Group by (scenario, arm).
+    from collections import defaultdict
+    by: dict[tuple[str, str], list[Result]] = defaultdict(list)
+    for r in results:
+        by[(r.name, r.critic_arm or "on")].append(r)
+    scenarios = sorted({r.name for r in results})
+    print(f"{'scenario':<20} {'arm':<5} {'pass':>5} {'esc':>5} {'wrong':>6} {'avg_s':>6}  critic stats")
+    print("-" * 72)
+    for sc in scenarios:
+        for arm in ("on", "off"):
+            rs = by.get((sc, arm), [])
+            if not rs:
+                continue
+            n_pass = sum(1 for r in rs if r.correct)
+            n_esc = sum(1 for r in rs if r.escalated and not r.correct)
+            n_wrong = sum(1 for r in rs if not r.correct and not r.escalated)
+            avg = sum(r.elapsed for r in rs) / len(rs)
+            calls = sum(r.critic_calls for r in rs)
+            flagged = sum(r.critic_flagged for r in rs)
+            useful = sum(r.critic_useful_interventions for r in rs)
+            cstats = (f"{calls}v/{flagged}f/{useful}u" if arm == "on" else "(disabled)")
+            print(f"{sc:<20} {arm:<5} {n_pass:>5} {n_esc:>5} {n_wrong:>6} {avg:>5.1f}s  {cstats}")
+    # Totals per arm.
+    print("-" * 72)
+    for arm in ("on", "off"):
+        rs = [r for r in results if (r.critic_arm or "on") == arm]
+        if not rs:
+            continue
+        n_pass = sum(1 for r in rs if r.correct)
+        n_wrong = sum(1 for r in rs if not r.correct and not r.escalated)
+        rate = n_pass / len(rs) * 100 if rs else 0
+        print(f"  arm={arm:<4}: {n_pass}/{len(rs)} correct ({rate:.0f}%), "
+              f"{n_wrong} wrong-merge(s)")
+    print("\nlegend: pass=success esc=escalated(safe) wrong=staged-bad-merge  "
+          "critic: v=verdicts f=flagged u=useful(beyond syntactic checks)")
+
+
+def _dump_results(results: list[Result]) -> None:
     out = Path("/tmp/capybase-live/results.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(
         [{k: v for k, v in r.__dict__.items() if k != "journal_events"} | {"journal_events": r.journal_events}
          for r in results], indent=2))
-    print(f"\nfull results: {out}")
-    return 0 if n_wrong == 0 else 1  # escalated is acceptable (safe failure); wrong-merge is a bug
+    print(f"\nfull results: {out}", flush=True)
 
 
 if __name__ == "__main__":

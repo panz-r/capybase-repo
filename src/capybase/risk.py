@@ -138,6 +138,21 @@ class RiskEngine:
                 reasons=soft or ["dropped a symbol a later commit needs"],
                 required_followups=soft,
             )
+        # Verifier-model critic disagreement (surveys §1/§5 Proposer-Critic): the
+        # LLM judge flagged the resolution as dropping a side's INTENT — the one
+        # semantic signal no syntactic validator can make. Same retry-then-
+        # escalate contract as the deterministic drops above: give the model a
+        # chance to re-include the dropped intent, escalate if it persists. The
+        # critic's verdict feeds the CEGIS loop via the failure reason so the
+        # retry is grounded in concrete feedback ("verifier: may drop replayed
+        # side intent"). Gated by retry_count so a persistent critic disagreement
+        # still escalates rather than looping forever.
+        if "verifier_model" in warning_names and retry_count < self.max_retries_per_unit:
+            return RiskDecision(
+                action="retry",
+                reasons=soft or ["verifier flagged dropped intent"],
+                required_followups=soft,
+            )
 
         # Passed with no hard signals: accept — unless consensus shows no
         # reliable majority. Two complementary signals for small N:
