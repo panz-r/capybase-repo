@@ -1362,6 +1362,167 @@ def compute_diagnostic_delta(
     return new_errors
 
 
+# ---------------------------------------------------------------------------
+# Whole-file semantic checks (Python, stdlib ast): duplicate definitions and
+# unreachable code. These are the two "looks plausible, passes line/token
+# validators" failure shapes a small model produces (concatenate both sides'
+# blocks → duplicate class; stack two returns → unreachable). Tree-sitter
+# (structural.duplicate_definitions) covers Rust; stdlib ast covers Python AND
+# catches bare module-level assignments (``FEATURE_FLAGS = ...``) that
+# enumerate_entities intentionally skips. Both degrade to [] on any parse error
+# (a syntax failure is the syntax check's job to report, not theirs).
+# ---------------------------------------------------------------------------
+
+# Coarse node-type → kind label, mirroring structural._KIND_BY_NODE_TYPE so the
+# message vocabulary ("class"/"function"/"variable") is consistent across
+# Python and Rust findings.
+_PY_DEF_KIND = {
+    ast.ClassDef: "class",
+    ast.FunctionDef: "function",
+    ast.AsyncFunctionDef: "function",
+}
+
+
+def _py_duplicate_definitions(source: str) -> list[tuple[str, str, list[int]]] | None:
+    """Per-scope duplicate definitions in a Python module (stdlib ast).
+
+    Returns ``(kind, name, line_numbers)`` tuples — one per name defined more
+    than once within the SAME scope (module, class body, or function body).
+    ``ClassDef``/``FunctionDef``/``AsyncFunctionDef`` collide on their kind;
+    bare-name assignments (``X = ...``, ``X: T = ...``) collide as ``variable``
+    so a duplicated ``FEATURE_FLAGS = {...}`` is caught (tree-sitter misses
+    these). A function shadowed by a same-named class is NOT a collision
+    (different kind) — that's a legitimate (if odd) redefinition.
+
+    Returns ``None`` on SyntaxError/ValueError so the caller can record
+    ``checked=False`` (couldn't analyze) — distinct from ``[]`` (parsed fine,
+    no duplicates). The syntax check owns reporting the parse failure itself.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+
+    findings: list[tuple[str, str, list[int]]] = []
+
+    def _names_assigned(stmt: ast.stmt) -> list[str]:
+        """Bare ``Name`` targets of an Assign/AnnAssign (module/class-level)."""
+        targets: list[ast.expr] = []
+        if isinstance(stmt, ast.Assign):
+            targets = list(stmt.targets)
+        elif isinstance(stmt, ast.AnnAssign) and stmt.target is not None:
+            targets = [stmt.target]
+        out = []
+        for t in targets:
+            if isinstance(t, ast.Name):
+                out.append(t.id)
+            # Tuple/multi-target unpacking (``a = b = 1`` or ``a, b = ...``) is
+            # rare for top-level config; skip rather than over-match.
+        return out
+
+    def _scan_scope(body: list[ast.stmt]):
+        seen: dict[tuple[str, str], list[int]] = {}
+        for stmt in body:
+            kind = _PY_DEF_KIND.get(type(stmt))
+            name = getattr(stmt, "name", None)
+            if kind and name:
+                seen.setdefault((kind, name), []).append(stmt.lineno)
+                # Recurse into the def's own body (methods, nested classes).
+                _scan_scope(getattr(stmt, "body", []))
+                continue
+            # Bare assignment: record as "variable" in THIS scope.
+            if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+                for nm in _names_assigned(stmt):
+                    seen.setdefault(("variable", nm), []).append(stmt.lineno)
+            # Function/class bodies are only entered via the def branches above;
+            # control-flow blocks (if/for/with) introduce a new scope in Python
+            # only for comprehensions, not for ``if`` bodies — but a duplicate
+            # inside an ``if`` is conditional, so we don't recurse there.
+        for key, rows in seen.items():
+            if len(rows) > 1:
+                findings.append((key[0], key[1], sorted(rows)))
+
+    _scan_scope(tree.body)
+    return findings
+
+
+# Statement nodes that unconditionally terminate control flow at their scope.
+_PY_TERMINATORS = (ast.Return, ast.Raise, ast.Break, ast.Continue)
+# Trailing statements after a terminator that carry no executable weight —
+# a Pass, a bare docstring expression, or an ellipsis — must NOT trip the check.
+_PY_TRIVIAL_AFTER_TERMINATOR = (ast.Pass,)
+
+
+def _py_unreachable_code(source: str) -> list[tuple[str, str, int]] | None:
+    """Statements unreachable due to an earlier unconditional terminator.
+
+    Returns ``(funcname, terminator_kind, line)`` triples — one per
+    non-trivial statement that follows a ``return``/``raise``/``break``/
+    ``continue`` at the same block level inside a function/method body.
+    Module-level code is not scanned (a top-level ``return`` is itself a
+    SyntaxError). Recurses into nested functions and the bodies of
+    compound statements (if/for/while/with/try) so a terminator buried in a
+    branch is still detected, but only flags SIBLINGS after the terminator,
+    not the terminator's own nested block.
+
+    Skips trivial trailing nodes (``pass``, docstrings, ``...``) to avoid
+    false positives on idiomatic ``return`` then ``pass`` stubs. Returns
+    ``None`` on SyntaxError/ValueError (couldn't analyze — distinct from
+    ``[]``, which means no unreachable code was found).
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+
+    findings: list[tuple[str, str, int]] = []
+
+    def _check_body(body: list[ast.stmt], owner: str):
+        terminated = False
+        term_kind = ""
+        for stmt in body:
+            if terminated:
+                if _is_trivial_after_terminator(stmt):
+                    continue
+                findings.append((owner, term_kind, stmt.lineno))
+                continue
+            if isinstance(stmt, _PY_TERMINATORS):
+                terminated = True
+                term_kind = type(stmt).__name__.lower()
+            # Descend into compound statements so nested terminators (and
+            # unreachable code after them) are found, regardless of whether
+            # THIS statement terminates.
+            _descend(stmt, owner)
+
+    def _descend(stmt: ast.stmt, owner: str):
+        """Recurse into any nested function/compound body, keeping ``owner``."""
+        # A nested def gets its own owner name (so the message is precise).
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            _check_body(stmt.body, stmt.name)
+            return
+        for attr in ("body", "orelse", "finalbody", "handlers"):
+            val = getattr(stmt, attr, None)
+            if isinstance(val, list):
+                for item in val:
+                    if isinstance(item, ast.stmt):
+                        _descend(item, owner)
+            elif isinstance(val, ast.ExceptHandler):
+                _descend(val, owner)
+
+    def _is_trivial_after_terminator(stmt: ast.stmt) -> bool:
+        if isinstance(stmt, _PY_TRIVIAL_AFTER_TERMINATOR):
+            return True
+        # A bare docstring or ``...`` expression-statement.
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+            return True
+        return False
+
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            _check_body(node.body, node.name)
+
+    return findings
+
 
 def _compile_rust(
     source: str, *, rustc_path: str = "rustc", edition: str = "2021"
@@ -1803,6 +1964,15 @@ class VerificationEngine:
         features["syntax_checked"] = features.get("syntax_checked", syntax_checked)
         features["syntax_passed"] = features.get("syntax_passed", syntax_ok)
 
+        # Semantic whole-file checks: duplicate definitions + unreachable code.
+        # Always-on (no config knob — mirror the syntax check), degrading to a
+        # silent pass when the parser/grammar is unavailable or on a parse
+        # error. These catch the two "plausible but wrong" merge shapes a small
+        # model produces that pass line/token validators: a duplicated block
+        # (both sides present, just twice) and stacked terminators (dead code).
+        self._run_duplicate_definition_check(path, language, whole, hard, features)
+        self._run_unreachable_code_check(path, language, whole, hard, features)
+
         # LSP / type-checker diagnostics (Phase B): reject NEW errors.
         self._run_lsp_diagnostics(
             path, language, original, whole, repo_root, hard, features
@@ -2114,6 +2284,119 @@ class VerificationEngine:
                         detail=check.detail,
                     )
                 )
+
+    def _run_duplicate_definition_check(
+        self,
+        path: str,
+        language: str | None,
+        whole: str,
+        hard: list[VerificationFailure],
+        features: dict[str, float | int | str | bool],
+    ) -> None:
+        """Reject a merge that defines the same name twice in one scope.
+
+        The "duplicate block" failure shape a small model produces when it
+        concatenates both sides' versions of a class/struct/function instead of
+        merging them: both sides' content is present (so BothSidesRepresented
+        and the token-set validators pass), just defined twice. This is almost
+        always a wrong merge — a deliberate redefinition is rare in a conflict
+        region — so severity is ``error`` and feeds the whole-file repair loop.
+
+        Python uses stdlib ``ast`` (catches classes/functions AND bare
+        module-level assignments like ``FEATURE_FLAGS = {...}`` that
+        tree-sitter's enumerate_entities intentionally skips). Rust reuses
+        ``structural.duplicate_definitions`` (tree-sitter, lazy). Other
+        languages / no language: no-op. Degrades to a silent pass on any parse
+        gap (a missing grammar or a syntax error — the latter is the syntax
+        check's failure to report, not this one's).
+        """
+        features.setdefault("duplicate_definition_checked", False)
+        features.setdefault("duplicate_definition_count", 0)
+        if language == "python":
+            dupes = _py_duplicate_definitions(whole)
+        elif language == "rust":
+            try:
+                from capybase.adapters import structural
+            except Exception:  # noqa: BLE001
+                return
+            if not structural.is_available("rust"):
+                return
+            dupes = structural.duplicate_definitions(whole, "rust")
+        else:
+            return
+        if dupes is None:
+            # Parse failed (Python) or tree-sitter couldn't parse (Rust): the
+            # syntax check owns reporting that. Record not-checked and stop.
+            return
+        features["duplicate_definition_checked"] = True
+        features["duplicate_definition_count"] = len(dupes)
+        for kind, name, rows in dupes:
+            # The leading row is the FIRST definition; the message leads with
+            # the last duplicate's line so repair attribution (which parses
+            # "line N" from the message) lands on the offending (duplicate)
+            # occurrence, not the legitimate original.
+            loc = rows[-1]
+            where = ", ".join(str(r) for r in rows)
+            hard.append(
+                VerificationFailure(
+                    validator="duplicate_definition",
+                    severity="error",
+                    message=(
+                        f"line {loc}: {kind} '{name}' defined more than once "
+                        f"in the same scope (at lines {where})"
+                    ),
+                    detail={"kind": kind, "name": name, "lines": rows},
+                )
+            )
+
+    def _run_unreachable_code_check(
+        self,
+        path: str,
+        language: str | None,
+        whole: str,
+        hard: list[VerificationFailure],
+        features: dict[str, float | int | str | bool],
+    ) -> None:
+        """Reject unreachable code after an unconditional terminator.
+
+        Catches the "stacked return" merge where a small model emits both
+        sides' return statements one after the other (``return 'hi'`` then
+        ``return 'howdy'``) — syntactically valid, both sides "present", but
+        the second is dead. A legitimate merge would combine the values, not
+        concatenate the statements.
+
+        Python only (stdlib ``ast``); other languages are a no-op for now
+        (Rust has no single-call equivalent to this and the cargo floor plus
+        clippy cover most dead-code cases there). Severity ``error``. Skips
+        trivial trailing nodes (``pass``, docstrings, ``...``) so idiomatic
+        stubs don't trip it. Degrades to a silent pass on a syntax error.
+        """
+        features.setdefault("unreachable_code_checked", False)
+        features.setdefault("unreachable_code_count", 0)
+        if language != "python":
+            return
+        findings = _py_unreachable_code(whole)
+        if findings is None:
+            # Parse failed: the syntax check reports it. Don't double-report.
+            return
+        features["unreachable_code_checked"] = True
+        features["unreachable_code_count"] = len(findings)
+        for funcname, term_kind, line in findings:
+            hard.append(
+                VerificationFailure(
+                    validator="unreachable_code",
+                    severity="error",
+                    message=(
+                        f"line {line}: unreachable code after {term_kind} "
+                        f"in {funcname}()"
+                    ),
+                    detail={
+                        "function": funcname,
+                        "terminator": term_kind,
+                        "line": line,
+                    },
+                )
+            )
 
     def _run_lsp_diagnostics(
         self,

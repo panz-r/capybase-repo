@@ -482,12 +482,21 @@ def _try_list_union(base: str, current: str, replayed: str) -> str | None:
     if set(cur_appended) & set(rep_appended):
         return None
     merged_items = base_items + cur_appended + rep_appended
+    # Reconstruct BLOCK-SCOPED output (not whole-file): ``base`` is the unit's
+    # full base stage blob, so slicing ``base[:open]`` / ``base[close:]`` would
+    # drag the ENTIRE rest of the file into the resolution and, when spliced
+    # into the marker span, duplicate every definition after the list. The
+    # block-scoped sides (``current``/``replayed``) carry the exact same
+    # prefix/suffix around the list — use one of them as the template instead.
+    # Both sides share the base prefix/suffix by construction (the rule only
+    # fires when each preserves base items in place), so ``current`` is a safe
+    # template; mirror its surrounding text and swap in the merged list.
     return (
-        base[:base_open_off]
+        current[: cur[2]]
         + "["
         + ", ".join(merged_items)
         + "]"
-        + base[base_close_off:]
+        + current[cur[3]:]
     )
 
 
@@ -534,7 +543,12 @@ def _try_dict_union(base: str, current: str, replayed: str) -> str | None:
     if cur_added_keys & base_keys or rep_added_keys & base_keys:
         return None
     merged = base_entries + cur_added + rep_added
-    return _rebuild_dict(base, b, merged)
+    # Reconstruct BLOCK-SCOPED output (see _try_list_union for the rationale):
+    # ``base`` is the unit's whole base blob, so rebuilding from it would drag
+    # the rest of the file into the resolution and duplicate surrounding defs.
+    # The block-scoped ``current`` carries the same dict-surrounding text, so
+    # use it as the rebuild template instead.
+    return _rebuild_dict(current, cur, merged)
 
 
 def _try_insertion_union(base: str, current: str, replayed: str) -> str | None:

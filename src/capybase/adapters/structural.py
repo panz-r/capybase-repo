@@ -444,6 +444,65 @@ def _collect_entities(container, source: str, language: str) -> list[Entity] | N
     return entities
 
 
+def duplicate_definitions(
+    source: str, language: str
+) -> list[tuple[str, str, list[int]]] | None:
+    """Find top-level definition names defined more than once PER SCOPE.
+
+    Catches the silent "duplicate block" merge a small model produces when it
+    concatenates both sides' versions of a class/struct/function instead of
+    merging them — a merge that passes line/token validators because both
+    sides' content is present, just twice. ``BothSidesRepresented`` sees every
+    distinctive token; this check sees the same ``(kind, name)`` twice in one
+    container.
+
+    Scope is the same container notion :func:`enumerate_entities` uses (module,
+    class, impl, mod body): a ``fn foo`` in one ``impl`` does not collide with
+    ``fn foo`` in another. Collisions are exact ``(kind, name)`` matches, not
+    fuzzy — a rename shows up as two distinct names.
+
+    Returns a list of ``(kind, name, line_numbers)`` tuples (one per collided
+    name within a scope; ``line_numbers`` are the 1-based start rows of each
+    duplicate occurrence, ordered, for repair attribution). ``None`` when
+    tree-sitter is unavailable or parsing fails. An empty list means no
+    per-scope duplicates were found.
+    """
+    tree = _parse(source, language)
+    if tree is None:
+        return None
+
+    findings: list[tuple[str, str, list[int]]] = []
+
+    def _scan_container(node, ptype):
+        """Record entities in this container, recursing into nested scopes.
+
+        Mirrors ``_collect_entities._scan`` but keeps a per-container name→rows
+        map so a collision is detected within ONE scope only, then descends
+        into each child scope separately (so the recursion doesn't flatten
+        cross-scope names together).
+        """
+        seen: dict[tuple[str, str], list[int]] = {}
+        for child in node.children:
+            ctype = child.type
+            kind = _coerce_kind(ctype, ptype, language)
+            if kind is not None:
+                name = _entity_name(child, language)
+                if name:
+                    key = (kind, name)
+                    # tree-sitter rows are 0-based; report 1-based for messages.
+                    seen.setdefault(key, []).append(child.start_point.row + 1)
+                    continue  # don't recurse into a definition we already took
+            # Recurse into nested scopes (class/impl/mod bodies) separately.
+            if ctype in _CONTAINER_NODE_TYPES or ctype in _DEFINITION_TYPES:
+                _scan_container(child, ctype)
+        for (kind, name), rows in seen.items():
+            if len(rows) > 1:
+                findings.append((kind, name, sorted(rows)))
+
+    _scan_container(tree.root_node, "module")
+    return findings
+
+
 def sibling_signatures(
     source: str, language: str, container_span: tuple[int, int], *, exclude: str | None = None, limit: int = 8
 ) -> list[str] | None:
