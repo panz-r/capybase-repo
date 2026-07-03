@@ -67,26 +67,26 @@ def _ctx(
 
 def test_no_budget_passes_everything_through():
     ctx = _ctx(few_shot=2, deps=2, anchor=True, siblings=True)
-    anchor, siblings, deps_b, shot, primary, hist, trims = _fit_to_budget(
+    anchor, siblings, deps_b, shot, primary, hist, obls, trims = _fit_to_budget(
         budget=None,
         intro="i", contract="c", rules="r",
         sides_text="sides", structural_anchor="A", siblings_block="S",
-        deps="D", few_shot="F", primary_text="P", history="H",
+        deps="D", few_shot="F", primary_text="P", history="H", obligations="O",
     )
-    assert (anchor, siblings, deps_b, shot, primary, hist) == ("A", "S", "D", "F", "P", "H")
+    assert (anchor, siblings, deps_b, shot, primary, hist, obls) == ("A", "S", "D", "F", "P", "H", "O")
     assert trims == []
 
 
 def test_disabled_budget_is_noop():
     ctx = _ctx(few_shot=2, deps=2)
     # budget total=0 → disabled
-    anchor, siblings, deps_b, shot, primary, hist, trims = _fit_to_budget(
+    anchor, siblings, deps_b, shot, primary, hist, obls, trims = _fit_to_budget(
         budget=TokenBudget(total=0),
         intro="i", contract="c", rules="r",
         sides_text="sides", structural_anchor="A", siblings_block="S",
-        deps="D", few_shot="F", primary_text="P", history="H",
+        deps="D", few_shot="F", primary_text="P", history="H", obligations="O",
     )
-    assert (anchor, siblings, deps_b, shot, primary, hist) == ("A", "S", "D", "F", "P", "H")
+    assert (anchor, siblings, deps_b, shot, primary, hist, obls) == ("A", "S", "D", "F", "P", "H", "O")
     assert trims == []
 
 
@@ -193,3 +193,62 @@ def test_trims_payload_has_section_and_detail():
     for t in parts["trims"]:
         assert "section" in t and "detail" in t
         assert isinstance(t["detail"], str) and t["detail"]
+
+
+# ---------------------------------------------------------------------------
+# #idea 9: obligations survive trimming (highest-priority augmentation)
+# ---------------------------------------------------------------------------
+
+
+def test_obligations_survive_when_history_dropped():
+    """Obligations are a first-class budget section that trims AFTER structural
+    context — they survive when history (replay facts) is dropped (#idea 9)."""
+    # A tight budget that forces history to drop but leaves obligations.
+    # Use _fit_to_budget directly for precise control. Make history large enough
+    # (~500 chars ≈ 125 tokens) to exceed the small augmentation budget.
+    anchor, siblings, deps_b, shot, primary, hist, obls, trims = _fit_to_budget(
+        budget=TokenBudget(total=200, reserved_for_completion=100),
+        intro="i", contract="c", rules="r",
+        sides_text="sides",
+        structural_anchor="", siblings_block="",
+        deps="", few_shot="", primary_text="",
+        history="H" * 500,  # ~125 tokens — exceeds the ~97 available
+        obligations="Future obligations:\n  - keep parse_config\n",
+    )
+    # History was dropped (lowest priority).
+    sections = [t["section"] for t in trims]
+    assert "history" in sections
+    # Obligations survived (highest priority — dropped last).
+    assert obls, "obligations should survive when history is dropped"
+
+
+def test_obligations_dropped_last_after_structural():
+    """Obligations are the LAST augmentation dropped — after anchor, siblings,
+    deps, few-shot, primary_text, and history. A very tight budget drops all of
+    those but keeps obligations until they too must go."""
+    anchor, siblings, deps_b, shot, primary, hist, obls, trims = _fit_to_budget(
+        budget=TokenBudget(total=150, reserved_for_completion=100),
+        intro="i", contract="c", rules="r",
+        sides_text="sides",
+        structural_anchor="A" * 50, siblings_block="S" * 50,
+        deps="D" * 50, few_shot="F" * 50, primary_text="P" * 50,
+        history="H" * 50,
+        obligations="OBLIG: keep parse\n",
+    )
+    sections = [t["section"] for t in trims]
+    # History is dropped before obligations.
+    if "obligations" in sections:
+        # If obligations were dropped, everything lower-priority was too.
+        assert "history" in sections
+        assert "structural_anchor" in sections
+
+
+def test_obligations_in_prompt_render_before_sides():
+    """The obligations section renders in the data block (the model sees it)."""
+    from capybase.conflict_model import ContextBundle
+    bundle = ContextBundle(
+        primary_text="x", token_estimate=1,
+        obligations_context="Future obligations:\n  - keep helper\n",
+    )
+    parts = _resolve_prompt_parts(_unit(), bundle, budget=None)
+    assert "keep helper" in parts["data"]

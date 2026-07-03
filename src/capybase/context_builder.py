@@ -189,6 +189,16 @@ class ContextBuilder:
         # conflict's replay position + future-commit relevance, rendered for the
         # model. Empty when no history service is set (non-rebase sessions).
         history_text = self._build_history_context(unit)
+        # High-priority obligations context (#idea 9): the future-obligations +
+        # branch-intent blocks, lifted out of history_context into a first-class
+        # budget section that the trimmer protects (trims after structural context,
+        # not first like the replay facts).
+        obl_parts = []
+        if self.branch_intent_block:
+            obl_parts.append(self.branch_intent_block)
+        if self.future_obligations_block:
+            obl_parts.append(self.future_obligations_block)
+        obligations_text = "\n".join(obl_parts)
         return ContextBundle(
             primary_text=primary,
             side_summaries=side_summaries,
@@ -199,6 +209,7 @@ class ContextBuilder:
             token_estimate=est,
             structural_view=structural_view,
             history_context=history_text,
+            obligations_context=obligations_text,
         )
 
     def _build_history_context(self, unit: ConflictUnit) -> str:
@@ -243,12 +254,11 @@ class ContextBuilder:
             lines.append("Recent target commits touching this file:")
             for c in ctx.recent_target_commits_touching_file[:2]:
                 lines.append(f"  - \"{_sanitize_subject(c.subject)}\"")
-        # Future obligations (#9 step 3): what later commits expect of the
-        # resolution. Pre-rendered by the orchestrator (it has git access to
-        # fetch the future patches). Appended last; budget-protected like side
-        # obligations so it's never trimmed.
-        if self.future_obligations_block:
-            lines.append(self.future_obligations_block)
+        # Future obligations + branch intent (#idea 9): lifted OUT of history_context
+        # into a separate high-priority budget section (obligations_context) so the
+        # budget trimmer protects them — they were previously buried inside the
+        # lowest-priority history blob and dropped first. The replay facts stay in
+        # history_context (trimmable first).
         return "\n".join(lines)
 
 

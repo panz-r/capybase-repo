@@ -179,8 +179,9 @@ def test_context_builder_appends_future_obligations_block():
         structural_metadata={"replayed_commit_oid": "c1"},
     )
     bundle = builder.build(unit)
-    assert "Future obligations" in bundle.history_context
-    assert "parse_config" in bundle.history_context
+    # Obligations moved to obligations_context (#idea 9 — first-class budget section).
+    assert "Future obligations" in bundle.obligations_context
+    assert "parse_config" in bundle.obligations_context
 
 
 def test_resolve_prompt_renders_history_block():

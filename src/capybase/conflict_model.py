@@ -216,9 +216,15 @@ class ContextBundle(BaseModel):
     # History-aware context (#history step 7): a compact summary of where this
     # conflict sits in the replay sequence + what later commits touch the same
     # region. Empty string when no history is available (non-rebase sessions);
-    # populated by the context builder from the HistoryQueryService. Rendered as
-    # a dedicated prompt section (budget-trimmable, lowest priority after deps).
+    # populated by the context builder from the HistoryQueryService. The replay
+    # facts here are the LOWEST-priority budget section (trimmed first).
     history_context: str = ""
+    # High-priority history-derived context (#idea 9): future obligations + branch
+    # intent. Lifted OUT of history_context into a first-class budget section that
+    # trims AFTER structural context (not first, like the replay facts). Populated
+    # by the context builder from its future_obligations_block + branch_intent_block.
+    # Empty when neither applies.
+    obligations_context: str = ""
     token_estimate: int = 0
 
 
