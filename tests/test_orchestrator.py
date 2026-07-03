@@ -520,7 +520,7 @@ def _verifier_config(repo):
     return cfg
 
 
-def test_verifier_blocks_accept_when_it_flags_dropped_intent(conflicted_repo):
+def test_verifier_blocks_accept_when_it_flags_dropped_intent(conflicted_repo, verifier_critic_enabled):
     """Flag on + critic says the resolution drops a side → NOT accepted. The
     candidate is structurally clean (no markers, valid merge) so the syntactic
     validators pass; only the semantic critic catches the dropped intent, and at
@@ -543,7 +543,7 @@ def test_verifier_blocks_accept_when_it_flags_dropped_intent(conflicted_repo):
     assert result.escalated
 
 
-def test_verifier_allows_accept_when_it_confirms_both_sides(conflicted_repo):
+def test_verifier_allows_accept_when_it_confirms_both_sides(conflicted_repo, verifier_critic_enabled):
     """Flag on + critic confirms both sides preserved → accepted (rebase
     completes), proving the critic does not over-reject clean merges."""
     repo = conflicted_repo["repo"]

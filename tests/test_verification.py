@@ -240,7 +240,7 @@ def _verifier_engine(client, *, severity="warning"):
     )
 
 
-def test_verifier_inert_when_disabled_makes_no_call():
+def test_verifier_inert_when_disabled_makes_no_call(verifier_critic_enabled):
     """enable_verifier_model off → the validator is inert AND makes no LLM call.
     This is the zero-cost default: existing deployments are untouched."""
     client = FakeCriticClient('{"preserves_current": false}')  # would fail if called
@@ -256,7 +256,7 @@ def test_verifier_inert_when_disabled_makes_no_call():
     assert client.calls == []  # never called
 
 
-def test_verifier_passes_when_preserves_both():
+def test_verifier_passes_when_preserves_both(verifier_critic_enabled):
     client = FakeCriticClient(
         '{"preserves_current": true, "preserves_replayed": true, "reason": "ok", "confidence": 0.9}'
     )
@@ -272,7 +272,7 @@ def test_verifier_passes_when_preserves_both():
     assert len(client.calls) == 1
 
 
-def test_verifier_flags_dropped_side_as_warning_by_default():
+def test_verifier_flags_dropped_side_as_warning_by_default(verifier_critic_enabled):
     """A resolution that drops the replayed side's intent → critic fails at the
     configured (warning) severity, surfacing as a warning, not a hard failure."""
     client = FakeCriticClient(
@@ -291,7 +291,7 @@ def test_verifier_flags_dropped_side_as_warning_by_default():
     assert not any(f.validator == "verifier_model" for f in res.hard_failures)
 
 
-def test_verifier_hard_rejects_when_severity_error():
+def test_verifier_hard_rejects_when_severity_error(verifier_critic_enabled):
     """Strict deployments (verifier_severity='error') treat a dropped-intent
     verdict as a hard failure that blocks acceptance."""
     client = FakeCriticClient(
@@ -306,7 +306,7 @@ def test_verifier_hard_rejects_when_severity_error():
     assert any(f.validator == "verifier_model" for f in res.hard_failures)
 
 
-def test_verifier_degrades_gracefully_on_client_error():
+def test_verifier_degrades_gracefully_on_client_error(verifier_critic_enabled):
     """A flaky critic (client raises) must never crash resolution — it skips
     and reports verifier_checked=False, leaving the candidate accepted."""
     client = FakeCriticClient(RuntimeError("LLM request failed"))
@@ -318,7 +318,7 @@ def test_verifier_degrades_gracefully_on_client_error():
     assert res.features["verifier_checked"] is False
 
 
-def test_verifier_degrades_gracefully_on_unparseable_response():
+def test_verifier_degrades_gracefully_on_unparseable_response(verifier_critic_enabled):
     """A malformed critic verdict (no JSON) skips rather than rejecting."""
     client = FakeCriticClient("the merge looks fine to me, no JSON here")
     engine = _verifier_engine(client)

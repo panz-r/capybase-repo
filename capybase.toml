@@ -134,8 +134,11 @@ enable_shadow_tests = false
 # resolution preserves BOTH sides' semantic intent — the one failure the
 # syntactic validators are blind to (a merge that parses cleanly but drops a
 # side's intent). Uses the same black-box API as the resolver; no model is
-# trained or hosted. Inert + zero calls when false.
-enable_verifier_model = false
+# trained or hosted. OPT-OUT (default true): the critic is the only check for
+# silently-dropped intent, so it runs on every resolution by default. Set false
+# to disable (e.g. to cut latency/cost on a trusted corpus). Gracefully skips
+# (no hard-reject) if the call fails or the verdict is unparseable.
+enable_verifier_model = true
 # Critic disagreement severity: "warning" (bias toward retry/escalate) or
 # "error" (hard-reject a dropped-intent resolution).
 verifier_severity = "warning"
@@ -277,7 +280,7 @@ min_balance_for_sbcr_accept = 0.0
 enable_self_consistency = false   # raise [model] samples + set true for majority voting
 enable_rag = false                # set true + [memory] enabled = true for RAG few-shot
 enable_structural_context = false  # set true + [structural] enabled = true for AST context
-enable_verifier_model = false
+enable_verifier_model = true      # now wired + default-on in [validation] (opt-out)
 enable_mutation_testing = false
 # Deterministic structural pre-resolution (survey §6.4 layer 1): BEFORE the LLM,
 # attempt a model-free resolution (identical sides / one-sided change / disjoint

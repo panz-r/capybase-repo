@@ -89,6 +89,52 @@ def real_profile_loader(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cp.ModelProfile, "load", cp.ModelProfile._real_load)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_verifier_critic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the unit suite hermetic w.r.t. the verifier-model critic.
+
+    The critic is OPT-OUT in production (``enable_verifier_model`` defaults
+    True — it's the only check for silently-dropped intent, so it runs by
+    default). But the hermetic suite drives the orchestrator with FAKE clients
+    returning canned RESOLUTION payloads, not critic VERDICTS: a critic call
+    would either consume a fake response (breaking careful payload accounting)
+    or parse a resolution payload as a verdict (meaningless). So the suite opts
+    out by default: ``VerifierModelValidator.verify`` is neutered to a no-op
+    pass unless a test opts in via ``verifier_critic_enabled``. (Patching the
+    pydantic field default does NOT work — pydantic v2 binds the default into a
+    compiled core schema at class creation — so the validator itself is the
+    reliable chokepoint.) The real ``capybase run`` path is unaffected (it
+    doesn't import this conftest).
+    """
+    from capybase.verification import VerifierModelValidator
+
+    # Stash the real verify once so the opt-in fixture can restore it.
+    if not getattr(VerifierModelValidator, "_real_verify", None):
+        VerifierModelValidator._real_verify = VerifierModelValidator.verify
+
+    def _noop_verify(self, ctx):
+        from capybase.verification import VerificationCheckResult
+        return VerificationCheckResult(
+            name="verifier_model",
+            passed=True,
+            message="verifier critic disabled in hermetic suite",
+            features={"verifier_checked": False},
+        )
+
+    monkeypatch.setattr(VerifierModelValidator, "verify", _noop_verify)
+
+
+@pytest.fixture
+def verifier_critic_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opt IN to the verifier critic for tests that exercise it (undoes the
+    autouse ``_isolate_verifier_critic`` so the real ``verify`` runs)."""
+    from capybase.verification import VerifierModelValidator
+
+    monkeypatch.setattr(
+        VerifierModelValidator, "verify", VerifierModelValidator._real_verify
+    )
+
+
 @pytest.fixture
 def conflicted_repo(repo: Path) -> dict:
     """A repo stopped at a UU rebase conflict over ``app.py``.

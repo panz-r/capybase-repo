@@ -396,12 +396,19 @@ class Orchestrator:
         self.verification = VerificationEngine.default(
             ValidationConfig.from_dict(config.validation.model_dump())
         )
-        # Verifier-model critic (surveys §1/§5): when enabled, register an LLM
-        # judge that checks the resolution preserves both sides' semantic intent
-        # — the failure mode the syntactic validators are blind to. It runs last
-        # in the validator chain (after the cheap structural checks) and uses the
-        # same black-box API client as the resolver. Inert + zero calls when off.
-        if config.validation.enable_verifier_model:
+        # Verifier-model critic (surveys §1/§5): when enabled (the default —
+        # opt-out), register an LLM judge that checks the resolution preserves
+        # both sides' semantic intent — the failure mode the syntactic
+        # validators are blind to. It runs last in the validator chain (after
+        # the cheap structural checks) and uses the same black-box API client as
+        # the resolver. Skipped (not registered) when the engine exposes no
+        # ``client`` (e.g. a custom/test engine that only mimics propose): the
+        # critic needs a real client to make its call, so absence is a clean
+        # no-op rather than a crash. The critic's own verify() also degrades
+        # gracefully on any call/parse failure.
+        if config.validation.enable_verifier_model and getattr(
+            self.resolution_engine, "client", None
+        ) is not None:
             from capybase.verification import VerifierModelValidator
 
             self.verification.register(

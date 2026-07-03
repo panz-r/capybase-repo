@@ -309,8 +309,10 @@ class ValidationConfig(BaseModel):
     # validators (markers, splice scope, AST, LSP) are structurally blind to:
     # a merge that parses cleanly but silently drops a side's intent. Uses the
     # same black-box API client already in the orchestrator; no model is trained
-    # or hosted. When off (default) the validator is inert and makes no calls.
-    enable_verifier_model: bool = False
+    # or hosted. OPT-OUT (default ON): the critic is the only check for
+    # silently-dropped intent, so it runs by default in every real resolution
+    # — set false to disable (e.g. to cut latency/cost on a trusted corpus).
+    enable_verifier_model: bool = True
     # Severity of a critic disagreement: "warning" (default — bias toward
     # retry/escalate but don't hard-reject a syntactically-valid merge) or
     # "error" (strict — treat a dropped-intent verdict as a hard failure).
@@ -390,7 +392,9 @@ class FutureConfig(BaseModel):
     enable_self_consistency: bool = False
     enable_rag: bool = False
     enable_structural_context: bool = False
-    enable_verifier_model: bool = False
+    # Now wired AND default-on in [validation] (opt-out); mirrored here for the
+    # [future] seam documentation. See ValidationConfig.enable_verifier_model.
+    enable_verifier_model: bool = True
     enable_mutation_testing: bool = False
     # Deterministic structural pre-resolution (survey §6.4 layer 1): BEFORE the
     # LLM, attempt a model-free resolution from base+sides via provably-safe

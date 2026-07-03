@@ -101,7 +101,10 @@ class ValidationConfig:
     lsp_baseline_strict: bool = True
     enable_shadow_tests: bool = False
     # Verifier-model critic (mirrors config.ValidationConfig; the live flags).
-    enable_verifier_model: bool = False
+    # OPT-OUT: default ON in production; the hermetic test suite opts out via
+    # the autouse _isolate_verifier_critic conftest fixture (fake clients can't
+    # answer critic prompts, so the check would be meaningless noise there).
+    enable_verifier_model: bool = True
     verifier_severity: str = "warning"
     # VeriGuard policy gate (mirrors config.ValidationConfig).
     enable_policy_gate: bool = False
@@ -609,7 +612,8 @@ class VerifierModelValidator:
 
     Cost & safety contract:
 
-    - **Opt-in.** Inert (no LLM call) unless ``enable_verifier_model`` is on.
+    - **Opt-out.** Runs by default (``enable_verifier_model`` defaults True —
+      it's the only check for silently-dropped intent). Set false to disable.
       The gate is read from ``ctx.config`` so it mirrors the LSP/shadow wiring.
     - **Graceful degrade.** Any failure to call the client or parse the verdict
       yields ``verifier_checked=False`` and ``passed=True`` — a flaky or
