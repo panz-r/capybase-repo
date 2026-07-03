@@ -990,6 +990,70 @@ def _dropped_units_evidence(
     return "\n".join(parts) + "\n"
 
 
+def build_verifier_prompt_conflict(
+    unit: ConflictUnit,
+    candidate: CandidateResolution,
+    context: ContextBundle,
+) -> str:
+    """The CONFLICT-focus critic prompt (PoLL jury §2.1, second judge).
+
+    A second critic with a COMPLEMENTARY focus to :func:`build_verifier_prompt`
+    (which judges intent PRESERVATION — "did it drop a side"). This judge asks a
+    different question: does the merge introduce a semantic CONFLICT — two
+    behaviors that can't both hold, or a value/branch that CONTRADICTS a side's
+    change? Same JSON schema so the existing verdict parsing is reused; the jury
+    takes the UNION of both critics' flags (a candidate flagged by EITHER is
+    retried) — coverage over voting, since for merge correctness missing a real
+    bug is worse than an extra retry.
+
+    Same-model different-prompt jury (our reality: one local model). Correlated
+    blind spots vs a cross-model jury, but the distinct focus still broadens
+    coverage beyond a single judge.
+    """
+    cur_lines, base_lines, rep_lines = _prompt_sides(unit)
+    sv = context.structural_view
+    enc_sig = sv.get("enclosing_node_signature") if sv else None
+    enc_text = sv.get("enclosing_node_text") if sv else None
+    structural_anchor = ""
+    if enc_sig and enc_text:
+        structural_anchor = (
+            f"Logical block (tree-sitter AST):\n{enc_sig}\n{enc_text}\n\n"
+        )
+    return f"""You are a strict code reviewer judging a git merge resolution for SEMANTIC
+CONFLICTS. A merge conflict has three sides and a proposed resolution. Judge
+ONLY whether the resolution introduces a CONFLICT or CONTRADICTION — where the
+two sides' changes cannot both hold, or the resolution picks a value/branch that
+contradicts what one side deliberately changed. (This is distinct from "did it
+DROP a side" — a different judge covers that. You cover CONTRADICTIONS.)
+
+{structural_anchor}CURRENT_UPSTREAM_SIDE (one branch's change):
+{cur_lines}
+
+REPLAYED_COMMIT_SIDE (the other branch's change):
+{rep_lines}
+
+BASE (common ancestor):
+{base_lines}
+
+PROPOSED RESOLUTION:
+{candidate.resolved_text}
+
+Does the resolution introduce a semantic conflict? A conflict exists when the
+resolution contradicts a deliberate change from either side, or combines two
+behaviors that cannot both be true (ignore cosmetic differences and cases where
+both sides' changes are independently preserved). Output ONE ```json fenced
+object, nothing else:
+```json
+{{
+  "preserves_current": true,
+  "preserves_replayed": true,
+  "reason": "<one short sentence>",
+  "confidence": 0.0
+}}
+```
+"""
+
+
 class ResolutionEngine:
     def __init__(
         self,

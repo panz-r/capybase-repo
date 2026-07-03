@@ -592,14 +592,20 @@ def test_verifier_seeds_verdict_into_repair_prompt_on_retry(conflicted_repo, ver
     prompt contained the critic's message, and that the run converged (no
     escalation) on the correct merge."""
     repo = conflicted_repo["repo"]
+    # Two critics are registered (the PoLL jury), so each validation round makes
+    # 2 critic calls: preservation (verifier_model) then conflict
+    # (verifier_model_conflict). Script both: preservation flags the drop on the
+    # first round, conflict passes; both pass on the retry round.
+    both_ok = json.dumps({"preserves_current": True, "preserves_replayed": True,
+                          "reason": "both preserved", "confidence": 0.9})
     client = CapturingSequenceClient([
         _make_resolved_payload("    return 'hi'"),  # structurally clean, drops replayed
         json.dumps({"preserves_current": True, "preserves_replayed": False,
-                    "reason": "dropped howdy", "confidence": 0.5}),  # critic verdict
+                    "reason": "dropped howdy", "confidence": 0.5}),  # preservation verdict
+        both_ok,  # conflict verdict (round 1)
         _make_resolved_payload("    return 'hi' + 'howdy'"),  # the correct merge on retry
-        # The retry's critic verdict (confirms both): keeps the call count finite.
-        json.dumps({"preserves_current": True, "preserves_replayed": True,
-                    "reason": "both preserved", "confidence": 0.9}),
+        both_ok,  # preservation verdict (retry round)
+        both_ok,  # conflict verdict (retry round)
     ])
     cfg = _verifier_config(repo)
     # WARNING severity so the critic flag is a soft retry signal (the path that
@@ -613,9 +619,11 @@ def test_verifier_seeds_verdict_into_repair_prompt_on_retry(conflicted_repo, ver
     text = (repo / "app.py").read_text()
     assert "<<<<<<<" not in text
     assert "'hi'" in text and "'howdy'" in text  # both sides preserved
-    # The retry (3rd complete call, index 2) carried the critic's feedback.
-    assert len(client.prompts) >= 3, client.prompts
-    retry_prompt = client.prompts[2]
+    # The retry resolution is the call after the two critic verdicts (index 3
+    # with the PoLL jury: resolution, preservation-verdict, conflict-verdict,
+    # retry-resolution). It must carry the critic's seeded feedback.
+    assert len(client.prompts) >= 4, client.prompts
+    retry_prompt = client.prompts[3]
     assert "verifier_model" in retry_prompt or "drop" in retry_prompt, (
         "critic verdict not seeded into the repair prompt: " + retry_prompt[:300]
     )

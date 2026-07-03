@@ -125,6 +125,23 @@ def test_verifier_critic_budget_is_separate_from_main():
     assert eng.decide(wres, retry_count=0, critic_retry_count=3).action == "accept"
 
 
+def test_jury_union_any_critic_member_routes_to_retry():
+    """PoLL jury (§2.1): ANY verifier_model* critic member's warning triggers the
+    critic retry path — the preservation judge (verifier_model) OR a jury member
+    (verifier_model_conflict). Union of findings, not voting: a flag from EITHER
+    judge is enough to retry (coverage > voting for merge correctness)."""
+    eng = RiskEngine(max_retries_per_unit=2, max_critic_retries_per_unit=2)
+    # The conflict critic flags it (not the preservation critic) → still retries.
+    res = _result(
+        True, {"verifier_confidence": 0.5},
+        warnings=[VerificationWarning(
+            validator="verifier_model_conflict", message="semantic contradiction",
+        )],
+    )
+    assert eng.decide(res, retry_count=0, critic_retry_count=0).action == "retry"
+
+
+
 def test_verifier_critic_high_confidence_escalates_when_budget_exhausted():
     """When the critic budget is exhausted AND the critic was high-confidence,
     escalate instead of accepting — merge correctness is essential, so a judge

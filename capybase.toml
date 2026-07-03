@@ -135,6 +135,11 @@ reject_if_drops_a_side = true
 reject_if_model_needs_human = true
 require_whole_file_validation = true
 require_ast_preservation = true
+# Intent-coverage floor (requires tree-sitter): minimum fraction of a side's
+# ADDED structural units that must survive in the resolution. A deterministic,
+# hard coverage guarantee — "never silently drop > (1-ratio) of a side's added
+# units without a retry". Warning severity. 0.0 = disabled.
+min_preservation_ratio = 0.5
 # LSP / type-checker (Phase B): reject candidates introducing NEW type/compile
 # errors. Requires pyright (pip install pyright) or rust-analyzer. Inert when
 # the tool is absent.

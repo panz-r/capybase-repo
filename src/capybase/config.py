@@ -290,6 +290,15 @@ class ValidationConfig(BaseModel):
     # ExactSpliceScope check misses (it only guards line boundaries). When the
     # grammar is absent this validator is inert.
     require_ast_preservation: bool = True
+    # Intent-coverage floor (requires tree-sitter): the minimum fraction of a
+    # side's ADDED structural units (functions/classes/fields beyond base) that
+    # must survive in the resolution. A deterministic, hard coverage guarantee —
+    # "never silently drop > (1-ratio) of a side's added units without a retry".
+    # Warning severity (feeds the critic retry path); a deterministic backstop
+    # that fires even when the LLM critic is uncertain or skipped. 0.0 = disabled
+    # (no coverage floor). Only fires when a side added ≥1 structural entity, so
+    # value-only conflicts are unaffected (the token-set validator backstops those).
+    min_preservation_ratio: float = 0.5
     # LSP / type-checker diagnostics (requires pyright/rust-analyzer): reject a
     # candidate that introduces NEW type or compilation errors not present in
     # the pre-conflict baseline. Runs in Phase B on the fully-spliced file.

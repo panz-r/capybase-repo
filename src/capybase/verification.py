@@ -95,6 +95,8 @@ class ValidationConfig:
     reject_if_model_needs_human: bool = True
     require_whole_file_validation: bool = True
     require_ast_preservation: bool = True
+    # Intent-coverage floor (mirrors config.ValidationConfig; see docs there).
+    min_preservation_ratio: float = 0.5
     enable_lsp_diagnostics: bool = False
     pyright_path: str = "pyright"
     rust_analyzer_path: str = "rust-analyzer"
@@ -312,6 +314,99 @@ class BothSidesRepresentedValidator:
                 "dropped_a_side": dropped,
                 "dropped_current_additions": cur_missing,
                 "dropped_replayed_additions": rep_missing,
+            },
+        )
+
+
+class IntentCoverageValidator:
+    """Deterministic per-side structural-intent coverage (survey §5.1 signatures).
+
+    The hard coverage guarantee: of the logical units (function/method/class/
+    field) each side ADDED beyond base, the resolution must preserve at least a
+    configured fraction. Computed via tree-sitter ``enumerate_entities`` — no
+    LLM, fully deterministic. Complements the LLM critic: where the critic is a
+    qualitative judge (uncertain, degrades silently), this is a quantitative
+    floor ("2/3 replayed-side units preserved → ratio 0.67") that fires even
+    when the critic is skipped or returns a low-confidence pass.
+
+    Warning severity (feeds the critic retry path, same as the other soft drops).
+    Only fires when a side added ≥1 structural entity, so value-only conflicts
+    (e.g. changing a constant) are unaffected — the token-set
+    :class:`BothSidesRepresentedValidator` remains the backstop there.
+    Inert when tree-sitter or the grammar is unavailable.
+    """
+
+    name = "intent_coverage"
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        unit = ctx.unit
+        lang = unit.language
+        floor = getattr(ctx.config, "min_preservation_ratio", 0.5)
+        if not floor or lang not in ("python", "rust"):
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="intent coverage skipped (disabled or unsupported language)",
+                features={"intent_coverage_checked": False},
+            )
+        try:
+            from capybase.adapters import structural
+        except Exception:  # noqa: BLE001
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="intent coverage skipped (tree-sitter unavailable)",
+                features={"intent_coverage_checked": False},
+            )
+        if not structural.is_available(lang):
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message=f"intent coverage skipped (no {lang} grammar)",
+                features={"intent_coverage_checked": False},
+            )
+        base = unit.base.text or ""
+        cur = unit.current.text or ""
+        rep = unit.replayed.text or ""
+        resolved = ctx.candidate.resolved_text or ""
+        cur_cov = structural.preservation_coverage(base, cur, resolved, lang)
+        rep_cov = structural.preservation_coverage(base, rep, resolved, lang)
+        if cur_cov is None or rep_cov is None:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="intent coverage skipped (parse failed)",
+                features={"intent_coverage_checked": False},
+            )
+        # A side below the floor (and it added something) is a coverage failure.
+        cur_bad = cur_cov.added > 0 and cur_cov.ratio < floor
+        rep_bad = rep_cov.added > 0 and rep_cov.ratio < floor
+        failed = cur_bad or rep_bad
+        dropped_names = []
+        if cur_bad:
+            dropped_names += [f"current:{e.kind} '{e.name}'" for e in cur_cov.dropped]
+        if rep_bad:
+            dropped_names += [f"replayed:{e.kind} '{e.name}'" for e in rep_cov.dropped]
+        return VerificationCheckResult(
+            name=self.name,
+            passed=not failed,
+            severity="warning",
+            message=(
+                f"intent coverage below floor ({floor:.0%}): dropped "
+                f"{', '.join(dropped_names)}"
+                if failed
+                else "intent coverage above floor for both sides"
+            ),
+            detail={
+                "current_ratio": cur_cov.ratio,
+                "current_preserved": cur_cov.preserved,
+                "current_total": cur_cov.added,
+                "replayed_ratio": rep_cov.ratio,
+                "replayed_preserved": rep_cov.preserved,
+                "replayed_total": rep_cov.added,
+                "dropped": dropped_names,
+            },
+            features={
+                "intent_coverage_checked": True,
+                "intent_coverage_failed": failed,
+                "current_preservation_ratio": cur_cov.ratio,
+                "replayed_preservation_ratio": rep_cov.ratio,
             },
         )
 
@@ -641,6 +736,8 @@ class VerifierModelValidator:
         *,
         json_mode: bool = True,
         max_tokens: int = 0,
+        prompt_builder=None,
+        name_suffix: str = "",
     ) -> None:
         # ``client`` is the same LLMClient the resolution engine uses. Typed as
         # ``object`` to avoid an import cycle (adapters → ... → verification);
@@ -656,6 +753,24 @@ class VerifierModelValidator:
         # config so it scales with the resolver's own budget. 0 = fall back to a
         # default that fits a non-reasoning model's verdict.
         self.max_tokens = max_tokens or _CRITIC_DEFAULT_MAX_TOKENS
+        # PoLL jury (§2.1): a second critic with a DIFFERENT prompt focus. The
+        # default builder judges intent preservation; a jury member passes a
+        # complementary builder (e.g. conflict/contradiction focus) so the union
+        # of both critics' flags broadens coverage. Lazy-imported to avoid a
+        # cycle (resolution_engine → ... → verification).
+        self._prompt_builder = prompt_builder
+        # Distinguishes jury members in features/warnings: "verifier_model" (the
+        # default preservation critic) vs "verifier_model_conflict". The risk
+        # engine matches the ``verifier_model*`` prefix so all jury members route
+        # to the critic retry path.
+        if name_suffix:
+            self.name = f"verifier_model_{name_suffix}"
+
+    def _build_prompt(self, unit, candidate, context):
+        if self._prompt_builder is not None:
+            return self._prompt_builder(unit, candidate, context)
+        from capybase.resolution_engine import build_verifier_prompt
+        return build_verifier_prompt(unit, candidate, context)
 
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
         cfg = ctx.config
@@ -667,10 +782,9 @@ class VerifierModelValidator:
                 message="verifier model disabled",
                 features={"verifier_checked": False},
             )
-        from capybase.resolution_engine import build_verifier_prompt
         from capybase.adapters.parsers import parse_resolution_json
 
-        prompt = build_verifier_prompt(ctx.unit, ctx.candidate, _verifier_context(ctx))
+        prompt = self._build_prompt(ctx.unit, ctx.candidate, _verifier_context(ctx))
         messages = [
             {"role": "system", "content": "You are a strict code reviewer."},
             {"role": "user", "content": prompt},
@@ -1713,6 +1827,7 @@ class VerificationEngine:
             AstPreservationValidator(),
             PreservationHeuristicValidator(),
             BothSidesRepresentedValidator(),
+            IntentCoverageValidator(),
             ObligationValidator(),
             NeedsHumanValidator(),
         ]
@@ -2607,6 +2722,7 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
         "ast_preservation": cfg.require_ast_preservation,
         "preservation_heuristic": cfg.reject_if_copies_one_side,
         "both_sides_represented": cfg.reject_if_drops_a_side,
+        "intent_coverage": cfg.min_preservation_ratio > 0.0,
         "obligation": cfg.reject_if_drops_obligation,
         "referenced_symbol_dropped": cfg.reject_if_drops_referenced_symbol,
         "needs_human": cfg.reject_if_model_needs_human,
@@ -2615,7 +2731,13 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
         "policy_gate": cfg.enable_policy_gate,
         "code_smell": cfg.enable_code_smell_checks,
     }
-    return table.get(name, True)
+    if name in table:
+        return table[name]
+    # PoLL jury members are named verifier_model_<focus>; all route through the
+    # same enable_verifier_model gate (the jury is on iff the critic is on).
+    if name.startswith("verifier_model_"):
+        return cfg.enable_verifier_model
+    return True
 
 
 def _blank_markers(text: str, language: str | None = None) -> str:

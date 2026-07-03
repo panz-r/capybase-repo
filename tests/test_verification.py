@@ -351,6 +351,65 @@ def test_verifier_prompt_contains_all_sides_and_candidate():
     assert "preserves_replayed" in prompt
 
 
+def test_conflict_critic_prompt_uses_complementary_focus():
+    """The PoLL jury's second critic (build_verifier_prompt_conflict) asks a
+    DIFFERENT question than the preservation critic: semantic CONFLICT/
+    CONTRADICTION, not intent drop. Same JSON schema so the existing verdict
+    parsing is reused. The distinct focus is what broadens jury coverage."""
+    from capybase.resolution_engine import (
+        build_verifier_prompt,
+        build_verifier_prompt_conflict,
+    )
+    from capybase.context_builder import ContextBuilder
+
+    worktree = "def f():\n<<<<<<< H\n    return 1\n=======\n    return 2\n>>>>>>> b\n"
+    unit = _unit("def f():\n    pass", "    return 1", "    return 2", worktree)
+    cand = _candidate("    return 1 + 2")
+    ctx = ContextBuilder().build(unit)
+    preservation = build_verifier_prompt(unit, cand, ctx)
+    conflict = build_verifier_prompt_conflict(unit, cand, ctx)
+    # Both carry the same sides + candidate + JSON schema.
+    for p in (preservation, conflict):
+        assert "CURRENT_UPSTREAM_SIDE" in p
+        assert "REPLAYED_COMMIT_SIDE" in p
+        assert "preserves_replayed" in p
+    # The conflict critic is framed around CONTRADICTION, not preservation.
+    assert "CONFLICT" in conflict or "contradict" in conflict.lower()
+    # The two prompts are genuinely different (distinct focus).
+    assert conflict != preservation
+
+
+def test_verifier_jury_member_uses_custom_prompt_and_name(verifier_critic_enabled):
+    """A VerifierModelValidator constructed with prompt_builder + name_suffix uses
+    the custom prompt and a distinguishable name (verifier_model_<suffix>), so the
+    jury's members are individually auditable and route via the prefix match."""
+    from capybase.resolution_engine import build_verifier_prompt_conflict
+    from capybase.verification import VerifierModelValidator, ValidationConfig, VerificationContext
+
+    # A fake client that captures the prompt it's asked to judge with.
+    class _Cap:
+        def __init__(self):
+            self.prompt = ""
+        def complete(self, messages, **kw):
+            self.prompt = messages[-1]["content"]
+            return _LLMResp('{"preserves_current": true, "preserves_replayed": true, "reason": "ok", "confidence": 0.9}')
+
+    cap = _Cap()
+    critic = VerifierModelValidator(
+        cap, model_name="m", prompt_builder=build_verifier_prompt_conflict,
+        name_suffix="conflict",
+    )
+    assert critic.name == "verifier_model_conflict"
+    worktree = "def f():\n<<<<<<< H\n    return 1\n=======\n    return 2\n>>>>>>> b\n"
+    unit = _unit("def f():\n    pass", "    return 1", "    return 2", worktree)
+    vctx = VerificationContext(unit=unit, candidate=_candidate("    return 1 + 2"),
+                               config=ValidationConfig(enable_verifier_model=True))
+    critic.verify(vctx)
+    # The prompt used was the conflict-focus one.
+    assert "CONFLICT" in cap.prompt or "contradict" in cap.prompt.lower()
+
+
+
 # ---------------------------------------------------------------------------
 # VeriGuard-style deterministic policy gate (survey §4): the only check that
 # inspects WHAT a patch introduces (imports/calls), not just its structure.

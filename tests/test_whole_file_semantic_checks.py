@@ -322,3 +322,109 @@ def test_dropped_entities_degrades_when_grammar_missing(monkeypatch):
     out = structural.dropped_entities("def a():pass", "def a():pass\ndef b():pass", "def a():pass", "python")
     assert out is None
 
+
+# ---------------------------------------------------------------------------
+# preservation_coverage: the quantitative per-side coverage ratio (survey §5.1).
+# ---------------------------------------------------------------------------
+
+
+def test_preservation_coverage_ratio_math():
+    """Side adds 2 entities; resolution keeps 1, drops 1 → ratio 0.5."""
+    from capybase.adapters.structural import preservation_coverage
+
+    base = "def main():\n    return 1\n"
+    side = "def main():\n    return 1\n\ndef keep():\n    return 2\n\ndef drop():\n    return 3\n"
+    resolved = "def main():\n    return 1\n\ndef keep():\n    return 2\n"
+    cov = preservation_coverage(base, side, resolved, "python")
+    assert cov is not None
+    assert cov.added == 2
+    assert cov.preserved == 1
+    assert cov.ratio == 0.5
+    assert [e.name for e in cov.dropped] == ["drop"]
+
+
+def test_preservation_coverage_all_preserved_is_1():
+    from capybase.adapters.structural import preservation_coverage
+
+    side = "def main():\n    return 1\n\ndef a():\n    pass\n"
+    cov = preservation_coverage("def main():\n    return 1\n", side, side, "python")
+    assert cov.ratio == 1.0 and cov.preserved == 1
+
+
+def test_preservation_coverage_nothing_added_is_1():
+    """A side that added nothing beyond base → ratio 1.0 (nothing to drop)."""
+    from capybase.adapters.structural import preservation_coverage
+
+    base = "def main():\n    return 1\n"
+    cov = preservation_coverage(base, base, base, "python")
+    assert cov.added == 0 and cov.ratio == 1.0
+
+
+# ---------------------------------------------------------------------------
+# IntentCoverageValidator (always-on, warning severity, ratio-gated).
+# ---------------------------------------------------------------------------
+
+
+def _coverage_unit(resolved, *, replayed=None):
+    """A unit where the replayed side adds 2 functions and the candidate may drop them."""
+    base = "def main():\n    return 1\n"
+    rep = replayed or "def main():\n    return 1\n\ndef keep():\n    return 2\n\ndef drop():\n    return 3\n"
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+
+    return ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=base),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=rep),
+        original_worktree_text="", marker_span=(1, 5),
+    )
+
+
+def _coverage_result(resolved, *, floor=0.5, replayed=None):
+    from capybase.verification import IntentCoverageValidator, ValidationConfig, VerificationContext
+    from capybase.conflict_model import CandidateResolution
+
+    ctx = VerificationContext(
+        unit=_coverage_unit(resolved, replayed=replayed),
+        candidate=CandidateResolution(
+            candidate_id="c", unit_id="u", model_name="m", prompt_version="v",
+            resolved_text=resolved,
+        ),
+        config=ValidationConfig(min_preservation_ratio=floor),
+    )
+    return IntentCoverageValidator().verify(ctx)
+
+
+def test_intent_coverage_warns_below_floor():
+    """Drops both added functions (ratio 0.0 < 0.5) → warning, coverage failed."""
+    res = _coverage_result("def main():\n    return 1\n")  # drops keep + drop
+    assert not res.passed
+    assert res.severity == "warning"
+    assert res.features["intent_coverage_checked"] is True
+    assert res.features["intent_coverage_failed"] is True
+    assert res.features["replayed_preservation_ratio"] == 0.0
+    assert "keep" in res.message and "drop" in res.message
+
+
+def test_intent_coverage_passes_at_or_above_floor():
+    """Keeps 1 of 2 (ratio 0.5 == floor) → passes (not strictly below)."""
+    res = _coverage_result("def main():\n    return 1\n\ndef keep():\n    return 2\n")
+    assert res.passed
+    assert res.features["replayed_preservation_ratio"] == 0.5
+
+
+def test_intent_coverage_passes_when_nothing_added():
+    """A side that added no structural entities → coverage undefined → pass."""
+    from capybase.conflict_model import ConflictSide
+    res = _coverage_result("def main():\n    return 1\n", replayed="def main():\n    return 1\n")
+    assert res.passed
+    # No entities added → the validator doesn't trip (token-set backstop owns that case).
+
+
+def test_intent_coverage_disabled_when_floor_zero():
+    """min_preservation_ratio=0.0 → the validator is a no-op pass."""
+    res = _coverage_result("def main():\n    return 1\n", floor=0.0)
+    assert res.passed
+    assert res.features["intent_coverage_checked"] is False
+

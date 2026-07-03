@@ -114,6 +114,13 @@ class RiskEngine:
         # disables its retry behavior — turning off reject_if_drops_a_side means
         # the risk engine won't retry on it either.
         warning_names = {w.validator for w in result.warnings}
+        # PoLL jury (§2.1): any verifier_model* critic (the preservation judge
+        # "verifier_model" OR a jury member "verifier_model_<focus>") counts as a
+        # critic disagreement — the union of the jury's flags.
+        critic_flagged = any(
+            n == "verifier_model" or n.startswith("verifier_model_")
+            for n in warning_names
+        )
         # Copying one side verbatim is a warning; treat as retryable then escalate.
         if "preservation_heuristic" in warning_names and retry_count < self.max_retries_per_unit:
             return RiskDecision(
@@ -129,6 +136,17 @@ class RiskEngine:
             return RiskDecision(
                 action="retry",
                 reasons=soft or ["dropped a side's additions"],
+                required_followups=soft,
+            )
+        # Intent-coverage floor (survey §5.1 signatures): the deterministic
+        # coverage check found a side's added structural units were dropped
+        # below the configured fraction — a hard, quantitative backstop that
+        # fires even when the LLM critic is uncertain or skipped. Same retry
+        # contract as the other soft drops.
+        if "intent_coverage" in warning_names and retry_count < self.max_retries_per_unit:
+            return RiskDecision(
+                action="retry",
+                reasons=soft or ["intent coverage below floor"],
                 required_followups=soft,
             )
         # Dropping a base-referenced dependency (survey §2.2 SafeMerge necessary
@@ -169,7 +187,7 @@ class RiskEngine:
         # through to accept-with-warning (the conservative default — a soft
         # signal biases toward retry but doesn't hard-block a structurally-valid
         # merge the judge was merely unsure about).
-        if "verifier_model" in warning_names:
+        if critic_flagged:
             if critic_retry_count < self.max_critic_retries_per_unit:
                 return RiskDecision(
                     action="retry",

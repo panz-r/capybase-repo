@@ -541,6 +541,55 @@ def dropped_entities(
     ]
 
 
+@dataclass(frozen=True)
+class CoverageReport:
+    """Quantitative per-side preservation coverage (survey §5.1 intent signatures).
+
+    Of the ``added`` entities a side introduced beyond ``base``, ``preserved``
+    survive in the resolution and ``dropped`` are absent. The ratio
+    ``preserved / added`` is the coverage floor the IntentCoverageValidator
+    gates on — a hard, deterministic guarantee that no side's structural intent
+    is silently lost beyond a configured fraction.
+    """
+
+    added: int          # entities the side added beyond base (the denominator)
+    preserved: int      # of those, present in the resolution
+    dropped: list[Entity]  # of those, absent from the resolution
+
+    @property
+    def ratio(self) -> float:
+        return self.preserved / self.added if self.added else 1.0
+
+
+def preservation_coverage(
+    base: str, side: str, resolved: str, language: str
+) -> CoverageReport | None:
+    """How much of a ``side``'s added structural intent survives in ``resolved``.
+
+    The deterministic coverage signal behind the IntentCoverageValidator and the
+    hard "no silent drop > X%" guarantee: of the M logical units (function/
+    method/class/field) the side ADDED beyond ``base``, how many are present in
+    the resolution. Returns a :class:`CoverageReport` with the ratio; ``None``
+    when tree-sitter is unavailable or any text fails to parse (coverage
+    undefined, not a failure). An ``added == 0`` report means the side added no
+    structural entities (ratio 1.0 — nothing to drop).
+    """
+    base_ents = enumerate_entities(base, language)
+    side_ents = enumerate_entities(side, language)
+    resolved_ents = enumerate_entities(resolved, language)
+    if base_ents is None or side_ents is None or resolved_ents is None:
+        return None
+    base_names = {e.name for e in base_ents}
+    resolved_names = {e.name for e in resolved_ents}
+    added = [e for e in side_ents if e.name not in base_names]
+    dropped = [e for e in added if e.name not in resolved_names]
+    return CoverageReport(
+        added=len(added),
+        preserved=len(added) - len(dropped),
+        dropped=dropped,
+    )
+
+
 def sibling_signatures(
     source: str, language: str, container_span: tuple[int, int], *, exclude: str | None = None, limit: int = 8
 ) -> list[str] | None:

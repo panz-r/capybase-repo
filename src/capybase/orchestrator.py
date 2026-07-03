@@ -155,9 +155,13 @@ def _critic_warning(validation: VerificationResult) -> VerificationWarning | Non
     skipped, or the critic wasn't enabled). Used to (a) route the retry to the
     separate critic budget and (b) seed the critic's verdict into the repair
     prompt as actionable feedback.
+
+    PoLL jury (§2.1): matches ANY ``verifier_model*`` warning (the preservation
+    critic ``verifier_model`` OR a jury member like ``verifier_model_conflict``)
+    — the union of the jury's flags. Returns the first found.
     """
     for w in validation.warnings:
-        if w.validator == "verifier_model":
+        if w.validator == "verifier_model" or w.validator.startswith("verifier_model_"):
             return w
     return None
 
@@ -499,18 +503,38 @@ class Orchestrator:
         ) is not None:
             from capybase.verification import VerifierModelValidator
 
+            # PoLL jury (§2.1): two same-model different-prompt critics whose
+            # flags are UNIONED (a candidate flagged by EITHER is retried) —
+            # coverage over voting. The first judges intent PRESERVATION (did it
+            # drop a side); the second judges semantic CONFLICT (does it
+            # contradict a side / combine incompatible behaviors). Distinct
+            # focuses broaden coverage beyond a single judge's blind spots.
+            critic_kwargs = dict(
+                model_name=config.model.model,
+                json_mode=config.model.json_mode,
+                # Scale the verdict budget to the model's own generation budget
+                # so a reasoning model's <think> chain doesn't run out of tokens
+                # before it emits the JSON verdict (silent-degrade guard).
+                max_tokens=config.model.max_tokens,
+            )
             self.verification.register(
                 VerifierModelValidator(
-                    self.resolution_engine.client,
-                    model_name=config.model.model,
-                    json_mode=config.model.json_mode,
-                    # Scale the verdict budget to the model's own generation
-                    # budget so a reasoning model's <think> chain doesn't run
-                    # out of tokens before it emits the JSON verdict (which
-                    # would make the critic silently degrade to no-op).
-                    max_tokens=config.model.max_tokens,
+                    self.resolution_engine.client, **critic_kwargs
                 )
             )
+            try:
+                from capybase.resolution_engine import build_verifier_prompt_conflict
+
+                self.verification.register(
+                    VerifierModelValidator(
+                        self.resolution_engine.client,
+                        prompt_builder=build_verifier_prompt_conflict,
+                        name_suffix="conflict",
+                        **critic_kwargs,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - jury is best-effort; never block on it
+                pass
         # Dependency-preservation validator (survey §2.2 SafeMerge necessary
         # condition): warns when a merge drops a base-referenced symbol that has
         # an in-repo definition and neither side removed. Registered only when
