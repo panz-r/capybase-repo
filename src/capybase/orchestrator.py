@@ -416,6 +416,11 @@ class Orchestrator:
                     self.resolution_engine.client,
                     model_name=config.model.model,
                     json_mode=config.model.json_mode,
+                    # Scale the verdict budget to the model's own generation
+                    # budget so a reasoning model's <think> chain doesn't run
+                    # out of tokens before it emits the JSON verdict (which
+                    # would make the critic silently degrade to no-op).
+                    max_tokens=config.model.max_tokens,
                 )
             )
         # Dependency-preservation validator (survey §2.2 SafeMerge necessary

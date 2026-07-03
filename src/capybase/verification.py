@@ -61,6 +61,13 @@ class Validator(Protocol):
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult: ...
 
 
+# Default generation budget for the verifier critic's verdict call. Fits a
+# non-reasoning model's short JSON verdict; reasoning models override this via
+# the model config's max_tokens (threaded at registration) so their <think>
+# chain doesn't exhaust the budget before the verdict is emitted.
+_CRITIC_DEFAULT_MAX_TOKENS = 1024
+
+
 # Lightweight config mirror to avoid an import cycle with config.py.
 @dataclass
 class ValidationConfig:
@@ -627,13 +634,28 @@ class VerifierModelValidator:
 
     name = "verifier_model"
 
-    def __init__(self, client: object, model_name: str = "", *, json_mode: bool = True) -> None:
+    def __init__(
+        self,
+        client: object,
+        model_name: str = "",
+        *,
+        json_mode: bool = True,
+        max_tokens: int = 0,
+    ) -> None:
         # ``client`` is the same LLMClient the resolution engine uses. Typed as
         # ``object`` to avoid an import cycle (adapters → ... → verification);
         # it only needs a ``complete`` method.
         self.client = client
         self.model_name = model_name
         self.json_mode = json_mode
+        # Generation budget for the verdict call. Reasoning models (e.g.
+        # VibeThinker/DeepSeek-R1 style) emit a long <think> chain BEFORE the
+        # JSON verdict; a fixed-small budget (the old 512) runs out mid-thought
+        # (finish_reason=length) and the verdict is never produced → the critic
+        # silently degrades to verifier_checked=False. Threaded from the model
+        # config so it scales with the resolver's own budget. 0 = fall back to a
+        # default that fits a non-reasoning model's verdict.
+        self.max_tokens = max_tokens or _CRITIC_DEFAULT_MAX_TOKENS
 
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
         cfg = ctx.config
@@ -658,7 +680,7 @@ class VerifierModelValidator:
                 messages,
                 model=self.model_name or _default_model(ctx),
                 temperature=0.0,
-                max_tokens=512,
+                max_tokens=self.max_tokens,
                 json_mode=self.json_mode,
             )
         except Exception:  # noqa: BLE001 - degrade, never crash resolution
