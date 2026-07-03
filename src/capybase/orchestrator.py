@@ -33,6 +33,7 @@ from capybase.conflict_model import (
     RiskDecision,
     VerificationFailure,
     VerificationResult,
+    VerificationWarning,
 )
 from capybase.context_builder import ContextBuilder
 from capybase.escalation import write_review_bundle
@@ -137,6 +138,40 @@ def _is_whole_file_delete(
         return False
     unit, cand = accepted[0]
     return unit.marker_span is None and not cand.resolved_text.strip()
+
+
+def _critic_warning(validation: VerificationResult) -> VerificationWarning | None:
+    """The verifier-critic's warning on this candidate, if it flagged one.
+
+    Returns the (single) ``verifier_model`` ``VerificationWarning`` from the
+    validation, or None when the critic didn't flag (confirmed both sides,
+    skipped, or the critic wasn't enabled). Used to (a) route the retry to the
+    separate critic budget and (b) seed the critic's verdict into the repair
+    prompt as actionable feedback.
+    """
+    for w in validation.warnings:
+        if w.validator == "verifier_model":
+            return w
+    return None
+
+
+def _critic_failure(warning: VerificationWarning) -> VerificationFailure:
+    """Synthesize a hard-failure-shaped object from a critic warning.
+
+    The CEGIS repair-prompt renderer (``_render_failure``) consumes
+    ``VerificationFailure`` objects; the critic emits a ``VerificationWarning``
+    (no severity). This lifts the critic's verdict into the failure shape so its
+    message ("may drop replayed side intent") reaches the model on retry as
+    concrete counterexample feedback — instead of a feedback-free regeneration.
+    Marked ``severity="warning"`` so it's distinguishable from a real hard
+    failure in the prompt, and the renderer surfaces it the same way.
+    """
+    return VerificationFailure(
+        validator=warning.validator,
+        severity="warning",
+        message=warning.message,
+        detail=dict(warning.detail),
+    )
 
 
 def _attribute_whole_file_failure(
@@ -475,12 +510,16 @@ class Orchestrator:
                 escalate_threshold=config.calibration.escalate_threshold,
                 entropy_escalate_threshold=config.calibration.entropy_escalate_threshold,
                 min_agreement=config.model.consensus_min_agreement,
+                max_critic_retries_per_unit=config.policy.max_critic_retries_per_unit,
+                critic_confidence_escalate_threshold=config.policy.critic_confidence_escalate_threshold,
             )
         else:
             self.risk = RiskEngine(
                 max_retries_per_unit=config.policy.max_retries_per_unit,
                 entropy_escalate_threshold=config.calibration.entropy_escalate_threshold,
                 min_agreement=config.model.consensus_min_agreement,
+                max_critic_retries_per_unit=config.policy.max_critic_retries_per_unit,
+                critic_confidence_escalate_threshold=config.policy.critic_confidence_escalate_threshold,
             )
         # Acceptance-strictness policy (#10): tightens the accept branch per the
         # configured mode (interactive/dry_run/ci/unattended). Inert in the
@@ -3149,6 +3188,11 @@ class Orchestrator:
         else:
             self._future_obligation_validator.set_obligations(None)
         retry_count = 0
+        # Separate ledger for verifier-critic-driven retries: a critic flag
+        # consumes THIS budget (max_critic_retries_per_unit), not retry_count,
+        # so a stubborn dropped-intent case can't starve the syntactic-CEGIS
+        # retries. Incremented only when the retry was critic-driven.
+        critic_retry_count = 0
         # seed_failures: when set (whole-file CEGIS), the unit is re-resolved
         # starting from the repair path with the file-level failures pre-seeded,
         # so the model gets the concrete cross-unit error on its first attempt.
@@ -3390,6 +3434,7 @@ class Orchestrator:
                 consensus_agreement=(
                     consensus_report.agreement_score if consensus_report else None
                 ),
+                critic_retry_count=critic_retry_count,
             )
             outcome.decision = decision
             self.journal.emit(
@@ -3471,9 +3516,25 @@ class Orchestrator:
                 path=unit.path,
                 unit_id=unit.unit_id,
             )
-            failures = validation.hard_failures or None
+            # Seed the retry: hard failures PLUS the critic's verdict (if any) as
+            # a synthesized VerificationFailure, so the repair prompt the model
+            # sees on the next attempt carries the critic's concrete feedback
+            # ("may drop replayed side intent"). Without this, a critic-driven
+            # retry regenerated with NO feedback (the warning was dropped at the
+            # old `hard_failures or None` seed), so the model kept reproducing the
+            # same dropped-side merge — the A/B's 30-min convergence loop.
+            critic_warning = _critic_warning(validation)
+            failures = list(validation.hard_failures)
+            if critic_warning is not None:
+                failures.append(_critic_failure(critic_warning))
+            failures = failures or None
+            # Track which budget this retry consumes: critic-driven retries use
+            # the separate critic budget, not the syntactic retry_count.
+            if critic_warning is not None:
+                critic_retry_count += 1
+            else:
+                retry_count += 1
             prev_candidate = cand  # for targeted repair on next attempt
-            retry_count += 1
 
     # ------------------------------------------------------------------ helpers
 

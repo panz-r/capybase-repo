@@ -413,11 +413,15 @@ class CalibratedRiskEngine:
         fallback: RiskEngine | None = None,
         entropy_escalate_threshold: float = 0.6,
         min_agreement: float = 0.0,
+        max_critic_retries_per_unit: int = 0,
+        critic_confidence_escalate_threshold: float = 0.8,
     ) -> None:
         self.fallback = fallback or RiskEngine(
             max_retries_per_unit=max_retries_per_unit,
             entropy_escalate_threshold=entropy_escalate_threshold,
             min_agreement=min_agreement,
+            max_critic_retries_per_unit=max_critic_retries_per_unit,
+            critic_confidence_escalate_threshold=critic_confidence_escalate_threshold,
         )
         self.model = model
 
@@ -430,6 +434,8 @@ class CalibratedRiskEngine:
         escalate_threshold: float,
         entropy_escalate_threshold: float = 0.6,
         min_agreement: float = 0.0,
+        max_critic_retries_per_unit: int = 0,
+        critic_confidence_escalate_threshold: float = 0.8,
     ) -> "CalibratedRiskEngine":
         """Build from config: load the conformal model if present, else the
         logistic calibration model, else passthrough."""
@@ -443,6 +449,8 @@ class CalibratedRiskEngine:
             model=model,
             entropy_escalate_threshold=entropy_escalate_threshold,
             min_agreement=min_agreement,
+            max_critic_retries_per_unit=max_critic_retries_per_unit,
+            critic_confidence_escalate_threshold=critic_confidence_escalate_threshold,
         )
 
     def decide(
@@ -453,6 +461,7 @@ class CalibratedRiskEngine:
         failure_kind: str = "",
         consensus_entropy: float | None = None,
         consensus_agreement: float | None = None,
+        critic_retry_count: int = 0,
     ) -> RiskDecision:
         decision = self.fallback.decide(
             result,
@@ -460,6 +469,7 @@ class CalibratedRiskEngine:
             failure_kind=failure_kind,
             consensus_entropy=consensus_entropy,
             consensus_agreement=consensus_agreement,
+            critic_retry_count=critic_retry_count,
         )
         # Calibration only overrides the ACCEPT path: a candidate that passed
         # all hard checks but is predicted likely to fail gets escalated.

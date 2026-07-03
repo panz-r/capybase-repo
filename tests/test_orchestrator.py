@@ -561,6 +561,66 @@ def test_verifier_allows_accept_when_it_confirms_both_sides(conflicted_repo, ver
     assert "<<<<<<<" not in (repo / "app.py").read_text()
 
 
+class CapturingSequenceClient:
+    """Like SequenceClient but records the prompt of each complete() call.
+
+    Used to assert the critic's verdict is seeded into the repair prompt on
+    retry (the Step-2 feedback-seeding fix): without it, a critic-driven retry
+    regenerated with no feedback and the model kept reproducing the same
+    dropped-side merge.
+    """
+
+    def __init__(self, responses: list[str]):
+        self.responses = list(responses)
+        self.prompts: list[str] = []  # the user-message text of each call, in order
+
+    def complete(self, messages, *, model, temperature, max_tokens, json_mode):
+        self.prompts.append(messages[-1]["content"])
+        if not self.responses:
+            raise RuntimeError("no more fake responses")
+        return LLMResponse(text=self.responses.pop(0))
+
+
+def test_verifier_seeds_verdict_into_repair_prompt_on_retry(conflicted_repo, verifier_critic_enabled):
+    """A critic flag at WARNING severity triggers a retry whose repair prompt
+    CONTAINS the critic's verdict — so the model sees concrete feedback ("may
+    drop replayed side intent") instead of regenerating blind. This is what makes
+    critic-driven retries actually converge on a correct merge.
+
+    Sequence: (1) one-sided resolution → (2) critic verdict flags replayed
+    dropped → (3) the retry: model returns the correct merge. We assert call #3's
+    prompt contained the critic's message, and that the run converged (no
+    escalation) on the correct merge."""
+    repo = conflicted_repo["repo"]
+    client = CapturingSequenceClient([
+        _make_resolved_payload("    return 'hi'"),  # structurally clean, drops replayed
+        json.dumps({"preserves_current": True, "preserves_replayed": False,
+                    "reason": "dropped howdy", "confidence": 0.5}),  # critic verdict
+        _make_resolved_payload("    return 'hi' + 'howdy'"),  # the correct merge on retry
+        # The retry's critic verdict (confirms both): keeps the call count finite.
+        json.dumps({"preserves_current": True, "preserves_replayed": True,
+                    "reason": "both preserved", "confidence": 0.9}),
+    ])
+    cfg = _verifier_config(repo)
+    # WARNING severity so the critic flag is a soft retry signal (the path that
+    # previously dropped the feedback at the retry-seed line).
+    cfg.validation.verifier_severity = "warning"
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    assert not result.escalated, result.reason
+    text = (repo / "app.py").read_text()
+    assert "<<<<<<<" not in text
+    assert "'hi'" in text and "'howdy'" in text  # both sides preserved
+    # The retry (3rd complete call, index 2) carried the critic's feedback.
+    assert len(client.prompts) >= 3, client.prompts
+    retry_prompt = client.prompts[2]
+    assert "verifier_model" in retry_prompt or "drop" in retry_prompt, (
+        "critic verdict not seeded into the repair prompt: " + retry_prompt[:300]
+    )
+
+
 def test_verifier_not_registered_when_flag_off(conflicted_repo):
     """Flag off → the verifier validator is not in the engine's chain at all,
     so no critic call is ever made (zero-cost default)."""

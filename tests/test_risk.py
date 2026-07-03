@@ -72,35 +72,87 @@ def test_dropped_a_side_retries():
 
 def test_verifier_critic_disagreement_retries():
     """The LLM critic flagged the resolution as dropping a side's intent — the
-    one semantic signal no syntactic validator can make. Same retry-then-
-    escalate contract as the deterministic drops: retry while budget remains so
-    the model gets another chance to preserve the dropped intent."""
+    one semantic signal no syntactic validator can make. Retry while the critic
+    budget remains so the model gets another chance to preserve the dropped
+    intent (the critic's verdict is seeded into the repair prompt so the retry
+    is grounded in concrete feedback)."""
     eng = RiskEngine(max_retries_per_unit=2)
     res = _result(
-        True, {"verifier_checked": True, "verifier_preserves_replayed": False},
+        True, {"verifier_checked": True, "verifier_preserves_replayed": False,
+               "verifier_confidence": 0.5},
         warnings=[VerificationWarning(
             validator="verifier_model", message="may drop replayed side intent",
         )],
     )
-    assert eng.decide(res, retry_count=0).action == "retry"
-    assert eng.decide(res, retry_count=1).action == "retry"
+    assert eng.decide(res, retry_count=0, critic_retry_count=0).action == "retry"
+    assert eng.decide(res, retry_count=0, critic_retry_count=1).action == "retry"
 
 
 def test_verifier_critic_disagreement_accepts_when_budget_exhausted():
-    """A persistent critic disagreement (retries exhausted) is accepted-with-
-    warning, matching the other soft drops (both_sides_represented etc.): a soft
+    """A persistent LOW-CONFIDENCE critic disagreement (critic budget exhausted,
+    confidence below the escalation threshold) is accepted-with-warning — a soft
     signal biases toward retry but, once the budget is gone, does not hard-block
-    a structurally-valid merge. The critic's value is the retry it provoked, not
-    a guaranteed escalation — the warning is still surfaced for review."""
-    eng = RiskEngine(max_retries_per_unit=2)
+    a structurally-valid merge the judge was merely unsure about."""
+    eng = RiskEngine(max_retries_per_unit=2, critic_confidence_escalate_threshold=0.8)
     res = _result(
-        True, {"verifier_checked": True, "verifier_preserves_replayed": False},
+        True, {"verifier_checked": True, "verifier_preserves_replayed": False,
+               "verifier_confidence": 0.3},
         warnings=[VerificationWarning(
             validator="verifier_model", message="may drop replayed side intent",
         )],
     )
-    # retry_count == max_retries_per_unit → no more retries → accept-with-warning.
-    assert eng.decide(res, retry_count=2).action == "accept"
+    # critic_retry_count == max_critic_retries_per_unit (mirrors 2) + low conf
+    # → no more retries, no confidence escalation → accept-with-warning.
+    assert eng.decide(res, retry_count=0, critic_retry_count=2).action == "accept"
+
+
+def test_verifier_critic_budget_is_separate_from_main():
+    """The critic gets its OWN budget: a critic-driven retry does NOT consume the
+    syntactic retry_count, and vice versa. So a stubborn dropped-intent case
+    can't starve the syntactic-CEGIS retries (and the resolver keeps its full
+    budget for hard failures even after several critic retries)."""
+    eng = RiskEngine(max_retries_per_unit=2, max_critic_retries_per_unit=3)
+    wres = _result(
+        True, {"verifier_confidence": 0.5},
+        warnings=[VerificationWarning(
+            validator="verifier_model", message="may drop replayed side intent",
+        )],
+    )
+    # Main budget fully exhausted (retry_count=2) but critic budget has room → retry.
+    assert eng.decide(wres, retry_count=2, critic_retry_count=0).action == "retry"
+    assert eng.decide(wres, retry_count=2, critic_retry_count=2).action == "retry"
+    # Critic budget exhausted (3) → falls through (accept/escalate by confidence).
+    assert eng.decide(wres, retry_count=0, critic_retry_count=3).action == "accept"
+
+
+def test_verifier_critic_high_confidence_escalates_when_budget_exhausted():
+    """When the critic budget is exhausted AND the critic was high-confidence,
+    escalate instead of accepting — merge correctness is essential, so a judge
+    that's quite sure a side was dropped must not let the merge through. Uses the
+    previously-ignored verifier_confidence field."""
+    eng = RiskEngine(max_retries_per_unit=2, critic_confidence_escalate_threshold=0.8)
+    res = _result(
+        True, {"verifier_checked": True, "verifier_preserves_replayed": False,
+               "verifier_confidence": 0.9},
+        warnings=[VerificationWarning(
+            validator="verifier_model", message="may drop replayed side intent",
+        )],
+    )
+    assert eng.decide(res, retry_count=0, critic_retry_count=2).action == "escalate"
+
+
+def test_verifier_critic_confidence_gate_disabled_never_escalates():
+    """critic_confidence_escalate_threshold=0.0 disables confidence escalation —
+    a high-confidence flag still accepts-with-warning when the budget is gone
+    (the conservative default, never hard-blocking on the critic alone)."""
+    eng = RiskEngine(max_retries_per_unit=2, critic_confidence_escalate_threshold=0.0)
+    res = _result(
+        True, {"verifier_confidence": 0.99},
+        warnings=[VerificationWarning(
+            validator="verifier_model", message="may drop replayed side intent",
+        )],
+    )
+    assert eng.decide(res, retry_count=0, critic_retry_count=2).action == "accept"
 
 
 def test_verifier_critic_pass_does_not_retry():

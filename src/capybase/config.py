@@ -180,6 +180,21 @@ class PolicyConfig(BaseModel):
     )
     supported_file_kinds: list[str] = Field(default_factory=lambda: ["text"])
     max_retries_per_unit: int = 2
+    # Separate retry budget for verifier-critic disagreements. A critic-driven
+    # retry (the model produced a structurally-valid merge the LLM judge flagged
+    # for dropped intent) consumes THIS budget, NOT max_retries_per_unit — so a
+    # stubborn dropped-intent case can't starve the syntactic-CEGIS retries.
+    # 0 = mirror max_retries_per_unit (the same-size default — merge correctness
+    # is essential, latency is not, so the critic gets as many chances as the
+    # resolver). A nonzero value overrides.
+    max_critic_retries_per_unit: int = 0
+    # Confidence-gated escalation: when the critic budget is exhausted, a
+    # high-confidence critic flag (verifier_confidence >= this threshold)
+    # escalates instead of accepting-with-warning. Uses the critic's own
+    # confidence — 0.0 = never confidence-escalate (always accept-with-warning
+    # when the budget is gone, the conservative default); 0.8 = escalate only
+    # when the judge is quite sure the side was dropped.
+    critic_confidence_escalate_threshold: float = 0.8
     allow_skip: bool = False
     allow_delete_conflicted_file: bool = False
     stage_only_validated_paths: bool = True

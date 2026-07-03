@@ -96,6 +96,17 @@ supported_conflict_types = ["UU"]
 # Which file kinds are eligible for auto-resolution.
 supported_file_kinds = ["text"]
 max_retries_per_unit = 2
+# Separate retry budget for verifier-critic disagreements. A critic-driven retry
+# (the model produced a structurally-valid merge the LLM judge flagged for
+# dropped intent) consumes THIS budget, NOT max_retries_per_unit — so a stubborn
+# dropped-intent case can't starve the syntactic-CEGIS retries. 0 = mirror
+# max_retries_per_unit (the same-size default — merge correctness is essential,
+# latency is not, so the critic gets as many chances as the resolver).
+max_critic_retries_per_unit = 0
+# When the critic budget is exhausted, escalate only if the critic's verdict was
+# high-confidence (verifier_confidence >= this threshold); otherwise accept-with-
+# warning. 0.0 = never confidence-escalate (the conservative default).
+critic_confidence_escalate_threshold = 0.8
 allow_skip = false
 allow_delete_conflicted_file = false
 stage_only_validated_paths = true

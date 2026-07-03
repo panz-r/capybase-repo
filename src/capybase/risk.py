@@ -17,6 +17,8 @@ class RiskEngine:
         max_retries_per_unit: int = 2,
         entropy_escalate_threshold: float = 0.6,
         min_agreement: float = 0.0,
+        max_critic_retries_per_unit: int = 0,
+        critic_confidence_escalate_threshold: float = 0.8,
     ) -> None:
         self.max_retries_per_unit = max_retries_per_unit
         self.entropy_escalate_threshold = entropy_escalate_threshold
@@ -26,6 +28,17 @@ class RiskEngine:
         # entropy for small N (where even a 2-of-3 majority reads as ~0.92
         # entropy). 0.0 disables the check.
         self.min_agreement = min_agreement
+        # Separate budget for verifier-critic disagreements (see config docs):
+        # 0 = mirror the main budget so the critic gets as many chances as the
+        # resolver. The orchestrator tracks critic-driven retries in a separate
+        # counter (critic_retry_count) so they can't starve syntactic retries.
+        self.max_critic_retries_per_unit = (
+            max_critic_retries_per_unit or max_retries_per_unit
+        )
+        # When the critic budget is exhausted, escalate only if the critic's
+        # verdict was high-confidence; otherwise accept-with-warning. 0.0 means
+        # never confidence-escalate (the conservative default).
+        self.critic_confidence_escalate_threshold = critic_confidence_escalate_threshold
 
     def decide(
         self,
@@ -35,6 +48,7 @@ class RiskEngine:
         failure_kind: str = "",
         consensus_entropy: float | None = None,
         consensus_agreement: float | None = None,
+        critic_retry_count: int = 0,
     ) -> RiskDecision:
         """Apply MVP rules in priority order.
 
@@ -140,19 +154,43 @@ class RiskEngine:
             )
         # Verifier-model critic disagreement (surveys §1/§5 Proposer-Critic): the
         # LLM judge flagged the resolution as dropping a side's INTENT — the one
-        # semantic signal no syntactic validator can make. Same retry-then-
-        # escalate contract as the deterministic drops above: give the model a
-        # chance to re-include the dropped intent, escalate if it persists. The
-        # critic's verdict feeds the CEGIS loop via the failure reason so the
-        # retry is grounded in concrete feedback ("verifier: may drop replayed
-        # side intent"). Gated by retry_count so a persistent critic disagreement
-        # still escalates rather than looping forever.
-        if "verifier_model" in warning_names and retry_count < self.max_retries_per_unit:
-            return RiskDecision(
-                action="retry",
-                reasons=soft or ["verifier flagged dropped intent"],
-                required_followups=soft,
-            )
+        # semantic signal no syntactic validator can make. The critic gets its
+        # OWN retry budget (max_critic_retries_per_unit, default = mirror the
+        # main budget) tracked separately by the orchestrator, so a stubborn
+        # dropped-intent case can't starve the syntactic-CEGIS retries.
+        #
+        # When the critic budget still has room → retry. The orchestrator seeds
+        # the critic's verdict into the repair prompt (as a synthesized failure),
+        # so the retry is grounded in concrete feedback ("may drop replayed side
+        # intent") rather than a feedback-free regeneration.
+        #
+        # When the critic budget is exhausted → escalate iff the critic was
+        # HIGH-confidence (verifier_confidence >= threshold); otherwise fall
+        # through to accept-with-warning (the conservative default — a soft
+        # signal biases toward retry but doesn't hard-block a structurally-valid
+        # merge the judge was merely unsure about).
+        if "verifier_model" in warning_names:
+            if critic_retry_count < self.max_critic_retries_per_unit:
+                return RiskDecision(
+                    action="retry",
+                    reasons=soft or ["verifier flagged dropped intent"],
+                    required_followups=soft,
+                )
+            if (
+                self.critic_confidence_escalate_threshold > 0.0
+                and float(feats.get("verifier_confidence", 0.0))
+                >= self.critic_confidence_escalate_threshold
+            ):
+                return _escalate(
+                    result,
+                    [
+                        f"verifier flagged dropped intent with confidence "
+                        f">= {self.critic_confidence_escalate_threshold:.2f} after "
+                        f"{critic_retry_count} critic retries",
+                        *soft,
+                    ],
+                )
+            # Low-confidence flag, budget exhausted → fall through to accept.
 
         # Passed with no hard signals: accept — unless consensus shows no
         # reliable majority. Two complementary signals for small N:
