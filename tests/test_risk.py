@@ -125,6 +125,51 @@ def test_verifier_critic_budget_is_separate_from_main():
     assert eng.decide(wres, retry_count=0, critic_retry_count=3).action == "accept"
 
 
+def test_critic_budget_scales_down_for_low_coverage():
+    """A low-coverage merge (the model dropped a whole side's worth of units) is
+    fundamentally wrong — retrying rarely converges, just loops (the A/B's stall).
+    So the critic retry budget scales DOWN with coverage: low coverage → 1 retry
+    max, then escalate. Bounds latency without sacrificing the high-coverage
+    cases that ARE worth retrying."""
+    eng = RiskEngine(max_retries_per_unit=4, max_critic_retries_per_unit=4)
+    wres = _result(
+        True, {"verifier_confidence": 0.5, "replayed_preservation_ratio": 0.3},
+        warnings=[VerificationWarning(
+            validator="verifier_model", message="may drop replayed side intent",
+        )],
+    )
+    # Low coverage (0.3 < 0.5) → budget 1: one retry, then escalate/accept.
+    assert eng.decide(wres, retry_count=0, critic_retry_count=0).action == "retry"
+    assert eng.decide(wres, retry_count=0, critic_retry_count=1).action != "retry"
+
+
+def test_critic_budget_keeps_full_for_high_coverage():
+    """A high-coverage merge the critic flagged is a subtle, fixable failure —
+    worth the full retry budget (coverage >= 0.9 → no scaling)."""
+    eng = RiskEngine(max_retries_per_unit=4, max_critic_retries_per_unit=4)
+    wres = _result(
+        True, {"verifier_confidence": 0.5,
+               "current_preservation_ratio": 1.0,
+               "replayed_preservation_ratio": 0.95},
+        warnings=[VerificationWarning(
+            validator="verifier_model", message="may drop replayed side intent",
+        )],
+    )
+    # High coverage → full budget (4): retries through critic_retry_count=3.
+    for i in range(4):
+        assert eng.decide(wres, retry_count=0, critic_retry_count=i).action == "retry", i
+    assert eng.decide(wres, retry_count=0, critic_retry_count=4).action != "retry"
+
+
+def test_critic_budget_no_coverage_falls_back_to_full():
+    """When coverage wasn't computed (validator inert / no entities added), the
+    budget is the full configured ceiling — coverage-alignment is opt-in via the
+    IntentCoverageValidator having run, not a hard requirement."""
+    eng = RiskEngine(max_retries_per_unit=3, max_critic_retries_per_unit=3)
+    assert eng._critic_budget({}) == 3
+    assert eng._critic_budget({"replayed_preservation_ratio": None}) == 3
+
+
 def test_jury_union_any_critic_member_routes_to_retry():
     """PoLL jury (§2.1): ANY verifier_model* critic member's warning triggers the
     critic retry path — the preservation judge (verifier_model) OR a jury member

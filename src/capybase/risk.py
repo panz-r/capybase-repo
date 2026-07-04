@@ -40,6 +40,37 @@ class RiskEngine:
         # never confidence-escalate (the conservative default).
         self.critic_confidence_escalate_threshold = critic_confidence_escalate_threshold
 
+    def _critic_budget(self, feats: dict) -> int:
+        """The effective critic retry budget, scaled by intent coverage.
+
+        A low-coverage merge (the model dropped a whole side's worth of units)
+        is fundamentally wrong — the retry almost never converges, just loops
+        (the A/B's 30-min stall). A high-coverage merge that the critic flagged
+        is a subtle, fixable failure worth more retries. So scale the budget
+        DOWN for low coverage and keep it at the configured ceiling for high:
+
+          coverage >= 0.9  →  full budget
+          0.5 <= coverage < 0.9  →  ceil/2 (rounded up)
+          coverage < 0.5  →  1 (one shot, then escalate)
+
+        Coverage comes from the IntentCoverageValidator's per-side ratios; we
+        take the MIN of the two sides (the worse-preserved side governs). When
+        coverage wasn't computed (validator inert / no entities added), fall
+        back to the full configured budget.
+        """
+        base = self.max_critic_retries_per_unit
+        cur = feats.get("current_preservation_ratio")
+        rep = feats.get("replayed_preservation_ratio")
+        ratios = [r for r in (cur, rep) if isinstance(r, (int, float))]
+        if not ratios:
+            return base
+        cov = min(ratios)
+        if cov >= 0.9:
+            return base
+        if cov >= 0.5:
+            return max(1, (base + 1) // 2)  # ceil(base/2)
+        return 1
+
     def decide(
         self,
         result: VerificationResult,
@@ -188,7 +219,12 @@ class RiskEngine:
         # signal biases toward retry but doesn't hard-block a structurally-valid
         # merge the judge was merely unsure about).
         if critic_flagged:
-            if critic_retry_count < self.max_critic_retries_per_unit:
+            # Coverage-aligned budget: scale the critic retry ceiling by how
+            # much of each side's intent survived. A fundamentally-wrong (low-
+            # coverage) merge gets few retries; a subtle high-coverage failure
+            # gets the full budget. Bounds the latency of the deep-retry stall.
+            critic_budget = self._critic_budget(feats)
+            if critic_retry_count < critic_budget:
                 return RiskDecision(
                     action="retry",
                     reasons=soft or ["verifier flagged dropped intent"],

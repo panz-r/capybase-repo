@@ -92,6 +92,39 @@ def test_repair_prompt_says_fix_not_rewrite():
     assert "do not rewrite from scratch" in prompt.lower()
 
 
+def test_repair_prompt_requires_plan_before_fix():
+    """Self-correction plan step (survey §3.3): the repair prompt forces the
+    model to reason about WHY each failure happened + the fix BEFORE emitting
+    resolved_text — internalizing the critic feedback so retries converge
+    instead of reproducing the same mistake. The plan is a `plan` field the
+    candidate parser preserves for audit."""
+    prompt = build_repair_prompt(_unit(), _ctx(), _candidate(), _failures())
+    assert "plan" in prompt.lower()
+    # Asks the model to state why + the fix per failure, then emit the code.
+    assert "why it happened" in prompt.lower() or "why" in prompt.lower()
+    # The JSON schema includes the plan field.
+    assert '"plan"' in prompt
+
+
+def test_repair_plan_field_is_captured_on_candidate():
+    """A model response that includes a `plan` field is parsed and stored on the
+    CandidateResolution as repair_plan (auditable), and resolved_text is still
+    extracted correctly — the plan field doesn't disrupt the candidate contract."""
+    client = FakeClient([
+        '{"plan": "The syntax error is an unclosed bracket; I will close it at line 1.", '
+        '"resolved_text": "    return [0, 9]", "explanation": "closed bracket"}'
+    ])
+    cfg = ModelConfig(samples=1)
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose(
+        _unit(), _ctx(), failures=_failures(), prev_candidate=_candidate()
+    )
+    assert len(cands) == 1
+    assert cands[0].resolved_text == "    return [0, 9]"
+    assert "unclosed bracket" in cands[0].repair_plan
+
+
+
 # ---------------------------------------------------------------------------
 # Engine integration
 # ---------------------------------------------------------------------------

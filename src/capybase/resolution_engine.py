@@ -678,6 +678,15 @@ def build_repair_prompt(
     feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
     cur_lines, _base_lines, rep_lines = _prompt_sides(unit)
     side_intent = _side_intent_block(unit)
+    # Self-correction plan step (survey §3.3): force the model to reason about
+    # WHY each failure happened and WHAT it will change BEFORE emitting the fix,
+    # in the same response (no extra round-trip). The A/B showed the model
+    # reproducing the same dropped-side merge across retries — it wasn't
+    # internalizing the feedback. Articulating a concrete plan first ("restore
+    # validate_token because the critic flagged it dropped") makes the
+    # subsequent code far more likely to actually address the failure instead of
+    # regenerating the same mistake. The plan is emitted in a `plan` field the
+    # candidate parser ignores, so it doesn't change the resolved_text contract.
     return f"""Your previous merge attempt had errors. Fix the SPECIFIC errors in
 your code below — do not rewrite from scratch unless necessary. Keep all parts
 that were correct; change only what the validator flagged.
@@ -697,8 +706,11 @@ YOUR PREVIOUS ATTEMPT (needs fixing):
 ### validator feedback (fix these specific issues)
 {feedback}
 
-Output the corrected resolved_text as a ```json fenced object:
+FIRST, reason about the fix: for each failure above, state in one short sentence
+WHY it happened and the specific edit you will make. Only AFTER you have a
+concrete plan, emit the corrected resolved_text. Output a ```json fenced object:
 {{
+  "plan": "<one sentence per failure: why it happened + the fix>",
   "resolved_text": "<the fixed replacement text, exact indentation>",
   "explanation": "<what you changed and why>",
   "self_reported_confidence": 0.0
@@ -1592,6 +1604,7 @@ class ResolutionEngine:
             replayed_commit_intent=list(data.get("replayed_commit_intent", [])),
             resolved_text=str(data.get("resolved_text", "")),
             explanation=str(data.get("explanation", "")),
+            repair_plan=str(data.get("plan", "")),
             preserved_current_side=bool(data.get("preserved_current_side", True)),
             preserved_replayed_commit_side=bool(
                 data.get("preserved_replayed_commit_side", True)

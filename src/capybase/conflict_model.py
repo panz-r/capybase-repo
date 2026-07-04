@@ -255,6 +255,11 @@ class CandidateResolution(BaseModel):
     replayed_commit_intent: list[str] = Field(default_factory=list)
     resolved_text: str
     explanation: str = ""
+    # Self-correction plan (survey §3.3): on a repair retry, the model's stated
+    # reasoning about WHY each failure happened + the fix it will make, emitted
+    # BEFORE the resolved_text to force internalization of the critic feedback.
+    # Empty on fresh resolves (no plan step there). Auditable but not acted on.
+    repair_plan: str = ""
 
     preserved_current_side: bool = True
     preserved_replayed_commit_side: bool = True
