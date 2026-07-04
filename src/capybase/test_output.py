@@ -269,10 +269,62 @@ def classify_test_output(
 
 
 def _tool_of(command: str) -> str:
-    """The tool name for dispatch: 'cargo' / 'pytest' / '' ."""
-    first = (command or "").strip().split()[0] if (command or "").strip() else ""
-    if first.endswith("cargo"):
+    """The tool name for dispatch: 'cargo' / 'pytest' / '' .
+
+    Checks the full command string (not just the first token) so invocations
+    like ``python -m pytest`` or ``/path/to/python -m pytest`` are recognized —
+    the first token is the interpreter, but ``pytest`` appears as a later arg.
+    """
+    cmd = (command or "").strip()
+    if not cmd:
+        return ""
+    tokens = cmd.split()
+    # ``cargo`` as the invoked binary (first token), e.g. ``cargo test``.
+    if tokens[0].endswith("cargo"):
         return "cargo"
-    if "pytest" in first or first == "py.test":
+    # ``pytest`` anywhere (handles ``python -m pytest``, bare ``pytest``, and
+    # path-prefix variants), plus the legacy ``py.test`` invocation.
+    if any("pytest" in t for t in tokens) or "py.test" in cmd:
         return "pytest"
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Per-test node-ID extraction (test-continuity invariant, survey §2.1a)
+# ---------------------------------------------------------------------------
+
+# pytest -v line: ``tests/test_x.py::test_name PASSED`` / ``... FAILED``.
+_PYTEST_NODEID_RE = re.compile(r"^\s*(?P<nodeid>\S+::\S+)\s+(?P<outcome>PASSED|FAILED)\b")
+# cargo test line: ``test path::test_name ... ok`` / ``... FAILED``.
+_CARGO_TEST_RE = re.compile(r"^\s*test\s+(?P<name>\S+)\s+\.\.\.\s+(?P<outcome>ok|FAILED)\b")
+
+
+def parse_passing_node_ids(stdout: str, tool: str) -> set[str]:
+    """The set of PASSING test node-IDs from a test command's ``stdout``.
+
+    Powers the test-continuity invariant (survey §2.1a): the set captured
+    pre-rebase (the baseline) is diffed against the post-merge set — any
+    baseline-passing test absent from the post-merge set is a behavioral
+    regression the merge introduced (a counterexample for the CEGIS loop).
+
+    - **pytest** (``-v`` output): ``tests/test_x.py::test_name PASSED``. Without
+      ``-v``, pytest emits no per-test lines → empty set (the invariant degrades
+      to inert; callers run pytest with ``-v`` when continuity is on).
+    - **cargo**: ``test path::test_name ... ok``.
+
+    Returns the empty set when the tool is unrecognized, the output has no
+    per-test lines, or no tests passed. Pure function over stdout; no I/O.
+    """
+    passing: set[str] = set()
+    if tool == "pytest":
+        for line in stdout.splitlines():
+            m = _PYTEST_NODEID_RE.match(line)
+            if m and m.group("outcome") == "PASSED":
+                passing.add(m.group("nodeid"))
+    elif tool == "cargo":
+        for line in stdout.splitlines():
+            m = _CARGO_TEST_RE.match(line)
+            if m and m.group("outcome") == "ok":
+                passing.add(m.group("name"))
+    return passing
+

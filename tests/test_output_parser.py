@@ -176,3 +176,49 @@ def test_unknown_command_pass():
 def test_unknown_command_fail():
     v = classify_test_output("make test", "", "boom", returncode=2)
     assert v.kind == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# parse_passing_node_ids: the test-continuity baseline substrate (survey §2.1a).
+# ---------------------------------------------------------------------------
+
+from capybase.test_output import parse_passing_node_ids  # noqa: E402
+
+
+def test_parse_passing_node_ids_pytest():
+    """pytest -v: ``node PASSED`` lines → the passing node-ID set."""
+    out = (
+        "tests/test_auth.py::test_login PASSED                              [ 33%]\n"
+        "tests/test_auth.py::test_logout PASSED                             [ 66%]\n"
+        "tests/test_auth.py::test_signup FAILED                             [100%]\n"
+        "========================= 2 passed, 1 failed in 0.1s =========================\n"
+    )
+    p = parse_passing_node_ids(out, "pytest")
+    assert p == {"tests/test_auth.py::test_login", "tests/test_auth.py::test_logout"}
+
+
+def test_parse_passing_node_ids_cargo():
+    """cargo: ``test name ... ok`` lines → the passing test-name set."""
+    out = (
+        "running 3 tests\n"
+        "test config::tests::test_new ... ok\n"
+        "test config::tests::test_port ... ok\n"
+        "test config::tests::test_bad ... FAILED\n"
+        "test result: FAILED. 2 passed; 1 failed\n"
+    )
+    p = parse_passing_node_ids(out, "cargo")
+    assert p == {"config::tests::test_new", "config::tests::test_port"}
+
+
+def test_parse_passing_node_ids_non_verbose_pytest_is_empty():
+    """Without -v, pytest emits no per-test lines → empty set (inert baseline)."""
+    assert parse_passing_node_ids("=== 2 passed in 0.1s ===", "pytest") == set()
+
+
+def test_parse_passing_node_ids_unknown_tool_is_empty():
+    assert parse_passing_node_ids("test foo ... ok", "jest") == set()
+
+
+def test_parse_passing_node_ids_empty_stdout():
+    assert parse_passing_node_ids("", "pytest") == set()
+

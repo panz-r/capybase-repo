@@ -46,6 +46,8 @@ from capybase.risk import RiskEngine
 from capybase.session import SessionPaths, new_session_id
 from capybase.verification import ValidationConfig, VerificationEngine
 from capybase.adapters.tests import TestRunner
+from capybase.test_output import parse_passing_node_ids
+from capybase.test_output import _tool_of as _tool_of_test_cmd
 from capybase.config import Config
 from capybase.consensus import rank_by_consensus
 from capybase.preflight import run_rebase_preflight
@@ -425,6 +427,13 @@ class Orchestrator:
         # The most recent test-gate verdict (human-readable), stashed by
         # _run_tests for the accept report written after the gate.
         self._last_test_verdict: str | None = None
+        # Test-continuity baseline (survey §2.1a): the set of test node-IDs that
+        # PASSED pre-rebase, captured in rebase() before the rebase starts. Diffed
+        # against the post-merge passing set in _run_tests — a baseline-passing
+        # test that now fails is a behavioral regression the merge introduced (a
+        # high-signal counterexample for the CEGIS loop). None = no baseline
+        # captured (continuity inert; the existing test gate runs unchanged).
+        self._test_continuity_baseline: set[str] | None = None
         # History-awareness substrate (#history): the rebase plan + query service,
         # set by rebase() at start. Empty service when not rebase()-driven (the
         # run()/inspect paths), so all history queries degrade to no-op.
@@ -1855,6 +1864,12 @@ class Orchestrator:
             "rebase started: session=%s target=%s branch=%s start=%s backup=%s",
             self.session_id, target, backup_branch, start_oid[:8], backup_ref,
         )
+        # Test-continuity baseline (survey §2.1a): capture which tests PASS on
+        # the pre-rebase tree, BEFORE the rebase starts. Post-merge, a baseline-
+        # passing test that now fails is a behavioral regression the merge
+        # introduced. Best-effort: any failure leaves the baseline None and the
+        # invariant inert (the existing test gate still runs).
+        self._capture_test_continuity_baseline()
         res = self.git.start_rebase(resolved_target, autostash=autostash)
         if not res.ok and not self.git.rebase_in_progress():
             self.journal.emit(
@@ -4019,6 +4034,59 @@ class Orchestrator:
             return
         self.git.write_worktree_file(path, buffer.encode("utf-8"))
 
+    def _capture_test_continuity_baseline(self) -> None:
+        """Run the test suite on the pre-rebase tree and record passing node-IDs.
+
+        Survey §2.1a test-continuity invariant: the baseline set is diffed
+        against the post-merge passing set in _run_tests — a baseline-passing
+        test that now fails is a behavioral regression the merge introduced.
+        Best-effort: any failure, missing command, or empty per-test output
+        leaves ``self._test_continuity_baseline`` None and the invariant inert.
+        """
+        if not self.config.tests.enable_test_continuity:
+            return
+        cmd = self.config.tests.pre_continue or self.config.tests.final
+        if not cmd:
+            return
+        cmd = self._resolve_test_command(cmd)
+        # pytest needs -v to emit per-test ``node PASSED`` lines we can parse.
+        if _tool_of_test_cmd(cmd) == "pytest" and "-v" not in cmd.split():
+            cmd = cmd + " -v"
+        try:
+            run = self.tests.run(cmd)
+        except Exception:  # noqa: BLE001 - baseline is best-effort
+            return
+        if not run.stdout:
+            return
+        tool = _tool_of_test_cmd(cmd)
+        baseline = parse_passing_node_ids(run.stdout, tool)
+        if baseline:
+            self._test_continuity_baseline = baseline
+            self.journal.emit(
+                "test_continuity_baseline",
+                {"count": len(baseline), "tool": tool},
+            )
+            self.log.info(
+                "test-continuity baseline: %d passing test(s) captured (%s)",
+                len(baseline), tool,
+            )
+
+    def _test_continuity_regressions(self, postmerge_stdout: str, cmd: str) -> list[str]:
+        """Tests that PASSED pre-rebase but are absent from the post-merge pass set.
+
+        Returns the sorted list of regressed node-IDs (baseline-passing tests
+        that no longer pass), or [] when no baseline was captured. These are
+        high-signal counterexamples for the CEGIS loop: "test X passed before
+        this rebase and fails now — your merge broke it".
+        """
+        baseline = self._test_continuity_baseline
+        if not baseline:
+            return []
+        tool = _tool_of_test_cmd(cmd)
+        postmerge_passing = parse_passing_node_ids(postmerge_stdout or "", tool)
+        regressed = sorted(baseline - postmerge_passing)
+        return regressed
+
     def _run_tests(self, label: str, result: StepResult) -> bool:
         cmd = getattr(self.config.tests, label) if hasattr(self.config.tests, label) else None
         if not cmd:
@@ -4079,6 +4147,21 @@ class Orchestrator:
         # after this call returns, in run()'s loop, and needs the human-readable
         # verdict like "1 test failed" / "compile error").
         self._last_test_verdict = run.verdict.summary or None
+        # Test-continuity diff (survey §2.1a): tests that PASSED pre-rebase but
+        # no longer pass are regressions the merge introduced — high-signal
+        # counterexamples. Sharpen the verdict so the human/model sees WHICH
+        # baseline tests broke, not just "tests failed".
+        regressions = self._test_continuity_regressions(run.stdout, cmd)
+        if regressions:
+            names = ", ".join(regressions[:5]) + (" ..." if len(regressions) > 5 else "")
+            self._last_test_verdict = (
+                f"{len(regressions)} test(s) that passed pre-rebase now fail: {names}"
+            )
+            self.journal.emit(
+                "test_continuity_regressions",
+                {"regressions": regressions, "label": label},
+                step_index=self.step,
+            )
         if not run.passed:
             # Surface the parsed verdict so the human sees *why* the tests failed
             # (compile error vs. test failure vs. timeout vs. lock contention),
@@ -4091,6 +4174,12 @@ class Orchestrator:
             )
             for d in run.verdict.diagnostics[:3]:
                 self.out(f"      {d}")
+            if regressions:
+                self.out(
+                    "  " + self._warn(
+                        f"  test-continuity: passed pre-rebase, now failing: {names}"
+                    )
+                )
         return run.passed
 
     def _run_test_command(self, cmd: str, *, cwd: str | None = None):

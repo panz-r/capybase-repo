@@ -231,6 +231,15 @@ class TestsConfig(BaseModel):
     final: str | None = "pytest"
     timeout_seconds: int = 300
     required: bool = True
+    # Test-continuity invariant (survey §2.1a): capture which tests PASS on the
+    # pre-rebase tree, then treat a baseline-passing test that FAILS post-merge
+    # as a behavioral regression the merge introduced — a high-signal
+    # counterexample the syntactic/intent validators can't catch (a merge can
+    # preserve structure + intent-units yet still break behavior). Runs the
+    # configured pre_continue/final command at rebase() start (best-effort: a
+    # failed/missing baseline leaves the invariant inert). pytest is run with
+    # -v so per-test node-IDs are parseable. OPT-OUT (default ON).
+    enable_test_continuity: bool = True
 
 
 class PolicyRule(BaseModel):

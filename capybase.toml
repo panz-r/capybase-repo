@@ -123,6 +123,12 @@ pre_continue = "pytest"
 final = "pytest"
 timeout_seconds = 300
 required = true
+# Test-continuity invariant: capture which tests PASS on the pre-rebase tree,
+# then treat a baseline-passing test that FAILS post-merge as a behavioral
+# regression the merge introduced — a high-signal counterexample the syntactic/
+# intent validators can't catch. Runs the suite at rebase() start (best-effort;
+# pytest is auto-run with -v so per-test node-IDs are parseable). OPT-OUT.
+enable_test_continuity = true
 
 [validation]
 require_no_markers = true
