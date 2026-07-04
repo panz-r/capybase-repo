@@ -411,6 +411,78 @@ class IntentCoverageValidator:
         )
 
 
+class UnattributedCodeValidator:
+    """Deterministic spurious-addition guard (survey §2.1 unattributed code).
+
+    The INVERSE of :class:`IntentCoverageValidator`: where coverage checks that
+    no side's unit was DROPPED, this checks that the merge added no unit present
+    in NONE of the three sides — a hallucinated helper, an extra branch, a
+    synthesized function. LLMs add "helpful" logic no side asked for; this is the
+    only check for surplus code, completing the "neither dropped nor spurious"
+    guarantee. Computed via tree-sitter ``unattributed_entities`` (no LLM).
+
+    Warning severity (feeds the retry path, like the other soft signals). A unit
+    is "unattributed" if its NAME appears in none of base/current/replayed — so a
+    legitimate extracted helper (genuinely needed but newly named) also flags;
+    the model can justify keeping it on retry, and the message names the specific
+    unit so a human can judge. Inert when tree-sitter or the grammar is absent.
+    """
+
+    name = "unattributed_code"
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        unit = ctx.unit
+        lang = unit.language
+        if lang not in ("python", "rust"):
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="unattributed code skipped (unsupported language)",
+                features={"unattributed_code_checked": False},
+            )
+        try:
+            from capybase.adapters import structural
+        except Exception:  # noqa: BLE001
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="unattributed code skipped (tree-sitter unavailable)",
+                features={"unattributed_code_checked": False},
+            )
+        if not structural.is_available(lang):
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message=f"unattributed code skipped (no {lang} grammar)",
+                features={"unattributed_code_checked": False},
+            )
+        unattributed = structural.unattributed_entities(
+            unit.base.text or "", unit.current.text or "",
+            unit.replayed.text or "", ctx.candidate.resolved_text or "", lang,
+        )
+        if unattributed is None:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="unattributed code skipped (parse failed)",
+                features={"unattributed_code_checked": False},
+            )
+        names = ", ".join(f"{e.kind} '{e.name}'" for e in unattributed)
+        failed = bool(unattributed)
+        return VerificationCheckResult(
+            name=self.name,
+            passed=not failed,
+            severity="warning",
+            message=(
+                f"unattributed code: {len(unattributed)} unit(s) in the merge "
+                f"appear in neither side: {names}"
+                if failed
+                else "no unattributed code"
+            ),
+            detail={"unattributed": [e.name for e in unattributed]},
+            features={
+                "unattributed_code_checked": True,
+                "unattributed_code_count": len(unattributed),
+            },
+        )
+
+
 class ObligationValidator:
     """Side-obligation contract (#3): a candidate must preserve each side's edits.
 
@@ -1828,6 +1900,7 @@ class VerificationEngine:
             PreservationHeuristicValidator(),
             BothSidesRepresentedValidator(),
             IntentCoverageValidator(),
+            UnattributedCodeValidator(),
             ObligationValidator(),
             NeedsHumanValidator(),
         ]
@@ -2723,6 +2796,7 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
         "preservation_heuristic": cfg.reject_if_copies_one_side,
         "both_sides_represented": cfg.reject_if_drops_a_side,
         "intent_coverage": cfg.min_preservation_ratio > 0.0,
+        "unattributed_code": True,
         "obligation": cfg.reject_if_drops_obligation,
         "referenced_symbol_dropped": cfg.reject_if_drops_referenced_symbol,
         "needs_human": cfg.reject_if_model_needs_human,

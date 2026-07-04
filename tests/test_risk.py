@@ -186,6 +186,23 @@ def test_jury_union_any_critic_member_routes_to_retry():
     assert eng.decide(res, retry_count=0, critic_retry_count=0).action == "retry"
 
 
+def test_unattributed_code_warning_retries():
+    """The spurious-addition guard (survey §2.1): a merge containing a unit in
+    NEITHER side triggers a retry so the model removes or justifies it."""
+    eng = RiskEngine(max_retries_per_unit=2)
+    res = _result(
+        True, {"unattributed_code_checked": True, "unattributed_code_count": 1},
+        warnings=[VerificationWarning(
+            validator="unattributed_code",
+            message="unattributed code: function 'ghost' appears in neither side",
+        )],
+    )
+    assert eng.decide(res, retry_count=0).action == "retry"
+    assert eng.decide(res, retry_count=1).action == "retry"
+    # Budget exhausted → accept-with-warning (soft signal, like the coverage drops).
+    assert eng.decide(res, retry_count=2).action == "accept"
+
+
 
 def test_verifier_critic_high_confidence_escalates_when_budget_exhausted():
     """When the critic budget is exhausted AND the critic was high-confidence,

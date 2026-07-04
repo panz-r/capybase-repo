@@ -590,6 +590,42 @@ def preservation_coverage(
     )
 
 
+def unattributed_entities(
+    base: str, current: str, replayed: str, resolved: str, language: str
+) -> list[Entity] | None:
+    """Logical units in ``resolved`` that appear in NONE of the three sides.
+
+    The INVERSE of :func:`dropped_entities` (which finds side-units missing
+    from the merge). This catches the spurious-addition failure mode: a unit the
+    merge introduces that no side asked for — a hallucinated helper, an extra
+    branch, a synthesized function. Every other preservation check is drop-
+    directional ("did the merge LOSE a side's unit?"); this is the only check
+    for surplus code, completing the "neither dropped nor spurious" guarantee.
+
+    An entity is "unattributed" if its ``name`` appears in NONE of base/current/
+    replayed. Matched by name (not body): a renamed unit IS a new name, so a
+    rename-in-merge flags — acceptable since a rename in a conflict resolution is
+    unusual and worth surfacing for review. A legitimate extracted helper (genuinely
+    needed to reconcile the sides but with a new name) also flags; the caller
+    treats this as a warning (retry/escalate), not a hard reject, so the model can
+    justify keeping it.
+
+    Returns ``None`` when tree-sitter is unavailable or any text fails to parse.
+    An empty list means every resolved unit derives from (or matches the name of)
+    a unit in at least one side.
+    """
+    base_ents = enumerate_entities(base, language)
+    cur_ents = enumerate_entities(current, language)
+    rep_ents = enumerate_entities(replayed, language)
+    res_ents = enumerate_entities(resolved, language)
+    if any(x is None for x in (base_ents, cur_ents, rep_ents, res_ents)):
+        return None
+    known = {e.name for e in base_ents}
+    known |= {e.name for e in cur_ents}
+    known |= {e.name for e in rep_ents}
+    return [e for e in res_ents if e.name not in known]
+
+
 def sibling_signatures(
     source: str, language: str, container_span: tuple[int, int], *, exclude: str | None = None, limit: int = 8
 ) -> list[str] | None:

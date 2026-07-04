@@ -180,6 +180,16 @@ class RiskEngine:
                 reasons=soft or ["intent coverage below floor"],
                 required_followups=soft,
             )
+        # Unattributed code (survey §2.1 spurious-addition guard): the merge
+        # contains a unit present in NONE of the three sides — a hallucinated
+        # helper/branch the model invented. The inverse failure mode of the
+        # coverage drops above. Retry so the model removes or justifies it.
+        if "unattributed_code" in warning_names and retry_count < self.max_retries_per_unit:
+            return RiskDecision(
+                action="retry",
+                reasons=soft or ["unattributed code (unit in neither side)"],
+                required_followups=soft,
+            )
         # Dropping a base-referenced dependency (survey §2.2 SafeMerge necessary
         # condition): the merge silently removed a symbol base + both sides kept
         # — a semantic regression the syntactic checks miss. Retry so the model

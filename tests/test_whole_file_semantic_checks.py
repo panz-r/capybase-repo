@@ -428,3 +428,107 @@ def test_intent_coverage_disabled_when_floor_zero():
     assert res.passed
     assert res.features["intent_coverage_checked"] is False
 
+
+# ---------------------------------------------------------------------------
+# Unattributed Code Sentinel (survey §2.1): the spurious-addition guard.
+# Inverse of dropped_entities — flags merge units present in NEITHER side.
+# ---------------------------------------------------------------------------
+
+
+def test_unattributed_entities_flags_spurious_unit():
+    """A merge that adds a function in NO side → that unit is unattributed."""
+    from capybase.adapters.structural import unattributed_entities
+
+    base = "def main():\n    return 1\n"
+    cur = "def main():\n    return 1\n"
+    rep = "def main():\n    return 1\n\ndef helper():\n    return 2\n"
+    # Merge introduces ghost() — present in none of base/cur/rep.
+    resolved = "def main():\n    return 1\n\ndef helper():\n    return 2\n\ndef ghost():\n    return 3\n"
+    out = unattributed_entities(base, cur, rep, resolved, "python")
+    assert out is not None
+    assert [e.name for e in out] == ["ghost"]
+
+
+def test_unattributed_entities_empty_when_all_attributed():
+    """Every resolved unit derives from (or matches the name of) a side → empty."""
+    from capybase.adapters.structural import unattributed_entities
+
+    base = "def main():\n    return 1\n"
+    rep = "def main():\n    return 1\n\ndef helper():\n    return 2\n"
+    out = unattributed_entities(base, base, rep, rep, "python")
+    assert out == []
+
+
+def test_unattributed_entities_flags_rename_as_new():
+    """A rename (new name not in any side) flags — a rename in a merge is
+    unusual and worth surfacing for review, even though it may be legitimate."""
+    from capybase.adapters.structural import unattributed_entities
+
+    base = "def main():\n    return 1\n"
+    rep = "def main():\n    return 1\n\ndef helper():\n    return 2\n"
+    # Merge renames helper → renamed_helper (new name not in any side).
+    resolved = "def main():\n    return 1\n\ndef renamed_helper():\n    return 2\n"
+    out = unattributed_entities(base, base, rep, resolved, "python")
+    assert out is not None
+    assert [e.name for e in out] == ["renamed_helper"]
+
+
+def test_unattributed_entities_degrades_when_grammar_missing(monkeypatch):
+    from capybase.adapters import structural
+
+    monkeypatch.setattr(structural, "_make_parser", lambda lang: None)
+    out = structural.unattributed_entities(
+        "def a():pass", "def a():pass", "def a():pass", "def a():pass\ndef b():pass", "python"
+    )
+    assert out is None
+
+
+def _unattributed_unit(resolved):
+    """A unit where the replayed side adds helper(); the candidate may add a ghost."""
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+
+    base = "def main():\n    return 1\n"
+    rep = "def main():\n    return 1\n\ndef helper():\n    return 2\n"
+    return ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=base),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=rep),
+        original_worktree_text="", marker_span=(1, 5),
+    )
+
+
+def _unattributed_result(resolved):
+    from capybase.verification import (
+        UnattributedCodeValidator, ValidationConfig, VerificationContext,
+    )
+    from capybase.conflict_model import CandidateResolution
+
+    ctx = VerificationContext(
+        unit=_unattributed_unit(resolved),
+        candidate=CandidateResolution(
+            candidate_id="c", unit_id="u", model_name="m", prompt_version="v",
+            resolved_text=resolved,
+        ),
+        config=ValidationConfig(),
+    )
+    return UnattributedCodeValidator().verify(ctx)
+
+
+def test_unattributed_validator_warns_on_spurious_unit():
+    """A merge with a ghost() in no side → warning, count 1."""
+    res = _unattributed_result(
+        "def main():\n    return 1\n\ndef helper():\n    return 2\n\ndef ghost():\n    return 3\n"
+    )
+    assert not res.passed
+    assert res.severity == "warning"
+    assert res.features["unattributed_code_count"] == 1
+    assert "ghost" in res.message
+
+
+def test_unattributed_validator_passes_when_all_attributed():
+    res = _unattributed_result("def main():\n    return 1\n\ndef helper():\n    return 2\n")
+    assert res.passed
+    assert res.features["unattributed_code_count"] == 0
+
