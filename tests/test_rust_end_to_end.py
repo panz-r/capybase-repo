@@ -43,6 +43,8 @@ class CyclingClient:
 def _config(repo) -> Config:
     cfg = Config()
     cfg.model.model = "fake"
+    cfg.model.samples = 1  # hermetic: script exact fake-client responses
+    cfg.model.enable_self_consistency = False
     cfg.tests.required = False  # no pytest/cargo in the fixture repo
     cfg.tests.pre_continue = None
     cfg.tests.final = None
@@ -170,6 +172,8 @@ def _test_gated_config(repo) -> Config:
     """Config with the cargo test gate REQUIRED (real ``cargo test``, no shim)."""
     cfg = Config()
     cfg.model.model = "fake"
+    cfg.model.samples = 1  # hermetic: script exact fake-client responses
+    cfg.model.enable_self_consistency = False
     cfg.tests.required = True
     # Explicit cargo test command (don't rely on the pytest→cargo auto-subst).
     cfg.tests.pre_continue = "cargo test"

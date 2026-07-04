@@ -62,6 +62,8 @@ def _config(repo, *, tests_required: bool = True) -> Config:
     """A config with the test gate set to `true` (always exits 0)."""
     cfg = Config()
     cfg.model.model = "fake"
+    cfg.model.samples = 1  # hermetic: script exact fake-client responses
+    cfg.model.enable_self_consistency = False
     cfg.tests.required = tests_required
     cfg.tests.pre_continue = "true"
     cfg.tests.final = "true"
@@ -459,6 +461,8 @@ def test_rebase_rust_resolves_and_compiles(repo):
     )
     cfg = Config()
     cfg.model.model = "fake"
+    cfg.model.samples = 1  # hermetic: script exact fake-client responses
+    cfg.model.enable_self_consistency = False
     cfg.tests.required = False
     cfg.tests.pre_continue = None
     cfg.tests.final = None

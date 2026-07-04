@@ -62,7 +62,14 @@ class ModelConfig(BaseModel):
     api_key: str = "sk-local"
     model: str = "vibethink"
     temperature: float = 0.2
-    samples: int = 1
+    # Best-of-N sampling (the success-rate default). A non-deterministic local
+    # model produces a correct merge on SOME draw even when a single attempt
+    # fails; samples=3 engages the parallel-sampling + consensus path so the
+    # system picks the best of N instead of one roll of the dice. Latency
+    # triples on first attempts (acceptable — correctness > latency), but
+    # convergence/retry load drops because a correct sample is more likely to
+    # be found at generation than via CEGIS retries. Set 1 to disable (legacy).
+    samples: int = 3
     # Difficulty-aware sample allocation (survey §4 UAB-lite): when routing is
     # enabled and a unit classifies as "complex", draw this many samples instead
     # of the base ``samples``. Concentrates test-time compute where a 3B model
@@ -117,7 +124,9 @@ class ModelConfig(BaseModel):
     # legacy location). Duplicated onto ModelConfig so ``capybase calibrate`` can
     # store it in the model profile (which overlays ModelConfig only). The
     # orchestrator reads this in preference to future.enable_self_consistency.
-    enable_self_consistency: bool = False
+    # Default ON (paired with samples=3) so best-of-N + majority-vote engages by
+    # default — the success-rate lever for a non-deterministic local model.
+    enable_self_consistency: bool = True
     # ``response_format: {type: json_object}`` is sent on every completion so
     # the model emits a single parseable JSON object. A few local servers reject
     # this key (older llama.cpp builds, some vLLM configs). ``capybase calibrate``
@@ -429,7 +438,9 @@ class FutureConfig(BaseModel):
     module), not a per-deploy config, by design — minimal config, no hidden knobs.
     """
 
-    enable_self_consistency: bool = False
+    # Default ON to match the [model] mirror (samples=3 + self-consistency is
+    # now the success-rate default). See ModelConfig.enable_self_consistency.
+    enable_self_consistency: bool = True
     enable_rag: bool = False
     enable_structural_context: bool = False
     # Now wired AND default-on in [validation] (opt-out); mirrored here for the

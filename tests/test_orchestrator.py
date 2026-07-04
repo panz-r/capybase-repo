@@ -52,6 +52,12 @@ class CyclingClient:
 def _config(tmp_path: Path, *, tests_required: bool = True, pre_continue: str | None = "true") -> Config:
     cfg = Config()
     cfg.model.model = "fake"
+    # The hermetic suite scripts exact fake-client responses for single-
+    # resolution flows; force samples=1 so the production default (samples=3 +
+    # self-consistency) doesn't triple the candidate draw and exhaust them. Tests
+    # that exercise the multi-sample path set samples explicitly.
+    cfg.model.samples = 1
+    cfg.model.enable_self_consistency = False
     cfg.tests.required = tests_required
     cfg.tests.pre_continue = pre_continue  # `true` always exits 0
     cfg.tests.final = pre_continue

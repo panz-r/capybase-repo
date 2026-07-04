@@ -163,10 +163,13 @@ def test_apply_profile_overlays_tuned_knobs_when_names_match():
     assert new_cfg.two_pass is True
     assert new_cfg.prompt_variants is True
     assert new_cfg.enable_self_consistency is True
-    # The knobs that differ from ModelConfig defaults are overlaid. plan_search
-    # and diverse_sampling are False in this profile (matching defaults), so they
-    # are NOT in the overridden set — "overridden" means "value changed".
-    expected_changed = set(PROFILE_KNOBS) - {"plan_search", "diverse_sampling"}
+    # The knobs that differ from ModelConfig defaults are overlaid. Knobs that
+    # MATCH the defaults (plan_search/diverse_sampling=False; samples=3 and
+    # enable_self_consistency=True now that those are the defaults) are NOT in
+    # the overridden set — "overridden" means "value changed".
+    expected_changed = set(PROFILE_KNOBS) - {
+        "plan_search", "diverse_sampling", "samples", "enable_self_consistency",
+    }
     assert set(overridden) == expected_changed
 
 

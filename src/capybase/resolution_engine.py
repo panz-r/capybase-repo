@@ -708,13 +708,36 @@ YOUR PREVIOUS ATTEMPT (needs fixing):
 
 FIRST, reason about the fix: for each failure above, state in one short sentence
 WHY it happened and the specific edit you will make. Only AFTER you have a
-concrete plan, emit the corrected resolved_text. Output a ```json fenced object:
+concrete plan, emit the correction.
+
+OUTPUT MODE — choose ONE:
+
+(A) EDIT mode (preferred for small, targeted fixes): output a JSON object with an
+"edits" field — a list of SEARCH/REPLACE blocks applied to YOUR PREVIOUS ATTEMPT
+above. Each "search" MUST be a UNIQUE verbatim snippet copied from your previous
+attempt (include enough surrounding context to be unique); "replace" is the
+corrected version of that snippet. Only the snippets change; everything else is
+kept as-is.
 {{
-  "plan": "<one sentence per failure: why it happened + the fix>",
-  "resolved_text": "<the fixed replacement text, exact indentation>",
+  "plan": "<one sentence per failure: why + the fix>",
+  "edits": [
+    {{"search": "<exact verbatim snippet from your previous attempt>", "replace": "<corrected snippet>"}}
+  ],
   "explanation": "<what you changed and why>",
   "self_reported_confidence": 0.0
 }}
+
+(B) FULL mode (for large rewrites): output the complete corrected replacement
+text, exact indentation.
+{{
+  "plan": "<one sentence per failure: why + the fix>",
+  "resolved_text": "<the full fixed replacement text, exact indentation>",
+  "explanation": "<what you changed and why>",
+  "self_reported_confidence": 0.0
+}}
+
+Prefer (A) EDIT mode when the fix is localized — it avoids re-deriving the whole
+merge and risking a new error. Use (B) FULL mode only when the fix is pervasive.
 """
 
 
@@ -737,6 +760,118 @@ def _render_failure(f: VerificationFailure) -> str:
                 sval = sval[:200] + " …"
             parts.append(f"    {key}: {sval}")
     return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# SEARCH/REPLACE focused repair (§3): the model emits targeted edits against the
+# previous attempt instead of reproducing the whole resolved_text. Applied here
+# to produce the new candidate's resolved_text — downstream (verify/splice) sees
+# the full applied text, unchanged. Graceful: a missed/malformed edit is skipped,
+# never produces empty/garbage; worst case is "no change" (retry again).
+# ---------------------------------------------------------------------------
+
+
+def _norm_ws(text: str) -> str:
+    """Whitespace-normalized form for fuzzy SEARCH matching (minor drift)."""
+    import re as _re
+
+    return _re.sub(r"\s+", " ", text).strip()
+
+
+def apply_search_replace(
+    prev_text: str, edits: list[dict]
+) -> tuple[str, list[str]]:
+    """Apply SEARCH/REPLACE blocks (the Aider/Cline format) to ``prev_text``.
+
+    Each edit is ``{"search": <verbatim snippet>, "replace": <new text>}``. The
+    ``search`` block is located in ``prev_text`` and replaced with ``replace``.
+    This lets the focused-repair path fix the failing region without reproducing
+    the whole resolved_text — the model emits a small targeted edit instead of
+    re-deriving the entire merge (which risks introducing a NEW error).
+
+    Matching is exact-substring first; on a miss, a whitespace-normalized match
+    locates the span (tolerates minor formatting drift from a small model). Each
+    edit applies to the result of the previous one, in order.
+
+    Returns ``(new_text, warnings)``. A warning is recorded per edit whose
+    ``search`` couldn't be located (that edit is skipped). When EVERY edit misses
+    the caller falls back to the model's full ``resolved_text`` (full-repair
+    mode) — so a bad edit payload degrades to today's behavior, never to
+    empty/garbage. Empty/missing ``search`` or ``replace`` keys are skipped.
+    """
+    warnings: list[str] = []
+    text = prev_text
+    for i, edit in enumerate(edits):
+        search = str(edit.get("search", "")).rstrip("\n")
+        replace = str(edit.get("replace", ""))
+        if not search:
+            warnings.append(f"edit {i}: empty search block; skipped")
+            continue
+        # Exact substring match (first occurrence).
+        idx = text.find(search)
+        if idx != -1:
+            text = text[:idx] + replace + text[idx + len(search):]
+            continue
+        # Fuzzy: whitespace-normalized match — locates the span tolerating minor
+        # formatting drift, then replaces the matched raw slice.
+        norm_text = _norm_ws(text)
+        norm_search = _norm_ws(search)
+        nidx = norm_text.find(norm_search)
+        if nidx != -1:
+            # Map the normalized span back to the raw text by walking characters.
+            raw_start = _denorm_index(text, nidx)
+            raw_end = _denorm_index(text, nidx + len(norm_search))
+            text = text[:raw_start] + replace + text[raw_end:]
+            continue
+        warnings.append(f"edit {i}: search block not found; skipped")
+    return text, warnings
+
+
+def _denorm_index(raw: str, norm_offset: int) -> int:
+    """Map an offset in the whitespace-normalized form back to ``raw``.
+
+    Walks ``raw``, collapsing runs of whitespace to a single space (matching
+    ``_norm_ws``), until we've consumed ``norm_offset`` normalized characters.
+    Returns the raw index at that point. Used to project a fuzzy-match span back
+    onto the original text for replacement.
+    """
+    raw_i = 0
+    norm_i = 0
+    in_ws = False
+    while raw_i < len(raw) and norm_i < norm_offset:
+        ch = raw[raw_i]
+        if ch.isspace():
+            if not in_ws:
+                norm_i += 1  # one space for the whole run
+                in_ws = True
+            raw_i += 1
+        else:
+            in_ws = False
+            norm_i += 1
+            raw_i += 1
+    return raw_i
+
+
+def _apply_repair_edits(
+    cand: CandidateResolution, prev_candidate: CandidateResolution
+) -> CandidateResolution:
+    """If a repair candidate carries SEARCH/REPLACE edits, apply them to the
+    previous attempt's resolved_text. Otherwise return it unchanged (full mode).
+
+    Module-level (called from ``propose()``) so it stays out of the class body.
+    The edits are stashed on the candidate as ``_repair_edits`` during
+    construction (see ``_candidate_from_response``).
+    """
+    edits = getattr(cand, "_repair_edits", None)
+    if not edits:
+        return cand  # full mode (resolved_text already set) or no edits
+    applied, warnings = apply_search_replace(prev_candidate.resolved_text, edits)
+    if warnings and applied == prev_candidate.resolved_text:
+        # All edits missed → fall back to the model's full resolved_text if it
+        # provided one, else keep the previous (no-op retry).
+        return cand
+    cand.resolved_text = applied
+    return cand
 
 
 # ---------------------------------------------------------------------------
@@ -1191,6 +1326,13 @@ class ResolutionEngine:
             if prompt_trims:
                 for c in candidates:
                     c.prompt_trims = list(prompt_trims)
+        # Focused repair (§3): when the repair prompt was used and the model
+        # emitted SEARCH/REPLACE edits, apply them to the previous attempt to
+        # produce the new resolved_text (instead of requiring a full rewrite).
+        # Graceful: no edits / all-missed → keep the model's resolved_text (full
+        # mode). The applied result flows downstream verbatim (verify/splice).
+        if prompt_version == PROMPT_REPAIR and prev_candidate and prev_candidate.resolved_text:
+            candidates = [_apply_repair_edits(c, prev_candidate) for c in candidates]
         return candidates
 
     def _sample_variants(
@@ -1587,15 +1729,16 @@ class ResolutionEngine:
                 resp.text, failure_kind="truncated",
             )
         data, warnings = coerce_candidate_dict(resp.text)
-        if not data or "resolved_text" not in data:
-            warnings = warnings or ["response missing resolved_text"]
+        has_edits = isinstance(data, dict) and bool(data.get("edits"))
+        if not data or ("resolved_text" not in data and not has_edits):
+            warnings = warnings or ["response missing resolved_text and edits"]
             return _failed_candidate(
                 unit, self.config.model, prompt_version,
                 "could not parse resolution", resp.text, warnings,
                 failure_kind="parse_failed",
             )
         needs_human = bool(data.get("needs_human", False))
-        return CandidateResolution(
+        cand = CandidateResolution(
             candidate_id=f"{unit.unit_id}:{uuid.uuid4().hex[:6]}",
             unit_id=unit.unit_id,
             model_name=self.config.model,
@@ -1627,6 +1770,12 @@ class ResolutionEngine:
             # and future/history lines were actually injected).
             provenance="plain_llm",
         )
+        # Stash SEARCH/REPLACE edits (focused-repair §3) for the propose() path
+        # to apply against the previous attempt. In edit mode the resolved_text
+        # is empty until the edits are applied.
+        if has_edits:
+            cand._repair_edits = list(data.get("edits") or [])
+        return cand
 
 
 
