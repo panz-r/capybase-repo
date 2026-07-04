@@ -24,12 +24,11 @@ api_key = "sk-local"
 # `capybase calibrate` keys the stored profile off this name, so keep it stable.
 model = "chat"
 temperature = 0.2
-# Best-of-N sampling (the success-rate default). A non-deterministic local model
-# produces a correct merge on SOME draw even when a single attempt fails;
-# samples=3 engages parallel-sampling + consensus so the system picks the best
-# of N. Latency triples on first attempts (acceptable — correctness > latency).
-# Set 1 to disable (legacy single-draw behavior).
-samples = 3
+# Samples per fresh resolve. Default 1 (single draw): best-of-N + self-
+# consistency is OPT-IN (raise samples AND set enable_self_consistency=true).
+# The live eval showed samples=3 with this model trades 5× latency for no
+# convergence gain — the per-draw success rate is too low for best-of-3 to help.
+samples = 1
 # Difficulty-aware sample allocation (survey §4 UAB-lite): when [routing] is
 # enabled and a unit classifies as "complex", draw this many samples instead of
 # the base `samples`. Concentrates test-time compute on multi-hunk files and
@@ -309,7 +308,7 @@ min_balance_for_sbcr_accept = 0.0
 
 # [future] documents planned seams — most are parsed, some are now wired.
 [future]
-enable_self_consistency = true   # now default-on (paired with [model] samples=3)
+enable_self_consistency = false   # opt-in: raise [model] samples + set true for majority voting
 enable_rag = false                # set true + [memory] enabled = true for RAG few-shot
 enable_structural_context = false  # set true + [structural] enabled = true for AST context
 enable_verifier_model = true      # now wired + default-on in [validation] (opt-out)
