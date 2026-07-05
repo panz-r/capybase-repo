@@ -81,7 +81,10 @@ def _config(repo: Path) -> Config:
     cfg.model.samples = 1
     cfg.model.enable_self_consistency = False
     cfg.tests.required = True
-    cfg.tests.pre_continue = f"{sys.executable} -m pytest -v"
+    # Scope pytest to the tmp repo ONLY: -c /dev/null prevents pytest from
+    # walking up to find capybase's pyproject.toml (which would collect
+    # capybase's 2000+ tests that pass regardless of the merged file).
+    cfg.tests.pre_continue = f"{sys.executable} -m pytest -v -c /dev/null tests/"
     cfg.tests.final = cfg.tests.pre_continue
     return cfg
 

@@ -1520,7 +1520,15 @@ class Orchestrator:
         except Exception:  # noqa: BLE001
             pass  # file may not exist yet (rare)
 
-        for side_label, side_text in (("current", cur_text), ("replayed", rep_text)):
+        # Try BOTH sides and record which pass validation + the test gate. The
+        # picker ONLY accepts when EXACTLY ONE side passes the test gate — that's
+        # the discriminator. If BOTH pass (e.g. a syntax-only gate like py_compile
+        # that can't distinguish the sides), there's no discrimination → decline
+        # and let the LLM/critic handle it. This prevents the picker from accepting
+        # the first side that compiles when the gate can't tell the sides apart.
+        sides = [("current", cur_text), ("replayed", rep_text)]
+        passed_sides: list[tuple[str, str, CandidateResolution, object]] = []
+        for side_label, side_text in sides:
             cand = CandidateResolution(
                 candidate_id=f"{unit.unit_id}:test_gated_{side_label}",
                 unit_id=unit.unit_id,
@@ -1532,12 +1540,10 @@ class Orchestrator:
             )
             validation = self.verification.verify(unit, cand)
             if not validation.passed:
-                continue  # this side fails validation; try the other
+                continue  # this side fails validation; skip it
             # Write the spliced file so the test gate runs against it.
             spliced = splice_resolution(unit.original_worktree_text, unit.marker_span, side_text)
             self.git.write_worktree_file(unit.path, spliced.encode("utf-8"))
-            # Run the test gate. Build a minimal StepResult carrying this unit so
-            # _run_tests can find the cargo-test cwd anchor if needed.
             probe = StepResult(step_index=self.step)
             probe.units_by_path[unit.path] = [unit]
             self.journal.emit(
@@ -1546,27 +1552,30 @@ class Orchestrator:
                 step_index=self.step, path=unit.path, unit_id=unit.unit_id,
             )
             test_ok = self._run_tests("pre_continue", probe)
-            if not test_ok:
-                continue  # this side fails the test gate; try the other
-            # This side passed validation AND the test gate — accept it.
-            # Restore is unnecessary: the spliced file IS the accepted result.
-            if self._strictness_blocks_pre_llm(unit, cand, validation, "test_gated"):
-                # Strict mode declined — restore the original worktree.
-                self.git.write_worktree_file(unit.path, original_bytes)
-                return None
-            outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
-            outcome.accepted = cand
-            self.journal.emit(
-                "candidate_accepted",
-                {"candidate_id": cand.candidate_id, "via": "test_gated_side",
-                 "side": side_label},
-                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
-            )
-            return outcome
+            if test_ok:
+                passed_sides.append((side_label, side_text, cand, validation))
 
-        # Neither side passed validation + test gate — restore and fall through.
-        self.git.write_worktree_file(unit.path, original_bytes)
-        return None
+        if len(passed_sides) != 1:
+            # 0 passed → neither side is test-correct; 2 passed → the gate can't
+            # discriminate (e.g. py_compile passes both). Either way, decline and
+            # let the LLM/critic handle it. Restore the original worktree.
+            self.git.write_worktree_file(unit.path, original_bytes)
+            return None
+
+        # Exactly one side passed → the test gate discriminated. Accept it.
+        side_label, side_text, cand, validation = passed_sides[0]
+        if self._strictness_blocks_pre_llm(unit, cand, validation, "test_gated"):
+            self.git.write_worktree_file(unit.path, original_bytes)
+            return None
+        outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+        outcome.accepted = cand
+        self.journal.emit(
+            "candidate_accepted",
+            {"candidate_id": cand.candidate_id, "via": "test_gated_side",
+             "side": side_label},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        return outcome
 
     def _try_block_capture(self, unit: ConflictUnit) -> UnitOutcome | None:
         """Block-capture resolution for large modify/delete conflicts.
