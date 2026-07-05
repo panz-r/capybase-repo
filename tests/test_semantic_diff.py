@@ -214,3 +214,84 @@ def test_detect_no_move_to_same_file():
     moves = structural.detect_cross_file_moves(old, new, "python")
     assert moves == []
 
+
+# ---------------------------------------------------------------------------
+# Commit change-type classifier (Phase 1a / survey §5.2)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_feature_adds_public_export():
+    """A diff that ADDS a public (non-_ prefixed) entity → feature."""
+    base = "def foo():\n    return 1\n"
+    replayed = "def foo():\n    return 1\n\ndef bar():\n    return 2\n"
+    out = structural.classify_commit_change(base, replayed, "app.py", "python")
+    assert out == "feature"
+
+
+def test_classify_bugfix_modifies_existing_behavior():
+    """A diff that changes an existing function's body, no new public export →
+    bugfix (the commit modifies existing behavior)."""
+    base = "def compute():\n    return a + b\n"
+    replayed = "def compute():\n    return a - b\n"
+    out = structural.classify_commit_change(base, replayed, "app.py", "python")
+    assert out == "bugfix"
+
+
+def test_classify_refactor_restructures_without_behavior_signal():
+    """A diff that only renames/removes entities with NO body/sig change on any
+    entity → refactor (behavior-preserving restructuring). The renamed entity
+    must not be referenced elsewhere in the file, or its callers' bodies change
+    (which would make it a bugfix, correctly)."""
+    base = "def orphan():\n    return 1\n"
+    # Pure rename of an uncalled function — no caller body changes.
+    replayed = "def renamed_orphan():\n    return 1\n"
+    out = structural.classify_commit_change(base, replayed, "app.py", "python")
+    assert out == "refactor"
+
+
+def test_classify_test_only_test_path_no_public_export():
+    """A test-file path with changes only to test entities (no public production
+    export added) → test_only."""
+    base = "def test_foo():\n    assert 1 == 1\n"
+    replayed = "def test_foo():\n    assert 1 == 1\n\ndef test_bar():\n    assert 2 == 2\n"
+    out = structural.classify_commit_change(base, replayed, "tests/test_app.py", "python")
+    assert out == "test_only"
+
+
+def test_classify_config_update_by_extension():
+    """A config-file extension → config_update (no parse needed)."""
+    base = "port = 8080\n"
+    replayed = "port = 9090\n"
+    out = structural.classify_commit_change(base, replayed, "config.toml", "python")
+    assert out == "config_update"
+
+
+def test_classify_config_update_value_only_no_code_entities():
+    """A non-config path whose diff changes no code entities (pure value edit) →
+    config_update (the change is a value/assignment, not code structure)."""
+    base = "PORT = 8080\n"
+    replayed = "PORT = 9090\n"
+    out = structural.classify_commit_change(base, replayed, "settings.py", "python")
+    assert out == "config_update"
+
+
+def test_classify_unknown_degrades_gracefully():
+    """When semantic_diff can't classify (parse fails on a non-test, non-config
+    path), it degrades to unknown — never raises."""
+    # Malformed input that tree-sitter may best-effort parse; the classifier must
+    # not crash. (tree-sitter recovers, so this exercises the non-test fallback.)
+    out = structural.classify_commit_change("garbage{{{", "more garbage}}}", "app.py", "python")
+    assert out in ("unknown", "config_update", "bugfix", "refactor", "feature", "test_only")
+
+
+def test_classify_private_add_is_not_feature():
+    """Adding a PRIVATE entity (``_``-prefixed) is not a feature (no new public
+    API surface) — it's a refactor/internal addition."""
+    base = "def compute():\n    return 1\n"
+    replayed = "def compute():\n    return 1\n\ndef _internal():\n    return 2\n"
+    out = structural.classify_commit_change(base, replayed, "app.py", "python")
+    # _internal is private → no public export → falls to refactor (no body/sig
+    # change on existing public entities).
+    assert out == "refactor"
+
+

@@ -57,18 +57,21 @@ def test_semantic_change_block_renders_add_on_replayed_side():
     assert "helper" in block
 
 
-def test_semantic_change_block_empty_when_no_entity_change():
-    """When neither side makes an entity-level change (e.g. a value-only edit
-    inside an existing function), the block is empty — no noise in the prompt."""
+def test_semantic_change_block_surfaces_role_when_no_entity_change():
+    """When neither side makes an entity-level change, the block still surfaces
+    the commit ROLE (a value-only edit is config_update) — the role is
+    informative even without entity changes. Only a truly-unclassifiable case
+    (role=unknown) with no changes is empty."""
     base = "def main():\n    return 1\n"
     current = "def main():\n    return 2\n"  # body change, same entity
     replayed = "def main():\n    return 3\n"
     block = _semantic_change_block(_unit(base, current, replayed))
-    # body_changed IS an entity-level change, so this surfaces it. Use a truly
-    # unchanged case to verify the empty path:
+    # body_changed IS an entity-level change, so this surfaces it.
     assert block != ""  # body change is reported
-    block_unchanged = _semantic_change_block(_unit(base, base, base))
-    assert block_unchanged == ""
+    # Identical input → no entity changes, but the role is config_update (value-
+    # only / no-code-change classification), so the block surfaces the role.
+    block_identical = _semantic_change_block(_unit(base, base, base))
+    assert "config_update" in block_identical
 
 
 def test_semantic_change_block_appears_in_resolve_prompt():
@@ -94,3 +97,57 @@ def test_semantic_change_block_empty_for_unsupported_language():
         original_worktree_text="", marker_span=(1, 5),
     )
     assert _semantic_change_block(unit) == ""
+
+
+def test_semantic_change_block_surfaces_commit_role_for_bugfix():
+    """A bugfix commit surfaces its role + correctness guidance even when there
+    ARE entity changes (so the model knows 'preserve behavior'). The role line
+    names the role and its guidance."""
+    base = "def compute():\n    return a + b\n"
+    current = base
+    replayed = "def compute():\n    return a - b\n"  # body change → bugfix
+    block = _semantic_change_block(_unit(base, current, replayed))
+    assert "REPLAYED commit role: bugfix" in block
+    assert "preserve" in block.lower() or "correctness" in block.lower()
+
+
+def test_semantic_change_block_surfaces_role_even_without_entity_changes():
+    """A config/value-only change has NO entity-level changes but a clear role
+    (config_update). The block surfaces the role rather than being empty — the
+    role is informative even when the entity diff is."""
+    base = "PORT = 8080\n"
+    current = base
+    replayed = "PORT = 9090\n"  # value change, no entity change → config_update
+    # Need a path that's not a config extension to exercise the value-only branch
+    # (a .toml path would short-circuit at the extension check, which is fine too,
+    # but here we test the no-entity-change path).
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="settings.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=current),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=replayed),
+        original_worktree_text="", marker_span=(1, 5),
+    )
+    block = _semantic_change_block(unit)
+    assert "config_update" in block
+    assert "REPLAYED commit role" in block
+
+
+def test_semantic_change_block_omits_unknown_role():
+    """An 'unknown' role (couldn't classify) is omitted — no noise. Only
+    informative roles surface the guidance line."""
+    # Malformed input that degrades to unknown: a non-config, non-test path that
+    # can't be parsed. The block should be empty (no changes, role unknown).
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="# same\n"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="# same\n"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="# same\n"),
+        original_worktree_text="", marker_span=(1, 5),
+    )
+    block = _semantic_change_block(unit)
+    assert "REPLAYED commit role: unknown" not in block

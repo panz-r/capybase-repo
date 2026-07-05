@@ -423,6 +423,17 @@ class ValidationConfig(BaseModel):
     # no-op for unsupported languages / when tree-sitter is unavailable.
     enable_cross_commit_guardian: bool = True
     cross_commit_policy: Literal["warn", "stop"] = "warn"
+    # Intent evolution trace (survey §3.2): a deterministic post-rebase audit
+    # that, for an entity touched across ≥2 commits, checks the final merge
+    # matches the entity's LAST source-branch evolution (its most recent body).
+    # A divergence flags an ``intent_evolution_gap`` — the merge likely reverted
+    # to or kept an earlier version, silently losing an intermediate step no
+    # per-commit validator sees. Purely advisory (observability/assurance, never
+    # blocks): the survey notes the retry would be too expensive for multi-commit
+    # chains, so this produces a report rather than a gate. Degrades to a no-op
+    # when tree-sitter is unavailable. ``evolution_policy`` is reserved for a
+    # future "stop" mode; currently always advisory.
+    enable_evolution_audit: bool = True
     # Session-level coverage SLO (survey §3.3): aggregate the per-unit intent
     # preservation coverage across the whole rebase window into one ratio
     # (preserved units / total units) and surface it in the completion report —

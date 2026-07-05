@@ -71,6 +71,46 @@ class RiskEngine:
             return max(1, (base + 1) // 2)  # ceil(base/2)
         return 1
 
+    def _change_type_budget_factor(self, feats: dict) -> float:
+        """Scale the retry budget by the replayed commit's semantic ROLE.
+
+        Survey §5.2: grounds the budget in WHAT the commit is doing, not just
+        coverage ratios. The factors are conservative — they MULTIPLY the base
+        budget and only refactor drops below 1.0, so correctness-critical cases
+        are never weakened:
+
+          bugfix    → 1.5  (correctness-critical — give the model more chances)
+          feature   → 1.0  (default; new behavior is acceptable)
+          refactor  → 0.75 (behavior-preserving — should converge fast or escalate;
+                            a refactor flailing across retries is a strong escalate
+                            signal, so reclaim those wasted retries)
+          test_only / config_update → 1.0 (these rarely need many retries; leave
+                            the base budget intact rather than cutting — per the
+                            "don't cut mechanisms for speed" directive)
+          unknown   → 1.0  (neutral default when the role can't be classified)
+
+        Returns 1.0 for any unrecognized/absent role. The factor is applied on
+        top of the coverage-based ``_critic_budget`` for critic retries too.
+        """
+        role = feats.get("commit_change_type")
+        if role == "bugfix":
+            return 1.5
+        if role == "refactor":
+            return 0.75
+        return 1.0
+
+    def _effective_budget(self, feats: dict) -> int:
+        """The main retry budget, scaled by the commit's change-type factor.
+
+        The base ``max_retries_per_unit`` multiplied by the role factor (bugfix
+        gets more, refactor gets fewer), floored at 1 and capped at 2× base so a
+        bugfix can't unboundedly extend the loop. The cap protects latency while
+        still giving correctness-critical fixes meaningful extra room.
+        """
+        factor = self._change_type_budget_factor(feats)
+        scaled = self.max_retries_per_unit * factor
+        return max(1, min(int(scaled), self.max_retries_per_unit * 2))
+
     def decide(
         self,
         result: VerificationResult,
@@ -95,6 +135,11 @@ class RiskEngine:
         passed validators. Both must clear for accept.
         """
         feats = result.features
+        # Change-type-aware budget (survey §5.2): scale the retry ceiling by the
+        # replayed commit's semantic role (bugfix → more, refactor → fewer).
+        # Used for every retryable branch below; the critic budget applies the
+        # same role factor on top of its coverage scaling (see _critic_budget).
+        budget = self._effective_budget(feats)
 
         # --- technical failures: retry, then escalate ---
         # Includes LSP/type-check failures: a candidate that introduces new
@@ -106,7 +151,7 @@ class RiskEngine:
                 if result.hard_failures
                 else f"{failure_kind}: no usable resolution"
             )
-            if retry_count < self.max_retries_per_unit:
+            if retry_count < budget:
                 return RiskDecision(
                     action="retry",
                     reasons=[reason],
@@ -129,7 +174,7 @@ class RiskEngine:
         # --- retryable failures ---
         if not result.passed:
             reasons = [f"{hf.validator}: {hf.message}" for hf in result.hard_failures]
-            if retry_count < self.max_retries_per_unit:
+            if retry_count < budget:
                 return RiskDecision(
                     action="retry",
                     reasons=reasons,
@@ -153,7 +198,7 @@ class RiskEngine:
             for n in warning_names
         )
         # Copying one side verbatim is a warning; treat as retryable then escalate.
-        if "preservation_heuristic" in warning_names and retry_count < self.max_retries_per_unit:
+        if "preservation_heuristic" in warning_names and retry_count < budget:
             return RiskDecision(
                 action="retry",
                 reasons=soft or ["copied one side verbatim"],
@@ -163,7 +208,7 @@ class RiskEngine:
         # of "didn't actually merge" signal as copying one side — the candidate
         # silently lost a branch's change. Retry so the model gets another chance
         # to represent both sides; escalate if it keeps happening.
-        if "both_sides_represented" in warning_names and retry_count < self.max_retries_per_unit:
+        if "both_sides_represented" in warning_names and retry_count < budget:
             return RiskDecision(
                 action="retry",
                 reasons=soft or ["dropped a side's additions"],
@@ -174,7 +219,7 @@ class RiskEngine:
         # below the configured fraction — a hard, quantitative backstop that
         # fires even when the LLM critic is uncertain or skipped. Same retry
         # contract as the other soft drops.
-        if "intent_coverage" in warning_names and retry_count < self.max_retries_per_unit:
+        if "intent_coverage" in warning_names and retry_count < budget:
             return RiskDecision(
                 action="retry",
                 reasons=soft or ["intent coverage below floor"],
@@ -184,7 +229,7 @@ class RiskEngine:
         # contains a unit present in NONE of the three sides — a hallucinated
         # helper/branch the model invented. The inverse failure mode of the
         # coverage drops above. Retry so the model removes or justifies it.
-        if "unattributed_code" in warning_names and retry_count < self.max_retries_per_unit:
+        if "unattributed_code" in warning_names and retry_count < budget:
             return RiskDecision(
                 action="retry",
                 reasons=soft or ["unattributed code (unit in neither side)"],
@@ -194,7 +239,7 @@ class RiskEngine:
         # condition): the merge silently removed a symbol base + both sides kept
         # — a semantic regression the syntactic checks miss. Retry so the model
         # re-includes it; escalate if it persists.
-        if "referenced_symbol_dropped" in warning_names and retry_count < self.max_retries_per_unit:
+        if "referenced_symbol_dropped" in warning_names and retry_count < budget:
             return RiskDecision(
                 action="retry",
                 reasons=soft or ["dropped a base-referenced dependency"],
@@ -205,7 +250,7 @@ class RiskEngine:
         # re-includes the symbol; escalate if it persists (same class as the
         # side-obligation + dependency drops above — "didn't preserve what the
         # branch needs").
-        if "future_obligation" in warning_names and retry_count < self.max_retries_per_unit:
+        if "future_obligation" in warning_names and retry_count < budget:
             return RiskDecision(
                 action="retry",
                 reasons=soft or ["dropped a symbol a later commit needs"],
@@ -233,7 +278,9 @@ class RiskEngine:
             # much of each side's intent survived. A fundamentally-wrong (low-
             # coverage) merge gets few retries; a subtle high-coverage failure
             # gets the full budget. Bounds the latency of the deep-retry stall.
-            critic_budget = self._critic_budget(feats)
+            critic_budget = max(
+                1, int(self._critic_budget(feats) * self._change_type_budget_factor(feats))
+            )
             if critic_retry_count < critic_budget:
                 return RiskDecision(
                     action="retry",

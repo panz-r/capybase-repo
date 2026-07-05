@@ -137,15 +137,32 @@ def _semantic_change_block(unit: ConflictUnit) -> str:
     try:
         cur_changes = structural.semantic_diff(base, cur, lang)
         rep_changes = structural.semantic_diff(base, rep, lang)
+        # The replayed commit's semantic role (survey §5.2): tells the model what
+        # "correct" means for this commit (bugfix = preserve behavior; feature =
+        # new behavior acceptable; refactor = behavior-preserving). Read off the
+        # feature spine when present; compute live as a pure fallback.
+        cf = unit.structural_metadata.get("conflict_features")
+        role = cf.get("commit_change_type") if isinstance(cf, dict) else None
+        if not role:
+            role = structural.classify_commit_change(base, rep, unit.path, lang)
+        guidance = structural.COMMIT_ROLE_GUIDANCE.get(role)
     except Exception:  # noqa: BLE001 - advisory, never break the prompt
         return ""
-    if not cur_changes and not rep_changes:
+    has_changes = bool(cur_changes or rep_changes)
+    has_role = bool(guidance) and role != "unknown"
+    if not has_changes and not has_role:
         return ""
-    lines = ["Entity-level changes vs BASE (deterministic — use these to read the sides):"]
-    if cur_changes:
-        lines.append("  CURRENT side: " + "; ".join(c.render() for c in cur_changes))
-    if rep_changes:
-        lines.append("  REPLAYED side: " + "; ".join(c.render() for c in rep_changes))
+    lines = []
+    if has_changes:
+        lines.append("Entity-level changes vs BASE (deterministic — use these to read the sides):")
+        if cur_changes:
+            lines.append("  CURRENT side: " + "; ".join(c.render() for c in cur_changes))
+        if rep_changes:
+            lines.append("  REPLAYED side: " + "; ".join(c.render() for c in rep_changes))
+    if has_role:
+        # Surface the commit role + its correctness guidance so the model knows
+        # what this merge must satisfy (e.g. a bugfix must preserve behavior).
+        lines.append(f"REPLAYED commit role: {role} — {guidance}")
     return "\n".join(lines) + "\n\n"
 
 

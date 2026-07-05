@@ -545,6 +545,13 @@ def conflict_features(unit: ConflictUnit) -> dict[str, float | int | str | bool]
         # live computation so this stays a pure function of the unit.
         "merge_kind": _merge_kind_of(unit),
         "modify_delete": _merge_kind_of(unit) == "modify_delete",
+        # Commit change-type (survey §5.2): the semantic ROLE of the replayed
+        # commit (test_only/config_update/feature/bugfix/refactor/unknown),
+        # classified deterministically from path + the BASE→REPLAYED entity diff.
+        # Grounds retry budgets (bugfix→more retries, refactor→fewer) and the LLM
+        # prompt ("this is a bugfix — preserve behavior") in the commit's role.
+        # Degrades to "unknown" when tree-sitter is unavailable.
+        "commit_change_type": _commit_change_type_of(unit),
     }
 
 
@@ -587,6 +594,27 @@ def _merge_kind_of(unit: ConflictUnit) -> str:
         ).kind
     except Exception:  # noqa: BLE001 - advisory feature
         return "both_modify"
+
+
+def _commit_change_type_of(unit: ConflictUnit) -> str:
+    """The semantic ROLE of ``unit``'s replayed commit (survey §5.2).
+
+    Classifies the replayed commit (test_only/config_update/feature/bugfix/
+    refactor/unknown) via :func:`structural.classify_commit_change` over the
+    BASE→REPLAYED entity diff + the unit's path. The replayed side IS the commit
+    being replayed, so its diff against base captures what the commit changed.
+    Returns ``"unknown"`` on any failure (advisory; must never crash the feature
+    spine). Pure function of the unit.
+    """
+    try:
+        from capybase.adapters import structural
+
+        return structural.classify_commit_change(
+            unit.base.text or "", unit.replayed.text or "",
+            unit.path, unit.language or "",
+        )
+    except Exception:  # noqa: BLE001 - advisory feature
+        return "unknown"
 
 
 def _enclosing_symbol(worktree_text: str, block: MarkerBlock) -> str | None:

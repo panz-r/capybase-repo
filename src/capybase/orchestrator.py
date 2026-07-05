@@ -3304,6 +3304,107 @@ class Orchestrator:
             )
         return StepResult(step_index=self.step, escalated=False, continued=True)
 
+    def _run_evolution_audit_on_completion(self) -> StepResult | None:
+        """Intent evolution trace (survey §3.2); None if clean.
+
+        Runs after the cross-commit guardian. For an entity touched across ≥2
+        source commits, checks the final merge matches the entity's LAST source-
+        branch evolution (its most recent body) — a divergence flags an
+        ``intent_evolution_gap`` (the merge likely reverted/kept an earlier
+        version, silently losing an intermediate step). Purely advisory
+        (observability/assurance, never blocks): the survey notes the retry would
+        be too expensive for multi-commit chains, so this produces a report. A
+        no-op when disabled or no source commits / tree-sitter available.
+        Returns None when there are no findings.
+        """
+        cfg = self.config.validation
+        if not getattr(cfg, "enable_evolution_audit", True):
+            return None
+        plan = getattr(self, "_history_plan", None)
+        if plan is None or not getattr(plan, "source_commits", None):
+            return None
+        try:
+            from capybase import cross_commit
+            from capybase.adapters import structural
+        except Exception:  # noqa: BLE001
+            return None
+
+        # Per-commit post-image file contents (the entity source for each step).
+        per_commit_files: dict[str, dict[str, str]] = {}
+        all_paths: set[str] = set()
+        for commit in plan.source_commits:
+            files: dict[str, str] = {}
+            for path in commit.touched_files:
+                all_paths.add(path)
+                blob = self.git.blob_at(commit.oid, path)
+                if blob is not None:
+                    try:
+                        files[path] = blob.decode("utf-8", errors="replace")
+                    except Exception:  # noqa: BLE001
+                        pass
+            if files:
+                per_commit_files[commit.oid] = files
+        if not per_commit_files:
+            return None
+
+        head_after = self.git.head_oid()
+        # Build evolution chains per language present in the touched files.
+        langs = {
+            cross_commit._language_for_path(p)
+            for p in all_paths
+            if cross_commit._language_for_path(p)
+            and structural.is_available(cross_commit._language_for_path(p) or "")
+        }
+        if not langs:
+            return None
+        order = [c.oid for c in plan.source_commits]
+        chains: list = []
+        for lang in sorted(langs):
+            chains.extend(cross_commit.build_evolution_chains(per_commit_files, order, lang))
+        if not chains:
+            return None
+
+        # Enumerate the final rebased tree's entities for the touched files.
+        final_tree: dict[str, list] = {}
+        for path in all_paths:
+            blob = self.git.blob_at(head_after, path)
+            if blob is None:
+                continue
+            lang = cross_commit._language_for_path(path)
+            if lang is None or not structural.is_available(lang):
+                continue
+            ents = structural.enumerate_entities(
+                blob.decode("utf-8", errors="replace"), lang
+            )
+            if ents is not None:
+                final_tree[path] = ents
+        gaps = cross_commit.audit_evolution(chains, final_tree)
+        if not gaps:
+            return None
+
+        rendered = [g.render() for g in gaps]
+        self.journal.emit(
+            "intent_evolution_gap",
+            {
+                "count": len(gaps),
+                "gaps": [
+                    {"name": g.name, "kind": g.kind, "commit_count": g.commit_count,
+                     "expected_from_commit": g.expected_from_commit}
+                    for g in gaps
+                ],
+            },
+            step_index=self.step,
+        )
+        self.out(
+            self._warn(
+                f"! intent evolution gaps detected ({len(gaps)}):\n"
+                + "\n".join(f"  - {r}" for r in rendered)
+            ) + "\n"
+        )
+        # Advisory only (the survey notes a retry is too expensive for multi-commit
+        # chains); never escalates.
+        return StepResult(step_index=self.step, escalated=False, continued=True)
+
     def run(self) -> StepResult:
         """Full auto loop: resolve → stage → test → continue, with retries."""
         # Preflight.
@@ -3385,6 +3486,11 @@ class Orchestrator:
                 if _ccb is not None and _ccb.escalated:
                     last = _ccb
                     break
+                # Intent evolution trace (survey §3.2): advisory post-window audit
+                # for entities that evolved across ≥2 commits — flags a merge
+                # that reverted/lost the last evolution step. Runs after the
+                # guardian; advisory only (never escalates).
+                self._run_evolution_audit_on_completion()
                 head_after = self.git.head_oid()
                 self.journal.emit(
                     "session_completed",

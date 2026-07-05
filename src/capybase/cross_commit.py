@@ -285,3 +285,187 @@ def audit_cross_commit_dependencies(
             break_type="missing_definition",
         ))
     return breaks
+
+
+# ---------------------------------------------------------------------------
+# Intent evolution trace (survey §3.2) — post-window assurance audit
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EvolutionStep:
+    """One step in an entity's evolution across the rebase window.
+
+    ``commit_oid`` is the commit that touched the entity; ``change`` is the
+    entity-level change (body_changed/renamed/signature_changed) relative to the
+    PRIOR step; ``body_fingerprint`` is the entity's body content AFTER this
+    commit (the post-image), so the chain's last step's fingerprint is what the
+    final merged version SHOULD match.
+    """
+
+    commit_oid: str
+    change: "EntityChange | None"
+    body_fingerprint: str
+
+
+@dataclass(frozen=True)
+class EvolutionChain:
+    """The ordered evolution of one entity across the commits that touched it.
+
+    ``name`` is the entity's name (matched by name across commits); ``kind`` is
+    its coarse kind; ``steps`` are ordered oldest-first. A chain of length ≥2
+    means the entity evolved across multiple commits — the case the evolution
+    audit examines for lost intermediate steps.
+    """
+
+    name: str
+    kind: str
+    steps: list[EvolutionStep] = field(default_factory=list)
+
+    @property
+    def expected_body_fingerprint(self) -> str:
+        """The body fingerprint the final merge SHOULD have — the LAST step's
+        post-image (the most recent evolution of the entity in the source branch)."""
+        return self.steps[-1].body_fingerprint if self.steps else ""
+
+
+@dataclass(frozen=True)
+class EvolutionGap:
+    """A divergence between an entity's expected final evolution and the merge.
+
+    ``name``/``kind`` identify the entity; ``commit_count`` is how many commits
+    touched it; ``expected_from_commit`` is the OID of the last commit that
+    evolved it; the final merged tree's body fingerprint does NOT match that
+    step's — the merge likely reverted to or kept an earlier version.
+    """
+
+    name: str
+    kind: str
+    commit_count: int
+    expected_from_commit: str
+    actual_body_fingerprint: str
+    expected_body_fingerprint: str
+
+    def render(self) -> str:
+        return (
+            f"{self.kind} `{self.name}` evolved across {self.commit_count} commit(s); "
+            f"final merge does not match the last evolution (from "
+            f"{self.expected_from_commit[:8]}) — a step may have been lost or reverted"
+        )
+
+
+def build_evolution_chains(
+    per_commit_files: "dict[str, dict[str, str]]",
+    commit_order: "list[str]",
+    language: str,
+) -> "list[EvolutionChain]":
+    """Build the per-entity evolution chains across the rebase window.
+
+    For each entity NAME that appears in ≥2 commits' post-images, the chain is
+    the ordered list of commits that defined it, each carrying the entity's
+    body fingerprint AFTER that commit. The chain's last step's fingerprint is
+    the expected final body the merge should preserve.
+
+    Args:
+        per_commit_files: ``{commit_oid: {path: file_text}}`` for each replayed
+            commit's touched files (post-image contents).
+        commit_order: the commit OIDs oldest-first (replay order).
+        language: the tree-sitter language to enumerate entities in.
+
+    Returns chains of length ≥2 only (single-commit entities don't evolve).
+    Empty list when tree-sitter is unavailable or no entity spans ≥2 commits.
+    Pure; takes pre-fetched contents so it's testable without a repo.
+    """
+    from capybase.adapters import structural
+
+    if not structural.is_available(language):
+        return []
+    # For each commit, enumerate entities (name → (kind, body_fingerprint)).
+    per_commit_ents: dict[str, dict[str, tuple[str, str]]] = {}
+    for oid in commit_order:
+        files = per_commit_files.get(oid)
+        if not files:
+            per_commit_ents[oid] = {}
+            continue
+        ents_map: dict[str, tuple[str, str]] = {}
+        for path, text in files.items():
+            if _language_for_path(path) != language:
+                continue
+            ents = structural.enumerate_entities(text, language)
+            if ents is None:
+                continue
+            for e in ents:
+                ents_map[e.name] = (e.kind, structural.entity_body_fingerprint(e, language) or "")
+        per_commit_ents[oid] = ents_map
+
+    # Group: name → list of (commit_oid, kind, body_fingerprint) in order.
+    by_name: dict[str, list[tuple[str, str, str]]] = {}
+    for oid in commit_order:
+        for name, (kind, bf) in per_commit_ents.get(oid, {}).items():
+            by_name.setdefault(name, []).append((oid, kind, bf))
+
+    chains: list[EvolutionChain] = []
+    for name, hits in by_name.items():
+        if len(hits) < 2:
+            continue  # single-commit entity — no evolution to lose
+        steps = [
+            EvolutionStep(commit_oid=oid, change=None, body_fingerprint=bf)
+            for oid, _kind, bf in hits
+        ]
+        chains.append(EvolutionChain(name=name, kind=hits[0][1], steps=steps))
+    return chains
+
+
+def audit_evolution(
+    chains: "list[EvolutionChain]",
+    final_tree_entities: "dict[str, list[Entity]]",
+) -> list[EvolutionGap]:
+    """Flag entities whose final merged body diverges from their last evolution.
+
+    For each chain (an entity that evolved across ≥2 commits), the final rebased
+    tree's entity with the same name should have the body fingerprint of the
+    chain's LAST step (the most recent source-branch evolution). A mismatch
+    means the merge kept/reverted to an earlier version — a lost intermediate
+    evolution step no per-commit validator sees.
+
+    This is the SOUND version of the survey's evolution check: rather than
+    speculatively composing body deltas (which don't compose like arithmetic),
+    it verifies the merge matches the LATEST known evolution of the entity. A
+    merge that silently drops the last step (the practical bug) is caught; the
+    rare case where a merge legitimately revises the body further is flagged for
+    review (advisory, not a hard gate).
+
+    Args:
+        chains: the evolution chains (from build_evolution_chains).
+        final_tree_entities: ``{path: [Entity]}`` for the final rebased tree.
+
+    Returns the gaps. Empty list = every evolved entity matches its last step.
+    """
+    from capybase.adapters import structural
+
+    # Index the final tree by name → body fingerprint.
+    final_by_name: dict[str, str] = {}
+    for ents in final_tree_entities.values():
+        for e in ents:
+            final_by_name.setdefault(
+                e.name, structural.entity_body_fingerprint(e, "") or ""
+            )
+
+    gaps: list[EvolutionGap] = []
+    for chain in chains:
+        if not chain.steps:
+            continue
+        last = chain.steps[-1]
+        actual = final_by_name.get(chain.name)
+        if actual is None:
+            continue  # entity gone entirely — the dependency guardian covers that
+        if actual == last.body_fingerprint:
+            continue  # matches the latest evolution → no gap
+        gaps.append(EvolutionGap(
+            name=chain.name, kind=chain.kind,
+            commit_count=len(chain.steps),
+            expected_from_commit=last.commit_oid,
+            actual_body_fingerprint=actual,
+            expected_body_fingerprint=last.body_fingerprint,
+        ))
+    return gaps

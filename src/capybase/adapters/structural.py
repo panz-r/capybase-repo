@@ -1163,6 +1163,134 @@ def semantic_diff(
     return changes
 
 
+# ---------------------------------------------------------------------------
+# Commit change-type classifier (survey Tier 5 §5.2)
+# ---------------------------------------------------------------------------
+
+#: The commit-role labels produced by :func:`classify_commit_change`. Grounds
+#: retry-budget decisions and the LLM prompt in the SEMANTIC ROLE of the commit
+#: rather than just hunk-size/coverage heuristics.
+COMMIT_TEST_ONLY = "test_only"
+COMMIT_CONFIG_UPDATE = "config_update"
+COMMIT_FEATURE = "feature"
+COMMIT_BUGFIX = "bugfix"
+COMMIT_REFACTOR = "refactor"
+COMMIT_UNKNOWN = "unknown"
+
+#: Test-file path patterns (path-relative basename or directory). A conflict
+#: whose path matches AND touches no non-test exports is a ``test_only`` commit.
+_TEST_PATH_PATTERNS = (
+    "test_", "_test.py", "_test.rs", "/tests/", "tests/", "\\tests\\",
+    "spec_", "_spec.py",
+)
+
+#: Config-file extensions. A conflict in one of these is a ``config_update``
+#: (the change is a value/key edit, not code structure).
+_CONFIG_EXTS = (".toml", ".yaml", ".yml", ".json", ".ini", ".cfg", ".conf", ".env")
+
+
+def _is_test_path(path: str) -> bool:
+    p = path.lower()
+    return any(pat in p for pat in _TEST_PATH_PATTERNS)
+
+
+def _is_config_path(path: str) -> bool:
+    p = path.lower()
+    dot = p.rfind(".")
+    if dot < 0:
+        return False
+    return p[dot:] in _CONFIG_EXTS
+
+
+def _is_public_name(name: str) -> bool:
+    """A public (non-private) identifier — not ``_``-prefixed (dunder excluded)."""
+    if not name:
+        return False
+    if name.startswith("__") and name.endswith("__"):
+        return True  # dunder like __init__ is public API surface
+    return not name.startswith("_")
+
+
+def classify_commit_change(
+    base_text: str, replayed_text: str, path: str, language: str
+) -> str:
+    """Classify the SEMANTIC ROLE of a replayed commit (survey §5.2).
+
+    Determines whether the commit being replayed is a ``test_only`` /
+    ``config_update`` / ``feature`` / ``bugfix`` / ``refactor`` change, using
+    deterministic rules over the file path + the entity-level ``semantic_diff``
+    of BASE→REPLAYED (the replayed side IS the commit being replayed). This
+    grounds retry budgets (a bugfix is correctness-critical → more retries; a
+    refactor should converge fast) and the LLM prompt ("this commit is a bugfix
+    — preserve existing behavior exactly") in the commit's role rather than just
+    hunk-size/coverage heuristics.
+
+    Rules, applied in priority order:
+    - ``config_update`` — config-file extension, OR no code entities changed
+      (pure value/assignment edits).
+    - ``test_only`` — a test-file path AND no public exports added/changed.
+    - ``feature`` — the diff ADDED a public (non-``_``) entity → new behavior.
+    - ``bugfix`` — code touched (body/signature/rename on existing entities),
+      no new public exports → modifies existing behavior.
+    - ``refactor`` — code touched with no behavior-observable signal (only
+      private-member renames / restructuring).
+    - ``unknown`` — ``semantic_diff`` unavailable (tree-sitter down / parse fail).
+
+    Pure and deterministic. Never raises — a parse failure degrades to
+    ``unknown`` (callers treat ``unknown`` as the neutral default budget).
+    """
+    # Config files: classify by extension before any parse attempt.
+    if _is_config_path(path):
+        return COMMIT_CONFIG_UPDATE
+    changes = semantic_diff(base_text, replayed_text, language)
+    if changes is None:
+        # Couldn't parse → if it's a test path, that's a safe structural signal;
+        # otherwise we can't tell the role.
+        return COMMIT_TEST_ONLY if _is_test_path(path) else COMMIT_UNKNOWN
+    if not changes:
+        # No entity-level change. If the file is a test file, it's test_only;
+        # if it's a config-ish file with no code entities, config_update;
+        # otherwise a value-only edit (treat as config_update — no code changed).
+        if _is_test_path(path):
+            return COMMIT_TEST_ONLY
+        return COMMIT_CONFIG_UPDATE
+
+    added_public = any(
+        c.change_type == "added"
+        and _is_public_name(c.name)
+        and not (_is_test_path(path) and c.name.lower().startswith("test"))
+        for c in changes
+    )
+    # A test file that adds/changes only test entities (no public production
+    # export) is test_only.
+    if _is_test_path(path) and not added_public:
+        return COMMIT_TEST_ONLY
+    if added_public:
+        return COMMIT_FEATURE
+    # Code touched but no new public export. Distinguish bugfix (behavior change
+    # on existing public/private surface) from refactor (pure restructuring).
+    has_body_or_sig = any(
+        c.change_type in ("body_changed", "signature_changed") for c in changes
+    )
+    if has_body_or_sig:
+        return COMMIT_BUGFIX
+    # Only renames / removals / moves on existing entities → restructuring.
+    return COMMIT_REFACTOR
+
+
+#: Human guidance per commit role, for the LLM prompt. Tells the model what
+#: "correct" means for this commit's role (bugfix = preserve behavior; feature =
+#: new behavior acceptable; refactor = behavior-preserving).
+COMMIT_ROLE_GUIDANCE: dict[str, str] = {
+    COMMIT_TEST_ONLY: "test-only change (assertions/coverage)",
+    COMMIT_CONFIG_UPDATE: "config/value change (no code behavior)",
+    COMMIT_FEATURE: "new feature (new public export — new behavior is expected)",
+    COMMIT_BUGFIX: "bugfix (correctness-critical — preserve the existing behavior, fix the defect)",
+    COMMIT_REFACTOR: "refactor (behavior-preserving — output must behave identically to the inputs)",
+    COMMIT_UNKNOWN: "change (role undetermined)",
+}
+
+
 @dataclass(frozen=True)
 class EntityMove:
     """One cross-file entity movement between two file-set snapshots.

@@ -140,3 +140,110 @@ def test_unsupported_language_files_are_skipped():
     empty symbol set (graceful degradation, no crash)."""
     syms = build_commit_symbols({"app.js": "function foo() { return bar(); }"})
     assert syms.defines == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# Intent evolution trace (survey §3.2 / Phase 2)
+# ---------------------------------------------------------------------------
+
+from capybase.cross_commit import (  # noqa: E402
+    audit_evolution,
+    build_evolution_chains,
+)
+
+
+def _evol_files(app_py: str) -> dict:
+    return {"app.py": app_py}
+
+
+def test_evolution_chain_built_for_multi_commit_entity():
+    """An entity defined in ≥2 commits gets an evolution chain; the last step's
+    body fingerprint is the expected final body."""
+    # commit A: foo returns 1; commit B: foo returns 2 (body evolved).
+    a = _evol_files("def foo():\n    return 1\n")
+    b = _evol_files("def foo():\n    return 2\n")
+    chains = build_evolution_chains({"A": a, "B": b}, ["A", "B"], "python")
+    foo_chains = [c for c in chains if c.name == "foo"]
+    assert len(foo_chains) == 1
+    chain = foo_chains[0]
+    assert len(chain.steps) == 2
+    assert chain.steps[0].commit_oid == "A"
+    assert chain.steps[1].commit_oid == "B"
+    # Expected final body = last step's (commit B's) fingerprint.
+    assert chain.expected_body_fingerprint == chain.steps[-1].body_fingerprint
+
+
+def test_evolution_chain_excludes_single_commit_entities():
+    """An entity defined in only one commit has no evolution chain (nothing to
+    lose). Only multi-commit entities span a chain."""
+    a = _evol_files("def foo():\n    return 1\n")
+    b = _evol_files("def foo():\n    return 1\n\ndef bar():\n    return 2\n")
+    chains = build_evolution_chains({"A": a, "B": b}, ["A", "B"], "python")
+    names = {c.name for c in chains}
+    # foo spans both → chain; bar only in B → no chain.
+    assert "foo" in names
+    assert "bar" not in names
+
+
+def test_audit_flags_gap_when_merge_reverts_evolution():
+    """The headline case: foo evolved across A→B (return 1 → return 2), but the
+    final merge kept A's version (return 1). The audit flags the gap — the merge
+    lost the last evolution step no per-commit validator sees."""
+    a = _evol_files("def foo():\n    return 1\n")
+    b = _evol_files("def foo():\n    return 2\n")
+    chains = build_evolution_chains({"A": a, "B": b}, ["A", "B"], "python")
+    # Final tree has foo = return 1 (A's version) → diverges from B's.
+    final = {"app.py": structural.enumerate_entities(
+        "def foo():\n    return 1\n", "python")}
+    gaps = audit_evolution(chains, final)
+    foo_gaps = [g for g in gaps if g.name == "foo"]
+    assert len(foo_gaps) == 1
+    assert foo_gaps[0].commit_count == 2
+    assert foo_gaps[0].expected_from_commit == "B"
+
+
+def test_audit_clean_when_merge_matches_latest_evolution():
+    """When the final merge matches the entity's LAST evolution step, no gap."""
+    a = _evol_files("def foo():\n    return 1\n")
+    b = _evol_files("def foo():\n    return 2\n")
+    chains = build_evolution_chains({"A": a, "B": b}, ["A", "B"], "python")
+    # Final tree has foo = return 2 (B's version) → matches → no gap.
+    final = {"app.py": structural.enumerate_entities(
+        "def foo():\n    return 2\n", "python")}
+    gaps = audit_evolution(chains, final)
+    assert gaps == []
+
+
+def test_audit_no_gap_when_entity_gone_from_final():
+    """An entity absent from the final tree isn't an evolution GAP (the dependency
+    guardian covers missing symbols); the evolution audit skips it."""
+    a = _evol_files("def foo():\n    return 1\n")
+    b = _evol_files("def foo():\n    return 2\n")
+    chains = build_evolution_chains({"A": a, "B": b}, ["A", "B"], "python")
+    # Final tree has no foo at all.
+    final = {"app.py": structural.enumerate_entities("def other():\n    pass\n", "python")}
+    gaps = audit_evolution(chains, final)
+    assert gaps == []
+
+
+def test_audit_render_human_readable():
+    """The gap renders a human-readable line naming the entity + commit count."""
+    from capybase.cross_commit import EvolutionGap
+
+    g = EvolutionGap(
+        name="foo", kind="function", commit_count=3,
+        expected_from_commit="abcdef12", actual_body_fingerprint="x",
+        expected_body_fingerprint="y",
+    )
+    r = g.render()
+    assert "foo" in r and "3 commit" in r and "abcdef12"[:8] in r
+
+
+def test_evolution_degrades_when_tree_sitter_unavailable(monkeypatch):
+    """When tree-sitter is unavailable, build_evolution_chains returns []. No crash."""
+    monkeypatch.setattr(structural, "_make_parser", lambda lang: None)
+    a = _evol_files("def foo():\n    return 1\n")
+    b = _evol_files("def foo():\n    return 2\n")
+    chains = build_evolution_chains({"A": a, "B": b}, ["A", "B"], "python")
+    assert chains == []
+
