@@ -703,6 +703,129 @@ def test_dropped_units_no_false_positive_when_entity_present():
     assert _dropped_units_for(unit, cand) == []
 
 
+def test_soft_warning_failures_lifts_actionable_warnings():
+    """A warning-driven retry must carry the validator's SPECIFIC finding into the
+    prompt — not regenerate from scratch with zero feedback. The old retry seed
+    lifted only hard_failures + the critic warning, so actionable soft warnings
+    (intent_coverage, unattributed_code, ...) produced feedback-free
+    regenerations. ``_soft_warning_failures`` lifts them into failure shape so
+    ``_render_failure`` surfaces their structured detail (dropped names, ratios)
+    and ``propose`` selects the targeted repair path."""
+    from capybase.orchestrator import _soft_warning_failures
+    from capybase.conflict_model import VerificationResult, VerificationWarning
+    validation = VerificationResult(
+        candidate_id="c", unit_id="u", passed=False,
+        hard_failures=[],
+        warnings=[
+            VerificationWarning(
+                validator="intent_coverage",
+                message="replayed side coverage 0.00 below floor 0.50",
+                detail={"dropped_names": ["helper"], "ratio": 0.0},
+            ),
+            VerificationWarning(
+                validator="unattributed_code",
+                message="resolved introduces unit in neither side",
+                detail={"names": ["mystery_fn"]},
+            ),
+        ],
+    )
+    lifted = _soft_warning_failures(validation)
+    validators = {f.validator for f in lifted}
+    assert validators == {"intent_coverage", "unattributed_code"}
+    # The structured detail (dropped names) is preserved → reaches the prompt.
+    ic = next(f for f in lifted if f.validator == "intent_coverage")
+    assert ic.detail == {"dropped_names": ["helper"], "ratio": 0.0}
+    assert ic.severity == "warning"  # distinguishable from a real hard failure
+    # _render_failure surfaces the dropped name so the model gets a concrete target.
+    from capybase.resolution_engine import _render_failure
+    assert "helper" in _render_failure(ic)
+
+
+def test_soft_warning_failures_excludes_critic_and_unrelated_warnings():
+    """``verifier_model*`` warnings are handled by ``_critic_failure`` against the
+    separate critic budget — they must NOT also be lifted here (double-counting).
+    Unrelated soft warnings (no retry semantics) are likewise excluded."""
+    from capybase.orchestrator import _soft_warning_failures
+    from capybase.conflict_model import VerificationResult, VerificationWarning
+    validation = VerificationResult(
+        candidate_id="c", unit_id="u", passed=False, hard_failures=[],
+        warnings=[
+            VerificationWarning(validator="verifier_model", message="critic flag"),
+            VerificationWarning(
+                validator="verifier_model_conflict", message="jury flag"),
+            VerificationWarning(validator="something_unrelated", message="noise"),
+        ],
+    )
+    assert _soft_warning_failures(validation) == []
+
+
+def test_warning_driven_retry_uses_repair_prompt_with_feedback():
+    """End-to-end: when the only signal driving a retry is an actionable soft
+    warning (no hard failures, no critic), the retry must (a) reuse the previous
+    candidate and (b) feed the validator's specific finding back via the repair
+    prompt — not regenerate from scratch. This pins the Phase 1 fix: a non-empty
+    ``failures`` list selects ``build_repair_prompt`` over ``build_resolve_prompt``.
+    """
+    from capybase.adapters.llm_openai import LLMResponse
+    from capybase.conflict_model import (
+        CandidateResolution, ConflictSide, ConflictUnit, VerificationResult,
+        VerificationWarning,
+    )
+    from capybase.config import ModelConfig
+    from capybase.context_builder import ContextBuilder
+    from capybase.resolution_engine import ResolutionEngine, PROMPT_REPAIR
+
+    class _CapturingClient:
+        def __init__(self, text):
+            self._text = text
+            self.calls = []
+
+        def complete(self, messages, **kw):
+            self.calls.append({"messages": messages, **kw})
+            return LLMResponse(
+                text=self._text,
+                raw={"_accumulated": {"finish_reason": "stop"}},
+            )
+
+    base = "def main():\n    return 1\n"
+    replayed = "def main():\n    return 1\n\ndef helper():\n    return 2\n"
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=base),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=replayed),
+        original_worktree_text="", marker_span=(1, 5),
+    )
+    prev = CandidateResolution(
+        candidate_id="c1", unit_id="u", model_name="m", prompt_version="v",
+        resolved_text=base,  # dropped the helper the replayed side added
+    )
+    # The intent_coverage warning is the ONLY signal — no hard failures, no critic.
+    soft_warning = VerificationWarning(
+        validator="intent_coverage",
+        message="replayed side coverage 0.00 below floor 0.50",
+        detail={"dropped_names": ["helper"], "ratio": 0.0},
+    )
+    validation = VerificationResult(
+        candidate_id="c1", unit_id="u", passed=False, hard_failures=[],
+        warnings=[soft_warning],
+    )
+    # Simulate what the orchestrator's retry seed now produces (Phase 1 fix).
+    from capybase.orchestrator import _soft_warning_failures
+    failures = _soft_warning_failures(validation)
+    assert failures, "expected the soft warning to lift to a failure"
+
+    client = _CapturingClient('{"resolved_text": "def main():\\n    return 1\\n\\ndef helper():\\n    return 2\\n"}')
+    engine = ResolutionEngine(ModelConfig(samples=1), client=client)
+    cands = engine.propose(unit, ContextBuilder().build(unit), failures=failures, prev_candidate=prev)
+    # (a) The targeted repair path was chosen (not a fresh resolve).
+    assert cands[0].prompt_version == PROMPT_REPAIR, cands[0].prompt_version
+    # (b) The validator's specific finding reached the prompt.
+    sent = client.calls[0]["messages"][1]["content"]
+    assert "helper" in sent, "dropped entity name must reach the model on retry"
+
+
 def test_wall_time_budget_escalates_non_converging_unit(conflicted_repo, verifier_critic_enabled):
     """A unit that can't converge within its wall-clock budget escalates instead
     of looping indefinitely. The critic keeps flagging a dropped-side merge

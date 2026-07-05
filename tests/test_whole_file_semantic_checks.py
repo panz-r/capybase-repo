@@ -300,6 +300,79 @@ def test_dropped_entities_empty_when_nothing_added_or_all_preserved():
     assert dropped_entities(base, side, side, "python") == []
 
 
+def test_dropped_entities_recognizes_rename_not_a_drop():
+    """A side entity that survives in the resolution under a RENAMED name is
+    NOT dropped — a rename is a legitimate merge, not a loss. The analyzer pairs
+    by body fingerprint across names, so 'helper'→'renamed_helper' is preserved.
+    This closes the false-positive the name-only matcher produced (renamed entity
+    read as dropped)."""
+    from capybase.adapters.structural import dropped_entities
+
+    base = "def main():\n    return 1\n"
+    side = "def main():\n    return 1\n\ndef helper():\n    return 2\n"
+    # Resolution renames helper (same body content, new name).
+    resolved = "def main():\n    return 1\n\ndef renamed_helper():\n    return 2\n"
+    out = dropped_entities(base, side, resolved, "python")
+    assert out == [], out  # renamed → preserved, not dropped
+
+
+def test_dropped_entities_still_flags_genuine_drop():
+    """A side entity genuinely absent from the resolution (no rename, no
+    same-name match) STILL flags — rename-awareness only suppresses recognized
+    renames, not real drops."""
+    from capybase.adapters.structural import dropped_entities
+
+    base = "def main():\n    return 1\n"
+    side = "def main():\n    return 1\n\ndef helper():\n    return 2\n"
+    resolved = "def main():\n    return 1\n"  # helper truly gone
+    out = dropped_entities(base, side, resolved, "python")
+    assert [(e.kind, e.name) for e in out] == [("function", "helper")]
+
+
+def test_preservation_coverage_counts_rename_as_preserved():
+    """Coverage is computed over entities a side ADDED beyond base. A rename
+    counts as preserved (survives under a new name), so it neither lowers the
+    ratio nor counts as dropped. A genuine drop still lowers coverage."""
+    from capybase.adapters.structural import preservation_coverage
+
+    base = "def main():\n    return 1\n"
+    side = "def main():\n    return 1\n\ndef helper():\n    return 2\n"
+    # Rename: helper survives as renamed_helper → fully preserved (ratio 1.0).
+    renamed = "def main():\n    return 1\n\ndef renamed_helper():\n    return 2\n"
+    cov = preservation_coverage(base, side, renamed, "python")
+    assert cov is not None
+    assert cov.ratio == 1.0, cov
+    assert cov.dropped == []
+    # Genuine drop → ratio 0.0.
+    cov_drop = preservation_coverage(base, side, base, "python")
+    assert cov_drop.ratio == 0.0, cov_drop
+
+
+def test_match_entities_classifies_rename_and_same_name():
+    """match_entities returns the per-source classification the analyzers build on:
+    same_name for an exact (kind,name) match, renamed for a body-match across a
+    different name, unmatched otherwise."""
+    from capybase.adapters import structural
+    from capybase.adapters.structural import (
+        MATCH_SAME_NAME, MATCH_RENAMED, MATCH_UNMATCHED, match_entities,
+    )
+
+    sources = structural.enumerate_entities(
+        "def kept():\n    return transform(data)\n"
+        "def renamed_away():\n    return validate(token)\n"
+        "def dropped():\n    return x\n", "python")
+    # kept stays; renamed_away → renamed_to (same body); dropped has no counterpart.
+    targets = structural.enumerate_entities(
+        "def kept():\n    return transform(data)\n"
+        "def renamed_to():\n    return validate(token)\n", "python")
+    matches = {m.source.name: m for m in match_entities(sources, targets)}
+    assert matches["kept"].kind == MATCH_SAME_NAME
+    assert matches["renamed_away"].kind == MATCH_RENAMED
+    assert matches["renamed_away"].target.name == "renamed_to"
+    assert matches["dropped"].kind == MATCH_UNMATCHED
+    assert matches["dropped"].target is None
+
+
 @pytest.mark.skipif(
     not _rust_available(), reason="tree-sitter rust grammar not installed"
 )
@@ -459,18 +532,36 @@ def test_unattributed_entities_empty_when_all_attributed():
     assert out == []
 
 
-def test_unattributed_entities_flags_rename_as_new():
-    """A rename (new name not in any side) flags — a rename in a merge is
-    unusual and worth surfacing for review, even though it may be legitimate."""
+def test_unattributed_entities_recognizes_legitimate_rename():
+    """A rename (new name not in any side, but body-matching a side entity) is
+    ATTRIBUTED, not flagged — a recognized rename is a legitimate merge, not a
+    hallucination. Only a unit whose name AND body are both novel flags. This
+    reduces false positives when the model legitimately renames to reconcile."""
     from capybase.adapters.structural import unattributed_entities
 
     base = "def main():\n    return 1\n"
     rep = "def main():\n    return 1\n\ndef helper():\n    return 2\n"
-    # Merge renames helper → renamed_helper (new name not in any side).
+    # Merge renames helper → renamed_helper (new name, same body content).
     resolved = "def main():\n    return 1\n\ndef renamed_helper():\n    return 2\n"
     out = unattributed_entities(base, base, rep, resolved, "python")
     assert out is not None
-    assert [e.name for e in out] == ["renamed_helper"]
+    # The rename is attributed (body-matches helper) → does NOT flag.
+    assert out == []
+
+
+def test_unattributed_entities_flags_genuinely_novel_unit():
+    """A resolved unit whose name AND body are both novel (no counterpart in any
+    side) STILL flags — the spurious-addition guard is preserved. Rename-awareness
+    only suppresses recognized renames, not genuine hallucinations."""
+    from capybase.adapters.structural import unattributed_entities
+
+    base = "def main():\n    return 1\n"
+    rep = "def main():\n    return 1\n\ndef helper():\n    return 2\n"
+    # Merge invents ghost — name novel, body novel (no side has 'return 3').
+    resolved = "def main():\n    return 1\n\ndef helper():\n    return 2\n\ndef ghost():\n    return 3\n"
+    out = unattributed_entities(base, base, rep, resolved, "python")
+    assert out is not None
+    assert [e.name for e in out] == ["ghost"]
 
 
 def test_unattributed_entities_degrades_when_grammar_missing(monkeypatch):

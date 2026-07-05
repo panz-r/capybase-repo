@@ -412,6 +412,26 @@ class ValidationConfig(BaseModel):
     # (1.0 = whole block returned; 0.85 default tolerates minor edits). Higher =
     # fewer false positives but may miss a partially-resurrected block.
     resurrection_min_similarity: float = 0.85
+    # Cross-commit dependency guardian (survey §3.1): a deterministic post-rebase
+    # audit that catches cross-window dependency breaks the per-commit validators
+    # miss (e.g. commit A renames ``foo``→``bar``, a later commit B still calls
+    # ``foo`` — locally valid per commit, broken across the window). When enabled
+    # (default), runs after the resurrection scan on clean completion and surfaces
+    # ``cross_commit_dependency_break`` findings; in "stop" mode (cross_commit_policy)
+    # it escalates like the resurrection scan, in "warn" it continues. The guardian
+    # is purely deterministic (tree-sitter defines/uses, no LLM) and degrades to a
+    # no-op for unsupported languages / when tree-sitter is unavailable.
+    enable_cross_commit_guardian: bool = True
+    cross_commit_policy: Literal["warn", "stop"] = "warn"
+    # Session-level coverage SLO (survey §3.3): aggregate the per-unit intent
+    # preservation coverage across the whole rebase window into one ratio
+    # (preserved units / total units) and surface it in the completion report —
+    # an observability metric for detecting regressions across orchestrator
+    # changes (e.g. "session coverage dropped from 97% to 91%"). Purely advisory
+    # (never blocks the rebase). ``session_coverage_slo`` is the floor; when > 0
+    # and the session ratio falls below it, an advisory is emitted (still not a
+    # hard gate — observability, not enforcement, per the survey). 0 disables.
+    session_coverage_slo: float = 0.0
 
 
 class JournalConfig(BaseModel):

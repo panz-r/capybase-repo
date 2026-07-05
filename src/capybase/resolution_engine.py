@@ -104,6 +104,51 @@ def _side_intent_block(unit: ConflictUnit) -> str:
     return "\n\n".join(parts) + "\n\n"
 
 
+def _semantic_change_block(unit: ConflictUnit) -> str:
+    """A compact 'what each side changed at the ENTITY level' annotation.
+
+    Deterministic (tree-sitter ``semantic_diff``): classifies each side's
+    entity-level changes vs BASE as added / removed / renamed / signature_changed
+    / body_changed, and renders a one-line-per-change summary. This gives the
+    model PRECISE change intent — e.g. "CURRENT side renamed `validate_token`→
+    `check_token`" — that the raw side text + obligation lines convey only
+    implicitly. The survey's Tier 5 finding: surfacing structured change types
+    lifts a small LLM's merge quality by removing guesswork about what each side
+    is doing.
+
+    Folded into the budget-protected core alongside the side-intent block: it's
+    short (a few lines), high-value, and directly helps the model read the sides
+    it must merge. Returns "" when tree-sitter is unavailable, the language isn't
+    supported, or neither side made an entity-level change (degrades gracefully).
+    Pure; reads only the side texts.
+    """
+    lang = unit.language or ""
+    if lang not in ("python", "rust"):
+        return ""
+    try:
+        from capybase.adapters import structural
+    except Exception:  # noqa: BLE001
+        return ""
+    if not structural.is_available(lang):
+        return ""
+    base = unit.base.text or ""
+    cur = unit.current.text or ""
+    rep = unit.replayed.text or ""
+    try:
+        cur_changes = structural.semantic_diff(base, cur, lang)
+        rep_changes = structural.semantic_diff(base, rep, lang)
+    except Exception:  # noqa: BLE001 - advisory, never break the prompt
+        return ""
+    if not cur_changes and not rep_changes:
+        return ""
+    lines = ["Entity-level changes vs BASE (deterministic — use these to read the sides):"]
+    if cur_changes:
+        lines.append("  CURRENT side: " + "; ".join(c.render() for c in cur_changes))
+    if rep_changes:
+        lines.append("  REPLAYED side: " + "; ".join(c.render() for c in rep_changes))
+    return "\n".join(lines) + "\n\n"
+
+
 def _fit_to_budget(
     *,
     budget: TokenBudget | None,
@@ -341,10 +386,13 @@ def _resolve_prompt_parts(
     # _fit_to_budget's "essential" accounting is accurate. The side-intent
     # annotation is also essential (it disambiguates a deletion from a missing
     # side — the model needs it to read the sides correctly), so it's folded
-    # into sides_text for the budget accounting.
+    # into sides_text for the budget accounting. The entity-level semantic-change
+    # summary is folded in too (same reason — precise change intent helps the
+    # model read the sides; short + high-value).
     side_intent = _side_intent_block(unit)
+    semantic_change = _semantic_change_block(unit)
     sides_text = (
-        f"{side_intent}"
+        f"{side_intent}{semantic_change}"
         f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
         f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
         f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
@@ -367,7 +415,7 @@ def _resolve_prompt_parts(
     # few-shot, three sides, context) form one contiguous block that variants keep
     # together. Obligations render early (high priority) so the model sees them.
     data_block = (
-        f"{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{side_intent}"
+        f"{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{side_intent}{semantic_change}"
         f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
         f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
         f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"

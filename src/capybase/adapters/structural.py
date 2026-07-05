@@ -503,6 +503,115 @@ def duplicate_definitions(
     return findings
 
 
+#: Match classification for a (source entity → target entity) pair.
+#:
+#: - ``same_name``: paired by exact ``(kind, name)`` identity.
+#: - ``renamed``: paired across DIFFERENT names by body-fingerprint equality or
+#:   near-equality (Jaccard ≥ threshold) — the source's old name is gone in target.
+#: - ``unmatched``: no counterpart found in target (neither by name nor by body).
+#:
+#: Produced by :func:`match_entities`; consumed by the analyzers below so a
+#: legitimate rename is recognized rather than read as a drop + spurious add.
+MATCH_SAME_NAME = "same_name"
+MATCH_RENAMED = "renamed"
+MATCH_UNMATCHED = "unmatched"
+
+
+@dataclass(frozen=True)
+class EntityMatch:
+    """One source entity's classification against a target entity set.
+
+    ``target`` is the paired :class:`Entity` for ``same_name`` / ``renamed`` (the
+    counterpart in the target set), or ``None`` for ``unmatched``. For a rename,
+    ``target.name`` is the new name. ``source`` is always the original entity.
+    """
+
+    source: Entity
+    target: Entity | None
+    kind: str  # one of the MATCH_* constants above
+
+
+def match_entities(
+    sources: "list[Entity]", targets: "list[Entity]"
+) -> list[EntityMatch]:
+    """Classify each ``source`` entity against the ``targets`` set.
+
+    Mirrors the rename-pairing logic of :func:`semantic_diff` but returns a
+    per-source match record so the analyzers can ask "does this side entity
+    survive in the resolution under ANY name?" — recognizing renames instead of
+    treating a renamed entity as dropped (old name gone) + unattributed (new name
+    novel). A rename requires the source's old name to be GONE from targets (a
+    copy is NOT a rename), a body-fingerprint match (exact, or Jaccard ≥ 0.80 for
+    a rename-with-edit), AND name-similarity ≥ 0.6 or a substantial body — so two
+    distinct entities sharing a trivial body don't false-pair.
+
+    Pure (no parsing); operates on already-enumerated entity lists. Deterministic.
+    """
+    target_by_name: dict[tuple[str, str], Entity] = {(e.kind, e.name): e for e in targets}
+    target_names_by_kind: dict[str, set[str]] = {}
+    for e in targets:
+        target_names_by_kind.setdefault(e.kind, set()).add(e.name)
+    # Index targets by (kind, body-fingerprint) for rename pairing.
+    target_by_body: dict[tuple[str, str], Entity] = {}
+    target_body_tokens: dict[tuple[str, str], frozenset[str]] = {}
+    for e in targets:
+        bf = entity_body_fingerprint(e, "") or ""
+        if bf:
+            key = (e.kind, bf)
+            target_by_body.setdefault(key, e)
+            target_body_tokens[key] = frozenset(_token_set(bf))
+
+    out: list[EntityMatch] = []
+    for src in sources:
+        # 1. Exact (kind, name) match.
+        exact = target_by_name.get((src.kind, src.name))
+        if exact is not None:
+            out.append(EntityMatch(source=src, target=exact, kind=MATCH_SAME_NAME))
+            continue
+        # 2. Rename: body-fingerprint match across a different name.
+        bf = entity_body_fingerprint(src, "") or ""
+        target: Entity | None = None
+        if bf:
+            direct = target_by_body.get((src.kind, bf))
+            if (
+                direct is not None
+                and src.name not in target_names_by_kind.get(src.kind, set())
+                and (
+                    _name_similarity(direct.name, src.name) >= _RENAME_NAME_SIMILARITY_THRESHOLD
+                    or _body_is_substantial(bf)
+                )
+            ):
+                target = direct
+            else:
+                # Jaccard fallback for a rename that also edited the body.
+                tk = frozenset(_token_set(bf))
+                best: tuple[float, Entity] | None = None
+                for key, oks in target_body_tokens.items():
+                    if key[0] != src.kind:
+                        continue
+                    cand = target_by_body[key]
+                    if src.name in target_names_by_kind.get(src.kind, set()):
+                        break  # source name still present → not a rename
+                    inter = len(tk & oks)
+                    union = len(tk | oks)
+                    if union == 0:
+                        continue
+                    j = inter / union
+                    if (
+                        j >= _RENAME_BODY_JACCARD_THRESHOLD
+                        and _body_is_substantial(bf)
+                        and (best is None or j > best[0])
+                    ):
+                        best = (j, cand)
+                if best is not None:
+                    target = best[1]
+        if target is not None:
+            out.append(EntityMatch(source=src, target=target, kind=MATCH_RENAMED))
+        else:
+            out.append(EntityMatch(source=src, target=None, kind=MATCH_UNMATCHED))
+    return out
+
+
 def dropped_entities(
     base: str, side: str, resolved: str, language: str
 ) -> list[Entity] | None:
@@ -517,11 +626,13 @@ def dropped_entities(
 
     An entity is "added by the side" if its ``(kind, name)`` identity appears in
     ``side`` but not ``base``. It's "dropped" if that identity is then absent
-    from ``resolved`` (matched by name — a renamed-but-present entity counts as
-    preserved, since renaming is a legitimate merge, not a drop). Module-level
-    bare assignments (``X = ...``) are NOT enumerated (see _KIND_BY_NODE_TYPE),
-    so this catches structural defs only; the token-set BothSidesRepresented
-    validator remains the backstop for value/assignment drops.
+    from ``resolved``. A renamed-but-present entity counts as preserved (a rename
+    is a legitimate merge, not a drop): rename-aware matching (``match_entities``)
+    recognizes a side entity whose body content reappears in the resolution under
+    a different name, so a legitimate rename does NOT surface as a false drop.
+    Module-level bare assignments (``X = ...``) are NOT enumerated (see
+    _KIND_BY_NODE_TYPE), so this catches structural defs only; the token-set
+    BothSidesRepresented validator remains the backstop for value/assignment drops.
 
     Returns ``None`` when tree-sitter is unavailable or any of the three texts
     fail to parse (the critic degrades gracefully). An empty list means the side
@@ -533,12 +644,15 @@ def dropped_entities(
     if base_ents is None or side_ents is None or resolved_ents is None:
         return None
     base_names = {e.name for e in base_ents}
-    resolved_names = {e.name for e in resolved_ents}
-    # Added by the side (name not in base) AND absent from the resolution.
-    return [
-        e for e in side_ents
-        if e.name not in base_names and e.name not in resolved_names
-    ]
+    # Added by the side = name not in base. A dropped entity is one that's
+    # UNMATCHED in the resolution (neither same-name nor a recognized rename),
+    # so a legitimate rename survives rather than counting as a false drop.
+    matches = match_entities(side_ents, resolved_ents)
+    dropped: list[Entity] = []
+    for m in matches:
+        if m.source.name not in base_names and m.kind == MATCH_UNMATCHED:
+            dropped.append(m.source)
+    return dropped
 
 
 @dataclass(frozen=True)
@@ -569,10 +683,12 @@ def preservation_coverage(
     The deterministic coverage signal behind the IntentCoverageValidator and the
     hard "no silent drop > X%" guarantee: of the M logical units (function/
     method/class/field) the side ADDED beyond ``base``, how many are present in
-    the resolution. Returns a :class:`CoverageReport` with the ratio; ``None``
-    when tree-sitter is unavailable or any text fails to parse (coverage
-    undefined, not a failure). An ``added == 0`` report means the side added no
-    structural entities (ratio 1.0 — nothing to drop).
+    the resolution. A rename counts as preserved (a renamed-but-present entity
+    survives under a different name), so it does not lower coverage. Returns a
+    :class:`CoverageReport` with the ratio; ``None`` when tree-sitter is
+    unavailable or any text fails to parse (coverage undefined, not a failure).
+    An ``added == 0`` report means the side added no structural entities
+    (ratio 1.0 — nothing to drop).
     """
     base_ents = enumerate_entities(base, language)
     side_ents = enumerate_entities(side, language)
@@ -580,9 +696,18 @@ def preservation_coverage(
     if base_ents is None or side_ents is None or resolved_ents is None:
         return None
     base_names = {e.name for e in base_ents}
-    resolved_names = {e.name for e in resolved_ents}
-    added = [e for e in side_ents if e.name not in base_names]
-    dropped = [e for e in added if e.name not in resolved_names]
+    # Added by the side = name not in base. Of those, the ones UNMATCHED in the
+    # resolution (neither same-name nor a recognized rename) are dropped; a
+    # rename is preserved (survives under a new name) and so not counted dropped.
+    matches = match_entities(side_ents, resolved_ents)
+    added: list[Entity] = []
+    dropped: list[Entity] = []
+    for m in matches:
+        if m.source.name in base_names:
+            continue  # entity present in base → not an "add" by this side
+        added.append(m.source)
+        if m.kind == MATCH_UNMATCHED:
+            dropped.append(m.source)
     return CoverageReport(
         added=len(added),
         preserved=len(added) - len(dropped),
@@ -602,17 +727,17 @@ def unattributed_entities(
     directional ("did the merge LOSE a side's unit?"); this is the only check
     for surplus code, completing the "neither dropped nor spurious" guarantee.
 
-    An entity is "unattributed" if its ``name`` appears in NONE of base/current/
-    replayed. Matched by name (not body): a renamed unit IS a new name, so a
-    rename-in-merge flags — acceptable since a rename in a conflict resolution is
-    unusual and worth surfacing for review. A legitimate extracted helper (genuinely
-    needed to reconcile the sides but with a new name) also flags; the caller
-    treats this as a warning (retry/escalate), not a hard reject, so the model can
-    justify keeping it.
+    An entity is "unattributed" if it has no counterpart in ANY of base/current/
+    replayed — matched by name OR by body fingerprint (a rename). A resolved
+    entity that body-matches a side entity under a different name is attributed
+    (a legitimate rename, not a hallucination), so it does not flag here. Only a
+    unit whose name AND body are both novel — appearing in no side in any form —
+    is unattributed. This reduces false positives when the model legitimately
+    renames an entity to reconcile the sides.
 
     Returns ``None`` when tree-sitter is unavailable or any text fails to parse.
-    An empty list means every resolved unit derives from (or matches the name of)
-    a unit in at least one side.
+    An empty list means every resolved unit derives from (by name or by a
+    recognized rename of) a unit in at least one side.
     """
     base_ents = enumerate_entities(base, language)
     cur_ents = enumerate_entities(current, language)
@@ -620,10 +745,12 @@ def unattributed_entities(
     res_ents = enumerate_entities(resolved, language)
     if any(x is None for x in (base_ents, cur_ents, rep_ents, res_ents)):
         return None
-    known = {e.name for e in base_ents}
-    known |= {e.name for e in cur_ents}
-    known |= {e.name for e in rep_ents}
-    return [e for e in res_ents if e.name not in known]
+    # Match each resolved entity against the union of all side entities. A
+    # same-name OR rename match (body-fingerprint equal/near) counts as
+    # attributed; only an unmatched resolved entity is unattributed.
+    sides = list(base_ents) + list(cur_ents) + list(rep_ents)
+    matches = match_entities(res_ents, sides)
+    return [m.source for m in matches if m.kind == MATCH_UNMATCHED]
 
 
 def sibling_signatures(
@@ -731,6 +858,394 @@ def fingerprint_region(
 
     walk(tree.root_node)
     return " ".join(outside), " ".join(inside)
+
+
+# ---------------------------------------------------------------------------
+# Per-entity semantic diff (survey §5 foundational layer)
+# ---------------------------------------------------------------------------
+#
+# The analyzers above (dropped_entities / preservation_coverage /
+# unattributed_entities) match entities by EXACT name, so a legitimate rename is
+# invisible: a side that renames ``foo``→``bar`` reads as "added bar" (covered)
+# while ``dropped_entities`` sees nothing dropped. The whole-file ``ast_fingerprint``
+# is name-agnostic (node-type sequence), so it can't pair an entity across names
+# either. This section provides the two missing primitives:
+#
+# 1. ``entity_body_fingerprint`` / ``entity_sig_fingerprint`` — content-aware
+#    per-entity digests (body vs signature), normalized so a rename is the ONLY
+#    difference between a base entity and its renamed counterpart.
+# 2. ``semantic_diff`` — classifies each entity across two snapshots as
+#    added / removed / renamed / signature_changed / body_changed, using the
+#    fingerprints to pair an entity across names (a rename).
+#
+# Both build on ``enumerate_entities`` and degrade to ``None`` when tree-sitter is
+# unavailable (the same graceful-degradation contract as every analyzer here).
+
+# Token-set Jaccard floor for pairing an entity across names when the body is
+# NOT exactly equal (a rename WITH a small edit, e.g. a renamed fn whose body
+# also gained a line). Exact body-content equality always pairs first (the strong
+# signal from structural_resolver._detect_renames); this is the fallback for
+# near-equal bodies. Tuned conservatively — too low conflates distinct entities.
+_RENAME_BODY_JACCARD_THRESHOLD = 0.80
+
+# When body-content equality pairs an old→new entity across DIFFERENT names, also
+# require either name similarity above this floor OR a non-trivial body — mirrors
+# structural_resolver._detect_renames' guard so two distinct entities that happen
+# to share a trivial body (``pass`` / ``return 1``) aren't misread as a rename.
+_RENAME_NAME_SIMILARITY_THRESHOLD = 0.6
+
+
+def _name_similarity(a: str, b: str) -> float:
+    """String similarity ratio in [0, 1] via difflib (no new dependency)."""
+    if not a or not b:
+        return 0.0
+    import difflib
+
+    return difflib.SequenceMatcher(a=a, b=b, autojunk=False).ratio()
+
+
+def _body_is_substantial(body_fp: str) -> bool:
+    """True when a body has enough content to be a reliable rename signal."""
+    return len(body_fp) >= 8
+
+
+def _split_header_body(entity: Entity) -> tuple[str, str]:
+    """Split an entity's body into (header, rest), whitespace-normalized.
+
+    A rename changes the def/fn header (``def foo`` → ``def bar``) but leaves the
+    body content identical, so rename detection must compare the header-STRIPPED
+    body. Mirrors ``structural_resolver._body_content`` but returns both parts so
+    the signature fingerprint can use the header.
+    """
+    body = entity.body or ""
+    if not body:
+        return "", ""
+    lines = body.split("\n")
+    header = lines[0]
+    rest = "\n".join(lines[1:])
+    return _norm(header), _norm(rest)
+
+
+def _norm(text: str) -> str:
+    """Whitespace-collapse normalization (stable across formatting changes)."""
+    return " ".join((text or "").split())
+
+
+def _token_set(text: str) -> set[str]:
+    """The bag of non-whitespace tokens, for Jaccard body comparison."""
+    return set((text or "").split())
+
+
+def entity_body_fingerprint(entity: Entity, language: str) -> str | None:
+    """A normalized digest of an entity's body CONTENT (signature-stripped).
+
+    Invariant under whitespace, comment, and formatting changes; RENAME-SENSITIVE
+    only in the header (which is stripped) — two functions differing only in name
+    produce the SAME body fingerprint, which is what lets ``semantic_diff`` pair a
+    renamed entity to its base original. This is the per-entity, content-aware
+    counterpart to the name-agnostic whole-file ``ast_fingerprint``.
+
+    Returns the normalized body-without-header; ``None`` is reserved for the
+    "tree-sitter unavailable" sentinel at a higher level (an entity already
+    enumerated has a parseable body, so "" indicates an empty body, not failure).
+    """
+    _ = language  # entity.body is exact source; language not needed to split it
+    _, rest = _split_header_body(entity)
+    return rest
+
+
+def entity_sig_fingerprint(entity: Entity, language: str) -> str:
+    """A normalized digest of an entity's SIGNATURE (kind + name + header).
+
+    Two entities with the same name but different parameter lists differ here, so
+    ``semantic_diff`` can flag a ``signature_changed``. The kind is folded in so a
+    function→class collision doesn't silently match. The header is the def/fn
+    line; the name is included explicitly so a rename (same body, different
+    header) is detectable as a header change even when the rest is identical.
+    """
+    header, _ = _split_header_body(entity)
+    return f"{entity.kind}|{entity.name}|{header}"
+
+
+def _header_sans_name(entity: Entity) -> str:
+    """The signature header with the entity's own name removed.
+
+    Two methods with the same body and parameters but DIFFERENT names produce the
+    same header-sans-name → strong evidence of a rename rather than an add. Used
+    alongside body-fingerprint equality to confirm a rename.
+    """
+    header, _ = _split_header_body(entity)
+    if entity.name and entity.name in header:
+        # Remove the bare name token (word-boundary safe) to neutralize the rename.
+        import re
+
+        return re.sub(rf"\b{re.escape(entity.name)}\b", "", header)
+    return header
+
+
+@dataclass(frozen=True)
+class EntityChange:
+    """One classified change between two snapshots of an entity set.
+
+    ``change_type`` is one of ``added`` / ``removed`` / ``renamed`` /
+    ``signature_changed`` / ``body_changed`` / ``moved``. For ``renamed``,
+    ``old_name``/``new_name`` carry the rename pair; for the rest both equal
+    ``name`` (and ``new_name``/``old_name`` are empty when not applicable).
+    ``kind`` is the entity's coarse kind (function/class/method/field).
+    """
+
+    kind: str
+    name: str
+    change_type: str
+    old_name: str = ""
+    new_name: str = ""
+
+    def render(self) -> str:
+        """One-line human rendering for prompts/reports."""
+        if self.change_type == "renamed":
+            return f"renamed `{self.old_name}`→`{self.new_name}` ({self.kind})"
+        if self.change_type == "signature_changed":
+            return f"signature_changed `{self.name}` ({self.kind})"
+        if self.change_type == "body_changed":
+            return f"body_changed `{self.name}` ({self.kind})"
+        if self.change_type == "added":
+            return f"added `{self.name}` ({self.kind})"
+        if self.change_type == "removed":
+            return f"removed `{self.name}` ({self.kind})"
+        if self.change_type == "moved":
+            return f"moved `{self.name}` ({self.kind})"
+        return f"{self.change_type} `{self.name}` ({self.kind})"
+
+
+def semantic_diff(
+    old_text: str, new_text: str, language: str
+) -> list[EntityChange] | None:
+    """Classify the entity-level changes between two snapshots (survey §5.1).
+
+    Enumerates entities in ``old_text`` and ``new_text``, then classifies each by
+    name-match + body/signature fingerprint:
+
+    - name in ``new`` only → ``added``
+    - name in ``old`` only → ``removed``, UNLESS a new entity has the same body
+      fingerprint (content-equal) or a near-equal body (Jaccard ≥ threshold) AND
+      its old name is gone → ``renamed`` (old_name → new_name)
+    - name in both, signature fingerprint differs → ``signature_changed``
+    - name in both, signature same but body differs → ``body_changed``
+
+    Returns ``None`` when tree-sitter is unavailable or either text fails to
+    parse (callers degrade gracefully). An empty list means no entity-level
+    change. ``moved`` (cross-file) is NOT detected here — it requires multi-file
+    input (see ``detect_cross_file_moves``).
+
+    The rename-pairing logic generalizes ``structural_resolver._detect_renames``:
+    body-content equality is the strong signal, with a Jaccard fallback so a
+    rename that also touches the body is still recognized.
+    """
+    old_ents = enumerate_entities(old_text, language)
+    new_ents = enumerate_entities(new_text, language)
+    if old_ents is None or new_ents is None:
+        return None
+
+    old_by_name: dict[tuple[str, str], Entity] = {(e.kind, e.name): e for e in old_ents}
+    new_by_name: dict[tuple[str, str], Entity] = {(e.kind, e.name): e for e in new_ents}
+
+    # Index old entities by (kind, body-fingerprint) for rename pairing.
+    old_by_body: dict[tuple[str, str], Entity] = {}
+    old_body_tokens: dict[tuple[str, str], frozenset[str]] = {}
+    for e in old_ents:
+        bf = entity_body_fingerprint(e, language) or ""
+        key = (e.kind, bf)
+        if bf:  # skip empty bodies (ambiguous)
+            old_by_body.setdefault(key, e)
+            old_body_tokens[key] = frozenset(_token_set(bf))
+
+    new_names_by_kind: dict[str, set[str]] = {}
+    for e in new_ents:
+        new_names_by_kind.setdefault(e.kind, set()).add(e.name)
+
+    changes: list[EntityChange] = []
+    renamed_old_names: set[tuple[str, str]] = set()
+
+    # Pass 1: classify NEW entities (added / renamed / signature_changed / body_changed).
+    for e in new_ents:
+        ident = (e.kind, e.name)
+        old = old_by_name.get(ident)
+        if old is not None:
+            # Same name exists in old — classify the modification (if any).
+            old_sig = entity_sig_fingerprint(old, language)
+            new_sig = entity_sig_fingerprint(e, language)
+            if old_sig == new_sig:
+                # Signature identical — is the body content different?
+                old_body = entity_body_fingerprint(old, language) or ""
+                new_body = entity_body_fingerprint(e, language) or ""
+                if old_body != new_body:
+                    changes.append(EntityChange(
+                        kind=e.kind, name=e.name, change_type="body_changed",
+                    ))
+            else:
+                # Signature differs: distinguish a param/signature change from a
+                # body-only change via the header with the name neutralized.
+                old_hdr = _header_sans_name(old)
+                new_hdr = _header_sans_name(e)
+                if _norm(old_hdr) != _norm(new_hdr):
+                    changes.append(EntityChange(
+                        kind=e.kind, name=e.name, change_type="signature_changed",
+                    ))
+                else:
+                    changes.append(EntityChange(
+                        kind=e.kind, name=e.name, change_type="body_changed",
+                    ))
+            continue
+        # Name is new → either added OR a rename of an old entity.
+        bf = entity_body_fingerprint(e, language) or ""
+        rename_target: Entity | None = None
+        if bf:
+            exact = old_by_body.get((e.kind, bf))
+            # Exact body match: the old name must be GONE from new (renamed, not
+            # copied), and we need name-similarity OR a substantial body so a
+            # trivial shared body (``pass``/``return 1``) doesn't false-pair.
+            if (
+                exact is not None
+                and exact.name not in new_names_by_kind.get(e.kind, set())
+                and (
+                    _name_similarity(exact.name, e.name) >= _RENAME_NAME_SIMILARITY_THRESHOLD
+                    or _body_is_substantial(bf)
+                )
+            ):
+                rename_target = exact
+            else:
+                # Jaccard fallback: a renamed entity whose body also changed.
+                tk = frozenset(_token_set(bf))
+                best: tuple[float, Entity] | None = None
+                for key, oks in old_body_tokens.items():
+                    if key[0] != e.kind:
+                        continue
+                    old_e = old_by_body[key]
+                    # Old name must be gone from new (renamed away, not copied).
+                    if old_e.name in new_names_by_kind.get(e.kind, set()):
+                        continue
+                    inter = len(tk & oks)
+                    union = len(tk | oks)
+                    if union == 0:
+                        continue
+                    j = inter / union
+                    # Require a substantial body so trivial shared bodies don't
+                    # pair across distinct names.
+                    if (
+                        j >= _RENAME_BODY_JACCARD_THRESHOLD
+                        and _body_is_substantial(bf)
+                        and (best is None or j > best[0])
+                    ):
+                        best = (j, old_e)
+                if best is not None:
+                    rename_target = best[1]
+        if rename_target is not None:
+            renamed_old_names.add((rename_target.kind, rename_target.name))
+            changes.append(EntityChange(
+                kind=e.kind, name=e.name, change_type="renamed",
+                old_name=rename_target.name, new_name=e.name,
+            ))
+        else:
+            changes.append(EntityChange(
+                kind=e.kind, name=e.name, change_type="added",
+            ))
+
+    # Pass 2: classify OLD entities not yet accounted for → removed.
+    for e in old_ents:
+        ident = (e.kind, e.name)
+        if ident in renamed_old_names:
+            continue  # renamed away (already reported as a rename)
+        if ident not in new_by_name:
+            changes.append(EntityChange(
+                kind=e.kind, name=e.name, change_type="removed",
+            ))
+
+    return changes
+
+
+@dataclass(frozen=True)
+class EntityMove:
+    """One cross-file entity movement between two file-set snapshots.
+
+    ``name``/``kind`` identify the entity; ``old_path`` is the file it lived in
+    before; ``new_path`` is where it now lives. ``new_name`` differs from
+    ``name`` only when the move coincided with a rename.
+    """
+
+    kind: str
+    name: str
+    old_path: str
+    new_path: str
+    new_name: str = ""
+
+    def render(self) -> str:
+        nm = self.new_name or self.name
+        return f"{self.kind} `{self.name}` moved {self.old_path} → {self.new_path} (now `{nm}`)"
+
+
+def detect_cross_file_moves(
+    old_files: "dict[str, str]",
+    new_files: "dict[str, str]",
+    language: str,
+) -> list[EntityMove] | None:
+    """Detect entities that moved from one file to another across snapshots.
+
+    For each entity in an ``old_files`` entry that has NO counterpart (by name)
+    in that same file under ``new_files``, search every OTHER new file for a
+    body-fingerprint match. A match in a different path is a ``moved`` event —
+    the entity relocated rather than being deleted. This catches the case where
+    the upstream side reorganized code (e.g. ``auth.py`` → ``auth/core.py``) and
+    the replayed side's edits to that entity must apply at the NEW location; the
+    LLM, told only the old file, would apply edits to the now-empty old path.
+
+    Args:
+        old_files: ``{path: file_text}`` for the base/old snapshot.
+        new_files: ``{path: file_text}`` for the current/new snapshot.
+        language: the tree-sitter language to enumerate entities in.
+
+    Returns ``None`` when tree-sitter is unavailable (callers degrade). An empty
+    list means no cross-file movement was detected. Pure; takes pre-fetched file
+    contents so it's testable without a repo. Rename-aware: a moved entity that
+    ALSO renamed pairs by body fingerprint across the new name.
+    """
+    # Build a global index of NEW entities by (kind, body-fingerprint) → (path, Entity).
+    new_by_body: dict[tuple[str, str], tuple[str, Entity]] = {}
+    for path, text in new_files.items():
+        ents = enumerate_entities(text, language)
+        if ents is None:
+            continue  # parse failure on one file doesn't sink the whole scan
+        for e in ents:
+            bf = entity_body_fingerprint(e, language) or ""
+            if bf:
+                new_by_body.setdefault((e.kind, bf), (path, e))
+
+    moves: list[EntityMove] = []
+    for old_path, text in old_files.items():
+        old_ents = enumerate_entities(text, language)
+        if old_ents is None:
+            continue
+        # The new version of THIS file (if any): entities still here by name
+        # are NOT moves; only absent ones are candidates.
+        new_same_path = enumerate_entities(new_files.get(old_path, ""), language) or []
+        present_names = {e.name for e in new_same_path}
+        for e in old_ents:
+            if e.name in present_names:
+                continue  # still in the same file → not a move
+            bf = entity_body_fingerprint(e, language) or ""
+            if not bf:
+                continue
+            hit = new_by_body.get((e.kind, bf))
+            if hit is None:
+                continue  # no body match anywhere → genuinely removed
+            new_path, new_ent = hit
+            if new_path == old_path:
+                continue  # matched back to the same file (shouldn't happen, guard)
+            moves.append(EntityMove(
+                kind=e.kind, name=e.name,
+                old_path=old_path, new_path=new_path,
+                new_name=new_ent.name if new_ent.name != e.name else "",
+            ))
+    return moves
 
 
 # ---------------------------------------------------------------------------

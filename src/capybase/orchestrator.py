@@ -233,6 +233,53 @@ def _dropped_units_for(
     return dropped
 
 
+#: Warnings that drive ``risk.decide`` retries but carry concrete, actionable
+#: feedback (the validator names a SPECIFIC problem: dropped entity, spurious
+#: addition, dropped dependency). These are the signals the retry-seed below
+#: lifts into the prompt so the model gets counterexample feedback instead of a
+#: blind regeneration. ``verifier_model*`` is handled separately by
+#: ``_critic_failure`` (separate budget) and is intentionally excluded here.
+_ACTIONABLE_SOFT_WARNINGS: frozenset[str] = frozenset({
+    "intent_coverage",          # dropped a side's added structural units (ratio)
+    "unattributed_code",        # hallucinated a unit in neither side
+    "both_sides_represented",   # copied one side verbatim (dropped the other)
+    "preservation_heuristic",   # one-sided merge heuristic
+    "referenced_symbol_dropped",  # dropped a base-referenced dependency
+    "future_obligation",        # dropped a symbol a later commit needs
+})
+
+
+def _soft_warning_failures(validation: VerificationResult) -> list[VerificationFailure]:
+    """Lift actionable soft-validator warnings into failure-shape prompt feedback.
+
+    ``risk.decide`` retries on these warnings (``risk.py:156-213``), but the
+    old retry seed only lifted ``hard_failures`` + the critic's warning. For a
+    warning-driven retry that left ``failures`` empty, ``propose()`` fell
+    through to ``build_resolve_prompt`` — a FRESH generation with NO feedback
+    and NO memory of the rejected candidate (``prev_candidate`` is ignored
+    when ``failures`` is falsy). So the model kept reproducing the same
+    dropped-side merge across retries, burning a model call each time with
+    zero guidance.
+
+    This synthesizes a ``VerificationFailure`` (severity="warning") for each
+    actionable warning, so ``_render_failure`` surfaces its structured
+    ``detail`` (dropped entity names, ratios, etc.) in the repair prompt and
+    ``propose()`` selects the targeted ``build_repair_prompt`` path against
+    the previous candidate. ``verifier_model*`` warnings are excluded — they
+    are handled by ``_critic_failure`` against the separate critic budget.
+    """
+    out: list[VerificationFailure] = []
+    for w in validation.warnings:
+        if w.validator in _ACTIONABLE_SOFT_WARNINGS:
+            out.append(VerificationFailure(
+                validator=w.validator,
+                severity="warning",
+                message=w.message,
+                detail=dict(w.detail),
+            ))
+    return out
+
+
 def _attribute_whole_file_failure(
     failures: list, units: list[ConflictUnit]
 ) -> int:
@@ -629,6 +676,11 @@ class Orchestrator:
         # accumulated across steps so detect_conflict_chains() can find related
         # conflicts sharing a region coordinate. Reset per rebase()/run().
         self._conflict_observations: list = []
+        # Session-level coverage samples (survey §3.3 SLO): one (path, preserved,
+        # total) per accepted unit across the WHOLE window, accumulated each step
+        # so the post-rebase rollup can compute one aggregate preservation ratio.
+        # Reset per rebase()/run().
+        self._session_coverage_samples: list[tuple[str, int, int]] = []
         # Whether the interactive fallback may fire. Defaults to the real TTY
         # check; tests override this (they can't provide a real terminal).
         self._is_interactive_terminal = _is_interactive_terminal
@@ -3003,6 +3055,255 @@ class Orchestrator:
         )
         return outcome
 
+    def _accumulate_coverage_samples(self, result: StepResult) -> None:
+        """Fold this step's accepted-unit coverage into the session SLO rollup.
+
+        For each accepted unit whose validation ran the intent-coverage check,
+        record (path, preserved, total) — summing both sides' added units. The
+        post-rebase rollup aggregates these into one window-level ratio. Best-
+        effort: units without coverage detail (unsupported language, parse
+        failure, tree-sitter unavailable) are simply skipped — the SLO reflects
+        what could be measured.
+        """
+        try:
+            for outcome in result.outcomes:
+                if outcome.accepted is None or outcome.validation is None:
+                    continue
+                # The intent-coverage check's detail carries per-side preserved/
+                # total. Aggregate both sides into one (preserved, total) sample.
+                detail = None
+                for w in outcome.validation.warnings:
+                    if w.validator == "intent_coverage":
+                        detail = w.detail
+                        break
+                if detail is None:
+                    # Coverage may have passed without a warning; check hard
+                    # failures too (a below-floor result is a warning, but be
+                    # thorough). The check's detail is the same shape either way.
+                    for hf in outcome.validation.hard_failures:
+                        if hf.validator == "intent_coverage":
+                            detail = hf.detail
+                            break
+                if not detail:
+                    continue
+                preserved = (
+                    int(detail.get("current_preserved", 0))
+                    + int(detail.get("replayed_preserved", 0))
+                )
+                total = (
+                    int(detail.get("current_total", 0))
+                    + int(detail.get("replayed_total", 0))
+                )
+                if total > 0:
+                    self._session_coverage_samples.append(
+                        (outcome.unit.path, preserved, total)
+                    )
+        except Exception:  # noqa: BLE001 - the SLO is advisory, never break the loop
+            pass
+
+    def _session_coverage_rollup(self) -> tuple[float, int, int] | None:
+        """Aggregate per-unit coverage across the window into one ratio.
+
+        Returns ``(ratio, preserved, total)`` — the fraction of all measured
+        intent units (across both sides, every accepted unit) preserved in the
+        final rebased branch. ``None`` when no coverage was measured (no units
+        with structural intent, or tree-sitter was unavailable throughout).
+        """
+        if not self._session_coverage_samples:
+            return None
+        total = sum(t for _path, _p, t in self._session_coverage_samples)
+        preserved = sum(p for _path, p, _t in self._session_coverage_samples)
+        if total == 0:
+            return None
+        return preserved / total, preserved, total
+
+    def _report_session_coverage_slo(self) -> None:
+        """Surface the session-level coverage ratio (survey §3.3 SLO) at completion.
+
+        Emits a journal event + a completion-report line with the aggregate
+        preservation ratio across the window. When ``session_coverage_slo`` is
+        set (> 0) and the ratio falls below it, also emits an advisory (still
+        advisory only — observability, not enforcement, per the survey). No-op
+        when no coverage was measured (clean rebase, unsupported languages).
+        """
+        try:
+            rollup = self._session_coverage_rollup()
+            if rollup is None:
+                return
+            ratio, preserved, total = rollup
+            n_units = len(self._session_coverage_samples)
+            self.journal.emit(
+                "session_coverage_slo",
+                {"ratio": round(ratio, 4), "preserved": preserved,
+                 "total": total, "units": n_units},
+                step_index=self.step,
+            )
+            self.out(
+                f"  session intent coverage: {ratio:.1%} "
+                f"({preserved}/{total} units preserved across {n_units} unit(s))\n"
+            )
+            slo = getattr(self.config.validation, "session_coverage_slo", 0.0)
+            if slo and ratio < slo:
+                self.journal.emit_advisory(
+                    "session_coverage_below_slo",
+                    f"session coverage {ratio:.1%} below SLO {slo:.0%}",
+                )
+                self.out(
+                    self._warn(
+                        f"  warning: session coverage {ratio:.1%} below the "
+                        f"configured SLO ({slo:.0%})."
+                    ) + "\n"
+                )
+        except Exception:  # noqa: BLE001 - the SLO is advisory, never break completion
+            pass
+
+    def _commit_added_lines_by_path(
+        self, oid: str, paths: "Iterable[str]"
+    ) -> "dict[str, str]":
+        """Per-path added (``+``) lines of commit ``oid``'s patch.
+
+        Parses the commit's unified-diff patch (``git diff-tree -p``) into a
+        ``{path: added_text}`` map (only the ``+`` content lines, ``+++`` headers
+        excluded). Used by the cross-commit guardian to derive a commit's USES
+        from its actual contribution rather than its cumulative post-image — so a
+        later commit re-including an earlier definition isn't misread as locally
+        using it. Best-effort: returns {} on any parse/fetch failure (the
+        guardian then falls back to the post-image for uses). Only paths in
+        ``paths`` are included.
+        """
+        out: dict[str, str] = {}
+        try:
+            patch = self.git.commit_patch(oid)
+        except Exception:  # noqa: BLE001
+            return out
+        if not patch:
+            return out
+        wanted = set(paths)
+        cur_path: str | None = None
+        lines_buf: list[str] = []
+        for raw in patch.decode("utf-8", errors="replace").split("\n"):
+            if raw.startswith("diff --git "):
+                # Flush the previous file.
+                if cur_path in wanted and lines_buf:
+                    out[cur_path] = "\n".join(lines_buf)
+                parts = raw.split(" b/", 1)
+                cur_path = parts[-1] if len(parts) == 2 else None
+                lines_buf = []
+                continue
+            if raw.startswith("+++") or raw.startswith("---"):
+                continue
+            if raw.startswith("+") and cur_path is not None:
+                lines_buf.append(raw[1:])
+        if cur_path in wanted and lines_buf:
+            out[cur_path] = "\n".join(lines_buf)
+        return out
+
+    def _run_cross_commit_guardian_on_completion(self) -> StepResult | None:
+        """Cross-commit dependency guardian audit (survey §3.1); None if clean.
+
+        Runs after the resurrection scan on clean completion. Closes the per-
+        commit blind spot: builds a defines/uses map across the replayed source
+        commits, derives cross-commit dependency edges (a later commit uses a
+        symbol an earlier commit defines), and verifies each edge's symbol still
+        resolves in the final rebased tree — catching e.g. commit A renaming
+        ``foo``→``bar`` while a later commit B still calls ``foo``. Purely
+        deterministic (tree-sitter); a no-op when disabled or no source commits
+        are available. With ``cross_commit_policy = "stop"`` a break escalates
+        like the resurrection scan; with ``"warn"`` (default) it surfaces and
+        continues. Returns None when there are no findings (nothing to do).
+        """
+        cfg = self.config.validation
+        if not getattr(cfg, "enable_cross_commit_guardian", True):
+            return None
+        plan = getattr(self, "_history_plan", None)
+        if plan is None or not getattr(plan, "source_commits", None):
+            return None  # no source-sequence knowledge → can't build the graph
+        head_after = self.git.head_oid()
+        try:
+            from capybase import cross_commit
+            from capybase.adapters import structural
+        except Exception:  # noqa: BLE001
+            return None
+
+        # Build the per-commit defines/uses map from each source commit's touched
+        # files. DEFINES come from the post-image (blob_at the commit's OID);
+        # USES come from the commit's ADDED lines (its actual contribution), so a
+        # later commit whose post-image re-includes an earlier definition doesn't
+        # count that name as locally-used. The added lines are parsed from the
+        # commit's patch (per-path ``+`` lines), mirroring future_obligations.
+        commit_symbols: dict[str, cross_commit.CommitSymbols] = {}
+        all_paths: set[str] = set()
+        for commit in plan.source_commits:
+            files: dict[str, str] = {}
+            for path in commit.touched_files:
+                all_paths.add(path)
+                blob = self.git.blob_at(commit.oid, path)
+                if blob is not None:
+                    try:
+                        files[path] = blob.decode("utf-8", errors="replace")
+                    except Exception:  # noqa: BLE001
+                        pass
+            if not files:
+                continue
+            added_text = self._commit_added_lines_by_path(commit.oid, files.keys())
+            commit_symbols[commit.oid] = cross_commit.build_commit_symbols(
+                files, added_text=added_text or None,
+            )
+        if not commit_symbols:
+            return None
+
+        edges = cross_commit.build_dependency_graph(
+            commit_symbols, [c.oid for c in plan.source_commits]
+        )
+        if not edges:
+            return None
+
+        # Enumerate the final rebased tree's entities for the touched files.
+        final_tree: dict[str, list] = {}
+        for path in all_paths:
+            blob = self.git.blob_at(head_after, path)
+            if blob is None:
+                continue
+            lang = cross_commit._language_for_path(path)
+            if lang is None or not structural.is_available(lang):
+                continue
+            ents = structural.enumerate_entities(
+                blob.decode("utf-8", errors="replace"), lang
+            )
+            if ents is not None:
+                final_tree[path] = ents
+        breaks = cross_commit.audit_cross_commit_dependencies(edges, final_tree)
+        if not breaks:
+            return None
+
+        # Surface the findings (journal + summary); escalate under "stop".
+        rendered = [b.render() for b in breaks]
+        self.journal.emit(
+            "cross_commit_dependency_break",
+            {
+                "count": len(breaks),
+                "breaks": [
+                    {"symbol": b.symbol, "definer": b.definer,
+                     "user": b.user, "break_type": b.break_type}
+                    for b in breaks
+                ],
+            },
+            step_index=self.step,
+        )
+        self.out(
+            self._warn(
+                f"! cross-commit dependency breaks detected ({len(breaks)}):\n"
+                + "\n".join(f"  - {r}" for r in rendered)
+            ) + "\n"
+        )
+        if cfg.cross_commit_policy == "stop":
+            return StepResult(
+                step_index=self.step,
+                escalated=True,
+                reason=f"cross-commit dependency breaks ({len(breaks)})",
+            )
+        return StepResult(step_index=self.step, escalated=False, continued=True)
+
     def run(self) -> StepResult:
         """Full auto loop: resolve → stage → test → continue, with retries."""
         # Preflight.
@@ -3037,6 +3338,10 @@ class Orchestrator:
             result = self._resolve_step()
             result.step_index = self.step
             last = result
+            # Accumulate this step's accepted-unit coverage into the session
+            # SLO rollup (survey §3.3). Cheap (reads already-computed detail);
+            # the post-rebase report aggregates it into one ratio.
+            self._accumulate_coverage_samples(result)
             if result.escalated:
                 break
             # Tests gate continue.
@@ -3072,12 +3377,24 @@ class Orchestrator:
                 if _res is not None and _res.escalated:
                     last = _res
                     break
+                # Cross-commit dependency guardian (survey §3.1): deterministic
+                # window-level audit for cross-commit rename/reference breaks the
+                # per-commit validators can't see. Runs after the resurrection
+                # scan; under "stop" it escalates like resurrection.
+                _ccb = self._run_cross_commit_guardian_on_completion()
+                if _ccb is not None and _ccb.escalated:
+                    last = _ccb
+                    break
                 head_after = self.git.head_oid()
                 self.journal.emit(
                     "session_completed",
                     {"head_after": head_after},
                     git_head_after=head_after,
                 )
+                # Session-level coverage SLO (survey §3.3): one aggregate
+                # preservation ratio across the window, surfaced as observability
+                # for regression detection. Advisory; never blocks.
+                self._report_session_coverage_slo()
                 self.git.record_step_ref(self.session_id, self.step, head_after)
                 self.out(self._ok(f"✓ rebase complete (session {self.session_id})"))
                 break
@@ -3781,6 +4098,13 @@ class Orchestrator:
                 # plain message when tree-sitter can't enumerate entities.
                 dropped = _dropped_units_for(unit, cand)
                 failures.append(_critic_failure(critic_warning, dropped))
+            # Lift actionable soft-validator warnings (intent_coverage,
+            # unattributed_code, both_sides_represented, ...) into the failure
+            # list so they reach the repair prompt too. Without this, a
+            # warning-driven retry left ``failures`` empty → propose() fell
+            # through to a feedback-free build_resolve_prompt regeneration
+            # (the critic-path comment above describes the same pathology).
+            failures.extend(_soft_warning_failures(validation))
             failures = failures or None
             # Track which budget this retry consumes: critic-driven retries use
             # the separate critic budget, not the syntactic retry_count.
