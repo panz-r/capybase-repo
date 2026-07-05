@@ -225,6 +225,13 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
     cfg.validation.require_whole_file_validation = False
     cfg.validation.reject_if_drops_a_side = False
     cfg.validation.reject_if_drops_referenced_symbol = False
+    # Disable the deterministic pre-LLM layers so the conflicts reach the LLM
+    # path where samples_complex applies. (Without this the union/structural
+    # rules merge them with zero LLM calls, exercising the resolver not the
+    # sample allocation.)
+    cfg.future.enable_structural_resolver = False
+    cfg.future.enable_combination_search = False
+    cfg.future.enable_block_capture = False
     engine = ResolutionEngine(cfg.model, client=client)
     orch = Orchestrator(
         cfg, repo=str(repo), resolution_engine=engine,
@@ -232,6 +239,8 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
     )
     result = orch.run()
     assert not result.escalated, result.reason
-    # Two complex units × 3 samples each = 6 calls. (Without samples_complex it
-    # would be 2 × 1 = 2.)
-    assert client.calls == 6, client.calls
+    # The two hunks classify differently under the ConflictClassifier: the
+    # services-list hunk is trivial (simple → 1 sample), the feature-flags hunk
+    # is hard (complex → samples_complex=3). Total = 1 + 3 = 4. (Without
+    # samples_complex the complex hunk would draw the base 1 → 1 + 1 = 2.)
+    assert client.calls == 4, client.calls
