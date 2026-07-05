@@ -37,11 +37,12 @@ from capybase.provenance import (
 
 
 def test_provenance_values_match_spec():
-    """The seven spec values are present, in a stable order."""
+    """The spec values are present, in a stable order."""
     assert PROVENANCE_VALUES == (
         "deterministic_structural",
         "exact_history_reuse",
         "combination_search",
+        "test_gated_side",
         "block_capture",
         "history_augmented_llm",
         "plain_llm",

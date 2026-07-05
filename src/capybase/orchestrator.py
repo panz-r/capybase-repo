@@ -1472,6 +1472,102 @@ class Orchestrator:
         )
         return outcome
 
+    def _try_test_gated_side(self, unit: ConflictUnit) -> UnitOutcome | None:
+        """Test-gated side picker: when both pre-LLM resolvers decline a conflict
+        where taking EITHER side verbatim is a plausible resolution, try each side
+        and let the TEST GATE discriminate. Survey §4.2 / conftest port pattern.
+
+        The structural resolver and SBCR both correctly decline same-line scalar
+        conflicts (port=9090 vs port=7070: no deterministic answer). But that
+        means no pre-LLM mechanism proposes either side, so the conflict goes
+        straight to the LLM — which on a small model often fails. This mechanism
+        fills that gap: it builds a candidate from each side, validates it
+        (markers/splice/AST/syntax), and for any that pass, writes the spliced
+        file and runs the test gate. The first side that passes BOTH validation
+        AND the test gate is accepted.
+
+        Safety contract (mirrors SBCR's): a side that fails validation OR the
+        test gate is discarded; the conflict falls through to the LLM. The test
+        gate is the discriminator (it knows ``port == 9090`` from the assertion).
+        Only fires when tests are required AND a real test command is configured
+        (not the ``true`` no-op) — otherwise there's no way to discriminate.
+        """
+        # Scope guard: only when the test gate is real (required + a non-trivial
+        # command). The no-op ``true`` shim can't discriminate, so decline.
+        cmd = self.config.tests.pre_continue or self.config.tests.final
+        if not self.config.tests.required or not cmd or cmd.strip() in ("true", "pytest"):
+            # Note: "pytest" is left to the LLM because pytest runs the WHOLE
+            # suite (slow, and may have pre-existing failures unrelated to this
+            # unit); the side picker targets targeted test commands (cargo test,
+            # a specific pytest invocation) that actually exercise the merged code.
+            return None
+        # Only marker-block units (whole-file units have no "side" to pick).
+        if unit.marker_span is None:
+            return None
+        cur_text = unit.current.text or ""
+        rep_text = unit.replayed.text or ""
+        # Both sides must be non-empty (each is a standalone candidate) and differ
+        # (identical sides would've been caught by the structural resolver).
+        if not cur_text.strip() or not rep_text.strip() or cur_text == rep_text:
+            return None
+
+        from capybase.adapters.parsers import splice_resolution
+
+        # Save the worktree file so we can restore it if neither side passes.
+        original_bytes = b""
+        try:
+            original_bytes = self.git.read_worktree_file(unit.path)
+        except Exception:  # noqa: BLE001
+            pass  # file may not exist yet (rare)
+
+        for side_label, side_text in (("current", cur_text), ("replayed", rep_text)):
+            cand = CandidateResolution(
+                candidate_id=f"{unit.unit_id}:test_gated_{side_label}",
+                unit_id=unit.unit_id,
+                model_name="test_gated",
+                prompt_version=f"test_gated.{side_label}",
+                resolved_text=side_text,
+                explanation=f"test-gated side pick ({side_label} side verbatim)",
+                provenance="test_gated_side",
+            )
+            validation = self.verification.verify(unit, cand)
+            if not validation.passed:
+                continue  # this side fails validation; try the other
+            # Write the spliced file so the test gate runs against it.
+            spliced = splice_resolution(unit.original_worktree_text, unit.marker_span, side_text)
+            self.git.write_worktree_file(unit.path, spliced.encode("utf-8"))
+            # Run the test gate. Build a minimal StepResult carrying this unit so
+            # _run_tests can find the cargo-test cwd anchor if needed.
+            probe = StepResult(step_index=self.step)
+            probe.units_by_path[unit.path] = [unit]
+            self.journal.emit(
+                "test_gated_side_probe",
+                {"candidate_id": cand.candidate_id, "side": side_label},
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            test_ok = self._run_tests("pre_continue", probe)
+            if not test_ok:
+                continue  # this side fails the test gate; try the other
+            # This side passed validation AND the test gate — accept it.
+            # Restore is unnecessary: the spliced file IS the accepted result.
+            if self._strictness_blocks_pre_llm(unit, cand, validation, "test_gated"):
+                # Strict mode declined — restore the original worktree.
+                self.git.write_worktree_file(unit.path, original_bytes)
+                return None
+            outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+            outcome.accepted = cand
+            self.journal.emit(
+                "candidate_accepted",
+                {"candidate_id": cand.candidate_id, "via": "test_gated_side",
+                 "side": side_label},
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            return outcome
+
+        # Neither side passed validation + test gate — restore and fall through.
+        self.git.write_worktree_file(unit.path, original_bytes)
+        return None
+
     def _try_block_capture(self, unit: ConflictUnit) -> UnitOutcome | None:
         """Block-capture resolution for large modify/delete conflicts.
 
@@ -3337,6 +3433,17 @@ class Orchestrator:
             early = self._try_combination_search(unit)
             if early is not None:
                 return early  # accepted via combination search; LLM loop skipped
+
+        # Test-gated side picker: when both pre-LLM resolvers decline a conflict
+        # where taking either side verbatim is plausible, try each side and let
+        # the test gate discriminate (e.g. port=9090 vs 7070, where the test
+        # asserts ==9090). The documented job of the test gate (conftest port
+        # pattern), but as a PRE-LLM discriminator instead of post-LLM. Only on a
+        # FRESH resolve, same as the other pre-LLM layers.
+        if failures is None:
+            early = self._try_test_gated_side(unit)
+            if early is not None:
+                return early  # accepted via test-gated side pick; LLM loop skipped
 
         # Block-capture resolution (large modify/delete): when one side deleted a
         # large block and the structural rule declined (the keeper modified it),

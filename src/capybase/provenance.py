@@ -59,6 +59,7 @@ PROVENANCE_VALUES: tuple[str, ...] = (
     "deterministic_structural",
     "exact_history_reuse",
     "combination_search",
+    "test_gated_side",
     "block_capture",
     "history_augmented_llm",
     "plain_llm",
@@ -74,6 +75,7 @@ LEGACY_PROVENANCE = ""
 PROVENANCE_LABELS: dict[str, str] = {
     "deterministic_structural": "deterministic structural",
     "combination_search": "combination search",
+    "test_gated_side": "test-gated side pick",
     "block_capture": "block-capture (keep/delete)",
     "exact_history_reuse": "exact history reuse",
     "history_augmented_llm": "history-augmented LLM",

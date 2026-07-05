@@ -216,10 +216,16 @@ def _config_for(scenario: Scenario, *, critic_enabled: bool = True) -> Config:
     cfg.model.json_mode = True
     cfg.model.request_timeout_seconds = 600
     cfg.model.generation_timeout_seconds = 240
-    # Tests gate: real pytest/cargo. For Rust scenarios the cargo check/test
-    # IS part of correctness (port must be 9090 for the test to pass).
+    # Tests gate: real cargo test (Rust) or a per-file compile check (Python).
+    # For Rust the cargo check/test IS part of correctness (port must be 9090 for
+    # the test to pass). For Python the scenarios have no test suite, so compile
+    # the resolved file as the syntax floor — py_compile needs a filename arg the
+    # orchestrator doesn't append, so bake the (repo-relative) path in here.
     # NOTE: use `python3` (not `python`) — the eval host only has python3 on PATH.
-    cfg.tests.pre_continue = "cargo test" if scenario.cargo else "python3 -m py_compile"
+    if scenario.cargo:
+        cfg.tests.pre_continue = "cargo test"
+    else:
+        cfg.tests.pre_continue = f"python3 -m py_compile {scenario.path}"
     cfg.tests.final = cfg.tests.pre_continue
     cfg.tests.required = True
     cfg.tests.timeout_seconds = 300

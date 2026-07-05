@@ -208,13 +208,16 @@ def test_rust_test_gate_accepts_value_preserving_merge(rust_test_gated_repo):
 
 @skip_no_cargo
 def test_rust_test_gate_rejects_compiling_but_wrong_merge(rust_test_gated_repo):
-    """A merge that compiles but fails the project's test is rejected at the gate.
+    """A merge that compiles but fails the project's test is resolved by the
+    test-gated side picker (not escalated).
 
-    The merge keeps the wrong port (7070): it compiles cleanly (so Phase B's
-    cargo floor accepts it), but the ``#[cfg(test)]`` assertion fails under
-    ``cargo test``. With ``tests.required``, the orchestrator escalates rather
-    than silently shipping a value the test suite rejects. This is the gap the
-    compile floor alone cannot close.
+    The conflict is port=9090 (upstream) vs port=7070 (replayed) on the same
+    line — both sides changed it, so the structural resolver + SBCR decline. The
+    test-gated side picker then tries each side: the upstream side (9090) passes
+    ``cargo test`` (the assertion is ``port == 9090``), so it's accepted without
+    an LLM call. The LLM (which would've proposed the wrong 7070) never runs.
+    This is the documented job of the test gate (conftest port pattern), now as a
+    PRE-LLM discriminator.
     """
     repo = rust_test_gated_repo["repo"]
     engine = ResolutionEngine(
@@ -226,6 +229,9 @@ def test_rust_test_gate_rejects_compiling_but_wrong_merge(rust_test_gated_repo):
         out=lambda *_a, **_k: None,
     )
     result = orch.run()
-    # The merge compiled but the test gate caught the wrong value → escalate.
-    assert result.escalated
+    # The side picker resolved it: port=9090 (the value the test asserts).
+    assert not result.escalated, result.reason
+    text = (repo / "src" / "lib.rs").read_text()
+    assert "9090" in text
+    assert "7070" not in text
 
