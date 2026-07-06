@@ -385,13 +385,14 @@ def test_dropped_entities_rust():
 
 
 def test_dropped_entities_degrades_when_grammar_missing(monkeypatch):
-    """When tree-sitter can't parse (grammar unavailable) → None (graceful; the
-    critic falls back to its own qualitative verdict). dropped_entities degrades
-    via enumerate_entities/_parse returning None, not via is_available (which the
-    caller checks before invoking)."""
+    """When the structural parser can't parse (parse returns None) → None
+    (graceful; the critic falls back to its own qualitative verdict).
+    dropped_entities degrades via enumerate_entities/_abstract_parse returning
+    None, not via is_available (which the caller checks before invoking)."""
     from capybase.adapters import structural
 
-    monkeypatch.setattr(structural, "_make_parser", lambda lang: None)
+    # The abstract parser is primary (Round 1); a failed parse surfaces as None.
+    monkeypatch.setattr(structural, "_abstract_parse", lambda src, lang: None)
     out = structural.dropped_entities("def a():pass", "def a():pass\ndef b():pass", "def a():pass", "python")
     assert out is None
 
@@ -567,7 +568,8 @@ def test_unattributed_entities_flags_genuinely_novel_unit():
 def test_unattributed_entities_degrades_when_grammar_missing(monkeypatch):
     from capybase.adapters import structural
 
-    monkeypatch.setattr(structural, "_make_parser", lambda lang: None)
+    # The abstract parser is primary (Round 1); a failed parse surfaces as None.
+    monkeypatch.setattr(structural, "_abstract_parse", lambda src, lang: None)
     out = structural.unattributed_entities(
         "def a():pass", "def a():pass", "def a():pass", "def a():pass\ndef b():pass", "python"
     )

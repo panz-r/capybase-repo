@@ -49,7 +49,7 @@ class Config:
 def test_enclosing_node_resolves_function():
     node = S.enclosing_node(PY_SOURCE, (1, 1), "python")
     assert node is not None
-    assert node.node_type == "function_definition"
+    assert node.node_type == "function"
     assert node.signature == "def greet():"
     assert "return 'hi'" in node.text
 
@@ -58,7 +58,7 @@ def test_enclosing_node_resolves_function():
 def test_enclosing_node_resolves_class():
     node = S.enclosing_node(PY_SOURCE, (7, 7), "python")
     assert node is not None
-    assert node.node_type == "class_definition"
+    assert node.node_type == "class"
     assert node.signature == "class Config:"
 
 
@@ -69,7 +69,7 @@ def test_enclosing_node_anchors_on_span_start():
     # marker-block being wider than the base content it replaces).
     node = S.enclosing_node(PY_SOURCE, (1, 5), "python")
     assert node is not None
-    assert node.node_type == "function_definition"
+    assert node.node_type == "function"
 
 
 @needs_ts
@@ -91,9 +91,10 @@ def test_fingerprint_differs_for_different_structure():
 def test_fingerprint_region_partitions_nodes():
     outside, inside = S.fingerprint_region(PY_SOURCE, "python", (0, 1))
     assert outside is not None and inside is not None
-    # The outside region must mention farewell and Config (unchanged nodes).
-    assert outside.count("function_definition") >= 1
-    assert "class_definition" in outside
+    # The outside region must mention farewell and Config (unchanged units).
+    # The abstract fingerprint uses coarse kinds: function/class.
+    assert outside.count("function") >= 1
+    assert "class:Config" in outside
 
 
 @needs_ts
@@ -113,11 +114,14 @@ def test_rust_enclosing_node_impl():
     }
 }
 """
-    pytest.importorskip("tree_sitter_rust")
     assert S.is_available("rust")
     node = S.enclosing_node(rs, (2, 2), "rust")
     assert node is not None
-    assert node.node_type == "impl_item"
+    # The impl is a container-only scope; a span inside fn next resolves to the
+    # method (kind "method"), not the impl. Mirrors tree-sitter, where impl_item
+    # is a container whose body is enumerated, not an entity itself.
+    assert node.node_type == "method"
+    assert node.signature is not None and "fn next" in node.signature
 
 
 def test_is_available_false_for_unsupported_language():
@@ -274,7 +278,7 @@ def test_extractor_populates_structural_metadata():
     assert len(units) == 1
     u = units[0]
     assert u.unit_kind == "ast_region"
-    assert u.structural_metadata.get("enclosing_node_type") == "function_definition"
+    assert u.structural_metadata.get("enclosing_node_type") == "function"
     assert u.structural_metadata.get("enclosing_node_signature") == "def greet():"
     assert "ast_fingerprint_base_outside" in u.structural_metadata
     assert u.enclosing_symbol == "def greet():"
@@ -321,5 +325,5 @@ def test_context_builder_surfaces_enclosing_node():
     )
     unit = ex.extract_file_units("app.py", 1, "s")[0]
     ctx = ContextBuilder(context_lines=5).build(unit)
-    assert ctx.structural_view.get("enclosing_node_type") == "function_definition"
+    assert ctx.structural_view.get("enclosing_node_type") == "function"
     assert ctx.structural_view.get("enclosing_node_signature") == "def greet():"

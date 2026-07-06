@@ -239,9 +239,11 @@ def test_audit_render_human_readable():
     assert "foo" in r and "3 commit" in r and "abcdef12"[:8] in r
 
 
-def test_evolution_degrades_when_tree_sitter_unavailable(monkeypatch):
-    """When tree-sitter is unavailable, build_evolution_chains returns []. No crash."""
-    monkeypatch.setattr(structural, "_make_parser", lambda lang: None)
+def test_evolution_degrades_when_parser_unavailable(monkeypatch):
+    """When the structural parser is unavailable, build_evolution_chains returns
+    []. No crash. The guardian gates on is_available before enumerating."""
+    # Force is_available False (the capability probe the guardian checks first).
+    monkeypatch.setattr(structural, "is_available", lambda lang: False)
     a = _evol_files("def foo():\n    return 1\n")
     b = _evol_files("def foo():\n    return 2\n")
     chains = build_evolution_chains({"A": a, "B": b}, ["A", "B"], "python")
