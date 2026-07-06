@@ -201,6 +201,117 @@ def _critic_failure(
     )
 
 
+# Cosine similarity floor (embeddings survey §5): above this, two critic flags
+# are treated as semantically EQUIVALENT (one is dropped, the more specific
+# kept). 0.90 is the survey's "same issue, different wording" threshold.
+_CRITIC_DEDUP_EQUIVALENT = 0.90
+# Below this, two flags address DIFFERENT failure modes (keep both). The band
+# 0.60–0.90 is "related but distinct" (keep both, specificity-ordered).
+_CRITIC_DEDUP_DIFFERENT = 0.60
+
+
+def _all_critic_warnings(validation: VerificationResult) -> list[VerificationWarning]:
+    """Every ``verifier_model*`` warning (the full PoLL jury output).
+
+    PoLL jury (§2.1) emits up to N ``verifier_model*`` warnings — one per jury
+    member. ``_critic_warning`` returns only the FIRST; this returns the full
+    list so :func:`_dedupe_critic_warnings` can merge equivalent flags before
+    they dilute the plan-first step's attention.
+    """
+    return [
+        w for w in validation.warnings
+        if w.validator == "verifier_model" or w.validator.startswith("verifier_model_")
+    ]
+
+
+def _critic_warning_text(w: VerificationWarning) -> str:
+    """A single string fingerprint of a critic warning for embedding comparison.
+
+    Concatenates the message + the dropped_units detail (the most specific
+    signal), so two flags naming the same dropped entity under different wording
+    embed as equivalent. Pure; no network.
+    """
+    parts = [w.message]
+    du = w.detail.get("dropped_units") if w.detail else None
+    if du:
+        parts.append(", ".join(f"{k} {n}" for k, n in du))
+    return " ".join(parts)
+
+
+def _dedupe_critic_warnings(
+    warnings: list[VerificationWarning], embedder: object | None,
+) -> list[VerificationWarning]:
+    """Deduplicate PoLL-jury critic flags by embedding similarity (survey §5).
+
+    The dual-critic jury may emit two flags for the SAME issue with different
+    wording — feeding both to the plan-first step dilutes the model's attention
+    across two semantically-identical instructions. This merges them:
+
+    - cosine ≥ 0.90 → equivalent: keep the MORE SPECIFIC one (longer detail /
+      more dropped_units), drop the other.
+    - 0.60–0.90 → related-but-distinct: keep both, order by specificity.
+    - < 0.60 → different: keep both in original order.
+
+    A single batch embed of the (≤ handful of) short flag texts. ``embedder=None``
+    returns the list unchanged (the prior behavior — first-found only via
+    ``_critic_warning``). Never raises; a failed embed returns the input list.
+    Survivors are ordered by specificity (most specific first) so the plan-first
+    step sees the most actionable flag before the supporting ones.
+    """
+    if len(warnings) < 2 or embedder is None:
+        return list(warnings)
+    texts = [_critic_warning_text(w) for w in warnings]
+    try:
+        vecs = embedder.embed(texts)  # type: ignore[attr-defined]
+        if len(vecs) != len(warnings):
+            return list(warnings)
+    except Exception:  # noqa: BLE001 - dedup is best-effort
+        return list(warnings)
+
+    def _specificity(w: VerificationWarning) -> int:
+        du = w.detail.get("dropped_units") if w.detail else None
+        return (len(du) if du else 0) + len(w.message)
+
+    # Greedy equivalence merge: for each pair at cosine ≥ 0.90, drop the less
+    # specific. Survivors are those never dropped.
+    dropped: set[int] = set()
+    for i in range(len(warnings)):
+        if i in dropped:
+            continue
+        for j in range(i + 1, len(warnings)):
+            if j in dropped:
+                continue
+            if _critic_cosine(vecs[i], vecs[j]) >= _CRITIC_DEDUP_EQUIVALENT:
+                if _specificity(warnings[j]) > _specificity(warnings[i]):
+                    dropped.add(i)
+                    break
+                else:
+                    dropped.add(j)
+    survivors = [i for i in range(len(warnings)) if i not in dropped]
+    # Order by specificity descending (stable for ties) so the most actionable
+    # flag leads the plan-first feedback.
+    survivors.sort(key=lambda i: -_specificity(warnings[i]))
+    return [warnings[i] for i in survivors]
+
+
+def _critic_cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two equal-length vectors (local; never imports)."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0.0 or nb <= 0.0:
+        return 0.0
+    import math
+
+    return dot / (math.sqrt(na) * math.sqrt(nb))
+
+
 def _dropped_units_for(
     unit: ConflictUnit, cand: CandidateResolution
 ) -> list[tuple[str, str]]:
@@ -589,7 +700,10 @@ class Orchestrator:
         # the embedding rename tier. Reuses the same embeddings endpoint/model
         # as the retriever; built only when memory is enabled. The adapter's
         # embedding tier is best-effort and degrades to pure-deterministic on any
-        # failure, so a missing endpoint never breaks matching.
+        # failure, so a missing endpoint never breaks matching. The same client
+        # is reused for critic-feedback deduplication (survey §5) and drift
+        # detection (survey §6) — one connection, one model, consistent vectors.
+        self._shared_embedder: object | None = None
         if config.memory.enabled:
             try:
                 from capybase.adapters import structural
@@ -598,7 +712,8 @@ class Orchestrator:
                 emb_cfg = config.model
                 if config.memory.embeddings_model:
                     emb_cfg = emb_cfg.model_copy(update={"model": config.memory.embeddings_model})
-                structural.set_entity_embedder(OpenAIEmbeddingsClient(emb_cfg))
+                self._shared_embedder = OpenAIEmbeddingsClient(emb_cfg)
+                structural.set_entity_embedder(self._shared_embedder)
             except Exception:  # noqa: BLE001 - semantic matching is best-effort
                 pass
         self.resolution_engine = resolution_engine or ResolutionEngine(config.model)
@@ -4282,19 +4397,36 @@ class Orchestrator:
             # sees on the next attempt carries the critic's concrete feedback
             # ("may drop replayed side intent"). Without this, a critic-driven
             # retry regenerated with NO feedback (the warning was dropped at the
-            # old `hard_failures or None` seed), so the model kept reproducing the
-            # same dropped-side merge — the A/B's 30-min convergence loop.
-            critic_warning = _critic_warning(validation)
+            # old `hard_failures or None` seed), so the model kept reproducing
+            # the same dropped-side merge — the A/B's 30-min convergence loop.
+            #
+            # Critic-feedback deduplication (embeddings survey §5): the PoLL jury
+            # may emit multiple verifier_model* flags; dedupe by embedding
+            # similarity so two equivalent flags (same issue, different wording)
+            # don't dilute the plan-first step's attention. All surviving flags
+            # seed the repair prompt (not just the first). Best-effort: no embedder
+            # → first-found only (the prior behavior).
+            all_critic = _all_critic_warnings(validation)
+            deduped_critic = _dedupe_critic_warnings(all_critic, self._shared_embedder)
+            if all_critic and len(deduped_critic) != len(all_critic):
+                self.journal.emit(
+                    "critic_dedup",
+                    {"input_count": len(all_critic),
+                     "survivor_count": len(deduped_critic),
+                     "dropped_count": len(all_critic) - len(deduped_critic)},
+                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                )
+            critic_warning = deduped_critic[0] if deduped_critic else None
             failures = list(validation.hard_failures)
             if critic_warning is not None:
-                # Enrich with the deterministic dropped-units list (survey §5.1
-                # quantitative): name the SPECIFIC functions/classes the side
-                # added that the resolution dropped, so the retry prompt gives
-                # the model exact targets ("reintroduce function `foo`") rather
-                # than a vague "you dropped a side". Falls back to the critic's
-                # plain message when tree-sitter can't enumerate entities.
+                # Enrich each surviving critic flag with the deterministic
+                # dropped-units list (survey §5.1 quantitative): name the SPECIFIC
+                # functions/classes the side added that the resolution dropped, so
+                # the retry prompt gives the model exact targets ("reintroduce
+                # function `foo`") rather than a vague "you dropped a side".
                 dropped = _dropped_units_for(unit, cand)
-                failures.append(_critic_failure(critic_warning, dropped))
+                for cw in deduped_critic:
+                    failures.append(_critic_failure(cw, dropped))
             # Lift actionable soft-validator warnings (intent_coverage,
             # unattributed_code, both_sides_represented, ...) into the failure
             # list so they reach the repair prompt too. Without this, a
