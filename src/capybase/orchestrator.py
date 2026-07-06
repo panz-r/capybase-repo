@@ -716,8 +716,13 @@ class Orchestrator:
                 from capybase.memory.embeddings import OpenAIEmbeddingsClient
 
                 emb_cfg = config.model
+                updates: dict = {}
                 if config.memory.embeddings_model:
-                    emb_cfg = emb_cfg.model_copy(update={"model": config.memory.embeddings_model})
+                    updates["model"] = config.memory.embeddings_model
+                if config.memory.embeddings_base_url:
+                    updates["base_url"] = config.memory.embeddings_base_url
+                if updates:
+                    emb_cfg = emb_cfg.model_copy(update=updates)
                 self._shared_embedder = OpenAIEmbeddingsClient(emb_cfg)
                 structural.set_entity_embedder(self._shared_embedder)
             except Exception:  # noqa: BLE001 - semantic matching is best-effort
@@ -2012,11 +2017,16 @@ class Orchestrator:
         try:
             from capybase.memory.embeddings import OpenAIEmbeddingsClient
 
-            # The embeddings model: explicit config, else reuse the completion
-            # model name (a single-model llama-server serving both).
+            # The embeddings model/base_url: explicit config, else reuse the
+            # completion model's (a single-model llama-server serving both).
             emb_cfg = config.model
+            updates: dict = {}
             if config.memory.embeddings_model:
-                emb_cfg = emb_cfg.model_copy(update={"model": config.memory.embeddings_model})
+                updates["model"] = config.memory.embeddings_model
+            if config.memory.embeddings_base_url:
+                updates["base_url"] = config.memory.embeddings_base_url
+            if updates:
+                emb_cfg = emb_cfg.model_copy(update=updates)
             client = OpenAIEmbeddingsClient(emb_cfg)
             # Persisted vector cache (embeddings survey §1): best-effort; any
             # failure degrades to None (re-embed each run, the prior behavior).
@@ -2728,6 +2738,9 @@ class Orchestrator:
             self._history_service = self._build_history_service(self._history_plan)
             self._branch_intent = self._build_branch_intent(self._history_plan)
             self.context_builder.history_service = self._history_service
+            # Drift anchor (embeddings survey §6): set it here too so the run()
+            # workflow (without a prior rebase() call) still measures drift.
+            self._set_drift_anchor()
         except Exception as exc:  # noqa: BLE001 - advisory
             self.journal.emit(
                 "history_unavailable", {"reason": f"lazy build failed: {exc}"},

@@ -590,6 +590,13 @@ class MemoryConfig(BaseModel):
     # completion model on a server serving both). Leave empty to reuse the
     # completion model name; calibrate records the working model in the profile.
     embeddings_model: str = ""
+    # The base_url for the embeddings endpoint, when it differs from the
+    # completion model's (e.g. completion on a localhost LM Studio, embeddings on
+    # a remote server). Empty (default) reuses the completion model's base_url —
+    # the common single-server case. When set, only the embeddings client uses it;
+    # the completion model, the verifier critic, and the block-capture decision
+    # calls still hit config.model.base_url.
+    embeddings_base_url: str = ""
     retriever_k: int = 3
     # Minimum experiences before retrieval is attempted (avoid noisy few-shot
     # from a near-empty corpus).

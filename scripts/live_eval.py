@@ -243,6 +243,32 @@ def _config_for(scenario: Scenario, *, critic_enabled: bool = True) -> Config:
     # A/B harness toggles this to measure the critic's contribution.
     cfg.validation.enable_verifier_model = critic_enabled
     cfg.validation.verifier_severity = "warning"
+    # Embeddings features (embeddings survey): env-gated so the default live-eval
+    # behavior is unchanged. Set CAPYBASE_EMBED=1 to enable memory + RAG +
+    # semantic entity matching + critic dedup + drift detection. The embeddings
+    # endpoint defaults to the completion endpoint; override separately with
+    # CAPYBASE_EMBED_BASE_URL when they differ (e.g. completion on localhost,
+    # embeddings on a remote server). CAPYBASE_EMBED_MODEL selects the embedding
+    # model id (defaults to "embed").
+    if os.environ.get("CAPYBASE_EMBED", "").strip() in ("1", "true", "yes", "on"):
+        cfg.memory.enabled = True
+        cfg.future.enable_rag = True
+        cfg.memory.retriever = "hybrid"  # BM25 + dense fusion
+        cfg.memory.embeddings_model = os.environ.get("CAPYBASE_EMBED_MODEL", "embed")
+        cfg.memory.embeddings_base_url = os.environ.get(
+            "CAPYBASE_EMBED_BASE_URL", ""
+        )  # empty → reuse completion base_url
+        cfg.memory.enable_drift_detection = True
+        # A SHARED experience store across all scenarios (each scenario builds a
+        # fresh temp repo, so the default repo-relative store would be empty).
+        # Points at one absolute seed corpus so retrieval has examples to surface.
+        seed = Path(os.environ.get(
+            "CAPYBASE_MEMORY_DIR", "/tmp/capybase-live/memory"
+        ))
+        seed.mkdir(parents=True, exist_ok=True)
+        cfg.memory.store_path = str(seed / "experiences.jsonl")
+        cfg.memory.vector_cache_path = str(seed / "vectors")
+        cfg.memory.min_examples_for_retrieval = 1  # live eval corpora are small
     return cfg
 
 
