@@ -280,6 +280,33 @@ def _soft_warning_failures(validation: VerificationResult) -> list[VerificationF
     return out
 
 
+def _invalidate_pycache(repo_root: "str | Path", path: str) -> None:
+    """Remove stale ``__pycache__`` bytecode for ``path`` (a .py file).
+
+    Python's pyc validity check keys on the source file's mtime. Two writes to
+    the same .py within one filesystem mtime tick (sub-second on most filesystems)
+    leave a STALE .pyc: Python sees the cached bytecode as fresh and skips
+    recompilation, importing the OLD content. This corrupts the test-gated side
+    picker (which rewrites the conflicted .py with each side's content in quick
+    succession) and any test gate that runs shortly after a worktree write.
+
+    Removing the file's ``__pycache__`` dir forces a recompile on the next
+    import. No-op for non-.py paths, missing dirs, or any error (never blocks a
+    rebase on a cache-cleanup failure).
+    """
+    if not path.endswith(".py"):
+        return
+    try:
+        from pathlib import Path
+        import shutil
+
+        d = Path(repo_root) / Path(path).parent / "__pycache__"
+        if d.is_dir():
+            shutil.rmtree(d, ignore_errors=True)
+    except Exception:  # noqa: BLE001 - cache invalidation must never break a run
+        pass
+
+
 def _attribute_whole_file_failure(
     failures: list, units: list[ConflictUnit]
 ) -> int:
@@ -1596,6 +1623,14 @@ class Orchestrator:
             # Write the spliced file so the test gate runs against it.
             spliced = splice_resolution(unit.original_worktree_text, unit.marker_span, side_text)
             self.git.write_worktree_file(unit.path, spliced.encode("utf-8"))
+            # Invalidate stale Python bytecode after writing: each probe rewrites
+            # the conflicted .py with a different side's content, and two writes
+            # within the same mtime tick (sub-second) leave a STALE .pyc from the
+            # previous probe. The test gate would then import the old bytecode
+            # (e.g. PORT=7070 from the replayed-side probe) and fail on the new
+            # source (PORT=9090) — a false escalation. Clearing the file's
+            # __pycache__ forces a recompile on the next import.
+            _invalidate_pycache(self.git.repo, unit.path)
             probe = StepResult(step_index=self.step)
             probe.units_by_path[unit.path] = [unit]
             self.journal.emit(
