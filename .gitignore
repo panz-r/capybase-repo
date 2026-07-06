@@ -34,3 +34,4 @@ venv/
 # scripts/fetch_mergeconflict_datasets.py and read by tests/realworld_loader.py.
 # Tests skip cleanly when these are empty (data not downloaded).
 # (Contents are ignored by each dir's own .gitignore; listed here for visibility.)
+uv.lock
