@@ -33,11 +33,21 @@ class ContextBuilder:
         max_related_snippets: int = 3,
         max_snippet_chars: int = 400,
         history_service: "HistoryQueryService | None" = None,
+        repair_retriever: "Retriever | None" = None,
+        repair_retriever_k: int = 1,
     ) -> None:
         self.context_lines = context_lines
         self.retriever = retriever
         self.retriever_k = retriever_k
         self.min_examples = min_examples
+        # Repair-path retrieval (embeddings survey §2): a strictly-filtered
+        # retriever (QualityFilteredRetriever) used ONLY to populate
+        # ContextBundle.repair_retrieved_examples for the CEGIS repair prompt.
+        # None → the repair prompt gets no few-shot (the prior behavior). Top-1
+        # by default (a single high-trust anchor; more dilutes the surgical-fix
+        # signal on the broken candidate).
+        self.repair_retriever = repair_retriever
+        self.repair_retriever_k = repair_retriever_k
         self.use_enclosing_as_primary = use_enclosing_as_primary
         self.canonicalize_context = canonicalize_context
         # Cross-file dependency slicing (survey §5.3 Rover / §1.2): resolve the
@@ -177,6 +187,24 @@ class ContextBuilder:
                 # Stash the error so the orchestrator can journal an advisory
                 # (#idea 4); the builder has no journal access itself.
                 self.last_retrieval_error = str(exc)
+        # Repair-path retrieval (embeddings survey §2): a strictly-filtered top-1
+        # example for the CEGIS repair prompt. Separate from the fresh-generation
+        # retrieval above — higher score floor + retry-count quality filter (a
+        # misleading example costs more when the model is already fixing a specific
+        # error; a merge that took many retries may have converged by luck). Best-
+        # effort: any failure yields an empty list (the repair prompt omits the
+        # few-shot block, exactly as when no retriever is configured).
+        repair_retrieved: list = []
+        if self.repair_retriever is not None:
+            try:
+                repair_query = " ".join([unit.base.text, unit.current.text, unit.replayed.text])
+                repair_scored = self.repair_retriever.retrieve_scored(
+                    repair_query, k=self.repair_retriever_k, language=unit.language,
+                    path=unit.path,
+                )
+                repair_retrieved = [ex for _, ex in repair_scored][: self.repair_retriever_k]
+            except Exception:  # noqa: BLE001 - repair retrieval is best-effort
+                repair_retrieved = []
         # Cross-file dependency slicing (survey §5.3): resolve definitions of
         # symbols referenced in the EDITED sides (current + replayed). These are
         # the dependencies the merged result must stay consistent with — helpers,
@@ -204,6 +232,7 @@ class ContextBuilder:
             side_summaries=side_summaries,
             related_snippets=related,
             retrieved_examples=retrieved,
+            repair_retrieved_examples=repair_retrieved,
             retrieval_scores=retrieval_scores,
             retrieval_explanations=retrieval_explanations,
             token_estimate=est,

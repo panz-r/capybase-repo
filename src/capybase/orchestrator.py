@@ -556,6 +556,22 @@ class Orchestrator:
                 str(self.git.repo), config.memory.store_path
             )
             retriever = self._build_retriever(config)
+        # Repair-path retrieval (embeddings survey §2): a strictly-filtered view
+        # of the same retriever for the CEGIS repair prompt — higher score floor
+        # + retry-count quality filter (survey §1 index-quality rule). Built
+        # only when memory is enabled and a base retriever exists; None otherwise
+        # (the repair prompt gets no few-shot, the prior behavior). The wrapper
+        # over-fetches from the base retriever so the filter still yields k.
+        repair_retriever = None
+        if retriever is not None and self.memory_store is not None:
+            from capybase.memory.retriever import QualityFilteredRetriever
+
+            repair_retriever = QualityFilteredRetriever(
+                retriever,
+                self.memory_store,
+                max_retries=config.memory.repair_retrieval_max_retries,
+                min_score=config.memory.repair_retrieval_min_similarity,
+            )
         self.context_builder = ContextBuilder(
             config.policy.context_lines,
             retriever=retriever,
@@ -566,6 +582,7 @@ class Orchestrator:
             cross_file_slice=config.structural.cross_file_slice,
             slice_search_globs=config.structural.slice_search_globs,
             slice_repo_root=str(self.git.repo),
+            repair_retriever=repair_retriever,
         )
         self.resolution_engine = resolution_engine or ResolutionEngine(config.model)
         self.verification = VerificationEngine.default(

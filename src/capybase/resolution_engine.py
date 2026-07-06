@@ -952,10 +952,32 @@ def build_repair_prompt(
     few-shot/deps/anchor), so ``budget`` is largely a no-op here — the sides
     and candidate are protected and never trimmed. Accepted for signature
     symmetry with the other prompt builders.
+
+    Repair-path few-shot (embeddings survey §2): a SINGLE high-trust retrieved
+    example (``context.repair_retrieved_examples``, top-1, quality-filtered) is
+    surfaced as a one-shot anchor after the validator feedback. This is the A/B
+    failure site where the model reproduces the same dropped-side merge across
+    retries; one concrete prior resolution gives it a pattern to follow instead
+    of regenerating the same mistake. Kept to top-1 (not top-k like fresh-gen)
+    so the surgical-fix signal on the broken candidate is not diluted. Empty
+    when no retriever, the corpus is too small, or nothing clears the stricter
+    filter — the block is omitted, preserving the prior behavior.
     """
     feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
     cur_lines, _base_lines, rep_lines = _prompt_sides(unit)
     side_intent = _side_intent_block(unit)
+    # Repair few-shot anchor (embeddings survey §2): top-1 quality-filtered
+    # example. Rendered as a compact one-shot AFTER the feedback and BEFORE the
+    # plan-first step so the model has a concrete resolution pattern in mind.
+    repair_anchor = ""
+    if context.repair_retrieved_examples:
+        ex = context.repair_retrieved_examples[0]
+        repair_anchor = (
+            "A SIMILAR conflict was resolved correctly before (match this style for the fix):\n"
+            f"  CURRENT: {ex.current}\n"
+            f"  REPLAYED: {ex.replayed}\n"
+            f"  RESOLVED: {ex.resolved}\n\n"
+        )
     # Self-correction plan step (survey §3.3): force the model to reason about
     # WHY each failure happened and WHAT it will change BEFORE emitting the fix,
     # in the same response (no extra round-trip). The A/B showed the model
@@ -984,7 +1006,7 @@ YOUR PREVIOUS ATTEMPT (needs fixing):
 ### validator feedback (fix these specific issues)
 {feedback}
 
-FIRST, reason about the fix: for each failure above, state in one short sentence
+{repair_anchor}FIRST, reason about the fix: for each failure above, state in one short sentence
 WHY it happened and the specific edit you will make. Only AFTER you have a
 concrete plan, emit the correction.
 

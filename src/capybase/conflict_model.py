@@ -200,6 +200,14 @@ class ContextBundle(BaseModel):
     side_summaries: dict[str, str] = Field(default_factory=dict)
     related_snippets: list[RelatedSnippet] = Field(default_factory=list)
     retrieved_examples: list[HistoricalExample] = Field(default_factory=list)
+    # Repair-path few-shot (embeddings survey §2): a STRICTLY-filtered subset of
+    # retrieved_examples for the CEGIS repair/retry prompt. The repair path is the
+    # A/B failure site; a single high-trust anchor there closes the loop where the
+    # model reproduces the same dropped-side merge. Populated by the context
+    # builder via a QualityFilteredRetriever (retry-count + higher score floor);
+    # empty when no retriever, the corpus is too small, or nothing clears the
+    # stricter filter. Top-1 (not top-k) to preserve the surgical-fix signal.
+    repair_retrieved_examples: list[HistoricalExample] = Field(default_factory=list)
     # Confidence scores of the retrieved examples (cosine for embedding
     # retrieval, BM25 for lexical), parallel to ``retrieved_examples``. Empty
     # when no retrieval ran or the retriever doesn't expose scores. Surfaced so

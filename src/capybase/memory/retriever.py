@@ -757,6 +757,116 @@ class HybridRetriever:
             out.append((expl, ex))
         return out
 
+
+# ---------------------------------------------------------------------------
+# QualityFilteredRetriever (embeddings survey §1 index-quality rule, §2 repair)
+# ---------------------------------------------------------------------------
+
+
+class QualityFilteredRetriever:
+    """Wrap a retriever to apply a retry-count + score-floor quality filter.
+
+    The repair/retry path (embeddings survey §2) is the A/B failure site where
+    the model reproduces the same dropped-side merge. Injecting a retrieved
+    example helps ONLY if the example is trustworthy: the survey's §1 index-
+    quality rule excludes merges that took many retries to converge (they may
+    have converged by luck, not a generalizable strategy). This wrapper looks up
+    each retrieved example's ``retry_count`` in the store and drops any above
+    ``max_retries`` (``-1`` disables), then applies a higher score floor than
+    fresh-generation (a misleading example costs more when the model is already
+    fixing a specific error).
+
+    Implements the ``Retriever`` Protocol by delegation: it calls the wrapped
+    retriever with an OVER-fetch (``k * 3``) so the filter still has ``k``
+    survivors after pruning. The retry_count lookup is O(retrieved) against an
+    in-memory dict built once per call from ``store.accepted()``.
+    """
+
+    def __init__(
+        self, inner: "Retriever", store: "ExperienceStore",
+        *, max_retries: int = 2, min_score: float = 0.0,
+    ) -> None:
+        self.inner = inner
+        self.store = store
+        self.max_retries = int(max_retries)
+        self.min_score = float(min_score)
+
+    def _retry_count_by_summary(self) -> dict[str, int]:
+        """Map ``example.summary`` → ``retry_count`` for quality filtering.
+
+        ``summary`` (``{path}:{unit_id}``) is the stable per-example key used
+        across the memory layer; it disambiguates experiences when the same
+        content appears in multiple sessions.
+        """
+        out: dict[str, int] = {}
+        for exp in self.store.accepted():
+            out.setdefault(exp.example.summary, exp.retry_count)
+        return out
+
+    def _filtered(
+        self, scored: list[tuple[float, HistoricalExample]], k: int,
+    ) -> list[tuple[float, HistoricalExample]]:
+        if not scored:
+            return []
+        rc = self._retry_count_by_summary() if self.max_retries >= 0 else {}
+        out: list[tuple[float, HistoricalExample]] = []
+        for score, ex in scored:
+            if score < self.min_score:
+                continue
+            if self.max_retries >= 0:
+                if rc.get(ex.summary, 1 << 30) > self.max_retries:
+                    continue
+            out.append((score, ex))
+            if len(out) >= k:
+                break
+        return out
+
+    def retrieve_scored(
+        self, query: str, *, k: int = 3, language: str | None = None,
+        path: str | None = None,
+    ) -> list[tuple[float, HistoricalExample]]:
+        # Over-fetch so the quality filter still yields k survivors.
+        got = self.inner.retrieve_scored(query, k=max(k * 3, k), language=language)  # type: ignore[attr-defined]
+        return self._filtered(got, k)
+
+    def retrieve(
+        self, query: str, *, k: int = 3, language: str | None = None,
+        path: str | None = None,
+    ) -> list[HistoricalExample]:
+        return [ex for _, ex in self.retrieve_scored(query, k=k, language=language)]
+
+    def retrieve_explained(
+        self, query: str, *, k: int = 3, language: str | None = None,
+        path: str | None = None, region_kind: str | None = None,
+        conflict_shape: str | None = None,
+    ) -> list[tuple[RetrievalExplanation, HistoricalExample]]:
+        try:
+            got = self.inner.retrieve_explained(  # type: ignore[attr-defined]
+                query, k=max(k * 3, k), language=language, path=path,
+                region_kind=region_kind, conflict_shape=conflict_shape,
+            )
+        except Exception:  # noqa: BLE001 - delegate to scored path
+            scored = self.retrieve_scored(query, k=k, language=language)
+            return [(RetrievalExplanation(score=s, prior_outcome=""), ex) for s, ex in scored]
+        if not got:
+            return []
+        rc = self._retry_count_by_summary() if self.max_retries >= 0 else {}
+        out: list[tuple[RetrievalExplanation, HistoricalExample]] = []
+        for expl, ex in got:
+            if expl.score < self.min_score:
+                continue
+            if self.max_retries >= 0 and rc.get(ex.summary, 1 << 30) > self.max_retries:
+                continue
+            out.append((expl, ex))
+            if len(out) >= k:
+                break
+        return out
+
+    def refresh(self) -> None:
+        fn = getattr(self.inner, "refresh", None)
+        if fn is not None:
+            fn()
+
     def refresh(self) -> None:
         """Force both sub-retrievers to rebuild their indexes/caches."""
         self.lexical.refresh()
