@@ -95,6 +95,69 @@ def test_both_sides_present_passes():
     assert res.features["dropped_a_side"] is False
 
 
+# ---------------------------------------------------------------------------
+# Value-resolution conflicts: a one-sided merge of a divergent value is CORRECT
+# (the base operation is preserved; only the value/expression is resolved). The
+# both-sides-represented + preservation-heuristic validators must NOT flag it.
+# ---------------------------------------------------------------------------
+
+
+def _unit_with_value_resolution(base, current, replayed, worktree, vr_feature):
+    """A unit whose conflict_features carry a value_resolution classification
+    (as the real extractor populates it)."""
+    unit = _unit(base, current, replayed, worktree)
+    unit.structural_metadata["conflict_features"] = {"value_resolution": vr_feature}
+    return unit
+
+
+def test_value_resolution_return_one_sided_merge_passes():
+    """The gemma case: return 'hi' vs return 'howdy' (base return 'hello'). A
+    one-sided merge (pick current) is correct — the return statement is
+    preserved, only the value was resolved. Neither validator flags it."""
+    worktree = (
+        "def greet():\n<<<<<<< H\n    return 'hi'\n=======\n"
+        "    return 'howdy'\n>>>>>>> b\n"
+    )
+    unit = _unit_with_value_resolution(
+        "def greet():\n    return 'hello'\n", "    return 'hi'",
+        "    return 'howdy'", worktree, vr_feature="return",
+    )
+    cand = _candidate("    return 'hi'")  # picks current — correct value resolution
+    res = _engine().verify(unit, cand)
+    assert not any(
+        w.validator in ("both_sides_represented", "preservation_heuristic")
+        for w in res.warnings
+    ), [w.validator for w in res.warnings]
+    # The value-resolution classification rides the feature spine (the validator
+    # also sets a boolean flag; either signal confirms the fast path fired).
+    assert res.features.get("value_resolution")
+
+
+def test_value_resolution_assignment_one_sided_merge_passes():
+    """a = 5 vs a = f(x) - 2 (base a = 1): both assign to `a`; picking one side's
+    RHS is a correct resolution. The validators must not flag the dropped side."""
+    worktree = "a = 1\n<<<<<<< H\na = 5\n=======\na = f(x) - 2\n>>>>>>> b\n"
+    unit = _unit_with_value_resolution(
+        "a = 1", "a = 5", "a = f(x) - 2", worktree, vr_feature="assignment:a",
+    )
+    cand = _candidate("a = 5")  # picks current's RHS
+    res = _engine().verify(unit, cand)
+    assert not any(
+        w.validator in ("both_sides_represented", "preservation_heuristic")
+        for w in res.warnings
+    )
+
+
+def test_value_resolution_absent_still_enforces_both_sides():
+    """When value_resolution is NOT set (genuine distinct additions), the
+    validators apply their existing token-set pressure unchanged."""
+    worktree = "x\n<<<<<<< H\ncur\n=======\nrep\n>>>>>>> b\n"
+    unit = _unit_with_value_resolution("x", "cur", "rep", worktree, vr_feature="")
+    cand = _candidate("cur")  # drops replayed — should be flagged
+    res = _engine().verify(unit, cand)
+    assert any(w.validator == "both_sides_represented" for w in res.warnings)
+
+
 def test_pure_deletion_side_no_false_positive():
     """A side that only DELETED base content (no additions) imposes no
     requirement — representing "nothing new" is trivially satisfied."""
@@ -289,6 +352,31 @@ def test_verifier_flags_dropped_side_as_warning_by_default(verifier_critic_enabl
     assert res.features["verifier_preserves_replayed"] is False
     # default severity is warning → not a hard failure
     assert not any(f.validator == "verifier_model" for f in res.hard_failures)
+
+
+def test_verifier_value_resolution_overrides_dropped_side(verifier_critic_enabled):
+    """A one-sided value merge (return 'hi' picked over 'howdy') where the critic
+    flags the dropped replayed side is OVERRIDDEN to a pass: for a value
+    resolution, picking either side's value is correct (the base operation is
+    preserved). The critic doesn't fight a correct value resolution."""
+    client = FakeCriticClient(
+        '{"preserves_current": true, "preserves_replayed": false, '
+        '"reason": "replayed value dropped", "confidence": 0.9}'
+    )
+    engine = _verifier_engine(client, severity="warning")
+    worktree = (
+        "def greet():\n<<<<<<< H\n    return 'hi'\n=======\n"
+        "    return 'howdy'\n>>>>>>> b\n"
+    )
+    unit = _unit(
+        "def greet():\n    return 'hello'\n", "    return 'hi'",
+        "    return 'howdy'", worktree,
+    )
+    unit.structural_metadata["conflict_features"] = {"value_resolution": "return"}
+    res = engine.verify(unit, _candidate("    return 'hi'"))  # picks current
+    # The override relaxes the dropped-side verdict to a pass — no warning.
+    assert not any(w.validator == "verifier_model" for w in res.warnings)
+    assert res.features["verifier_checked"] is True
 
 
 def test_verifier_hard_rejects_when_severity_error(verifier_critic_enabled):

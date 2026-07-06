@@ -255,6 +255,54 @@ def git_backend(repo: Path) -> GitBackend:
 
 
 @pytest.fixture
+def distinct_additions_repo(repo: Path) -> dict:
+    """A repo stopped at a UU conflict where each side ADDS a DISTINCT line.
+
+    Unlike ``conflicted_repo`` (a same-line value conflict where picking a side
+    is correct), both sides here add genuinely-distinct content that must
+    coexist: current adds ``cache_on = True``, replayed adds ``metrics_on = True``.
+    A one-sided merge DROPS a real addition — the both-sides-represented validator
+    (token-set) and the critic SHOULD flag it. The additions use distinct
+    identifiers (no shared tokens like ``import``) so the token-set check reliably
+    catches a drop. Used by tests that need a non-value-resolution conflict (where
+    blocking a dropped side is correct behavior).
+    """
+    base = "config_loaded = True\n"
+    upstream = "config_loaded = True\ncache_on = True\n"      # CURRENT adds cache_on
+    replayed = "config_loaded = True\nmetrics_on = True\n"   # REPLAYED adds metrics_on
+
+    (repo / "app.py").write_text(base)
+    git(repo, "add", "app.py")
+    git(repo, "commit", "-q", "-m", "base")
+
+    git(repo, "branch", "feat")
+    git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text(replayed)
+    git(repo, "add", "app.py")
+    git(repo, "commit", "-q", "-m", "replayed: add metrics_on")
+
+    git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text(upstream)
+    git(repo, "add", "app.py")
+    git(repo, "commit", "-q", "-m", "upstream: add cache_on")
+
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected a rebase conflict"
+    return {
+        "repo": repo,
+        "path": "app.py",
+        "base": base,
+        "current": upstream,
+        "replayed": replayed,
+        # A correct merge carries BOTH additions; a one-sided merge drops one.
+        "correct_merged": "config_loaded = True\ncache_on = True\nmetrics_on = True",
+        "current_only": "config_loaded = True\ncache_on = True",  # drops replayed (metrics_on)
+    }
+
+
+
+@pytest.fixture
 def rust_conflicted_repo(repo: Path) -> dict:
     """A repo stopped at a UU rebase conflict over ``src/config.rs``.
 

@@ -211,6 +211,22 @@ class PreservationHeuristicValidator:
     name = "preservation_heuristic"
 
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        # Value-resolution fast path: when both sides preserve the same statement
+        # shape and only a value diverged (a return, an assignment to the same
+        # target), a verbatim copy of one side is the CORRECT resolution — the
+        # base operation is preserved and the value is resolved. Don't flag it.
+        cf = ctx.unit.structural_metadata.get("conflict_features")
+        if isinstance(cf, dict) and cf.get("value_resolution"):
+            return VerificationCheckResult(
+                name=self.name,
+                passed=True,
+                severity="warning",
+                message="value-resolution conflict: one side's value selected (base op preserved)",
+                features={
+                    "copied_one_side": False,
+                    "value_resolution": True,
+                },
+            )
         cur = ctx.unit.current.text.strip()
         rep = ctx.unit.replayed.text.strip()
         resolved = ctx.candidate.resolved_text.strip()
@@ -285,6 +301,25 @@ class BothSidesRepresentedValidator:
         return set(re.findall(r"\w+", text or ""))
 
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        # Value-resolution fast path: when both sides preserve the same statement
+        # shape and only a value diverged (a return, an assignment to the same
+        # target), a one-sided merge (picking either side's value) is the correct
+        # resolution — the base operation is preserved. The token-set "both sides
+        # represented" pressure is wrong here (two return values or two assignments
+        # to the same target don't compose), so don't flag a dropped side.
+        cf = ctx.unit.structural_metadata.get("conflict_features")
+        if isinstance(cf, dict) and cf.get("value_resolution"):
+            return VerificationCheckResult(
+                name=self.name,
+                passed=True,
+                severity="warning",
+                message="value-resolution conflict: base operation preserved, value/expression resolved",
+                detail={"value_resolution": cf["value_resolution"]},
+                features={
+                    "dropped_a_side": False,
+                    "value_resolution": True,
+                },
+            )
         base = self._token_set(ctx.unit.base.text)
         cur = self._token_set(ctx.unit.current.text)
         rep = self._token_set(ctx.unit.replayed.text)
@@ -898,6 +933,23 @@ class VerifierModelValidator:
             dropped.append("current")
         if not preserves_replayed:
             dropped.append("replayed")
+        # Value-resolution override: when both sides preserved the same statement
+        # shape and only a value diverged (a return, an assignment to the same
+        # target), a one-sided merge IS the correct resolution — the base
+        # operation is preserved and the value is resolved. The critic judges
+        # "did the resolution preserve each side's intent?", which for a value
+        # conflict means "did it keep one of the divergent values?" — picking
+        # either side satisfies that. So a verdict flagging the dropped side is
+        # not a defect here; relax it to a pass so the critic doesn't fight a
+        # correct value resolution (the deterministic validators already pass).
+        cf = ctx.unit.structural_metadata.get("conflict_features")
+        if (
+            isinstance(cf, dict)
+            and cf.get("value_resolution")
+            and not preserves_both
+        ):
+            preserves_both = True
+            dropped = []
         return VerificationCheckResult(
             name=self.name,
             passed=preserves_both,

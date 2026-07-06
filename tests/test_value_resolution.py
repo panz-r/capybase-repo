@@ -1,0 +1,161 @@
+"""Spec for value-resolution conflict detection.
+
+A value resolution is a conflict where both sides preserve the SAME statement
+shape (a return, an assignment to the same target) and only a value/expression
+diverges — picking either side is the correct merge, not a dropped intent. These
+tests pin classify_value_resolution for Python (ast) and Family-A (regex).
+Pure — no I/O, no model.
+"""
+
+from __future__ import annotations
+
+from capybase.value_resolution import classify_value_resolution
+
+
+# ---------------------------------------------------------------------------
+# Python: return value resolution
+# ---------------------------------------------------------------------------
+
+
+def test_python_return_value_conflict_indented():
+    """The py_simple case: indented return statements with different values."""
+    r = classify_value_resolution(
+        "return 'hello'", "    return 'hi'", "    return 'howdy'", "python"
+    )
+    assert r is not None
+    assert r.kind == "return"
+    assert r.target == ""
+
+
+def test_python_return_value_conflict_all_indented():
+    r = classify_value_resolution(
+        "    return 1", "    return 2", "    return 3", "python"
+    )
+    assert r is not None and r.kind == "return"
+
+
+def test_python_return_bare():
+    r = classify_value_resolution("return a", "return b", "return c", "python")
+    assert r is not None and r.kind == "return"
+
+
+# ---------------------------------------------------------------------------
+# Python: assignment value resolution
+# ---------------------------------------------------------------------------
+
+
+def test_python_assignment_same_target_divergent_rhs():
+    """Both sides assign to `a` with different RHS → assignment value resolution."""
+    r = classify_value_resolution("a = 1", "a = 5", "a = f(x) - 2", "python")
+    assert r is not None
+    assert r.kind == "assignment"
+    assert r.target == "a"
+
+
+def test_python_assignment_indented():
+    r = classify_value_resolution("    a = 1", "    a = 5", "    a = 9", "python")
+    assert r is not None and r.kind == "assignment" and r.target == "a"
+
+
+def test_python_augassign_same_target_and_op():
+    """a += 1 / a += 2 / a += 3 → augassign value resolution."""
+    r = classify_value_resolution("a += 1", "a += 2", "a += 3", "python")
+    assert r is not None
+    assert r.kind == "augassign"
+    assert r.target == "a"
+
+
+def test_python_augassign_different_op_not_value_resolution():
+    """a += 1 vs a -= 2 differ in operator → not a clean value resolution."""
+    r = classify_value_resolution("a += 1", "a += 2", "a -= 3", "python")
+    assert r is None
+
+
+# ---------------------------------------------------------------------------
+# Python: NOT a value resolution (genuine distinct additions / mismatches)
+# ---------------------------------------------------------------------------
+
+
+def test_python_different_assignment_targets():
+    """x = 5 vs y = 6 → different targets, not a value resolution."""
+    assert classify_value_resolution("x = 1", "x = 5", "y = 6", "python") is None
+
+
+def test_python_distinct_additions_function_vs_import():
+    """A function def on one side and an import on the other → distinct additions."""
+    assert classify_value_resolution(
+        "pass", "def foo():\n    return 1", "import os", "python"
+    ) is None
+
+
+def test_python_malformed_fragment_returns_none():
+    """Malformed input never raises; returns None."""
+    assert classify_value_resolution("garbage{{{", "more}}}", "junk", "python") is None
+
+
+def test_python_empty_sides_returns_none():
+    assert classify_value_resolution("", "", "", "python") is None
+
+
+def test_python_different_statement_types():
+    """A return on one side and an assignment on the other → not a value resolution."""
+    assert classify_value_resolution("return 1", "return 2", "x = 3", "python") is None
+
+
+# ---------------------------------------------------------------------------
+# Family A (Rust / brace-delimited): regex-based
+# ---------------------------------------------------------------------------
+
+
+def test_rust_return_value_conflict():
+    r = classify_value_resolution("return 1", "return 2", "return 3", "rust")
+    assert r is not None and r.kind == "return"
+
+
+def test_rust_let_assignment_same_target():
+    r = classify_value_resolution("let x = 1;", "let x = 5;", "let x = 6;", "rust")
+    assert r is not None
+    assert r.kind == "assignment"
+    assert r.target == "x"
+
+
+def test_rust_bare_assignment_same_target():
+    """A bare `x = ...` assignment (no let) with the same target."""
+    r = classify_value_resolution("x = 1;", "x = 5;", "x = 6;", "rust")
+    assert r is not None and r.kind == "assignment" and r.target == "x"
+
+
+def test_rust_different_targets_not_value_resolution():
+    assert classify_value_resolution(
+        "let x = 5;", "let x = 6;", "let y = 7;", "rust"
+    ) is None
+
+
+def test_javascript_return_value_conflict():
+    r = classify_value_resolution(
+        "return 'hi'", "return 'howdy'", "return 'hello'", "javascript"
+    )
+    assert r is not None and r.kind == "return"
+
+
+def test_family_a_malformed_returns_none():
+    assert classify_value_resolution("{{{", "}}}", "junk", "rust") is None
+
+
+# ---------------------------------------------------------------------------
+# Dispatch + unknown language
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_language_returns_none():
+    assert classify_value_resolution("return 1", "return 2", "return 3", "cobol") is None
+    assert classify_value_resolution("return 1", "return 2", "return 3", None) is None
+
+
+def test_as_feature_format():
+    """The compact feature string for the conflict-features spine."""
+    from capybase.value_resolution import ValueResolution
+
+    assert ValueResolution("return").as_feature() == "return"
+    assert ValueResolution("assignment", "a").as_feature() == "assignment:a"
+    assert ValueResolution("augassign", "count").as_feature() == "augassign:count"

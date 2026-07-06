@@ -526,18 +526,24 @@ def _verifier_config(repo):
     return cfg
 
 
-def test_verifier_blocks_accept_when_it_flags_dropped_intent(conflicted_repo, verifier_critic_enabled):
+def test_verifier_blocks_accept_when_it_flags_dropped_intent(distinct_additions_repo, verifier_critic_enabled):
     """Flag on + critic says the resolution drops a side → NOT accepted. The
     candidate is structurally clean (no markers, valid merge) so the syntactic
     validators pass; only the semantic critic catches the dropped intent, and at
-    error severity it blocks the accept path (escalation)."""
-    repo = conflicted_repo["repo"]
-    # 1st call: a structurally-clean resolution. 2nd call: the critic verdict
-    # saying the replayed side's intent was dropped.
+    error severity it blocks the accept path (escalation).
+
+    Uses a DISTINCT-ADDITIONS conflict (each side adds a different import) so a
+    one-sided merge genuinely drops an addition — the critic SHOULD block it.
+    (A same-line value conflict like ``return 'hi'`` vs ``return 'howdy'`` is a
+    value resolution where one-sided merging is correct, so it wouldn't test the
+    blocking path.)"""
+    repo = distinct_additions_repo["repo"]
+    # 1st call: a structurally-clean, one-sided resolution. 2nd call: the critic
+    # verdict saying the replayed side's import was dropped.
     client = SequenceClient([
-        _make_resolved_payload("    return 'hi'"),  # structurally clean, but one-sided
+        _make_resolved_payload(distinct_additions_repo["current_only"]),  # drops replayed
         json.dumps({"preserves_current": True, "preserves_replayed": False,
-                    "reason": "dropped howdy", "confidence": 0.9}),
+                    "reason": "dropped import sys", "confidence": 0.9}),
     ])
     cfg = _verifier_config(repo)
     cfg.validation.verifier_severity = "error"
@@ -587,35 +593,25 @@ class CapturingSequenceClient:
         return LLMResponse(text=self.responses.pop(0))
 
 
-def test_verifier_seeds_verdict_into_repair_prompt_on_retry(conflicted_repo, verifier_critic_enabled):
-    """A critic flag at WARNING severity triggers a retry whose repair prompt
-    CONTAINS the critic's verdict — so the model sees concrete feedback ("may
-    drop replayed side intent") instead of regenerating blind. This is what makes
-    critic-driven retries actually converge on a correct merge.
+def test_verifier_seeds_verdict_into_repair_prompt_on_retry(distinct_additions_repo, verifier_critic_enabled):
+    """A retry's repair prompt CONTAINS the validator feedback — so the model
+    sees concrete evidence ("dropped a side's addition") instead of regenerating
+    blind. This is what makes retries converge on a correct merge.
 
-    Sequence: (1) one-sided resolution → (2) critic verdict flags replayed
-    dropped → (3) the retry: model returns the correct merge. We assert call #3's
-    prompt contained the critic's message, and that the run converged (no
-    escalation) on the correct merge."""
-    repo = conflicted_repo["repo"]
-    # Two critics are registered (the PoLL jury), so each validation round makes
-    # 2 critic calls: preservation (verifier_model) then conflict
-    # (verifier_model_conflict). Script both: preservation flags the drop on the
-    # first round, conflict passes; both pass on the retry round.
-    both_ok = json.dumps({"preserves_current": True, "preserves_replayed": True,
-                          "reason": "both preserved", "confidence": 0.9})
+    Uses a DISTINCT-ADDITIONS conflict (each side adds a different flag) so a
+    one-sided merge genuinely drops an addition and the deterministic validators
+    flag it, driving a retry. (A value-resolution conflict would accept the
+    one-sided merge, so it can't exercise the retry-seeding path.)
+
+    Sequence: (1) one-sided resolution (drops replayed) → validators flag it →
+    (2) the retry: model returns the correct merge. We assert the retry's prompt
+    carried the validator feedback, and the run converged on the correct merge."""
+    repo = distinct_additions_repo["repo"]
     client = CapturingSequenceClient([
-        _make_resolved_payload("    return 'hi'"),  # structurally clean, drops replayed
-        json.dumps({"preserves_current": True, "preserves_replayed": False,
-                    "reason": "dropped howdy", "confidence": 0.5}),  # preservation verdict
-        both_ok,  # conflict verdict (round 1)
-        _make_resolved_payload("    return 'hi' + 'howdy'"),  # the correct merge on retry
-        both_ok,  # preservation verdict (retry round)
-        both_ok,  # conflict verdict (retry round)
+        _make_resolved_payload(distinct_additions_repo["current_only"]),  # drops replayed
+        _make_resolved_payload(distinct_additions_repo["correct_merged"]),  # correct merge on retry
     ])
     cfg = _verifier_config(repo)
-    # WARNING severity so the critic flag is a soft retry signal (the path that
-    # previously dropped the feedback at the retry-seed line).
     cfg.validation.verifier_severity = "warning"
     engine = ResolutionEngine(cfg.model, client=client)
     orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
@@ -624,14 +620,12 @@ def test_verifier_seeds_verdict_into_repair_prompt_on_retry(conflicted_repo, ver
     assert not result.escalated, result.reason
     text = (repo / "app.py").read_text()
     assert "<<<<<<<" not in text
-    assert "'hi'" in text and "'howdy'" in text  # both sides preserved
-    # The retry resolution is the call after the two critic verdicts (index 3
-    # with the PoLL jury: resolution, preservation-verdict, conflict-verdict,
-    # retry-resolution). It must carry the critic's seeded feedback.
-    assert len(client.prompts) >= 4, client.prompts
-    retry_prompt = client.prompts[3]
-    assert "verifier_model" in retry_prompt or "drop" in retry_prompt, (
-        "critic verdict not seeded into the repair prompt: " + retry_prompt[:300]
+    assert "cache_on" in text and "metrics_on" in text  # both sides preserved
+    # The retry (2nd complete() call) must carry seeded validator feedback.
+    assert len(client.prompts) >= 2, client.prompts
+    retry_prompt = client.prompts[1]
+    assert "drop" in retry_prompt.lower() or "both_sides" in retry_prompt.lower() or "verifier" in retry_prompt.lower(), (
+        "validator feedback not seeded into the repair prompt: " + retry_prompt[:300]
     )
 
 
@@ -826,22 +820,33 @@ def test_warning_driven_retry_uses_repair_prompt_with_feedback():
     assert "helper" in sent, "dropped entity name must reach the model on retry"
 
 
-def test_wall_time_budget_escalates_non_converging_unit(conflicted_repo, verifier_critic_enabled):
+def test_wall_time_budget_escalates_non_converging_unit(distinct_additions_repo, verifier_critic_enabled):
     """A unit that can't converge within its wall-clock budget escalates instead
     of looping indefinitely. The critic keeps flagging a dropped-side merge
     (CyclingClient returns the same one-sided resolution + verdict forever), so
     retries would normally pile up; the wall-time deadline bounds total latency
-    by escalating once it's exceeded."""
-    repo = conflicted_repo["repo"]
-    # Always returns a one-sided resolution + a critic verdict flagging it.
-    # CyclingClient repeats the final response, so the loop never converges.
+    by escalating once it's exceeded.
+
+    Uses a DISTINCT-ADDITIONS conflict so the one-sided merge genuinely drops an
+    addition and the critic keeps flagging it (a value-resolution conflict would
+    accept the one-sided merge, so it wouldn't loop)."""
+    repo = distinct_additions_repo["repo"]
+    # Always returns a one-sided resolution (drops the replayed addition) so the
+    # deterministic both-sides-represented + preservation-heuristic validators keep
+    # flagging it. CyclingClient repeats forever, so the loop never converges and
+    # the wall-time deadline must bound it.
     client = CyclingClient([
-        _make_resolved_payload("    return 'hi'"),  # drops replayed side
+        _make_resolved_payload(distinct_additions_repo["current_only"]),  # drops replayed
         json.dumps({"preserves_current": True, "preserves_replayed": False,
-                    "reason": "dropped howdy", "confidence": 0.5}),
+                    "reason": "dropped metrics_on", "confidence": 0.5}),
     ])
     cfg = _verifier_config(repo)
     cfg.validation.verifier_severity = "warning"  # soft → would retry forever
+    # Disable the pre-LLM resolvers: distinct additions would otherwise be
+    # unioned deterministically (resolving without the LLM), so the loop the
+    # wall-time deadline must bound would never start.
+    cfg.future.enable_structural_resolver = False
+    cfg.future.enable_combination_search = False
     # Tiny wall budget so the loop escalates quickly (well under a second). The
     # retry-count budgets are large enough that they wouldn't trigger first.
     cfg.policy.max_wall_time_per_unit_seconds = 0.2

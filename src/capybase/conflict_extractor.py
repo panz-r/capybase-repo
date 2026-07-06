@@ -552,6 +552,15 @@ def conflict_features(unit: ConflictUnit) -> dict[str, float | int | str | bool]
         # prompt ("this is a bugfix — preserve behavior") in the commit's role.
         # Degrades to "unknown" when tree-sitter is unavailable.
         "commit_change_type": _commit_change_type_of(unit),
+        # Value-resolution classification: when both sides preserve the SAME
+        # statement shape (a return, an assignment to the same target) and only a
+        # value/expression diverged, picking either side is the CORRECT merge
+        # (the base operation is preserved; only the value is resolved). A
+        # non-empty string ("return" / "assignment:a" / "augassign:count") gates
+        # the both-sides-represented + preservation-heuristic validators so they
+        # don't flag a correct one-sided merge as "dropped a side." Empty when
+        # the conflict is genuine distinct additions or a shape mismatch.
+        "value_resolution": _value_resolution_of(unit),
     }
 
 
@@ -615,6 +624,69 @@ def _commit_change_type_of(unit: ConflictUnit) -> str:
         )
     except Exception:  # noqa: BLE001 - advisory feature
         return "unknown"
+
+
+def _value_resolution_of(unit: ConflictUnit) -> str:
+    """The value-resolution classification of ``unit`` ("" when not applicable).
+
+    Returns the compact feature string from
+    :func:`value_resolution.classify_value_resolution` ("return" /
+    "assignment:a" / "augassign:count") when both sides preserve the same
+    statement shape and only a value diverged; "" otherwise (genuine distinct
+    additions, shape mismatch, parse failure, unknown language).
+
+    The base side in capybase's data model is the WHOLE base file, while the
+    current/replayed sides are the marker-block interiors (hunk fragments). For
+    statement-shape comparison we need the base HUNK — the region corresponding
+    to the conflict — so this re-derives it via diff3 (the same source the
+    refiner uses) and falls back to the whole-base text when diff3 is
+    unavailable. Pure function of the unit; never raises.
+    """
+    try:
+        from capybase.value_resolution import classify_value_resolution
+
+        base_text = unit.base.text or ""
+        # Prefer a diff3-refined base hunk if one was already recorded (tighter,
+        # and matches the conflict region rather than the whole base file).
+        refined = unit.structural_metadata.get("diff3_refined")
+        if isinstance(refined, dict) and refined.get("base") is not None:
+            base_text = refined["base"]
+        else:
+            # Derive the base hunk via diff3 over the three sides so the base is
+            # the same shape (hunk interior) as current/replayed.
+            base_hunk = _base_hunk_via_diff3(
+                unit.base.text or "", unit.current.text or "",
+                unit.replayed.text or "",
+            )
+            if base_hunk is not None:
+                base_text = base_hunk
+        vr = classify_value_resolution(
+            base_text, unit.current.text or "", unit.replayed.text or "",
+            unit.language,
+        )
+        return vr.as_feature() if vr else ""
+    except Exception:  # noqa: BLE001 - advisory feature
+        return ""
+
+
+def _base_hunk_via_diff3(base: str, current: str, replayed: str) -> str | None:
+    """The base region of the conflict hunk, re-derived via diff3.
+
+    Returns the ``block.base`` of the (single) conflict block diff3 produces, or
+    ``None`` when diff3 yields zero or multiple blocks (ambiguous — leave the
+    caller on the whole-base text). Advisory; never raises.
+    """
+    try:
+        from capybase.adapters.git_diff3 import merge_file_diff3
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        blocks = merge_file_diff3(base, current, replayed)
+    except Exception:  # noqa: BLE001
+        return None
+    if blocks and len(blocks) == 1:
+        return blocks[0].base
+    return None
 
 
 def _enclosing_symbol(worktree_text: str, block: MarkerBlock) -> str | None:
