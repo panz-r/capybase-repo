@@ -635,6 +635,13 @@ class Orchestrator:
         # of the source branch's net effect per file, computed once at rebase
         # start. None when no plan; rendered into the history prompt block.
         self._branch_intent = None
+        # Shared embeddings client (embeddings survey §2/§5/§6): one client
+        # reused across semantic entity matching, critic-feedback deduplication,
+        # and drift detection. Constructed lazily (only when memory is enabled)
+        # after the context builder — but its default must exist here so the
+        # drift monitor below can capture it. The actual construction happens in
+        # the memory block after _build_retriever; this just reserves the slot.
+        self._shared_embedder: object | None = None
         self.paths = SessionPaths(self.session_id, repo)
         self.paths.mkdirs()
         self.journal = Journal(self.paths)
@@ -703,7 +710,6 @@ class Orchestrator:
         # failure, so a missing endpoint never breaks matching. The same client
         # is reused for critic-feedback deduplication (survey §5) and drift
         # detection (survey §6) — one connection, one model, consistent vectors.
-        self._shared_embedder: object | None = None
         if config.memory.enabled:
             try:
                 from capybase.adapters import structural
@@ -716,6 +722,20 @@ class Orchestrator:
                 structural.set_entity_embedder(self._shared_embedder)
             except Exception:  # noqa: BLE001 - semantic matching is best-effort
                 pass
+        # Session-level semantic drift detection (embeddings survey §6): advisory
+        # only — never blocks a merge. Computes a session anchor once from the
+        # branch intent + commit subjects, then per-commit cosine distance of the
+        # merged resolved texts from that anchor. Constructed AFTER the shared
+        # embedder so it captures the real client; None (inactive) when drift
+        # detection is disabled or no embedder is available.
+        self._drift_monitor: "object | None" = None
+        if config.memory.enable_drift_detection:
+            from capybase.drift import DriftMonitor
+
+            self._drift_monitor = DriftMonitor(
+                embedder=self._shared_embedder,
+                threshold=config.memory.drift_threshold,
+            )
         self.resolution_engine = resolution_engine or ResolutionEngine(config.model)
         self.verification = VerificationEngine.default(
             ValidationConfig.from_dict(config.validation.model_dump())
@@ -2212,6 +2232,10 @@ class Orchestrator:
         # the source commits' patches. Rendered into the history prompt block;
         # trimmed last when the budget is tight.
         self._branch_intent = self._build_branch_intent(self._history_plan)
+        # Drift anchor (embeddings survey §6): embed the branch-intent render +
+        # the source commit subjects as the session goal vector. Idempotent;
+        # no-op when the monitor is inactive (disabled / no embedder).
+        self._set_drift_anchor()
         # Wire the history service into the context builder so prompt-generation
         # sees the history-context block (#history step 7). The builder was
         # constructed in __init__ without a service; set it now that rebase()
@@ -2444,6 +2468,13 @@ class Orchestrator:
                 f"HEAD; reset to it with `git reset --hard {backup_ref}`, or "
                 f"delete it with `git branch -D {backup_ref}`"
             )
+        # Drift summary (embeddings survey §6): emit the post-session headline
+        # so drift is visible in logs and detectable in regressions. No-op when
+        # the monitor was inactive (disabled / no embedder / no plan).
+        if self._drift_monitor is not None:
+            summary = self._drift_monitor.summary()  # type: ignore[attr-defined]
+            if summary:
+                self.journal.emit("drift_summary", {"summary": summary})
         return result
 
     # ------------------------------------------------------------------ resurrection
@@ -2552,6 +2583,79 @@ class Orchestrator:
                 "branch_intent_failed", f"branch-intent build failed: {exc}",
             )
             return None
+
+    def _drift_anchor_text(self) -> str:
+        """The session anchor text: branch-intent render + commit subjects.
+
+        Concatenated so the anchor embedding captures both the structural net-
+        effect summary and the commit-message intent (embeddings survey §6).
+        Uses a general text embedder (commit messages + summaries are natural
+        language). Empty when no plan/intent.
+        """
+        if self._history_plan is None:
+            return ""
+        parts = []
+        for c in getattr(self._history_plan, "source_commits", []) or []:
+            subj = getattr(c, "subject", "") or ""
+            body = getattr(c, "body_summary", "") or ""
+            if subj or body:
+                parts.append(f"{subj}\n{body}")
+        if self._branch_intent is not None:
+            try:
+                parts.append(self._branch_intent.render_block())
+            except Exception:  # noqa: BLE001
+                pass
+        return "\n\n".join(parts)
+
+    def _set_drift_anchor(self) -> None:
+        """Embed the session anchor (embeddings survey §6). No-op when inactive."""
+        if self._drift_monitor is None:
+            return
+        text = self._drift_anchor_text()
+        if text:
+            self._drift_monitor.set_anchor(text)  # type: ignore[attr-defined]
+
+    def _check_drift(self, commit_index: int, result: "StepResult | None" = None) -> None:
+        """Per-commit drift measurement (embeddings survey §6). Advisory only.
+
+        Measures the cosine distance between the session anchor (the branch
+        intent — the GOAL) and this step's MERGED resolved texts (the OUTCOME).
+        If the model's resolutions drift from the intended behavior, the merged-
+        code embeddings diverge from the intent-text anchor. A drift advisory is
+        journaled when distance exceeds the threshold. No-op when the monitor is
+        inactive. Never blocks a merge.
+        """
+        if self._drift_monitor is None:
+            return
+        # Build the per-commit probe from the step's accepted resolved texts —
+        # the actual merged code, not the static intent. Compared against the
+        # anchor (the intended goal), divergence signals drift.
+        probe = ""
+        if result is not None:
+            parts = []
+            for outcome in result.outcomes:
+                acc = outcome.accepted
+                if acc is not None and acc.resolved_text:
+                    parts.append(acc.resolved_text)
+            probe = "\n\n".join(parts)
+        if not probe:
+            return  # nothing merged this step (e.g. all escalated) — skip
+        try:
+            report = self._drift_monitor.check(probe, commit_index)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 - drift detection is best-effort
+            return
+        if report is not None and report.is_drift:
+            self.journal.emit_advisory(
+                "drift_detected", report.render(),
+            )
+            self.journal.emit(
+                "semantic_drift",
+                {"commit_index": report.commit_index,
+                 "distance": round(report.distance, 4),
+                 "cumulative": round(report.cumulative, 4),
+                 "threshold": report.threshold},
+                step_index=self.step,
+            )
 
     def _recent_target_commits(self, plan, *, max_commits: int = 5) -> list:
         """Recent target-branch commits touching the same files as the source.
@@ -4718,6 +4822,10 @@ class Orchestrator:
                         pass
             except Exception:  # noqa: BLE001 - memory is best-effort
                 pass
+        # Drift check (embeddings survey §6): after the step's outcomes are
+        # recorded, measure cumulative drift from the session anchor. Advisory
+        # only — never blocks. No-op when drift detection is inactive.
+        self._check_drift(self.step, result)
 
     def _write_and_stage(
         self,
