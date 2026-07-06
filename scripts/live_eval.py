@@ -67,6 +67,9 @@ class Scenario:
     path: str  # conflicted file (relative)
     expect_substrings: list[str]  # correctness check — all must appear in resolved file
     reject_substrings: list[str] = field(default_factory=list)  # must NOT appear
+    # For value-resolution conflicts where EITHER side's value (or a combination)
+    # is a correct merge: at least one of these must appear. Empty = not used.
+    expect_any_substrings: list[str] = field(default_factory=list)
     cargo: bool = False  # whether the repo has a Cargo.toml (runs cargo gate)
 
 
@@ -92,9 +95,13 @@ def scenario_py_simple() -> Scenario:
     _git(repo, "checkout", "-q", "feat")
     r = _git(repo, "rebase", "main", check=False)
     assert r.returncode != 0, "expected conflict"
-    # Correct merge preserves BOTH intents. 'hi' and 'howdy' both present.
+    # This is a VALUE-RESOLUTION conflict: both sides preserved the `return`
+    # statement and only the returned value diverged ('hi' vs 'howdy'). A correct
+    # merge picks one side's value OR writes a combining expression — either is
+    # valid (the base operation is preserved). So either literal must appear.
     return Scenario("py_simple", "python", repo, "app.py",
-                    expect_substrings=["def greet():", "'hi'", "'howdy'"],
+                    expect_substrings=["def greet():"],
+                    expect_any_substrings=["'hi'", "'howdy'"],
                     reject_substrings=["<<<<<<<", "=======", ">>>>>>>", "return 'hello'"])
 
 
@@ -346,6 +353,12 @@ def run_scenario(builder, out_dir: Path, *, critic_enabled: bool = True) -> Resu
         content = ""
 
     expect_ok = all(s in content for s in scenario.expect_substrings)
+    # For value-resolution conflicts: at least one of the divergent values (or a
+    # combination) must appear. Empty list = not applicable.
+    if scenario.expect_any_substrings:
+        expect_ok = expect_ok and any(
+            s in content for s in scenario.expect_any_substrings
+        )
     reject_ok = not any(s in content for s in scenario.reject_substrings)
     correct = expect_ok and reject_ok and not escalated
 

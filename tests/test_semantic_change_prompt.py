@@ -12,8 +12,12 @@ import pytest
 
 from capybase.adapters import structural
 from capybase.conflict_model import ConflictSide, ConflictUnit
-from capybase.context_builder import ContextBuilder
-from capybase.resolution_engine import _semantic_change_block, build_resolve_prompt
+from capybase.context_builder import ContextBuilder, ContextBundle
+from capybase.resolution_engine import (
+    _semantic_change_block,
+    _value_resolution_block,
+    build_resolve_prompt,
+)
 
 pytestmark = pytest.mark.skipif(
     not structural.is_available("python"),
@@ -151,3 +155,50 @@ def test_semantic_change_block_omits_unknown_role():
     )
     block = _semantic_change_block(unit)
     assert "REPLAYED commit role: unknown" not in block
+
+
+# ---------------------------------------------------------------------------
+# Value-resolution guidance block (pick a side OR write a combining expression)
+# ---------------------------------------------------------------------------
+
+
+def _unit_with_vr(vr: str) -> ConflictUnit:
+    u = _unit("def greet():\n    return 'hello'\n", "    return 'hi'", "    return 'howdy'")
+    u.structural_metadata["conflict_features"] = {"value_resolution": vr}
+    return u
+
+
+def test_value_resolution_block_surfaces_for_return_conflict():
+    """A return value-resolution conflict surfaces guidance telling the model it
+    may pick one side OR write a combining expression — so a reasoning model
+    doesn't self-report needs_human on a resolvable value conflict."""
+    block = _value_resolution_block(_unit_with_vr("return"))
+    assert "VALUE-RESOLUTION" in block
+    assert "pick one side" in block.lower()
+    assert "new expression" in block.lower()
+    assert "needs_human" in block  # the "don't report needs_human" steer
+
+
+def test_value_resolution_block_names_target_for_assignment():
+    """An assignment value resolution names the target so the model knows what
+    base operation must be preserved."""
+    block = _value_resolution_block(_unit_with_vr("assignment:a"))
+    assert "assignment" in block
+    assert "target `a`" in block
+
+
+def test_value_resolution_block_empty_when_not_value_resolution():
+    """When the conflict is not a value resolution (genuine distinct additions),
+    no guidance is surfaced — the prompt is unchanged."""
+    assert _value_resolution_block(_unit_with_vr("")) == ""
+    # No conflict_features dict at all → also empty (never breaks the prompt).
+    bare = _unit("x", "y", "z")
+    assert _value_resolution_block(bare) == ""
+
+
+def test_value_resolution_block_appears_in_resolve_prompt():
+    """The guidance reaches the full resolve prompt for a value-resolution unit."""
+    u = _unit_with_vr("return")
+    prompt = build_resolve_prompt(u, ContextBundle(primary_text=""))
+    assert "VALUE-RESOLUTION" in prompt
+

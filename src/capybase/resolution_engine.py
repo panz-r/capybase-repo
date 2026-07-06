@@ -166,6 +166,52 @@ def _semantic_change_block(unit: ConflictUnit) -> str:
     return "\n".join(lines) + "\n\n"
 
 
+#: Guidance surfaced to the model when the conflict is a value resolution (both
+#: sides preserved the same statement shape and only a value diverged). Tells the
+#: model that picking either side OR writing a new combining expression are both
+#: acceptable — so it doesn't self-report ``needs_human`` on a resolvable value
+#: conflict (the failure mode where a reasoning model concludes "two return
+#: values can't both be preserved" and gives up).
+_VALUE_RESOLUTION_GUIDANCE = (
+    "VALUE-RESOLUTION conflict: both sides preserved the same {kind} "
+    "({target}) and only the value/expression diverged. A correct merge PRESERVES\n"
+    "the {kind} and resolves the value. Either is acceptable:\n"
+    "  - pick one side's value (the operation is preserved; either is correct), OR\n"
+    "  - write a new expression combining both values when that is meaningful for\n"
+    "    the operation (e.g. a concatenation, sum, tuple). Prefer this only when the\n"
+    "    combination is semantically sound for the surrounding code.\n"
+    "Do NOT report needs_human merely because both literal values cannot coexist on\n"
+    "one line — picking one side is a valid resolution here.\n\n"
+)
+
+
+def _value_resolution_block(unit: ConflictUnit) -> str:
+    """Surface value-resolution guidance in the resolve prompt.
+
+    When the conflict is a value resolution (both sides preserved the same
+    ``return`` / assignment target and only the value diverged), tells the model
+    that picking either side OR writing a new combining expression is acceptable.
+    This counters the failure mode where a reasoning model sees two mutually-
+    exclusive values, concludes "they can't both be preserved," and self-reports
+    ``needs_human`` on a conflict that has a perfectly valid one-sided resolution.
+
+    Reads the ``value_resolution`` feature off the conflict-features spine
+    (computed at extraction). Returns "" when the conflict is NOT a value
+    resolution (the guidance doesn't apply). Pure; never breaks the prompt.
+    """
+    cf = unit.structural_metadata.get("conflict_features")
+    if not isinstance(cf, dict):
+        return ""
+    vr = cf.get("value_resolution")
+    if not vr:
+        return ""
+    # vr is "return" / "assignment:<target>" / "augassign:<target>".
+    kind = vr.split(":", 1)[0]
+    target = vr.split(":", 1)[1] if ":" in vr else ""
+    target_desc = f"target `{target}`" if target else "return statement"
+    return _VALUE_RESOLUTION_GUIDANCE.format(kind=kind, target=target_desc)
+
+
 def _fit_to_budget(
     *,
     budget: TokenBudget | None,
@@ -408,8 +454,9 @@ def _resolve_prompt_parts(
     # model read the sides; short + high-value).
     side_intent = _side_intent_block(unit)
     semantic_change = _semantic_change_block(unit)
+    value_resolution = _value_resolution_block(unit)
     sides_text = (
-        f"{side_intent}{semantic_change}"
+        f"{side_intent}{semantic_change}{value_resolution}"
         f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
         f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
         f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
@@ -432,7 +479,7 @@ def _resolve_prompt_parts(
     # few-shot, three sides, context) form one contiguous block that variants keep
     # together. Obligations render early (high priority) so the model sees them.
     data_block = (
-        f"{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{side_intent}{semantic_change}"
+        f"{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{side_intent}{semantic_change}{value_resolution}"
         f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
         f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
         f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
