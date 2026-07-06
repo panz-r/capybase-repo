@@ -378,6 +378,7 @@ class EmbeddingRetriever:
         self, store: ExperienceStore, client: object, *,
         min_similarity: float = MIN_SIMILARITY,
         calibration: "object | None" = None,
+        cache: "object | None" = None,
     ) -> None:
         self.store = store
         self.client = client  # EmbeddingsClient (Protocol); typed loose to avoid import cycle
@@ -389,6 +390,12 @@ class EmbeddingRetriever:
         # scale and the journaled scores reflect it. None → byte-identical to the
         # pre-calibration behavior.
         self.calibration = calibration
+        # An optional persisted VectorCache (embeddings survey §1). When set,
+        # ``_build`` consults the cache and embeds only NEW entries (content_keys
+        # not yet cached), persisting them for the next process. When None, every
+        # accepted example is re-embedded each run (the prior behavior). Typed
+        # loose to avoid an import cycle with vector_index.
+        self.cache = cache
         self._accepted: list[Experience] | None = None
         self._vectors: list[list[float]] | None = None
 
@@ -397,14 +404,34 @@ class EmbeddingRetriever:
         return " ".join([ex.base, ex.current, ex.replayed])
 
     def _build(self) -> None:
-        """Embed every accepted example. Cached until ``refresh``."""
+        """Embed every accepted example. Cached until ``refresh``.
+
+        With a persisted VectorCache (embeddings survey §1): consults the cache
+        and embeds only NEW entries (content_keys not yet seen), persisting them
+        for the next process. Without a cache: re-embeds every accepted example
+        each run (the prior behavior — fine for small corpora).
+        """
         accepted = self.store.accepted()
         self._accepted = accepted
         if not accepted:
             self._vectors = []
             return
+        sigs = [self._signature(e) for e in accepted]
+        if self.cache is not None:
+            try:
+                from capybase.memory.vector_index import build_cached_vectors
+
+                keys = [
+                    _example_key_str(e.example) for e in accepted
+                ]
+                vecs, _ = build_cached_vectors(self.cache, self.client, sigs, keys)  # type: ignore[arg-type]
+                # Partial embed failure → keep the subset that resolved (aligned).
+                self._accepted = [a for a, v in zip(accepted, vecs) if v]
+                self._vectors = [v for v in vecs if v]
+                return
+            except Exception:  # noqa: BLE001 - cache failure → fall through to full embed
+                pass
         try:
-            sigs = [self._signature(e) for e in accepted]
             self._vectors = self.client.embed(sigs)  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001 - degrade to no few-shot on any embed failure
             self._accepted = []
@@ -535,6 +562,23 @@ def _example_key(ex: HistoricalExample) -> tuple[str, ...]:
     the resolved text) merges them correctly.
     """
     return (ex.base, ex.current, ex.replayed, ex.resolved)
+
+
+def _example_key_str(ex: HistoricalExample) -> str:
+    """The string form of :func:`_example_key`, for the persisted vector cache.
+
+    Must match :func:`capybase.memory.vector_index.content_key` exactly so a
+    cached vector (keyed by this string) round-trips across process restarts.
+    Kept here (rather than delegating) to avoid importing vector_index at module
+    top — it lazily imports numpy/sqlite_vec; the retriever calls this only on
+    the cache path. The JSON form is identical: compact, ensure_ascii=False.
+    """
+    import json
+
+    return json.dumps(
+        [ex.base, ex.current, ex.replayed, ex.resolved],
+        ensure_ascii=False, separators=(",", ":"),
+    )
 
 
 def _rrf_scores(ranked: list[tuple[float, HistoricalExample]]) -> dict[tuple[str, ...], float]:

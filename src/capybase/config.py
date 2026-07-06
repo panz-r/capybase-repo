@@ -608,6 +608,35 @@ class MemoryConfig(BaseModel):
     # (survey §4). "rrf" (default, rank-only, scale-agnostic) or "dbsf"
     # (min-max normalized score sum). The profile may override this.
     fusion_method: str = "rrf"
+    # Persisted vector cache for the embedding retriever (embeddings survey §1).
+    # Without this, EmbeddingRetriever._build re-embeds every accepted experience
+    # on every process start — a re-embed cliff as the corpus grows past hundreds.
+    # "auto" (default) selects sqlite-vec when importable, else numpy, else
+    # in-memory (re-embeds each run, the prior behavior). "sqlite_vec"/"numpy"
+    # force a backend (ValueError if unavailable); "off" disables persistence.
+    vector_cache: str = "auto"
+    # Path stem for the persisted vector cache. The active backend appends its
+    # extension (".vec.sqlite" / ".npy" + ".npy.manifest.jsonl"). Relative paths
+    # resolve against the repo root, like store_path.
+    vector_cache_path: str = ".rebase-agent/memory/vectors"
+    # RAG into the repair/retry path (embeddings survey §2). The repair prompt
+    # previously carried NO few-shot — the A/B failure site where the model
+    # reproduces the same dropped-side merge across retries. Quality filter:
+    # only surface examples that converged within this many retries (survey §1's
+    # index-quality rule — merges that took many retries may have converged by
+    # luck, not a generalizable strategy). -1 disables the filter.
+    repair_retrieval_max_retries: int = 2
+    # Higher floor than fresh-generation for the repair path (the cost of a
+    # misleading example is higher when the model is already fixing a specific
+    # error). Applied in addition to the per-retriever min_similarity.
+    repair_retrieval_min_similarity: float = 0.55
+    # Session-level semantic drift detection (embeddings survey §6). Advisory
+    # only — never blocks a merge. Computes a session anchor once from the
+    # branch intent + commit messages, then per-commit cosine distance from it.
+    enable_drift_detection: bool = False
+    # Cosine DISTANCE threshold (1 - similarity) above which a drift advisory
+    # fires. 0.20 ≈ similarity 0.80 — tune on accumulated rebase history.
+    drift_threshold: float = 0.20
 
 
 class CalibrationConfig(BaseModel):

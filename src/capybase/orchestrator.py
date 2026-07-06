@@ -1833,7 +1833,10 @@ class Orchestrator:
         Returns None (rather than raising) on any construction failure so callers
         can fall back to BM25 — RAG never hard-fails. The calibrated envelope is
         reconstructed and attached so the isotonic transform + calibrated floor
-        apply when present (survey §2.1).
+        apply when present (survey §2.1). The persisted vector cache
+        (embeddings survey §1) is constructed from ``config.memory.vector_cache``
+        and resolves its path against the repo root like ``store_path``; a cache
+        construction failure degrades to in-memory (re-embed each run) silently.
         """
         from capybase.memory.retriever import EmbeddingRetriever
 
@@ -1846,11 +1849,30 @@ class Orchestrator:
             if config.memory.embeddings_model:
                 emb_cfg = emb_cfg.model_copy(update={"model": config.memory.embeddings_model})
             client = OpenAIEmbeddingsClient(emb_cfg)
+            # Persisted vector cache (embeddings survey §1): best-effort; any
+            # failure degrades to None (re-embed each run, the prior behavior).
+            cache = None
+            if config.memory.vector_cache != "off":
+                try:
+                    from capybase.memory.vector_index import make_vector_cache
+
+                    p = Path(config.memory.vector_cache_path)
+                    if not p.is_absolute():
+                        p = self.git.repo / p
+                    c = make_vector_cache(config.memory.vector_cache, p)
+                    # InMemoryCache (no deps available) is equivalent to None —
+                    # skip wrapping so the retriever takes the direct-embed path.
+                    from capybase.memory.vector_index import InMemoryCache
+
+                    cache = None if isinstance(c, InMemoryCache) else c
+                except Exception:  # noqa: BLE001 - cache is best-effort
+                    cache = None
             return EmbeddingRetriever(
                 self.memory_store,
                 client,
                 min_similarity=config.memory.embedding_min_similarity,
                 calibration=_reconstruct_calibration(config),
+                cache=cache,
             )
         except Exception:  # noqa: BLE001 - fall back to BM25, never break RAG
             return None

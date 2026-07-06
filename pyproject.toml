@@ -25,11 +25,23 @@ structural = [
     "tree-sitter-python>=0.23",
     "tree-sitter-rust>=0.23",
 ]
+# Embedding features (Pillar 2): persisted vector cache + vectorized cosine.
+# Lazy-imported at runtime; capybase works without these — the embedding
+# retriever falls back to in-memory re-embedding each run (the prior behavior)
+# and cosine uses the pure-Python loop. numpy is the floor; sqlite-vec adds a
+# durable ANN index for corpora past ~50K vectors. Included in `dev` so tests
+# exercise the real vector backends.
+embeddings = [
+    "numpy>=1.26",
+    "sqlite-vec>=0.1",
+]
 dev = [
     "pytest>=7",
     "tree-sitter>=0.23",
     "tree-sitter-python>=0.23",
     "tree-sitter-rust>=0.23",
+    "numpy>=1.26",
+    "sqlite-vec>=0.1",
 ]
 
 [project.scripts]

@@ -136,3 +136,74 @@ def probe_embeddings_support(client: EmbeddingsClient) -> bool:
     if not vectors or not vectors[0]:
         return False
     return len(vectors[0]) > 0
+
+
+# ---------------------------------------------------------------------------
+# Body normalization for semantic entity matching (embeddings survey §2)
+# ---------------------------------------------------------------------------
+
+import re as _re  # noqa: E402 - stdlib, kept local to avoid top-import noise
+
+# Matches common string-literal quotes (single/double/triple, incl. f/r prefixes).
+_STR_LITERAL = _re.compile(
+    r"""(?:[rbfu]{0,2})(?:"""  # prefix + open-quote alternation
+    r'''"""(?:.|\n)*?"""'''
+    r"""|'''(?:.|\n)*?'''"""
+    r"""|"(?:\\.|[^"\\])*\""""
+    r"""|'(?:\\.|[^'\\])*\'"""
+    r""")"""
+)
+# Line comments for the Family-A / common languages. Python ``#`` is handled by
+# the same rule (the ``#`` to end-of-line); ``//`` covers Rust/JS/TS/Go/C++.
+_LINE_COMMENT = _re.compile(r"#[^\n]*|//[^\n]*")
+
+
+def normalize_body_for_embedding(text: str) -> str:
+    """Normalize a code body so the embedding captures STRUCTURE not surface.
+
+    Survey §2 "What to embed": strip comments, collapse whitespace, and replace
+    string literals with a placeholder token so two functions that differ only
+    in the text of a log message or a literal value still embed as similar.
+    The body fingerprint's header-strip (``_split_header_body``) is the caller's
+    responsibility — this operates on the body content only.
+
+    Pure (no parse); language-agnostic. Never raises.
+    """
+    if not text:
+        return ""
+    # Order: literals first (so a ``#`` inside a string isn't stripped as a
+    # comment), then comments, then whitespace collapse.
+    out = _STR_LITERAL.sub("<STR>", text)
+    out = _LINE_COMMENT.sub("", out)
+    return " ".join(out.split())
+
+
+# ---------------------------------------------------------------------------
+# Batch chunking wrapper (embeddings survey §1 — corpus re-embed can be large)
+# ---------------------------------------------------------------------------
+
+
+class BatchEmbeddingClient:
+    """Wrap an :class:`EmbeddingsClient` to chunk large embed requests.
+
+    llama-server /v1/embeddings accepts a list input but has a practical per-
+    request cap (context length of the embedding model). The vector-cache build
+    (embeddings survey §1) re-embeds the whole corpus on a cache miss, which can
+    be thousands of texts. This wrapper splits the input into bounded batches,
+    calls the underlying client per batch, and concatenates — preserving input
+    alignment. Failed batches raise (the caller decides whether to skip the
+    row); a fully-unavailable endpoint surfaces ``EmbeddingsNotSupportedError``
+    on the first batch as before.
+    """
+
+    def __init__(self, client: EmbeddingsClient, *, batch_size: int = 32) -> None:
+        self.client = client
+        self.batch_size = max(1, int(batch_size))
+
+    def embed(self, texts: str | list[str]) -> list[list[float]]:
+        if isinstance(texts, str):
+            return self.client.embed(texts)
+        out: list[list[float]] = []
+        for i in range(0, len(texts), self.batch_size):
+            out.extend(self.client.embed(texts[i : i + self.batch_size]))
+        return out
