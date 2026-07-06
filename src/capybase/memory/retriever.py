@@ -757,6 +757,11 @@ class HybridRetriever:
             out.append((expl, ex))
         return out
 
+    def refresh(self) -> None:
+        """Force both sub-retrievers to rebuild their indexes/caches."""
+        self.lexical.refresh()
+        self.embedding.refresh()
+
 
 # ---------------------------------------------------------------------------
 # QualityFilteredRetriever (embeddings survey §1 index-quality rule, §2 repair)
