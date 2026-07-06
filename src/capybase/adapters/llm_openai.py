@@ -70,6 +70,35 @@ def _is_retryable(exc: BaseException) -> bool:
     return False
 
 
+def _is_response_format_400(exc: BaseException) -> bool:
+    """True when an HTTP 400 rejection is specifically about ``response_format``.
+
+    Some servers (LM Studio) reject ``response_format: {"type": "json_object"}``
+    for models that only accept ``json_schema`` or ``text``, returning a 400
+    whose body names ``response_format``. The worker wraps the underlying
+    :class:`HTTPError` in a ``RuntimeError`` (via ``raise ... from got``), so we
+    inspect the cause chain AND the message for the 400 + response_format signal.
+    """
+    chain: list[BaseException] = [exc]
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None:
+        chain.append(cause)
+    for e in chain:
+        if isinstance(e, urllib.error.HTTPError) and e.code == 400:
+            try:
+                detail = e.read().decode("utf-8", errors="replace").lower()
+            except Exception:  # noqa: BLE001
+                detail = ""
+            if "response_format" in detail:
+                return True
+        # Also match the wrapped message (some paths lose the HTTPError body).
+        if isinstance(e, RuntimeError):
+            msg = str(e).lower()
+            if "400" in msg and "response_format" in msg:
+                return True
+    return False
+
+
 def _with_retry(
     fn: Callable[[], T],
     *,
@@ -153,6 +182,36 @@ class OpenAICompatibleClient:
         self.config = config
 
     def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool,
+    ) -> LLMResponse:
+        try:
+            return self._complete_with_json_mode(
+                messages, model=model, temperature=temperature,
+                max_tokens=max_tokens, json_mode=json_mode,
+            )
+        except RuntimeError as exc:
+            # Some servers reject ``response_format: {"type": "json_object"}``
+            # with HTTP 400 (e.g. LM Studio requires ``json_schema`` or ``text``
+            # for certain models). That's a permanent per-request shape error,
+            # not a transient fault — retrying identically won't help. Fall back
+            # to a plain (text-mode) request: the tolerant JSON parser
+            # (parse_resolution_json) handles prose-prefixed / fenced JSON, so
+            # dropping server-side JSON constraining is safe. Only do this when
+            # the failure looks like the response_format 400 (not a generic error).
+            if json_mode and _is_response_format_400(exc):
+                return self._complete_with_json_mode(
+                    messages, model=model, temperature=temperature,
+                    max_tokens=max_tokens, json_mode=False,
+                )
+            raise
+
+    def _complete_with_json_mode(
         self,
         messages: list[dict[str, str]],
         *,

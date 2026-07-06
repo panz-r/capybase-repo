@@ -254,6 +254,9 @@ class Result:
     critic_calls: int = 0           # verdicts the critic actually produced
     critic_flagged: int = 0         # verdicts where preserves_* was False (dropped intent)
     critic_useful_interventions: int = 0  # critic flagged a candidate the syntactic checks PASSED
+    # Outline-prompt variant (small-model experiment): which outline framing was
+    # active, or "" for the baseline prompt. Set from CAPYBASE_PROMPT_VARIANT.
+    prompt_variant: str = ""
 
 
 def _critic_stats(orch) -> tuple[int, int, int]:
@@ -301,7 +304,22 @@ def _critic_stats(orch) -> tuple[int, int, int]:
 def run_scenario(builder, out_dir: Path, *, critic_enabled: bool = True) -> Result:
     scenario = builder()
     arm = "on" if critic_enabled else "off"
-    print(f"\n=== {scenario.name} ({scenario.language}) [critic={arm}] ===", flush=True)
+    # Outline-prompt variant (small-model experiment): select it on the
+    # resolution_engine before building the engine, so every fresh-resolve
+    # candidate uses the chosen framing. The variant tag is surfaced in results.
+    variant = os.environ.get("CAPYBASE_PROMPT_VARIANT", "").strip()
+    variant_n: int | None = None
+    if variant:
+        try:
+            variant_n = int(variant)
+        except ValueError:
+            variant_n = None
+    from capybase.resolution_engine import set_outline_variant
+    set_outline_variant(variant_n)
+    tag = f"v{variant_n}" if variant_n else "baseline"
+    os.environ["CAPYBASE_PROMPT_VARIANT_TAG"] = tag
+    print(f"\n=== {scenario.name} ({scenario.language}) [critic={arm}] [prompt={tag}] ===",
+          flush=True)
     t0 = time.time()
     cfg = _config_for(scenario, critic_enabled=critic_enabled)
     engine = ResolutionEngine(cfg.model, client=OpenAICompatibleClient(cfg.model))
@@ -373,11 +391,13 @@ def run_scenario(builder, out_dir: Path, *, critic_enabled: bool = True) -> Resu
 
     return Result(scenario.name, correct, escalated, reason, elapsed, preview, events,
                   critic_arm=arm, critic_calls=c_calls, critic_flagged=c_flagged,
-                  critic_useful_interventions=c_useful)
+                  critic_useful_interventions=c_useful,
+                  prompt_variant=os.environ.get("CAPYBASE_PROMPT_VARIANT_TAG", ""))
 
 
 def _probe_endpoint() -> bool:
     print("Probing model endpoint...", flush=True)
+    target_model = os.environ.get("CAPYBASE_MODEL", "chat")
     try:
         import urllib.request
         resp = urllib.request.urlopen(
@@ -385,11 +405,25 @@ def _probe_endpoint() -> bool:
             timeout=15,
         )
         models = json.loads(resp.read())
-        loaded = [m["id"] for m in models.get("data", []) if m.get("status", {}).get("value") == "loaded"]
-        print(f"  reachable. loaded models: {loaded}", flush=True)
-        if "chat" not in loaded:
-            print("  WARNING: 'chat' model not loaded — eval will fail.", flush=True)
-        return "chat" in loaded
+        all_ids = [m["id"] for m in models.get("data", [])]
+        # Some servers (the DESKTOP-NOVA llama.cpp build) report a per-model
+        # ``status.value == "loaded"``; others (LM Studio) just list available
+        # models with no status field. When statuses are reported, require the
+        # target to be loaded; otherwise settle for it being listed.
+        with_status = [m for m in models.get("data", []) if m.get("status")]
+        if with_status:
+            loaded = [m["id"] for m in with_status if m.get("status", {}).get("value") == "loaded"]
+            ok = target_model in loaded
+            print(f"  reachable. loaded models: {loaded}", flush=True)
+        else:
+            ok = target_model in all_ids
+            print(f"  reachable. available models: {all_ids}", flush=True)
+        if not ok:
+            print(
+                f"  WARNING: target model '{target_model}' not available — eval "
+                f"will fail.", flush=True
+            )
+        return ok
     except Exception as e:
         print(f"  UNREACHABLE: {e}", flush=True)
         return False

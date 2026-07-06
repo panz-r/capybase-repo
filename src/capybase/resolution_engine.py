@@ -700,6 +700,172 @@ _MINIMAL_DIFF_STEER = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Outline-first prompt variants (small-model experiment)
+# ---------------------------------------------------------------------------
+#
+# A family of resolve-prompt framings that state the conflict's structure TWICE:
+# first as a compact abstract OUTLINE (what each side wants, one line each),
+# then in full detail (the exact code sides). The hypothesis: a small (1B)
+# model reasons better when it first sees the task summarized — the outline
+# primes the merge intent before the literal text demands token-by-token
+# copying. The full detail block is identical to the baseline (same sides,
+# JSON contract, rules), so the spliced-output contract is invariant.
+#
+# Each variant changes the OUTLINE's phrasing/ordering to probe which summary
+# style helps a weak model most. Selection is via :func:`set_outline_variant`
+# (driven by CAPYBASE_PROMPT_VARIANT in live_eval); the default (None/0) is the
+# baseline prompt with NO outline — identical to production.
+
+#: The active outline variant, or None for the baseline prompt. Set via
+#: :func:`set_outline_variant`. 0/None = baseline; 1-5 = the outline framings.
+_OUTLINE_VARIANT: int | None = None
+
+#: Variant suffixes recorded on candidate.prompt_version for attribution.
+_OUTLINE_VARIANT_TAGS = {
+    1: "#outline.v1",
+    2: "#outline.v2",
+    3: "#outline.v3",
+    4: "#outline.v4",
+    5: "#outline.v5",
+}
+
+
+def set_outline_variant(variant: int | None) -> None:
+    """Select the outline-first prompt variant process-wide.
+
+    ``None`` or ``0`` restores the baseline prompt (no outline). ``1``-``5``
+    select one of the outline framings. Used by the live eval to A/B outline-
+    first prompts against a small model.
+    """
+    global _OUTLINE_VARIANT
+    _OUTLINE_VARIANT = variant if (variant is None or variant in _OUTLINE_VARIANT_TAGS) else None
+
+
+def get_outline_variant() -> int | None:
+    """The active outline variant (None = baseline)."""
+    return _OUTLINE_VARIANT
+
+
+def _side_outline_lines(unit: ConflictUnit) -> tuple[str, str, str]:
+    """One-line abstract summaries of the CURRENT / REPLAYED / BASE sides.
+
+    The outline is built from the side-intent annotations (the structural
+    metadata) when available, falling back to a first-line / line-count digest.
+    These are deliberately COARSE — the full detail follows later, so the
+    outline's job is to convey intent, not exact code.
+    """
+    cur = (unit.current.text or "").strip()
+    rep = (unit.replayed.text or "").strip()
+    base = (unit.base.text or "").strip()
+
+    def head(t: str) -> str:
+        if not t:
+            return "(empty)"
+        first = t.split("\n", 1)[0].strip()
+        return first[:80] + ("…" if len(first) > 80 else "")
+
+    return head(cur), head(rep), head(base)
+
+
+def build_outline_resolve_prompt(
+    unit: ConflictUnit,
+    context: ContextBundle,
+    budget: "TokenBudget | None" = None,
+) -> tuple[str, str]:
+    """Build the resolve prompt under the active outline variant.
+
+    Returns ``(prompt_text, variant_tag)``. ``variant_tag`` is "" for the
+    baseline and ``"#outline.vN"`` otherwise — appended to the candidate's
+    ``prompt_version`` so the journal records which framing produced it.
+
+    When the active variant is None/0, this is byte-identical to
+    :func:`build_resolve_prompt`. The outline variants reuse the baseline's
+    parts (intro/data/contract/rules from ``_resolve_prompt_parts``) — they only
+    PREPEND a summary outline and adjust the intro's framing, so the full detail
+    and the JSON contract are invariant across variants.
+    """
+    variant = _OUTLINE_VARIANT
+    p = _resolve_prompt_parts(unit, context, budget=budget)
+    intro, data, contract, rules = p["intro"], p["data"], p["contract"], p["rules"]
+    if not variant:
+        return intro + data + contract + rules, ""
+
+    cur_h, rep_h, base_h = _side_outline_lines(unit)
+    tag = _OUTLINE_VARIANT_TAGS[variant]
+
+    # Shared header explaining the two-pass structure (outline then detail).
+    outline_intro = (
+        "Resolve ONE git merge conflict. This prompt shows the problem TWICE:\n"
+        "first as a SHORT OUTLINE (what each side wants), then in FULL DETAIL\n"
+        "(the exact code). Read the outline first to understand the goal, then\n"
+        "use the full detail to write the exact merged text.\n\n"
+        f"file: {unit.path}\n"
+        f"language: {unit.language or 'unknown'}\n\n"
+    )
+
+    if variant == 1:
+        # v1 — plain intent outline: one line per side, "goal" framing.
+        outline = (
+            "=== OUTLINE (read this first) ===\n"
+            f"Goal: merge BOTH sides into one coherent result; keep each side's intent.\n"
+            f"CURRENT (upstream) wants: {cur_h}\n"
+            f"REPLAYED (commit being applied) wants: {rep_h}\n"
+            f"BASE (common ancestor): {base_h}\n"
+            "Both sides must be represented in the result.\n\n"
+        )
+    elif variant == 2:
+        # v2 — change-relative outline: what CHANGED from base on each side.
+        outline = (
+            "=== OUTLINE (read this first) ===\n"
+            "Two branches each changed the same region from a shared BASE. Your job is\n"
+            "to combine both changes.\n"
+            f"- BASE:              {base_h}\n"
+            f"- CURRENT changed it to: {cur_h}\n"
+            f"- REPLAYED changed it to: {rep_h}\n"
+            "The result must include BOTH branches' changes, not pick one.\n\n"
+        )
+    elif variant == 3:
+        # v3 — checklist outline: explicit "must include" items, then detail.
+        outline = (
+            "=== OUTLINE (read this first) ===\n"
+            "Before writing the answer, confirm your merge will:\n"
+            f"  [ ] include CURRENT's change: {cur_h}\n"
+            f"  [ ] include REPLAYED's change: {rep_h}\n"
+            f"  [ ] not lose either side (BASE was: {base_h})\n"
+            "Both checkmarks must be satisfied.\n\n"
+        )
+    elif variant == 4:
+        # v4 — role + outline: "you are merging two branches", then intent lines.
+        outline = (
+            "=== OUTLINE (read this first) ===\n"
+            "You are merging two git branches that both edited the same code.\n"
+            "CURRENT is the branch you are merging INTO; REPLAYED is the commit being\n"
+            "applied. A correct merge contains BOTH edits.\n"
+            f"  CURRENT  (merge into this): {cur_h}\n"
+            f"  REPLAYED (apply this too):  {rep_h}\n"
+            f"  BASE     (original):        {base_h}\n"
+            "Do not drop either side's edit.\n\n"
+        )
+    else:
+        # v5 — contrast outline: side-by-side one-liners emphasizing both must win.
+        outline = (
+            "=== OUTLINE (read this first) ===\n"
+            "SIDE-BY-SIDE summary of the conflict:\n"
+            f"  CURRENT  | {cur_h}\n"
+            f"  REPLAYED | {rep_h}\n"
+            f"  BASE     | {base_h}\n"
+            "Rule: the merged result must contain CURRENT's intent AND REPLAYED's\n"
+            "intent simultaneously. Neither side loses.\n\n"
+        )
+
+    # The full detail block: label it explicitly so the model knows the outline
+    # is a summary and this is the authoritative source for exact text.
+    detail_header = "=== FULL DETAIL (use this for the exact merged text) ===\n\n"
+    prompt = outline_intro + outline + detail_header + data + contract + rules
+    return prompt, tag
+
+
 def build_retry_prompt(
     unit: ConflictUnit,
     context: ContextBundle,
@@ -1349,9 +1515,19 @@ class ResolutionEngine:
             )
         else:
             prompt_version = PROMPT_RESOLVE
+            # Outline-first variant (small-model experiment): when an outline
+            # variant is active, build the prompt via build_outline_resolve_prompt
+            # (which reuses _resolve_prompt_parts, so the data/contract/rules are
+            # invariant; only the framing + an outline preamble differ). The
+            # variant tag is folded into prompt_version for attribution.
+            outline_prompt, outline_tag = build_outline_resolve_prompt(
+                unit, context, budget=self.token_budget
+            )
+            if outline_tag:
+                prompt_version = PROMPT_RESOLVE + outline_tag
             parts = _resolve_prompt_parts(unit, context, budget=self.token_budget)
             prompt_trims = parts["trims"]
-            prompt = parts["intro"] + parts["data"] + parts["contract"] + parts["rules"]
+            prompt = outline_prompt
         candidates: list[CandidateResolution] = []
         n = max(1, self.config.samples if n_samples is None else n_samples)
         # Prompt-variant sampling (survey §4): on a FRESH resolve only (retries/
