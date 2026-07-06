@@ -175,6 +175,29 @@ def set_parser_backend(backend: str | None) -> None:
     _BACKEND_OVERRIDE = backend
 
 
+# Module-level embedder singleton for the semantic entity-matching tier
+# (embeddings survey §2). Set once by the orchestrator (which builds the shared
+# OpenAIEmbeddingsClient) so the entity-matching call sites (validators,
+# conflict extractor, repair-prompt renderer) pick it up without threading the
+# param through every call — mirrors the ``_BACKEND_OVERRIDE`` pattern. ``None``
+# (default) keeps matching pure-deterministic (byte-identical to pre-embedding).
+_ENTITY_EMBEDDER: object | None = None
+
+
+def set_entity_embedder(embedder: object | None) -> None:
+    """Install the shared embeddings client for semantic rename detection.
+
+    When set, :func:`match_entities`'s embedding tier runs on otherwise-
+    unmatched entities (after the name + body-fp + Jaccard tiers all fail),
+    pairing renames whose bodies are semantically similar even when a heavy edit
+    dropped them below the Jaccard floor (embeddings survey §2). ``None``
+    restores pure-deterministic matching. Best-effort: the embedding tier never
+    raises — a failed embed leaves the entity unmatched.
+    """
+    global _ENTITY_EMBEDDER
+    _ENTITY_EMBEDDER = embedder
+
+
 def _abstract_parse(source: str, language: str):
     """Parse via the abstract parser; return a :class:`FileIR` or ``None``.
 
@@ -727,12 +750,18 @@ def _duplicate_definitions_tree_sitter(
 #: - ``same_name``: paired by exact ``(kind, name)`` identity.
 #: - ``renamed``: paired across DIFFERENT names by body-fingerprint equality or
 #:   near-equality (Jaccard ≥ threshold) — the source's old name is gone in target.
+#: - ``possibly_renamed``: a WEAKER rename signal from semantic embeddings
+#:   (embeddings survey §2) — cosine 0.70–0.85 with a corroborating signal
+#:   (Jaccard/name-similarity above their floors). Like ``renamed`` it is NOT
+#:   counted as dropped/unattributed (the false positive is suppressed), but it
+#:   is distinguishable so validators can downgrade severity to advisory.
 #: - ``unmatched``: no counterpart found in target (neither by name nor by body).
 #:
 #: Produced by :func:`match_entities`; consumed by the analyzers below so a
 #: legitimate rename is recognized rather than read as a drop + spurious add.
 MATCH_SAME_NAME = "same_name"
 MATCH_RENAMED = "renamed"
+MATCH_POSSIBLY_RENAMED = "possibly_renamed"
 MATCH_UNMATCHED = "unmatched"
 
 
@@ -750,8 +779,16 @@ class EntityMatch:
     kind: str  # one of the MATCH_* constants above
 
 
+# Sentinel so match_entities can distinguish "caller didn't pass embedder"
+# (→ consult the module-level singleton) from "caller explicitly passed None"
+# (→ disable the embedding tier for this call). Tests pass None explicitly to
+# assert pure-deterministic behavior regardless of the global singleton.
+_EMBEDDER_UNSET = object()
+
+
 def match_entities(
-    sources: "list[Entity]", targets: "list[Entity]"
+    sources: "list[Entity]", targets: "list[Entity]", *,
+    embedder: "object | _EMBEDDER_UNSET | None" = _EMBEDDER_UNSET,
 ) -> list[EntityMatch]:
     """Classify each ``source`` entity against the ``targets`` set.
 
@@ -764,8 +801,24 @@ def match_entities(
     a rename-with-edit), AND name-similarity ≥ 0.6 or a substantial body — so two
     distinct entities sharing a trivial body don't false-pair.
 
-    Pure (no parsing); operates on already-enumerated entity lists. Deterministic.
+    Semantic embedding tier (embeddings survey §2): when an embedder is available
+    (the module-level singleton set by :func:`set_entity_embedder`, or an explicit
+    ``embedder`` arg), a 4th pass runs on otherwise-unmatched entities (after name
+    + body-fp + Jaccard all fail). It embeds the source body and each same-kind
+    target body (normalized: comments stripped, literals masked) and pairs by
+    cosine: ≥ 0.85 → ``renamed``; 0.70–0.85 with a corroborating signal (Jaccard
+    or name similarity above their floors) → ``possibly_renamed``. The conjunction
+    of two independent signals reduces false negatives. Passing ``embedder=None``
+    explicitly disables the tier for this call (pure-deterministic, the pre-
+    embedding behavior); omitting it consults the singleton.
+
+    Pure (no parsing); operates on already-enumerated entity lists. Deterministic
+    except the embedding tier, which is gated behind the embedder and never raises
+    (any embed failure leaves the entity ``unmatched``).
     """
+    # Resolve the effective embedder: explicit arg wins; else the singleton.
+    if embedder is _EMBEDDER_UNSET:
+        embedder = _ENTITY_EMBEDDER
     target_by_name: dict[tuple[str, str], Entity] = {(e.kind, e.name): e for e in targets}
     target_names_by_kind: dict[str, set[str]] = {}
     for e in targets:
@@ -826,22 +879,143 @@ def match_entities(
                     target = best[1]
         if target is not None:
             out.append(EntityMatch(source=src, target=target, kind=MATCH_RENAMED))
+        elif embedder is not None:
+            # 3. Semantic embedding tier (embeddings survey §2): for an otherwise-
+            # unmatched source, embed its body and each same-kind target body
+            # (different name required — a copy is not a rename). Pairs by cosine
+            # with the conjunction rule: high cosine alone (≥0.85) confirms a
+            # rename; mid cosine (0.70–0.85) needs a corroborating Jaccard/name
+            # signal. Never raises — a failed embed leaves the source unmatched.
+            emb_match = _embedding_rename_match(
+                src, targets, target_names_by_kind, bf, embedder
+            )
+            if emb_match is not None:
+                out.append(emb_match)
+            else:
+                out.append(EntityMatch(source=src, target=None, kind=MATCH_UNMATCHED))
         else:
             out.append(EntityMatch(source=src, target=None, kind=MATCH_UNMATCHED))
     return out
 
 
+# Cosine floors for the embedding rename tier (embeddings survey §2). 0.85 is
+# the survey's "renamed" threshold (suppress the false positive); 0.70–0.85 is
+# the "possibly_renamed" band (downgrade to advisory). The conjunction rule
+# (§2): a mid-band match is accepted only with a corroborating signal — Jaccard
+# ≥ 0.80 OR name-similarity ≥ 0.6 — so two semantically-similar-but-distinct
+# functions don't false-pair.
+_EMB_RENAME_THRESHOLD = 0.85
+_EMB_POSSIBLY_RENAMED_THRESHOLD = 0.70
+
+
+def _embedding_rename_match(
+    src: "Entity",
+    targets: "list[Entity]",
+    target_names_by_kind: dict[str, set[str]],
+    src_body_fp: str,
+    embedder: "object",
+) -> EntityMatch | None:
+    """Find a rename for ``src`` via body-embedding cosine (embeddings survey §2).
+
+    Returns an ``EntityMatch`` (``renamed`` or ``possibly_renamed``) or None.
+    Pure helper for :func:`match_entities`'s embedding tier. Never raises.
+    """
+    from capybase.memory.embeddings import normalize_body_for_embedding
+
+    # A copy is not a rename: skip if the source name still exists in targets.
+    if src.name in target_names_by_kind.get(src.kind, set()):
+        return None
+    if not _body_is_substantial(src_body_fp):
+        return None
+    # Collect same-kind target bodies to embed alongside the source.
+    cand_targets = [t for t in targets if t.kind == src.kind]
+    if not cand_targets:
+        return None
+    src_norm = normalize_body_for_embedding(src_body_fp)
+    if not src_norm:
+        return None
+    cand_norms = [normalize_body_for_embedding(entity_body_fingerprint(t, "") or "") for t in cand_targets]
+    # Embed source + candidates in one batch; cosine-rank.
+    try:
+        texts = [src_norm] + [c for c in cand_norms if c]
+        if len(texts) < 2:
+            return None
+        vecs = embedder.embed(texts)  # type: ignore[attr-defined]
+        if not vecs or len(vecs) < len(texts):
+            return None
+        src_vec = vecs[0]
+        cand_vecs = vecs[1:]
+        # Align cand_vecs to cand_targets (skip empties).
+        best: tuple[float, str, Entity] | None = None
+        vi = 0
+        for t, cn in zip(cand_targets, cand_norms):
+            if not cn or vi >= len(cand_vecs):
+                break
+            cv = cand_vecs[vi]
+            vi += 1
+            sim = _cosine_sim(src_vec, cv)
+            if sim < _EMB_POSSIBLY_RENAMED_THRESHOLD:
+                continue
+            # Conjunction rule (§2): mid-band needs a corroborating signal.
+            t_body_fp = entity_body_fingerprint(t, "") or ""
+            j = _jaccard(src_body_fp, t_body_fp)
+            name_sim = _name_similarity(src.name, t.name)
+            if sim >= _EMB_RENAME_THRESHOLD:
+                kind = MATCH_RENAMED
+            elif j >= _RENAME_BODY_JACCARD_THRESHOLD or name_sim >= _RENAME_NAME_SIMILARITY_THRESHOLD:
+                kind = MATCH_POSSIBLY_RENAMED
+            else:
+                continue
+            if best is None or sim > best[0]:
+                best = (sim, kind, t)
+        if best is None:
+            return None
+        return EntityMatch(source=src, target=best[2], kind=best[1])
+    except Exception:  # noqa: BLE001 - embedding tier never breaks matching
+        return None
+
+
+def _cosine_sim(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two equal-length vectors. 0 for zero/mismatched."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0.0 or nb <= 0.0:
+        return 0.0
+    import math
+
+    return dot / (math.sqrt(na) * math.sqrt(nb))
+
+
+def _jaccard(a: str, b: str) -> float:
+    """Token-set Jaccard similarity of two body strings (local to this tier)."""
+    sa = _token_set(a)
+    sb = _token_set(b)
+    if not sa or not sb:
+        return 0.0
+    inter = len(sa & sb)
+    union = len(sa | sb)
+    return inter / union if union else 0.0
+
+
 def dropped_entities(
-    base: str, side: str, resolved: str, language: str
+    base: str, side: str, resolved: str, language: str, *,
+    embedder: "object | None" = None,
 ) -> list[Entity] | None:
     """Entities a ``side`` ADDED that are ABSENT from ``resolved``.
 
-    The quantitative per-side preservation signal for the verifier critic and
-    the CEGIS retry feedback: instead of a boolean "dropped a side", this lists
-    the SPECIFIC logical units (function/method/class/field by name) that the
-    side introduced beyond ``base`` and that the resolution dropped — giving the
-    model exact targets to reintroduce on retry ("reintroduce: function `foo`,
-    class `Bar`") and the LLM judge concrete evidence.
+    The quantitative per-side preservation signal for the verifier critic and the
+    CEGIS retry feedback: instead of a boolean "dropped a side", this lists the
+    SPECIFIC logical units (function/method/class/field by name) that the side
+    introduced beyond ``base`` and that the resolution dropped — giving the model
+    exact targets to reintroduce on retry ("reintroduce: function `foo`, class
+    `Bar`") and the LLM judge concrete evidence.
 
     An entity is "added by the side" if its ``(kind, name)`` identity appears in
     ``side`` but not ``base``. It's "dropped" if that identity is then absent
@@ -849,9 +1023,12 @@ def dropped_entities(
     is a legitimate merge, not a drop): rename-aware matching (``match_entities``)
     recognizes a side entity whose body content reappears in the resolution under
     a different name, so a legitimate rename does NOT surface as a false drop.
-    Module-level bare assignments (``X = ...``) are NOT enumerated (see
-    _KIND_BY_NODE_TYPE), so this catches structural defs only; the token-set
-    BothSidesRepresented validator remains the backstop for value/assignment drops.
+    With ``embedder`` (embeddings survey §2), a semantic-body rename also counts
+    as preserved, closing the false-positive gap where a renamed+heavily-edited
+    function fires as dropped. Module-level bare assignments (``X = ...``) are
+    NOT enumerated (see _KIND_BY_NODE_TYPE), so this catches structural defs
+    only; the token-set BothSidesRepresented validator remains the backstop for
+    value/assignment drops.
 
     Returns ``None`` when tree-sitter is unavailable or any of the three texts
     fail to parse (the critic degrades gracefully). An empty list means the side
@@ -864,9 +1041,10 @@ def dropped_entities(
         return None
     base_names = {e.name for e in base_ents}
     # Added by the side = name not in base. A dropped entity is one that's
-    # UNMATCHED in the resolution (neither same-name nor a recognized rename),
-    # so a legitimate rename survives rather than counting as a false drop.
-    matches = match_entities(side_ents, resolved_ents)
+    # UNMATCHED in the resolution (neither same-name nor a recognized rename —
+    # including a semantic rename when embedder is given), so a legitimate
+    # rename survives rather than counting as a false drop.
+    matches = match_entities(side_ents, resolved_ents, embedder=embedder)
     dropped: list[Entity] = []
     for m in matches:
         if m.source.name not in base_names and m.kind == MATCH_UNMATCHED:
@@ -895,7 +1073,8 @@ class CoverageReport:
 
 
 def preservation_coverage(
-    base: str, side: str, resolved: str, language: str
+    base: str, side: str, resolved: str, language: str, *,
+    embedder: "object | None" = None,
 ) -> CoverageReport | None:
     """How much of a ``side``'s added structural intent survives in ``resolved``.
 
@@ -903,11 +1082,12 @@ def preservation_coverage(
     hard "no silent drop > X%" guarantee: of the M logical units (function/
     method/class/field) the side ADDED beyond ``base``, how many are present in
     the resolution. A rename counts as preserved (a renamed-but-present entity
-    survives under a different name), so it does not lower coverage. Returns a
-    :class:`CoverageReport` with the ratio; ``None`` when tree-sitter is
-    unavailable or any text fails to parse (coverage undefined, not a failure).
-    An ``added == 0`` report means the side added no structural entities
-    (ratio 1.0 — nothing to drop).
+    survives under a different name), so it does not lower coverage. With
+    ``embedder`` (embeddings survey §2), a semantic-body rename also counts as
+    preserved. Returns a :class:`CoverageReport` with the ratio; ``None`` when
+    tree-sitter is unavailable or any text fails to parse (coverage undefined,
+    not a failure). An ``added == 0`` report means the side added no structural
+    entities (ratio 1.0 — nothing to drop).
     """
     base_ents = enumerate_entities(base, language)
     side_ents = enumerate_entities(side, language)
@@ -916,9 +1096,10 @@ def preservation_coverage(
         return None
     base_names = {e.name for e in base_ents}
     # Added by the side = name not in base. Of those, the ones UNMATCHED in the
-    # resolution (neither same-name nor a recognized rename) are dropped; a
-    # rename is preserved (survives under a new name) and so not counted dropped.
-    matches = match_entities(side_ents, resolved_ents)
+    # resolution (neither same-name nor a recognized rename — including a
+    # semantic rename when embedder is given) are dropped; a rename is preserved
+    # (survives under a new name) and so not counted dropped.
+    matches = match_entities(side_ents, resolved_ents, embedder=embedder)
     added: list[Entity] = []
     dropped: list[Entity] = []
     for m in matches:
@@ -935,7 +1116,8 @@ def preservation_coverage(
 
 
 def unattributed_entities(
-    base: str, current: str, replayed: str, resolved: str, language: str
+    base: str, current: str, replayed: str, resolved: str, language: str, *,
+    embedder: "object | None" = None,
 ) -> list[Entity] | None:
     """Logical units in ``resolved`` that appear in NONE of the three sides.
 
@@ -965,10 +1147,11 @@ def unattributed_entities(
     if any(x is None for x in (base_ents, cur_ents, rep_ents, res_ents)):
         return None
     # Match each resolved entity against the union of all side entities. A
-    # same-name OR rename match (body-fingerprint equal/near) counts as
-    # attributed; only an unmatched resolved entity is unattributed.
+    # same-name OR rename match (body-fingerprint equal/near, or a semantic
+    # rename via embedder — embeddings survey §2) counts as attributed; only an
+    # unmatched resolved entity is unattributed.
     sides = list(base_ents) + list(cur_ents) + list(rep_ents)
-    matches = match_entities(res_ents, sides)
+    matches = match_entities(res_ents, sides, embedder=embedder)
     return [m.source for m in matches if m.kind == MATCH_UNMATCHED]
 
 

@@ -584,6 +584,23 @@ class Orchestrator:
             slice_repo_root=str(self.git.repo),
             repair_retriever=repair_retriever,
         )
+        # Semantic entity matching (embeddings survey §2): install a shared
+        # embeddings client on the structural adapter so match_entities can run
+        # the embedding rename tier. Reuses the same embeddings endpoint/model
+        # as the retriever; built only when memory is enabled. The adapter's
+        # embedding tier is best-effort and degrades to pure-deterministic on any
+        # failure, so a missing endpoint never breaks matching.
+        if config.memory.enabled:
+            try:
+                from capybase.adapters import structural
+                from capybase.memory.embeddings import OpenAIEmbeddingsClient
+
+                emb_cfg = config.model
+                if config.memory.embeddings_model:
+                    emb_cfg = emb_cfg.model_copy(update={"model": config.memory.embeddings_model})
+                structural.set_entity_embedder(OpenAIEmbeddingsClient(emb_cfg))
+            except Exception:  # noqa: BLE001 - semantic matching is best-effort
+                pass
         self.resolution_engine = resolution_engine or ResolutionEngine(config.model)
         self.verification = VerificationEngine.default(
             ValidationConfig.from_dict(config.validation.model_dump())
