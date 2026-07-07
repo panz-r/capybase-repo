@@ -261,28 +261,56 @@ def parse_resolution_json(raw: str) -> tuple[dict, list[str]]:
        top-level ``{ ... }`` object, preferring the last one (the final
        answer), and we ignore braces that appear inside string literals so
        constructs like ``f'hi {name}'`` don't fool the scanner.
+
+    JSON repair (small-model hardening): when strict ``json.loads`` fails on a
+    candidate, a lenient ``repair_json`` pass salvages the common formatting
+    errors small models produce — trailing commas, missing brackets, single
+    quotes, stray prose, markdown fences, unescaped characters. A pre-processor
+    first escapes unescaped double quotes inside known code-content fields
+    (``resolved_text``, ``search``, ``replace``) — the highest-priority fix for
+    the confirmed small-model failure where embedded ``"`` breaks the JSON
+    envelope. Repair never raises; an unrepairable response falls through to the
+    scan and ultimately returns ``{}`` (a parse_failed candidate → retry).
     """
     warnings: list[str] = []
+    # Pre-processor: escape unescaped " inside known code-content fields. Small
+    # models emit code snippets with bare " inside JSON string values, breaking
+    # the envelope. This runs once, before every parse tier.
+    preprocessed = _escape_code_quotes(raw)
 
     # 1. Prefer a fenced ```json (or ```) block.
-    fenced = _extract_fenced(raw)
+    fenced = _extract_fenced(preprocessed)
     if fenced is not None:
         data, ok = _try_json(fenced)
         if ok:
             return _as_dict(data, warnings)
+        # Tier 2: lenient repair on the fenced block.
+        data, ok = _try_repair(fenced)
+        if ok:
+            warnings.append("fenced block salvaged via json-repair")
+            return _as_dict(data, warnings)
         warnings.append("fenced block was not valid JSON; falling back to scan")
 
     # 2. Direct parse of the whole response.
-    data, ok = _try_json(raw.strip())
+    data, ok = _try_json(preprocessed.strip())
     if ok:
+        return _as_dict(data, warnings)
+    # Tier 2: lenient repair on the whole response.
+    data, ok = _try_repair(preprocessed.strip())
+    if ok:
+        warnings.append("response salvaged via json-repair")
         return _as_dict(data, warnings)
 
     # 3. Scan for balanced top-level objects; keep the last parseable one.
     warnings.append("strict JSON parse failed; scanning for embedded object")
-    candidates = _find_balanced_objects(raw)
+    candidates = _find_balanced_objects(preprocessed)
     for cand in reversed(candidates):
         data, ok = _try_json(cand)
         if ok:
+            return _as_dict(data, warnings)
+        data, ok = _try_repair(cand)
+        if ok:
+            warnings.append("embedded object salvaged via json-repair")
             return _as_dict(data, warnings)
     warnings.append("no valid JSON object found in response")
     return {}, warnings
@@ -293,6 +321,68 @@ def _try_json(text: str) -> tuple[object, bool]:
         return json.loads(text), True
     except json.JSONDecodeError:
         return None, False
+
+
+def _try_repair(text: str) -> tuple[object, bool]:
+    """Tier 2: lenient JSON repair via json-repair (small-model hardening).
+
+    Handles trailing commas, missing brackets, single quotes, stray prose,
+    markdown fences, unescaped characters. Lazy-imported so the dependency is
+    optional at runtime (absent → degrades to the strict scan, the prior path).
+    Never raises; returns ``(None, False)`` on any failure.
+    """
+    if not text or not text.strip():
+        return None, False
+    try:
+        from json_repair import repair_json
+
+        result = repair_json(text, return_objects=True)
+        if result is not None:
+            return result, True
+    except Exception:  # noqa: BLE001 - repair is best-effort, never breaks parsing
+        pass
+    return None, False
+
+
+# Known code-content fields where small models emit unescaped double quotes.
+# The pre-processor (_escape_code_quotes) escapes bare " inside these fields'
+# string values so the outer JSON envelope stays intact. Mirrors the confirmed
+# small-model failure where a code snippet's embedded " breaks the parse.
+_CODE_FIELD_NAMES = (
+    "resolved_text", "search", "replace", "explanation", "reason",
+    "contents", "changes", "code", "diff",
+)
+
+
+def _escape_code_quotes(raw: str) -> str:
+    """Pre-processor: escape unescaped ``"`` inside known code-content fields.
+
+    Small models emit code snippets with bare ``"`` inside JSON string values
+    (e.g. ``"resolved_text": "x = "hello""``), breaking the envelope. This
+    escapes the inner quotes so the JSON parses. Operates only on the known
+    code-bearing fields; other string values are untouched. A robust
+    implementation would use a stateful parser; this regex is the pragmatic
+    middle ground that handles the common single-line and multi-line cases.
+    """
+    if not raw or '"' not in raw:
+        return raw
+    import re
+
+    fields = "|".join(_CODE_FIELD_NAMES)
+    pattern = re.compile(
+        rf'("(?:{fields})"\s*:\s*")'
+        r'(.*?)'
+        r'("(?:\s*[,}\]]))',
+        re.DOTALL,
+    )
+
+    def _escape_inner(m: re.Match) -> str:
+        inner = m.group(2)
+        # Protect already-escaped quotes, escape bare ones, then restore.
+        inner = inner.replace('\\"', '\x00').replace('"', '\\"').replace('\x00', '\\"')
+        return m.group(1) + inner + m.group(3)
+
+    return pattern.sub(_escape_inner, raw)
 
 
 def _as_dict(data: object, warnings: list[str]) -> tuple[dict, list[str]]:

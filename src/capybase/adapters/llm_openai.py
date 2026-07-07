@@ -530,8 +530,46 @@ def _has_complete_answer(accumulated: str) -> bool:
     output is babble we can discard — letting the adapter close the
     connection immediately rather than reading trailing prose.
     """
-    data, _ = parse_resolution_json(accumulated)
+    data, _ = _try_parse_complete(accumulated)
     return bool(data) and "resolved_text" in data
+
+
+def _try_parse_complete(text: str) -> tuple[dict, list[str]]:
+    """Lightweight parse for the streaming early-termination check.
+
+    Uses strict json.loads + the balanced-object scan ONLY — NOT the json-repair
+    pipeline or the quote-escaping pre-processor. Those operate on the FINAL
+    complete response; running them on partial streaming text would corrupt it
+    (the pre-processor would escape quotes in an incomplete string value). This
+    returns True only when the accumulated text is already valid complete JSON.
+    """
+    import json
+
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data, []
+    except json.JSONDecodeError:
+        pass
+    # Fall back to the fenced/scan extraction (strict only, no repair).
+    from capybase.adapters.parsers import _extract_fenced, _find_balanced_objects
+
+    fenced = _extract_fenced(text)
+    if fenced is not None:
+        try:
+            data = json.loads(fenced)
+            if isinstance(data, dict):
+                return data, []
+        except json.JSONDecodeError:
+            pass
+    for cand in reversed(_find_balanced_objects(text)):
+        try:
+            data = json.loads(cand)
+            if isinstance(data, dict):
+                return data, []
+        except json.JSONDecodeError:
+            pass
+    return {}, []
 
 
 def _from_non_stream(raw: dict[str, Any]) -> LLMResponse:

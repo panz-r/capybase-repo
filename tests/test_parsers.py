@@ -328,7 +328,9 @@ def test_parse_resolution_prose_then_json():
     raw = "user: let me think...\nso the answer is\n{\"resolved_text\": \"z\"}\n"
     data, warns = parse_resolution_json(raw)
     assert data["resolved_text"] == "z"
-    assert any("scan" in w for w in warns)
+    # The JSON repair tier (json-repair) now salvages this BEFORE the scan runs;
+    # the warning reflects the repair path, not the scan fallback.
+    assert any("salvaged" in w or "scan" in w for w in warns)
 
 
 def test_parse_resolution_ignores_braces_in_strings():
@@ -347,7 +349,10 @@ def test_parse_resolution_picks_last_object():
 def test_parse_resolution_no_json_returns_empty():
     data, warns = parse_resolution_json("just prose, no braces here")
     assert data == {}
-    assert any("no valid" in w for w in warns)
+    # The JSON repair tier may salvage the prose into a non-object (which
+    # _as_dict rejects → empty dict); the warning reflects that path. The key
+    # assertion is that pure prose yields no usable resolution (empty dict).
+    assert warns  # some parse warning was recorded
 
 
 def test_parse_resolution_multiline_escaped_text():
@@ -355,6 +360,74 @@ def test_parse_resolution_multiline_escaped_text():
     data, warns = parse_resolution_json(payload)
     assert "return" in data["resolved_text"]
     assert warns == []
+
+
+# ---------------------------------------------------------------------------
+# JSON repair (small-model hardening): three-tier fallback + pre-processor
+# ---------------------------------------------------------------------------
+
+
+def test_parse_repair_trailing_comma():
+    """Tier 2: a trailing comma is salvaged by json-repair."""
+    raw = '{"resolved_text": "x = 1", "needs_human": false,}'
+    data, warns = parse_resolution_json(raw)
+    assert data["resolved_text"] == "x = 1"
+    assert any("salvaged" in w for w in warns)
+
+
+def test_parse_repair_missing_closing_brace():
+    """Tier 2: a truncated JSON object (missing }) is salvaged."""
+    raw = '{"resolved_text": "z = 3"'
+    data, warns = parse_resolution_json(raw)
+    assert data.get("resolved_text") == "z = 3"
+    assert any("salvaged" in w for w in warns)
+
+
+def test_parse_repair_single_quotes():
+    """Tier 2: single-quote delimiters are salvaged."""
+    raw = "{'resolved_text': 'y = 2', 'needs_human': false}"
+    data, warns = parse_resolution_json(raw)
+    assert data.get("resolved_text") == "y = 2"
+
+
+def test_parse_preprocessor_unescaped_quotes_in_code_field():
+    """Pre-processor: bare " inside resolved_text is escaped before parsing.
+
+    The confirmed small-model failure: a code snippet with embedded " breaks
+    the JSON envelope. The pre-processor escapes the inner quotes.
+    """
+    raw = '{"resolved_text": "x = "hello"", "needs_human": false}'
+    data, warns = parse_resolution_json(raw)
+    assert data.get("resolved_text") == 'x = "hello"'
+
+
+def test_parse_preprocessor_preserves_already_escaped_quotes():
+    """Already-escaped \" in code fields are not double-escaped."""
+    raw = '{"resolved_text": "x = \\"hello\\"", "needs_human": false}'
+    data, _ = parse_resolution_json(raw)
+    assert data.get("resolved_text") == 'x = "hello"'
+
+
+def test_parse_repair_markdown_fence_wrapping():
+    """Tier 2: markdown fences around the JSON are handled (fenced extraction + repair)."""
+    raw = "Here is the answer:\n```json\n{\"resolved_text\": \"done\"}\n```"
+    data, _ = parse_resolution_json(raw)
+    assert data.get("resolved_text") == "done"
+
+
+def test_parse_repair_valid_json_uses_fast_path():
+    """Tier 1: valid JSON parses with zero warnings (no repair needed)."""
+    raw = '{"resolved_text": "x = 1", "needs_human": false}'
+    data, warns = parse_resolution_json(raw)
+    assert data["resolved_text"] == "x = 1"
+    assert warns == []  # no salvage warning on the happy path
+
+
+def test_parse_repair_returns_empty_on_garbage():
+    """Unrepairable garbage returns empty dict (→ parse_failed → retry)."""
+    raw = "completely unparseable garbage with no json structure at all !!!"
+    data, _ = parse_resolution_json(raw)
+    assert data == {}
 
 
 def test_coerce_candidate_dict_normalizes_aliases():

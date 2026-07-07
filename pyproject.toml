@@ -12,6 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "panz-r" }]
 dependencies = [
     "pydantic>=2.5",
+    "json-repair>=0.30",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +43,7 @@ dev = [
     "tree-sitter-rust>=0.23",
     "numpy>=1.26",
     "sqlite-vec>=0.1",
+    "json-repair>=0.30",
 ]
 
 [project.scripts]
