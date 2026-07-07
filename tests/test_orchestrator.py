@@ -523,6 +523,13 @@ class SequenceClient:
 def _verifier_config(repo):
     cfg = _config(repo)
     cfg.validation.enable_verifier_model = True
+    # Disable the critic guardrail phases in the raw-critic-behavior tests: they
+    # exercise the critic's verdict→escalation path with fake clients that return
+    # the verdict schema (not the reassessment schema), so Phase 2 would squash a
+    # genuine drop via null-evidence. The guardrail has its own test module.
+    cfg.validation.enable_verifier_assertion = False
+    cfg.validation.enable_verifier_reflection = False
+    cfg.validation.enable_verifier_guardrail = False
     return cfg
 
 

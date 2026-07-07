@@ -115,6 +115,11 @@ class ValidationConfig:
     # answer critic prompts, so the check would be meaningless noise there).
     enable_verifier_model: bool = True
     verifier_severity: str = "warning"
+    # Critic guardrail phases (mirror config.ValidationConfig).
+    enable_verifier_assertion: bool = True
+    enable_verifier_reflection: bool = True
+    enable_verifier_guardrail: bool = True
+    verifier_reflection_coverage_floor: float = 0.9
     # VeriGuard policy gate (mirrors config.ValidationConfig).
     enable_policy_gate: bool = False
     policy_rules: tuple = ()  # tuple of config.PolicyRule; default empty = no-op
@@ -877,7 +882,13 @@ class VerifierModelValidator:
         if self._prompt_builder is not None:
             return self._prompt_builder(unit, candidate, context)
         from capybase.resolution_engine import build_verifier_prompt
-        return build_verifier_prompt(unit, candidate, context)
+        # Phase 1 (critic guardrail): the deterministic assertion is injected
+        # unless the config disables it. The validator recomputes the same
+        # signal for the Phase 3 hard-backstop after parsing the verdict.
+        assertion_enabled = getattr(self, "_assertion_enabled", True)
+        return build_verifier_prompt(
+            unit, candidate, context, assertion_enabled=assertion_enabled
+        )
 
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
         cfg = ctx.config
@@ -950,6 +961,64 @@ class VerifierModelValidator:
         ):
             preserves_both = True
             dropped = []
+        # Critic guardrail telemetry — accumulates across the phases below.
+        guardrail_suppressed = False
+        guardrail_reason = ""
+        reassessed = False
+        reassessment_outcome = ""
+        reassessment_evidence_verified = False
+        if not preserves_both:
+            from capybase.resolution_engine import (
+                DeterministicPreservation,
+                _deterministic_preservation,
+                build_verifier_reassessment_prompt,
+            )
+
+            cur_lines, base_lines, rep_lines = _verifier_sides(ctx.unit)
+            dp = _deterministic_preservation(
+                ctx.unit, ctx.candidate, cur_lines, rep_lines, base_lines,
+            )
+            # Phase 3 — hard backstop: if the deterministic coverage is UNANIMOUSLY
+            # perfect (both ratios 1.0, no dropped additions), the math definitively
+            # contradicts the critic. Suppress regardless of confidence — zero
+            # extra LLM calls. Never fires on a genuine drop (which lowers a ratio).
+            if getattr(cfg, "enable_verifier_guardrail", True) and dp.unanimous:
+                preserves_both = True
+                dropped = []
+                guardrail_suppressed = True
+                guardrail_reason = (
+                    "deterministic preservation unanimous "
+                    f"(cur={dp.cur_ratio:.2f}, rep={dp.rep_ratio:.2f}, "
+                    "no dropped additions)"
+                )
+            # Phase 2 — show-your-work reflection: the critic flagged but entity
+            # coverage is high (not a clear structural drop). Demand it quote the
+            # exact missing/mangled snippet; verify the citation programmatically.
+            # Null/fabricated evidence squashes the flag. Skipped below the coverage
+            # floor — when entities are genuinely missing, the critic is likely
+            # right and a reassessment call would waste budget.
+            elif (
+                getattr(cfg, "enable_verifier_reflection", True)
+                and dp.min_ratio >= getattr(cfg, "verifier_reflection_coverage_floor", 0.9)
+            ):
+                rev_ok = self._reassess(
+                    ctx, data, dp,
+                    build_verifier_reassessment_prompt,
+                )
+                reassessed = True
+                if rev_ok is True:
+                    # Critic revoked (null/fabricated evidence) → squash.
+                    preserves_both = True
+                    dropped = []
+                    reassessment_outcome = "revoke"
+                    reassessment_evidence_verified = True
+                elif rev_ok is False:
+                    # Critic held with grounded, verifiable evidence → stand.
+                    reassessment_outcome = "hold"
+                    reassessment_evidence_verified = True
+                else:
+                    # Reassessment call failed/unparseable → can't override; stand.
+                    reassessment_outcome = "skip"
         return VerificationCheckResult(
             name=self.name,
             passed=preserves_both,
@@ -965,8 +1034,91 @@ class VerifierModelValidator:
                 "verifier_preserves_current": preserves_current,
                 "verifier_preserves_replayed": preserves_replayed,
                 "verifier_confidence": confidence,
+                "verifier_guardrail_suppressed": guardrail_suppressed,
+                "verifier_guardrail_reason": guardrail_reason,
+                "verifier_reassessed": reassessed,
+                "verifier_reassessment_outcome": reassessment_outcome,
+                "verifier_reassessment_evidence_verified": reassessment_evidence_verified,
             },
         )
+
+    def _reassess(
+        self,
+        ctx: VerificationContext,
+        original_verdict: dict,
+        dp: "DeterministicPreservation | None",
+        prompt_builder,
+    ) -> bool | None:
+        """Phase 2 show-your-work reflection (critic guardrail).
+
+        A second LLM call demanding the critic quote the exact missing/mangled
+        snippet. Returns:
+        - True: the critic REVOKED (evidence null/fabricated) → squash the flag.
+        - False: the critic HELD with grounded, verifiable evidence → stand.
+        - None: the call failed/unparseable → can't override (stand, no telemetry
+          claim).
+
+        Evidence verification is PROGRAMMATIC (substring match against the actual
+        sides + resolved text), not another model judgment — so it doesn't inherit
+        the critic's bias. A snippet that isn't a verbatim substring of any side
+        is fabricated → revoke.
+        """
+        from capybase.adapters.parsers import parse_resolution_json
+
+        prompt = prompt_builder(ctx.unit, ctx.candidate, original_verdict, dp)
+        messages = [
+            {"role": "system", "content": "You are re-examining your own verdict rigorously."},
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            resp = self.client.complete(
+                messages,
+                model=self.model_name or _default_model(ctx),
+                temperature=0.0,
+                max_tokens=self.max_tokens,
+                json_mode=self.json_mode,
+            )
+        except Exception:  # noqa: BLE001 - never crash resolution
+            return None
+        rdata, _ = parse_resolution_json(resp.text or "")
+        if not rdata:
+            return None
+        accurate = bool(rdata.get("original_verdict_accurate", True))
+        evidence = rdata.get("evidence_snippet")
+        # If the critic revoked itself, squash.
+        if not accurate:
+            return True
+        # If it held but provided no evidence, it can't ground the claim → squash.
+        if not evidence or not str(evidence).strip():
+            return True
+        # Verify the evidence is a VERBATIM substring of a side or the resolved
+        # text. A fabricated citation (not found anywhere) → squash. A genuine
+        # snippet from a side that's absent from the resolved text → stand.
+        ev = str(evidence)
+        cur_lines, base_lines, rep_lines = _verifier_sides(ctx.unit)
+        resolved = ctx.candidate.resolved_text or ""
+        in_resolved = ev in resolved
+        in_current = ev in cur_lines
+        in_replayed = ev in rep_lines
+        in_base = ev in base_lines
+        # Grounded evidence: the snippet is real text (appears in a side) AND is
+        # genuinely absent from the resolution (the drop claim is real). If it
+        # appears in the resolution, the critic is wrong (it's present) → squash.
+        if in_resolved:
+            return True  # the "missing" text is actually present → revoke
+        # Absent from resolved — is it real text from a side that should be there?
+        if in_current or in_replayed or in_base:
+            return False  # grounded, verifiable, genuinely absent → stand
+        # Not found anywhere → fabricated citation → revoke.
+        return True
+
+
+def _verifier_sides(unit):
+    """The conflict sides for the critic prompt (diff3-refined when available)."""
+    refined = unit.refined_sides
+    if refined is not None:
+        return refined
+    return unit.current.text, unit.base.text, unit.replayed.text
 
 
 def _verifier_context(ctx: VerificationContext) -> "ContextBundle":

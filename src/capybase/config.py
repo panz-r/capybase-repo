@@ -367,6 +367,23 @@ class ValidationConfig(BaseModel):
     # retry/escalate but don't hard-reject a syntactically-valid merge) or
     # "error" (strict — treat a dropped-intent verdict as a hard failure).
     verifier_severity: str = "warning"
+    # Critic guardrail — Phase 1: inject the deterministic preservation math into
+    # the critic's initial prompt as a SYSTEM ASSERTION, so it doesn't hallucinate
+    # drops the AST disproves. Default-on (strictly improves the prompt).
+    enable_verifier_assertion: bool = True
+    # Critic guardrail — Phase 2: when the critic still flags a drop, a second
+    # "show-your-work" call demanding it quote the exact missing/mangled snippet.
+    # The evidence is verified programmatically (substring match); null or
+    # fabricated evidence squashes the flag. Default-on; only fires when the
+    # critic flags AND min coverage >= the floor below.
+    enable_verifier_reflection: bool = True
+    # Critic guardrail — Phase 3: hard suppress a critic drop-flag when the
+    # deterministic coverage is UNANIMOUSLY perfect (both ratios 1.0, no dropped
+    # additions). The mathematically-authoritative backstop. Default-on.
+    enable_verifier_guardrail: bool = True
+    # Below this min coverage, Phase 2 reflection is skipped — the critic is
+    # likely right (a real drop), so don't waste the reassessment call.
+    verifier_reflection_coverage_floor: float = 0.9
     # VeriGuard-style deterministic policy gate (survey §4): statically extract
     # import/call facts from each candidate's resolved text and evaluate them
     # against ``policy_rules``. The ONLY check that inspects WHAT a patch

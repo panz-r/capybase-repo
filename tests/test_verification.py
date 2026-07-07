@@ -297,7 +297,18 @@ class _LLMResp:
 
 
 def _verifier_engine(client, *, severity="warning"):
-    cfg = ValidationConfig(enable_verifier_model=True, verifier_severity=severity)
+    # The critic guardrail (assertion/reflection/hard-suppress) is a layer ON TOP
+    # of the raw verdict. These tests exercise the critic's verdict SHAPE in
+    # isolation, so disable the guardrail phases — otherwise a genuine-drop
+    # scenario gets suppressed by Phase 2's reassessment (the fake client returns
+    # the verdict schema, not the reassessment schema, so evidence_snippet is null
+    # → squash). The guardrail has its own dedicated test module.
+    cfg = ValidationConfig(
+        enable_verifier_model=True, verifier_severity=severity,
+        enable_verifier_assertion=False,
+        enable_verifier_reflection=False,
+        enable_verifier_guardrail=False,
+    )
     return VerificationEngine.default(
         cfg, extra_validators=[VerifierModelValidator(client, model_name="critic-m")]
     )

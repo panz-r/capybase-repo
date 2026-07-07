@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Iterable
 
 from capybase.adapters.llm_openai import (
@@ -1342,6 +1343,8 @@ def build_verifier_prompt(
     unit: ConflictUnit,
     candidate: CandidateResolution,
     context: ContextBundle,
+    *,
+    assertion_enabled: bool = True,
 ) -> str:
     """Build the critic prompt for the verifier-model validator (surveys §1/§5).
 
@@ -1350,6 +1353,11 @@ def build_verifier_prompt(
     model sees BASE, CURRENT, REPLAYED, and the candidate RESOLVED, and must
     return strict JSON verdict booleans. This is purely a judging call on the
     same black-box API; it never edits code (the CEGIS loop does repairs).
+
+    Phase 1 (critic guardrail): when ``assertion_enabled`` (default), injects a
+    SYSTEM ASSERTION block with the deterministic preservation math so the critic
+    doesn't hallucinate drops the AST disproves. Computed inline from the three
+    sides + candidate via tree-sitter + the token-set check.
     """
     cur_lines, base_lines, rep_lines = _prompt_sides(unit)
     sv = context.structural_view
@@ -1360,6 +1368,14 @@ def build_verifier_prompt(
         structural_anchor = (
             f"Logical block (tree-sitter AST):\n{enc_sig}\n{enc_text}\n\n"
         )
+    # Phase 1 deterministic assertion (critic guardrail): inject the authoritative
+    # preservation math so the critic doesn't hallucinate drops the AST disproves.
+    # When unanimous, a directive (MUST NOT flag missing additions); when
+    # imperfect, a pointer at the genuine gaps.
+    assertion = ""
+    if assertion_enabled:
+        dp = _deterministic_preservation(unit, candidate, cur_lines, rep_lines, base_lines)
+        assertion = _deterministic_assertion_block(dp)
     # Deterministic per-side preservation evidence (survey §5.1 quantitative):
     # the specific logical units each side ADDED that are ABSENT from the
     # resolution. Gives the judge concrete evidence to weigh, beyond eyeballing
@@ -1370,7 +1386,7 @@ conflict has three sides and a proposed resolution. Judge ONLY whether the
 resolution preserves the INTENT of BOTH sides — it must not silently drop a
 behavior, guard, or value that either side added.
 
-{structural_anchor}{evidence}CURRENT_UPSTREAM_SIDE (one branch's change):
+{assertion}{structural_anchor}{evidence}CURRENT_UPSTREAM_SIDE (one branch's change):
 {cur_lines}
 
 REPLAYED_COMMIT_SIDE (the other branch's change):
@@ -1435,6 +1451,189 @@ def _dropped_units_evidence(
     parts.append("(Verify these are genuine intent drops, not renames the resolution deliberately made.)")
     parts.append("")
     return "\n".join(parts) + "\n"
+
+
+@dataclass(frozen=True)
+class DeterministicPreservation:
+    """The deterministic structural-preservation verdict for a candidate.
+
+    Two independent signals (embeddings survey → critic guardrail):
+    - ``cur_ratio``/``rep_ratio``: entity-level coverage (tree-sitter
+      ``preservation_coverage``) — of the structural units each side ADDED beyond
+      base, the fraction present in the resolution. 1.0 = all preserved.
+    - ``dropped_cur_additions``/``dropped_replayed_additions``: token-level
+      signal (the ``BothSidesRepresentedValidator`` logic) — whether the merge
+      carries ANY of a side's distinctive added tokens. False = represented.
+    - ``unanimous``: True iff BOTH ratios are exactly 1.0 AND neither side has
+      dropped additions — the hard-backstop condition.
+    """
+
+    cur_ratio: float
+    rep_ratio: float
+    dropped_cur_additions: bool
+    dropped_replayed_additions: bool
+    cur_dropped_names: list[str]
+    rep_dropped_names: list[str]
+
+    @property
+    def unanimous(self) -> bool:
+        return (
+            self.cur_ratio >= 1.0
+            and self.rep_ratio >= 1.0
+            and not self.dropped_cur_additions
+            and not self.dropped_replayed_additions
+        )
+
+    @property
+    def min_ratio(self) -> float:
+        return min(self.cur_ratio, self.rep_ratio)
+
+
+def _deterministic_preservation(
+    unit: ConflictUnit, candidate: CandidateResolution,
+    cur_lines: str, rep_lines: str, base_lines: str,
+) -> DeterministicPreservation | None:
+    """Compute the deterministic structural-preservation verdict.
+
+    Combines the entity-level coverage (tree-sitter, when available) with the
+    token-level dropped-additions check (always available, stdlib regex). Returns
+    None only when even the token-level check can't run (shouldn't happen for a
+    real candidate). Pure; never raises — a structural failure degrades to the
+    token-only signal with ratios reported as unavailable (represented as 1.0 so
+    the token check alone can still drive ``unanimous``).
+    """
+    import re
+
+    def _toks(text: str) -> set[str]:
+        return set(re.findall(r"\w+", text or ""))
+
+    base_t = _toks(base_lines)
+    cur_t = _toks(cur_lines)
+    rep_t = _toks(rep_lines)
+    merged_t = _toks(candidate.resolved_text or "")
+    cur_added = cur_t - base_t
+    rep_added = rep_t - base_t
+    dropped_cur = bool(cur_added) and not (cur_added & merged_t)
+    dropped_rep = bool(rep_added) and not (rep_added & merged_t)
+
+    # Entity-level coverage via tree-sitter (may be unavailable).
+    lang = unit.language
+    cur_ratio = rep_ratio = 1.0
+    cur_names: list[str] = []
+    rep_names: list[str] = []
+    try:
+        from capybase.adapters import structural
+
+        if lang in ("python", "rust") and structural.is_available(lang):
+            cur_cov = structural.preservation_coverage(base_lines, cur_lines, candidate.resolved_text, lang)
+            rep_cov = structural.preservation_coverage(base_lines, rep_lines, candidate.resolved_text, lang)
+            if cur_cov is not None:
+                cur_ratio = cur_cov.ratio
+                cur_names = [e.name for e in cur_cov.dropped]
+            if rep_cov is not None:
+                rep_ratio = rep_cov.ratio
+                rep_names = [e.name for e in rep_cov.dropped]
+    except Exception:  # noqa: BLE001 - token-only fallback
+        pass
+
+    return DeterministicPreservation(
+        cur_ratio=cur_ratio, rep_ratio=rep_ratio,
+        dropped_cur_additions=dropped_cur, dropped_replayed_additions=dropped_rep,
+        cur_dropped_names=cur_names, rep_dropped_names=rep_names,
+    )
+
+
+def _deterministic_assertion_block(dp: DeterministicPreservation | None) -> str:
+    """Render the SYSTEM ASSERTION block for the critic prompt (Phase 1).
+
+    When preservation is unanimous, a DIRECTIVE: the math proves both sides are
+    present, so the critic must not flag missing additions — judge only semantic
+    coherence / ordering / syntax. When imperfect, a POINTER: list the specific
+    dropped entities so the critic's attention goes to the real gap, not a
+    hallucinated one. Empty when no deterministic data is available.
+    """
+    if dp is None:
+        return ""
+    lines = ["SYSTEM ASSERTION (deterministic, authoritative):"]
+    lines.append(f"  current_preservation_ratio: {dp.cur_ratio:.2f}")
+    lines.append(f"  replayed_preservation_ratio: {dp.rep_ratio:.2f}")
+    lines.append(f"  dropped_current_additions: {str(dp.dropped_cur_additions).lower()}")
+    lines.append(f"  dropped_replayed_additions: {str(dp.dropped_replayed_additions).lower()}")
+    if dp.unanimous:
+        lines.append(
+            "  Both sides are MATHEMATICALLY preserved. You MUST NOT flag missing "
+            "additions — they are present. Judge ONLY: semantic coherence, logical "
+            "ordering, syntax validity."
+        )
+    else:
+        gaps: list[str] = []
+        if dp.dropped_cur_additions or dp.cur_ratio < 1.0:
+            nm = ", ".join(dp.cur_dropped_names) if dp.cur_dropped_names else "(token-level drop)"
+            gaps.append(f"  CURRENT side may drop: {nm}")
+        if dp.dropped_replayed_additions or dp.rep_ratio < 1.0:
+            nm = ", ".join(dp.rep_dropped_names) if dp.rep_dropped_names else "(token-level drop)"
+            gaps.append(f"  REPLAYED side may drop: {nm}")
+        if gaps:
+            lines.append("  Focus your review on these GENUINE gaps (not other additions):")
+            lines.extend(gaps)
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def build_verifier_reassessment_prompt(
+    unit: ConflictUnit,
+    candidate: CandidateResolution,
+    verdict: dict,
+    dp: DeterministicPreservation | None,
+) -> str:
+    """The Phase 2 show-your-work reflection prompt (critic guardrail).
+
+    A second call that asks the critic to PROVE its drop claim by extracting the
+    exact evidence snippet. The ``evidence_snippet`` is verified programmatically
+    downstream (substring match against the actual sides/resolved) — null or
+    fabricated evidence squashes the flag. Context-scoped: only the flagged
+    region + resolved text + the deterministic ratios, not the whole file.
+    """
+    cur_lines, _base_lines, rep_lines = _prompt_sides(unit)
+    dropped_sides = []
+    if not verdict.get("preserves_current", True):
+        dropped_sides.append("CURRENT_UPSTREAM_SIDE")
+    if not verdict.get("preserves_replayed", True):
+        dropped_sides.append("REPLAYED_COMMIT_SIDE")
+    sides_label = " and ".join(dropped_sides) or "a side"
+    ratios = ""
+    if dp is not None:
+        ratios = (
+            f"Deterministic preservation ratios: current={dp.cur_ratio:.2f}, "
+            f"replayed={dp.rep_ratio:.2f}.\n"
+        )
+    return f"""You previously judged this merge as dropping the {sides_label}. Re-examine
+that verdict with the deterministic evidence below. Your earlier call may have
+hallucinated a drop that the AST mathematically disproves.
+
+{ratios}CURRENT_UPSTREAM_SIDE:
+{cur_lines}
+
+REPLAYED_COMMIT_SIDE:
+{rep_lines}
+
+PROPOSED RESOLUTION:
+{candidate.resolved_text}
+
+If you still believe a side's intent was dropped or mangled, you MUST quote the
+EXACT verbatim text that is missing or wrong as ``evidence_snippet`` — copied
+character-for-character from one of the sides above (the content you claim is
+absent or corrupted in the resolution). If you cannot point to specific text
+(because the content is in fact present), set ``evidence_snippet`` to null and
+``original_verdict_accurate`` to false. Output ONE ```json fenced object:
+```json
+{{
+  "original_verdict_accurate": true,
+  "reasoning": "<one short sentence>",
+  "evidence_snippet": "<exact verbatim text, or null>"
+}}
+```
+"""
 
 
 def build_verifier_prompt_conflict(
