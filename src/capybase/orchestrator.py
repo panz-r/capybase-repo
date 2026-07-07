@@ -612,6 +612,10 @@ class Orchestrator:
         # The most recent test-gate verdict (human-readable), stashed by
         # _run_tests for the accept report written after the gate.
         self._last_test_verdict: str | None = None
+        # Per-side probe diagnostics from _try_test_gated_side, stashed on a
+        # DECLINE so _resolve_unit can thread them into the LLM path as seed
+        # failures (CEGIS loop hardening). None when no probe ran or it accepted.
+        self._last_side_probe_failures: list[VerificationFailure] | None = None
         # Test-continuity baseline (survey §2.1a): the set of test node-IDs that
         # PASSED pre-rebase, captured in rebase() before the rebase starts. Diffed
         # against the post-merge passing set in _run_tests — a baseline-passing
@@ -1785,6 +1789,10 @@ class Orchestrator:
         # the first side that compiles when the gate can't tell the sides apart.
         sides = [("current", cur_text), ("replayed", rep_text)]
         passed_sides: list[tuple[str, str, CandidateResolution, object]] = []
+        # Capture per-side diagnostics so a DECLINE can thread them into the LLM
+        # path as seed_failures (CEGIS loop hardening): when neither side compiles,
+        # the model never previously saw WHY. Stash the compile errors here.
+        probe_diagnostics: list[VerificationFailure] = []
         for side_label, side_text in sides:
             cand = CandidateResolution(
                 candidate_id=f"{unit.unit_id}:test_gated_{side_label}",
@@ -1797,6 +1805,10 @@ class Orchestrator:
             )
             validation = self.verification.verify(unit, cand)
             if not validation.passed:
+                # This side fails validation — record the hard failures so the
+                # LLM path sees what's wrong with taking it verbatim.
+                for hf in validation.hard_failures:
+                    probe_diagnostics.append(hf)
                 continue  # this side fails validation; skip it
             # Write the spliced file so the test gate runs against it.
             spliced = splice_resolution(unit.original_worktree_text, unit.marker_span, side_text)
@@ -1819,12 +1831,26 @@ class Orchestrator:
             test_ok = self._run_tests("pre_continue", probe)
             if test_ok:
                 passed_sides.append((side_label, side_text, cand, validation))
+            else:
+                # Capture the test-gate compile diagnostic so the LLM path sees
+                # WHY this side failed the gate (e.g. the cargo compile error).
+                # The _last_test_verdict holds the human-readable summary.
+                diag = getattr(self, "_last_test_verdict", None) or "side failed the test gate"
+                probe_diagnostics.append(VerificationFailure(
+                    validator="test_gated_side",
+                    severity="warning",
+                    message=f"{side_label} side verbatim failed the test gate: {diag}",
+                ))
 
         if len(passed_sides) != 1:
             # 0 passed → neither side is test-correct; 2 passed → the gate can't
             # discriminate (e.g. py_compile passes both). Either way, decline and
             # let the LLM/critic handle it. Restore the original worktree.
             self.git.write_worktree_file(unit.path, original_bytes)
+            # CEGIS loop hardening: stash the per-side probe diagnostics so the
+            # LLM path starts with them as seed_failures — the model finally sees
+            # WHY neither side compiled, instead of a feedback-free fresh resolve.
+            self._last_side_probe_failures = probe_diagnostics or None
             return None
 
         # Exactly one side passed → the test gate discriminated. Accept it.
@@ -4210,9 +4236,17 @@ class Orchestrator:
         # pattern), but as a PRE-LLM discriminator instead of post-LLM. Only on a
         # FRESH resolve, same as the other pre-LLM layers.
         if failures is None:
+            self._last_side_probe_failures = None  # reset before the probe
             early = self._try_test_gated_side(unit)
             if early is not None:
                 return early  # accepted via test-gated side pick; LLM loop skipped
+            # CEGIS loop hardening: if the picker DECLINED (neither side passed
+            # the test gate), thread its captured diagnostics into the LLM path
+            # as seed_failures. The model starts with the concrete compile errors
+            # instead of a feedback-free fresh resolve — it finally sees WHY
+            # neither side verbatim works.
+            if self._last_side_probe_failures:
+                failures = list(self._last_side_probe_failures)
 
         # Block-capture resolution (large modify/delete): when one side deleted a
         # large block and the structural rule declined (the keeper modified it),
