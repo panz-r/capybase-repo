@@ -1641,7 +1641,7 @@ def _is_rust_resolution_error(msg: str) -> bool:
 
 
 def _braces_balanced(text: str) -> bool:
-    """Cheap structural sanity check: are ``{}`` and ``()`` braces balanced?
+    """Cheap structural sanity check: are ``{}`` braces balanced?
 
     A per-unit splice that fills a marker span inside a larger construct (e.g.
     a bare ``Config { ... }`` initializer extracted without the surrounding
@@ -1654,9 +1654,23 @@ def _braces_balanced(text: str) -> bool:
     inside a string that throws off the count is rare and the guard only SKIPS,
     never false-fails). Comments (``//`` to EOL, ``#`` to EOL) are stripped first.
     """
+    return _brace_imbalance_line(text) is None
+
+
+def _brace_imbalance_line(text: str) -> int | None:
+    """The 0-based line where ``{}`` braces first diverge, or None if balanced.
+
+    Tracks running brace depth line-by-line; returns the line of the FIRST
+    closing ``}`` that makes depth negative (an extra close), or the LAST line
+    if depth ends positive (an unclosed ``{``). Used by the post-splice coherence
+    gate (Fix #2a) to attribute the imbalance to a unit and point the repair
+    feedback at the right line. Strings/comments are stripped first (same
+    normalization as ``_braces_balanced``).
+    """
     if not text:
-        return True
-    # Strip line comments (Rust // and Python #) so braces inside them don't count.
+        return None
+    import re
+
     cleaned_lines = []
     for line in text.split("\n"):
         for marker in ("//", "#"):
@@ -1664,21 +1678,24 @@ def _braces_balanced(text: str) -> bool:
             if idx >= 0:
                 line = line[:idx]
         cleaned_lines.append(line)
+    cleaned = "\n.join"  # placeholder, replaced below
     cleaned = "\n".join(cleaned_lines)
-    # Strip string literals (naive: "..." and '...') so braces inside them don't count.
-    import re
-
     cleaned = re.sub(r'"(?:\\.|[^"\\])*"', '""', cleaned)
     cleaned = re.sub(r"'(?:\\.|[^'\\])*'", "''", cleaned)
     depth = 0
-    for ch in cleaned:
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth < 0:
-                return False
-    return depth == 0
+    last_line = 0
+    for line_no, line in enumerate(cleaned.split("\n")):
+        last_line = line_no
+        for ch in line:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth < 0:
+                    return line_no  # extra closing brace here
+    if depth != 0:
+        return last_line  # unclosed opening brace; point at the end
+    return None
 
 
 class RustSyntaxValidator:
@@ -2570,6 +2587,42 @@ class VerificationEngine:
                     detail={},
                 )
             )
+
+        # Post-splice brace-balance gate (Fix #2a — multi-hunk coherence): a
+        # cheap structural check that catches the common cross-unit failure where
+        # individually-valid resolutions, when spliced together, produce an extra
+        # or missing brace (e.g. a candidate closes a block the original already
+        # closes). This runs BEFORE the expensive cargo/py_compile cycle, so a
+        # brace mismatch is caught in milliseconds instead of 3× 30s cargo runs.
+        # The divergence line is recorded in detail for attribution + feedback.
+        # Reported under the "syntax" validator name (it IS a syntax error) so
+        # the existing test assertions and the risk/retry path treat it uniformly.
+        if language in ("rust", "python") and self.config.require_syntax_if_supported:
+            imbalance_line = _brace_imbalance_line(whole)
+            if imbalance_line is not None:
+                hard.append(
+                    VerificationFailure(
+                        validator="syntax",
+                        severity="error",
+                        message=(
+                            f"splice coherence: unbalanced braces at line "
+                            f"{imbalance_line + 1} (a unit's resolution introduced "
+                            f"an extra or missing brace)"
+                        ),
+                        detail={"brace_imbalance_line": imbalance_line + 1},
+                    )
+                )
+                # Skip the expensive cargo/py_compile cycle — the brace mismatch
+                # already explains the failure; the repair feedback is richer when
+                # it points at the divergence line directly.
+                features["syntax_checked"] = True
+                features["syntax_passed"] = False
+                features["hard_failure_count"] = len(hard)
+                features["warning_count"] = 0
+                return VerificationResult(
+                    candidate_id=file_id, unit_id=file_id, passed=False,
+                    hard_failures=hard, features=features,
+                )
 
         # Syntax check on the real, fully-spliced file.
         syntax_checked = False

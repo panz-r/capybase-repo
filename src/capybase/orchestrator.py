@@ -424,31 +424,39 @@ def _attribute_whole_file_failure(
     """Pick the index of the unit most likely at fault for a whole-file failure.
 
     Whole-file failures (cross-unit syntax errors, juxtaposition errors) are
-    file-scoped, but repair is unit-scoped. Attribution parses the error line
-    from a failure message (Python SyntaxErrors carry "(file, line N)") and
-    returns the unit whose ``marker_span`` contains that line. When the line
-    can't be parsed or no span contains it, the LAST unit is chosen — a
-    heuristic that juxtaposition errors tend to surface where splices meet,
-    and re-resolving the last unit is a sound default. Falls back to 0 for an
-    empty unit list (caller guards against this).
+    file-scoped, but repair is unit-scoped. Attribution reads the error line
+    from the failure's ``detail`` (the splice-coherence gate records the brace-
+    imbalance line; the syntax check records new-error lines) FIRST — this is
+    precise. Falls back to regex-parsing the message string ("line N") for older
+    failure shapes (Python SyntaxErrors). When no line is available or no span
+    contains it, the LAST unit is chosen — a heuristic that juxtaposition errors
+    tend to surface where splices meet.
     """
     if not units:
         return 0
     import re
 
     for f in failures:
-        msg = getattr(f, "message", "") or ""
-        # Match "line N" anywhere (Python: "line 12", "file, line 12").
-        m = re.search(r"line\s+(\d+)", msg)
-        if not m:
+        line: int | None = None
+        # Fix #2b: prefer the structured line in detail (precise — set by the
+        # splice-coherence gate and the syntax check's diagnostic delta).
+        detail = getattr(f, "detail", {}) or {}
+        if isinstance(detail.get("brace_imbalance_line"), int):
+            line = detail["brace_imbalance_line"]
+        elif isinstance(detail.get("lines"), list) and detail["lines"]:
+            line = detail["lines"][0]
+        # Fall back to regex on the message (Python SyntaxError "line N").
+        if line is None:
+            msg = getattr(f, "message", "") or ""
+            m = re.search(r"line\s+(\d+)", msg)
+            if m:
+                try:
+                    line = int(m.group(1))
+                except ValueError:
+                    pass
+        if line is None:
             continue
-        try:
-            line = int(m.group(1))
-        except ValueError:
-            continue
-        # Units are 1-indexed in the original marker-laden worktree; marker_span
-        # is 0-based [start, end] line indices. Check containment (1-based line
-        # falls within the 0-based span converted to 1-based).
+        # marker_span is 0-based [start, end]; the error line is 1-based.
         for i, u in enumerate(units):
             if u.marker_span is None:
                 continue
@@ -457,6 +465,55 @@ def _attribute_whole_file_failure(
                 return i
     # No line attribution possible → default to the last unit.
     return len(units) - 1
+def _splice_context_snippet(
+    failures: list, original: str,
+    accepted: list[tuple[ConflictUnit, CandidateResolution]],
+) -> str:
+    """Build a ±5-line snippet of the spliced file around the error line (Fix #3).
+
+    Enriches the whole-file repair feedback so the model sees the actual brace
+    mismatch in context, not just the raw cargo message. Returns empty string
+    when no error line is available or the splice fails (the raw failures still
+    reach the model; this is additive).
+    """
+    # Find the error line from the failures' detail (same sources as attribution).
+    line: int | None = None
+    for f in failures:
+        detail = getattr(f, "detail", {}) or {}
+        if isinstance(detail.get("brace_imbalance_line"), int):
+            line = detail["brace_imbalance_line"]
+            break
+        elif isinstance(detail.get("lines"), list) and detail["lines"]:
+            line = detail["lines"][0]
+            break
+    if line is None:
+        # Fall back to regex on the message.
+        import re
+
+        for f in failures:
+            m = re.search(r"line\s+(\d+)", getattr(f, "message", "") or "")
+            if m:
+                try:
+                    line = int(m.group(1))
+                    break
+                except ValueError:
+                    pass
+    if line is None:
+        return ""
+    # Build the spliced file to show the actual content around the error.
+    try:
+        whole = _resolved_buffer(original, accepted)
+    except Exception:  # noqa: BLE001 - splice may fail on bad spans
+        return ""
+    lines = whole.split("\n")
+    # line is 1-based; show ±5 lines around it.
+    start = max(0, line - 6)
+    end = min(len(lines), line + 5)
+    numbered = []
+    for i in range(start, end):
+        marker = " >>>" if (i + 1) == line else "    "
+        numbered.append(f"{marker} {i + 1:4d} | {lines[i]}")
+    return "\n".join(numbered)
 
 
 def _extract_alternates(
@@ -4129,6 +4186,20 @@ class Orchestrator:
         """
         fault_idx = _attribute_whole_file_failure(failures, [u for u, _ in accepted])
         unit, _old_cand = accepted[fault_idx]
+        # Fix #3 — enriched feedback: build a splice-context snippet (the resolved
+        # file ±5 lines around the error) so PROMPT_REPAIR shows the model the
+        # actual brace mismatch in context, not just the raw cargo message. The
+        # model couldn't locate the error in the live eval (3 identical retries on
+        # "unexpected closing delimiter }"); the snippet gives it the surrounding
+        # code to find the extra/missing brace.
+        enriched_failures = list(failures)
+        snippet = _splice_context_snippet(failures, original, accepted)
+        if snippet:
+            enriched_failures.append(VerificationFailure(
+                validator="splice_coherence",
+                severity="warning",
+                message=f"the spliced file around the error:\n{snippet}",
+            ))
         # Pass the previously-accepted candidate as seed_candidate so the
         # re-resolve routes to PROMPT_REPAIR (shows the broken candidate + the
         # compile diagnostic) instead of PROMPT_RETRY (blind regeneration). The
@@ -4139,7 +4210,7 @@ class Orchestrator:
             _old_cand is not None and getattr(_old_cand, "resolved_text", "")
         ) else None
         outcome = self._resolve_unit(
-            unit, seed_failures=failures, seed_candidate=seed_cand,
+            unit, seed_failures=enriched_failures, seed_candidate=seed_cand,
         )
         self.journal.emit(
             "candidate_validated",
