@@ -121,6 +121,7 @@ class ValidationConfig:
     enable_verifier_guardrail: bool = True
     verifier_reflection_coverage_floor: float = 0.9
     enable_recovery_retry: bool = True
+    require_rust_syntax_check: bool = False
     # VeriGuard policy gate (mirrors config.ValidationConfig).
     enable_policy_gate: bool = False
     policy_rules: tuple = ()  # tuple of config.PolicyRule; default empty = no-op
@@ -1559,6 +1560,138 @@ class SyntaxValidator:
         )
 
 
+def _resolve_tool(name: str) -> str | None:
+    """Resolve an executable name to a path via shutil.which, or None."""
+    from shutil import which
+
+    return which(name)
+
+
+# Rust diagnostics with an ``E0xxx`` code are SEMANTIC (type-check, borrow-check,
+# name resolution, missing-field), not parse errors. A per-unit standalone rustc
+# compile can't resolve crate dependencies or know the full struct/function
+# context, so these surface as artifacts of compiling a fragment out of crate
+# context — NOT defects in the merge. Only true PARSE/syntax errors (which rustc
+# emits WITHOUT an E0xxx code, e.g. ``error: expected `;`...``) are candidate
+# defects at the per-unit level. Semantic errors defer to Phase B (whole-file
+# cargo check) where the full crate context is available.
+import re as _re_for_rust
+_RUST_SEMANTIC_ERROR = _re_for_rust.compile(r"error\[E\d{4}\]")
+
+
+def _is_rust_resolution_error(msg: str) -> bool:
+    """True when a rustc diagnostic is a semantic (E0xxx) error, not a parse error.
+
+    Per-unit standalone rustc produces semantic errors (missing fields, type
+    mismatches, unresolved names) as artifacts of the fragment lacking crate
+    context. These are NOT candidate defects. Only parse/syntax errors (emitted
+    WITHOUT an ``E0xxx`` code) are real defects at this level — e.g. the
+    malformed ``format!`` macro reads ``error: expected`` with no code.
+    """
+    return bool(msg and _RUST_SEMANTIC_ERROR.search(msg))
+
+
+class RustSyntaxValidator:
+    """Per-unit Rust syntax check (CEGIS loop hardening).
+
+    The deprecated :class:`SyntaxValidator` is Python-only and (historically)
+    structurally broken for multi-unit files. But Rust syntax errors that slip
+    past the structural validators — a malformed ``format!`` macro, a stray
+    brace — never reached the per-unit CEGIS loop: they only surfaced in Phase B
+    (``verify_file``), which runs AFTER all units resolve. A candidate with a
+    Rust syntax error could be accepted per-unit and rejected only later, or
+    (worse) rejected by the critic for an unrelated ``unattributed_code`` warning
+    with the syntax error never fed back as a diagnostic.
+
+    This validator splices the candidate into the worktree, BLANKS sibling
+    conflict markers to comments (so the spliced file parses even in a multi-
+    hunk file — the same technique ``AstPreservationValidator`` uses), and runs
+    ``_compile_rust`` (``rustc --emit=metadata``). The diagnostic becomes a
+    ``VerificationFailure`` that seeds the repair prompt — the model sees the
+    exact compile error on the FIRST retry, not a vague unrelated warning.
+
+    Rust-only; no-op (passes) for other languages. Skips when ``rustc``/``cargo``
+    is absent or the marker span is unknown. Runs as a hard failure
+    (``severity="error"``) so it's retryable like the Python syntax check.
+    """
+
+    name = "rust_syntax"
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        if ctx.unit.language != "rust":
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="not rust; syntax check skipped",
+                features={"rust_syntax_checked": False},
+            )
+        if ctx.unit.marker_span is None:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="no marker span",
+                features={"rust_syntax_checked": False},
+            )
+        if not ctx.candidate.resolved_text:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="empty resolved_text; syntax check skipped",
+                features={"rust_syntax_checked": False},
+            )
+        cfg = ctx.config
+        # Splice + blank sibling markers so the parse reflects real structure
+        # even in a multi-hunk file (sibling marker blocks would corrupt rustc).
+        spliced = splice_resolution(
+            ctx.unit.original_worktree_text,
+            ctx.unit.marker_span,
+            ctx.candidate.resolved_text,
+        )
+        spliced = _blank_markers(spliced, "rust")
+        rustc = _resolve_tool(getattr(cfg, "rustc_path", "rustc"))
+        if rustc is None:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="rustc not available; syntax not checked",
+                features={"rust_syntax_checked": False, "syntax_passed": True},
+            )
+        edition = getattr(cfg, "rust_edition", "") or "2021"
+        try:
+            ok, msg = _compile_rust(spliced, rustc_path=rustc, edition=edition)
+        except FileNotFoundError:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="rustc vanished; syntax not checked",
+                features={"rust_syntax_checked": False, "syntax_passed": True},
+            )
+        except Exception as exc:  # noqa: BLE001 - never crash resolution
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message=f"rust syntax check error: {exc}",
+                features={"rust_syntax_checked": False, "syntax_passed": True},
+            )
+        # Per-unit standalone rustc can't resolve crate dependencies (types from
+        # other modules, ``use`` imports) — it only has the single spliced file.
+        # So a name-resolution error (E0433/E0425 "unresolved name/module") is NOT
+        # a syntax defect in the merge; it's an artifact of compiling a fragment
+        # out of crate context. Only surface true PARSE/syntax errors (the
+        # malformed ``format!`` macro, a stray brace) — those are the candidate's
+        # defect, and they read as "error: expected ..."/"error: unexpected ...".
+        # Resolution errors fall through to Phase B (verify_file) which compiles
+        # the whole crate via cargo with full context.
+        if not ok and _is_rust_resolution_error(msg):
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message=f"rust standalone-compile showed unresolved names (not a syntax defect); deferring to whole-file cargo check",
+                features={"rust_syntax_checked": True, "syntax_passed": True},
+            )
+        return VerificationCheckResult(
+            name=self.name,
+            passed=ok,
+            severity="error",
+            message=msg,
+            detail={"diagnostic": msg},
+            features={"rust_syntax_checked": True, "syntax_passed": ok},
+        )
+
+
 class WholeFileMarkerValidator:
     """Deprecated per-unit whole-file marker validator.
 
@@ -2109,6 +2242,17 @@ class VerificationEngine:
             ObligationValidator(),
             NeedsHumanValidator(),
         ]
+        # Per-unit Rust syntax check (CEGIS loop hardening): surfaces a malformed
+        # format!/stray brace as a hard failure that seeds the repair prompt, so
+        # the model sees the compile error on the first retry instead of an
+        # unrelated warning. OPT-IN (default off): standalone rustc on a per-unit
+        # splice can produce false parse errors when the candidate is a partial
+        # context (a function body compiled without the surrounding impl/fn), so
+        # it's gated behind require_rust_syntax_check. The whole-file cargo check
+        # (Phase B) remains the authoritative compile gate; this per-unit check is
+        # an early-feedback optimization for configs that can tolerate its edges.
+        if getattr(config, "require_rust_syntax_check", False):
+            validators.append(RustSyntaxValidator())
         # Extra validators (e.g. the opt-in VerifierModelValidator) are appended
         # so they run last — after the cheap structural checks. This keeps the
         # rank-order validation loop cheap for structurally-invalid candidates
