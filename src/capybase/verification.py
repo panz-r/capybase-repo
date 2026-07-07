@@ -170,6 +170,55 @@ class NoConflictMarkersValidator:
         )
 
 
+class NonEmptyResolutionValidator:
+    """Reject a candidate whose ``resolved_text`` is empty or whitespace-only.
+
+    An empty resolution is never a correct merge — it means the model produced
+    nothing (a parse salvage that extracted only prose, or a refusal that slipped
+    through as needs_human=False with empty text). Without this guard, an empty
+    candidate passes every other validator (no markers, splices to nothing, no
+    entities to drop) and produces a corrupted splice that deletes the conflict
+    region's content. Surfaced as a hard failure so the CEGIS loop retries with
+    concrete feedback ("produced empty resolution") rather than accepting a
+    silently-destructive merge.
+
+    Runs FIRST (before the marker/scope checks) so an empty candidate is rejected
+    before any splicing or parsing. Does NOT fire on a deliberate deletion (a
+    modify/delete where the correct resolution IS empty) — that case is handled
+    by the block-capture / structural-resolver layers before the LLM loop, so a
+    candidate reaching here with empty text is a model failure, not a deletion.
+    """
+
+    name = "non_empty_resolution"
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        text = ctx.candidate.resolved_text or ""
+        is_empty = not text.strip()
+        # Block-capture's accept_deletion deliberately produces an empty
+        # resolved_text (deleting the block IS the correct resolution). Skip the
+        # guard for block-capture candidates — the empty text is intentional, not
+        # a model failure. Detected via the prompt_version (PROMPT_BLOCK_CAPTURE)
+        # or provenance ("block_capture").
+        pv = getattr(ctx.candidate, "prompt_version", "") or ""
+        prov = getattr(ctx.candidate, "provenance", "") or ""
+        is_deliberate_deletion = (
+            pv.startswith("block_capture") or prov == "block_capture"
+        )
+        if is_empty and is_deliberate_deletion:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="empty resolution is a deliberate block-capture deletion",
+                features={"empty_resolution": False},
+            )
+        return VerificationCheckResult(
+            name=self.name,
+            passed=not is_empty,
+            severity="error",
+            message="model produced an empty resolution (no resolved_text); retry",
+            features={"empty_resolution": is_empty},
+        )
+
+
 class ExactSpliceScopeValidator:
     """The resolved text, when spliced, must not change lines outside the
     conflict block — i.e. splicing only replaces the marker block."""
@@ -2354,6 +2403,7 @@ class VerificationEngine:
         # non-last unit and could never catch cross-unit errors. They now run
         # in Phase B (``verify_file``) against the fully-spliced file.
         validators: list[Validator] = [
+            NonEmptyResolutionValidator(),
             NoConflictMarkersValidator(),
             ExactSpliceScopeValidator(),
             AstPreservationValidator(),

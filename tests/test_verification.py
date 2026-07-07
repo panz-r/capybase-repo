@@ -45,6 +45,42 @@ def test_fails_on_remaining_markers():
     assert not res.passed
 
 
+def test_fails_on_empty_resolution():
+    """An empty resolved_text is never a correct merge — hard-fail + retry.
+
+    Without this guard, an empty candidate passes every other validator (no
+    markers, splices to nothing, no entities to drop) and produces a corrupted
+    splice that deletes the conflict region. Live-eval evidence: rust_impl :1:1
+    accepted an empty candidate, corrupting the whole-file splice.
+    """
+    worktree = "def f():\n<<<<<<< H\n    return 1\n=======\n    return 2\n>>>>>>> b\n"
+    unit = _unit("def f():\n    pass", "    return 1", "    return 2", worktree)
+    cand = _candidate("")
+    res = _engine().verify(unit, cand)
+    assert not res.passed
+    assert any(f.validator == "non_empty_resolution" for f in res.hard_failures)
+
+
+def test_fails_on_whitespace_only_resolution():
+    """Whitespace-only resolved_text is also rejected (not just truly empty)."""
+    worktree = "def f():\n<<<<<<< H\n    return 1\n=======\n    return 2\n>>>>>>> b\n"
+    unit = _unit("def f():\n    pass", "    return 1", "    return 2", worktree)
+    cand = _candidate("   \n  \n")
+    res = _engine().verify(unit, cand)
+    assert not res.passed
+    assert any(f.validator == "non_empty_resolution" for f in res.hard_failures)
+
+
+def test_non_empty_resolution_passes_valid_text():
+    """A candidate with actual content passes the empty-resolution guard."""
+    worktree = "def f():\n<<<<<<< H\n    return 1\n=======\n    return 2\n>>>>>>> b\n"
+    unit = _unit("def f():\n    pass", "    return 1", "    return 2", worktree)
+    cand = _candidate("    return 1")
+    res = _engine().verify(unit, cand)
+    # Passes the empty check (may fail others, but not non_empty_resolution).
+    assert not any(f.validator == "non_empty_resolution" for f in res.hard_failures)
+
+
 def test_fails_on_needs_human():
     worktree = "x\n<<<<<<< H\na\n=======\nb\n>>>>>>> c\n"
     unit = _unit("x", "a", "b", worktree)
