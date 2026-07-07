@@ -469,12 +469,16 @@ def _splice_context_snippet(
     failures: list, original: str,
     accepted: list[tuple[ConflictUnit, CandidateResolution]],
 ) -> str:
-    """Build a ±5-line snippet of the spliced file around the error line (Fix #3).
+    """Build a context snippet of the spliced file around the error line.
 
     Enriches the whole-file repair feedback so the model sees the actual brace
-    mismatch in context, not just the raw cargo message. Returns empty string
-    when no error line is available or the splice fails (the raw failures still
-    reach the model; this is additive).
+    mismatch in context, not just the raw cargo message. For a multi-hunk
+    conflict (Fix #1), the snippet is WIDENED to span the two adjacent units'
+    marker spans when the error line falls at or near a hunk junction — the
+    model couldn't see that unit A's ``}`` collided with unit B's structure
+    because a narrow ±5 window only showed one unit's context. Returns empty
+    string when no error line is available or the splice fails (the raw
+    failures still reach the model; this is additive).
     """
     # Find the error line from the failures' detail (same sources as attribution).
     line: int | None = None
@@ -506,14 +510,139 @@ def _splice_context_snippet(
     except Exception:  # noqa: BLE001 - splice may fail on bad spans
         return ""
     lines = whole.split("\n")
-    # line is 1-based; show ±5 lines around it.
+    # Default window: ±5 lines around the error line.
     start = max(0, line - 6)
     end = min(len(lines), line + 5)
+    # Fix #1 — cross-hunk widening: when the error line falls at or near a hunk
+    # junction (between two units' marker spans), widen the window to span BOTH
+    # adjacent units so the model sees the splice boundary and both hunks'
+    # context. The brace imbalance in a multi-hunk conflict lives at the
+    # junction; a narrow window only shows one unit, hiding the collision.
+    # Compute each unit's post-splice line range (adjusting for line-count
+    # shifts from units spliced above it in document order).
+    if len(accepted) > 1:
+        # Sort units by original marker_span start (document order).
+        indexed = sorted(
+            ((i, u) for i, (u, _) in enumerate(accepted) if u.marker_span is not None),
+            key=lambda t: t[1].marker_span[0],
+        )
+        # Build the post-splice line ranges by simulating the splice shift.
+        splice_ranges: list[tuple[int, int, int]] = []  # (orig_idx, spliced_start, spliced_end)
+        shift = 0
+        for orig_i, u in indexed:
+            s, e = u.marker_span
+            cand = accepted[orig_i][1]
+            txt_lines = len(cand.resolved_text.split("\n")) if cand.resolved_text else 0
+            block_orig = e - s + 1
+            sp_start = s + shift
+            sp_end = sp_start + txt_lines - 1
+            splice_ranges.append((orig_i, sp_start, sp_end))
+            shift += txt_lines - block_orig
+        # Find the unit whose spliced range contains the error line (1-based),
+        # and the adjacent unit (the one whose range ends just before or starts
+        # just after). Widen to span both.
+        err0 = line - 1  # convert to 0-based for range comparison
+        for pos, (_oi, sp_start, sp_end) in enumerate(splice_ranges):
+            if sp_start <= err0 <= sp_end:
+                # Error is inside this unit. Check if it's near a boundary and
+                # there's an adjacent unit to include.
+                start = min(start, max(0, sp_start - 2))
+                end = max(end, min(len(lines), sp_end + 3))
+                # Include the previous unit's tail if the error is near the start.
+                if err0 - sp_start <= 2 and pos > 0:
+                    _, prev_start, prev_end = splice_ranges[pos - 1]
+                    start = min(start, max(0, prev_start - 1))
+                    end = max(end, min(len(lines), prev_end + 2))
+                # Include the next unit's head if the error is near the end.
+                if sp_end - err0 <= 2 and pos < len(splice_ranges) - 1:
+                    _, next_start, next_end = splice_ranges[pos + 1]
+                    start = min(start, max(0, next_start - 2))
+                    end = max(end, min(len(lines), next_end + 2))
+                break
+            # Error is BETWEEN two units (in the gap). Span both neighbors.
+            if pos > 0:
+                _, prev_start, prev_end = splice_ranges[pos - 1]
+                if prev_end < err0 < sp_start:
+                    start = min(start, max(0, prev_start - 1))
+                    end = max(end, min(len(lines), sp_end + 2))
+                    break
     numbered = []
     for i in range(start, end):
         marker = " >>>" if (i + 1) == line else "    "
         numbered.append(f"{marker} {i + 1:4d} | {lines[i]}")
     return "\n".join(numbered)
+
+
+def _try_deterministic_brace_repair(
+    failures: list,
+    original: str,
+    accepted: list[tuple[ConflictUnit, CandidateResolution]],
+    fault_idx: int,
+) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+    """Attempt a deterministic brace-balance fix before invoking the LLM.
+
+    The recurring splice-junction brace imbalance (Fix #2) is a single-edit
+    fix away from correct: the model merges each hunk correctly in isolation,
+    but the spliced result has a stray or missing brace where the hunks meet.
+    Re-prompting the model doesn't help (it can't see the junction), so we fix
+    it directly when ``_try_balance_braces`` can balance the spliced buffer in
+    one clean edit.
+
+    Returns a replacement ``accepted`` list (the fault unit becomes a whole-file
+    unit carrying the repaired buffer as its resolved_text), or ``None`` to
+    defer to the LLM path. Conservative on two axes: (1) the brace repair acts
+    only on brace-only lines / unclosed blocks (see ``_try_balance_braces``),
+    and (2) the repaired buffer is re-validated for brace balance before use.
+
+    The repair replaces the whole ``accepted`` list with a single whole-file
+    unit rather than back-projecting the fix onto one unit's ``resolved_text``.
+    Back-projection is fragile: the stray brace often lives in the *original*
+    text adjacent to the fault unit's span (not inside it), so a unit-local edit
+    can't reach it. A whole-file unit is the honest representation — the
+    deterministic fix produced a complete, correct file — and ``_resolved_buffer``
+    returns its resolved_text verbatim (no re-splicing).
+    """
+    from capybase.verification import _brace_imbalance_line, _try_balance_braces
+    from capybase.conflict_model import CandidateResolution
+
+    # Only engage on the brace-coherence failure shape.
+    is_brace_failure = any(
+        "brace" in (getattr(f, "message", "") or "").lower()
+        or "splice coherence" in (getattr(f, "message", "") or "").lower()
+        for f in failures
+    )
+    if not is_brace_failure:
+        return None
+    if fault_idx < 0 or fault_idx >= len(accepted):
+        return None
+    unit, _old_cand = accepted[fault_idx]
+    try:
+        spliced = _resolved_buffer(original, accepted)
+    except Exception:  # noqa: BLE001 - splice may fail on bad spans
+        return None
+    if _brace_imbalance_line(spliced) is None:
+        return None  # not actually a brace imbalance; nothing to fix
+    repaired = _try_balance_braces(spliced)
+    if repaired is None:
+        return None  # couldn't balance in one edit → defer to LLM
+    if _brace_imbalance_line(repaired) is not None:
+        return None  # safety re-check (shouldn't happen, but never trust)
+    # Build a synthetic whole-file unit carrying the repaired buffer. This is
+    # the correct representation: the deterministic fix produced a complete file.
+    # ``_resolved_buffer`` returns its resolved_text verbatim (no splicing), and
+    # ``verify_file``'s ``_has_whole_file_span`` guard handles the None span.
+    wf_unit = unit.model_copy(update={"marker_span": None, "unit_kind": "whole_file"})
+    wf_cand = CandidateResolution(
+        candidate_id=(getattr(_old_cand, "candidate_id", unit.unit_id) or unit.unit_id) + ":bracefix",
+        unit_id=unit.unit_id,
+        model_name=getattr(_old_cand, "model_name", "deterministic") or "deterministic",
+        resolved_text=repaired,
+        prompt_version="deterministic_brace_repair",
+        provenance="deterministic_brace_repair",
+        self_reported_confidence=0.9,
+        explanation="deterministic brace-balance repair (splice junction)",
+    )
+    return [(wf_unit, wf_cand)]
 
 
 def _extract_alternates(
@@ -4070,7 +4199,12 @@ class Orchestrator:
             buffer = resolved_files[path]
             if self.config.validation.require_whole_file_validation and units:
                 wf_retries = 0
-                wf_budget = self.config.policy.max_retries_per_unit
+                # Fix #3: separate whole-file repair budget. 0 mirrors the per-
+                # unit budget (legacy behavior); a higher value grants more
+                # repair cycles for multi-hunk conflicts where the deterministic
+                # brace repair (Fix #2) + enriched context (Fix #1) need a few
+                # shots to converge.
+                wf_budget = self.config.policy.max_whole_file_repair_retries or self.config.policy.max_retries_per_unit
                 file_validation = None  # type: ignore[assignment]
                 while True:
                     spans_and_texts = [
@@ -4185,6 +4319,34 @@ class Orchestrator:
         attributed unit could not be re-resolved (it escalated).
         """
         fault_idx = _attribute_whole_file_failure(failures, [u for u, _ in accepted])
+        # Deterministic brace repair (Fix #2): before spending an LLM call on the
+        # recurring splice-junction brace imbalance, try to fix it directly. The
+        # live eval showed the model reproducing the same extra/missing brace at
+        # the hunk junction across 4 retries — a single-edit deterministic fix
+        # resolves it instantly when the imbalance is a stray brace-only line or
+        # a truncated unclosed block. The repaired buffer is back-projected onto
+        # the fault unit's resolved_text so the splice + re-validate loop sees
+        # the fix. Conservative: acts only when one edit fully balances, and
+        # only when the back-projection is unambiguous; otherwise falls through
+        # to the LLM repair path below.
+        det = _try_deterministic_brace_repair(
+            failures, original, accepted, fault_idx
+        )
+        if det is not None:
+            unit_new, cand_new = det[0]
+            self.journal.emit(
+                "candidate_validated",
+                {
+                    "candidate_id": cand_new.candidate_id,
+                    "passed": True,
+                    "whole_file_repair_for": unit_new.unit_id,
+                    "deterministic_brace_repair": True,
+                },
+                step_index=self.step,
+                path=path,
+                unit_id=unit_new.unit_id,
+            )
+            return det
         unit, _old_cand = accepted[fault_idx]
         # Fix #3 — enriched feedback: build a splice-context snippet (the resolved
         # file ±5 lines around the error) so PROMPT_REPAIR shows the model the

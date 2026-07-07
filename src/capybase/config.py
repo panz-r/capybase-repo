@@ -206,6 +206,16 @@ class PolicyConfig(BaseModel):
     # Recovery retries use a SEPARATE counter so they can't starve syntactic or
     # critic retries.
     max_recovery_retries_per_unit: int = 1
+    # Whole-file repair retry budget (Fix #3). The Phase 2 loop re-resolves the
+    # attributed unit and re-validates the spliced file when a cross-unit error
+    # (brace imbalance, duplicate symbol) surfaces. This is a SEPARATE budget
+    # from max_retries_per_unit (which governs per-unit CEGIS) because a
+    # whole-file cycle is more expensive (~cargo run) but also more likely to
+    # converge with the deterministic brace-repair fallback (Fix #2) + enriched
+    # cross-hunk context (Fix #1). 0 = mirror max_retries_per_unit (the default,
+    # preserving the legacy behavior). A higher value grants more repair cycles
+    # for multi-hunk conflicts where the model needs several shots.
+    max_whole_file_repair_retries: int = 0
     # Confidence-gated escalation: when the critic budget is exhausted, a
     # high-confidence critic flag (verifier_confidence >= this threshold)
     # escalates instead of accepting-with-warning. Uses the critic's own

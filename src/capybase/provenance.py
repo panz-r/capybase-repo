@@ -57,6 +57,7 @@ ResolutionProvenance = Literal[
 #: stable table and by the dry-run report (#10).
 PROVENANCE_VALUES: tuple[str, ...] = (
     "deterministic_structural",
+    "deterministic_brace_repair",
     "exact_history_reuse",
     "combination_search",
     "test_gated_side",
@@ -74,6 +75,7 @@ LEGACY_PROVENANCE = ""
 #: string maps to ``(legacy)`` so old candidates render something sane.
 PROVENANCE_LABELS: dict[str, str] = {
     "deterministic_structural": "deterministic structural",
+    "deterministic_brace_repair": "deterministic brace repair",
     "combination_search": "combination search",
     "test_gated_side": "test-gated side pick",
     "block_capture": "block-capture (keep/delete)",

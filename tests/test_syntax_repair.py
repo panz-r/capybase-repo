@@ -74,6 +74,76 @@ def test_braces_balanced_empty():
 
 
 # ---------------------------------------------------------------------------
+# _try_balance_braces (deterministic brace repair — Fix #2)
+# ---------------------------------------------------------------------------
+
+from capybase.verification import _try_balance_braces, _brace_imbalance_line
+
+
+def test_balance_braces_passthrough_balanced():
+    """Already-balanced text returns None (nothing to fix)."""
+    assert _try_balance_braces("fn f() {\n    x\n}\n") is None
+
+
+def test_balance_braces_extra_single():
+    """One stray closing brace on a brace-only line is removed."""
+    text = "fn f() {\n    x\n}\n}\n"
+    fixed = _try_balance_braces(text)
+    assert fixed is not None
+    assert _brace_imbalance_line(fixed) is None
+    assert fixed == "fn f() {\n    x\n}\n"
+
+
+def test_balance_braces_extra_double():
+    """Two stray closing braces (duplicate junction closers) are both removed."""
+    text = "fn f() {\n    x\n}\n}\n}\n"
+    fixed = _try_balance_braces(text)
+    assert fixed is not None
+    assert _brace_imbalance_line(fixed) is None
+
+
+def test_balance_braces_unclosed_single():
+    """One unclosed brace is closed at the end."""
+    text = "fn f() {\n    x\n"
+    fixed = _try_balance_braces(text)
+    assert fixed is not None
+    assert _brace_imbalance_line(fixed) is None
+
+
+def test_balance_braces_unclosed_double():
+    """Two unclosed braces are closed at the end."""
+    text = "fn f() {\n  if y {\n    x\n"
+    fixed = _try_balance_braces(text)
+    assert fixed is not None
+    assert _brace_imbalance_line(fixed) is None
+
+
+def test_balance_braces_code_line_not_touched():
+    """A stray } sharing a line with real code is NOT auto-removed."""
+    # The extra } is on a line with `bar()` — removing it would corrupt structure.
+    text = "fn f() {\n    foo()\n}\nbar() }\n"
+    assert _try_balance_braces(text) is None
+
+
+def test_balance_braces_string_brace_ignored():
+    """Braces inside string literals are masked and don't trigger repair."""
+    text = 'let s = "{ not counted }";\nfn f() {}\n'
+    assert _try_balance_braces(text) is None
+
+
+def test_balance_braces_empty():
+    assert _try_balance_braces("") is None
+
+
+def test_balance_braces_nested_extra():
+    """A stray } in nested code (brace-only line) is removed."""
+    text = "fn f() {\n    if x {\n        y\n    }\n}\n}\n"
+    fixed = _try_balance_braces(text)
+    assert fixed is not None
+    assert _brace_imbalance_line(fixed) is None
+
+
+# ---------------------------------------------------------------------------
 # _is_rust_resolution_error (semantic filter)
 # ---------------------------------------------------------------------------
 

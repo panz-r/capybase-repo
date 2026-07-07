@@ -1698,6 +1698,132 @@ def _brace_imbalance_line(text: str) -> int | None:
     return None
 
 
+def _strip_strings_comments(text: str) -> list[str]:
+    """Strip // and # comments (per-line) then mask string/char literals.
+
+    Returns the cleaned lines (without the trailing-join). Shared by the brace
+    gate (:func:`_brace_imbalance_line`) and the deterministic repair
+    (:func:`_try_balance_braces`) so the two agree on what counts as a brace.
+    """
+    import re
+
+    cleaned_lines = []
+    for line in text.split("\n"):
+        for marker in ("//", "#"):
+            idx = line.find(marker)
+            if idx >= 0:
+                line = line[:idx]
+        cleaned_lines.append(line)
+    cleaned = "\n".join(cleaned_lines)
+    cleaned = re.sub(r'"(?:\\.|[^"\\])*"', '""', cleaned)
+    cleaned = re.sub(r"'(?:\\.|[^'\\])*'", "''", cleaned)
+    return cleaned.split("\n")
+
+
+def _try_balance_braces(text: str) -> str | None:
+    """Deterministically repair a single brace imbalance, or return None.
+
+    The live eval exposed a recurring failure: the model merges each hunk of a
+    multi-hunk conflict correctly *in isolation*, but the spliced result has an
+    extra or missing ``}`` at the hunk junction. Even with repair feedback the
+    model reproduces the same error across 4 retries — it can't *see* the
+    junction because it only ever sees one unit at a time. This function is the
+    cheap deterministic fallback: when the imbalance is a single stray brace
+    (one edit away from balanced), fix it directly and skip the LLM call.
+
+    Conservative by design — it acts ONLY when a single edit fully balances the
+    text, and never on lines where a brace shares space with code (e.g.
+    ``} else {``), where a blind removal would corrupt structure. Two cases:
+
+    * **depth goes negative** (extra ``}``): the line where depth first dips
+      below 0 carries a stray close. If that line is a *brace-only* line
+      (whitespace + ``}``, possibly a trailing comment), drop it. Otherwise
+      return None — the error is structural, not a dropped stray brace.
+    * **depth ends positive** (unclosed ``{``): append the deficit of ``}`` to
+      the end of the last non-blank, non-brace-only line. This closes a
+      truncated construct (the common splice-junction case where the model's
+      hunk ends mid-block).
+
+    Re-checks after the edit; returns None if still unbalanced so the caller
+    falls through to the LLM repair path. Strings/comments are masked first so
+    a literal brace inside a string isn't counted or touched.
+    """
+    if not text:
+        return None
+    lines = text.split("\n")
+    cleaned = _strip_strings_comments(text)
+
+    # Walk depth to classify the imbalance (extra-close vs unclosed-open).
+    # Walk the WHOLE text (don't break at the first negative) so the final
+    # depth reflects the true deficit — duplicate stray braces (the splice-
+    # junction case) drive depth to -2 or lower, and we need to remove all of
+    # them, not just the first.
+    depth = 0
+    neg_line: int | None = None
+    for line_no, cline in enumerate(cleaned):
+        for ch in cline:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth < 0 and neg_line is None:
+                    neg_line = line_no
+        # Don't break — keep walking to accumulate the full deficit.
+
+    if neg_line is not None:
+        # Extra closing brace(s): depth dipped below zero. The stray closes are
+        # the trailing brace-only lines at/after the divergence point — the common
+        # splice-junction case where the model's hunk carries duplicate closers.
+        # Collect ALL consecutive brace-only lines from the divergence point
+        # onward (each is "whitespace + }"), removing only enough to bring depth
+        # back to zero. This handles both a single stray and the duplicate-pair
+        # case (two extra ``}`` from a duplicated hunk boundary). Conservative:
+        # if the divergence line carries real code (not brace-only), bail — the
+        # error is structural, not a dropped stray.
+        to_remove: list[int] = []
+        deficit = abs(depth) if depth < 0 else 1  # how many stray } to drop
+        for i in range(neg_line, len(lines)):
+            if deficit <= 0:
+                break
+            raw = lines[i]
+            c = _strip_strings_comments(raw)[0] if i < len(cleaned) else raw
+            if c.strip() == "}":
+                to_remove.append(i)
+                deficit -= 1
+            elif c.strip() == "":
+                continue  # skip blank lines between stray braces
+            else:
+                break  # hit real code → stop collecting stray braces
+        if not to_remove or deficit > 0:
+            return None  # couldn't collect enough stray brace-only lines
+        candidate = [l for i, l in enumerate(lines) if i not in set(to_remove)]
+        result = "\n".join(candidate)
+        if _brace_imbalance_line(result) is None:
+            return result
+        return None
+
+    if depth > 0:
+        # Unclosed opening brace(s): close them at the end of the last line
+        # that has non-brace content, so we don't append after a bare `}`.
+        # Find the last line whose cleaned form has content other than braces.
+        insert_at = len(lines)
+        for i in range(len(cleaned) - 1, -1, -1):
+            content = cleaned[i].replace("{", "").replace("}", "").strip()
+            if content:
+                insert_at = i + 1
+                break
+        suffix = "}" * depth
+        # Append the closing braces on their own line at the insertion point.
+        candidate = lines[:insert_at] + [suffix] + lines[insert_at:]
+        result = "\n".join(candidate)
+        if _brace_imbalance_line(result) is None:
+            return result
+        return None
+
+    # Already balanced.
+    return None
+
+
 class RustSyntaxValidator:
     """Per-unit Rust syntax check (CEGIS loop hardening).
 
@@ -2600,14 +2726,35 @@ class VerificationEngine:
         if language in ("rust", "python") and self.config.require_syntax_if_supported:
             imbalance_line = _brace_imbalance_line(whole)
             if imbalance_line is not None:
+                # Fix #1 — enrich the message with the brace delta so the model
+                # knows WHICH kind of imbalance it is (extra `}` vs unclosed `{`),
+                # not just "unbalanced". The classification matches
+                # _try_balance_braces: walk the cleaned depth to see whether it
+                # goes negative (extra close) or ends positive (unclosed open).
+                cleaned_for_msg = _strip_strings_comments(whole)
+                _d = 0
+                _went_neg = False
+                for _cl in cleaned_for_msg:
+                    for _ch in _cl:
+                        if _ch == "{":
+                            _d += 1
+                        elif _ch == "}":
+                            _d -= 1
+                            if _d < 0:
+                                _went_neg = True
+                if _went_neg:
+                    _delta_desc = f"extra closing brace — depth went negative (remove a stray '}}' near line {imbalance_line + 1})"
+                elif _d > 0:
+                    _delta_desc = f"missing closing brace — {_d} unclosed '{{' (add {_d} '}}' before line {imbalance_line + 1})"
+                else:
+                    _delta_desc = "brace mismatch"
                 hard.append(
                     VerificationFailure(
                         validator="syntax",
                         severity="error",
                         message=(
                             f"splice coherence: unbalanced braces at line "
-                            f"{imbalance_line + 1} (a unit's resolution introduced "
-                            f"an extra or missing brace)"
+                            f"{imbalance_line + 1} ({_delta_desc})"
                         ),
                         detail={"brace_imbalance_line": imbalance_line + 1},
                     )

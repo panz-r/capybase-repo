@@ -239,6 +239,12 @@ def _config_for(scenario: Scenario, *, critic_enabled: bool = True) -> Config:
     # Structural resolver + combination search: keep ON (production defaults).
     cfg.future.enable_structural_resolver = True
     cfg.future.enable_combination_search = True
+    # Fix #3: grant more whole-file repair cycles for Rust (cargo) scenarios —
+    # a two-hunk conflict where the deterministic brace repair (Fix #2) + the
+    # enriched cross-hunk context (Fix #1) need a few shots to converge. A
+    # whole-file cycle is ~2min on cargo; one extra cycle is cheap insurance.
+    if scenario.cargo:
+        cfg.policy.max_whole_file_repair_retries = 3
     # Verifier-model critic A/B arm. Default ON (the production default); the
     # A/B harness toggles this to measure the critic's contribution.
     cfg.validation.enable_verifier_model = critic_enabled
