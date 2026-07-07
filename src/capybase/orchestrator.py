@@ -4304,18 +4304,32 @@ class Orchestrator:
             outcome.retrieval_explanations = list(context.retrieval_explanations)
             if self.config.journal.enabled and self.config.journal.store_prompts:
                 from capybase.resolution_engine import (
+                    PROMPT_REPAIR,
                     PROMPT_RETRY,
                     PROMPT_RESOLVE,
+                    build_repair_prompt,
                     build_resolve_prompt,
                     build_retry_prompt,
                 )
 
-                pv = PROMPT_RETRY if failures else PROMPT_RESOLVE
-                prompt = (
-                    build_retry_prompt(unit, context, failures)
-                    if failures
-                    else build_resolve_prompt(unit, context)
-                )
+                # Mirror propose()'s dispatch so the journaled prompt matches the
+                # ACTUAL prompt sent to the model. Previously this always used
+                # build_retry_prompt on any failure, which mismatches a retry that
+                # took the PROMPT_REPAIR path (candidate+targeted-fix) — making the
+                # audit trail misleading.
+                if pending_recovery:
+                    from capybase.resolution_engine import build_recovery_prompt
+                    pv = "cegis_recovery.v1"
+                    prompt = build_recovery_prompt(unit, context, failures)
+                elif failures and prev_candidate and prev_candidate.resolved_text:
+                    pv = PROMPT_REPAIR
+                    prompt = build_repair_prompt(unit, context, prev_candidate, failures)
+                elif failures:
+                    pv = PROMPT_RETRY
+                    prompt = build_retry_prompt(unit, context, failures)
+                else:
+                    pv = PROMPT_RESOLVE
+                    prompt = build_resolve_prompt(unit, context)
                 self.journal.store_prompt(unit.unit_id, retry_count, prompt)
             self.journal.emit(
                 "context_built",
