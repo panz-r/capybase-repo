@@ -120,6 +120,7 @@ class ValidationConfig:
     enable_verifier_reflection: bool = True
     enable_verifier_guardrail: bool = True
     verifier_reflection_coverage_floor: float = 0.9
+    enable_recovery_retry: bool = True
     # VeriGuard policy gate (mirrors config.ValidationConfig).
     enable_policy_gate: bool = False
     policy_rules: tuple = ()  # tuple of config.PolicyRule; default empty = no-op

@@ -934,6 +934,77 @@ fenced answer as instructed.
 """
 
 
+PROMPT_RECOVERY = "cegis_recovery.v1"
+
+
+def build_recovery_prompt(
+    unit: ConflictUnit,
+    context: ContextBundle,
+    failures: Iterable[VerificationFailure] | None,
+    budget: TokenBudget | None = None,
+) -> str:
+    """The recovery prompt for a model that self-reported needs_human (CEGIS loop).
+
+    A reframed resolve for the case where the model GAVE UP. Distinct from
+    build_retry_prompt (the candidate was syntactically wrong) and
+    build_repair_prompt (the candidate had a specific fixable error): here the
+    model refused entirely, so the prompt is restructured to:
+
+    - Acknowledge the difficulty and reframe as a step-by-step task (a model
+      that bailed on a zero-shot attempt often succeeds when walked through).
+    - STRIP the ``needs_human=true`` escape hatch from the output schema — the
+      recovery attempt must produce a merge, not another refusal. A genuine
+      inability surfaces as a wrong/empty merge the validators catch.
+    - Carry the prior failures (whatever caused the struggle) as concrete
+      feedback so the model knows what to fix.
+
+    Uses the same sides/structural anchor as the resolve prompt but with the
+    recovery framing. Falls back to the standard resolve contract minus the
+    needs_human field.
+    """
+    feedback = (
+        "\n".join(_render_failure(f) for f in (failures or []))
+        or "- (the previous attempt self-reported it could not merge; no specific validator failure)"
+    )
+    parts = _resolve_prompt_parts(unit, context, budget=budget or TokenBudget())
+    # Recovery framing: the same DATA (the sides + structural anchor) as a fresh
+    # resolve, but a CUSTOM contract+rules block. The standard contract/rules
+    # mention needs_human (the escape hatch the recovery retry must strip so the
+    # model produces a merge instead of repeating the refusal). A genuine
+    # inability surfaces as a wrong/empty merge the validators catch.
+    return f"""The previous merge attempt for this conflict reported it could not
+resolve safely. This is a RETRY with a fresh approach — work through it step by
+step. Most conflicts that seem impossible at first glance resolve once you
+identify each side's DISTINCT change and combine them. Do NOT report that you
+cannot merge; produce the best merge you can. If genuinely ambiguous, make the
+most conservative choice that preserves both sides' additions.
+
+{parts["data"]}
+### context from the previous (failed) attempt
+{feedback}
+
+YOUR TASK — reason step by step:
+1. What did CURRENT_UPSTREAM_SIDE change vs BASE? (one sentence)
+2. What did REPLAYED_COMMIT_SIDE change vs BASE? (one sentence)
+3. What is the smallest merge that keeps BOTH changes? (one sentence)
+4. Emit that merge.
+
+CRITICAL: PRESERVE leading indentation exactly. No conflict markers. Escape
+newlines as \\n and double quotes as \\" inside resolved_text. Output the
+```json block last; nothing after it.
+
+Output ONE ```json fenced object — do NOT include a needs_human field (this is a
+recovery attempt; you MUST produce a merge):
+```json
+{{
+  "resolved_text": "<the merged replacement text, exact indentation>",
+  "explanation": "<one short sentence>",
+  "self_reported_confidence": 0.0
+}}
+```
+"""
+
+
 def build_repair_prompt(
     unit: ConflictUnit,
     context: ContextBundle,
@@ -1997,6 +2068,26 @@ class ResolutionEngine:
             self._candidate_from_response(unit, prompt_version, resp)
             for resp in responses
         ]
+
+    def propose_recovery(
+        self,
+        unit: ConflictUnit,
+        context: ContextBundle,
+        *,
+        failures: list[VerificationFailure] | None = None,
+    ) -> list[CandidateResolution]:
+        """One recovery candidate via build_recovery_prompt (CEGIS loop hardening).
+
+        For a model that self-reported needs_human: a single-sample retry with
+        the reframed recovery prompt (strips the needs_human escape hatch, adds
+        step-by-step scaffolding). Distinct from propose() — no difficulty
+        routing, no consensus, no prev_candidate (the refusal produced no usable
+        code to repair). The orchestrator calls this when risk.decide grants a
+        recovery retry (the __recovery_retry__ followup marker).
+        """
+        prompt = build_recovery_prompt(unit, context, failures, budget=self.token_budget)
+        resp = self._one(unit, context, prompt, PROMPT_RECOVERY)
+        return [resp] if resp is not None else []
 
     def propose_with_consensus(
         self,

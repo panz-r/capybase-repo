@@ -19,6 +19,8 @@ class RiskEngine:
         min_agreement: float = 0.0,
         max_critic_retries_per_unit: int = 0,
         critic_confidence_escalate_threshold: float = 0.8,
+        max_recovery_retries_per_unit: int = 1,
+        enable_recovery_retry: bool = True,
     ) -> None:
         self.max_retries_per_unit = max_retries_per_unit
         self.entropy_escalate_threshold = entropy_escalate_threshold
@@ -39,6 +41,13 @@ class RiskEngine:
         # verdict was high-confidence; otherwise accept-with-warning. 0.0 means
         # never confidence-escalate (the conservative default).
         self.critic_confidence_escalate_threshold = critic_confidence_escalate_threshold
+        # Recovery retry budget for model self-refusals (needs_human). A model
+        # that says "I can't" gets one retry with a reframed prompt before
+        # escalating — a struggling model often succeeds with better scaffolding.
+        # The orchestrator tracks these in a separate counter so they can't
+        # starve syntactic/critic retries. Disabled by enable_recovery_retry=False.
+        self.max_recovery_retries_per_unit = max_recovery_retries_per_unit
+        self.enable_recovery_retry = enable_recovery_retry
 
     def _critic_budget(self, feats: dict) -> int:
         """The effective critic retry budget, scaled by intent coverage.
@@ -120,6 +129,7 @@ class RiskEngine:
         consensus_entropy: float | None = None,
         consensus_agreement: float | None = None,
         critic_retry_count: int = 0,
+        recovery_retry_count: int = 0,
     ) -> RiskDecision:
         """Apply MVP rules in priority order.
 
@@ -158,6 +168,27 @@ class RiskEngine:
                     required_followups=[reason],
                 )
             return _escalate(result, [reason, "max retries exhausted"])
+
+        # --- recovery retry for model self-refusals (needs_human) ---
+        # Before the absolute escalate: a model that self-reported needs_human
+        # gets ONE retry with a reframed prompt (build_recovery_prompt). A
+        # struggling model often succeeds with better scaffolding; a model that
+        # refuses twice is genuinely stuck. The orchestrator detects the
+        # recovery-retry reason marker and selects the recovery prompt. Bounded
+        # by max_recovery_retries_per_unit (default 1); disabled by
+        # enable_recovery_retry=False. Uses a SEPARATE counter so it can't starve
+        # the syntactic or critic budgets.
+        if (
+            (failure_kind == "model_refusal" or feats.get("model_needs_human"))
+            and self.enable_recovery_retry
+            and recovery_retry_count < self.max_recovery_retries_per_unit
+        ):
+            return RiskDecision(
+                action="retry",
+                reasons=["model self-reported needs_human; recovery retry with reframed prompt"],
+                required_followups=["__recovery_retry__"],
+                risk_score=None,
+            )
 
         # --- absolute escalation: genuine model refusal ---
         if failure_kind == "model_refusal" or feats.get("model_needs_human"):

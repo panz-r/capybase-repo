@@ -854,6 +854,10 @@ class Orchestrator:
                 min_agreement=config.model.consensus_min_agreement,
                 max_critic_retries_per_unit=config.policy.max_critic_retries_per_unit,
                 critic_confidence_escalate_threshold=config.policy.critic_confidence_escalate_threshold,
+                max_recovery_retries_per_unit=config.policy.max_recovery_retries_per_unit,
+                enable_recovery_retry=getattr(
+                    config.validation, "enable_recovery_retry", True
+                ),
             )
         # Acceptance-strictness policy (#10): tightens the accept branch per the
         # configured mode (interactive/dry_run/ci/unattended). Inert in the
@@ -4142,6 +4146,16 @@ class Orchestrator:
         # so a stubborn dropped-intent case can't starve the syntactic-CEGIS
         # retries. Incremented only when the retry was critic-driven.
         critic_retry_count = 0
+        # Separate ledger for recovery retries (needs_human self-refusals): a
+        # model that gave up gets one retry with build_recovery_prompt before
+        # escalating. Uses max_recovery_retries_per_unit; incremented only when
+        # the retry was recovery-driven.
+        recovery_retry_count = 0
+        # Carries the recovery-retry flag across loop iterations: set in the
+        # retry-seed block (after a needs_human decision grants a recovery
+        # attempt), consumed at the top of the next iteration by propose() to
+        # select build_recovery_prompt instead of the normal resolve/repair path.
+        pending_recovery = False
         # Wall-clock deadline for this unit (the outermost budget, above the
         # per-retry counts). 0 = disabled. Checked at the top of each loop
         # iteration so a non-converging unit escalates instead of looping.
@@ -4329,7 +4343,17 @@ class Orchestrator:
                 or self.config.future.enable_self_consistency
             )
 
-            if difficulty == "simple":
+            # Recovery retry (CEGIS loop hardening): a model that self-reported
+            # needs_human gets one retry with build_recovery_prompt (a reframed
+            # resolve that strips the needs_human escape hatch). Overrides the
+            # normal difficulty routing — it's a single-sample recovery probe,
+            # not a fresh multi-sample resolve.
+            if pending_recovery:
+                pending_recovery = False  # consume
+                candidates = self.resolution_engine.propose_recovery(
+                    unit, context, failures=failures,
+                )
+            elif difficulty == "simple":
                 # Fast path: one low-temperature sample, no intent pass, no
                 # consensus. Simple isolated hunks resolve trivially. Force
                 # n_samples=1 so a calibrated samples>1 never leaks into the
@@ -4428,6 +4452,7 @@ class Orchestrator:
                     consensus_report.agreement_score if consensus_report else None
                 ),
                 critic_retry_count=critic_retry_count,
+                recovery_retry_count=recovery_retry_count,
             )
             outcome.decision = decision
             self.journal.emit(
@@ -4552,9 +4577,21 @@ class Orchestrator:
             # (the critic-path comment above describes the same pathology).
             failures.extend(_soft_warning_failures(validation))
             failures = failures or None
-            # Track which budget this retry consumes: critic-driven retries use
-            # the separate critic budget, not the syntactic retry_count.
-            if critic_warning is not None:
+            # Track which budget this retry consumes. A recovery retry (model
+            # self-reported needs_human; risk.decide granted a recovery attempt)
+            # uses the separate recovery budget and a reframed prompt — detected
+            # via the __recovery_retry__ followup marker.
+            is_recovery_retry = "__recovery_retry__" in (decision.required_followups or [])
+            if is_recovery_retry:
+                recovery_retry_count += 1
+                pending_recovery = True
+                self.journal.emit(
+                    "recovery_retry",
+                    {"retry_count": recovery_retry_count,
+                     "outcome": "pending"},
+                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                )
+            elif critic_warning is not None:
                 critic_retry_count += 1
             else:
                 retry_count += 1

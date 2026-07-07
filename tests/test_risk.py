@@ -21,7 +21,9 @@ def test_accept_on_pass():
 
 
 def test_escalate_on_needs_human():
-    eng = RiskEngine()
+    # Recovery retry disabled → needs_human escalates immediately (the legacy
+    # behavior; with recovery on, a refusal gets one reframed retry first).
+    eng = RiskEngine(enable_recovery_retry=False)
     d = eng.decide(_result(False, {"model_needs_human": True}), retry_count=0)
     assert d.action == "escalate"
 
@@ -269,7 +271,9 @@ def test_truncated_retries():
 
 
 def test_model_refusal_escalates_immediately():
-    eng = RiskEngine(max_retries_per_unit=2)
+    # Recovery retry disabled → genuine refusal escalates even on retry 0 (the
+    # legacy behavior; with recovery on, a refusal gets one reframed retry first).
+    eng = RiskEngine(max_retries_per_unit=2, enable_recovery_retry=False)
     res = _result(False, {"model_needs_human": True})
     # genuine refusal: escalate even on retry 0
     assert eng.decide(res, retry_count=0, failure_kind="model_refusal").action == "escalate"

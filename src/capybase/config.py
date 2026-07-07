@@ -198,6 +198,14 @@ class PolicyConfig(BaseModel):
     # is essential, latency is not, so the critic gets as many chances as the
     # resolver). A nonzero value overrides.
     max_critic_retries_per_unit: int = 0
+    # Recovery retry budget for model self-refusals (needs_human). When the model
+    # self-reports needs_human, a single recovery retry with a reframed prompt
+    # (build_recovery_prompt) is granted before escalating — a struggling model
+    # often succeeds with better scaffolding. 1 = one recovery retry (default);
+    # 0 = disable (escalate immediately on needs_human, the legacy behavior).
+    # Recovery retries use a SEPARATE counter so they can't starve syntactic or
+    # critic retries.
+    max_recovery_retries_per_unit: int = 1
     # Confidence-gated escalation: when the critic budget is exhausted, a
     # high-confidence critic flag (verifier_confidence >= this threshold)
     # escalates instead of accepting-with-warning. Uses the critic's own
@@ -384,6 +392,11 @@ class ValidationConfig(BaseModel):
     # Below this min coverage, Phase 2 reflection is skipped — the critic is
     # likely right (a real drop), so don't waste the reassessment call.
     verifier_reflection_coverage_floor: float = 0.9
+    # Recovery retry for model self-refusals (needs_human): when the model gives
+    # up, grant one retry with a reframed prompt (build_recovery_prompt) before
+    # escalating. A struggling model often succeeds with better scaffolding. The
+    # budget is max_recovery_retries_per_unit in [policy]. Default-on.
+    enable_recovery_retry: bool = True
     # VeriGuard-style deterministic policy gate (survey §4): statically extract
     # import/call facts from each candidate's resolved text and evaluate them
     # against ``policy_rules``. The ONLY check that inspects WHAT a patch

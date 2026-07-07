@@ -144,7 +144,13 @@ def test_calibrated_escalates_high_risk_passing_candidate():
     coeffs = [0.0] * len(_FEATURE_KEYS)
     coeffs[idx_nh] = 5.0
     model = CalibrationModel(coefficients=coeffs, intercept=0.0, threshold=0.5)
-    engine = CalibratedRiskEngine(max_retries_per_unit=2, model=model)
+    # Recovery retry disabled so needs_human escalates (the calibrated path this
+    # test exercises); with recovery on, a refusal gets one reframed retry first.
+    from capybase.risk import RiskEngine as _RE
+    engine = CalibratedRiskEngine(
+        max_retries_per_unit=2, model=model,
+        fallback=_RE(max_retries_per_unit=2, enable_recovery_retry=False),
+    )
     # A candidate that PASSES all hard checks but has model_needs_human=True
     # (a soft signal the rules engine ignores on the accept path).
     res = _passed_result({"syntax_passed": True, "model_needs_human": True})
