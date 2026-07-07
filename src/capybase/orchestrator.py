@@ -4129,7 +4129,18 @@ class Orchestrator:
         """
         fault_idx = _attribute_whole_file_failure(failures, [u for u, _ in accepted])
         unit, _old_cand = accepted[fault_idx]
-        outcome = self._resolve_unit(unit, seed_failures=failures)
+        # Pass the previously-accepted candidate as seed_candidate so the
+        # re-resolve routes to PROMPT_REPAIR (shows the broken candidate + the
+        # compile diagnostic) instead of PROMPT_RETRY (blind regeneration). The
+        # _old_cand caused the file-level failure; showing it gives the model a
+        # surgical target. Only when it has usable resolved_text (an empty/needs-
+        # human candidate has nothing to repair).
+        seed_cand = _old_cand if (
+            _old_cand is not None and getattr(_old_cand, "resolved_text", "")
+        ) else None
+        outcome = self._resolve_unit(
+            unit, seed_failures=failures, seed_candidate=seed_cand,
+        )
         self.journal.emit(
             "candidate_validated",
             {
@@ -4147,7 +4158,8 @@ class Orchestrator:
         return accepted
 
     def _resolve_unit(
-        self, unit: ConflictUnit, *, seed_failures: list | None = None
+        self, unit: ConflictUnit, *, seed_failures: list | None = None,
+        seed_candidate: "CandidateResolution | None" = None,
     ) -> UnitOutcome:
         outcome = UnitOutcome(unit=unit)
         # Build the per-unit history snapshot ONCE (#idea 5 cohesion). This
@@ -4192,7 +4204,12 @@ class Orchestrator:
         # starting from the repair path with the file-level failures pre-seeded,
         # so the model gets the concrete cross-unit error on its first attempt.
         failures = list(seed_failures) if seed_failures else None
-        prev_candidate = None
+        # seed_candidate: when set (whole-file CEGIS repair), the previously-
+        # accepted candidate that caused the file-level failure. Seeded as the
+        # initial prev_candidate so the first loop iteration routes to
+        # PROMPT_REPAIR (shows the broken candidate + the compile diagnostic)
+        # instead of PROMPT_RETRY (blind regeneration).
+        prev_candidate = seed_candidate
 
         # Exact history reuse (#9 step 4): BEFORE every other mechanism, check
         # whether an IDENTICAL prior conflict was already accepted. If so, replay

@@ -53,6 +53,7 @@ def _config(repo: Path) -> Config:
     cfg = Config()
     cfg.model.model = "fake"
     cfg.tests.required = False  # relax the test gate; we're testing the menu
+    cfg.validation.enable_per_unit_syntax_check = False  # fragmentary fake candidates
     return cfg
 
 

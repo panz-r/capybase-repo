@@ -48,6 +48,11 @@ def _config(repo) -> Config:
     cfg.tests.required = False  # no pytest/cargo in the fixture repo
     cfg.tests.pre_continue = None
     cfg.tests.final = None
+    # The per-unit Rust syntax validator false-fails on the fake client's partial
+    # snippets (struct-init lines without the surrounding impl context); disable
+    # it here — the whole-file Phase B cargo check is the authoritative gate, and
+    # the per-unit validator has its own dedicated tests.
+    cfg.validation.enable_per_unit_syntax_check = False
     return cfg
 
 

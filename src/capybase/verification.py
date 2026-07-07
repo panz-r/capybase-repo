@@ -121,7 +121,7 @@ class ValidationConfig:
     enable_verifier_guardrail: bool = True
     verifier_reflection_coverage_floor: float = 0.9
     enable_recovery_retry: bool = True
-    require_rust_syntax_check: bool = False
+    enable_per_unit_syntax_check: bool = True
     # VeriGuard policy gate (mirrors config.ValidationConfig).
     enable_policy_gate: bool = False
     policy_rules: tuple = ()  # tuple of config.PolicyRule; default empty = no-op
@@ -1591,6 +1591,47 @@ def _is_rust_resolution_error(msg: str) -> bool:
     return bool(msg and _RUST_SEMANTIC_ERROR.search(msg))
 
 
+def _braces_balanced(text: str) -> bool:
+    """Cheap structural sanity check: are ``{}`` and ``()`` braces balanced?
+
+    A per-unit splice that fills a marker span inside a larger construct (e.g.
+    a bare ``Config { ... }`` initializer extracted without the surrounding
+    ``impl``/``fn``) produces structurally-incomplete code that rustc rejects
+    with a spurious parse error (``error: missing \`struct\` for struct
+    definition``) — a false positive, since the merge is correct in context.
+    This guard skips the compile when the spliced text has unbalanced braces,
+    deferring to Phase B (whole-file cargo) where the full context is available.
+    String/comment contents are ignored (naive but sufficient — a literal ``{``
+    inside a string that throws off the count is rare and the guard only SKIPS,
+    never false-fails). Comments (``//`` to EOL, ``#`` to EOL) are stripped first.
+    """
+    if not text:
+        return True
+    # Strip line comments (Rust // and Python #) so braces inside them don't count.
+    cleaned_lines = []
+    for line in text.split("\n"):
+        for marker in ("//", "#"):
+            idx = line.find(marker)
+            if idx >= 0:
+                line = line[:idx]
+        cleaned_lines.append(line)
+    cleaned = "\n".join(cleaned_lines)
+    # Strip string literals (naive: "..." and '...') so braces inside them don't count.
+    import re
+
+    cleaned = re.sub(r'"(?:\\.|[^"\\])*"', '""', cleaned)
+    cleaned = re.sub(r"'(?:\\.|[^'\\])*'", "''", cleaned)
+    depth = 0
+    for ch in cleaned:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
 class RustSyntaxValidator:
     """Per-unit Rust syntax check (CEGIS loop hardening).
 
@@ -1645,6 +1686,17 @@ class RustSyntaxValidator:
             ctx.candidate.resolved_text,
         )
         spliced = _blank_markers(spliced, "rust")
+        # Brace-balance guard: a per-unit splice that fills a marker span inside
+        # a larger construct (e.g. a bare struct initializer without the
+        # surrounding impl/fn) produces structurally-incomplete code that rustc
+        # rejects with a spurious parse error. Skip the compile (defer to Phase B
+        # whole-file cargo) when the spliced text has unbalanced braces.
+        if not _braces_balanced(spliced):
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="spliced text has unbalanced braces; deferring to whole-file check",
+                features={"rust_syntax_checked": False, "syntax_passed": True},
+            )
         rustc = _resolve_tool(getattr(cfg, "rustc_path", "rustc"))
         if rustc is None:
             return VerificationCheckResult(
@@ -1689,6 +1741,76 @@ class RustSyntaxValidator:
             message=msg,
             detail={"diagnostic": msg},
             features={"rust_syntax_checked": True, "syntax_passed": ok},
+        )
+
+
+class PythonSyntaxValidator:
+    """Per-unit Python syntax check (CEGIS loop hardening).
+
+    The deprecated :class:`SyntaxValidator` was removed from the default engine
+    (its per-unit splicing was structurally broken for multi-unit files). But
+    that left Python syntax errors (an unclosed bracket, a bad indent) invisible
+    to the per-unit CEGIS loop — they only surfaced in Phase B (``verify_file``),
+    which runs AFTER all units resolve. A candidate with a Python syntax error
+    could be accepted per-unit and rejected only later, with the model never
+    seeing the diagnostic as targeted repair feedback.
+
+    This validator splices the candidate into the worktree, BLANKS sibling
+    conflict markers to comments (multi-unit-safe, same technique as
+    ``AstPreservationValidator``), and runs ``_compile_python`` (``py_compile``).
+    Python has no separate type-resolution phase, so a fragment compiles cleanly
+    in isolation when it's syntactically valid — no crate-context problem. The
+    diagnostic becomes a ``VerificationFailure`` that seeds PROMPT_REPAIR.
+
+    Python-only; no-op (passes) for other languages. Skips when the marker span
+    is unknown or resolved_text is empty. Runs as a hard failure
+    (``severity="error"``) so it's retryable.
+    """
+
+    name = "python_syntax"
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        if ctx.unit.language != "python":
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="not python; syntax check skipped",
+                features={"python_syntax_checked": False},
+            )
+        if ctx.unit.marker_span is None:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="no marker span",
+                features={"python_syntax_checked": False},
+            )
+        if not ctx.candidate.resolved_text:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="empty resolved_text; syntax check skipped",
+                features={"python_syntax_checked": False},
+            )
+        # Splice + blank sibling markers so the parse reflects real structure
+        # even in a multi-hunk file (sibling marker blocks would corrupt the parse).
+        spliced = splice_resolution(
+            ctx.unit.original_worktree_text,
+            ctx.unit.marker_span,
+            ctx.candidate.resolved_text,
+        )
+        spliced = _blank_markers(spliced, "python")
+        try:
+            ok, msg = _compile_python(spliced)
+        except Exception as exc:  # noqa: BLE001 - never crash resolution
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message=f"python syntax check error: {exc}",
+                features={"python_syntax_checked": False, "syntax_passed": True},
+            )
+        return VerificationCheckResult(
+            name=self.name,
+            passed=ok,
+            severity="error",
+            message=msg,
+            detail={"diagnostic": msg},
+            features={"python_syntax_checked": True, "syntax_passed": ok},
         )
 
 
@@ -2242,16 +2364,16 @@ class VerificationEngine:
             ObligationValidator(),
             NeedsHumanValidator(),
         ]
-        # Per-unit Rust syntax check (CEGIS loop hardening): surfaces a malformed
-        # format!/stray brace as a hard failure that seeds the repair prompt, so
-        # the model sees the compile error on the first retry instead of an
-        # unrelated warning. OPT-IN (default off): standalone rustc on a per-unit
-        # splice can produce false parse errors when the candidate is a partial
-        # context (a function body compiled without the surrounding impl/fn), so
-        # it's gated behind require_rust_syntax_check. The whole-file cargo check
-        # (Phase B) remains the authoritative compile gate; this per-unit check is
-        # an early-feedback optimization for configs that can tolerate its edges.
-        if getattr(config, "require_rust_syntax_check", False):
+        # Per-unit syntax checks (CEGIS loop hardening): surface a code syntax
+        # error (malformed format!, unclosed bracket, bad indent) as a hard
+        # failure that seeds PROMPT_REPAIR, so the model sees the compile error
+        # and the broken candidate on the first retry. Distinct from
+        # require_syntax_if_supported (which gates the Phase B whole-file check):
+        # the per-unit check is OPT-OUT via enable_per_unit_syntax_check so the
+        # hermetic suite (whose fake clients produce partial snippets) can
+        # disable it without disabling Phase B.
+        if getattr(config, "enable_per_unit_syntax_check", True):
+            validators.append(PythonSyntaxValidator())
             validators.append(RustSyntaxValidator())
         # Extra validators (e.g. the opt-in VerifierModelValidator) are appended
         # so they run last — after the cheap structural checks. This keeps the

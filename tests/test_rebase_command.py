@@ -67,6 +67,10 @@ def _config(repo, *, tests_required: bool = True) -> Config:
     cfg.tests.required = tests_required
     cfg.tests.pre_continue = "true"
     cfg.tests.final = "true"
+    # Per-unit syntax validators false-fail on the fake client's partial snippets;
+    # disable in the hermetic loop-mechanics tests (the validators have dedicated
+    # tests with complete code).
+    cfg.validation.enable_per_unit_syntax_check = False
     return cfg
 
 
@@ -466,6 +470,7 @@ def test_rebase_rust_resolves_and_compiles(repo):
     cfg.tests.required = False
     cfg.tests.pre_continue = None
     cfg.tests.final = None
+    cfg.validation.enable_per_unit_syntax_check = False  # partial snippets
     engine = ResolutionEngine(
         cfg.model, client=CyclingClient([_payload(r_new), _payload(r_label)])
     )

@@ -61,6 +61,12 @@ def _config(tmp_path: Path, *, tests_required: bool = True, pre_continue: str | 
     cfg.tests.required = tests_required
     cfg.tests.pre_continue = pre_continue  # `true` always exits 0
     cfg.tests.final = pre_continue
+    # The per-unit syntax validators (PythonSyntaxValidator/RustSyntaxValidator)
+    # are a production feature; the hermetic suite's fake clients produce partial
+    # conflict-region snippets (not complete parseable files), so the per-unit
+    # compile would false-fail on them. Disable here — the validators have their
+    # own dedicated tests with complete code.
+    cfg.validation.enable_per_unit_syntax_check = False
     # Write artifacts under the repo's .rebase-agent (cwd of the repo).
     return cfg
 

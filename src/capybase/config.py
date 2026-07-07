@@ -397,14 +397,14 @@ class ValidationConfig(BaseModel):
     # escalating. A struggling model often succeeds with better scaffolding. The
     # budget is max_recovery_retries_per_unit in [policy]. Default-on.
     enable_recovery_retry: bool = True
-    # Per-unit Rust syntax check (CEGIS loop hardening): OPT-IN. Runs rustc
-    # --emit=metadata on the spliced candidate so a malformed format!/stray brace
-    # becomes a hard failure that seeds the repair prompt. Default OFF because
-    # standalone rustc on a per-unit splice can produce false parse errors when
-    # the candidate is a partial context (a fn body without the surrounding
-    # impl). The whole-file cargo check (Phase B) is the authoritative gate; this
-    # is an early-feedback optimization for configs that tolerate its edges.
-    require_rust_syntax_check: bool = False
+    # Per-unit syntax checks (CEGIS loop hardening): PythonSyntaxValidator +
+    # RustSyntaxValidator run on each candidate so a code syntax error becomes a
+    # hard failure that seeds PROMPT_REPAIR (targeted fix showing the broken
+    # candidate + the compile diagnostic). Distinct from
+    # require_syntax_if_supported (which gates the Phase B whole-file check);
+    # this is the PER-UNIT early-feedback check. Default-on; the hermetic suite
+    # opts out (fake clients produce partial snippets that don't compile standalone).
+    enable_per_unit_syntax_check: bool = True
     # VeriGuard-style deterministic policy gate (survey §4): statically extract
     # import/call facts from each candidate's resolved text and evaluate them
     # against ``policy_rules``. The ONLY check that inspects WHAT a patch

@@ -225,6 +225,7 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
     cfg.validation.require_whole_file_validation = False
     cfg.validation.reject_if_drops_a_side = False
     cfg.validation.reject_if_drops_referenced_symbol = False
+    cfg.validation.enable_per_unit_syntax_check = False  # fragmentary candidates
     # Disable the deterministic pre-LLM layers so the conflicts reach the LLM
     # path where samples_complex applies. (Without this the union/structural
     # rules merge them with zero LLM calls, exercising the resolver not the

@@ -523,7 +523,12 @@ def _rule(name, kind, pattern, severity="error", reason=""):
 
 def _gate_engine(rules):
     """A VerificationEngine with the policy gate enabled and the given rules."""
-    cfg = ValidationConfig(enable_policy_gate=True, policy_rules=tuple(rules))
+    cfg = ValidationConfig(
+        enable_policy_gate=True, policy_rules=tuple(rules),
+        # The per-unit syntax validators false-fail on the fragmentary candidates
+        # these tests use (they test the policy gate, not syntax); disable them.
+        enable_per_unit_syntax_check=False,
+    )
     return VerificationEngine.default(cfg)
 
 
@@ -595,7 +600,7 @@ def test_extract_policy_facts_empty_for_non_python():
 def test_policy_gate_inert_when_disabled():
     """enable_policy_gate off → the gate is a no-op: passed, policy_checked
     False, and risk_tags untouched. This is the zero-cost default."""
-    cfg = ValidationConfig(enable_policy_gate=False)
+    cfg = ValidationConfig(enable_policy_gate=False, enable_per_unit_syntax_check=False)
     engine = VerificationEngine.default(
         cfg,
         extra_validators=[PolicyGateValidator()],
@@ -609,7 +614,9 @@ def test_policy_gate_inert_when_disabled():
 
 def test_policy_gate_inert_when_no_rules():
     """Enabled but no rules → still a no-op (the code ships no rules)."""
-    cfg = ValidationConfig(enable_policy_gate=True, policy_rules=())
+    cfg = ValidationConfig(
+        enable_policy_gate=True, policy_rules=(), enable_per_unit_syntax_check=False,
+    )
     engine = VerificationEngine.default(
         cfg,
         extra_validators=[PolicyGateValidator()],
@@ -698,7 +705,10 @@ from capybase.verification import PolicyGateValidator  # noqa: E402
 
 
 def _smell_engine(severity="warning"):
-    cfg = ValidationConfig(enable_code_smell_checks=True, code_smell_severity=severity)
+    cfg = ValidationConfig(
+        enable_code_smell_checks=True, code_smell_severity=severity,
+        enable_per_unit_syntax_check=False,  # fragmentary candidates; not testing syntax
+    )
     return VerificationEngine.default(cfg)
 
 
@@ -777,7 +787,7 @@ def test_smell_empty_for_unparseable():
 def test_smell_validator_inert_when_disabled():
     """enable_code_smell_checks off → inert: passed, smell_checked False,
     risk_tags untouched. The zero-cost default."""
-    cfg = ValidationConfig(enable_code_smell_checks=False)
+    cfg = ValidationConfig(enable_code_smell_checks=False, enable_per_unit_syntax_check=False)
     engine = VerificationEngine.default(
         cfg, extra_validators=[CodeSmellValidator()]
     )
