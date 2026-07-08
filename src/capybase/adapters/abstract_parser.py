@@ -1516,3 +1516,369 @@ def units_in_container(ir: FileIR, span: tuple[int, int]) -> list[StructuralUnit
     if container is None:
         return list(ir.units)
     return list(container.children) if container.children else []
+
+
+# ---------------------------------------------------------------------------
+# 3-way structural diff (Improvement #5 — survey Phase 3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AlignedUnit:
+    """One unit aligned across the three versions (base/left/right).
+
+    Each field is the :class:`StructuralUnit` from that version, or ``None``
+    when absent. ``change_kind`` classifies the alignment for the LLM prompt.
+    """
+    base: StructuralUnit | None
+    left: StructuralUnit | None
+    right: StructuralUnit | None
+    change_kind: str  # see _CHANGE_KIND_* constants below
+
+    @property
+    def name(self) -> str:
+        """The best available name for this aligned unit (for display)."""
+        for u in (self.left, self.right, self.base):
+            if u is not None and u.name:
+                return u.name
+        return "<anon>"
+
+    @property
+    def kind(self) -> str:
+        """The best available kind for this aligned unit."""
+        for u in (self.left, self.right, self.base):
+            if u is not None:
+                return u.kind
+        return KIND_UNKNOWN
+
+
+_CHANGE_KIND_UNCHANGED = "unchanged"
+_CHANGE_KIND_MODIFIED_LEFT = "modified_left"
+_CHANGE_KIND_MODIFIED_RIGHT = "modified_right"
+_CHANGE_KIND_MODIFIED_BOTH = "modified_both"
+_CHANGE_KIND_ADDED_LEFT = "added_left"
+_CHANGE_KIND_ADDED_RIGHT = "added_right"
+_CHANGE_KIND_ADDED_BOTH = "added_both"
+_CHANGE_KIND_DELETED_LEFT = "deleted_left"
+_CHANGE_KIND_DELETED_RIGHT = "deleted_right"
+_CHANGE_KIND_DELETED_BOTH = "deleted_both"
+_CHANGE_KIND_RENAMED = "renamed"
+
+
+@dataclass(frozen=True)
+class StructuralDiff3Way:
+    """3-way alignment of a file's structural units across base/left/right.
+
+    ``aligned`` is the list of :class:`AlignedUnit` entries, each carrying the
+    base/left/right unit (or None) and a ``change_kind`` classification. This is
+    the data structure the structural context annotation (Improvement #6) is
+    built from — it tells the model "both sides modified the same function" or
+    "left added a unit, right added a different unit" (no structural conflict).
+    """
+    base_units: list[StructuralUnit]
+    left_units: list[StructuralUnit]
+    right_units: list[StructuralUnit]
+    aligned: list[AlignedUnit]
+    family: str
+    language: str | None = None
+
+    @property
+    def structural_conflicts(self) -> list[AlignedUnit]:
+        """Alignments where BOTH sides modified the SAME unit (potential conflict)."""
+        return [a for a in self.aligned if a.change_kind == _CHANGE_KIND_MODIFIED_BOTH]
+
+    @property
+    def required_units(self) -> list[str]:
+        """Names of units that must appear in the merged output."""
+        out: list[str] = []
+        for a in self.aligned:
+            if a.change_kind in (
+                _CHANGE_KIND_UNCHANGED, _CHANGE_KIND_MODIFIED_LEFT,
+                _CHANGE_KIND_MODIFIED_RIGHT, _CHANGE_KIND_MODIFIED_BOTH,
+                _CHANGE_KIND_ADDED_LEFT, _CHANGE_KIND_ADDED_RIGHT,
+                _CHANGE_KIND_ADDED_BOTH, _CHANGE_KIND_RENAMED,
+            ):
+                if a.name != "<anon>":
+                    out.append(a.name)
+        return out
+
+
+def _normalize_body_ws_only(text: str) -> str:
+    """Whitespace-collapse WITHOUT blanking string literals or stripping comments.
+
+    Used by :func:`_bodies_differ` for change detection: a string-value change
+    (``return 'hi'`` vs ``return 'bye'``) IS a real body change for merge
+    purposes, so we preserve string content. Only whitespace is normalized so
+    reformatting doesn't register as a change.
+    """
+    if not text:
+        return ""
+    # Strip comment-only lines (they don't carry merge-relevant content), then
+    # collapse whitespace — but keep string literals intact.
+    kept = [ln for ln in text.split("\n") if _has_code_content(ln)]
+    return " ".join(" ".join(kept).split())
+
+
+def _bodies_differ(a: StructuralUnit, b: StructuralUnit) -> bool:
+    """True if two units' bodies differ.
+
+    Uses a whitespace-normalized comparison that preserves string-literal
+    content (unlike the body fingerprint, which blanks strings for rename
+    matching). This ensures a string-value edit registers as a real change.
+    """
+    return _normalize_body_ws_only(a.body) != _normalize_body_ws_only(b.body)
+
+
+def compute_structural_diff_3way(
+    base: str, left: str, right: str, language: str | None = None,
+) -> StructuralDiff3Way | None:
+    """Compute a 3-way structural alignment across base/left/right source texts.
+
+    Parses each version into a :class:`FileIR`, flattens to top-level units, and
+    aligns by ``(kind, name)`` with fingerprint fallback for rename detection.
+    Each alignment is classified (``modified_both``, ``added_left``, etc.) to
+    drive the structural context annotation. Returns ``None`` when parsing fails
+    or the language has no family mapping.
+    """
+    ir_base = parse_file(base, language=language)
+    ir_left = parse_file(left, language=language)
+    ir_right = parse_file(right, language=language)
+    if ir_base is None or ir_left is None or ir_right is None:
+        return None
+    family = ir_base.family
+    # Flatten to include nested children (methods inside classes/impls) so the
+    # alignment operates at the entity level the LLM merges at — not just
+    # top-level containers. Container-scope units (impl/mod) are skipped but
+    # their children are walked (mirrors _all_units_flat).
+    base_units = _all_units_flat(ir_base)
+    left_units = _all_units_flat(ir_left)
+    right_units = _all_units_flat(ir_right)
+
+    # Index by identity (kind, name) for O(1) lookup.
+    base_by_id = {u.identity: u for u in base_units}
+    left_by_id = {u.identity: u for u in left_units}
+    right_by_id = {u.identity: u for u in right_units}
+
+    # Collect all identities across the three versions, preserving source order
+    # (base first, then left additions, then right additions).
+    seen: set[tuple[str, str]] = set()
+    ordered: list[tuple[str, str]] = []
+    for u in base_units:
+        if u.identity not in seen:
+            seen.add(u.identity)
+            ordered.append(u.identity)
+    for u in left_units:
+        if u.identity not in seen:
+            seen.add(u.identity)
+            ordered.append(u.identity)
+    for u in right_units:
+        if u.identity not in seen:
+            seen.add(u.identity)
+            ordered.append(u.identity)
+
+    aligned: list[AlignedUnit] = []
+    for ident in ordered:
+        b = base_by_id.get(ident)
+        l = left_by_id.get(ident)
+        r = right_by_id.get(ident)
+        kind = _classify_alignment(b, l, r)
+        aligned.append(AlignedUnit(base=b, left=l, right=r, change_kind=kind))
+
+    # Rename detection: left or right units not matched by identity but with a
+    # matching body fingerprint to a base unit. This is a secondary pass — the
+    # identity-matched alignments are already done; here we pair unmatched units.
+    _detect_renames(base_units, left_units, right_units, aligned)
+
+    return StructuralDiff3Way(
+        base_units=base_units,
+        left_units=left_units,
+        right_units=right_units,
+        aligned=aligned,
+        family=family,
+        language=language,
+    )
+
+
+def _classify_alignment(
+    base: StructuralUnit | None,
+    left: StructuralUnit | None,
+    right: StructuralUnit | None,
+) -> str:
+    """Classify a 3-way alignment into a change-kind label."""
+    has_b = base is not None
+    has_l = left is not None
+    has_r = right is not None
+
+    if has_b and has_l and has_r:
+        l_changed = _bodies_differ(base, left)
+        r_changed = _bodies_differ(base, right)
+        if l_changed and r_changed:
+            return _CHANGE_KIND_MODIFIED_BOTH
+        if l_changed:
+            return _CHANGE_KIND_MODIFIED_LEFT
+        if r_changed:
+            return _CHANGE_KIND_MODIFIED_RIGHT
+        return _CHANGE_KIND_UNCHANGED
+    if not has_b and has_l and has_r:
+        return _CHANGE_KIND_ADDED_BOTH
+    if not has_b and has_l and not has_r:
+        return _CHANGE_KIND_ADDED_LEFT
+    if not has_b and not has_l and has_r:
+        return _CHANGE_KIND_ADDED_RIGHT
+    if has_b and not has_l and not has_r:
+        return _CHANGE_KIND_DELETED_BOTH
+    if has_b and not has_l and has_r:
+        # Deleted by left, present in right (and base) — right kept it.
+        return _CHANGE_KIND_DELETED_LEFT if _bodies_differ(base, right) else _CHANGE_KIND_UNCHANGED
+    if has_b and has_l and not has_r:
+        # Deleted by right, present in left (and base) — left kept it.
+        return _CHANGE_KIND_DELETED_RIGHT if _bodies_differ(base, left) else _CHANGE_KIND_UNCHANGED
+    return _CHANGE_KIND_UNCHANGED
+
+
+def _detect_renames(
+    base_units: list[StructuralUnit],
+    left_units: list[StructuralUnit],
+    right_units: list[StructuralUnit],
+    aligned: list[AlignedUnit],
+) -> None:
+    """Detect renamed units via body-fingerprint matching and append them.
+
+    A unit in left (or right) whose body fingerprint matches a base unit that
+    was NOT identity-matched is a rename. This is conservative — it only pairs
+    on exact body-fingerprint match (the header-stripped digest), so a rename +
+    heavy body edit won't pair (it'll appear as added+removed, which is safe)."""
+    # Index base units by body fingerprint for lookup.
+    base_by_fp: dict[str, StructuralUnit] = {}
+    for u in base_units:
+        if u.fingerprint and u.fingerprint != f"l{u.body.count(chr(10))}":
+            base_by_fp[u.fingerprint] = u
+
+    # Find base units already matched by identity (so we don't re-pair them).
+    matched_base_ids = {a.base.identity for a in aligned if a.base is not None}
+
+    # Check left units for renames of unmatched base units.
+    matched_left_ids = {a.left.identity for a in aligned if a.left is not None}
+    for lu in left_units:
+        if lu.identity in matched_left_ids or not lu.fingerprint:
+            continue
+        base_match = base_by_fp.get(lu.fingerprint)
+        if base_match and base_match.identity not in matched_base_ids:
+            # Rename: base_match → lu (in left). Check if right also has it.
+            ru = next((u for u in right_units if u.identity == lu.identity), None)
+            aligned.append(AlignedUnit(
+                base=base_match, left=lu, right=ru,
+                change_kind=_CHANGE_KIND_RENAMED,
+            ))
+            matched_base_ids.add(base_match.identity)
+            matched_left_ids.add(lu.identity)
+
+    # Check right units for renames.
+    matched_right_ids = {a.right.identity for a in aligned if a.right is not None}
+    for ru in right_units:
+        if ru.identity in matched_right_ids or not ru.fingerprint:
+            continue
+        base_match = base_by_fp.get(ru.fingerprint)
+        if base_match and base_match.identity not in matched_base_ids:
+            lu = next((u for u in left_units if u.identity == ru.identity), None)
+            aligned.append(AlignedUnit(
+                base=base_match, left=lu, right=ru,
+                change_kind=_CHANGE_KIND_RENAMED,
+            ))
+            matched_base_ids.add(base_match.identity)
+            matched_right_ids.add(ru.identity)
+
+
+# ---------------------------------------------------------------------------
+# Structural context annotation (Improvement #6 — survey §"Structural context
+# annotation for the LLM prompt")
+# ---------------------------------------------------------------------------
+
+#: Human-readable labels for change kinds, for the prompt annotation.
+_CHANGE_LABELS = {
+    _CHANGE_KIND_UNCHANGED: "unchanged",
+    _CHANGE_KIND_MODIFIED_LEFT: "MODIFIED by current/upstream",
+    _CHANGE_KIND_MODIFIED_RIGHT: "MODIFIED by replayed",
+    _CHANGE_KIND_MODIFIED_BOTH: "MODIFIED BY BOTH SIDES",
+    _CHANGE_KIND_ADDED_LEFT: "ADDED by current/upstream",
+    _CHANGE_KIND_ADDED_RIGHT: "ADDED by replayed",
+    _CHANGE_KIND_ADDED_BOTH: "ADDED BY BOTH SIDES",
+    _CHANGE_KIND_DELETED_LEFT: "deleted by current/upstream",
+    _CHANGE_KIND_DELETED_RIGHT: "deleted by replayed",
+    _CHANGE_KIND_DELETED_BOTH: "deleted by both",
+    _CHANGE_KIND_RENAMED: "RENAMED",
+}
+
+
+def render_structural_context(
+    diff: StructuralDiff3Way,
+    conflict_span: tuple[int, int] | None = None,
+) -> str:
+    """Render a structural context annotation block for the LLM prompt.
+
+    Produces a compact summary of the 3-way structural alignment: which units
+    exist, what each side changed, whether there are structural conflicts (both
+    sides modified the same unit), and which units must appear in the merge.
+    Omitted (returns "") when the diff has no useful signal (e.g. single-unit
+    files with no changes). ``conflict_span`` optionally annotates which unit
+    the conflict markers fall inside.
+
+    This directly addresses the "dropped replayed side" failure mode: the model
+    sees unit boundaries and required outputs explicitly before generating.
+    """
+    lines: list[str] = []
+    # Only show units that changed (not unchanged) — the model doesn't need to
+    # see a list of everything that stayed the same.
+    changed = [a for a in diff.aligned if a.change_kind != _CHANGE_KIND_UNCHANGED]
+    if not changed:
+        return ""  # no structural signal — nothing changed at the entity level
+
+    lang_label = diff.language or diff.family
+    lines.append(f"STRUCTURAL CONTEXT (language-family: {lang_label}/{diff.family}):")
+
+    # Base structure overview (compact).
+    base_summary = ", ".join(
+        f"[{u.kind.upper()}] {u.name} lines {u.span[0]+1}-{u.span[1]+1}"
+        for u in diff.base_units
+        if u.name and not u.is_container_scope
+    )
+    if base_summary:
+        lines.append(f"Base structure: {base_summary}")
+
+    # Per-unit change summary.
+    for a in changed:
+        label = _CHANGE_LABELS.get(a.change_kind, a.change_kind)
+        lines.append(f"  {a.kind.upper()} {a.name}: {label}")
+
+    # Structural conflicts: units both sides modified.
+    conflicts = diff.structural_conflicts
+    if conflicts:
+        names = ", ".join(c.name for c in conflicts)
+        lines.append(
+            f"Structural conflicts: {len(conflicts)} unit(s) modified by both sides ({names}) — "
+            "synthesize both changes."
+        )
+    else:
+        lines.append(
+            "Structural conflicts: NONE (modifications are in separate units) — "
+            "preserve each side's changes independently."
+        )
+
+    # Required units.
+    required = diff.required_units
+    if required:
+        lines.append(f"Required: preserve these units in the merged output: {', '.join(required)}")
+
+    # Span annotation: which unit does the conflict fall inside?
+    if conflict_span is not None:
+        # Find the unit in base whose span contains the conflict anchor.
+        anchor = conflict_span[0]
+        enclosing = None
+        for u in diff.base_units:
+            if u.span[0] <= anchor <= u.span[1]:
+                if enclosing is None or (u.span[0] >= enclosing.span[0] and u.span[1] <= enclosing.span[1]):
+                    enclosing = u
+        if enclosing and enclosing.name:
+            lines.append(f"This conflict is inside: {enclosing.kind.upper()} {enclosing.name}")
+
+    return "\n".join(lines)

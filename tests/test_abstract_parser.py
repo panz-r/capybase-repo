@@ -557,3 +557,107 @@ def test_family_a_row_at_matches_count():
     for byte_idx in range(0, len(src), 7):  # sample every 7 bytes
         expected = src.count("\n", 0, byte_idx)
         assert ap._row_at(idx, byte_idx) == expected, f"mismatch at byte {byte_idx}"
+
+
+# ---------------------------------------------------------------------------
+# 3-way structural diff (Improvement #5)
+# ---------------------------------------------------------------------------
+
+
+def test_structural_diff_no_changes():
+    """All three versions identical → all units unchanged, no conflicts."""
+    src = "def foo():\n    return 1\n\ndef bar():\n    return 2\n"
+    diff = ap.compute_structural_diff_3way(src, src, src, language="python")
+    assert diff is not None
+    assert len(diff.aligned) == 2
+    assert all(a.change_kind == ap._CHANGE_KIND_UNCHANGED for a in diff.aligned)
+    assert len(diff.structural_conflicts) == 0
+
+
+def test_structural_diff_modified_both():
+    """Both sides modified the same unit → modified_both → structural conflict."""
+    base = "def foo():\n    return 1\n"
+    left = "def foo():\n    return 2\n"  # left changed body
+    right = "def foo():\n    return 3\n"  # right changed body differently
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    assert diff is not None
+    foo = next(a for a in diff.aligned if a.name == "foo")
+    assert foo.change_kind == ap._CHANGE_KIND_MODIFIED_BOTH
+    assert len(diff.structural_conflicts) == 1
+
+
+def test_structural_distinct_additions_no_conflict():
+    """Each side adds a DIFFERENT unit → no structural conflict."""
+    base = "def existing():\n    pass\n"
+    left = "def existing():\n    pass\n\ndef left_new():\n    return 1\n"
+    right = "def existing():\n    pass\n\ndef right_new():\n    return 2\n"
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    assert diff is not None
+    assert len(diff.structural_conflicts) == 0
+    names = {a.name for a in diff.aligned}
+    assert "left_new" in names and "right_new" in names
+
+
+def test_structural_diff_required_units():
+    """required_units lists all units that must appear in the merge."""
+    base = "def foo():\n    return 1\n"
+    left = "def foo():\n    return 2\n\ndef added():\n    pass\n"
+    right = "def foo():\n    return 3\n"
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    assert diff is not None
+    assert "foo" in diff.required_units
+    assert "added" in diff.required_units
+
+
+def test_structural_diff_rust_multi_unit():
+    """The rust_impl scenario: struct + two methods, each side modifies a
+    different method → no structural conflict."""
+    base = (
+        "pub struct Config {\n    pub name: String,\n}\n\n"
+        "impl Config {\n    pub fn new() -> Self {\n        Config { name: \"\".into() }\n    }\n"
+        "    pub fn label(&self) -> String {\n        format!(\"hi\")\n    }\n}\n"
+    )
+    left = base.replace('"".into()', '"x".into()')  # left changes new()
+    right = base.replace('format!("hi")', 'format!("bye")')  # right changes label()
+    diff = ap.compute_structural_diff_3way(base, left, right, language="rust")
+    assert diff is not None
+    kinds = {a.name: a.change_kind for a in diff.aligned}
+    assert kinds.get("new") == ap._CHANGE_KIND_MODIFIED_LEFT
+    assert kinds.get("label") == ap._CHANGE_KIND_MODIFIED_RIGHT
+    assert len(diff.structural_conflicts) == 0  # different units, no conflict
+
+
+# ---------------------------------------------------------------------------
+# Structural context annotation (Improvement #6)
+# ---------------------------------------------------------------------------
+
+
+def test_render_context_shows_changes():
+    """The annotation lists changed units and the required output."""
+    base = "def foo():\n    return 1\n"
+    left = "def foo():\n    return 2\n"
+    right = "def foo():\n    return 3\n"
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    text = ap.render_structural_context(diff)
+    assert "STRUCTURAL CONTEXT" in text
+    assert "MODIFIED BY BOTH" in text
+    assert "foo" in text
+    assert "synthesize" in text
+
+
+def test_render_context_no_changes_returns_empty():
+    """No changes → empty annotation (nothing to tell the model)."""
+    src = "def foo():\n    return 1\n"
+    diff = ap.compute_structural_diff_3way(src, src, src, language="python")
+    assert ap.render_structural_context(diff) == ""
+
+
+def test_render_context_distinct_additions_says_no_conflict():
+    """Distinct additions → annotation says 'no structural conflicts'."""
+    base = "def existing():\n    pass\n"
+    left = "def existing():\n    pass\n\ndef left_new():\n    pass\n"
+    right = "def existing():\n    pass\n\ndef right_new():\n    pass\n"
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    text = ap.render_structural_context(diff)
+    assert "NONE" in text
+    assert "left_new" in text and "right_new" in text
