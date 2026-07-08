@@ -1174,6 +1174,13 @@ def apply_search_replace(
     warnings: list[str] = []
     text = prev_text
     for i, edit in enumerate(edits):
+        # Defensive: small models sometimes emit edits as strings instead of
+        # {"search": ..., "replace": ...} objects (e.g. a bare code snippet).
+        # Skip malformed entries with a warning so a bad edit degrades to the
+        # full-resolved_text fallback rather than crashing the retry loop.
+        if not isinstance(edit, dict):
+            warnings.append(f"edit {i}: not an object ({type(edit).__name__}); skipped")
+            continue
         search = str(edit.get("search", "")).rstrip("\n")
         replace = str(edit.get("replace", ""))
         if not search:

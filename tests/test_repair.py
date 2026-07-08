@@ -165,6 +165,20 @@ def test_apply_search_replace_empty_search_skipped():
     assert "empty search" in warns[0]
 
 
+def test_apply_search_replace_string_edit_skipped():
+    """A malformed edit (a string instead of a dict) is skipped, not crashed on.
+
+    Small models sometimes emit edits as bare strings instead of
+    {"search": ..., "replace": ...} objects. The parser must degrade to the
+    full-resolved_text fallback, not crash the retry loop."""
+    out, warns = apply_search_replace("def f():\n    1\n", [
+        "def f():\n    1\n",  # string instead of dict
+        {"search": "1", "replace": "2"},
+    ])
+    assert out == "def f():\n    2\n"  # second (valid) edit still applies
+    assert "not an object" in warns[0]
+
+
 def test_repair_prompt_offers_edit_mode():
     """The repair prompt offers BOTH edit mode (SEARCH/REPLACE) and full mode."""
     prompt = build_repair_prompt(_unit(), _ctx(), _candidate(), _failures())
