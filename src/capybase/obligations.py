@@ -82,17 +82,40 @@ class Obligations:
 def extract_obligations(unit: "object") -> Obligations:
     """Derive the per-side obligation contract for a conflict unit.
 
-    Reads ``unit.base.text`` / ``unit.current.text`` / ``unit.replayed.text``
-    and diffs each side against base via :mod:`difflib`. Pure; never raises
+    Diffs each side against the base via :mod:`difflib`. Pure; never raises
     (a unit with missing side text yields empty obligations).
+
+    **Base scoping** (critical for multi-hunk files): ``unit.base.text`` is the
+    *entire merge-base file* (the git stage-1 blob), while ``current`` and
+    ``replayed`` are just the conflict region's lines. Diffing the whole-file
+    base against a narrow hunk produces garbage obligations — "removed:
+    everything except these 3 lines" — which actively misleads the model. When
+    diff3 refinement is available (``unit.refined_sides``), the refined base is
+    the same shape (hunk interior) as the sides, so the diff is meaningful.
+    Falls back to the raw ``unit.base.text`` when no refinement is recorded
+    (single-hunk conflicts where base == whole file are still correct because
+    the sides also span the whole region in that case).
 
     Returns an :class:`Obligations` carrying the current (upstream) and replayed
     side obligations. An unchanged side yields empty obligations (it conceded —
     nothing to preserve beyond base).
     """
-    base = _text(unit, "base")
-    current = _text(unit, "current")
-    replayed = _text(unit, "replayed")
+    # Prefer the diff3-refined sides: the refined base is scoped to the conflict
+    # hunk (same shape as current/replayed), so the obligation diff is accurate.
+    # Without refinement, unit.base.text is the whole merge-base file — fine for
+    # single-hunk conflicts where the whole file IS the conflict region, but
+    # garbage for multi-hunk files where the hunk is a small slice.
+    refined = None
+    try:
+        refined = unit.refined_sides
+    except (AttributeError, TypeError):
+        pass
+    if refined is not None:
+        current, base, replayed = refined
+    else:
+        base = _text(unit, "base")
+        current = _text(unit, "current")
+        replayed = _text(unit, "replayed")
     return Obligations(
         current=_side_obligations(base, current),
         replayed=_side_obligations(base, replayed),

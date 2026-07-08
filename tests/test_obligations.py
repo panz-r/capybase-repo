@@ -133,6 +133,42 @@ def test_both_added_distinct_lines_satisfied_when_both_present():
     assert ok
 
 
+def test_extract_obligations_uses_refined_base_for_multi_hunk():
+    """When diff3 refinement narrows the base to the conflict hunk,
+    extract_obligations must use the refined base — not the whole-file base.
+
+    Without this, a multi-hunk conflict's obligations are garbage: the
+    whole-file base diffs against a narrow hunk to report 'removed: entire
+    file'. The refined base (same shape as the sides) produces accurate
+    per-side added/changed/removed."""
+    # Simulate a unit where base.text is the WHOLE FILE (as git stage-1
+    # provides), current/replayed are narrow hunks, and diff3_refined holds
+    # the scoped base hunk.
+    whole_file = "struct C {\n    x: u32,\n}\n\nfn f() {\n    let y = 1;\n}\n"
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="c.rs", language="rust",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=whole_file),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="    let y = 2;"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="    let y = 1;\n    let z = 3;"),
+        original_worktree_text=whole_file, marker_span=(5, 5),
+        structural_metadata={
+            "diff3_refined": {
+                "current": "    let y = 2;",
+                "base": "    let y = 1;",
+                "replayed": "    let y = 1;\n    let z = 3;",
+            }
+        },
+    )
+    ob = extract_obligations(unit)
+    # With the refined base, current changed y=1→y=2 (no garbage 'removed struct C').
+    assert any("y = 1" in old and "y = 2" in new for old, new in ob.current.changed)
+    assert not any("struct C" in r for r in ob.current.removed), "should not report whole-file removals"
+    # Replayed added z=3.
+    assert any("z = 3" in a for a in ob.replayed.added)
+    assert not any("struct C" in r for r in ob.replayed.removed)
+
+
 # ---------------------------------------------------------------------------
 # render_obligation_block (prompt integration)
 # ---------------------------------------------------------------------------
