@@ -1453,15 +1453,184 @@ class SymbolResolver(Protocol):
     def resolve(self, names: list[str], language: str) -> list[RelatedSnippet]: ...
 
 
+# ---------------------------------------------------------------------------
+# Per-language reserved keywords (used by referenced_symbols to keep language
+# keywords out of the cross-commit ``uses`` set and the dependency-drop check).
+# ---------------------------------------------------------------------------
+
+#: The C-syntax family keyword base — shared by every Family-A language (the
+#: control-flow and common primitives that recur across C/C++/Java/JS/Go/Rust/...).
+#: Per-language sets below ADD to this; none subtract, so a superset is always a
+#: safe filter (filtering an extra identifier that happens to match a keyword is
+#: a missed-but-safe case; the cost is a possibly-missed symbol reference, never
+#: a wrong merge).
+_C_FAMILY_KEYWORDS = frozenset({
+    # Control flow (shared across nearly all C-syntax languages).
+    "if", "else", "for", "while", "do", "switch", "case", "default",
+    "break", "continue", "return", "goto", "in", "of",
+    # Exception/try (Java/JS/PHP/Dart/...).
+    "try", "catch", "finally", "throw", "throws",
+    # Common primitives / literals.
+    "true", "false", "null", "nil", "this", "super", "self",
+    "new", "delete", "sizeof", "typeof", "instanceof", "void",
+})
+
+#: Per-language reserved words. Each is the union of ``_C_FAMILY_KEYWORDS`` and
+#: the language's own declarations/modifiers/types. Built once at import. Python
+#: uses the stdlib ``keyword`` module (authoritative, version-synced); every
+#: other entry is a static frozenset of the language's reserved word list.
+_RESERVED_KEYWORDS: dict[str, frozenset[str]] = {}
+
+
+def _build_reserved_keywords() -> None:
+    """Populate ``_RESERVED_KEYWORDS`` for each supported language."""
+    import keyword as _kw
+    # Python — the stdlib list is authoritative (includes softkwlist like 'match').
+    _RESERVED_KEYWORDS["python"] = frozenset(_kw.kwlist) | frozenset(_kw.softkwlist)
+
+    # Rust.
+    _RESERVED_KEYWORDS["rust"] = _C_FAMILY_KEYWORDS | frozenset({
+        "fn", "let", "mut", "pub", "use", "mod", "struct", "enum", "trait",
+        "impl", "match", "crate", "Self", "as", "ref", "where", "unsafe",
+        "async", "await", "dyn", "move", "loop", "box", "extern", "static",
+        "const", "type", "true", "false", "u8", "u16", "u32", "u64", "usize",
+        "i8", "i16", "i32", "i64", "isize", "f32", "f64", "bool", "char", "str",
+    })
+
+    # Go.
+    _RESERVED_KEYWORDS["go"] = _C_FAMILY_KEYWORDS | frozenset({
+        "func", "package", "import", "var", "const", "type", "struct",
+        "interface", "chan", "map", "range", "go", "defer", "select",
+        "fallthrough", "byte", "rune", "int", "int8", "int16", "int32", "int64",
+        "uint", "uint8", "uint16", "uint32", "uint64", "uintptr", "float32",
+        "float64", "complex64", "complex128", "string", "bool", "error", "any",
+    })
+
+    # JavaScript / TypeScript (shared; TS-only keywords folded in — filtering
+    # them in JS is harmless).
+    _JS_TS_KEYWORDS = _C_FAMILY_KEYWORDS | frozenset({
+        "function", "var", "let", "const", "class", "extends", "implements",
+        "import", "export", "default", "async", "await", "yield", "static",
+        "get", "set", "undefined", "number", "string", "boolean", "symbol",
+        "bigint", "object", "never", "unknown", "any", "void", "type",
+        "namespace", "declare", "readonly", "abstract", "public", "private",
+        "protected", "enum", "satisfies", "from", "as", "is", "keyof", "infer",
+    })
+    for lang in ("javascript", "typescript", "js", "ts", "jsx", "tsx"):
+        _RESERVED_KEYWORDS[lang] = _JS_TS_KEYWORDS
+
+    # Java.
+    _RESERVED_KEYWORDS["java"] = _C_FAMILY_KEYWORDS | frozenset({
+        "public", "private", "protected", "static", "final", "void", "class",
+        "interface", "enum", "extends", "implements", "import", "package",
+        "abstract", "synchronized", "volatile", "transient", "native",
+        "strictfp", "assert", "instanceof", "int", "long", "double", "float",
+        "boolean", "char", "byte", "short", "String",
+    })
+
+    # C / C++.
+    _C_CPP_KEYWORDS = _C_FAMILY_KEYWORDS | frozenset({
+        "int", "long", "short", "char", "float", "double", "unsigned",
+        "signed", "void", "const", "static", "struct", "union", "enum", "class",
+        "public", "private", "protected", "typedef", "extern", "volatile",
+        "register", "auto", "inline", "virtual", "explicit", "friend",
+        "namespace", "using", "template", "typename", "operator", "wchar_t",
+        "size_t", "bool",
+    })
+    for lang in ("c", "cpp", "c++", "h"):
+        _RESERVED_KEYWORDS[lang] = _C_CPP_KEYWORDS
+
+    # C#.
+    _RESERVED_KEYWORDS["csharp"] = _C_FAMILY_KEYWORDS | frozenset({
+        "public", "private", "protected", "internal", "static", "readonly",
+        "void", "class", "struct", "interface", "enum", "namespace", "using",
+        "abstract", "sealed", "virtual", "override", "async", "await", "var",
+        "dynamic", "get", "set", "value", "params", "ref", "out", "int",
+        "long", "short", "double", "float", "decimal", "bool", "char", "byte",
+        "object", "string", "uint", "ulong", "ushort", "sbyte",
+    })
+    _RESERVED_KEYWORDS["cs"] = _RESERVED_KEYWORDS["csharp"]
+
+    # Kotlin.
+    _RESERVED_KEYWORDS["kotlin"] = _C_FAMILY_KEYWORDS | frozenset({
+        "fun", "val", "var", "class", "object", "interface", "enum", "sealed",
+        "data", "annotation", "import", "package", "typealias", "vararg",
+        "suspend", "inline", "operator", "infix", "lateinit", "override",
+        "open", "abstract", "final", "private", "protected", "internal",
+        "public", "companion", "init", "constructor", "by", "as", "is", "in",
+        "out", "reified", "crossinline", "noinline",
+    })
+
+    # Swift.
+    _RESERVED_KEYWORDS["swift"] = _C_FAMILY_KEYWORDS | frozenset({
+        "func", "let", "var", "class", "struct", "enum", "protocol", "extension",
+        "import", "init", "deinit", "subscript", "operator", "precedencegroup",
+        "typealias", "associatedtype", "mutating", "nonmutating", "convenience",
+        "required", "override", "final", "open", "public", "private",
+        "fileprivate", "internal", "static", "lazy", "weak", "unowned", "inout",
+        "guard", "defer", "repeat", "fallthrough", "as", "is", "nil", "Self",
+        "some", "any", "actor", "async", "await", "throws", "rethrows", "try",
+    })
+
+    # Scala.
+    _RESERVED_KEYWORDS["scala"] = _C_FAMILY_KEYWORDS | frozenset({
+        "def", "val", "var", "class", "object", "trait", "extends", "with",
+        "type", "import", "package", "match", "case", "given", "using", "enum",
+        "yield", "lazy", "override", "abstract", "final", "sealed", "private",
+        "protected", "implicit", "inline", "opaque", "open", "transparent",
+        "forSome", "do", "then", "else", "catch", "finally", "throw", "try",
+        "while", "for", "return", "true", "false", "null", "this", "super",
+    })
+
+    # Dart.
+    _RESERVED_KEYWORDS["dart"] = _C_FAMILY_KEYWORDS | frozenset({
+        "var", "final", "const", "class", "extends", "implements", "with",
+        "mixin", "enum", "typedef", "import", "library", "part", "export",
+        "abstract", "interface", "static", "late", "external", "async", "await",
+        "sync", "yield", "factory", "operator", "get", "set", "covariant",
+        "dynamic", "Future", "Stream", "int", "double", "num", "bool", "String",
+        "List", "Map", "Set", "void", "Null",
+    })
+
+    # PHP.
+    _RESERVED_KEYWORDS["php"] = _C_FAMILY_KEYWORDS | frozenset({
+        "function", "fn", "var", "const", "class", "interface", "trait", "enum",
+        "extends", "implements", "use", "namespace", "new", "clone", "instanceof",
+        "insteadof", "global", "public", "private", "protected", "static",
+        "abstract", "final", "readonly", "yield", "async", "await", "int",
+        "float", "bool", "string", "array", "object", "callable", "iterable",
+        "mixed", "never", "void", "null", "self", "parent", "echo", "print",
+    })
+
+
+_build_reserved_keywords()
+
+
+def _reserved_keywords(language: str) -> frozenset[str]:
+    """The reserved-keyword set for ``language`` (empty for unknown languages).
+
+    Filtering an identifier that happens to match a keyword is a safe miss (a
+    possibly-missed symbol reference); the cost is never a wrong merge. So an
+    unknown language yields an empty set rather than Python's list — the caller
+    degrades to "no keyword filtering" rather than "Python-only filtering",
+    which was the prior bug (Go ``func``/Rust ``crate`` leaked because Python's
+    ``keyword.iskeyword`` doesn't know them).
+    """
+    lang = (language or "").strip().lower()
+    return _RESERVED_KEYWORDS.get(lang, frozenset())
+
+
 def referenced_symbols(text: str, language: str) -> list[str]:
     """Extract likely symbol names referenced in ``text``.
 
     A coarse, regex-free heuristic: identifiers that look like definitions or
     call targets. Sufficient for the MVP's cross-file slicing; a precise
     resolver would walk the AST and resolve scopes. Deduplicates, preserving
-    order. Excludes language keywords.
+    order. Excludes language-specific reserved keywords so they don't pollute
+    the cross-commit ``uses`` set or the dependency-drop check (a Go ``func`` or
+    Rust ``crate`` is not a symbol reference).
     """
-    import keyword
+    reserved = _reserved_keywords(language)
 
     out: list[str] = []
     seen: set[str] = set()
@@ -1470,13 +1639,13 @@ def referenced_symbols(text: str, language: str) -> list[str]:
         if ch.isalnum() or ch == "_":
             cur += ch
         else:
-            if cur and cur not in seen and not keyword.iskeyword(cur):
+            if cur and cur not in seen and cur not in reserved:
                 # Skip trivially short / all-digit tokens.
                 if len(cur) > 1 and not cur.isdigit():
                     out.append(cur)
                     seen.add(cur)
             cur = ""
-    if cur and cur not in seen and not keyword.iskeyword(cur):
+    if cur and cur not in seen and cur not in reserved:
         if len(cur) > 1 and not cur.isdigit():
             out.append(cur)
     return out

@@ -140,6 +140,50 @@ def test_referenced_symbols_extracts_identifiers():
     assert "return" not in names  # keywords excluded
 
 
+@pytest.mark.parametrize("lang,leaked_keyword", [
+    ("go", "func"), ("go", "package"), ("go", "chan"), ("go", "defer"),
+    ("rust", "fn"), ("rust", "crate"), ("rust", "unsafe"), ("rust", "let"),
+    ("javascript", "typeof"), ("javascript", "await"), ("javascript", "undefined"),
+    ("java", "synchronized"), ("java", "throws"), ("java", "instanceof"),
+    ("csharp", "namespace"), ("kotlin", "fun"), ("swift", "guard"),
+])
+def test_referenced_symbols_filters_per_language_keywords(lang, leaked_keyword):
+    """Each language's reserved keywords are filtered out of the symbol list —
+    not just Python's. Previously ``referenced_symbols`` used Python's
+    ``keyword.iskeyword`` for ALL languages, so Go ``func``/Rust ``crate``/JS
+    ``typeof``/Java ``synchronized`` leaked into the cross-commit ``uses`` set
+    and the dependency-drop check (where they could form spurious edges or
+    trigger false 'dropped symbol' reports)."""
+    syms = S.referenced_symbols(f"{leaked_keyword} real_symbol()", lang)
+    assert leaked_keyword not in syms
+    assert "real_symbol" in syms  # the actual reference survives
+
+
+def test_referenced_symbols_unknown_language_degrades_gracefully():
+    """An unrecognized language yields no keyword filtering (empty set), not
+    Python's list — so symbols are extracted without false keyword matches.
+    Better to over-extract (miss is safe) than to apply the wrong language's
+    keyword list (the prior Python-only bug)."""
+    syms = S.referenced_symbols("SELECT col FROM tbl", "sql")
+    assert "col" in syms and "tbl" in syms
+
+
+def test_referenced_symbols_keeps_types_and_values_for_real_code():
+    """Realistic multi-language snippets: keywords filtered, real call targets
+    and identifiers kept. Guards against an over-broad keyword set suppressing
+    genuine symbol references."""
+    # Go: helper() is a real dependency; func/package/int filtered.
+    go = S.referenced_symbols(
+        "package main\n\nfunc main() int {\n    return helper()\n}", "go")
+    assert "helper" in go and "main" in go
+    assert "func" not in go and "package" not in go and "int" not in go
+    # Rust: compute() kept; fn/let/u32 filtered.
+    rust = S.referenced_symbols(
+        "fn run() -> u32 {\n    let x = compute();\n    x\n}", "rust")
+    assert "compute" in rust and "run" in rust
+    assert "fn" not in rust and "let" not in rust and "u32" not in rust
+
+
 # ---------------------------------------------------------------------------
 # AstPreservationValidator
 # ---------------------------------------------------------------------------
