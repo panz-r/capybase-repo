@@ -724,6 +724,17 @@ _A_FUNC_KEYWORDS = (
 # declarations without a following ``{`` (so they don't open a scope) — detected
 # separately from the brace machine.
 _A_FIELD_KEYWORDS = ("const", "static", "type", "var", "let", "final")
+
+# Control-flow keywords whose ``(...)`` + ``{`` shape mimics a keyword-less method
+# signature (``if (x) {``, ``while (y) {``, ``switch (s) {``). Used by the
+# keyword-less method heuristic in :func:`_classify_a_brace` to reject braces
+# that look like a method (identifier + parens + brace) but are actually control
+# flow. ``do``/``else``/``try``/``finally`` have no parens but are included as
+# defense-in-depth for ``do {`` / ``else {`` at a method-direct depth.
+_A_CONTROL_FLOW_KEYWORDS = frozenset({
+    "if", "else", "while", "for", "switch", "case", "catch", "do", "try",
+    "finally", "synchronized", "lock", "using", "with", "unsafe",
+})
 # Import-like top-level statements.
 _A_IMPORT_PATTERNS = (
     re.compile(r"^\s*(?:use\s+\S|import\s+\S|export\s+\{[^}]*\}\s+from|require\s*\(|#include\s+)"),
@@ -912,7 +923,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
         # --- track braces / parens ---
         if ch == "{":
             # Classify this brace.
-            classified = _classify_a_brace(buf, stack, language)
+            classified = _classify_a_brace(buf, stack, language, brace_depth)
             if classified is not None:
                 # Declaration-level brace. Push a new unit.
                 kind, name, container_only = classified
@@ -1138,7 +1149,8 @@ def _close_a_unit(
 
 
 def _classify_a_brace(
-    buf: str, stack: list[_OpenAUnit], language: str | None
+    buf: str, stack: list[_OpenAUnit], language: str | None,
+    brace_depth: int = 0,
 ) -> tuple[str, str | None, bool] | None:
     """Classify a declaration-level ``{`` from the preceding token buffer.
 
@@ -1147,6 +1159,19 @@ def _classify_a_brace(
     is the identifier following the declaration keyword (the function/class
     name); ``None`` for an anonymous block. ``container_only`` is True for
     impl/mod/namespace (containers whose children are the real entities).
+
+    Two classification paths:
+
+    1. **Keyword-prefixed** (the common case): the buffer contains a declaration
+       keyword (``fn``/``func``/``function``/``def``/``class``/``struct``/...).
+       The name is the identifier after the keyword.
+
+    2. **Keyword-less method** (Java/C/C++/C#/Dart): when NO keyword is found,
+       a heuristic recognizes the ``<type> <name> (<params>) {`` shape at the
+       depth where methods live (directly inside a class/container body, or at
+       file scope). This is gated by ``brace_depth`` so control-flow braces
+       (``if (x) {`` inside a method body, which sit one level deeper) are
+       excluded by construction. See :func:`_classify_keywordless_method`.
     """
     # The buffer is a whitespace-normalized run ending where the ``{`` is. Strip
     # a trailing ``{``-adjacent tokens we may have already added.
@@ -1170,7 +1195,11 @@ def _classify_a_brace(
             last_kw = t
             break
     if last_kw_idx < 0:
-        return None  # no declaration keyword → expression-level brace
+        # No declaration keyword. Try the keyword-less method heuristic — the
+        # path that recovers Java/C/C++/C# methods (whose signatures lead with
+        # a return type, not a keyword). Returns None for control flow / object
+        # literals / anything that isn't a method-shaped declaration.
+        return _classify_keywordless_method(toks, stack, brace_depth)
 
     # Determine the name: the identifier right after the keyword.
     name: str | None = None
@@ -1200,6 +1229,95 @@ def _classify_a_brace(
     )
     kind = KIND_METHOD if in_container else KIND_FUNCTION
     return (kind, name, False)
+
+
+def _classify_keywordless_method(
+    toks: list[str], stack: list[_OpenAUnit], brace_depth: int,
+) -> tuple[str, str | None, bool] | None:
+    """Recognize a keyword-less method/function declaration before a ``{``.
+
+    Handles Java/C/C++/C#/Dart methods and C free functions, whose signatures
+    have no declaration keyword (``int foo() { ... }``, ``void bar() { ... }``).
+    The default keyword-recognition in :func:`_classify_a_brace` misses these
+    entirely — every method is absorbed into its class. This recovers them via a
+    conservative four-guard heuristic:
+
+    1. **Method-depth**: the ``{`` directly enters a container body. ``brace_depth``
+       must equal the top open frame's ``open_brace_depth`` (a direct child of
+       the class/struct/impl), OR be 0 with no open container (a C free
+       function). Control flow inside a method body sits at ``brace_depth >=
+       container_depth + 1`` and is excluded here — this is the critical guard,
+       because an ``if``/``while`` inside an *unrecognized* method shares the
+       same ``[class]`` stack as the method itself, so the stack alone can't
+       tell them apart.
+    2. **Signature shape**: the buffer ends in ``<name> (<...>)`` — an
+       identifier (the method name) immediately followed by a parenthesized
+       parameter list, immediately before the ``{``.
+    3. **Name is an identifier**: the token before ``(`` is a valid name.
+    4. **Not control flow**: the token before ``(`` is not a control-flow keyword
+       (``if``/``while``/``for``/``switch``/...). Defense-in-depth for the rare
+       case a control-flow construct appears at method-depth.
+
+    Returns ``(METHOD or FUNCTION, name, False)`` on a match, else ``None`` (a
+    bare/object-literal/control-flow brace). The kind is METHOD when inside a
+    container, FUNCTION at file scope (C free functions).
+    """
+    if not toks:
+        return None
+    # Guard 1: method-depth. The ``{`` must directly enter a container body.
+    if stack:
+        top = stack[-1]
+        is_method_depth = (brace_depth == top.open_brace_depth)
+        in_container = any(
+            (u.kind == KIND_CLASS or u.container_only) for u in reversed(stack)
+        )
+    else:
+        # No open container — only a file-scope free function (C) qualifies.
+        is_method_depth = (brace_depth == 0)
+        in_container = False
+    if not is_method_depth:
+        return None
+
+    # Guard 2: signature shape ``<name> (<...>)``. The last token must end with
+    # ``)`` (the closing paren of the param list) and the token before it must
+    # contain ``(`` (so there's a param list). We look for the ``name (`` pair.
+    # The buffer is whitespace-normalized; ``foo()`` may be one token or ``foo``
+    # + ``()`` depending on spacing. Find the last ``(`` to locate the param list.
+    # Re-join to scan the raw shape (tokens were split on whitespace).
+    joined = " ".join(toks)
+    # Find the parameter list: the last ``(`` ... ``)`` run ending the buffer.
+    paren_open = -1
+    depth_p = 0
+    for idx in range(len(joined) - 1, -1, -1):
+        c = joined[idx]
+        if c == ")":
+            depth_p += 1
+            if paren_open < 0:
+                # Must end in ``)`` for a signature (params before ``{``).
+                if idx != len(joined) - 1:
+                    return None
+        elif c == "(":
+            if depth_p > 0:
+                depth_p -= 1
+                if depth_p == 0:
+                    paren_open = idx
+                    break
+    if paren_open < 0:
+        return None  # no balanced param list → not a signature
+    # The name is the identifier immediately before ``(``.
+    name_part = joined[:paren_open].rstrip()
+    if not name_part:
+        return None
+    # The name is the last whitespace-separated token of the pre-param run.
+    name_tok = name_part.split()[-1] if name_part.split() else ""
+    # Guard 3: valid identifier.
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
+        return None
+    # Guard 4: not a control-flow keyword.
+    if name_tok in _A_CONTROL_FLOW_KEYWORDS:
+        return None
+    kind = KIND_METHOD if in_container else KIND_FUNCTION
+    return (kind, name_tok, False)
 
 
 def _find_decl_start(src: str, brace_idx: int, line_start: int) -> int:
@@ -1650,6 +1768,12 @@ def compute_structural_diff_3way(
     ir_left = parse_file(left, language=language)
     ir_right = parse_file(right, language=language)
     if ir_base is None or ir_left is None or ir_right is None:
+        return None
+    # A structural annotation built from a minified/garbage parse (confidence
+    # 0.0) is worse than no annotation — it would feed the LLM empty/wrong
+    # structure as authoritative. Decline when any side is untrustworthy.
+    if ir_base.parse_confidence == 0.0 or ir_left.parse_confidence == 0.0 \
+            or ir_right.parse_confidence == 0.0:
         return None
     family = ir_base.family
     # Flatten to include nested children (methods inside classes/impls) so the

@@ -339,6 +339,26 @@ def test_normal_code_is_full_confidence():
     assert ir.parse_confidence == 1.0
 
 
+def test_low_confidence_parse_degrades_to_none_in_consumers():
+    """A confidence-0.0 parse (minified) surfaces as None through the consumer
+    wrapper and the 3-way diff, NOT as an empty FileIR. This lets callers
+    distinguish "no trustworthy structure" from "genuinely empty file" — the
+    contract parse_confidence was always meant to send but never did (Round 4
+    wired the gate)."""
+    from capybase.adapters import structural
+    # Minified JS: median line length > 200 → confidence 0.0.
+    minified = "var a=1;" + "x" * 300 + ";"
+    # The parser still returns the FileIR (confidence stamped)...
+    ir = ap.parse_file(minified, language="javascript")
+    assert ir is not None and ir.parse_confidence == 0.0
+    # ...but the consumer wrapper gates it to None.
+    assert structural._abstract_parse(minified, "javascript") is None
+    assert structural.enumerate_entities(minified, "javascript") is None
+    # And the 3-way diff declines when any side is untrustworthy.
+    normal = "function foo() { return 1; }"
+    assert ap.compute_structural_diff_3way(normal, normal, minified, language="javascript") is None
+
+
 # ---------------------------------------------------------------------------
 # Region queries
 # ---------------------------------------------------------------------------
@@ -444,7 +464,10 @@ def test_go_parsing():
 
 
 def test_java_parsing():
-    """Java class + method detection."""
+    """Java class + method detection. The keyword-less ``main`` method (whose
+    signature leads with return type ``void``, no ``fn``/``function`` keyword)
+    is now extracted as a METHOD child of the class (Round 4 keyword-less
+    method heuristic)."""
     src = (
         "import java.util.List;\n\n"
         "public class Main {\n"
@@ -457,6 +480,120 @@ def test_java_parsing():
     assert ir is not None
     classes = [u.name for u in ir.units if u.kind == "class"]
     assert "Main" in classes
+    # The keyword-less method is now a child of the class.
+    flat = ap._all_units_flat(ir)
+    methods = [u.name for u in flat if u.kind == "method"]
+    assert "main" in methods
+
+
+def test_java_keywordless_methods_extracted():
+    """Java methods (no declaration keyword — return type leads) are extracted as
+    METHOD children of their class. Multiple sibling methods, constructors, and
+    methods with complex signatures all recover. Before Round 4, every Java
+    method was absorbed into the class body (invisible to the merge engine)."""
+    src = (
+        "class Service {\n"
+        "    Service() { init(); }\n"
+        "    public int compute(int x, int y) { return x + y; }\n"
+        "    private void log(String msg) { System.err.println(msg); }\n"
+        "}\n"
+    )
+    ir = ap.parse_file(src, language="java")
+    flat = ap._all_units_flat(ir)
+    methods = sorted(u.name for u in flat if u.kind == "method")
+    # Constructor + both methods recovered.
+    assert "Service" in methods       # constructor (classname as method)
+    assert "compute" in methods
+    assert "log" in methods
+
+
+def test_cpp_methods_with_access_specifiers():
+    """C++ methods are extracted despite ``public:``/``private:`` access-
+    specifier lines between them (the access specifier is just absorbed, not a
+    declaration). Constructor + regular method both recovered."""
+    src = (
+        "class Widget {\n"
+        "public:\n"
+        "    Widget() { count = 0; }\n"
+        "    int getCount() { return count; }\n"
+        "private:\n"
+        "    void reset() { count = 0; }\n"
+        "};\n"
+    )
+    ir = ap.parse_file(src, language="cpp")
+    flat = ap._all_units_flat(ir)
+    methods = sorted(u.name for u in flat if u.kind == "method")
+    assert "Widget" in methods    # constructor
+    assert "getCount" in methods
+    assert "reset" in methods
+
+
+def test_csharp_methods_extracted():
+    """C# methods (keyword-less, like Java) are extracted as METHOD children."""
+    src = (
+        "class Config {\n"
+        "    public string GetName() { return name; }\n"
+        "    private void SetName(string v) { name = v; }\n"
+        "}\n"
+    )
+    ir = ap.parse_file(src, language="csharp")
+    flat = ap._all_units_flat(ir)
+    methods = sorted(u.name for u in flat if u.kind == "method")
+    assert "GetName" in methods
+    assert "SetName" in methods
+
+
+def test_control_flow_not_misclassified_as_methods():
+    """Regression guard for the keyword-less method heuristic: control-flow
+    blocks (``if``/``while``/``for``/``switch``) inside a method body must NOT
+    be extracted as methods. They sit one brace-depth deeper than real methods,
+    so the depth guard excludes them by construction."""
+    src = (
+        "class C {\n"
+        "    void m() {\n"
+        "        if (x) { y(); }\n"
+        "        while (z) { w(); }\n"
+        "        for (int i = 0; i < n; i++) { v(); }\n"
+        "        switch (s) { case 1: break; }\n"
+        "    }\n"
+        "}\n"
+    )
+    ir = ap.parse_file(src, language="java")
+    flat = ap._all_units_flat(ir)
+    methods = [u.name for u in flat if u.kind == "method"]
+    # Only ``m`` is a method — the if/while/for/switch blocks are NOT entities.
+    assert methods == ["m"], f"control flow leaked as methods: {methods}"
+
+
+def test_c_free_functions_extracted_at_file_scope():
+    """C free functions (keyword-less, at file scope) are extracted as FUNCTION
+    units. The depth guard allows ``brace_depth == 0`` with no open container."""
+    src = "int main() { return 0; }\nint helper(int x) { return x + 1; }\n"
+    ir = ap.parse_file(src, language="c")
+    flat = ap._all_units_flat(ir)
+    funcs = sorted(u.name for u in flat if u.kind == "function")
+    assert "main" in funcs
+    assert "helper" in funcs
+
+
+def test_js_class_method_shorthand_extracted():
+    """JS/TS class method shorthand (``class C { m() {} }`` — no ``function``
+    keyword) is now extracted as a METHOD. Previously absorbed into the class."""
+    src = "class C {\n    m() { return 1; }\n    n() { return 2; }\n}\n"
+    ir = ap.parse_file(src, language="javascript")
+    flat = ap._all_units_flat(ir)
+    methods = sorted(u.name for u in flat if u.kind == "method")
+    assert "m" in methods and "n" in methods
+
+
+def test_rust_keyword_extraction_unchanged_by_keywordless_heuristic():
+    """Regression guard: Rust (which uses ``fn``) is unaffected by the keyword-
+    less method heuristic — keyword-prefixed classification still takes priority."""
+    src = "impl C {\n    fn foo() {}\n    fn bar() {}\n}\n"
+    ir = ap.parse_file(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    methods = sorted(u.name for u in flat if u.kind == "method")
+    assert methods == ["bar", "foo"]
 
 
 def test_is_available_for_all_family_languages():

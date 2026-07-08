@@ -100,13 +100,22 @@ def _abstract_parse(source: str, language: str):
     """Parse via the abstract parser; return a :class:`FileIR` or ``None``.
 
     Thin wrapper that imports lazily so the abstract parser is only loaded when
-    needed. Returns ``None`` when the language has no family mapping.
+    needed. Returns ``None`` when the language has no family mapping, OR when the
+    parse reported ``parse_confidence == 0.0`` (minified/generated input with no
+    reliable structure). The confidence gate lets callers distinguish "no
+    trustworthy structure here" from "this file genuinely has no entities" — a
+    minified JS file previously returned an empty FileIR (indistinguishable from
+    a real empty file) instead of the ``None`` every consumer treats as "no
+    structural signal, degrade gracefully."
     """
     try:
         from capybase.adapters import abstract_parser
     except Exception:  # noqa: BLE001
         return None
-    return abstract_parser.parse_file(source, language=language)
+    ir = abstract_parser.parse_file(source, language=language)
+    if ir is not None and ir.parse_confidence == 0.0:
+        return None
+    return ir
 
 
 def _unit_to_entity(unit) -> Entity:
