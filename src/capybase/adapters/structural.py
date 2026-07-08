@@ -1,15 +1,16 @@
-"""Tree-sitter structural analysis for capybase.
+"""Structural analysis for capybase.
 
-Parses source into an AST, finds the lowest common ancestor node enclosing a
-conflict span, and computes a canonical structural fingerprint for AST-level
-preservation checks. This replaces the semantically-blind ``<<<<<<<`` marker
-window with a logical block (the specific ``def``/``fn``/``impl``/``struct``)
-so the resolver and validators reason about code structure, not line counts.
+Parses source into an abstract :class:`FileIR` (via
+:mod:`capybase.adapters.abstract_parser`), finds the lowest structural unit
+enclosing a conflict span, and computes a canonical structural fingerprint for
+AST-level preservation checks. This replaces the semantically-blind ``<<<<<<<``
+marker window with a logical block (the specific ``def``/``fn``/``impl``/
+``struct``) so the resolver and validators reason about code structure, not
+line counts.
 
-All ``tree_sitter`` imports are lazy and the module degrades gracefully:
-every public function returns ``None`` (or an empty result) if the library or
-a grammar is absent or parsing fails. Callers must treat a ``None`` result as
-"no structural signal available" and fall back to the line-window behavior.
+Every public function returns ``None`` (or an empty result) if the language is
+unsupported or parsing fails. Callers must treat a ``None`` result as "no
+structural signal available" and fall back to the line-window behavior.
 """
 
 from __future__ import annotations
@@ -67,120 +68,17 @@ class Entity:
         return (self.kind, self.name)
 
 
-# Tree-sitter node types that represent a self-contained logical definition.
-# The lowest enclosing node is only "useful" if it is one of these; otherwise
-# we keep walking up (or give up at module level).
-_DEFINITION_TYPES = {
-    # Python
-    "function_definition",
-    "class_definition",
-    "decorated_definition",
-    # Rust
-    "function_item",
-    "impl_item",
-    "struct_item",
-    "enum_item",
-    "trait_item",
-    "mod_item",
-    "macro_definition",
-}
-
-# Node types whose children are definitions (we descend into these to find the
-# real definition node rather than reporting the container).
-_CONTAINER_TYPES = {
-    "decorated_definition",  # Python @decorator\ndef ...
-    "implementation_list",  # Rust impl { ... }
-    "declaration_list",  # Rust mod { ... }
-    "struct_body",
-    "enum_body",
-}
-
-
 # ---------------------------------------------------------------------------
-# Lazy grammar loading
+# Embedder singleton + abstract-parser parsing helpers
 # ---------------------------------------------------------------------------
-
-
-def _language_for(language: str):
-    """Build a tree-sitter Language for ``language`` or return ``None``.
-
-    Delegates to the language adapter (#5) for grammar loading so the
-    python/rust branch lives in one place; imports stay deferred so capybase
-    works without the ``structural`` extra.
-    """
-    try:
-        from capybase.adapters.language import adapter_for
-        return adapter_for(language).tree_sitter_language()
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _make_parser(language: str):
-    """Return a configured Parser for ``language`` or ``None`` if unavailable."""
-    lang = _language_for(language)
-    if lang is None:
-        return None
-    try:
-        from tree_sitter import Parser
-
-        return Parser(lang)
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _parse(source: str, language: str):
-    """Parse ``source`` into a tree-sitter Tree, or return ``None``."""
-    parser = _make_parser(language)
-    if parser is None:
-        return None
-    try:
-        return parser.parse(source.encode("utf-8"))
-    except Exception:  # noqa: BLE001
-        return None
-
-
-# ---------------------------------------------------------------------------
-# Backend selection — abstract parser (default) vs tree-sitter (legacy)
-# ---------------------------------------------------------------------------
-
-
-#: The active parser backend. ``"abstract"`` (default, Round 1): the grammar-free
-#: abstract parser in :mod:`capybase.adapters.abstract_parser`. ``"tree_sitter"``:
-#: the legacy path via :func:`_parse`, kept as an A/B parity escape hatch before
-#: full removal. Tests that need to force a backend set this directly; production
-#: reads :attr:`ValidationConfig.parser_backend` (default ``"abstract"``).
-_BACKEND_OVERRIDE: str | None = None
-
-
-def _active_backend(language: str) -> str:
-    """The parser backend to use for ``language``.
-
-    Honors ``_BACKEND_OVERRIDE`` (set by tests / the orchestrator) then falls
-    back to the default. The abstract parser advertises support for the same
-    language set as the legacy path (``python``/``rust`` in Round 1), so
-    ``is_available`` agrees across backends and the skip-path tests stay green.
-    """
-    if _BACKEND_OVERRIDE is not None:
-        return _BACKEND_OVERRIDE
-    return "abstract"
-
-
-def set_parser_backend(backend: str | None) -> None:
-    """Force the parser backend process-wide (``"abstract"``/``"tree_sitter"``/None).
-
-    Used by the orchestrator to apply ``ValidationConfig.parser_backend`` and by
-    tests to pin a backend. ``None`` restores the default (abstract).
-    """
-    global _BACKEND_OVERRIDE
-    _BACKEND_OVERRIDE = backend
 
 
 # Module-level embedder singleton for the semantic entity-matching tier
 # (embeddings survey §2). Set once by the orchestrator (which builds the shared
 # OpenAIEmbeddingsClient) so the entity-matching call sites (validators,
 # conflict extractor, repair-prompt renderer) pick it up without threading the
-# param through every call — mirrors the ``_BACKEND_OVERRIDE`` pattern. ``None``
-# (default) keeps matching pure-deterministic (byte-identical to pre-embedding).
+# param through every call. ``None`` (default) keeps matching pure-deterministic
+# (byte-identical to pre-embedding).
 _ENTITY_EMBEDDER: object | None = None
 
 
@@ -202,8 +100,7 @@ def _abstract_parse(source: str, language: str):
     """Parse via the abstract parser; return a :class:`FileIR` or ``None``.
 
     Thin wrapper that imports lazily so the abstract parser is only loaded when
-    needed (mirroring the tree-sitter lazy-import discipline). Returns ``None``
-    when the language has no family mapping (same sentinel tree-sitter produces).
+    needed. Returns ``None`` when the language has no family mapping.
     """
     try:
         from capybase.adapters import abstract_parser
@@ -236,96 +133,23 @@ def _all_flat_entities(ir) -> list[Entity]:
 # ---------------------------------------------------------------------------
 
 
-def _contains(node, start_row: int, end_row: int) -> bool:
-    """True if ``node``'s row range fully contains [start_row, end_row]."""
-    ns, ne = node.start_point.row, node.end_point.row
-    return ns <= start_row and ne >= end_row
-
-
-def _is_trivia(node_type: str) -> bool:
-    """Nodes that carry no structural meaning and should be ignored in a
-    fingerprint so comments/formatting don't perturb the digest."""
-    return node_type in {
-        "comment",
-        "line_comment",
-        "block_comment",
-        "documentation",  # rust doc comments
-    }
-
-
-def _is_useful(node_type: str) -> bool:
-    """A node worth recording in a structural fingerprint.
-
-    Excludes trivia (comments) and anonymous punctuation/bracket nodes whose
-    presence is implied by their parent's type — keeping them would make the
-    fingerprint sensitive to formatting noise (e.g. optional trailing commas).
-    """
-    if _is_trivia(node_type):
-        return False
-    return node_type not in {
-        # anonymous punctuation/brackets present in many grammars
-        "",
-        "(",
-        ")",
-        "[",
-        "]",
-        "{",
-        "}",
-        ",",
-        ";",
-        ":",
-        ".",
-        "=",
-        "->",
-        "=>",
-        "+",
-        "-",
-        "*",
-        "/",
-        "\\",
-        "|",
-        "&",
-        "!",
-        "?",
-        "@",
-        "#",
-        "$",
-        "%",
-        "^",
-        "~",
-        "<",
-        ">",
-    }
-
-
 def enclosing_node(
     source: str, span: tuple[int, int], language: str
 ) -> NodeInfo | None:
-    """Find the lowest useful AST node enclosing ``span``.
+    """Find the lowest useful structural unit enclosing ``span``.
 
-    Descends from the root into the deepest child whose row range still fully
-    contains the span, but STOPS as soon as it reaches a definition-typed node
-    (``function_definition``, ``impl_item``, ``struct_item`` ...). A conflict
-    inside a function resolves to that function, not the bare ``return``
-    statement within it — the model needs the whole logical block. Returns
-    ``None`` if tree-sitter is unavailable or no parse is possible.
+    Resolves the enclosing structural unit via the abstract parser's FileIR (a
+    coarse ``def``/``fn``/``impl``/``struct``/... kind). A conflict inside a
+    function resolves to that function, not the bare ``return`` statement
+    within it — the model needs the whole logical block. Returns ``None`` if
+    the language is unsupported or no parse is possible.
 
     Note: ``span`` is a line range in the CONFLICTED worktree (the marker
     block). Callers should pass a *clean, parseable* source whose line layout
     matches the worktree outside the conflict — typically the BASE blob — so
     the parser sees valid structure. Passing the raw marker-laden worktree
-    produces ERROR nodes and a useless enclosing ``module``.
+    produces a useless enclosing module.
     """
-    # Abstract backend: resolve via FileIR's enclosing_unit (coarse kinds).
-    if _active_backend(language) == "abstract":
-        return _enclosing_node_abstract(source, span, language)
-    return _enclosing_node_tree_sitter(source, span, language)
-
-
-def _enclosing_node_abstract(
-    source: str, span: tuple[int, int], language: str
-) -> NodeInfo | None:
-    """enclosing_node on the abstract parser's FileIR (coarse kinds)."""
     ir = _abstract_parse(source, language)
     if ir is None:
         return None
@@ -346,151 +170,20 @@ def _enclosing_node_abstract(
     )
 
 
-def _enclosing_node_tree_sitter(
-    source: str, span: tuple[int, int], language: str
-) -> NodeInfo | None:
-    """enclosing_node on the tree-sitter parse (legacy backend)."""
-    tree = _parse(source, language)
-    if tree is None:
-        return None
-    # Use the START line of the span as the anchor: it reliably sits inside the
-    # enclosing definition even when the span end extends past the definition
-    # boundary (which happens because a conflict marker block is wider than the
-    # base content it replaces). This is more robust than requiring the node to
-    # contain the full span.
-    anchor_row = span[0]
-    node = tree.root_node
-    while node.type not in _DEFINITION_TYPES:
-        child = None
-        for c in node.children:
-            if c.start_point.row <= anchor_row <= c.end_point.row:
-                child = c
-                break
-        if child is None or child == node:
-            break
-        node = child
-    text = source.encode("utf-8")[node.start_byte : node.end_byte].decode(
-        "utf-8", errors="replace"
-    )
-    nspan = (node.start_point.row, node.end_point.row)
-    return NodeInfo(
-        node_type=node.type,
-        span=nspan,
-        text=text,
-        signature=_signature(node, language),
-    )
-
-
-def _signature(node, language: str) -> str | None:
-    """Best-effort short label for a definition node (e.g. ``def greet()``).
-
-    Only definition-typed nodes have a meaningful signature header; other node
-    types (module, block) return ``None`` rather than a misleading first line.
-    """
-    if node.type not in _DEFINITION_TYPES:
-        return None
-    try:
-        raw = node.text
-        if raw is None:
-            return None
-        first_line = raw.decode("utf-8", errors="replace").split("\n", 1)[0]
-        return first_line.strip() or None
-    except Exception:  # noqa: BLE001
-        return None
-
-
 # ---------------------------------------------------------------------------
 # Entity-level structure (survey §3.2 coarse AST / entity merge)
 # ---------------------------------------------------------------------------
-
-# Map grammar-specific definition node types to a coarse, language-neutral
-# ``kind`` label. Entity identity is (kind, name), so two sides that each add a
-# DISTINCT entity at the same insertion point are recognized as non-conflicting
-# even when git's line-diff reports a conflict (both insert at one base line).
-# "method" vs "function" distinguishes defs inside an impl/class body from
-# module-level ones — needed because Rust tracks ``fn`` in ``impl_item``
-# separately from free ``function_item``, and Python methods are just
-# ``function_definition`` inside a ``class_definition``.
-_KIND_BY_NODE_TYPE: dict[str, str] = {
-    # Python
-    "function_definition": "function",
-    "class_definition": "class",
-    # Rust
-    "function_item": "function",
-    "struct_item": "class",
-    "enum_item": "class",
-    "trait_item": "class",
-    "const_item": "field",
-    "static_item": "field",
-    "type_item": "field",
-    # common leaf-ish definitions (e.g. assignments inside class bodies) are
-    # NOT mapped — they don't carry a stable name from the node type alone.
-}
-
-# Node types whose direct children are the definitions we enumerate (i.e. a
-# container). Module root is always a container; class/impl/mod bodies too.
-# ``block``/``statement_block`` are the body wrappers Python/some grammars use
-# inside class/impl bodies — including them lets the scan reach the methods.
-# This is safe because the scan records each definition and does NOT recurse
-# into it (a function-body ``block`` is never scanned — its owning function is
-# recorded first and ``continue``s).
-_CONTAINER_NODE_TYPES = {
-    "module",
-    "class_definition",
-    "impl_item",
-    "implementation_list",
-    "declaration_list",
-    "struct_body",
-    "enum_body",
-    "trait_body",
-    "block",
-    "statement_block",
-}
-
-
-def _entity_name(node, language: str) -> str | None:
-    """The bare identifier name of a definition node, or None if unresolvable.
-
-    Walks the node's first child for a ``name``/``identifier``-typed token. This
-    avoids brittle regex on the source text and matches how tree-sitter exposes
-    names across grammars.
-    """
-    for child in node.children:
-        ctype = child.type
-        if ctype in ("identifier", "type_identifier", "field_identifier"):
-            try:
-                return child.text.decode("utf-8", errors="replace") if child.text else None
-            except Exception:  # noqa: BLE001
-                return None
-    return None
-
-
-def _coerce_kind(node_type: str, parent_type: str | None, language: str) -> str | None:
-    """Coarse ``kind`` for a definition node.
-
-    Functions inside an impl/class body are relabeled ``method`` so a method and
-    a same-named free function aren't conflated (different identity). Other
-    definitions keep their mapped kind. Returns None for unmapped node types
-    (we only enumerate stable-nameable top-level defs).
-    """
-    kind = _KIND_BY_NODE_TYPE.get(node_type)
-    if kind is None:
-        return None
-    if kind == "function" and parent_type in _CONTAINER_NODE_TYPES and parent_type != "module":
-        return "method"
-    return kind
-
 
 def enumerate_entities(
     source: str, language: str, container_span: tuple[int, int] | None = None
 ) -> list[Entity] | None:
     """List the coarse top-level entities in ``source`` (survey §3.2/§5.3).
 
-    Parses ``source`` and returns one :class:`Entity` per definition-typed unit
-    that is a *direct child of a container* (module, class, impl, mod body).
-    Each carries a coarse ``kind`` (function/method/class/field), its ``name``,
-    and exact source ``body`` text — the text-carrying leaves the survey
-    prescribes. Identity is ``(kind, name)``.
+    Parses ``source`` via the abstract parser and returns one :class:`Entity`
+    per structural unit that is a *direct child of a container* (module, class,
+    impl, mod body). Each carries a coarse ``kind`` (function/method/class/
+    field), its ``name``, and exact source ``body`` text — the text-carrying
+    leaves the survey prescribes. Identity is ``(kind, name)``.
 
     ``container_span`` restricts the enumeration to the children of the container
     enclosing that span (the typical case: "what entities live in the same
@@ -500,15 +193,6 @@ def enumerate_entities(
     line-level handling). An empty list means the container had no enumeratable
     entities.
     """
-    if _active_backend(language) == "abstract":
-        return _enumerate_entities_abstract(source, language, container_span)
-    return _enumerate_entities_tree_sitter(source, language, container_span)
-
-
-def _enumerate_entities_abstract(
-    source: str, language: str, container_span: tuple[int, int] | None
-) -> list[Entity] | None:
-    """enumerate_entities on the abstract parser's FileIR."""
     ir = _abstract_parse(source, language)
     if ir is None:
         return None
@@ -518,10 +202,9 @@ def _enumerate_entities_abstract(
         return None
 
     def to_entities(units) -> list[Entity]:
-        # Skip module_stmt (imports) to match tree-sitter's entity set — imports
-        # are not definition-typed nodes (not in _KIND_BY_NODE_TYPE), so the
-        # existing drop/coverage/unattributed analyzers (calibrated on that set)
-        # must not see them. Imports surface via referenced_symbols/
+        # Skip module_stmt (imports) — they are not definition-typed entities,
+        # so the existing drop/coverage/unattributed analyzers (calibrated on
+        # that set) must not see them. Imports surface via referenced_symbols/
         # find_symbol_definitions, not entity enumeration.
         return [
             _unit_to_entity(u)
@@ -530,14 +213,12 @@ def _enumerate_entities_abstract(
         ]
 
     if container_span is None:
-        # Whole module: top-level units only (mirrors tree-sitter's module-root
-        # enumeration — methods/fields are children, surfaced only via their
-        # parent or a container_span query).
+        # Whole module: top-level units only (methods/fields are children,
+        # surfaced only via their parent or a container_span query).
         return to_entities(ir.units)
     # Container-scoped: the siblings inside the container enclosing the span.
-    # tree-sitter flattens to the container's direct children; the abstract
-    # parser returns the same via units_in_container. For an impl container,
-    # those are its methods (the impl itself is container-only and not emitted).
+    # For an impl container, those are its methods (the impl itself is
+    # container-only and not emitted).
     units = abstract_parser.units_in_container(ir, container_span)
     if not units:
         # Fall back to flattening the enclosing unit's whole subtree if the
@@ -547,80 +228,6 @@ def _enumerate_entities_abstract(
             return to_entities([enc] + list(enc.children))
         return []
     return to_entities(units)
-
-
-def _enumerate_entities_tree_sitter(
-    source: str, language: str, container_span: tuple[int, int] | None
-) -> list[Entity] | None:
-    """enumerate_entities on the tree-sitter parse (legacy backend)."""
-    tree = _parse(source, language)
-    if tree is None:
-        return None
-    root = tree.root_node
-
-    # Resolve the container node to enumerate within.
-    container = root  # module
-    if container_span is not None:
-        anchor = container_span[0]
-        # Descend to the deepest container enclosing the anchor, but stop at a
-        # definition node (the enclosing class/impl is itself a container).
-        node = root
-        while True:
-            child = None
-            for c in node.children:
-                if c.start_point.row <= anchor <= c.end_point.row:
-                    child = c
-                    break
-            if child is None or child == node:
-                break
-            node = child
-            if node.type in _CONTAINER_NODE_TYPES:
-                container = node
-                # Keep descending only while we're in containers; a def node is
-                # a leaf for this purpose.
-                if node.type in _DEFINITION_TYPES:
-                    break
-        # If the enclosing container is a definition node (e.g. class/impl),
-        # its CHILDREN are the entities, so don't break out yet — but we already
-        # set container=node above. For a class/impl, the body list is the child.
-
-    return _collect_entities(container, source, language)
-
-
-def _collect_entities(container, source: str, language: str) -> list[Entity] | None:
-    """Gather direct definition children of ``container`` as entities.
-
-    For class/impl bodies the definitions sit inside a body list node
-    (``implementation_list``/``declaration_list``/block); we look one level down
-    into that list when present so method/field definitions are found.
-    """
-    src = source.encode("utf-8")
-    entities: list[Entity] = []
-    parent_type = container.type
-
-    def _scan(node, ptype):
-        for child in node.children:
-            ctype = child.type
-            kind = _coerce_kind(ctype, ptype, language)
-            if kind is not None:
-                name = _entity_name(child, language)
-                if name:
-                    text = src[child.start_byte : child.end_byte].decode("utf-8", errors="replace")
-                    entities.append(
-                        Entity(
-                            kind=kind,
-                            name=name,
-                            body=text,
-                            span=(child.start_point.row, child.end_point.row),
-                        )
-                    )
-                    continue  # don't recurse into a definition we already took
-            # Recurse into body-list containers to find nested defs.
-            if ctype in _CONTAINER_NODE_TYPES or ctype in _DEFINITION_TYPES:
-                _scan(child, ctype)
-
-    _scan(container, parent_type)
-    return entities
 
 
 def duplicate_definitions(
@@ -646,19 +253,6 @@ def duplicate_definitions(
     parser is unavailable or parsing fails. An empty list means no per-scope
     duplicates were found.
     """
-    if _active_backend(language) == "abstract":
-        return _duplicate_definitions_abstract(source, language)
-    return _duplicate_definitions_tree_sitter(source, language)
-
-
-def _duplicate_definitions_abstract(
-    source: str, language: str
-) -> list[tuple[str, str, list[int]]] | None:
-    """duplicate_definitions on the abstract parser's FileIR.
-
-    Walks each container's direct children, counting ``(kind, name)`` collisions
-    per scope (module, then each class/impl body). Reports 1-based start rows.
-    """
     ir = _abstract_parse(source, language)
     if ir is None:
         return None
@@ -669,7 +263,7 @@ def _duplicate_definitions_abstract(
 
     findings: list[tuple[str, str, list[int]]] = []
 
-    def scan_scope(units: list, rows_out: None = None) -> None:
+    def scan_scope(units: list) -> None:
         seen: dict[tuple[str, str], list[int]] = {}
         for u in units:
             # Container-scope units (impl/mod/namespace) are scopes, NOT entities
@@ -678,7 +272,7 @@ def _duplicate_definitions_abstract(
             if u.is_container_scope or not u.name:
                 continue
             key = (u.kind, u.name)
-            # 1-based start row for repair attribution (matches tree-sitter path).
+            # 1-based start row for repair attribution.
             seen.setdefault(key, []).append(u.span[0] + 1)
         for (kind, name), rows in seen.items():
             if len(rows) > 1:
@@ -690,58 +284,6 @@ def _duplicate_definitions_abstract(
                 scan_scope(u.children)
 
     scan_scope(ir.units)
-    return findings
-
-
-def _duplicate_definitions_tree_sitter(
-    source: str, language: str
-) -> list[tuple[str, str, list[int]]] | None:
-    """duplicate_definitions on the tree-sitter parse (legacy backend).
-
-    Scope is the same container notion :func:`enumerate_entities` uses (module,
-    class, impl, mod body): a ``fn foo`` in one ``impl`` does not collide with
-    ``fn foo`` in another. Collisions are exact ``(kind, name)`` matches, not
-    fuzzy — a rename shows up as two distinct names.
-
-    Returns a list of ``(kind, name, line_numbers)`` tuples (one per collided
-    name within a scope; ``line_numbers`` are the 1-based start rows of each
-    duplicate occurrence, ordered, for repair attribution). ``None`` when
-    tree-sitter is unavailable or parsing fails. An empty list means no
-    per-scope duplicates were found.
-    """
-    tree = _parse(source, language)
-    if tree is None:
-        return None
-
-    findings: list[tuple[str, str, list[int]]] = []
-
-    def _scan_container(node, ptype):
-        """Record entities in this container, recursing into nested scopes.
-
-        Mirrors ``_collect_entities._scan`` but keeps a per-container name→rows
-        map so a collision is detected within ONE scope only, then descends
-        into each child scope separately (so the recursion doesn't flatten
-        cross-scope names together).
-        """
-        seen: dict[tuple[str, str], list[int]] = {}
-        for child in node.children:
-            ctype = child.type
-            kind = _coerce_kind(ctype, ptype, language)
-            if kind is not None:
-                name = _entity_name(child, language)
-                if name:
-                    key = (kind, name)
-                    # tree-sitter rows are 0-based; report 1-based for messages.
-                    seen.setdefault(key, []).append(child.start_point.row + 1)
-                    continue  # don't recurse into a definition we already took
-            # Recurse into nested scopes (class/impl/mod bodies) separately.
-            if ctype in _CONTAINER_NODE_TYPES or ctype in _DEFINITION_TYPES:
-                _scan_container(child, ctype)
-        for (kind, name), rows in seen.items():
-            if len(rows) > 1:
-                findings.append((kind, name, sorted(rows)))
-
-    _scan_container(tree.root_node, "module")
     return findings
 
 
@@ -1026,9 +568,9 @@ def dropped_entities(
     With ``embedder`` (embeddings survey §2), a semantic-body rename also counts
     as preserved, closing the false-positive gap where a renamed+heavily-edited
     function fires as dropped. Module-level bare assignments (``X = ...``) are
-    NOT enumerated (see _KIND_BY_NODE_TYPE), so this catches structural defs
-    only; the token-set BothSidesRepresented validator remains the backstop for
-    value/assignment drops.
+    NOT enumerated, so this catches structural defs only; the token-set
+    BothSidesRepresented validator remains the backstop for value/assignment
+    drops.
 
     Returns ``None`` when tree-sitter is unavailable or any of the three texts
     fail to parse (the critic degrades gracefully). An empty list means the side
@@ -1191,29 +733,15 @@ def sibling_signatures(
 def ast_fingerprint(source: str, language: str) -> str | None:
     """A canonical structural digest of ``source``.
 
-    The fingerprint is the sequence of structural unit kinds in pre-order
-    traversal (the coarse function/class/method/field/... kinds, plus the unit
-    names), joined by spaces. It is invariant under whitespace, comment, and
-    formatting changes — two programs with the same structure produce the same
-    fingerprint. Used by ``AstPreservationValidator`` to prove that nodes outside
-    a conflict span are structurally unchanged after a resolution is spliced in.
-    Returns ``None`` if parsing is unavailable.
-    """
-    if _active_backend(language) == "abstract":
-        return _ast_fingerprint_abstract(source, language)
-    return _ast_fingerprint_tree_sitter(source, language)
-
-
-def _ast_fingerprint_abstract(source: str, language: str) -> str | None:
-    """ast_fingerprint on the abstract parser's FileIR.
-
     Emits a pre-order walk of ``kind:name:fingerprint`` tokens for every unit
     (top-level + nested children), where ``fingerprint`` is the unit's body
     content digest (stable under whitespace/comments, but sensitive to body
     edits). This captures BOTH structural identity (kind+name) and internal
-    structure (the body digest) — so the AstPreservationValidator detects a
+    structure (the body digest) — so the ``AstPreservationValidator`` detects a
     resolution that changes a unit's body, not just one that renames/reorders
-    units. Invariant under whitespace/comment/formatting changes.
+    units. It is invariant under whitespace, comment, and formatting changes —
+    two programs with the same structure produce the same fingerprint. Returns
+    ``None`` if parsing is unavailable.
     """
     ir = _abstract_parse(source, language)
     if ir is None:
@@ -1235,66 +763,30 @@ def _ast_fingerprint_abstract(source: str, language: str) -> str | None:
     return " ".join(parts)
 
 
-def _ast_fingerprint_tree_sitter(source: str, language: str) -> str | None:
-    """ast_fingerprint on the tree-sitter parse (legacy backend).
-
-    The fingerprint is the sequence of AST node *types* in pre-order traversal
-    (skipping comments and anonymous punctuation), joined by spaces. It is
-    invariant under whitespace, comment, and formatting changes — two programs
-    with the same structure produce the same fingerprint. Used by
-    ``AstPreservationValidator`` to prove that nodes outside a conflict span are
-    structurally unchanged after a resolution is spliced in. Returns ``None``
-    if parsing is unavailable.
-    """
-    tree = _parse(source, language)
-    if tree is None:
-        return None
-
-    parts: list[str] = []
-
-    def walk(n) -> None:
-        if _is_useful(n.type):
-            parts.append(n.type)
-        for c in n.children:
-            walk(c)
-
-    walk(tree.root_node)
-    return " ".join(parts)
-
-
 def fingerprint_region(
     source: str, language: str, span: tuple[int, int] | None
 ) -> tuple[str | None, str | None]:
     """Return (outside_fingerprint, inside_fingerprint) for a span.
 
-    For AST preservation, we compare the structure of nodes OUTSIDE the conflict
+    For AST preservation, we compare the structure of units OUTSIDE the conflict
     span before and after splicing. ``outside`` is the structural-unit sequence
     of all units that do not fall within ``span``; ``inside`` is the sequence of
     units within it. If ``span`` is None, ``outside`` is the whole-file
     fingerprint and ``inside`` is None.
     """
-    if _active_backend(language) == "abstract":
-        return _fingerprint_region_abstract(source, language, span)
-    return _fingerprint_region_tree_sitter(source, language, span)
-
-
-def _fingerprint_region_abstract(
-    source: str, language: str, span: tuple[int, int] | None
-) -> tuple[str | None, str | None]:
-    """fingerprint_region on the abstract parser's FileIR."""
     ir = _abstract_parse(source, language)
     if ir is None:
         return None, None
     if span is None:
-        return _ast_fingerprint_abstract(source, language), None
+        return ast_fingerprint(source, language), None
     start_row, end_row = span
 
     def token(u, *, with_body: bool) -> str:
         # Fold the body fingerprint in so body edits are detected (matches
-        # _ast_fingerprint_abstract's per-unit token shape) — but ONLY for units
-        # entirely outside the span. A unit that STRADDLES the span has its body
-        # partially inside the conflict region and will legitimately change after
-        # a resolution is spliced in, so it contributes only its kind:name
+        # ast_fingerprint's per-unit token shape) — but ONLY for units entirely
+        # outside the span. A unit that STRADDLES the span has its body partially
+        # inside the conflict region and will legitimately change after a
+        # resolution is spliced in, so it contributes only its kind:name
         # (structural shape, not content) to the outside digest.
         if u.is_container_scope:
             return f"scope:{u.name or '<anon>'}"
@@ -1325,53 +817,6 @@ def _fingerprint_region_abstract(
                 walk(u.children)
 
     walk(ir.units)
-    return " ".join(outside), " ".join(inside)
-
-
-def _fingerprint_region_tree_sitter(
-    source: str, language: str, span: tuple[int, int] | None
-) -> tuple[str | None, str | None]:
-    """fingerprint_region on the tree-sitter parse (legacy backend).
-
-    For AST preservation, we compare the structure of nodes OUTSIDE the conflict
-    span before and after splicing. ``outside`` is the node-type sequence of all
-    nodes that do not fall within ``span``; ``inside`` is the sequence of nodes
-    within it. If ``span`` is None, ``outside`` is the whole-file fingerprint and
-    ``inside`` is None.
-    """
-    tree = _parse(source, language)
-    if tree is None:
-        return None, None
-    if span is None:
-        return ast_fingerprint(source, language), None
-    start_row, end_row = span
-
-    outside: list[str] = []
-    inside: list[str] = []
-
-    def walk(n) -> None:
-        ns, ne = n.start_point.row, n.end_point.row
-        useful = _is_useful(n.type)
-        # Node entirely inside the span → inside only.
-        if ns >= start_row and ne <= end_row:
-            if useful:
-                inside.append(n.type)
-            return
-        # Node entirely outside the span → outside only (recurse).
-        if ne < start_row or ns > end_row:
-            if useful:
-                outside.append(n.type)
-            for c in n.children:
-                walk(c)
-            return
-        # Node straddles the span → record its type as outside (structure) and
-        # recurse into children to partition them.
-        if useful:
-            outside.append(n.type)
-        for c in n.children:
-            walk(c)
-
-    walk(tree.root_node)
     return " ".join(outside), " ".join(inside)
 
 
@@ -2022,22 +1467,12 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
 def is_available(language: str) -> bool:
     """True if a structural parser is available for ``language``.
 
-    Honors the active backend (default ``abstract``): the abstract parser is
-    available for the Family-A/Family-B languages it dispatches on (in Round 1,
-    ``python`` and ``rust`` — the same surface the legacy tree-sitter path
-    covered, so skip-path tests stay green). For the legacy backend this probes
-    tree-sitter + the grammar wheel.
+    The abstract parser is available when ``language`` maps to a known language
+    family (``detect_family`` is non-None). In Round 1 that is ``python`` and
+    ``rust``; broader coverage is Round 3.
     """
-    backend = _active_backend(language)
-    if backend == "tree_sitter":
-        return _make_parser(language) is not None
-    # abstract backend: available when the language maps to a family AND it's in
-    # the supported set (Round 1 keeps python/rust; broader coverage is Round 3).
     try:
         from capybase.adapters import abstract_parser
     except Exception:  # noqa: BLE001
         return False
-    return (
-        abstract_parser.detect_family(language, None) is not None
-        and language in abstract_parser._SUPPORTED_LANGUAGES
-    )
+    return abstract_parser.detect_family(language, None) is not None

@@ -16,16 +16,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Structural analysis (Pillar 1): AST parsing + preservation checks for Python
-# AND Rust. Lazy-imported at runtime; capybase works without these but degrades
-# to the line-window context and skips AST-level validation when they are absent.
-# Included in `dev` so a development install lights up Rust structural context,
-# entity-level merge, AST-preservation, and sibling-entity resolution by default.
-structural = [
-    "tree-sitter>=0.23",
-    "tree-sitter-python>=0.23",
-    "tree-sitter-rust>=0.23",
-]
+# Structural analysis (Pillar 1): the grammar-free abstract parser is now the
+# sole structural backend (no tree-sitter dependency). This extra is kept as an
+# empty placeholder so existing install commands (`pip install -e .[structural]`)
+# don't break; it pulls in no additional packages.
+structural = []
 # Embedding features (Pillar 2): persisted vector cache + vectorized cosine.
 # Lazy-imported at runtime; capybase works without these — the embedding
 # retriever falls back to in-memory re-embedding each run (the prior behavior)
@@ -38,9 +33,6 @@ embeddings = [
 ]
 dev = [
     "pytest>=7",
-    "tree-sitter>=0.23",
-    "tree-sitter-python>=0.23",
-    "tree-sitter-rust>=0.23",
     "numpy>=1.26",
     "sqlite-vec>=0.1",
     "json-repair>=0.30",

@@ -15,7 +15,9 @@ Scope — the PURE, low-risk behaviors first (this phase):
 - ``definition_patterns`` — the ``def {name}`` / ``fn {name}`` keyword prefixes.
 - ``container_has_braces`` — whether a container body ends in ``}`` (Rust) or not
   (Python), used by the structural resolver's trailer logic.
-- ``tree_sitter_language`` — lazy grammar loading (delegates to structural).
+- ``tree_sitter_language`` — deprecated; always returns ``None``. The abstract
+  parser (:mod:`capybase.adapters.abstract_parser`) is the sole structural
+  backend. Retained on the Protocol for API compatibility.
 
 The I/O-heavy behaviors (syntax_check / cargo check / LSP / clippy / shadow
 tests) stay in their existing helpers for now — they're deeply interleaved with
@@ -76,9 +78,11 @@ class LanguageAdapter(Protocol):
         ...
 
     def tree_sitter_language(self) -> Any:
-        """The tree-sitter ``Language`` for this adapter's grammar, or None when
-        the grammar isn't installed. Lazily imported so capybase works without
-        the ``structural`` extra."""
+        """Deprecated: tree-sitter is no longer used. Always returns ``None``.
+
+        Retained on the Protocol for API compatibility; the abstract parser
+        (:mod:`capybase.adapters.abstract_parser`) is the sole structural
+        backend. Callers should not depend on a non-None return."""
         ...
 
 
@@ -112,12 +116,9 @@ class PythonAdapter(_BaseAdapter):
         )
 
     def tree_sitter_language(self) -> Any:
-        try:
-            from tree_sitter import Language
-            from tree_sitter_python import language as _py_lang
-            return Language(_py_lang())
-        except Exception:  # noqa: BLE001 - optional grammar
-            return None
+        # Deprecated: tree-sitter is no longer used. The abstract parser is
+        # the sole structural backend. Returns None for API compatibility.
+        return None
 
 
 @dataclass(frozen=True)
@@ -139,12 +140,8 @@ class RustAdapter(_BaseAdapter):
         )
 
     def tree_sitter_language(self) -> Any:
-        try:
-            from tree_sitter import Language
-            from tree_sitter_rust import language as _rust_lang
-            return Language(_rust_lang())
-        except Exception:  # noqa: BLE001 - optional grammar
-            return None
+        # Deprecated: tree-sitter is no longer used. Returns None.
+        return None
 
 
 @dataclass(frozen=True)

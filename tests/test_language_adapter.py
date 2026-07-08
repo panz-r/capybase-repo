@@ -69,13 +69,15 @@ def test_null_adapter_safe_defaults():
     assert null.tree_sitter_language() is None
 
 
-def test_tree_sitter_language_loads_when_grammar_available():
-    """The adapter loads the tree-sitter grammar when the extra is installed
-    (the dev install includes it), else returns None gracefully."""
+def test_tree_sitter_language_returns_none_after_migration():
+    """tree-sitter is deprecated; the abstract parser is the sole backend.
+
+    The method is retained on the Protocol for API compatibility but always
+    returns None — no grammar loading, no optional dependency."""
     py = adapter_for("python")
-    lang = py.tree_sitter_language()
-    # Either the grammar loaded (dev install) or it's None (no extra) — both fine.
-    assert lang is None or lang is not None
+    assert py.tree_sitter_language() is None
+    rs = adapter_for("rust")
+    assert rs.tree_sitter_language() is None
 
 
 # ---------------------------------------------------------------------------

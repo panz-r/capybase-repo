@@ -472,13 +472,10 @@ class ValidationConfig(BaseModel):
     enable_cross_commit_guardian: bool = True
     cross_commit_policy: Literal["warn", "stop"] = "warn"
     # Structural parser backend (Round 1 of the abstract-parser migration).
-    # ``abstract`` (default): the grammar-free, in-process abstract parser
-    # (capybase.adapters.abstract_parser) — Family A (brace-delimited) +
-    # Family B (indentation-delimited) state machines with no per-language
-    # grammar files. ``tree_sitter``: the legacy tree-sitter-backed path, kept
-    # as an escape hatch for A/B parity measurement before full removal. When
-    # the chosen backend is unavailable for a language, the other is tried, then
-    # the analyzers degrade to ``None`` (no structural signal).
+    # Deprecated: the grammar-free abstract parser
+    # (capybase.adapters.abstract_parser) is the sole structural backend. This
+    # field is retained for config-file backward compatibility (it parsed from
+    # capybase.toml) but has no effect — the tree-sitter backend was removed.
     parser_backend: Literal["abstract", "tree_sitter"] = "abstract"
     # Intent evolution trace (survey §3.2): a deterministic post-rebase audit
     # that, for an entity touched across ≥2 commits, checks the final merge
