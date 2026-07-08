@@ -318,6 +318,13 @@ def _sibling_spans(unit: ConflictUnit) -> list[tuple[int, int]]:
         return []
     out: list[tuple[int, int]] = []
     for sib in raw:
+        # Defensive: sibling_units is normally a list of dicts
+        # ({"unit_id": ..., "marker_span": [...]}), but a unit that was
+        # model_copy'd or reconstructed (e.g. the deterministic brace repair's
+        # whole-file unit) may carry stale/malformed metadata. Skip non-dict
+        # entries instead of crashing.
+        if not isinstance(sib, dict):
+            continue
         if sib.get("unit_id") == unit.unit_id:
             continue
         span = sib.get("marker_span")
