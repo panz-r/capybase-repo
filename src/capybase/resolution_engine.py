@@ -108,31 +108,68 @@ def _side_intent_block(unit: ConflictUnit) -> str:
 def _structural_context_block(unit: ConflictUnit) -> str:
     """3-way structural context annotation for the LLM prompt (Improvement #6).
 
-    Computes a :class:`StructuralDiff3Way` from the unit's base/current/replayed
-    sides and renders it via :func:`render_structural_context`. The annotation
-    shows which structural units each side changed, whether there are structural
-    conflicts (both sides modified the same unit), and which units must survive
-    the merge. Returns "" when the annotation has no useful signal (single-unit
-    file with no changes, or parsing unavailable).
+    Shows which structural units exist in the file, which unit the conflict
+    falls inside, and — when the sides are full-file versions — what each side
+    changed and which units must survive. Returns "" when there's no useful
+    structural signal.
 
-    This directly addresses the "dropped replayed side" failure: the model sees
-    unit boundaries and required outputs explicitly before generating, instead of
-    inferring scope from raw line content.
+    **Multi-hunk handling**: for a multi-hunk conflict, ``unit.base.text`` is the
+    whole merge-base file but ``unit.current.text``/``unit.replayed.text`` are
+    just the narrow conflict-block fragments. A 3-way diff across these mismatched
+    inputs produces garbage ("deleted by both" for every unit). So we detect the
+    multi-hunk case (base substantially larger than the sides) and fall back to a
+    FILE-STRUCTURE-ONLY annotation: parse the base, show the unit list, and
+    highlight which unit the conflict is inside. This is the key signal for a
+    multi-hunk merge — the model needs to know the file has struct Config, fn
+    new, fn label, and its conflict is inside fn new (not fn label).
     """
-    # The structural diff needs the FULL file texts (base/current/replayed), not
-    # just the conflict region. The unit's sides are conflict-block fragments;
-    # we use them directly — the abstract parser handles fragments gracefully
-    # (it produces a partial FileIR). For the 3-way diff, we parse each side as
-    # a standalone source to extract the entity-level structure.
     try:
         from capybase.adapters.abstract_parser import (
             compute_structural_diff_3way, render_structural_context,
+            parse_file, enclosing_unit, _all_units_flat,
         )
         base_text = unit.base.text or ""
         current_text = unit.current.text or ""
         replayed_text = unit.replayed.text or ""
         if not base_text and not current_text and not replayed_text:
             return ""
+
+        # Detect the multi-hunk case: base is substantially larger than the
+        # sides (the sides are conflict-block fragments, not full files).
+        base_len = len(base_text)
+        side_max = max(len(current_text), len(replayed_text))
+        is_multi_hunk = base_len > side_max * 3 and base_len > 200
+
+        if is_multi_hunk:
+            # File-structure-only: parse the base, show units + enclosing unit.
+            ir = parse_file(base_text, language=unit.language)
+            if ir is None or not ir.units:
+                return ""
+            flat = _all_units_flat(ir)
+            if not flat:
+                return ""
+            lines = [f"STRUCTURAL CONTEXT (language-family: {unit.language or ir.family}/{ir.family}):"]
+            # Show the file's unit inventory.
+            unit_lines = []
+            for u in flat:
+                if u.name:
+                    unit_lines.append(f"  [{u.kind.upper()}] {u.name} lines {u.span[0]+1}-{u.span[1]+1}")
+            if not unit_lines:
+                return ""
+            lines.append("File structure:")
+            lines.extend(unit_lines)
+            # Highlight which unit this conflict falls inside.
+            if unit.marker_span is not None:
+                enc = enclosing_unit(ir, unit.marker_span)
+                if enc and enc.name:
+                    lines.append(f"This conflict is inside: {enc.kind.upper()} {enc.name}")
+                    lines.append(
+                        f"Required: preserve ALL units listed above in the merged output "
+                        f"(the file has {len(flat)} structural unit(s))."
+                    )
+            return "\n".join(lines) + "\n\n"
+
+        # Single-hunk (or full-file sides): compute the full 3-way diff.
         diff = compute_structural_diff_3way(
             base_text, current_text, replayed_text, language=unit.language,
         )
