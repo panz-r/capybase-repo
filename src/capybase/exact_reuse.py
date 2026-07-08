@@ -98,14 +98,27 @@ def find_exact_reuse(
     store: "ExperienceStore | None",
     language: str | None,
     region_kind: str,
+    path: str | None = None,
 ) -> ReuseCandidate | None:
     """Find a prior accepted resolution to replay verbatim (#9 step 4 / #idea 8).
 
     Scans the store's accepted experiences for one matching ALL trust conditions
-    (same conflict shape, same language, same region kind, accepted outcome,
-    validation evidence). Returns the FIRST match (oldest-first store order) as a
-    :class:`ReuseCandidate` carrying ``matched_conditions`` (which conditions
-    satisfied) + ``near_misses`` (same-shape priors that were rejected + why).
+    (same conflict shape, same language, same region kind, same path, accepted
+    outcome, validation evidence). Returns the FIRST match (oldest-first store
+    order) as a :class:`ReuseCandidate` carrying ``matched_conditions`` (which
+    conditions satisfied) + ``near_misses`` (same-shape priors that were rejected
+    + why).
+
+    The **path** condition is load-bearing: the conflict-shape hash is
+    intentionally content-independent (it captures the per-side edit structure —
+    added/removed/changed line counts), so two conflicts in *different files*
+    with the same edit structure hash equal. Without the path check, a resolution
+    from one file can be verbatim-replayed into a structurally-unrelated file —
+    the live eval showed ``rust_port_test``'s ``port: 9090`` resolution replayed
+    into ``rust_impl``'s ``src/config.rs`` hunk because both had the same shape.
+    Path is matched on the repo-relative path both sides record (exact string
+    match, forward-slash normalized); when ``path`` is None/empty the check is
+    skipped (backward compat for callers that don't pass it).
 
     Returns None when no store, or when there's nothing to reuse from. When the
     store has same-shape priors but none passed all conditions, returns a
@@ -130,13 +143,15 @@ def find_exact_reuse(
     target_shape = conflict_shape_hash(
         base=base, current=current, replayed=replayed
     )
+    # Normalize the query path once (repo-relative, forward-slashes).
+    target_path = (path or getattr(unit, "path", "") or "").replace("\\", "/").strip()
     near_misses: list[str] = []
     for exp in store.accepted():
         # Condition 1: same conflict shape.
         if not exp.conflict_shape or exp.conflict_shape != target_shape:
             continue
         # This prior matches the SHAPE — a candidate for near-miss recording.
-        # Conditions 2-6 narrow it; each failure is a near-miss with a reason.
+        # Conditions 2-7 narrow it; each failure is a near-miss with a reason.
         # Condition 2: same language.
         if language is not None and exp.language and exp.language != language:
             near_misses.append(f"{exp.example.summary}: wrong language ({exp.language})")
@@ -144,6 +159,13 @@ def find_exact_reuse(
         # Condition 3: same region kind (the structural coordinate).
         if region_kind and exp.region_kind and exp.region_kind != region_kind:
             near_misses.append(f"{exp.example.summary}: wrong region kind ({exp.region_kind})")
+            continue
+        # Condition 4: same file path. The shape hash is content-independent, so
+        # two different files with the same edit structure collide here — the path
+        # check prevents a resolution from one file leaking into another.
+        exp_path = (exp.path or "").replace("\\", "/").strip()
+        if target_path and exp_path and exp_path != target_path:
+            near_misses.append(f"{exp.example.summary}: wrong path ({exp.path})")
             continue
         # Condition 4: prior outcome accepted (store.accepted() already
         # filters to outcome == "accepted", so this is guaranteed; the check
@@ -167,6 +189,7 @@ def find_exact_reuse(
             f"shape={target_shape}",
             f"language={exp.language or 'any'}",
             f"region_kind={exp.region_kind or 'any'}",
+            f"path={exp.path or 'any'}",
             "outcome=accepted",
             "evidence=" + (
                 "tests_passed" if (exp.validator_features or {}).get("tests_passed") is True

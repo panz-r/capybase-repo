@@ -86,6 +86,35 @@ def test_repair_prompt_includes_previous_attempt():
     assert "line: 1" in prompt  # structured detail
 
 
+def test_repair_prompt_structural_context_is_tentative():
+    """The structural-context annotation appears on the FIRST repair (attempt 0)
+    to orient the model, but is OMITTED on subsequent repairs (attempt >= 1).
+    Rationale: a small model can take the structural sketch too literally — some
+    correct merges are non-obvious combinations (inlining, splitting) that don't
+    match it. On a second repair the validator feedback + concrete code are the
+    right signal, not the structural framing."""
+    unit = _unit()
+    ctx = _ctx()
+    cand = _candidate()
+    failures = _failures()
+    # First repair: structural context present (when the unit has structure).
+    first = build_repair_prompt(unit, ctx, cand, failures, attempt=0)
+    # Second repair: structural context omitted.
+    second = build_repair_prompt(unit, ctx, cand, failures, attempt=1)
+    # The first attempt's structural-context block (if any) must disappear on
+    # the second attempt. We compare the structural-context presence directly.
+    from capybase.resolution_engine import _structural_context_block
+    has_struct = bool(_structural_context_block(unit))
+    if has_struct:
+        assert "STRUCTURAL CONTEXT" in first
+        assert "STRUCTURAL CONTEXT" not in second
+    else:
+        # If the unit produces no structural context, both are empty — the
+        # tentative gate is a no-op, which is correct.
+        assert "STRUCTURAL CONTEXT" not in first
+        assert "STRUCTURAL CONTEXT" not in second
+
+
 def test_repair_prompt_says_fix_not_rewrite():
     prompt = build_repair_prompt(_unit(), _ctx(), _candidate(), _failures())
     assert "fix" in prompt.lower()

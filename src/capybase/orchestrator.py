@@ -1659,6 +1659,7 @@ class Orchestrator:
             reuse = find_exact_reuse(
                 unit=unit, store=self.memory_store,
                 language=unit.language, region_kind=region_kind,
+                path=unit.path,
             )
         except Exception as exc:  # noqa: BLE001 - distinguish failure from no-match
             # find_exact_reuse returns None for a genuine no-match but propagates
@@ -4573,7 +4574,7 @@ class Orchestrator:
                     prompt = build_recovery_prompt(unit, context, failures)
                 elif failures and prev_candidate and prev_candidate.resolved_text:
                     pv = PROMPT_REPAIR
-                    prompt = build_repair_prompt(unit, context, prev_candidate, failures)
+                    prompt = build_repair_prompt(unit, context, prev_candidate, failures, attempt=retry_count)
                 elif failures:
                     pv = PROMPT_RETRY
                     prompt = build_retry_prompt(unit, context, failures)
@@ -4658,7 +4659,7 @@ class Orchestrator:
                 # cheap path (it would otherwise fall back to config.samples).
                 candidates = self.resolution_engine.propose(
                     unit, context, failures=failures, prev_candidate=prev_candidate,
-                    n_samples=1,
+                    n_samples=1, attempt=retry_count,
                 )
             elif failures is None and self.config.model.two_pass and n_complex > 1:
                 # Two-pass prompting + consensus: extract intents, then sample

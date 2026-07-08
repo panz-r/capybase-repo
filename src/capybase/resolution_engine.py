@@ -1093,6 +1093,7 @@ def build_repair_prompt(
     candidate: CandidateResolution,
     failures: Iterable[VerificationFailure],
     budget: TokenBudget | None = None,
+    attempt: int = 0,
 ) -> str:
     """Targeted repair: send the broken candidate back for surgical fixing.
 
@@ -1107,6 +1108,16 @@ def build_repair_prompt(
     and candidate are protected and never trimmed. Accepted for signature
     symmetry with the other prompt builders.
 
+    ``attempt`` is the repair index (0 = first repair, 1+ = subsequent). The
+    structural-context annotation is TENTATIVE: included on the first repair
+    (attempt 0) where it helps the model orient, but OMITTED on subsequent
+    repairs. Rationale: the structural instruction ("preserve these units",
+    "this conflict is inside METHOD X") can be taken too literally by a small
+    model — some correct merges are non-obvious combinations that don't match
+    the structural sketch (e.g. inlining a method, splitting a unit). On a
+    second repair the model should focus on the validator feedback and the
+    concrete code, not re-litigate the structural framing.
+
     Repair-path few-shot (embeddings survey §2): a SINGLE high-trust retrieved
     example (``context.repair_retrieved_examples``, top-1, quality-filtered) is
     surfaced as a one-shot anchor after the validator feedback. This is the A/B
@@ -1120,7 +1131,12 @@ def build_repair_prompt(
     feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
     cur_lines, _base_lines, rep_lines = _prompt_sides(unit)
     side_intent = _side_intent_block(unit)
-    struct_ctx = _structural_context_block(unit)
+    # Structural context is TENTATIVE: shown on the first repair (attempt 0)
+    # to orient the model, omitted on subsequent repairs so it doesn't anchor
+    # the model to a structural sketch that a correct non-obvious merge might
+    # legitimately violate (inlining, splitting, combining units). On a second
+    # repair the validator feedback + concrete code are the right signal.
+    struct_ctx = _structural_context_block(unit) if attempt == 0 else ""
     # Repair few-shot anchor (embeddings survey §2): top-1 quality-filtered
     # example. Rendered as a compact one-shot AFTER the feedback and BEFORE the
     # plan-first step so the model has a concrete resolution pattern in mind.
@@ -1906,6 +1922,7 @@ class ResolutionEngine:
         failures: list[VerificationFailure] | None = None,
         prev_candidate: CandidateResolution | None = None,
         n_samples: int | None = None,
+        attempt: int = 0,
     ) -> list[CandidateResolution]:
         """Generate one or more candidates for ``unit``.
 
@@ -1925,7 +1942,7 @@ class ResolutionEngine:
             prompt_version = PROMPT_REPAIR
             # The repair prompt carries sides+candidate+feedback only; build it
             # via the public builder (string). Trims stay empty (sides protected).
-            prompt = build_repair_prompt(unit, context, prev_candidate, failures)
+            prompt = build_repair_prompt(unit, context, prev_candidate, failures, attempt=attempt)
         elif failures:
             prompt_version = PROMPT_RETRY
             # Retry: resolve-parts (budget-trimmed) + feedback. Read the trims

@@ -20,9 +20,9 @@ from capybase.memory.shape import conflict_shape_hash
 from capybase.memory.store import Experience, ExperienceStore
 
 
-def _unit(base, current, replayed, *, language="python"):
+def _unit(base, current, replayed, *, language="python", path="cfg.py"):
     return ConflictUnit(
-        session_id="s", step_index=0, path="cfg.py", language=language,
+        session_id="s", step_index=0, path=path, language=language,
         conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
         base=ConflictSide(label="BASE", text=base),
         current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=current),
@@ -33,17 +33,17 @@ def _unit(base, current, replayed, *, language="python"):
 
 def _exp(base, current, replayed, resolved, *, region_kind="function",
          conflict_shape=None, language="python", outcome="accepted",
-         validator_features=None):
+         validator_features=None, path="cfg.py"):
     if conflict_shape is None:
         conflict_shape = conflict_shape_hash(
             base=base, current=current, replayed=replayed
         )
     return Experience(
         example=HistoricalExample(
-            summary="cfg.py:u1", base=base, current=current,
+            summary=f"{path}:u1", base=base, current=current,
             replayed=replayed, resolved=resolved, source="s1",
         ),
-        outcome=outcome, language=language, path="cfg.py",
+        outcome=outcome, language=language, path=path,
         region_kind=region_kind, conflict_shape=conflict_shape,
         validator_features=validator_features or {},
     )
@@ -226,6 +226,77 @@ def test_orchestrator_falls_through_when_no_match(repo, tmp_path):
                  "def load():\n    return 2",
                  "def load():\n    return 3")
     assert orch._try_exact_reuse(unit) is None
+
+
+# ---------------------------------------------------------------------------
+# Cross-file contamination guard (live-eval regression): the conflict-shape
+# hash is content-independent, so two different files with the same edit
+# structure hash equal. Without a path check, a resolution from one file can
+# be verbatim-replayed into another. The live eval showed rust_port_test's
+# resolution (containing ``port: 9090``) replayed into rust_impl's
+# src/config.rs hunk because both had shape e3f8d0f45f7c.
+# ---------------------------------------------------------------------------
+
+
+def test_same_shape_different_path_does_not_match(tmp_path):
+    """A prior from a DIFFERENT file with the same conflict shape must NOT be
+    reused — the path condition blocks cross-file contamination. The prior's
+    resolved text belongs to a structurally-unrelated file."""
+    # Two conflicts with identical edit structure (both sides change one line)
+    # but in different files. Same shape hash, different paths.
+    base = "def f():\n    return 1"
+    cur = "def f():\n    return 2"
+    rep = "def f():\n    return 3"
+    shape = conflict_shape_hash(base=base, current=cur, replayed=rep)
+    # Stored experience from src/lib.rs.
+    other_resolved = "def f():\n    return PORT_9090\n"  # чужой контент
+    store = _store(tmp_path, [
+        _exp(base, cur, rep, other_resolved, path="src/lib.rs",
+             conflict_shape=shape),
+    ])
+    # Querying for src/config.rs — same shape, different file.
+    unit = _unit(base, cur, rep, path="src/config.rs")
+    reuse = find_exact_reuse(unit=unit, store=store, language="python",
+                             region_kind="function", path="src/config.rs")
+    assert reuse is None or reuse.skip_reason  # no full match
+
+
+def test_same_shape_same_path_does_match(tmp_path):
+    """A prior from the SAME file with the same shape IS reused — the path
+    condition is the discriminator that makes cross-file reuse safe while
+    preserving legitimate same-file replay across rebases."""
+    base = "def f():\n    return 1"
+    cur = "def f():\n    return 2"
+    rep = "def f():\n    return 3"
+    resolved = "def f():\n    return 4"
+    store = _store(tmp_path, [_exp(base, cur, rep, resolved, path="src/config.rs")])
+    unit = _unit(base, cur, rep, path="src/config.rs")
+    reuse = find_exact_reuse(unit=unit, store=store, language="python",
+                             region_kind="function", path="src/config.rs")
+    assert reuse is not None and not reuse.skip_reason
+    assert reuse.resolved_text == resolved
+
+
+def test_path_condition_defaults_to_unit_path(tmp_path):
+    """When ``path`` isn't passed explicitly, find_exact_reuse falls back to
+    ``unit.path`` — so existing callers that don't pass it still get the path
+    check (the orchestrator passes unit.path explicitly, but the finder is
+    defensive)."""
+    base = "def f():\n    return 1"
+    cur = "def f():\n    return 2"
+    rep = "def f():\n    return 3"
+    resolved = "def f():\n    return 4"
+    store = _store(tmp_path, [_exp(base, cur, rep, resolved, path="cfg.py")])
+    # Same path via unit.path (no explicit path arg).
+    unit = _unit(base, cur, rep, path="cfg.py")
+    reuse = find_exact_reuse(unit=unit, store=store, language="python",
+                             region_kind="function")
+    assert reuse is not None and not reuse.skip_reason
+    # Different path via unit.path → no match.
+    unit2 = _unit(base, cur, rep, path="other.py")
+    reuse2 = find_exact_reuse(unit=unit2, store=store, language="python",
+                              region_kind="function")
+    assert reuse2 is None or reuse2.skip_reason
 
 
 def test_orchestrator_no_store_returns_none(repo):
