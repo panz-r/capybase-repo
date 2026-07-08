@@ -105,6 +105,47 @@ def _side_intent_block(unit: ConflictUnit) -> str:
     return "\n\n".join(parts) + "\n\n"
 
 
+def _structural_context_block(unit: ConflictUnit) -> str:
+    """3-way structural context annotation for the LLM prompt (Improvement #6).
+
+    Computes a :class:`StructuralDiff3Way` from the unit's base/current/replayed
+    sides and renders it via :func:`render_structural_context`. The annotation
+    shows which structural units each side changed, whether there are structural
+    conflicts (both sides modified the same unit), and which units must survive
+    the merge. Returns "" when the annotation has no useful signal (single-unit
+    file with no changes, or parsing unavailable).
+
+    This directly addresses the "dropped replayed side" failure: the model sees
+    unit boundaries and required outputs explicitly before generating, instead of
+    inferring scope from raw line content.
+    """
+    # The structural diff needs the FULL file texts (base/current/replayed), not
+    # just the conflict region. The unit's sides are conflict-block fragments;
+    # we use them directly — the abstract parser handles fragments gracefully
+    # (it produces a partial FileIR). For the 3-way diff, we parse each side as
+    # a standalone source to extract the entity-level structure.
+    try:
+        from capybase.adapters.abstract_parser import (
+            compute_structural_diff_3way, render_structural_context,
+        )
+        base_text = unit.base.text or ""
+        current_text = unit.current.text or ""
+        replayed_text = unit.replayed.text or ""
+        if not base_text and not current_text and not replayed_text:
+            return ""
+        diff = compute_structural_diff_3way(
+            base_text, current_text, replayed_text, language=unit.language,
+        )
+        if diff is None:
+            return ""
+        annotation = render_structural_context(diff, conflict_span=unit.marker_span)
+        if not annotation:
+            return ""
+        return annotation + "\n\n"
+    except Exception:  # noqa: BLE001 - advisory; never break the prompt
+        return ""
+
+
 def _semantic_change_block(unit: ConflictUnit) -> str:
     """A compact 'what each side changed at the ENTITY level' annotation.
 
@@ -456,8 +497,14 @@ def _resolve_prompt_parts(
     side_intent = _side_intent_block(unit)
     semantic_change = _semantic_change_block(unit)
     value_resolution = _value_resolution_block(unit)
+    # 3-way structural context annotation (Improvement #6): aligns the file's
+    # structural units across base/left/right and renders a compact summary —
+    # which units each side changed, whether there are structural conflicts,
+    # and which units must survive the merge. Directly addresses the "dropped
+    # replayed side" failure: the model sees unit boundaries explicitly.
+    struct_ctx = _structural_context_block(unit)
     sides_text = (
-        f"{side_intent}{semantic_change}{value_resolution}"
+        f"{struct_ctx}{side_intent}{semantic_change}{value_resolution}"
         f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
         f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
         f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
@@ -480,7 +527,7 @@ def _resolve_prompt_parts(
     # few-shot, three sides, context) form one contiguous block that variants keep
     # together. Obligations render early (high priority) so the model sees them.
     data_block = (
-        f"{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{side_intent}{semantic_change}{value_resolution}"
+        f"{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{struct_ctx}{side_intent}{semantic_change}{value_resolution}"
         f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
         f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
         f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
@@ -1038,6 +1085,7 @@ def build_repair_prompt(
     feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
     cur_lines, _base_lines, rep_lines = _prompt_sides(unit)
     side_intent = _side_intent_block(unit)
+    struct_ctx = _structural_context_block(unit)
     # Repair few-shot anchor (embeddings survey §2): top-1 quality-filtered
     # example. Rendered as a compact one-shot AFTER the feedback and BEFORE the
     # plan-first step so the model has a concrete resolution pattern in mind.
@@ -1065,7 +1113,7 @@ that were correct; change only what the validator flagged.
 
 file: {unit.path}
 language: {unit.language or 'unknown'}
-{side_intent}
+{struct_ctx}{side_intent}
 CURRENT_UPSTREAM_SIDE body:
 {cur_lines}
 
