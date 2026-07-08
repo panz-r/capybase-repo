@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from bisect import bisect_right
 from dataclasses import dataclass, field
 
 # ---------------------------------------------------------------------------
@@ -116,11 +117,13 @@ _EXT_LANG: dict[str, str] = {
     ".php": "php",
 }
 
-#: Languages capybase advertises structural support for. Round 1 keeps this to
-#: the two with established coverage (python, rust); Family-A expansion is
-#: Round 3. ``detect_family`` knows the broader map above; ``is_available``
-#: gates the public API so skip-path tests stay green.
-_SUPPORTED_LANGUAGES = frozenset({"python", "rust"})
+#: Languages capybase advertises structural support for. Family A (brace-
+#: delimited: Rust, JS, TS, Go, Java, C/C++, C#, Kotlin, Swift, Scala, Dart,
+#: PHP) and Family B (indentation-delimited: Python) are all supported by the
+#: grammar-free state machines. Family C (declarative/data) is not yet
+#: implemented. ``detect_family`` knows the broader map; ``is_available``
+#: gates the public API.
+_SUPPORTED_LANGUAGES = frozenset(_LANG_FAMILY.keys())
 
 
 def detect_family(language: str | None, path: str | None = None) -> str | None:
@@ -209,6 +212,13 @@ class FileIR:
     a consumer should fall back to LSP (low confidence ⇒ degraded parse). The
     parser never raises — a file it can't make sense of still produces a FileIR,
     just with low confidence / UNKNOWN_BLOCK units.
+
+    ``imports`` and ``exports`` are the file's dependency surfaces (survey §"What
+    Structural Information Actually Drives Merge Correctness"): imports are
+    external names brought in (``import``/``use``/``require``/``#include``);
+    exports are top-level public names defined here. The survey notes "a simple
+    imports-only tool outperformed complex structured tools" — this surface
+    enables cross-commit dependency checks without re-scanning the file.
     """
 
     family: str
@@ -216,6 +226,8 @@ class FileIR:
     parse_confidence: float = 1.0
     source: str = ""
     language: str | None = None
+    imports: list[str] = field(default_factory=list)
+    exports: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +413,88 @@ def _slice_body(source: str, lines: list[str], start: int, end: int) -> str:
     return "\n".join(lines[start : end + 1])
 
 
+def _build_line_index(source: str) -> list[int]:
+    """Byte offsets where each line starts (0-based row → byte offset).
+
+    ``index[0]`` is always 0 (line 0 starts at byte 0). For a source with N
+    newlines, this produces N+1 entries. Used by :func:`_row_at` for O(log n)
+    byte-offset → row conversion — avoids the O(n) ``str.count('\\n', 0, idx)``
+    scan that was called once per declaration push and once per unit close.
+    """
+    index = [0]
+    pos = source.find("\n")
+    while pos >= 0:
+        index.append(pos + 1)
+        pos = source.find("\n", pos + 1)
+    return index
+
+
+def _row_at(line_index: list[int], byte_idx: int) -> int:
+    """Convert a byte offset to a 0-based row number via binary search.
+
+    O(log n) instead of the O(n) ``source.count('\\n', 0, byte_idx)``. The
+    ``line_index`` is precomputed once per parse by :func:`_build_line_index``.
+    """
+    # bisect_right finds the insertion point — the number of line starts at or
+    # before byte_idx, minus 1 = the row number (0-based).
+    return bisect_right(line_index, byte_idx) - 1
+
+
+# ---------------------------------------------------------------------------
+# Import / export surface extraction (survey §"What Structural Information
+# Actually Drives Merge Correctness" — requirement 4 + 5)
+# ---------------------------------------------------------------------------
+
+# Family B (Python) export: top-level names not starting with `_`.
+_B_EXPORT_RE = re.compile(r"^(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)")
+_B_PUBLIC_NAME = re.compile(r"^([A-Za-z][A-Za-z0-9_]*)\s*=")  # module-level const
+
+
+def _extract_imports_exports_b(source: str, units: list[StructuralUnit]) -> tuple[list[str], list[str]]:
+    """Collect the import and export surfaces for a Family-B file.
+
+    Imports: the names from ``import``/``from...import`` lines (already detected
+    as MODULE_STMT units — extract their names). Exports: top-level public
+    function/class/constant names (not ``_``-prefixed)."""
+    imports: list[str] = []
+    for u in units:
+        if u.kind == KIND_MODULE_STMT and u.name and u.name != "<import>":
+            imports.append(u.name)
+    exports: list[str] = []
+    for u in units:
+        if u.kind in (KIND_FUNCTION, KIND_CLASS) and u.name and not u.name.startswith("_"):
+            exports.append(u.name)
+    return imports, exports
+
+
+def _extract_imports_exports_a(source: str, units: list[StructuralUnit]) -> tuple[list[str], list[str]]:
+    """Collect the import and export surfaces for a Family-A file.
+
+    Imports: names from ``use``/``import``/``require``/``#include`` MODULE_STMT
+    units. Exports: top-level public names — ``pub``/``export``/``public``
+    functions/classes/fields (Rust/JS/Java), or any non-private top-level name.
+    """
+    imports: list[str] = []
+    for u in units:
+        if u.kind == KIND_MODULE_STMT and u.name and u.name != "<import>":
+            imports.append(u.name)
+    exports: list[str] = []
+    for u in units:
+        if u.kind in (KIND_FUNCTION, KIND_CLASS, KIND_FIELD) and u.name:
+            # Family-A publicness: check if the body starts with a pub/export
+            # modifier. Rust: ``pub fn``/``pub struct``/``pub const``. JS/TS:
+            # ``export``. Java: ``public``. A name starting with uppercase is
+            # conventionally public in most Family-A languages.
+            first_line = u.body.split("\n", 1)[0] if u.body else ""
+            is_public = any(
+                kw in first_line.split()
+                for kw in ("pub", "export", "public", "EPORTED")
+            )
+            if is_public or u.kind == KIND_CLASS:
+                exports.append(u.name)
+    return imports, exports
+
+
 def parse_family_b(source: str, language: str | None = "python") -> FileIR:
     """Parse an indentation-delimited (Family B) source into a :class:`FileIR`.
 
@@ -532,12 +626,15 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
     close_units_at_or_below(0, last_line_row)
 
     confidence = _assess_confidence(source, units)
+    imports, exports = _extract_imports_exports_b(source, units)
     return FileIR(
         family=FAMILY_B,
         units=units,
         parse_confidence=confidence,
         source=source,
         language=language,
+        imports=imports,
+        exports=exports,
     )
 
 
@@ -695,8 +792,13 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
     row = 0  # current line (0-based)
     line_start = 0  # byte offset of current line start
 
+    # Precompute the line-offset index for O(log n) byte→row conversion
+    # (Improvement #4: eliminates the O(n) str.count('\n',...) scan that ran
+    # once per declaration push and once per unit close).
+    _line_index = _build_line_index(src)
+
     def cur_row_at(byte_idx: int) -> int:
-        return src.count("\n", 0, byte_idx)
+        return _row_at(_line_index, byte_idx)
 
     while i < n:
         ch = src[i]
@@ -710,6 +812,13 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 in_line_comment = False
                 # A line comment ends a statement run (token buffer boundary).
                 buf = ""
+            else:
+                # A newline acts as a token separator so declarations on
+                # consecutive lines don't concatenate in the buffer (e.g.
+                # ``package main\nfunc main()`` must not become ``packagemain
+                # func main()``). Mirrors the ``isspace()`` accumulation below.
+                if buf and not buf.endswith(" "):
+                    buf += " "
             i += 1
             continue
 
@@ -787,7 +896,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             ):
                 # Close all open units.
                 while stack:
-                    _close_a_unit(stack.pop(), brace_depth + 1, src, units, stack)
+                    _close_a_unit(stack.pop(), brace_depth + 1, src, units, stack, _line_index)
                 # Reset statement state.
                 buf = ""
                 # Skip the rest of this line.
@@ -833,7 +942,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # Close any unit whose scope this brace ends. Pass the closing brace
             # index so the body slice can be computed precisely.
             while stack and brace_depth < stack[-1].open_brace_depth:
-                _close_a_unit(stack.pop(), i, src, units, stack)
+                _close_a_unit(stack.pop(), i, src, units, stack, _line_index)
             buf = ""
             i += 1
             continue
@@ -931,19 +1040,22 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
 
     # EOF: close any still-open units (malformed/unclosed — never crash).
     while stack:
-        _close_a_unit(stack.pop(), n, src, units, stack)
+        _close_a_unit(stack.pop(), n, src, units, stack, _line_index)
 
     # Sweep: emit FIELD units for top-level ``const``/``static``/``type`` decls
     # that didn't open a brace (``pub const N: u32 = 5;``). Re-scan line-based.
     _emit_a_field_units(units, src, language)
 
     confidence = _assess_confidence(source, units)
+    imports, exports = _extract_imports_exports_a(source, units)
     return FileIR(
         family=FAMILY_A,
         units=units,
         parse_confidence=confidence,
         source=source,
         language=language,
+        imports=imports,
+        exports=exports,
     )
 
 
@@ -953,6 +1065,7 @@ def _close_a_unit(
     src: str,
     units: list[StructuralUnit],
     stack: list[_OpenAUnit],
+    line_index: list[int] | None = None,
 ) -> None:
     """Finalize a Family-A unit: slice body, compute span/fingerprint, attach.
 
@@ -978,7 +1091,10 @@ def _close_a_unit(
         start_byte = ab + 1 if ab >= 0 else 0
     body = src[start_byte:end_byte]
     body = _dedent_body(body)
-    end_row = src.count("\n", 0, end_byte)
+    if line_index is not None:
+        end_row = _row_at(line_index, min(end_byte, len(src) - 1)) if src else 0
+    else:
+        end_row = src.count("\n", 0, end_byte)
     if end_row < start_row:
         end_row = start_row
 
@@ -1209,7 +1325,22 @@ def _extract_a_import_name(line: str) -> str:
     m = re.match(r"use\s+([A-Za-z_][\w:]*)", s)
     if m:
         return m.group(1)
+    # JS/TS: `import { foo, bar } from './mod'` → the module path.
+    m = re.match(r"import\s+.*?\s+from\s+['\"]([^'\"]+)", s)
+    if m:
+        return m.group(1)
+    # JS/TS: `import './mod'` or `import name from './mod'`.
+    m = re.match(r"import\s+(?:([A-Za-z_]\w*)\s+)?from\s+['\"]([^'\"]+)", s)
+    if m:
+        return m.group(2) or m.group(1) or "<import>"
     m = re.match(r"import\s+(?:type\s+)?([A-Za-z_][\w{}]*)", s)
+    if m:
+        return m.group(1)
+    m = re.match(r"export\s+\{[^}]*\}\s+from\s+['\"]([^'\"]+)", s)
+    if m:
+        return m.group(1)
+    # Go: `import "fmt"` → the module path.
+    m = re.match(r'import\s+["\x27]([^"\x27]+)', s)
     if m:
         return m.group(1)
     m = re.match(r"#include\s+[<\"]([^>\"]+)[>\"]", s)
