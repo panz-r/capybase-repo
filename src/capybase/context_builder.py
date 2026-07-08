@@ -113,7 +113,7 @@ class ContextBuilder:
         if siblings:
             structural_view["sibling_conflict_count"] = len(siblings)
             structural_view["sibling_spans"] = [list(s) for s in siblings]
-        # Structural deconstruction: when tree-sitter resolved the enclosing
+        # Structural deconstruction: when the parser resolved the enclosing
         # definition node and it fits the size budget, use it as primary_text
         # instead of the line window. The model sees the full logical block
         # (def/impl) it is merging inside — sharper than an arbitrary text

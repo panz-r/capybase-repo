@@ -63,8 +63,8 @@ def test_feature_and_unknown_use_base_budget():
 
 
 def test_budget_factor_neutral_when_role_absent():
-    """A result without the commit_change_type feature (e.g. tree-sitter was down
-    at extraction) falls back to the neutral 1.0× factor — never weakens."""
+    """A result without the commit_change_type feature (e.g. the parser was
+    unavailable at extraction) falls back to the neutral 1.0× factor — never weakens."""
     r = RiskEngine(max_retries_per_unit=2)
     assert r._change_type_budget_factor({}) == 1.0
     assert r._effective_budget({}) == 2

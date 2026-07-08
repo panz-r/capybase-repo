@@ -131,7 +131,7 @@ def test_same_name_in_different_scopes_not_duplicate():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skipif(
-    not _rust_available(), reason="tree-sitter rust grammar not installed"
+    not _rust_available(), reason="abstract parser unavailable for rust"
 )
 def test_rust_duplicate_method_in_impl_caught():
     """Two fns with the same name in ONE impl collide."""
@@ -152,7 +152,7 @@ def test_rust_duplicate_method_in_impl_caught():
 
 
 @pytest.mark.skipif(
-    not _rust_available(), reason="tree-sitter rust grammar not installed"
+    not _rust_available(), reason="abstract parser unavailable for rust"
 )
 def test_rust_same_fn_in_different_impls_not_duplicate():
     """``fn make`` in two distinct impls is NOT a collision (per-scope)."""
@@ -256,8 +256,8 @@ def test_syntax_error_does_not_crash_semantic_checks():
 
 
 def test_rust_duplicate_degrades_when_grammar_missing(monkeypatch):
-    """When tree-sitter rust is unavailable, the Rust duplicate check is a
-    silent no-op (passes, checked=False) — never crashes."""
+    """When the structural parser is unavailable for rust, the Rust duplicate
+    check is a silent no-op (passes, checked=False) — never crashes."""
     from capybase.adapters import structural
 
     monkeypatch.setattr(structural, "is_available", lambda lang: False)
@@ -374,7 +374,7 @@ def test_match_entities_classifies_rename_and_same_name():
 
 
 @pytest.mark.skipif(
-    not _rust_available(), reason="tree-sitter rust grammar not installed"
+    not _rust_available(), reason="abstract parser unavailable for rust"
 )
 def test_dropped_entities_rust():
     from capybase.adapters.structural import dropped_entities

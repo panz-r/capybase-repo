@@ -483,13 +483,15 @@ def _extract_imports_exports_a(source: str, units: list[StructuralUnit]) -> tupl
         if u.kind in (KIND_FUNCTION, KIND_CLASS, KIND_FIELD) and u.name:
             # Family-A publicness: check if the body starts with a pub/export
             # modifier. Rust: ``pub fn``/``pub struct``/``pub const``. JS/TS:
-            # ``export``. Java: ``public``. A name starting with uppercase is
-            # conventionally public in most Family-A languages.
+            # ``export``. Java: ``public``. CommonJS: ``module.exports``. (The
+            # earlier ``"EPORTED"`` entry here was a dead typo — ``.split()``
+            # never produces it — and ``exported`` isn't a keyword in any target
+            # language; removed.)
             first_line = u.body.split("\n", 1)[0] if u.body else ""
-            is_public = any(
-                kw in first_line.split()
-                for kw in ("pub", "export", "public", "EPORTED")
-            )
+            toks = first_line.split()
+            is_public = any(kw in toks for kw in ("pub", "export", "public"))
+            if not is_public and "module.exports" in first_line:
+                is_public = True
             if is_public or u.kind == KIND_CLASS:
                 exports.append(u.name)
     return imports, exports
@@ -990,7 +992,9 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             buf = ""
             i = line_end + 1
             row += 1
-            if i <= n and src[line_end] == "\n":
+            # Guard the bounds: when the ``#`` line was the last line (no trailing
+            # newline), ``line_end == n`` and ``src[line_end]`` would overflow.
+            if line_end < n and src[line_end] == "\n":
                 line_start = line_end + 1
             continue
 
@@ -1016,7 +1020,9 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 buf = ""
                 i = line_end + 1
                 row += 1
-                if src[line_end] == "\n":
+                # When the import was the last line (no trailing newline),
+                # ``line_end == n`` and ``src[line_end]`` would overflow; guard it.
+                if line_end < n and src[line_end] == "\n":
                     line_start = line_end + 1
                 continue
 
@@ -1810,6 +1816,87 @@ _CHANGE_LABELS = {
 }
 
 
+def _render_import_surface(diff: StructuralDiff3Way) -> str:
+    """Render the import-surface change block, or "" when no import changed.
+
+    Surveys of structured-merge tools find import handling is the single
+    highest-value structural operation: an imports-only merger outperformed
+    complex structured tools. The correct merge of imports is almost always the
+    UNION of both sides' additions (each side's imports are independently
+    needed) minus only genuine removes. This block makes that explicit instead
+    of leaving the model to infer it from generic per-unit lines.
+
+    Output shape (only the populated lines appear)::
+
+        Import surface: CURRENT adds json; REPLAYED adds sys — union them
+        → merged imports must include: os, json, sys
+
+    A remove by one side is called out separately so the model knows the union
+    is NOT always the whole set. Returns "" when no import unit changed (the
+    common no-import-conflict case) so the annotation is unchanged there.
+    """
+    cur_adds: list[str] = []
+    rep_adds: list[str] = []
+    cur_drops: list[str] = []
+    rep_drops: list[str] = []
+    # The full set of imports that must survive in the merge: every import
+    # present in base, left, or right, minus those a side deliberately removed.
+    survivors: list[str] = []
+    seen: set[str] = set()
+
+    def remember(name: str) -> None:
+        if name and name not in seen and name != "<import>":
+            seen.add(name)
+            survivors.append(name)
+
+    for a in diff.aligned:
+        if a.kind != KIND_MODULE_STMT:
+            continue
+        ck = a.change_kind
+        if ck == _CHANGE_KIND_ADDED_LEFT:
+            cur_adds.append(a.name)
+        elif ck == _CHANGE_KIND_ADDED_RIGHT:
+            rep_adds.append(a.name)
+        elif ck == _CHANGE_KIND_ADDED_BOTH:
+            cur_adds.append(a.name)
+            rep_adds.append(a.name)
+        elif ck == _CHANGE_KIND_DELETED_LEFT:
+            rep_drops.append(a.name)
+        elif ck == _CHANGE_KIND_DELETED_RIGHT:
+            cur_drops.append(a.name)
+        elif ck == _CHANGE_KIND_DELETED_BOTH:
+            pass  # removed by both — not a survivor
+        # Track survivors (union of all sides' present imports).
+        if a.base is not None:
+            remember(a.name)
+        if a.left is not None:
+            remember(a.name)
+        if a.right is not None:
+            remember(a.name)
+
+    if not cur_adds and not rep_adds and not cur_drops and not rep_drops:
+        return ""  # no import-surface change — leave the annotation unchanged
+
+    parts: list[str] = []
+    if cur_adds:
+        parts.append(f"CURRENT adds {', '.join(cur_adds)}")
+    if rep_adds:
+        parts.append(f"REPLAYED adds {', '.join(rep_adds)}")
+    if cur_drops:
+        parts.append(f"CURRENT removes {', '.join(cur_drops)}")
+    if rep_drops:
+        parts.append(f"REPLAYED removes {', '.join(rep_drops)}")
+    head = "Import surface: " + "; ".join(parts)
+    # When both sides only ADD imports, the merge rule is unambiguous: union.
+    if not cur_drops and not rep_drops and (cur_adds or rep_adds):
+        head += " — union them (imports are additive; keep every side's adds)"
+    out = [head]
+    if survivors:
+        out.append(f"→ merged imports must include: {', '.join(survivors)}")
+    return "\n".join(out)
+
+
+
 def render_structural_context(
     diff: StructuralDiff3Way,
     conflict_span: tuple[int, int] | None = None,
@@ -1836,17 +1923,32 @@ def render_structural_context(
     lang_label = diff.language or diff.family
     lines.append(f"STRUCTURAL CONTEXT (language-family: {lang_label}/{diff.family}):")
 
-    # Base structure overview (compact).
+    # Base structure overview (compact) — imports are summarized in their own
+    # dedicated block below, so exclude them here to avoid double-listing.
     base_summary = ", ".join(
         f"[{u.kind.upper()}] {u.name} lines {u.span[0]+1}-{u.span[1]+1}"
         for u in diff.base_units
-        if u.name and not u.is_container_scope
+        if u.name and not u.is_container_scope and u.kind != KIND_MODULE_STMT
     )
     if base_summary:
         lines.append(f"Base structure: {base_summary}")
 
-    # Per-unit change summary.
+    # Import-surface block (survey: "imports-only tool outperformed complex
+    # structured tools — import conflict handling is the single highest-value
+    # structural operation"). Imports are the one unit kind where the correct
+    # merge is almost always the UNION of both sides' adds minus genuine removes;
+    # make that instruction explicit instead of leaving the model to infer it
+    # from a generic "[MODULE_STMT] json: ADDED" line. Emits only when at least
+    # one import unit changed.
+    import_block = _render_import_surface(diff)
+    if import_block:
+        lines.append(import_block)
+
+    # Per-unit change summary — skip imports (already handled above) so the
+    # entity changes read as the code changes they are, not import noise.
     for a in changed:
+        if a.kind == KIND_MODULE_STMT:
+            continue
         label = _CHANGE_LABELS.get(a.change_kind, a.change_kind)
         lines.append(f"  {a.kind.upper()} {a.name}: {label}")
 

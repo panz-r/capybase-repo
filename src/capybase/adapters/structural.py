@@ -572,7 +572,7 @@ def dropped_entities(
     BothSidesRepresented validator remains the backstop for value/assignment
     drops.
 
-    Returns ``None`` when tree-sitter is unavailable or any of the three texts
+    Returns ``None`` when the structural parser is unavailable or any of the three texts
     fail to parse (the critic degrades gracefully). An empty list means the side
     added nothing that's missing.
     """
@@ -627,7 +627,7 @@ def preservation_coverage(
     survives under a different name), so it does not lower coverage. With
     ``embedder`` (embeddings survey §2), a semantic-body rename also counts as
     preserved. Returns a :class:`CoverageReport` with the ratio; ``None`` when
-    tree-sitter is unavailable or any text fails to parse (coverage undefined,
+    the structural parser is unavailable or any text fails to parse (coverage undefined,
     not a failure). An ``added == 0`` report means the side added no structural
     entities (ratio 1.0 — nothing to drop).
     """
@@ -678,7 +678,7 @@ def unattributed_entities(
     is unattributed. This reduces false positives when the model legitimately
     renames an entity to reconcile the sides.
 
-    Returns ``None`` when tree-sitter is unavailable or any text fails to parse.
+    Returns ``None`` when the structural parser is unavailable or any text fails to parse.
     An empty list means every resolved unit derives from (by name or by a
     recognized rename of) a unit in at least one side.
     """
@@ -711,7 +711,7 @@ def sibling_signatures(
     that *some* structured context helps, distinct from the cross-file callee
     definitions surfaced elsewhere.
 
-    Returns ``None`` when tree-sitter is unavailable; an empty list when the
+    Returns ``None`` when the structural parser is unavailable; an empty list when the
     container has no other entities.
     """
     ents = enumerate_entities(source, language, container_span=container_span)
@@ -838,7 +838,7 @@ def fingerprint_region(
 #    added / removed / renamed / signature_changed / body_changed, using the
 #    fingerprints to pair an entity across names (a rename).
 #
-# Both build on ``enumerate_entities`` and degrade to ``None`` when tree-sitter is
+# Both build on ``enumerate_entities`` and degrade to ``None`` when the abstract parser is
 # unavailable (the same graceful-degradation contract as every analyzer here).
 
 # Token-set Jaccard floor for pairing an entity across names when the body is
@@ -876,14 +876,120 @@ def _split_header_body(entity: Entity) -> tuple[str, str]:
     body content identical, so rename detection must compare the header-STRIPPED
     body. Mirrors ``structural_resolver._body_content`` but returns both parts so
     the signature fingerprint can use the header.
+
+    For a MULTI-LINE body the header is ``lines[0]`` (the def/fn/class line) and
+    the rest is the body lines below it — the common case. For a SINGLE-LINE body
+    (``fn foo() { 1 }``, ``def foo(): return 1``, ``function foo() { return 1; }``)
+    ``lines[0]`` is the WHOLE body, so the naive split leaves ``rest=""`` — which
+    makes every one-liner body edit register as ``signature_changed`` (the body
+    content gets folded into the "header") and breaks rename pairing (empty body
+    fingerprint never matches). We instead split a one-liner at its scope opener:
+    the first ``{`` (Family A) or the first ``:`` at bracket-depth 0 (Family B),
+    so the signature lands in the header and the inline body lands in ``rest``.
+    Detected from the text itself (no language param) so it's robust to mismatched
+    metadata; falls back to the whole-line-as-header when no opener is found.
     """
     body = entity.body or ""
     if not body:
         return "", ""
     lines = body.split("\n")
-    header = lines[0]
-    rest = "\n".join(lines[1:])
-    return _norm(header), _norm(rest)
+    if len(lines) > 1:
+        # Multi-line: header is the declaration line, rest is the body below it.
+        header = lines[0]
+        rest = "\n".join(lines[1:])
+        return _norm(header), _norm(rest)
+    # Single-line body: split at the scope opener so the body content isn't
+    # folded into the header. Family A opens with ``{``; Family B with ``:``.
+    line = lines[0]
+    brace = _scope_opener_brace(line)
+    if brace >= 0:
+        header = line[: brace + 1]
+        rest = line[brace + 1 :]
+        # Drop the single matching closing ``}`` (the function's own brace) so the
+        # rest is the body content, not ``... }``. Best-effort; nested braces in
+        # the body are left as-is (both sides compare identically regardless).
+        r = rest.rstrip()
+        if r.endswith("}"):
+            rest = r[:-1]
+        return _norm(header), _norm(rest)
+    colon = _scope_opener_colon(line)
+    if colon >= 0:
+        header = line[: colon + 1]
+        rest = line[colon + 1 :]
+        return _norm(header), _norm(rest)
+    # No opener found (e.g. a field ``const N = 5;``): keep prior behavior.
+    return _norm(line), ""
+
+
+def _scope_opener_brace(line: str) -> int:
+    """Index of the first ``{`` opening a body, or -1.
+
+    Skips braces inside strings/char-literals and inside ``()``/``[]`` (e.g. an
+    array literal ``[1, 2]`` or a generic ``Vec<{...}>`` — rare on a header line).
+    The first brace at paren/bracket depth 0 is the body opener.
+    """
+    depth = 0
+    i = 0
+    n = len(line)
+    quote: str | None = None
+    while i < n:
+        c = line[i]
+        if quote is not None:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ('"', "'", "`"):
+            quote = c
+            i += 1
+            continue
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth = max(0, depth - 1)
+        elif c == "{" and depth == 0:
+            return i
+        i += 1
+    return -1
+
+
+def _scope_opener_colon(line: str) -> int:
+    """Index of the first ``:`` at bracket-depth 0, or -1.
+
+    For a Family-B one-liner (``def foo(a: int) -> str: body``) the body-opening
+    colon is the first ``:`` NOT inside ``()``/``[]``/``{}`` — so type-annotation
+    colons inside the parameter list are skipped. Returns -1 when there is none
+    at depth 0 (e.g. ``const N = 5;``), leaving the caller's fallback in charge.
+    """
+    depth = 0
+    i = 0
+    n = len(line)
+    quote: str | None = None
+    while i < n:
+        c = line[i]
+        if quote is not None:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ('"', "'", "`"):
+            quote = c
+            i += 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth = max(0, depth - 1)
+        elif c == ":" and depth == 0:
+            return i
+        i += 1
+    return -1
 
 
 def _norm(text: str) -> str:
@@ -906,7 +1012,7 @@ def entity_body_fingerprint(entity: Entity, language: str) -> str | None:
     counterpart to the name-agnostic whole-file ``ast_fingerprint``.
 
     Returns the normalized body-without-header; ``None`` is reserved for the
-    "tree-sitter unavailable" sentinel at a higher level (an entity already
+    "structural parser unavailable" sentinel at a higher level (an entity already
     enumerated has a parseable body, so "" indicates an empty body, not failure).
     """
     _ = language  # entity.body is exact source; language not needed to split it
@@ -992,7 +1098,7 @@ def semantic_diff(
     - name in both, signature fingerprint differs → ``signature_changed``
     - name in both, signature same but body differs → ``body_changed``
 
-    Returns ``None`` when tree-sitter is unavailable or either text fails to
+    Returns ``None`` when the structural parser is unavailable or either text fails to
     parse (callers degrade gracefully). An empty list means no entity-level
     change. ``moved`` (cross-file) is NOT detected here — it requires multi-file
     input (see ``detect_cross_file_moves``).
@@ -1194,7 +1300,7 @@ def classify_commit_change(
       no new public exports → modifies existing behavior.
     - ``refactor`` — code touched with no behavior-observable signal (only
       private-member renames / restructuring).
-    - ``unknown`` — ``semantic_diff`` unavailable (tree-sitter down / parse fail).
+    - ``unknown`` — ``semantic_diff`` unavailable (parser down / parse fail).
 
     Pure and deterministic. Never raises — a parse failure degrades to
     ``unknown`` (callers treat ``unknown`` as the neutral default budget).
@@ -1289,9 +1395,9 @@ def detect_cross_file_moves(
     Args:
         old_files: ``{path: file_text}`` for the base/old snapshot.
         new_files: ``{path: file_text}`` for the current/new snapshot.
-        language: the tree-sitter language to enumerate entities in.
+        language: the language to enumerate entities in.
 
-    Returns ``None`` when tree-sitter is unavailable (callers degrade). An empty
+    Returns ``None`` when the structural parser is unavailable (callers degrade). An empty
     list means no cross-file movement was detected. Pure; takes pre-fetched file
     contents so it's testable without a repo. Rename-aware: a moved entity that
     ALSO renamed pairs by body fingerprint across the new name.

@@ -21,7 +21,7 @@ from capybase.resolution_engine import (
 
 pytestmark = pytest.mark.skipif(
     not structural.is_available("python"),
-    reason="tree-sitter Python grammar unavailable",
+    reason="abstract parser unavailable for python",
 )
 
 
@@ -90,10 +90,13 @@ def test_semantic_change_block_appears_in_resolve_prompt():
 
 
 def test_semantic_change_block_empty_for_unsupported_language():
-    """A non-python/rust language degrades to an empty block (no crash)."""
-    base = "function foo() { return 1; }"
+    """A language the abstract parser has no family for (Family C / declarative,
+    e.g. SQL) degrades to an empty block (no crash). Note: javascript IS
+    supported by the Family-A parser and now produces a real block — see
+    test_semantic_change_block_works_for_javascript."""
+    base = "SELECT * FROM users;"
     unit = ConflictUnit(
-        session_id="s", step_index=1, path="app.js", language="javascript",
+        session_id="s", step_index=1, path="query.sql", language="sql",
         conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
         base=ConflictSide(label="BASE", text=base),
         current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=base),
@@ -101,6 +104,27 @@ def test_semantic_change_block_empty_for_unsupported_language():
         original_worktree_text="", marker_span=(1, 5),
     )
     assert _semantic_change_block(unit) == ""
+
+
+def test_semantic_change_block_works_for_javascript():
+    """A Family-A language (javascript) — supported by the abstract parser —
+    now produces a real entity-change block, not empty. Regression guard for the
+    old ``python/rust``-only gate that left 12 of 14 languages without the
+    annotation."""
+    base = "function foo() {\n    return 1;\n}\n"
+    current = base
+    replayed = "function foo() {\n    return 2;\n}\nfunction bar() {\n    return 3;\n}\n"
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.js", language="javascript",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=current),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=replayed),
+        original_worktree_text="", marker_span=(1, 5),
+    )
+    block = _semantic_change_block(unit)
+    assert "Entity-level changes" in block
+    assert "bar" in block  # the added function surfaces
 
 
 def test_semantic_change_block_surfaces_commit_role_for_bugfix():

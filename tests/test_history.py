@@ -132,6 +132,20 @@ def test_region_key_rust_impl():
     assert region_key_from_unit(u).kind == "impl"
 
 
+def test_region_key_trusts_parser_coarse_kind():
+    """The abstract parser emits coarse kinds (``function``/``method``/...) as
+    ``enclosing_node_type``. _coarse_kind must trust these directly rather than
+    always falling through to the signature heuristic (the old tree-sitter-keyed
+    _NODE_KIND_MAP always missed, forcing methods and keyword-less Family-A
+    decls to ``unknown``). A method node_type → kind ``method``, not unknown."""
+    u = _unit(meta={
+        "enclosing_node_type": "method",
+        "enclosing_node_signature": "validate(self):",  # no def/fn prefix → heuristic misses
+        "enclosing_node_span": [10, 20],
+    })
+    assert region_key_from_unit(u).kind == "method"
+
+
 # ---------------------------------------------------------------------------
 # HistoryQueryService: answers per-conflict questions
 # ---------------------------------------------------------------------------

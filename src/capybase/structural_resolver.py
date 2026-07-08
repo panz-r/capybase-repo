@@ -988,7 +988,7 @@ def _try_entity_disjoint(unit: ConflictUnit) -> str | None:
       4. Decline (return None) the moment a single entity is touched by BOTH
          sides — that's a genuine intra-entity conflict for the line/LLM resolvers.
 
-    Declines (returns None) when tree-sitter is unavailable, the conflict isn't
+    Declines (returns None) when the structural parser is unavailable, the conflict isn't
     inside a parseable container, or any entity overlaps. Every resolution this
     produces is STILL validated by the orchestrator before acceptance.
     """

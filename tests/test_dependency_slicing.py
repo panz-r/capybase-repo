@@ -223,5 +223,5 @@ def test_orchestrator_threads_cross_file_slice():
 
 needs_ts = pytest.mark.skipif(
     not __import__("capybase.adapters.structural", fromlist=["is_available"]).is_available("python"),
-    reason="tree-sitter not installed",
+    reason="abstract parser unavailable",
 )

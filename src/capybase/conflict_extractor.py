@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 # Naive but dependency-free language inference from the file extension. Good
 # enough for the MVP's syntax-validation gating; structural merge (later) will
-# replace this with tree-sitter autodetection.
+# replace this with abstract-parser autodetection.
 _EXT_LANG = {
     ".py": "python",
     ".js": "javascript",
@@ -190,7 +190,7 @@ class ConflictExtractor:
             for u in units:
                 u.structural_metadata["sibling_units"] = siblings
                 u.structural_metadata["sibling_count"] = len(units)
-        # Enrich units with tree-sitter structural data when configured and the
+        # Enrich units with abstract-parser structural data when configured and the
         # grammar is available. For each unit we resolve the lowest enclosing
         # AST node (the specific def/impl/struct) and record its text, type,
         # signature, and a base fingerprint of the original file. This lets the
@@ -203,7 +203,7 @@ class ConflictExtractor:
             _enrich_structural(units, worktree_text, base_text, self.structural_config)
         # Diff3 marker refinement (survey §1.3/§1.4): recompute the tightest
         # conflict boundaries via `git merge-file`. This is logically SEPARATE
-        # from tree-sitter AST enrichment above — it only rewrites the side/base
+        # from the structural enrichment above — it only rewrites the side/base
         # texts recorded for resolution (advisory; splicing still uses worktree
         # coordinates). It must run even when [structural] is disabled, because
         # the accurate refined base is what scopes the SBCR combination search
@@ -550,7 +550,7 @@ def conflict_features(unit: ConflictUnit) -> dict[str, float | int | str | bool]
         # classified deterministically from path + the BASE→REPLAYED entity diff.
         # Grounds retry budgets (bugfix→more retries, refactor→fewer) and the LLM
         # prompt ("this is a bugfix — preserve behavior") in the commit's role.
-        # Degrades to "unknown" when tree-sitter is unavailable.
+        # Degrades to "unknown" when the structural parser is unavailable.
         "commit_change_type": _commit_change_type_of(unit),
         # Value-resolution classification: when both sides preserve the SAME
         # statement shape (a return, an assignment to the same target) and only a
@@ -875,7 +875,7 @@ def _blocks_cost(blocks: list | None) -> int:
 
 
 def _blank_markers(text: str) -> str:
-    """Replace conflict-marker lines with comments so tree-sitter can parse."""
+    """Replace conflict-marker lines with comments so the parser can parse."""
     out = []
     for line in text.split("\n"):
         if line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
@@ -891,7 +891,7 @@ def _enrich_structural(
     base_text: str,
     cfg: "StructuralConfig",
 ) -> None:
-    """Populate ``structural_metadata`` with tree-sitter AST data per unit.
+    """Populate ``structural_metadata`` with abstract-parser structural data per unit.
 
     Lazy-imports the structural adapter so capybase works without the
     ``structural`` extra. For each unit whose language has an available grammar

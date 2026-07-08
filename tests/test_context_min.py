@@ -171,7 +171,7 @@ def test_defaults_do_not_change_behavior():
 
 needs_ts = pytest.mark.skipif(
     not __import__("capybase.adapters.structural", fromlist=["is_available"]).is_available("python"),
-    reason="tree-sitter not installed",
+    reason="abstract parser unavailable",
 )
 
 

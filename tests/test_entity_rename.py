@@ -20,7 +20,7 @@ import pytest
 structural = pytest.importorskip("capybase.adapters.structural")
 needs_ts = pytest.mark.skipif(
     not structural.is_available("python"),
-    reason="tree-sitter python grammar not installed",
+    reason="abstract parser unavailable for python",
 )
 
 from capybase.conflict_model import ConflictSide, ConflictUnit

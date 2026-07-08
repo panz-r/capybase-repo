@@ -25,7 +25,7 @@ from tests.conftest import git
 
 pytestmark = pytest.mark.skipif(
     not structural.is_available("python"),
-    reason="tree-sitter Python grammar unavailable",
+    reason="abstract parser unavailable for python",
 )
 
 

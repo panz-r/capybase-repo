@@ -186,7 +186,7 @@ def _structural_context_block(unit: ConflictUnit) -> str:
 def _semantic_change_block(unit: ConflictUnit) -> str:
     """A compact 'what each side changed at the ENTITY level' annotation.
 
-    Deterministic (tree-sitter ``semantic_diff``): classifies each side's
+    Deterministic (abstract-parser ``semantic_diff``): classifies each side's
     entity-level changes vs BASE as added / removed / renamed / signature_changed
     / body_changed, and renders a one-line-per-change summary. This gives the
     model PRECISE change intent — e.g. "CURRENT side renamed `validate_token`→
@@ -195,15 +195,13 @@ def _semantic_change_block(unit: ConflictUnit) -> str:
     lifts a small LLM's merge quality by removing guesswork about what each side
     is doing.
 
-    Folded into the budget-protected core alongside the side-intent block: it's
-    short (a few lines), high-value, and directly helps the model read the sides
-    it must merge. Returns "" when tree-sitter is unavailable, the language isn't
-    supported, or neither side made an entity-level change (degrades gracefully).
-    Pure; reads only the side texts.
+    Available for every language the grammar-free abstract parser covers (the
+    full Family A + Family B set, 14 languages). Availability is gated solely by
+    ``structural.is_available(lang)``; a language with no family mapping yields
+    ``""``. Returns "" when the language isn't supported or neither side made an
+    entity-level change (degrades gracefully). Pure; reads only the side texts.
     """
     lang = unit.language or ""
-    if lang not in ("python", "rust"):
-        return ""
     try:
         from capybase.adapters import structural
     except Exception:  # noqa: BLE001
@@ -437,7 +435,7 @@ def _resolve_prompt_parts(
     enc_text = sv.get("enclosing_node_text") if sv else None
     structural_anchor = ""
     if enc_sig and enc_text:
-        structural_anchor = f"""Logical block you are merging inside (tree-sitter AST):
+        structural_anchor = f"""Logical block you are merging inside (structural parse):
 {enc_sig}
 {enc_text}
 
@@ -1520,7 +1518,7 @@ def build_verifier_prompt(
     Phase 1 (critic guardrail): when ``assertion_enabled`` (default), injects a
     SYSTEM ASSERTION block with the deterministic preservation math so the critic
     doesn't hallucinate drops the AST disproves. Computed inline from the three
-    sides + candidate via tree-sitter + the token-set check.
+    sides + candidate via the abstract parser + the token-set check.
     """
     cur_lines, base_lines, rep_lines = _prompt_sides(unit)
     sv = context.structural_view
@@ -1529,7 +1527,7 @@ def build_verifier_prompt(
     structural_anchor = ""
     if enc_sig and enc_text:
         structural_anchor = (
-            f"Logical block (tree-sitter AST):\n{enc_sig}\n{enc_text}\n\n"
+            f"Logical block (structural parse):\n{enc_sig}\n{enc_text}\n\n"
         )
     # Phase 1 deterministic assertion (critic guardrail): inject the authoritative
     # preservation math so the critic doesn't hallucinate drops the AST disproves.
@@ -1584,9 +1582,9 @@ def _dropped_units_evidence(
     base_lines: str,
 ) -> str:
     """A deterministic 'units this side appears to have dropped' note for the
-    critic prompt, computed from the three sides + candidate via tree-sitter.
+    critic prompt, computed from the three sides + candidate via the abstract parser.
 
-    Empty string when tree-sitter is unavailable or no structural entities were
+    Empty string when the structural parser is unavailable or no structural entities were
     dropped (the judge then falls back to eyeballing the sides). Lists the
     specific (kind, name) units missing from the resolution so the judge weighs
     concrete evidence rather than guessing.
@@ -1621,7 +1619,7 @@ class DeterministicPreservation:
     """The deterministic structural-preservation verdict for a candidate.
 
     Two independent signals (embeddings survey → critic guardrail):
-    - ``cur_ratio``/``rep_ratio``: entity-level coverage (tree-sitter
+    - ``cur_ratio``/``rep_ratio``: entity-level coverage (abstract parser
       ``preservation_coverage``) — of the structural units each side ADDED beyond
       base, the fraction present in the resolution. 1.0 = all preserved.
     - ``dropped_cur_additions``/``dropped_replayed_additions``: token-level
@@ -1658,7 +1656,7 @@ def _deterministic_preservation(
 ) -> DeterministicPreservation | None:
     """Compute the deterministic structural-preservation verdict.
 
-    Combines the entity-level coverage (tree-sitter, when available) with the
+    Combines the entity-level coverage (abstract parser, when available) with the
     token-level dropped-additions check (always available, stdlib regex). Returns
     None only when even the token-level check can't run (shouldn't happen for a
     real candidate). Pure; never raises — a structural failure degrades to the
@@ -1679,7 +1677,7 @@ def _deterministic_preservation(
     dropped_cur = bool(cur_added) and not (cur_added & merged_t)
     dropped_rep = bool(rep_added) and not (rep_added & merged_t)
 
-    # Entity-level coverage via tree-sitter (may be unavailable).
+    # Entity-level coverage via the abstract parser (may be unavailable).
     lang = unit.language
     cur_ratio = rep_ratio = 1.0
     cur_names: list[str] = []
@@ -1826,7 +1824,7 @@ def build_verifier_prompt_conflict(
     structural_anchor = ""
     if enc_sig and enc_text:
         structural_anchor = (
-            f"Logical block (tree-sitter AST):\n{enc_sig}\n{enc_text}\n\n"
+            f"Logical block (structural parse):\n{enc_sig}\n{enc_text}\n\n"
         )
     return f"""You are a strict code reviewer judging a git merge resolution for SEMANTIC
 CONFLICTS. A merge conflict has three sides and a proposed resolution. Judge

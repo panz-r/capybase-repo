@@ -26,7 +26,7 @@ Invariants (must always hold):
 - **Never overrides local validation.** A history hint never overrides a failed
   side-obligation / syntax / splice check. History can *add* a reason to
   escalate, never a reason to accept something invalid.
-- **Degrades to current behavior.** When tree-sitter, the rebase-merge state,
+- **Degrades to current behavior.** When the structural parser, the rebase-merge state,
   or the commit sequence is unavailable, every history function returns empty/
   None and the pipeline behaves exactly as it does today.
 - **Vanilla-Git compatible.** No reliance on non-standard git features; the
@@ -161,7 +161,7 @@ class RegionKey:
 
     ``structural_hash`` is the AST-fingerprint of the file's structure OUTSIDE
     the conflict span (already computed by ``fingerprint_region`` at extraction);
-    it's stable under whitespace/formatting changes. When tree-sitter is
+    it's stable under whitespace/formatting changes. When the parser is
     unavailable, ``kind`` falls back to ``"unknown"`` and only path+span carry
     identity (the current behavior).
     """
@@ -234,7 +234,18 @@ def region_key_from_unit(unit: Any) -> RegionKey:
 
 
 _NODE_KIND_MAP = {
-    # tree-sitter node types → coarse RegionKey kind
+    # The abstract parser emits coarse kinds (function/class/method/field/
+    # module_stmt/unknown_block) as NodeInfo.node_type, which the conflict
+    # extractor stamps into ``enclosing_node_type``. These map directly.
+    "function": "function",
+    "method": "method",
+    "class": "class",
+    "field": "field",
+    "module_stmt": "module_stmt",
+    # Legacy tree-sitter node types — kept for backward compatibility with
+    # metadata persisted before the parser migration (e.g. an Experience store
+    # or journal from an older capybase run). Production no longer produces
+    # these, but recognizing them keeps historical region-key matching intact.
     "function_definition": "function",
     "function_item": "function",
     "class_definition": "class",
@@ -248,7 +259,14 @@ _NODE_KIND_MAP = {
 
 
 def _coarse_kind(node_type: str | None, signature: str | None) -> str:
-    """Map a tree-sitter node type / signature to a coarse RegionKey kind."""
+    """Map a parsed node type / signature to a coarse RegionKey kind.
+
+    ``node_type`` is the abstract parser's coarse kind (``function``/``class``/
+    ``method``/...) when structural enrichment ran; trust it directly. When the
+    node_type is absent or ``unknown_block`` (the parser couldn't classify it),
+    fall back to inferring the kind from the declaration signature — the prefix
+    of the ``def``/``fn``/``class``/``struct``/``impl`` header line.
+    """
     if node_type and node_type in _NODE_KIND_MAP:
         return _NODE_KIND_MAP[node_type]
     if signature:

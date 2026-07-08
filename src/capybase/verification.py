@@ -414,7 +414,7 @@ class IntentCoverageValidator:
 
     The hard coverage guarantee: of the logical units (function/method/class/
     field) each side ADDED beyond base, the resolution must preserve at least a
-    configured fraction. Computed via tree-sitter ``enumerate_entities`` — no
+    configured fraction. Computed via the abstract parser's ``enumerate_entities`` — no
     LLM, fully deterministic. Complements the LLM critic: where the critic is a
     qualitative judge (uncertain, degrades silently), this is a quantitative
     floor ("2/3 replayed-side units preserved → ratio 0.67") that fires even
@@ -424,7 +424,7 @@ class IntentCoverageValidator:
     Only fires when a side added ≥1 structural entity, so value-only conflicts
     (e.g. changing a constant) are unaffected — the token-set
     :class:`BothSidesRepresentedValidator` remains the backstop there.
-    Inert when tree-sitter or the grammar is unavailable.
+    Inert when the structural parser is unavailable for the language.
     """
 
     name = "intent_coverage"
@@ -444,7 +444,7 @@ class IntentCoverageValidator:
         except Exception:  # noqa: BLE001
             return VerificationCheckResult(
                 name=self.name, passed=True,
-                message="intent coverage skipped (tree-sitter unavailable)",
+                message="intent coverage skipped (parser unavailable)",
                 features={"intent_coverage_checked": False},
             )
         if not structural.is_available(lang):
@@ -510,13 +510,13 @@ class UnattributedCodeValidator:
     in NONE of the three sides — a hallucinated helper, an extra branch, a
     synthesized function. LLMs add "helpful" logic no side asked for; this is the
     only check for surplus code, completing the "neither dropped nor spurious"
-    guarantee. Computed via tree-sitter ``unattributed_entities`` (no LLM).
+    guarantee. Computed via the abstract parser's ``unattributed_entities`` (no LLM).
 
     Warning severity (feeds the retry path, like the other soft signals). A unit
     is "unattributed" if its NAME appears in none of base/current/replayed — so a
     legitimate extracted helper (genuinely needed but newly named) also flags;
     the model can justify keeping it on retry, and the message names the specific
-    unit so a human can judge. Inert when tree-sitter or the grammar is absent.
+    unit so a human can judge. Inert when the structural parser is unavailable for the language.
     """
 
     name = "unattributed_code"
@@ -535,7 +535,7 @@ class UnattributedCodeValidator:
         except Exception:  # noqa: BLE001
             return VerificationCheckResult(
                 name=self.name, passed=True,
-                message="unattributed code skipped (tree-sitter unavailable)",
+                message="unattributed code skipped (parser unavailable)",
                 features={"unattributed_code_checked": False},
             )
         if not structural.is_available(lang):
@@ -2045,11 +2045,11 @@ class AstPreservationValidator:
     unchanged code *within* the visible window (e.g. collapse two statements,
     delete a comment) as long as the line count matches — a regression
     invisible to line checks. This validator parses the original and the
-    spliced-resolved file with tree-sitter, computes the node-type fingerprint
+    spliced-resolved file with the abstract parser, computes the node-type fingerprint
     of every node OUTSIDE the conflict span, and rejects the candidate if they
     differ.
 
-    Inert when tree-sitter or the language grammar is unavailable, or when the
+    Inert when the structural parser is unavailable, or when the
     extractor did not record a base fingerprint (structural context disabled).
     """
 
@@ -2081,7 +2081,7 @@ class AstPreservationValidator:
             return VerificationCheckResult(
                 name=self.name,
                 passed=True,
-                message="ast preservation skipped (tree-sitter unavailable)",
+                message="ast preservation skipped (parser unavailable)",
                 features={"ast_checked": False, "ast_preserved": True},
             )
         if not structural.is_available(lang):
@@ -2093,7 +2093,7 @@ class AstPreservationValidator:
             )
         # Splice the candidate into the original and re-fingerprint the outside.
         # CRITICAL: for multi-hunk files, the worktree still has sibling conflict
-        # marker blocks. Those raw markers corrupt the tree-sitter parse and
+        # marker blocks. Those raw markers corrupt the abstract parse and
         # produce a false AST-preservation failure. Blank them to comments first
         # (same approach as the LSP baseline) so the parse reflects real structure.
         spliced = splice_resolution(
@@ -2254,8 +2254,8 @@ def _py_duplicate_definitions(source: str) -> list[tuple[str, str, list[int]]] |
     than once within the SAME scope (module, class body, or function body).
     ``ClassDef``/``FunctionDef``/``AsyncFunctionDef`` collide on their kind;
     bare-name assignments (``X = ...``, ``X: T = ...``) collide as ``variable``
-    so a duplicated ``FEATURE_FLAGS = {...}`` is caught (tree-sitter misses
-    these). A function shadowed by a same-named class is NOT a collision
+    so a duplicated ``FEATURE_FLAGS = {...}`` is caught (the abstract parser's
+    enumerate_entities misses these). A function shadowed by a same-named class is NOT a collision
     (different kind) — that's a legitimate (if odd) redefinition.
 
     Returns ``None`` on SyntaxError/ValueError so the caller can record
@@ -3239,8 +3239,8 @@ class VerificationEngine:
 
         Python uses stdlib ``ast`` (catches classes/functions AND bare
         module-level assignments like ``FEATURE_FLAGS = {...}`` that
-        tree-sitter's enumerate_entities intentionally skips). Rust reuses
-        ``structural.duplicate_definitions`` (tree-sitter, lazy). Other
+        the abstract parser's enumerate_entities intentionally skips). Rust reuses
+        ``structural.duplicate_definitions`` (abstract parser, lazy). Other
         languages / no language: no-op. Degrades to a silent pass on any parse
         gap (a missing grammar or a syntax error — the latter is the syntax
         check's failure to report, not this one's).
@@ -3260,7 +3260,7 @@ class VerificationEngine:
         else:
             return
         if dupes is None:
-            # Parse failed (Python) or tree-sitter couldn't parse (Rust): the
+            # Parse failed (Python) or the abstract parser couldn't parse (Rust): the
             # syntax check owns reporting that. Record not-checked and stop.
             return
         features["duplicate_definition_checked"] = True

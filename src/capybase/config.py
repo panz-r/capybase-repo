@@ -321,13 +321,13 @@ class ValidationConfig(BaseModel):
     # juxtaposed, duplicate symbols across hunks. Meaningful even for
     # single-unit files; disable only for non-code where it's moot.
     require_whole_file_validation: bool = True
-    # AST preservation (requires tree-sitter): prove that nodes OUTSIDE the
+    # AST preservation (requires the structural parser): prove that nodes OUTSIDE the
     # conflict span are structurally unchanged after splicing. Catches a model
     # silently rewriting or deleting unchanged code that the line-level
     # ExactSpliceScope check misses (it only guards line boundaries). When the
     # grammar is absent this validator is inert.
     require_ast_preservation: bool = True
-    # Intent-coverage floor (requires tree-sitter): the minimum fraction of a
+    # Intent-coverage floor (requires the structural parser): the minimum fraction of a
     # side's ADDED structural units (functions/classes/fields beyond base) that
     # must survive in the resolution. A deterministic, hard coverage guarantee —
     # "never silently drop > (1-ratio) of a side's added units without a retry".
@@ -468,7 +468,7 @@ class ValidationConfig(BaseModel):
     # ``cross_commit_dependency_break`` findings; in "stop" mode (cross_commit_policy)
     # it escalates like the resurrection scan, in "warn" it continues. The guardian
     # is purely deterministic (tree-sitter defines/uses, no LLM) and degrades to a
-    # no-op for unsupported languages / when tree-sitter is unavailable.
+    # no-op for unsupported languages / when the structural parser is unavailable.
     enable_cross_commit_guardian: bool = True
     cross_commit_policy: Literal["warn", "stop"] = "warn"
     # Structural parser backend (Round 1 of the abstract-parser migration).
@@ -485,7 +485,7 @@ class ValidationConfig(BaseModel):
     # per-commit validator sees. Purely advisory (observability/assurance, never
     # blocks): the survey notes the retry would be too expensive for multi-commit
     # chains, so this produces a report rather than a gate. Degrades to a no-op
-    # when tree-sitter is unavailable. ``evolution_policy`` is reserved for a
+    # when the structural parser is unavailable. ``evolution_policy`` is reserved for a
     # future "stop" mode; currently always advisory.
     enable_evolution_audit: bool = True
     # Session-level coverage SLO (survey §3.3): aggregate the per-unit intent
@@ -574,8 +574,9 @@ class StructuralConfig(BaseModel):
     conflict extractor populates ``ConflictUnit.structural_metadata`` with the
     lowest enclosing AST node (e.g. the specific ``def``/``impl``) so the
     resolver and validators see a logical block rather than an arbitrary line
-    window. All tree-sitter imports are lazy; when the lib is absent or parsing
-    fails, capybase silently degrades to the line-window behavior.
+    window. The abstract parser is imported lazily; when the language is
+    unrecognized or parsing fails, capybase silently degrades to the
+    line-window behavior.
     """
 
     enabled: bool = False

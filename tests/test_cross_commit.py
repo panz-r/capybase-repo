@@ -19,7 +19,7 @@ from capybase.cross_commit import (
 
 pytestmark = pytest.mark.skipif(
     not structural.is_available("python"),
-    reason="tree-sitter Python grammar unavailable",
+    reason="abstract parser unavailable for python",
 )
 
 
@@ -136,9 +136,11 @@ def test_render_human_readable():
 
 
 def test_unsupported_language_files_are_skipped():
-    """A commit whose touched files are all unsupported languages produces an
-    empty symbol set (graceful degradation, no crash)."""
-    syms = build_commit_symbols({"app.js": "function foo() { return bar(); }"})
+    """A commit whose touched files are all unrecognized extensions produces an
+    empty symbol set (graceful degradation, no crash). Note: .js/.go/etc. ARE
+    supported by the abstract parser now (Round 3), so use a genuinely
+    unrecognized extension to exercise the degradation path."""
+    syms = build_commit_symbols({"readme.md": "function foo() { return bar(); }"})
     assert syms.defines == frozenset()
 
 
@@ -248,4 +250,70 @@ def test_evolution_degrades_when_parser_unavailable(monkeypatch):
     b = _evol_files("def foo():\n    return 2\n")
     chains = build_evolution_chains({"A": a, "B": b}, ["A", "B"], "python")
     assert chains == []
+
+
+# ---------------------------------------------------------------------------
+# Multi-language coverage (Round 3): the guardian now derives its language map
+# from the abstract parser, so it detects cross-commit breaks in every language
+# the parser supports — not just python/rust. Previously ``_LANG_BY_EXT`` mapped
+# only .py/.rs, silently no-op'ing the guardian for Go/JS/Java/etc.
+# ---------------------------------------------------------------------------
+
+
+def test_language_for_path_covers_all_parser_languages():
+    """The guardian's path→language map tracks the parser's coverage, not a
+    stale python/rust-only list. Go/Java/JS/C extensions all resolve."""
+    from capybase.cross_commit import _language_for_path
+    assert _language_for_path("main.go") == "go"
+    assert _language_for_path("App.java") == "java"
+    assert _language_for_path("app.js") == "javascript"
+    assert _language_for_path("app.ts") == "typescript"
+    assert _language_for_path("main.c") == "c"
+    assert _language_for_path("util.cpp") == "cpp"
+    assert _language_for_path("Program.cs") == "csharp"
+    # Unsupported extension → None (guardian degrades gracefully).
+    assert _language_for_path("readme.md") is None
+
+
+def test_guardian_detects_cross_commit_break_in_javascript():
+    """Regression guard for the Round 3 language-map fix: commit A defines
+    ``helper`` (js), commit B (later) depends on it, and the final rebased tree
+    drops ``helper`` → the guardian flags a missing_definition break. Before the
+    fix, both .js files were silently skipped (lang=None → empty symbols)."""
+    a = build_commit_symbols({"a.js": "function helper() {\n    return 1;\n}\n"})
+    b = build_commit_symbols(
+        {"b.js": "function main() {\n    return helper();\n}\n"}
+    )
+    edges = build_dependency_graph({"A": a, "B": b}, ["A", "B"])
+    helper_edges = [e for e in edges if e.symbol == "helper"]
+    assert len(helper_edges) == 1
+    # Final tree that LOST helper → a real cross-commit break.
+    final = {
+        "b.js": structural.enumerate_entities(
+            "function main() {\n    return helper();\n}\n", "javascript"
+        )
+    }
+    breaks = audit_cross_commit_dependencies(edges, final)
+    assert any(b.symbol == "helper" for b in breaks)
+
+
+def test_guardian_detects_cross_commit_break_in_go():
+    """Same regression guard for Go: a Go cross-commit dependency break is now
+    detected (previously ``.go`` → lang=None → no symbols → no edges → no break)."""
+    a = build_commit_symbols(
+        {"main.go": "package main\n\nfunc helper() int {\n    return 1\n}\n"}
+    )
+    b = build_commit_symbols(
+        {"app.go": "package main\n\nfunc main() int {\n    return helper()\n}\n"}
+    )
+    edges = build_dependency_graph({"A": a, "B": b}, ["A", "B"])
+    assert any(e.symbol == "helper" for e in edges)
+    # Final tree that lost helper → break.
+    final = {
+        "app.go": structural.enumerate_entities(
+            "package main\n\nfunc main() int {\n    return helper()\n}\n", "go"
+        )
+    }
+    breaks = audit_cross_commit_dependencies(edges, final)
+    assert any(b.symbol == "helper" for b in breaks)
 

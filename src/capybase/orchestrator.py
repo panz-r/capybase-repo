@@ -317,8 +317,8 @@ def _dropped_units_for(
 ) -> list[tuple[str, str]]:
     """The (kind, name) entities the resolution dropped, across both sides.
 
-    Deterministic (tree-sitter) — the quantitative per-side preservation signal.
-    Returns [] when tree-sitter is unavailable, the language isn't supported, or
+    Deterministic (abstract parser) — the quantitative per-side preservation signal.
+    Returns [] when the structural parser is unavailable, the language isn't supported, or
     nothing structural was dropped (the critic's own message still carries the
     qualitative verdict in that case).
     """
@@ -3601,7 +3601,7 @@ class Orchestrator:
         record (path, preserved, total) — summing both sides' added units. The
         post-rebase rollup aggregates these into one window-level ratio. Best-
         effort: units without coverage detail (unsupported language, parse
-        failure, tree-sitter unavailable) are simply skipped — the SLO reflects
+        failure, structural parser unavailable) are simply skipped — the SLO reflects
         what could be measured.
         """
         try:
@@ -3646,7 +3646,7 @@ class Orchestrator:
         Returns ``(ratio, preserved, total)`` — the fraction of all measured
         intent units (across both sides, every accepted unit) preserved in the
         final rebased branch. ``None`` when no coverage was measured (no units
-        with structural intent, or tree-sitter was unavailable throughout).
+        with structural intent, or the parser was unavailable throughout).
         """
         if not self._session_coverage_samples:
             return None
@@ -3746,7 +3746,7 @@ class Orchestrator:
         symbol an earlier commit defines), and verifies each edge's symbol still
         resolves in the final rebased tree — catching e.g. commit A renaming
         ``foo``→``bar`` while a later commit B still calls ``foo``. Purely
-        deterministic (tree-sitter); a no-op when disabled or no source commits
+        deterministic (abstract parser); a no-op when disabled or no source commits
         are available. With ``cross_commit_policy = "stop"`` a break escalates
         like the resurrection scan; with ``"warn"`` (default) it surfaces and
         continues. Returns None when there are no findings (nothing to do).
@@ -3853,7 +3853,7 @@ class Orchestrator:
         version, silently losing an intermediate step). Purely advisory
         (observability/assurance, never blocks): the survey notes the retry would
         be too expensive for multi-commit chains, so this produces a report. A
-        no-op when disabled or no source commits / tree-sitter available.
+        no-op when disabled or no source commits / parser available.
         Returns None when there are no findings.
         """
         cfg = self.config.validation
@@ -4718,7 +4718,7 @@ class Orchestrator:
             # consensus winner is first, but on a 3B model the winner frequently
             # carries a syntax error while the 2nd/3rd sample is valid — trying
             # them before regenerating is free reliability (the tokens were
-            # already spent). These are local tree-sitter/splice checks, not
+            # already spent). These are local parser/splice checks, not
             # LLM calls, so validating all N is cheap. If none pass, the winner
             # (and its failures) feeds the CEGIS repair loop below.
             cand = winner

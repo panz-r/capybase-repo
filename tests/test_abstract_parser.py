@@ -517,6 +517,29 @@ def test_javascript_import_surface():
     assert "bar" in ir.exports
 
 
+def test_export_detection_no_dead_eported_token():
+    """Regression guard: the export keyword set no longer carries the dead
+    ``"EPORTED"`` typo. The real modifiers (pub/export/public) and the CommonJS
+    ``module.exports`` form drive export classification. Exercises the extractor
+    directly with a synthetic unit so the test isn't coupled to the parser's
+    anonymous-function-expression naming (a separate limitation)."""
+    # A named function with the CommonJS export form on its header line.
+    unit = ap.StructuralUnit(
+        kind=ap.KIND_FUNCTION, name="foo",
+        span=(0, 0),
+        body="module.exports = function foo() { return 1; }",
+    )
+    _imports, exports = ap._extract_imports_exports_a("", [unit])
+    assert "foo" in exports
+    # And the classic modifiers still work (the typo's removal didn't regress).
+    unit2 = ap.StructuralUnit(
+        kind=ap.KIND_FUNCTION, name="bar",
+        span=(0, 0), body="export function bar() { return 2; }",
+    )
+    _i2, exports2 = ap._extract_imports_exports_a("", [unit2])
+    assert "bar" in exports2
+
+
 # ---------------------------------------------------------------------------
 # Line-offset index (Improvement #4)
 # ---------------------------------------------------------------------------
@@ -661,3 +684,54 @@ def test_render_context_distinct_additions_says_no_conflict():
     text = ap.render_structural_context(diff)
     assert "NONE" in text
     assert "left_new" in text and "right_new" in text
+
+
+# ---------------------------------------------------------------------------
+# Import-surface annotation (survey: import handling is the highest-value
+# structural operation). The block surfaces an explicit "union the imports"
+# instruction instead of leaving the model to infer it from generic lines.
+# ---------------------------------------------------------------------------
+
+
+def test_render_context_import_union_python():
+    """Both sides add different imports → the annotation surfaces a dedicated
+    import-surface block with an explicit 'union them' instruction and the full
+    required import set. (The canonical import-combine merge shape.)"""
+    base = "import os"
+    left = "import os\nimport json"
+    right = "import os\nimport sys"
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    text = ap.render_structural_context(diff)
+    assert "Import surface" in text
+    assert "CURRENT adds json" in text
+    assert "REPLAYED adds sys" in text
+    assert "union" in text
+    # The full union of imports is named explicitly.
+    assert "os" in text and "json" in text and "sys" in text
+    # Imports are NOT duplicated in the generic per-unit change list.
+    assert "[MODULE_STMT]" not in text
+
+
+def test_render_context_import_union_rust_use():
+    """Family-A ``use`` statements get the same import-surface treatment —
+    guards the Rust import path (which also exercises the no-trailing-newline
+    crash fix in parse_family_a)."""
+    base = "use std::fs;"
+    left = "use std::fs;\nuse std::io;"
+    right = "use std::fs;\nuse std::path;"
+    diff = ap.compute_structural_diff_3way(base, left, right, language="rust")
+    text = ap.render_structural_context(diff)
+    assert "Import surface" in text
+    assert "std::io" in text and "std::path" in text
+    assert "union" in text
+
+
+def test_render_context_no_import_block_when_only_code_changed():
+    """A function-only change (no import change) produces NO import-surface
+    block — the annotation is unchanged from the pre-import-block behavior."""
+    base = "def foo():\n    return 1\n"
+    left = "def foo():\n    return 2\n"
+    right = "def foo():\n    return 3\n"
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    text = ap.render_structural_context(diff)
+    assert "Import surface" not in text

@@ -33,23 +33,47 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from capybase.adapters.structural import Entity
 
-#: Languages we can build a meaningful defines/uses map for. The guardian is a
-#: no-op for other languages (degrades gracefully, like every structural check).
-_SUPPORTED_LANGUAGES = ("python", "rust")
+#: Languages the cross-commit guardian can build a defines/uses map for. Derived
+#: from the abstract parser's own family map so the guardian tracks parser
+#: coverage by construction — adding a language to the parser automatically
+#: extends the guardian here. The guardian is a no-op for other languages
+#: (degrades gracefully, like every structural check). Resolved lazily to avoid
+#: an import cycle at module load.
+_SUPPORTED_LANGUAGES: tuple[str, ...] | None = None
+_LANG_BY_EXT: dict[str, str] | None = None
 
-#: Extension → language map for classifying a path's content.
-_LANG_BY_EXT = {
-    ".py": "python",
-    ".rs": "rust",
-}
+
+def _ensure_lang_maps() -> None:
+    """Populate ``_SUPPORTED_LANGUAGES`` / ``_LANG_BY_EXT`` from the parser.
+
+    Done lazily (first call) rather than at import time so ``cross_commit`` can
+    be imported without pulling in the adapter stack, mirroring the lazy
+    ``from capybase.adapters import structural`` pattern used throughout this
+    module.
+    """
+    global _SUPPORTED_LANGUAGES, _LANG_BY_EXT
+    if _LANG_BY_EXT is not None:
+        return
+    from capybase.adapters import abstract_parser
+    _SUPPORTED_LANGUAGES = tuple(abstract_parser._LANG_FAMILY.keys())
+    # The parser's ext→lang map is the source of truth; copy it so the guardian
+    # sees every extension the parser recognizes (.go/.java/.js/.ts/.c/.cpp/...).
+    _LANG_BY_EXT = dict(abstract_parser._EXT_LANG)
 
 
 def _language_for_path(path: str) -> str | None:
-    """The tree-sitter language for a file path, or None if unsupported."""
+    """The canonical language for a file path, or None if unsupported.
+
+    Routes through the abstract parser's extension map, so the guardian covers
+    every language the grammar-free parser recognizes (Family A + Family B).
+    Returns None for unrecognized extensions — callers treat that as "no
+    structural signal, skip this file" (the guardian degrades gracefully).
+    """
+    _ensure_lang_maps()
     dot = path.rfind(".")
     if dot < 0:
         return None
-    return _LANG_BY_EXT.get(path[dot:].lower())
+    return _LANG_BY_EXT.get(path[dot:].lower())  # type: ignore[union-attr]
 
 
 @dataclass(frozen=True)
@@ -370,10 +394,10 @@ def build_evolution_chains(
         per_commit_files: ``{commit_oid: {path: file_text}}`` for each replayed
             commit's touched files (post-image contents).
         commit_order: the commit OIDs oldest-first (replay order).
-        language: the tree-sitter language to enumerate entities in.
+        language: the language to enumerate entities in.
 
     Returns chains of length ≥2 only (single-commit entities don't evolve).
-    Empty list when tree-sitter is unavailable or no entity spans ≥2 commits.
+    Empty list when the structural parser is unavailable or no entity spans ≥2 commits.
     Pure; takes pre-fetched contents so it's testable without a repo.
     """
     from capybase.adapters import structural

@@ -18,7 +18,7 @@ from capybase.adapters import structural
 # degrade to None, and there's nothing to assert about the classification).
 pytestmark = pytest.mark.skipif(
     not structural.is_available("python"),
-    reason="tree-sitter Python grammar unavailable",
+    reason="abstract parser unavailable for python",
 )
 
 
@@ -106,6 +106,59 @@ def test_body_change_detected():
     assert out[0].name == "foo"
 
 
+def test_oneliner_body_change_not_signature_change():
+    """A single-line body edit (``def foo(): return 1`` → ``return 2``) is
+    body_changed, NOT signature_changed. Regression guard for the one-liner edge
+    case where the whole body sits on the header line: previously the body
+    content was folded into the "header" so any edit looked like an interface
+    change. Now _split_header_body splits at the scope opener."""
+    old = "def foo():\n    return 1\n"
+    new = "def foo():\n    return 2\n"
+    # The single-line form (no newline before the body) is the degenerate case.
+    out = structural.semantic_diff("def foo(): return 1", "def foo(): return 2", "python")
+    assert len(out) == 1
+    assert out[0].change_type == "body_changed"
+    assert out[0].name == "foo"
+
+
+@pytest.mark.parametrize("lang,old,new", [
+    ("rust", "fn foo() -> u32 { 42 }", "fn foo() -> u32 { 43 }"),
+    ("javascript", "function foo() { return 1; }", "function foo() { return 2; }"),
+    ("go", "func foo() int { return 1 }", "func foo() int { return 2 }"),
+    ("typescript", "function foo(): number { return 1; }", "function foo(): number { return 2; }"),
+])
+def test_oneliner_body_change_family_a(lang, old, new):
+    """One-liner body edits in Family-A languages classify as body_changed,
+    not signature_changed. Guards the _scope_opener_brace split path. (Java/C
+    methods lack a declaration keyword and aren't extracted as standalone
+    entities — a pre-existing Family-A limitation, out of scope here.)"""
+    if not structural.is_available(lang):
+        pytest.skip(f"abstract parser unavailable for {lang}")
+    out = structural.semantic_diff(old, new, lang)
+    assert len(out) == 1, f"{lang}: expected 1 change, got {out}"
+    assert out[0].change_type == "body_changed", f"{lang}: got {out[0].change_type}"
+
+
+def test_oneliner_signature_change_still_detected():
+    """A single-line body edit that ALSO changes the signature (params) is still
+    signature_changed — the fix must not over-broaden body_changed."""
+    old = "def foo(a, b): return a + b"
+    new = "def foo(a, b, c): return a + b + c"
+    out = structural.semantic_diff(old, new, "python")
+    assert len(out) == 1
+    assert out[0].change_type == "signature_changed"
+
+
+def test_oneliner_rename_pairs_by_body():
+    """A single-line rename (same body, different name) pairs as a rename —
+    previously impossible because one-liners had an empty body fingerprint."""
+    out = structural.semantic_diff("def foo(): return 1", "def bar(): return 1", "python")
+    renames = [c for c in out if c.change_type == "renamed"]
+    assert len(renames) == 1
+    assert renames[0].old_name == "foo"
+    assert renames[0].new_name == "bar"
+
+
 def test_class_entity_classified():
     old = "class Foo:\n    pass\n"
     new = "class Foo:\n    pass\n\nclass Bar:\n    pass\n"
@@ -138,7 +191,7 @@ def test_render_lines_human_readable():
 
 def test_rust_semantic_diff_added():
     if not structural.is_available("rust"):
-        pytest.skip("tree-sitter Rust grammar unavailable")
+        pytest.skip("abstract parser unavailable for rust")
     old = "pub fn foo() -> i32 {\n    1\n}\n"
     new = "pub fn foo() -> i32 {\n    1\n}\n\npub fn bar() -> i32 {\n    2\n}\n"
     out = structural.semantic_diff(old, new, "rust")

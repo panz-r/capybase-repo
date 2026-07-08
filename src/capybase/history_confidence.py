@@ -3,7 +3,7 @@
 History context can change decisions (future-apply probing, future obligations,
 prompt augmentation), but not all history signals are equally reliable. A
 future-region match found by precise diff-overlap should count far more than one
-guessed from a commit subject string; a region key with a tree-sitter kind and
+guessed from a commit subject string; a region key with a parsed kind and
 structural hash is more trustworthy than ``kind == "unknown"``. This module
 summarizes those signals into one :class:`HistoryConfidence` so the orchestrator
 can avoid over-trusting weak history (e.g. refusing to re-stamp a candidate as
