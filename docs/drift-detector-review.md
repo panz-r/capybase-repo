@@ -2,14 +2,43 @@
 
 ## Status
 
-**Under review.** This document describes a feature whose current implementation
-produces false positives on every scenario in our live eval (including correct,
-deterministically-resolved merges). We are sending it for external review to
-survey proven techniques and related research before reworking the approach. The
-goal is a drift signal that is trustworthy enough to act on — currently it is
-not.
+**Redesigned (external review completed).** The embedding-based detector
+described in this brief has been **scrapped**. An external review confirmed the
+core flaw diagnosed here — the cross-modal (prose-intent vs. merged-code) cosine
+comparison has no operating point: the ~0.29–0.45 distance floor is the baseline
+for a *correct* merge, so no threshold separates correct from drifted output.
+
+The review's three "immediate actions" have been implemented:
+
+1. **Gate on resolution mechanism.** Deterministic resolutions (exact-history
+   reuse, structural union, brace repair, test-gated side pick, combination
+   search, block capture) emit **no** drift signal — drift is impossible by
+   construction on those paths. This single gate eliminates the false positives
+   on every deterministic scenario in the eval (py_simple, py_multi_unit,
+   rust_port_test).
+2. **The prose-anchor embedding comparison is removed.** No embedder, no anchor,
+   no cosine, no threshold. There is nothing left to miscalibrate.
+3. **Test regression is the primary signal.** A baseline-passing test that now
+   fails (the existing test-continuity invariant) is the drift indicator — a
+   behavioral signal with a documented 0% false-positive rate in the
+   semantic-conflict literature (SAM). It fires only for LLM-produced
+   resolutions.
+
+The detector now lives in `src/capybase/drift.py` as a mechanism-gated
+behavioral accumulator (`DriftMonitor.observe` + `summary`), wired into the
+orchestrator's run loop after the test gate. The medium-term recommendations
+from the review (a code-specific embedder for a secondary same-domain signal,
+AST structural-delta tracking with refactoring-aware filtering, and a labeled
+calibration corpus) are **deferred** — they require the corpus-building work the
+review describes before they can be deployed without reintroducing the
+false-positive problem this redesign removed.
+
+The body below is retained as the historical record of the problem the review
+was commissioned to address.
 
 ---
+
+
 
 ## What it is
 

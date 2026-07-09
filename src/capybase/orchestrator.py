@@ -917,20 +917,27 @@ class Orchestrator:
                 structural.set_entity_embedder(self._shared_embedder)
             except Exception:  # noqa: BLE001 - semantic matching is best-effort
                 pass
-        # Session-level semantic drift detection (embeddings survey §6): advisory
-        # only — never blocks a merge. Computes a session anchor once from the
-        # branch intent + commit subjects, then per-commit cosine distance of the
-        # merged resolved texts from that anchor. Constructed AFTER the shared
-        # embedder so it captures the real client; None (inactive) when drift
-        # detection is disabled or no embedder is available.
+        # Session-level drift detection (behavioral-regression redesign). The
+        # first-gen detector embedded a prose anchor and cosine-compared it to
+        # merged code; an external review established that cross-modal
+        # comparison has no operating point (see docs/drift-detector-review.md),
+        # so it was scrapped. The replacement is mechanism-gated + behavioral:
+        # it emits a drift advisory only when an LLM-produced resolution
+        # introduces a test regression (a baseline-passing test that now fails
+        # — the test-continuity set). Deterministic resolutions (exact reuse,
+        # structural union, brace repair) emit nothing: drift is impossible by
+        # construction. No embedder, no threshold, nothing to calibrate.
         self._drift_monitor: "object | None" = None
         if config.memory.enable_drift_detection:
             from capybase.drift import DriftMonitor
 
-            self._drift_monitor = DriftMonitor(
-                embedder=self._shared_embedder,
-                threshold=config.memory.drift_threshold,
-            )
+            self._drift_monitor = DriftMonitor()
+        # The per-step test-continuity regressions, stashed by _run_tests right
+        # after the gate runs. Read by _observe_drift in the run loop (which
+        # runs after _run_tests, so the value is fresh for the step just
+        # resolved). Reset per step.
+        self._last_continuity_regressions: list[str] = []
+        self._drift_summary_emitted: bool = False
         self.resolution_engine = resolution_engine or ResolutionEngine(config.model)
         self.verification = VerificationEngine.default(
             ValidationConfig.from_dict(config.validation.model_dump())
@@ -2459,10 +2466,6 @@ class Orchestrator:
         # the source commits' patches. Rendered into the history prompt block;
         # trimmed last when the budget is tight.
         self._branch_intent = self._build_branch_intent(self._history_plan)
-        # Drift anchor (embeddings survey §6): embed the branch-intent render +
-        # the source commit subjects as the session goal vector. Idempotent;
-        # no-op when the monitor is inactive (disabled / no embedder).
-        self._set_drift_anchor()
         # Wire the history service into the context builder so prompt-generation
         # sees the history-context block (#history step 7). The builder was
         # constructed in __init__ without a service; set it now that rebase()
@@ -2695,13 +2698,15 @@ class Orchestrator:
                 f"HEAD; reset to it with `git reset --hard {backup_ref}`, or "
                 f"delete it with `git branch -D {backup_ref}`"
             )
-        # Drift summary (embeddings survey §6): emit the post-session headline
-        # so drift is visible in logs and detectable in regressions. No-op when
-        # the monitor was inactive (disabled / no embedder / no plan).
-        if self._drift_monitor is not None:
+        # Drift summary: emit the post-session behavioral-drift headline so it
+        # is visible in logs and detectable in regressions. No-op when the
+        # monitor was inactive (drift detection disabled or nothing observed).
+        # Guarded against double-emission: the run() loop emits on clean finish.
+        if self._drift_monitor is not None and not self._drift_summary_emitted:
             summary = self._drift_monitor.summary()  # type: ignore[attr-defined]
             if summary:
                 self.journal.emit("drift_summary", {"summary": summary})
+            self._drift_summary_emitted = True
         return result
 
     # ------------------------------------------------------------------ resurrection
@@ -2811,76 +2816,97 @@ class Orchestrator:
             )
             return None
 
-    def _drift_anchor_text(self) -> str:
-        """The session anchor text: branch-intent render + commit subjects.
+    def _step_mechanism(self, result: "StepResult") -> str:
+        """The coarse resolution class of a step's accepted outcomes.
 
-        Concatenated so the anchor embedding captures both the structural net-
-        effect summary and the commit-message intent (embeddings survey §6).
-        Uses a general text embedder (commit messages + summaries are natural
-        language). Empty when no plan/intent.
+        Returns ``"deterministic"``, ``"llm"``, or ``"mixed"`` — the mechanism
+        gate for the behavioral drift detector (drift-review immediate action
+        #1). A deterministic step (exact-history reuse, structural union, brace
+        repair, test-gated side pick, combination search, block capture) is a
+        verbatim or provably-safe replay of a validated state — drift is
+        impossible by construction, so the drift advisory never fires for it,
+        even if a pre-existing test failure is observed. Only ``"llm"`` /
+        ``"mixed"`` steps can carry model-induced drift.
         """
-        if self._history_plan is None:
-            return ""
-        parts = []
-        for c in getattr(self._history_plan, "source_commits", []) or []:
-            subj = getattr(c, "subject", "") or ""
-            body = getattr(c, "body_summary", "") or ""
-            if subj or body:
-                parts.append(f"{subj}\n{body}")
-        if self._branch_intent is not None:
-            try:
-                parts.append(self._branch_intent.render_block())
-            except Exception:  # noqa: BLE001
-                pass
-        return "\n\n".join(parts)
+        provs = [
+            getattr(o.accepted, "provenance", "") or ""
+            for o in result.outcomes
+            if o.accepted is not None
+        ]
+        if not provs:
+            # No accepted outcomes (e.g. escalated) — treat as deterministic so
+            # the step cannot spuriously fire drift (there was no resolution to
+            # drift from).
+            return "deterministic"
+        from capybase.provenance import LLM_PROVENANCES
 
-    def _set_drift_anchor(self) -> None:
-        """Embed the session anchor (embeddings survey §6). No-op when inactive."""
+        llm_markers = LLM_PROVENANCES | {"history_augmented_llm"}
+        deterministic_markers = frozenset({
+            "deterministic_structural", "deterministic_brace_repair",
+            "exact_history_reuse", "combination_search",
+            "test_gated_side", "block_capture",
+        })
+        has_llm = any(p in llm_markers for p in provs)
+        has_det = any(p in deterministic_markers for p in provs)
+        if has_llm and has_det:
+            return "mixed"
+        if has_llm:
+            return "llm"
+        return "deterministic"
+
+    def _drift_coverage_note(self) -> str:
+        """The behavioral-signal coverage note for this step's drift report.
+
+        The drift detector's primary signal is test regression, whose detection
+        ceiling is the test baseline's coverage. The note makes that ceiling
+        explicit so a non-firing is interpretable: "no drift detected" vs.
+        "insufficient coverage to detect drift" (drift-review: surface the
+        coverage fraction in the advisory output).
+        """
+        baseline = self._test_continuity_baseline
+        if baseline:
+            return (
+                f"test coverage for modified files: {len(baseline)} baseline "
+                f"test(s) active"
+            )
+        return "no test baseline captured — behavioral drift signal inactive"
+
+    def _observe_drift(self, commit_index: int, result: "StepResult") -> None:
+        """Per-step behavioral-drift observation. Advisory only, never blocks.
+
+        The second-generation drift detector (the embedding monitor was scrapped
+        — see docs/drift-detector-review.md). The signal is behavioral: the
+        test-continuity regressions for this step (baseline-passing tests that
+        now fail), gated on resolution mechanism. An LLM-produced resolution
+        that introduces a regression fires a high-confidence drift advisory
+        (0% FPR per the SAM literature). A deterministic resolution never fires
+        — drift is impossible by construction. No-op when the monitor is
+        inactive. Never raises.
+        """
         if self._drift_monitor is None:
             return
-        text = self._drift_anchor_text()
-        if text:
-            self._drift_monitor.set_anchor(text)  # type: ignore[attr-defined]
-
-    def _check_drift(self, commit_index: int, result: "StepResult | None" = None) -> None:
-        """Per-commit drift measurement (embeddings survey §6). Advisory only.
-
-        Measures the cosine distance between the session anchor (the branch
-        intent — the GOAL) and this step's MERGED resolved texts (the OUTCOME).
-        If the model's resolutions drift from the intended behavior, the merged-
-        code embeddings diverge from the intent-text anchor. A drift advisory is
-        journaled when distance exceeds the threshold. No-op when the monitor is
-        inactive. Never blocks a merge.
-        """
-        if self._drift_monitor is None:
-            return
-        # Build the per-commit probe from the step's accepted resolved texts —
-        # the actual merged code, not the static intent. Compared against the
-        # anchor (the intended goal), divergence signals drift.
-        probe = ""
-        if result is not None:
-            parts = []
-            for outcome in result.outcomes:
-                acc = outcome.accepted
-                if acc is not None and acc.resolved_text:
-                    parts.append(acc.resolved_text)
-            probe = "\n\n".join(parts)
-        if not probe:
-            return  # nothing merged this step (e.g. all escalated) — skip
+        mechanism = self._step_mechanism(result)
+        regressions = list(self._last_continuity_regressions)
+        coverage_note = self._drift_coverage_note()
         try:
-            report = self._drift_monitor.check(probe, commit_index)  # type: ignore[attr-defined]
+            report = self._drift_monitor.observe(  # type: ignore[attr-defined]
+                commit_index=commit_index,
+                mechanism=mechanism,
+                regressed_tests=regressions,
+                coverage_note=coverage_note,
+            )
         except Exception:  # noqa: BLE001 - drift detection is best-effort
             return
         if report is not None and report.is_drift:
-            self.journal.emit_advisory(
-                "drift_detected", report.render(),
-            )
+            self.journal.emit_advisory("drift_detected", report.render())
             self.journal.emit(
-                "semantic_drift",
-                {"commit_index": report.commit_index,
-                 "distance": round(report.distance, 4),
-                 "cumulative": round(report.cumulative, 4),
-                 "threshold": report.threshold},
+                "behavioral_drift",
+                {
+                    "commit_index": report.commit_index,
+                    "mechanism": report.mechanism,
+                    "regressions": list(report.regressed_tests),
+                    "coverage_note": report.coverage_note,
+                },
                 step_index=self.step,
             )
 
@@ -2955,9 +2981,6 @@ class Orchestrator:
             self._history_service = self._build_history_service(self._history_plan)
             self._branch_intent = self._build_branch_intent(self._history_plan)
             self.context_builder.history_service = self._history_service
-            # Drift anchor (embeddings survey §6): set it here too so the run()
-            # workflow (without a prior rebase() call) still measures drift.
-            self._set_drift_anchor()
         except Exception as exc:  # noqa: BLE001 - advisory
             self.journal.emit(
                 "history_unavailable", {"reason": f"lazy build failed: {exc}"},
@@ -3979,6 +4002,9 @@ class Orchestrator:
             result = self._resolve_step()
             result.step_index = self.step
             last = result
+            # Reset the per-step drift-regression stash before the test gate
+            # populates it (it's read by _observe_drift after the gate).
+            self._last_continuity_regressions = []
             # Accumulate this step's accepted-unit coverage into the session
             # SLO rollup (survey §3.3). Cheap (reads already-computed detail);
             # the post-rebase report aggregates it into one ratio.
@@ -3991,6 +4017,12 @@ class Orchestrator:
                 result.escalated = True
                 result.reason = "pre-continue tests failed"
                 break
+            # Drift observation (behavioral-regression redesign): runs AFTER the
+            # test gate so the step's regressions are known. Mechanism-gated:
+            # deterministic resolutions emit no drift (impossible by
+            # construction); only LLM resolutions with a test regression fire.
+            # Advisory only — never blocks. No-op when drift detection is off.
+            self._observe_drift(self.step, result)
             # Accept report (#4): both per-unit outcomes and the test verdict
             # exist here — write the "why we accepted" summary before continuing.
             self._write_accept_report(result)
@@ -4041,6 +4073,15 @@ class Orchestrator:
                 # preservation ratio across the window, surfaced as observability
                 # for regression detection. Advisory; never blocks.
                 self._report_session_coverage_slo()
+                # Drift summary (behavioral-regression redesign): emit the
+                # post-session headline here too so the run()-direct path
+                # (without a rebase() wrapper) surfaces it. Guarded against
+                # double-emission (rebase() emits again as a backstop).
+                if self._drift_monitor is not None and not self._drift_summary_emitted:
+                    summary = self._drift_monitor.summary()  # type: ignore[attr-defined]
+                    if summary:
+                        self.journal.emit("drift_summary", {"summary": summary})
+                    self._drift_summary_emitted = True
                 self.git.record_step_ref(self.session_id, self.step, head_after)
                 self.out(self._ok(f"✓ rebase complete (session {self.session_id})"))
                 break
@@ -5171,10 +5212,6 @@ class Orchestrator:
                         pass
             except Exception:  # noqa: BLE001 - memory is best-effort
                 pass
-        # Drift check (embeddings survey §6): after the step's outcomes are
-        # recorded, measure cumulative drift from the session anchor. Advisory
-        # only — never blocks. No-op when drift detection is inactive.
-        self._check_drift(self.step, result)
 
     def _write_and_stage(
         self,
@@ -5378,6 +5415,10 @@ class Orchestrator:
         # counterexamples. Sharpen the verdict so the human/model sees WHICH
         # baseline tests broke, not just "tests failed".
         regressions = self._test_continuity_regressions(run.stdout, cmd)
+        # Stash for the drift detector: _observe_drift (run after this gate)
+        # reads the step's regressions as the behavioral-drift primary signal.
+        # Set unconditionally — an empty list means "no regressions this step".
+        self._last_continuity_regressions = list(regressions)
         if regressions:
             names = ", ".join(regressions[:5]) + (" ..." if len(regressions) > 5 else "")
             self._last_test_verdict = (

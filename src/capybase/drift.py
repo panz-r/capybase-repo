@@ -1,125 +1,135 @@
-"""Session-level semantic drift detection (embeddings survey §6).
+"""Session-level drift detection (behavioral-regression, mechanism-gated).
 
-Every other validator is per-commit: it checks whether the merge of a single
-commit preserves that commit's intent. None detect when the CUMULATIVE effect
-of several merges drifts the branch from its original purpose — for example,
-when a merge accidentally incorporates unrelated changes, or when the model's
-plan-first step across retries has gradually shifted the merged code.
+This module is the second-generation drift detector. The first generation
+compared a **prose intent anchor** to **merged source code** via cosine
+embedding distance. An external review (see ``docs/drift-detector-review.md``)
+established that cross-modal comparison has no operating point: the
+prose-vs-code distance floor (~0.29–0.45) is the *baseline for a correct
+merge*, not noise around a signal, so no threshold separates correct from
+drifted output. That design was scrapped.
 
-This module provides an advisory (non-blocking) monitor:
+The replacement follows the review's three immediate-action recommendations:
 
-- :meth:`DriftMonitor.set_anchor`: once per session, embed the branch-intent
-  summary + commit subjects as a session anchor vector.
-- :meth:`DriftMonitor.check`: after each commit's outcomes are recorded, re-embed
-  the updated intent and compute cosine DISTANCE from the anchor. Above a
-  threshold → a drift advisory.
+1. **Gate on resolution mechanism.** A resolution produced by a deterministic
+   path (exact-history reuse, structural union, brace repair, test-gated side
+   pick, combination search, block capture) is a verbatim or provably-safe
+   replay of a previously-validated state — drift is impossible by
+   construction, so NO drift signal is emitted. Only LLM-produced resolutions
+   (the actual drift-risk case) can fire the advisory.
 
-Uses a general text embedder (the same OpenAIEmbeddingsClient the rest of the
-stack uses — commit messages + intent summaries are natural language, and
-Qwen3-Embedding handles both code and text). Never raises; a missing/failing
-embedder makes the monitor a silent no-op.
+2. **No embeddings, no anchor, no threshold.** The module holds no model, no
+   vector space, and no tuned number. There is nothing to calibrate.
+
+3. **Test regression is the primary signal.** The behavioral signal — "a test
+   that passed pre-rebase now fails" — has a documented 0% false-positive rate
+   in the semantic-conflict literature (SAM). The orchestrator already computes
+   this set via the test-continuity invariant; this module merely accumulates
+   it across the session as the drift trajectory.
+
+The monitor is advisory (never blocks a merge, never escalates, never mutates
+state) and best-effort (never raises; a missing test baseline makes it a silent
+no-op). It journals a ``DriftReport`` per observed step and a one-line
+``summary()`` at session end.
 """
 
 from __future__ import annotations
 
-import hashlib
-import math
 from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
 class DriftReport:
-    """One per-commit drift measurement (embeddings survey §6).
+    """One per-step behavioral-drift observation.
 
-    ``distance`` is cosine DISTANCE (1 - similarity) in [0, 2]: 0 = identical to
-    the anchor, 1 = orthogonal, 2 = opposite. The advisory fires when distance
-    exceeds the configured ``drift_threshold``. ``cumulative`` is the running
-    max distance across the session — the headline drift number.
+    ``mechanism`` is the coarse resolution class of the step's accepted
+    outcomes: ``"deterministic"`` (verbatim/structural replay — drift
+    impossible by construction), ``"llm"`` (model-produced), or ``"mixed"``
+    (some of each).
+
+    ``regressed_tests`` are the test node-IDs that passed on the pre-rebase
+    baseline but fail after this step's merge — the 0%-FPR behavioral signal.
+    ``coverage_note`` records whether the behavioral signal was active for this
+    step (a baseline was captured) or inactive (no baseline → the primary
+    signal cannot fire, and the note says so).
+
+    ``is_drift`` is True only when the step was model-produced AND introduced a
+    regression. A deterministic step never drifts regardless of regressions
+    (the resolution is a replay; a pre-existing test failure is not drift it
+    caused).
     """
 
     commit_index: int
-    distance: float
-    cumulative: float
-    threshold: float
+    mechanism: str
+    regressed_tests: tuple[str, ...]
+    coverage_note: str
 
     @property
     def is_drift(self) -> bool:
-        return self.distance > self.threshold
+        return bool(self.regressed_tests) and self.mechanism != "deterministic"
 
     def render(self) -> str:
-        band = (
-            "high" if self.distance > self.threshold * 1.5
-            else "medium" if self.distance > self.threshold
-            else "low"
-        )
+        n = len(self.regressed_tests)
+        if self.is_drift:
+            names = ", ".join(self.regressed_tests[:5])
+            tail = " ..." if n > 5 else ""
+            return (
+                f"behavioral drift @ commit {self.commit_index}: "
+                f"{n} regression(s) via {self.mechanism} resolution "
+                f"[{names}{tail}] — {self.coverage_note}"
+            )
+        if self.mechanism == "deterministic":
+            return (
+                f"no drift @ commit {self.commit_index}: deterministic "
+                f"resolution (drift impossible by construction) — "
+                f"{self.coverage_note}"
+            )
+        # LLM/mixed but no regression — the healthy case.
         return (
-            f"semantic drift @ commit {self.commit_index}: "
-            f"{self.distance:.2f} ({band}), cumulative={self.cumulative:.2f}, "
-            f"threshold={self.threshold:.2f}"
+            f"no drift @ commit {self.commit_index}: {self.mechanism} "
+            f"resolution, 0 regressions — {self.coverage_note}"
         )
 
 
 @dataclass
 class DriftMonitor:
-    """Advisory session-level drift detector (embeddings survey §6).
+    """Advisory session-level behavioral-drift accumulator.
 
-    Construct once per session; call :meth:`set_anchor` at the first commit
-    merge, then :meth:`check` after each subsequent commit. Never blocks a
-    merge — the advisory is journaled by the caller. Best-effort: a None/failing
-    embedder makes every method a no-op (returns None / empty).
+    Construct once per session; call :meth:`observe` after each step's test
+    gate has run (the observation needs the step's test-regression set and the
+    accepted resolutions' provenance). Never blocks a merge — the advisory is
+    journaled by the caller. Never raises; an inactive monitor (disabled by
+    config) observes nothing and reports an empty summary.
 
-    ``threshold`` is cosine DISTANCE (0.20 ≈ similarity 0.80). Tune on
-    accumulated rebase history; start conservative.
+    Unlike the scrapped embedding monitor, this one takes no embedder and no
+    threshold: the signal is behavioral (binary pass/fail) and the gate is
+    structural (the resolution mechanism). There is nothing to calibrate.
     """
 
-    embedder: object | None
-    threshold: float = 0.20
-    _anchor: list[float] | None = None
-    _anchor_digest: str = ""
     _history: list[DriftReport] = field(default_factory=list)
+    _active: bool = True
 
-    def set_anchor(self, text: str) -> None:
-        """Embed the session anchor (branch intent + commit subjects).
+    def observe(
+        self,
+        *,
+        commit_index: int,
+        mechanism: str,
+        regressed_tests: list[str] | tuple[str, ...] = (),
+        coverage_note: str = "",
+    ) -> DriftReport | None:
+        """Record one step's behavioral outcome.
 
-        Called once at session start. The anchor is the rebase goal vector;
-        per-commit distances are measured from it. Idempotent within a session
-        (re-calling with the same text is a no-op; a different text re-anchors).
-        Best-effort: a failed embed leaves the monitor inactive.
+        Returns the :class:`DriftReport` (appended to history), or None when the
+        monitor is inactive. The caller journals the report when
+        ``report.is_drift`` is True. ``mechanism`` must be one of
+        ``"deterministic"``, ``"llm"``, ``"mixed"``.
         """
-        if self.embedder is None or not text:
-            return
-        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-        if self._anchor is not None and digest == self._anchor_digest:
-            return  # same anchor text → no-op
-        try:
-            vecs = self.embedder.embed(text)  # type: ignore[attr-defined]
-            if vecs and vecs[0]:
-                self._anchor = list(vecs[0])
-                self._anchor_digest = digest
-        except Exception:  # noqa: BLE001 - drift detection is best-effort
-            self._anchor = None
-
-    def check(self, text: str, commit_index: int) -> DriftReport | None:
-        """Measure this commit's intent-text distance from the anchor.
-
-        Returns a :class:`DriftReport` (with cumulative history), or None when
-        the monitor is inactive (no embedder / no anchor / embed failed). Never
-        raises. The report's ``is_drift`` flags whether the threshold was crossed.
-        """
-        if self.embedder is None or self._anchor is None or not text:
+        if not self._active:
             return None
-        try:
-            vecs = self.embedder.embed(text)  # type: ignore[attr-defined]
-            if not vecs or not vecs[0]:
-                return None
-            dist = _cosine_distance(self._anchor, list(vecs[0]))
-        except Exception:  # noqa: BLE001 - drift detection is best-effort
-            return None
-        cumulative = max((r.distance for r in self._history), default=0.0)
-        cumulative = max(cumulative, dist)
         report = DriftReport(
-            commit_index=commit_index, distance=dist,
-            cumulative=cumulative, threshold=self.threshold,
+            commit_index=commit_index,
+            mechanism=mechanism,
+            regressed_tests=tuple(regressed_tests),
+            coverage_note=coverage_note or "no test baseline captured",
         )
         self._history.append(report)
         return report
@@ -128,41 +138,56 @@ class DriftMonitor:
     def history(self) -> list[DriftReport]:
         return list(self._history)
 
+    @property
+    def total_regressions(self) -> int:
+        """Total regressions across model-produced steps this session.
+
+        Deterministic steps are excluded: a regression observed after a
+        verbatim replay was not caused by the replay (it pre-existed on the
+        base), so it does not count toward LLM-induced drift.
+        """
+        return sum(
+            len(r.regressed_tests)
+            for r in self._history
+            if r.mechanism != "deterministic"
+        )
+
+    @property
+    def drift_steps(self) -> list[DriftReport]:
+        """Only the steps where drift actually fired (model-produced + regressions)."""
+        return [r for r in self._history if r.is_drift]
+
     def summary(self) -> str:
         """A one-line post-session drift summary for the report/logs.
 
-        ``"semantic drift over the N-commit window: 0.08 (low) / 0.41 (high)"``.
-        Empty when the monitor was inactive.
+        Reports total regressions across the session, broken out by mechanism,
+        so the operator can see whether drift was LLM-induced or only ever
+        appeared under deterministic replays (where it is not actionable drift).
+        Empty when the monitor observed nothing.
         """
         if not self._history:
             return ""
-        max_dist = max(r.distance for r in self._history)
-        band = (
-            "high" if max_dist > self.threshold * 1.5
-            else "medium" if max_dist > self.threshold
-            else "low"
-        )
         n = len(self._history)
-        return (
-            f"semantic drift over the {n}-commit window: "
-            f"{max_dist:.2f} ({band}) [threshold {self.threshold:.2f}]"
+        det_regressions = sum(
+            len(r.regressed_tests)
+            for r in self._history
+            if r.mechanism == "deterministic"
         )
-
-
-def _cosine_distance(a: list[float], b: list[float]) -> float:
-    """Cosine DISTANCE (1 - cosine similarity) in [0, 2]. 0 = identical."""
-    if not a or not b or len(a) != len(b):
-        return 1.0  # treat as orthogonal (max uncertainty)
-    dot = 0.0
-    na = 0.0
-    nb = 0.0
-    for x, y in zip(a, b):
-        dot += x * y
-        na += x * x
-        nb += y * y
-    if na <= 0.0 or nb <= 0.0:
-        return 1.0
-    sim = dot / (math.sqrt(na) * math.sqrt(nb))
-    # Clamp similarity to [-1, 1] to absorb float noise, then distance in [0, 2].
-    sim = max(-1.0, min(1.0, sim))
-    return 1.0 - sim
+        llm_regressions = self.total_regressions
+        drift_n = len(self.drift_steps)
+        if drift_n == 0 and llm_regressions == 0:
+            if det_regressions:
+                return (
+                    f"behavioral drift over the {n}-commit window: "
+                    f"0 LLM-induced regression(s) "
+                    f"({det_regressions} pre-existing under deterministic replays) "
+                    f"— no model-induced drift"
+                )
+            return (
+                f"behavioral drift over the {n}-commit window: "
+                f"0 regression(s) — no drift"
+            )
+        return (
+            f"behavioral drift over the {n}-commit window: "
+            f"{llm_regressions} LLM-induced regression(s) across {drift_n} step(s)"
+        )

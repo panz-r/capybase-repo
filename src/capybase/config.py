@@ -683,13 +683,15 @@ class MemoryConfig(BaseModel):
     # misleading example is higher when the model is already fixing a specific
     # error). Applied in addition to the per-retriever min_similarity.
     repair_retrieval_min_similarity: float = 0.55
-    # Session-level semantic drift detection (embeddings survey §6). Advisory
-    # only — never blocks a merge. Computes a session anchor once from the
-    # branch intent + commit messages, then per-commit cosine distance from it.
+    # Session-level drift detection (behavioral-regression redesign). Advisory
+    # only — never blocks a merge. The first-gen detector embedded a prose
+    # anchor and cosine-compared it to merged code; an external review showed
+    # that cross-modal comparison has no operating point, so it was scrapped
+    # (see docs/drift-detector-review.md). The replacement gates on resolution
+    # mechanism (deterministic resolutions emit nothing) and fires only when an
+    # LLM resolution introduces a test regression (baseline-passing test that
+    # now fails — the 0%-FPR behavioral signal). No threshold to calibrate.
     enable_drift_detection: bool = False
-    # Cosine DISTANCE threshold (1 - similarity) above which a drift advisory
-    # fires. 0.20 ≈ similarity 0.80 — tune on accumulated rebase history.
-    drift_threshold: float = 0.20
 
 
 class CalibrationConfig(BaseModel):
