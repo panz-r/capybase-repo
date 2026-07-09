@@ -679,6 +679,120 @@ def probe_mechanisms(
 
 
 # ---------------------------------------------------------------------------
+# Prompt-rendering profile A/B (calibrate)
+# ---------------------------------------------------------------------------
+
+
+def probe_prompt_profile(
+    client: Any,
+    model_cfg: ModelConfig,
+    *,
+    base_cfg: ModelConfig,
+    existing: "PromptProfile | None" = None,
+) -> tuple[ProbeResult, "PromptProfile"]:
+    """Empirically A/B-select the prompt-rendering profile on the blessed corpus.
+
+    Compares the default (v6 JSON) layout against the markdown-code layout (and,
+    if markdown-code wins, the top-heavy instruction position against the
+    winner), keeping whichever scores higher on the corpus. Mirrors
+    :func:`probe_mechanisms`'s independent-A/B strategy and its caution on small
+    corpora: below :data:`_MIN_CORPUS_FOR_MECHANISM_SELECTION` the probe refuses
+    and returns the ``existing`` profile (or DEFAULT) unchanged, so a hand-tuned
+    profile survives a recalibrate on a small corpus.
+
+    Each candidate layout is evaluated by resolving the whole corpus under it
+    (the active prompt profile is a process global, so we ``set_active_profile``
+    before each eval). Returns ``(ProbeResult, winning PromptProfile)``.
+    """
+    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
+    from capybase.prompt_profile import (
+        DEFAULT_PROFILE, InstructionPosition, OutputLayout,
+        PromptProfile, set_active_profile,
+    )
+
+    decisions: list[str] = []
+    winner: PromptProfile = existing if existing is not None else DEFAULT_PROFILE
+
+    if len(CALIBRATION_CONFLICTS) < _MIN_CORPUS_FOR_MECHANISM_SELECTION:
+        # Too few cases to trust a correctness difference — preserve the
+        # existing profile (or default) and record the refusal.
+        n = len(CALIBRATION_CONFLICTS)
+        decisions.append(
+            f"corpus too small for prompt-profile selection ({n} < "
+            f"{_MIN_CORPUS_FOR_MECHANISM_SELECTION} min); keeping existing profile"
+        )
+        return (
+            ProbeResult("prompt_profile", ok=False, detail="; ".join(decisions)),
+            winner,
+        )
+
+    # Baseline: the default (v6 JSON) layout.
+    try:
+        set_active_profile(DEFAULT_PROFILE)
+        baseline = _evaluate_mechanism_setting(client, base_cfg)
+    except Exception as exc:  # noqa: BLE001 - prompt profile is optional
+        decisions.append(f"baseline eval failed ({exc}); keeping default profile")
+        return (
+            ProbeResult("prompt_profile", ok=False, detail="; ".join(decisions)),
+            winner,
+        )
+
+    # Candidate 1: markdown-code layout.
+    md_profile = PromptProfile(output_layout=OutputLayout.MARKDOWN_CODE)
+    try:
+        set_active_profile(md_profile)
+        md_score = _evaluate_mechanism_setting(client, base_cfg)
+    except Exception as exc:  # noqa: BLE001 - a broken candidate stays off
+        decisions.append(f"markdown_code: off (eval error: {exc})")
+        md_score = baseline  # treat as no better
+
+    if _compare_quality(md_score, baseline) > 0:
+        winner = md_profile
+        decisions.append(
+            f"markdown_code: ON (improved {baseline.n_correct}->"
+            f"{md_score.n_correct} correct, proxy {baseline.proxy_sum:.0f}->"
+            f"{md_score.proxy_sum:.0f})"
+        )
+        # Candidate 2 (only if markdown won): top-heavy position. A model that
+        # benefits from the raw-code layout may also benefit from rules-first
+        # ordering; A/B it against the markdown winner.
+        top_profile = PromptProfile(
+            output_layout=OutputLayout.MARKDOWN_CODE,
+            instruction_position=InstructionPosition.TOP_HEAVY,
+        )
+        try:
+            set_active_profile(top_profile)
+            top_score = _evaluate_mechanism_setting(client, base_cfg)
+        except Exception as exc:  # noqa: BLE001
+            decisions.append(f"top_heavy: off (eval error: {exc})")
+            top_score = md_score
+        if _compare_quality(top_score, md_score) > 0:
+            winner = top_profile
+            decisions.append(
+                f"top_heavy: ON (improved {md_score.n_correct}->"
+                f"{top_score.n_correct} correct)"
+            )
+        else:
+            decisions.append(
+                f"top_heavy: off (no improvement; {top_score.n_correct} vs "
+                f"{md_score.n_correct} correct)"
+            )
+    else:
+        decisions.append(
+            f"markdown_code: off (no improvement; {md_score.n_correct} vs "
+            f"{baseline.n_correct} correct)"
+        )
+
+    # Restore the winner as the active profile so any downstream probe (and the
+    # caller's profile construction) sees it.
+    set_active_profile(winner if winner != DEFAULT_PROFILE else None)
+    return (
+        ProbeResult("prompt_profile", ok=(winner != DEFAULT_PROFILE), detail="; ".join(decisions)),
+        winner,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -733,6 +847,7 @@ def run_calibration(
     model_cfg: ModelConfig,
     *,
     run_mechanisms: bool = True,
+    run_prompt_profile: bool = True,
     embeddings_model: str = "",
 ) -> CalibrationReport:
     """Run every probe and assemble a :class:`ModelProfile`.
@@ -745,6 +860,9 @@ def run_calibration(
     ``run_mechanisms=False`` skips the empirical mechanism A/B sweep — the
     expensive phase (resolves the whole corpus ~14×). Used by ``--dry-run`` so a
     dry run is a quick capability check, not a multi-hour corpus evaluation.
+
+    ``run_prompt_profile=False`` likewise skips the prompt-rendering A/B (another
+    corpus sweep). Defaults to the value of ``run_mechanisms`` when omitted...
 
     ``model_cfg`` is the active config (its ``model``/``base_url``/``api_key``
     identify the target). The returned profile's ``model`` is taken from
@@ -821,6 +939,25 @@ def run_calibration(
         )
     results.append(mech_result)
 
+    # Prompt-rendering profile A/B: empirically select the output layout /
+    # instruction position on the blessed corpus. Reuses the same tuned budget
+    # (mech_cfg carries the selected samples/mechanisms so the eval reflects the
+    # settings we'd actually run with). Degrades gracefully (any error leaves
+    # the profile at default); never aborts calibration. Skipped under
+    # --dry-run alongside the mechanism sweep (it's another corpus pass).
+    from capybase.prompt_profile import DEFAULT_PROFILE as _DEFAULT_PROMPT
+    prompt_winner = _DEFAULT_PROMPT
+    if run_prompt_profile:
+        pp_result, prompt_winner = probe_prompt_profile(
+            client, model_cfg, base_cfg=mech_cfg, existing=_DEFAULT_PROMPT,
+        )
+    else:
+        pp_result = ProbeResult(
+            "prompt_profile", ok=False,
+            detail="skipped (--dry-run: prompt-rendering sweep elided)",
+        )
+    results.append(pp_result)
+
     notes: list[str] = []
     if not jm_result.ok:
         notes.append("json_mode disabled (server rejected or mishandled response_format)")
@@ -840,6 +977,7 @@ def run_calibration(
         notes.append("no mechanism beat the single-sample baseline; all left off")
 
     avg_ms = sum(latencies) / len(latencies) if latencies else 0.0
+    from capybase.calibration_profile import PromptProfileSection
     profile = ModelProfile(
         model=model_cfg.model,
         max_tokens=max_tokens,
@@ -856,6 +994,7 @@ def run_calibration(
         diverse_sampling=choices.diverse_sampling,
         enable_self_consistency=choices.enable_self_consistency,
         enable_embedding_rag=emb_result.ok,
+        prompt=PromptProfileSection(profile=prompt_winner),
         avg_latency_ms=round(avg_ms, 1),
         probed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         capybase_version=getattr(capybase, "__version__", ""),

@@ -148,3 +148,69 @@ def test_overlay_only_changes_tuned_knobs(repo: Path):
     # ...but non-profile knobs preserved.
     assert orch.config.model.temperature == 0.42
     assert orch.config.model.sampling_temperature == 0.95
+
+
+# ---------------------------------------------------------------------------
+# Prompt-rendering profile application (PromptProfileSection)
+# ---------------------------------------------------------------------------
+
+
+def test_matching_profile_applies_prompt_section(repo: Path, monkeypatch):
+    """A matching profile's prompt section becomes the active prompt profile."""
+    import capybase.prompt_profile as pp
+    from capybase.calibration_profile import PromptProfileSection
+    from capybase.prompt_profile import OutputLayout, PromptProfile, set_active_profile
+
+    set_active_profile(None)  # start clean
+    _write_profile(repo, _profile(prompt=PromptProfileSection(
+        profile=PromptProfile(output_layout=OutputLayout.MARKDOWN_CODE))))
+    cfg = _cfg_with_profile_path(repo)
+    # Clear any prompt env vars so the orchestrator applies the section.
+    for v in ("CAPYBASE_PROMPT_LAYOUT", "CAPYBASE_PROMPT_HISTORY",
+              "CAPYBASE_PROMPT_POSITION", "CAPYBASE_PROMPT_OUTLINE",
+              "CAPYBASE_PROMPT_EXAMPLES", "CAPYBASE_PROMPT_VARIANT"):
+        monkeypatch.delenv(v, raising=False)
+
+    Orchestrator(cfg, repo=str(repo))
+
+    assert pp.active_profile().output_layout is OutputLayout.MARKDOWN_CODE
+    set_active_profile(None)  # reset for other tests
+
+
+def test_env_override_wins_over_prompt_section(repo: Path, monkeypatch):
+    """An explicit CAPYBASE_PROMPT_LAYOUT env var beats the calibrated section."""
+    import capybase.prompt_profile as pp
+    from capybase.calibration_profile import PromptProfileSection
+    from capybase.prompt_profile import OutputLayout, PromptProfile, set_active_profile
+
+    set_active_profile(None)
+    _write_profile(repo, _profile(prompt=PromptProfileSection(
+        profile=PromptProfile(output_layout=OutputLayout.MARKDOWN_CODE))))
+    cfg = _cfg_with_profile_path(repo)
+    # The env override forces JSON_V6 — the orchestrator must NOT apply the
+    # profile's markdown_code section.
+    monkeypatch.setenv("CAPYBASE_PROMPT_LAYOUT", "json_v6")
+
+    Orchestrator(cfg, repo=str(repo))
+
+    # Env override wins: the active profile is NOT the section's markdown_code.
+    assert pp.active_profile().output_layout is not OutputLayout.MARKDOWN_CODE
+    set_active_profile(None)
+
+
+def test_absent_prompt_section_leaves_default_active(repo: Path):
+    """A profile without a prompt section leaves the default profile active."""
+    import capybase.prompt_profile as pp
+    from capybase.prompt_profile import set_active_profile
+
+    set_active_profile(None)
+    _write_profile(repo, _profile())  # no prompt section → default
+    cfg = _cfg_with_profile_path(repo)
+
+    Orchestrator(cfg, repo=str(repo))
+
+    # Equal by value to the default (the section was absent → default profile),
+    # though not necessarily the same instance (set_active_profile stores the
+    # section's profile, which is a distinct equal object).
+    assert pp.active_profile() == pp.DEFAULT_PROFILE
+    set_active_profile(None)

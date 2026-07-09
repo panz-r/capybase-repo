@@ -734,7 +734,42 @@ def _apply_model_profile(config: Config, repo_root: Path, journal: Journal) -> C
         config = config.model_copy(update={"model": new_model})
     # Capability flags (e.g. embedding RAG, the calibrated floor) apply even when
     # no ModelConfig knob changed — but only after the name match above passed.
-    return _apply_profile_capability_flags(config, profile)
+    config = _apply_profile_capability_flags(config, profile)
+    # Prompt-rendering profile: applies the calibrated PromptProfile section as
+    # the process-wide active profile. Env override wins (see _apply_prompt_profile).
+    _apply_prompt_profile(profile)
+    return config
+
+
+def _apply_prompt_profile(profile: "object") -> None:
+    """Apply the profile's prompt-rendering section as the active profile.
+
+    Sets the process-wide active prompt profile from the calibrated section, so
+    the engine + parser render and parse under the layout/framing/position the
+    A/B selected for this model. **Precedence**: an explicit env override
+    (``CAPYBASE_PROMPT_LAYOUT`` / ``_HISTORY`` / ``_POSITION`` / ``_OUTLINE``,
+    driven by ``live_eval``) wins — when any of those is set we leave the active
+    profile alone so the A/B selector stays authoritative. The calibrated
+    section applies only in normal (non-eval) runs.
+    """
+    import os
+
+    # Env override wins: if any prompt-rendering env var is set, the caller
+    # (live_eval) owns the active profile and we don't clobber it.
+    env_vars = (
+        "CAPYBASE_PROMPT_LAYOUT", "CAPYBASE_PROMPT_HISTORY",
+        "CAPYBASE_PROMPT_POSITION", "CAPYBASE_PROMPT_OUTLINE",
+        "CAPYBASE_PROMPT_EXAMPLES", "CAPYBASE_PROMPT_VARIANT",
+    )
+    if any(os.environ.get(v, "").strip() for v in env_vars):
+        return
+    try:
+        from capybase.prompt_profile import set_active_profile
+        section = getattr(profile, "prompt", None)
+        if section is not None and getattr(section, "profile", None) is not None:
+            set_active_profile(section.profile)
+    except Exception:  # noqa: BLE001 - prompt profile is advisory; never break resolution
+        pass
 
 
 def _apply_profile_capability_flags(config: Config, profile: "object") -> Config:

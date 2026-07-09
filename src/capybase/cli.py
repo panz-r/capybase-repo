@@ -286,12 +286,14 @@ def _run_calibrate(
         if client_factory is not None
         else _real_client(config.model)
     )
-    # --dry-run skips the expensive mechanism A/B sweep (resolves the corpus
-    # ~14×); it's a quick capability check (max_tokens/json_mode/logprobs) only.
+    # --dry-run skips the expensive mechanism + prompt-rendering A/B sweeps
+    # (each resolves the corpus ~14×); it's a quick capability check
+    # (max_tokens/json_mode/logprobs) only.
     report = run_calibration(
         client,
         config.model,
         run_mechanisms=not dry_run,
+        run_prompt_profile=not dry_run,
         embeddings_model=config.memory.embeddings_model,
     )
 

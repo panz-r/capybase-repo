@@ -294,9 +294,10 @@ def test_run_calibration_assembles_profile_for_healthy_server():
     assert p.json_mode is True           # supported
     assert p.capture_token_entropy is True
     assert p.generation_timeout_seconds >= _MIN_GEN_TIMEOUT
-    # All eight probes ran (context_window discovery + embeddings capability +
-    # mechanisms empirical A/B). context_window is 0 because the test's fake
-    # server doesn't serve /v1/models, so the probe reports not-ok (disabled).
+    # All nine probes ran (context_window discovery + embeddings capability +
+    # mechanisms + prompt-rendering empirical A/B). context_window is 0 because
+    # the test's fake server doesn't serve /v1/models, so the probe reports
+    # not-ok (disabled).
     assert [r.name for r in report.results] == [
         "reachability",
         "max_tokens",
@@ -306,6 +307,7 @@ def test_run_calibration_assembles_profile_for_healthy_server():
         "embeddings",
         "end_to_end",
         "mechanisms",
+        "prompt_profile",
     ]
     assert p.context_window == 0  # /v1/models not served in the fake harness
     assert p.enable_embedding_rag is False  # CalibClient doesn't serve embeddings
@@ -545,3 +547,111 @@ def test_probe_mechanisms_selects_at_or_above_min_corpus():
     result, choices = probe_mechanisms(client, base, base_cfg=base)
     # The gate did NOT fire (no "too small" refusal).
     assert "too small" not in result.detail
+
+
+# ---------------------------------------------------------------------------
+# probe_prompt_profile — empirical A/B of the prompt-rendering profile
+# ---------------------------------------------------------------------------
+
+
+class _LayoutSensitiveClient(CorpusAwareClient):
+    """Returns the CORRECT merge when the active profile is markdown_code, WRONG
+    otherwise. Simulates a model that escapes code reliably only under the raw-
+    fenced-block layout (the 3B failure mode the layout was built for)."""
+
+    def complete(self, messages, *, model, temperature, max_tokens, json_mode):
+        import capybase.prompt_profile as pp
+        from capybase.calibration_corpus import CALIBRATION_CONFLICTS
+
+        user = next((m["content"] for m in messages if m["role"] == "user"), "")
+        correct = pp.active_profile().output_layout.value == "markdown_code"
+        for c in CALIBRATION_CONFLICTS:
+            if c.unit.replayed.text[:20] in user:
+                return LLMResponse(
+                    text=_json_text(c.expected_text if correct else "WRONG"),
+                    raw={"_accumulated": {"finish_reason": "stop"}},
+                )
+        return LLMResponse(
+            text=_json_text("WRONG"),
+            raw={"_accumulated": {"finish_reason": "stop"}},
+        )
+
+
+def test_probe_prompt_profile_selects_markdown_when_it_scores_higher():
+    """When markdown_code strictly beats the default on the corpus, it's kept."""
+    from capybase.probes import probe_prompt_profile
+    import capybase.prompt_profile as pp
+
+    pp.set_active_profile(None)
+    client = _LayoutSensitiveClient()  # correct only under markdown_code
+    base = ModelConfig(model="vibethink")
+    result, winner = probe_prompt_profile(client, base, base_cfg=base)
+    assert winner.output_layout is pp.OutputLayout.MARKDOWN_CODE
+    assert result.ok is True
+    pp.set_active_profile(None)
+
+
+def test_probe_prompt_profile_returns_default_when_no_improvement():
+    """When markdown_code doesn't improve (both correct, or both wrong), default wins."""
+    from capybase.probes import probe_prompt_profile
+    import capybase.prompt_profile as pp
+
+    pp.set_active_profile(None)
+    client = CorpusAwareClient()  # always correct regardless of layout
+    base = ModelConfig(model="vibethink")
+    result, winner = probe_prompt_profile(client, base, base_cfg=base)
+    assert winner == pp.DEFAULT_PROFILE
+    assert result.ok is False  # no layout beat the default
+    pp.set_active_profile(None)
+
+
+def test_probe_prompt_profile_preserves_existing_on_small_corpus(monkeypatch):
+    """Below the min-corpus floor, the probe refuses and returns `existing`."""
+    from capybase import probes
+    from capybase.probes import probe_prompt_profile
+    import capybase.prompt_profile as pp
+
+    monkeypatch.setattr(probes, "_MIN_CORPUS_FOR_MECHANISM_SELECTION", 10**9)
+    existing = pp.PromptProfile(output_layout=pp.OutputLayout.MARKDOWN_CODE)
+    client = CorpusAwareClient()
+    base = ModelConfig(model="vibethink")
+    result, winner = probe_prompt_profile(
+        client, base, base_cfg=base, existing=existing)
+    assert winner is existing  # preserved, not clobbered by the default
+    assert "too small" in result.detail
+
+
+def test_probe_prompt_profile_baseline_error_returns_default(monkeypatch):
+    """When the baseline eval raises, the probe degrades to the default."""
+    from capybase.probes import probe_prompt_profile
+    import capybase.prompt_profile as pp
+
+    pp.set_active_profile(None)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("eval exploded")
+
+    # Patch the eval primitive to raise.
+    import capybase.probes as _probes_mod
+    monkeypatch.setattr(_probes_mod, "_evaluate_mechanism_setting", _boom)
+    client = CorpusAwareClient()
+    base = ModelConfig(model="vibethink")
+    result, winner = probe_prompt_profile(client, base, base_cfg=base)
+    assert winner == pp.DEFAULT_PROFILE
+    assert "baseline eval failed" in result.detail
+    pp.set_active_profile(None)
+
+
+def test_run_calibration_writes_prompt_section():
+    """The assembled ModelProfile carries the probe's winning prompt profile."""
+    from capybase.probes import run_calibration
+    import capybase.prompt_profile as pp
+
+    pp.set_active_profile(None)
+    client = _LayoutSensitiveClient()  # markdown_code wins
+    report = run_calibration(
+        client, ModelConfig(model="vibethink"),
+        run_mechanisms=False,  # skip the mechanism sweep (independent)
+    )
+    assert report.profile.prompt.profile.output_layout is pp.OutputLayout.MARKDOWN_CODE
+    pp.set_active_profile(None)

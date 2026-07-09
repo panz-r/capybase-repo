@@ -27,9 +27,13 @@ import json
 import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from capybase.config import ModelConfig
+from capybase.prompt_profile import DEFAULT_PROFILE, PromptProfile
+
+if TYPE_CHECKING:
+    pass
 
 
 @dataclass
@@ -109,20 +113,44 @@ class RetrievalProfile:
         return []  # retrieval has no load-bearing knobs that break resolution
 
 
-class ModelProfile:
-    """Calibrated runtime settings for one model — a composite of three sections.
+@dataclass
+class PromptProfileSection:
+    """Prompt-rendering calibration: written by ``capybase calibrate``.
 
-    ``capability`` (endpoint probing), ``quality`` (mechanism A/B selection), and
-    ``retrieval`` (RAG calibration) are logically independent: each is produced
-    by a different command (``calibrate`` vs ``calibrate-embeddings``), validated
-    separately, and may be invalidated without discarding the others. The three
-    are persisted together in one file (backward-compatible with the legacy flat
-    format) but each section carries its own ``model``-match gate and validation,
-    so ``calibrate-embeddings`` rewrites only the retrieval section and never
-    disturbs the capability/quality knobs it didn't re-probe.
+    Wraps a :class:`~capybase.prompt_profile.PromptProfile` (output layout,
+    history framing, instruction position, outline mode, example cap). Does NOT
+    overlay ``ModelConfig`` knobs — the orchestrator applies it via
+    :func:`~capybase.prompt_profile.set_active_profile` at init (a process
+    global, not a config field). Independent from capability/quality/retrieval
+    so re-running ``calibrate`` never disturbs the embedding floor, etc.
+
+    A bad value degrades to the default (the prompt profile's ``from_dict``
+    ignores unknown values), so there are no load-bearing knobs that can break
+    resolution — ``problems()`` is always empty, matching the retrieval section.
+    """
+
+    profile: PromptProfile = field(default_factory=lambda: DEFAULT_PROFILE)
+
+    def problems(self) -> list[str]:
+        return []  # prompt rendering has no load-bearing knobs that break resolution
+
+
+class ModelProfile:
+    """Calibrated runtime settings for one model — a composite of four sections.
+
+    ``capability`` (endpoint probing), ``quality`` (mechanism A/B selection),
+    ``retrieval`` (RAG calibration), and ``prompt`` (prompt-rendering A/B
+    selection) are logically independent: each is produced by a different
+    command (``calibrate`` vs ``calibrate-embeddings``), validated separately,
+    and may be invalidated without discarding the others. The four are persisted
+    together in one file (backward-compatible with the legacy flat format) but
+    each section carries its own ``model``-match gate and validation, so
+    ``calibrate-embeddings`` rewrites only the retrieval section and never
+    disturbs the capability/quality/prompt knobs it didn't re-probe.
+
 
     Construction accepts EITHER the section form (``capability=...,
-    quality=..., retrieval=...``) OR the legacy flat-kwarg form
+    quality=..., retrieval=..., prompt=...``) OR the legacy flat-kwarg form
     (``max_tokens=..., samples=..., embedding_min_similarity=...``) so existing
     probe/CLI call sites keep working unchanged. ``from_dict`` is the canonical
     loader; direct construction is for the calibrate commands.
@@ -135,6 +163,7 @@ class ModelProfile:
         capability: CapabilityProfile | None = None,
         quality: QualityProfile | None = None,
         retrieval: RetrievalProfile | None = None,
+        prompt: PromptProfileSection | None = None,
         probed_at: str = "",
         capybase_version: str = "",
         notes: list[str] | None = None,
@@ -174,6 +203,7 @@ class ModelProfile:
             embedding_calibration=embedding_calibration or {},
             fusion_method=fusion_method,
         )
+        self.prompt = prompt if prompt is not None else PromptProfileSection()
         self.probed_at = probed_at
         self.capybase_version = capybase_version
         self.notes = notes if isinstance(notes, list) else (
@@ -181,7 +211,7 @@ class ModelProfile:
         )
 
     def __eq__(self, other: object) -> bool:
-        """Structural equality over model + the three sections + metadata.
+        """Structural equality over model + the four sections + metadata.
 
         ``ModelProfile`` is no longer a dataclass (it has a flexible dual-form
         ``__init__``), so define equality explicitly for the round-trip tests
@@ -194,6 +224,7 @@ class ModelProfile:
             and self.capability == other.capability
             and self.quality == other.quality
             and self.retrieval == other.retrieval
+            and self.prompt == other.prompt
             and self.probed_at == other.probed_at
             and self.capybase_version == other.capybase_version
             and self.notes == other.notes
@@ -282,10 +313,10 @@ class ModelProfile:
     def to_dict(self) -> dict[str, Any]:
         """Serialize as nested sections + flat keys (backward compat).
 
-        Writes both the nested ``capability``/``quality``/``retrieval`` sections
-        AND the legacy flat keys (max_tokens, samples, embedding_min_similarity,
-        ...) so older capybase versions and any flat-key readers still load the
-        file. New readers prefer the sections.
+        Writes both the nested ``capability``/``quality``/``retrieval``/
+        ``prompt`` sections AND the legacy flat keys (max_tokens, samples,
+        embedding_min_similarity, ...) so older capybase versions and any
+        flat-key readers still load the file. New readers prefer the sections.
         """
         cap = asdict(self.capability)
         qual = asdict(self.quality)
@@ -296,6 +327,7 @@ class ModelProfile:
             "capability": cap,
             "quality": qual,
             "retrieval": ret,
+            "prompt": self.prompt.profile.to_dict(),
             # Flat keys (legacy) — mirror the sections for backward compat.
             **{k: v for k, v in cap.items()},
             **{k: v for k, v in qual.items()},
@@ -313,6 +345,7 @@ class ModelProfile:
             *self.capability.problems(),
             *self.quality.problems(),
             *self.retrieval.problems(),
+            *self.prompt.problems(),
         ]
 
     @classmethod
@@ -361,11 +394,22 @@ class ModelProfile:
             embedding_calibration=_coerce_calibration(_sec("retrieval", "embedding_calibration", {})),
             fusion_method=str(_sec("retrieval", "fusion_method", "") or ""),
         )
+        # The prompt section: a nested dict (the PromptProfile.to_dict() output).
+        # Graceful-absence: a missing/corrupt section degrades to the default
+        # (PromptProfile.from_dict ignores unknown values), never raises.
+        prompt_section = PromptProfileSection()
+        raw_prompt = d.get("prompt")
+        if isinstance(raw_prompt, dict):
+            try:
+                prompt_section = PromptProfileSection(profile=PromptProfile.from_dict(raw_prompt))
+            except Exception:  # noqa: BLE001 - graceful absence
+                pass
         profile = cls(
             model=str(d.get("model", "")),
             capability=cap,
             quality=qual,
             retrieval=ret,
+            prompt=prompt_section,
             probed_at=str(d.get("probed_at", "")),
             capybase_version=str(d.get("capybase_version", "")),
             notes=[str(n) for n in notes],

@@ -99,6 +99,55 @@ def test_from_dict_backward_compatible_without_mechanism_fields():
     assert p.enable_self_consistency is False
 
 
+# ---------------------------------------------------------------------------
+# Prompt-rendering section (PromptProfileSection)
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_section_defaults_when_omitted():
+    """A profile without a `prompt` key loads with the default (v6 JSON) profile."""
+    from capybase.prompt_profile import DEFAULT_PROFILE
+    p = ModelProfile.from_dict({"model": "x", "max_tokens": 4096})
+    assert p.prompt.profile == DEFAULT_PROFILE
+
+
+def test_prompt_section_round_trips_non_default_layout():
+    """A markdown_code prompt section survives to_dict/from_dict."""
+    from capybase.calibration_profile import PromptProfileSection
+    from capybase.prompt_profile import OutputLayout, PromptProfile
+    p = _profile(prompt=PromptProfileSection(
+        profile=PromptProfile(output_layout=OutputLayout.MARKDOWN_CODE)))
+    d = p.to_dict()
+    assert d["prompt"]["output_layout"] == "markdown_code"
+    again = ModelProfile.from_dict(d)
+    assert again.prompt.profile.output_layout is OutputLayout.MARKDOWN_CODE
+    assert again == p  # __eq__ compares the prompt section
+
+
+def test_prompt_section_save_load_roundtrip(tmp_path: Path):
+    from capybase.calibration_profile import PromptProfileSection
+    from capybase.prompt_profile import InstructionPosition, OutputLayout, PromptProfile
+    p = _profile(prompt=PromptProfileSection(profile=PromptProfile(
+        output_layout=OutputLayout.MARKDOWN_CODE,
+        instruction_position=InstructionPosition.TOP_HEAVY,
+    )))
+    path = tmp_path / "profile.json"
+    p.save(path)
+    loaded = ModelProfile.load(path)
+    assert loaded == p
+    assert loaded.prompt.profile.instruction_position is InstructionPosition.TOP_HEAVY
+
+
+def test_prompt_section_corrupt_value_degrades_to_default():
+    """An unknown output_layout value falls back to the default (graceful absence)."""
+    from capybase.prompt_profile import DEFAULT_PROFILE
+    p = ModelProfile.from_dict({
+        "model": "x", "max_tokens": 4096,
+        "prompt": {"output_layout": "nonsense", "example_limit": "x"},
+    })
+    assert p.prompt.profile == DEFAULT_PROFILE
+
+
 def test_save_load_roundtrip(tmp_path: Path):
     p = _profile()
     path = tmp_path / ".rebase-agent" / "memory" / "model_profile.json"
