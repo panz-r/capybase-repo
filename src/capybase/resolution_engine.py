@@ -14,9 +14,11 @@ Prompt versions::
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable
 
 from capybase.adapters.llm_openai import (
@@ -25,6 +27,21 @@ from capybase.adapters.llm_openai import (
     OpenAICompatibleClient,
     coerce_candidate_dict,
 )
+#: Regex to strip characters that are unsafe in filenames across OSes.
+_UNSAFE_FNAME_CHARS = re.compile(r'[<>:"/\\|?*\s\[\](){}#]+')
+
+
+def _safe_filename_part(s: str) -> str:
+    """Flatten a string into a filesystem-safe path component.
+
+    Used for prompt-log filenames derived from unit paths / prompt versions.
+    Collapses runs of unsafe chars (slashes, spaces, brackets, etc.) into a
+    single dash and strips leading/trailing dashes.
+    """
+    s = _UNSAFE_FNAME_CHARS.sub("-", s.strip())
+    return s.strip("-")[:80]  # cap length so names stay manageable
+
+
 from capybase.conflict_model import (
     CandidateResolution,
     ConflictUnit,
@@ -1910,6 +1927,7 @@ class ResolutionEngine:
         config: ModelConfig,
         *,
         client: LLMClient | None = None,
+        log_prompts_dir: str | Path | None = None,
     ) -> None:
         self.config = config
         self.client = client or OpenAICompatibleClient(config)
@@ -1918,6 +1936,54 @@ class ResolutionEngine:
         # profile overlay (which sets context_window) is applied before the
         # engine is constructed, so this reflects the calibrated window.
         self.token_budget = TokenBudget.from_config(config)
+        # Verbatim prompt logging: when set, every prompt sent to the LLM is
+        # written as a .md file under this directory before the request fires.
+        # Used for external prompt review — the exact text the model saw, not a
+        # reconstruction. Each file is named <path>-<unit>.attempt<N>.<version>.md
+        # so the sequence sorts chronologically. None (default) = no logging.
+        self._log_prompts_dir: Path | None = (
+            Path(log_prompts_dir) if log_prompts_dir else None
+        )
+        self._prompt_log_counter: int = 0
+
+    def _log_prompt(
+        self, prompt: str, *, unit: ConflictUnit | None = None,
+        prompt_version: str = "",
+    ) -> None:
+        """Write the verbatim prompt to the log dir as a .md file.
+
+        Best-effort: a failure to write is silently ignored (prompt logging is
+        diagnostic, never blocks a resolution). The filename encodes the unit
+        path, attempt index, and prompt version for sortability.
+        """
+        if self._log_prompts_dir is None:
+            return
+        try:
+            self._log_prompts_dir.mkdir(parents=True, exist_ok=True)
+            self._prompt_log_counter += 1
+            seq = self._prompt_log_counter
+            # Build a filesystem-safe name from the unit path + version.
+            path_part = _safe_filename_part(getattr(unit, "path", "") or "unknown")
+            unit_part = getattr(unit, "unit_id", "") or ""
+            if unit_part:
+                unit_part = "-" + _safe_filename_part(unit_part.split(":")[-1] if ":" in unit_part else unit_part)
+            ver_part = _safe_filename_part(prompt_version) or "prompt"
+            fname = f"{seq:03d}-{path_part}{unit_part}.{ver_part}.md"
+            fpath = self._log_prompts_dir / fname
+            # Markdown wrapper so the file renders nicely in a viewer; the raw
+            # prompt is in a fenced block so nothing is altered.
+            wrapper = (
+                f"# Prompt {seq}: {path_part}\n\n"
+                f"- **prompt_version**: `{prompt_version}`\n"
+                f"- **unit_id**: `{getattr(unit, 'unit_id', '')}`\n"
+                f"- **path**: `{getattr(unit, 'path', '')}`\n"
+                f"- **language**: `{getattr(unit, 'language', '')}`\n\n"
+                f"---\n\n"
+                f"```\n{prompt}\n```\n"
+            )
+            fpath.write_text(wrapper, encoding="utf-8")
+        except Exception:  # noqa: BLE001 - diagnostic; never block
+            pass
 
     def raw_complete(self, prompt: str, *, json_mode: bool = False) -> LLMResponse:
         """One-shot completion: send ``prompt`` and return the raw response.
@@ -1929,6 +1995,7 @@ class ResolutionEngine:
         parse with the decision-specific parser (not the candidate coercer).
         Raises on a request failure — the caller decides retry/fall-through.
         """
+        self._log_prompt(prompt, prompt_version="raw_complete")
         messages = [
             {"role": "system", "content": "You are a careful merge-resolution assistant."},
             {"role": "user", "content": prompt},
@@ -2170,6 +2237,7 @@ class ResolutionEngine:
         and safe: any server that doesn't support ``n`` simply yields the
         original behavior.
         """
+        self._log_prompt(prompt, unit=unit, prompt_version=prompt_version + f"x{n}")
         complete_many = getattr(self.client, "complete_many", None)
         if not callable(complete_many):
             return None
@@ -2412,6 +2480,7 @@ class ResolutionEngine:
         prompt_version: str,
         temperature_override: float | None = None,
     ) -> CandidateResolution:
+        self._log_prompt(prompt, unit=unit, prompt_version=prompt_version)
         messages = [
             {"role": "system", "content": "You are a careful merge-resolution assistant."},
             {"role": "user", "content": prompt},

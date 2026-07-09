@@ -361,7 +361,14 @@ def run_scenario(builder, out_dir: Path, *, critic_enabled: bool = True) -> Resu
           flush=True)
     t0 = time.time()
     cfg = _config_for(scenario, critic_enabled=critic_enabled)
-    engine = ResolutionEngine(cfg.model, client=OpenAICompatibleClient(cfg.model))
+    # Verbatim prompt logging (env-gated): set CAPYBASE_LOG_PROMPTS=/some/dir
+    # to write every prompt sent to the LLM as a .md file under that dir.
+    # Used for external prompt review of the exact text the model saw.
+    log_prompts = os.environ.get("CAPYBASE_LOG_PROMPTS", "").strip() or None
+    engine = ResolutionEngine(
+        cfg.model, client=OpenAICompatibleClient(cfg.model),
+        log_prompts_dir=log_prompts,
+    )
     # Suppress console color noise; route prints to /dev/null to keep timing clean.
     orch = Orchestrator(cfg, repo=str(scenario.repo),
                         resolution_engine=engine, out=lambda _m: None)

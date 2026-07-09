@@ -785,6 +785,7 @@ class Orchestrator:
         stdin_reader: Callable[..., str] | None = None,
         out: Callable[[str], None] = print,
         color: bool = False,
+        log_prompts_dir: str | None = None,
     ) -> None:
         from capybase.color import make_styler
 
@@ -938,7 +939,9 @@ class Orchestrator:
         # resolved). Reset per step.
         self._last_continuity_regressions: list[str] = []
         self._drift_summary_emitted: bool = False
-        self.resolution_engine = resolution_engine or ResolutionEngine(config.model)
+        self.resolution_engine = resolution_engine or ResolutionEngine(
+            config.model, log_prompts_dir=log_prompts_dir,
+        )
         self.verification = VerificationEngine.default(
             ValidationConfig.from_dict(config.validation.model_dump())
         )

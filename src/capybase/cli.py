@@ -73,6 +73,17 @@ def build_parser() -> argparse.ArgumentParser:
             f"(default: {DEFAULT_PROFILE_PATH}). Shared by all commands."
         ),
     )
+    p.add_argument(
+        "--log-prompts",
+        default=None,
+        metavar="DIR",
+        help=(
+            "log every prompt sent to the LLM as a verbatim .md file under DIR. "
+            "Used for external prompt review — the exact text the model saw, "
+            "including all repair retries, in send order. Best-effort: a write "
+            "failure never blocks a resolution."
+        ),
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("inspect", help="detect conflicts and write a review bundle; no mutation")
@@ -761,7 +772,10 @@ def main(argv: list[str] | None = None) -> int:
         color = getattr(args, "color", None)
         if color is None:
             color = color_enabled(sys.stdout)
-        orch = Orchestrator(config, repo=args.repo, session_id=session, color=color)
+        orch = Orchestrator(
+            config, repo=args.repo, session_id=session, color=color,
+            log_prompts_dir=getattr(args, "log_prompts", None),
+        )
     except Exception as exc:  # noqa: BLE001 - top-level CLI guard
         print(f"capybase: error: {exc}", file=sys.stderr)
         return 2
