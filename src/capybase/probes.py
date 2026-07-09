@@ -509,7 +509,12 @@ def _resolve_under_config(
             temperature=model_cfg.sampling_temperature,
         )
     elif model_cfg.enable_self_consistency:
-        candidates = engine.propose_with_consensus(
+        # propose_with_consensus returns (candidates, report); the other paths
+        # return just candidates. Unpack here so the winner extraction below is
+        # uniform — otherwise candidates[0] is the whole list, not the winner,
+        # and .resolved_text raises AttributeError (the "eval error" that
+        # silently disabled the self-consistency A/B on every prior calibrate).
+        candidates, _report = engine.propose_with_consensus(
             conflict.unit, context, n_samples=n,
         )
     else:
@@ -957,11 +962,25 @@ def run_calibration(
         )
     results.append(mech_result)
 
+    # Carry the winning mechanism choices onto the config the prompt-profile A/B
+    # evaluates under, so the layout comparison reflects the real calibrated
+    # settings (samples, two_pass, etc.) rather than the pre-mechanism defaults.
+    # Without this, a calibration that picks samples=3 would still evaluate the
+    # prompt layouts at samples=1.
+    mech_cfg = mech_cfg.model_copy(update={
+        "samples": choices.samples,
+        "two_pass": choices.two_pass,
+        "plan_search": choices.plan_search,
+        "prompt_variants": choices.prompt_variants,
+        "diverse_sampling": choices.diverse_sampling,
+        "enable_self_consistency": choices.enable_self_consistency,
+    })
+
     # Prompt-rendering profile A/B: empirically select the output layout /
     # instruction position on the blessed corpus. Reuses the same tuned budget
-    # (mech_cfg carries the selected samples/mechanisms so the eval reflects the
-    # settings we'd actually run with). Degrades gracefully (any error leaves
-    # the profile at default); never aborts calibration. Skipped under
+    # (mech_cfg now carries the selected samples/mechanisms so the eval reflects
+    # the settings we'd actually run with). Degrades gracefully (any error
+    # leaves the profile at default); never aborts calibration. Skipped under
     # --dry-run alongside the mechanism sweep (it's another corpus pass).
     from capybase.prompt_profile import DEFAULT_PROFILE as _DEFAULT_PROMPT
     prompt_winner = _DEFAULT_PROMPT
