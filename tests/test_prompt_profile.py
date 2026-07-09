@@ -15,8 +15,6 @@ and the outline preamble. These tests pin three contracts:
 
 from __future__ import annotations
 
-import importlib
-
 import capybase.prompt_profile as pp
 from capybase.conflict_model import ConflictSide, ConflictUnit
 from capybase.context_builder import ContextBuilder
@@ -256,7 +254,6 @@ def test_from_dict_ignores_unknown_values():
 def test_profile_from_env_reads_layout(monkeypatch):
     monkeypatch.setenv("CAPYBASE_PROMPT_LAYOUT", "markdown_code")
     monkeypatch.setenv("CAPYBASE_PROMPT_POSITION", "top_heavy")
-    importlib.reload(pp)
     prof = pp.profile_from_env()
     assert prof.output_layout is pp.OutputLayout.MARKDOWN_CODE
     assert prof.instruction_position is pp.InstructionPosition.TOP_HEAVY
@@ -267,6 +264,5 @@ def test_profile_from_env_legacy_variant_alias(monkeypatch):
     monkeypatch.setenv("CAPYBASE_PROMPT_VARIANT", "3")
     monkeypatch.delenv("CAPYBASE_PROMPT_OUTLINE", raising=False)
     monkeypatch.delenv("CAPYBASE_PROMPT_LAYOUT", raising=False)
-    importlib.reload(pp)
     prof = pp.profile_from_env()
     assert prof.outline is pp.OutlineMode.V3
