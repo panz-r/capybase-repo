@@ -580,9 +580,18 @@ def _from_non_stream(raw: dict[str, Any]) -> LLMResponse:
     return LLMResponse(text=text, raw=raw)
 
 
-def coerce_candidate_dict(raw_text: str) -> tuple[dict, list[str]]:
-    """Parse + lightly normalize the model's JSON into candidate fields."""
-    data, warnings = parse_resolution_json(raw_text)
+def coerce_candidate_dict(
+    raw_text: str, *, layout: str | None = None
+) -> tuple[dict, list[str]]:
+    """Parse + lightly normalize the model's response into candidate fields.
+
+    ``layout`` is the active :class:`~capybase.prompt_profile.OutputLayout`
+    value string (``"markdown_code"`` / ``"json_v6"`` / ``None``); it is
+    forwarded to :func:`parse_resolution_json` so the markdown-code layout's
+    raw-code-block response is extracted correctly. ``None`` (default) keeps
+    the legacy JSON path.
+    """
+    data, warnings = parse_resolution_json(raw_text, layout=layout)
     if not data:
         return data, warnings
     # Normalize common alternate spellings.

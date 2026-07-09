@@ -250,7 +250,9 @@ def splice_all_resolutions(
 # ---------------------------------------------------------------------------
 
 
-def parse_resolution_json(raw: str) -> tuple[dict, list[str]]:
+def parse_resolution_json(
+    raw: str, *, layout: str | None = None
+) -> tuple[dict, list[str]]:
     """Parse a model response into a resolution dict + parse warnings.
 
     Tolerates the common failure modes of small/reasoning models:
@@ -261,6 +263,19 @@ def parse_resolution_json(raw: str) -> tuple[dict, list[str]]:
        top-level ``{ ... }`` object, preferring the last one (the final
        answer), and we ignore braces that appear inside string literals so
        constructs like ``f'hi {name}'`` don't fool the scanner.
+
+    ``layout`` (the active :class:`~capybase.prompt_profile.OutputLayout`'s
+    value string) selects the response shape the model was asked to produce:
+
+    - ``None`` / ``"json_v6"`` (default): the model emits ONE ```json object
+      whose ``resolved_text`` string holds the merged code (escaped). This is
+      the legacy path, unchanged.
+    - ``"markdown_code"``: the model emits the merged code as a RAW fenced code
+      block (no escaping), followed by a small ```json metadata object. We
+      extract the code block as ``resolved_text`` (verbatim — the whole point
+      of this layout is to avoid JSON-escaping code) and merge the metadata
+      object on top. Falls back to the legacy JSON path when no code block is
+      found (a model that ignored the layout).
 
     JSON repair (small-model hardening): when strict ``json.loads`` fails on a
     candidate, a lenient ``repair_json`` pass salvages the common formatting
@@ -273,6 +288,23 @@ def parse_resolution_json(raw: str) -> tuple[dict, list[str]]:
     scan and ultimately returns ``{}`` (a parse_failed candidate → retry).
     """
     warnings: list[str] = []
+
+    # Markdown-code layout: extract the raw code block first, then parse the
+    # small metadata JSON object. The code goes straight into resolved_text
+    # verbatim (no unescaping — that's the win). When the model didn't produce
+    # a code block, fall through to the legacy JSON path so a non-conforming
+    # response still parses instead of being rejected outright.
+    if layout == "markdown_code":
+        code = _extract_markdown_code_block(raw)
+        if code is not None:
+            meta = _parse_markdown_metadata(raw)
+            data = dict(meta) if meta else {}
+            data["resolved_text"] = code
+            if not meta:
+                warnings.append("markdown-code layout: code block found but no metadata JSON")
+            return data, warnings
+        warnings.append("markdown-code layout: no fenced code block found; falling back to JSON parse")
+
     # Pre-processor: escape unescaped " inside known code-content fields. Small
     # models emit code snippets with bare " inside JSON string values, breaking
     # the envelope. This runs once, before every parse tier.
@@ -418,6 +450,91 @@ def _extract_fenced(raw: str) -> str | None:
         else:
             i += 1
     return blocks[-1] if blocks else None
+
+
+def _iter_fenced_blocks(raw: str):
+    """Yield ``(lang, body, is_code_block)`` for every fenced block in ``raw``.
+
+    ``lang`` is the fence info string (``json`` for `` ```json ``, ``""`` for a
+    bare fence). ``body`` is the raw text between the fences. ``is_code_block``
+    distinguishes the merged-code block (any non-``json`` fence) from the
+    metadata JSON fence so the markdown-code layout can split the two.
+    """
+    lines = raw.split("\n")
+    i = 0
+    n = len(lines)
+    while i < n:
+        stripped = lines[i].strip()
+        if stripped.startswith("```"):
+            # info string = everything after the opening fence
+            info = stripped[3:].strip()
+            buf: list[str] = []
+            j = i + 1
+            closed = False
+            while j < n:
+                if lines[j].strip().startswith("```"):
+                    closed = True
+                    break
+                buf.append(lines[j])
+                j += 1
+            if closed:
+                yield info, "\n".join(buf)
+                i = j + 1
+                continue
+            i = j + 1
+        else:
+            i += 1
+
+
+def _extract_markdown_code_block(raw: str) -> str | None:
+    """Return the body of the LAST non-JSON fenced code block, or None.
+
+    Under the markdown-code output layout the model emits the merged code as a
+    raw fenced block (e.g. `` ```python `` ... `` ``` ``) followed by a small
+    ```json metadata object. This returns the code block's contents verbatim —
+    no unescaping (that's the whole point of the layout: avoid JSON-escaping
+    code with embedded quotes / newlines). A ``json``-tagged fence is treated
+    as the metadata block, not the code; a bare `` ``` `` fence counts as code
+    (the model may not know the language). Returns ``None`` when no suitable
+    block exists so the caller can fall back to the legacy JSON parse.
+    """
+    code_blocks: list[str] = []
+    for info, body in _iter_fenced_blocks(raw):
+        # A ```json fence (or one whose info string starts with json) is the
+        # metadata block; everything else is the merged code.
+        if info.lower().startswith("json"):
+            continue
+        code_blocks.append(body)
+    return code_blocks[-1] if code_blocks else None
+
+
+def _parse_markdown_metadata(raw: str) -> dict | None:
+    """Return the metadata dict from the markdown-code layout's JSON fence.
+
+    The model emits a small ```json object (``needs_human``, ``explanation``,
+    intent arrays) after the code block. This finds the last ```json fence and
+    parses it tolerantly (reusing the repair + balanced-object scan). Returns
+    ``None`` when no JSON fence / object is found. Bare top-level JSON (no
+    fence) is also accepted so a terse model still parses.
+    """
+    json_blocks: list[str] = []
+    for info, body in _iter_fenced_blocks(raw):
+        if info.lower().startswith("json"):
+            json_blocks.append(body)
+    candidates: list[str] = []
+    if json_blocks:
+        candidates.append(json_blocks[-1])
+    # Also consider bare top-level objects (a model that emitted the metadata
+    # without a fence) — the balanced-object scan handles prose-prefixed JSON.
+    candidates.extend(_find_balanced_objects(raw))
+    for cand in candidates:
+        data, ok = _try_json(cand)
+        if ok:
+            return data if isinstance(data, dict) else None
+        data, ok = _try_repair(cand)
+        if ok:
+            return data if isinstance(data, dict) else None
+    return None
 
 
 def _find_balanced_objects(text: str) -> list[str]:

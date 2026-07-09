@@ -343,19 +343,15 @@ def _critic_stats(orch) -> tuple[int, int, int]:
 def run_scenario(builder, out_dir: Path, *, critic_enabled: bool = True) -> Result:
     scenario = builder()
     arm = "on" if critic_enabled else "off"
-    # Outline-prompt variant (small-model experiment): select it on the
-    # resolution_engine before building the engine, so every fresh-resolve
-    # candidate uses the chosen framing. The variant tag is surfaced in results.
-    variant = os.environ.get("CAPYBASE_PROMPT_VARIANT", "").strip()
-    variant_n: int | None = None
-    if variant:
-        try:
-            variant_n = int(variant)
-        except ValueError:
-            variant_n = None
-    from capybase.resolution_engine import set_outline_variant
-    set_outline_variant(variant_n)
-    tag = f"v{variant_n}" if variant_n else "baseline"
+    # Prompt-rendering profile (PromptProfile): select the active layout /
+    # framing / position / outline axes from CAPYBASE_PROMPT_* env vars before
+    # building the engine, so every fresh-resolve + repair candidate uses the
+    # chosen rendering. The profile tag is surfaced in results for attribution.
+    # Legacy CAPYBASE_PROMPT_VARIANT=<1-5> is still honored (an alias for the
+    # outline axis) so old eval invocations keep working.
+    from capybase.prompt_profile import active_profile, profile_from_env, set_active_profile
+    set_active_profile(profile_from_env())
+    tag = active_profile().tag() or "baseline"
     os.environ["CAPYBASE_PROMPT_VARIANT_TAG"] = tag
     print(f"\n=== {scenario.name} ({scenario.language}) [critic={arm}] [prompt={tag}] ===",
           flush=True)
