@@ -42,6 +42,19 @@ def _safe_filename_part(s: str) -> str:
     return s.strip("-")[:80]  # cap length so names stay manageable
 
 
+def _truncate_lines(text: str, max_lines: int = 5) -> str:
+    """Truncate multi-line text to ``max_lines`` lines + ``...`` if longer.
+
+    Used for few-shot example sides to reduce context density (lost-in-the-
+    middle: small models degrade on dense prompts). Short texts pass through
+    unchanged.
+    """
+    lines = text.split("\n")
+    if len(lines) <= max_lines:
+        return text
+    return "\n".join(lines[:max_lines]) + "\n..."
+
+
 from capybase.conflict_model import (
     CandidateResolution,
     ConflictUnit,
@@ -62,7 +75,7 @@ PROMPT_CODE = "code_from_intent.v1"
 # code_from_intent.v1#plan{i} so offline eval can attribute outcomes per plan.
 PROMPT_PLAN = "plan_search.v1"
 # Targeted repair (Step 4): send back the broken candidate for surgical fixing.
-PROMPT_REPAIR = "cegis_repair.v1"
+PROMPT_REPAIR = "cegis_repair.v2"
 # Block-capture (large modify/delete): the model picks keep/accept_deletion/
 # needs_human; the chosen side's text is spliced mechanically — the model never
 # reproduces the (large) block, eliminating escaping + placeholder-collapse.
@@ -496,13 +509,15 @@ def _resolve_prompt_parts(
         siblings_block = f"Other entities in this container (stay consistent with these):\n{joined}\n\n"
     few_shot = ""
     if context.retrieved_examples:
+        # Cap at 2 examples and truncate each side to 5 lines to reduce context
+        # density (lost-in-the-middle: small models degrade on dense prompts).
         blocks = []
-        for i, ex in enumerate(context.retrieved_examples, 1):
+        for i, ex in enumerate(context.retrieved_examples[:2], 1):
             blocks.append(
                 f"Example {i}:\n"
-                f"  CURRENT: {ex.current}\n"
-                f"  REPLAYED: {ex.replayed}\n"
-                f"  RESOLVED: {ex.resolved}"
+                f"  CURRENT: {_truncate_lines(ex.current)}\n"
+                f"  REPLAYED: {_truncate_lines(ex.replayed)}\n"
+                f"  RESOLVED: {_truncate_lines(ex.resolved)}"
             )
         few_shot = "Similar past merges (for reference — match this style):\n" + "\n".join(blocks) + "\n\n"
     # Cross-file dependency neighborhood (survey §5.3 Rover): definitions of
@@ -1191,9 +1206,9 @@ def build_repair_prompt(
         ex = context.repair_retrieved_examples[0]
         repair_anchor = (
             "A SIMILAR conflict was resolved correctly before (match this style for the fix):\n"
-            f"  CURRENT: {ex.current}\n"
-            f"  REPLAYED: {ex.replayed}\n"
-            f"  RESOLVED: {ex.resolved}\n\n"
+            f"  CURRENT: {_truncate_lines(ex.current)}\n"
+            f"  REPLAYED: {_truncate_lines(ex.replayed)}\n"
+            f"  RESOLVED: {_truncate_lines(ex.resolved)}\n\n"
         )
     # Self-correction plan step (survey §3.3): force the model to reason about
     # WHY each failure happened and WHAT it will change BEFORE emitting the fix,
@@ -1236,31 +1251,13 @@ concrete plan, emit the correction.
 
 VALIDATOR FEEDBACK ANOMALIES:
 If you have rigorously checked your code and are CERTAIN it is syntactically valid
-and the validator error does not correspond to anything in your snippet, do NOT
-output a no-op edit (where "search" and "replace" are identical). Instead, set
+and the validator error does not correspond to anything in your snippet, set
 "suspected_validator_error": true and explain why in "explanation". This signals
 the orchestrator to escalate for human review rather than retrying the same code.
 
-OUTPUT MODE — choose ONE:
-
-(A) EDIT mode (preferred for small, targeted fixes): output a JSON object with an
-"edits" field — a list of SEARCH/REPLACE blocks applied to YOUR PREVIOUS ATTEMPT
-above. Each "search" MUST be a UNIQUE verbatim snippet copied from your previous
-attempt (include enough surrounding context to be unique); "replace" is the
-corrected version of that snippet. Only the snippets change; everything else is
-kept as-is.
-{{
-  "plan": "<one sentence per failure: why + the fix>",
-  "edits": [
-    {{"search": "<exact verbatim snippet from your previous attempt>", "replace": "<corrected snippet>"}}
-  ],
-  "explanation": "<what you changed and why>",
-  "suspected_validator_error": false,
-  "self_reported_confidence": 0.0
-}}
-
-(B) FULL mode (for large rewrites): output the complete corrected replacement
-text, exact indentation.
+OUTPUT: emit the COMPLETE corrected replacement text (not a search/replace patch
+— small models are unreliable at exact substring matching). Fix the specific
+errors, keeping all parts that were correct.
 {{
   "plan": "<one sentence per failure: why + the fix>",
   "resolved_text": "<the full fixed replacement text, exact indentation>",
@@ -1268,9 +1265,6 @@ text, exact indentation.
   "suspected_validator_error": false,
   "self_reported_confidence": 0.0
 }}
-
-Prefer (A) EDIT mode when the fix is localized — it avoids re-deriving the whole
-merge and risking a new error. Use (B) FULL mode only when the fix is pervasive.
 """
 
 

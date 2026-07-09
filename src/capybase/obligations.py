@@ -58,14 +58,19 @@ class SideObligations:
         """A compact human-readable rendering of the obligations.
 
         Used by the prompt's "must preserve" block and the review bundle. Each
-        obligation is one short line; the content is truncated so a large block
-        stays legible. Empty → an empty list (the caller omits the block).
+        obligation is rendered with clear visual separation: ``changed`` uses a
+        two-line from/to format so small models don't blend the old and new
+        states (the single-line ``old -> new`` format wraps and confuses on long
+        values). Content is truncated so a large block stays legible. Empty →
+        an empty list (the caller omits the block).
         """
         out: list[str] = []
         for ln in self.added:
             out.append(f"added {_trunc(ln)}")
         for old, new in self.changed:
-            out.append(f"changed {_trunc(old)} -> {_trunc(new)}")
+            out.append(f"changed:")
+            out.append(f"  from: {_trunc(old)}")
+            out.append(f"  to:   {_trunc(new)}")
         for ln in self.removed:
             out.append(f"removed {_trunc(ln)}")
         return out

@@ -242,13 +242,16 @@ def test_apply_search_replace_string_edit_skipped():
     assert "not an object" in warns[0]
 
 
-def test_repair_prompt_offers_edit_mode():
-    """The repair prompt offers BOTH edit mode (SEARCH/REPLACE) and full mode."""
+def test_repair_prompt_forces_full_mode():
+    """The repair prompt forces FULL mode (complete replacement text) — no
+    EDIT/search-replace mode. Small models are unreliable at exact substring
+    matching, so the prompt asks for the full corrected text only."""
     prompt = build_repair_prompt(_unit(), _ctx(), _candidate(), _failures())
-    assert "edits" in prompt.lower()
-    assert "search" in prompt.lower() and "replace" in prompt.lower()
-    # Full mode is still offered as a fallback.
     assert "resolved_text" in prompt
+    # EDIT mode (search/replace) is NOT offered.
+    assert '"edits"' not in prompt
+    assert "EDIT mode" not in prompt
+    assert "SEARCH/REPLACE" not in prompt
 
 
 def test_repair_edit_mode_applies_to_previous_attempt():
