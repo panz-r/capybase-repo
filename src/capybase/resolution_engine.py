@@ -2197,6 +2197,25 @@ class ResolutionEngine:
         except Exception:  # noqa: BLE001 - diagnostic; never block
             pass
 
+    def _request_json_mode(self) -> bool:
+        """The effective ``json_mode`` for a candidate-producing request.
+
+        Server-side ``json_mode`` (``response_format: {type: json_object}``)
+        constrains the model to emit ONLY a JSON object — it structurally
+        forbids the fenced-code-block-then-JSON shape the markdown-code output
+        layout requires. So when the active profile's layout is
+        ``MARKDOWN_CODE``, candidate requests force ``json_mode=False`` (the
+        model needs free-form text to emit the code block); otherwise the
+        config value stands. The decision-style prompts (block-capture, plans)
+        and the verifier keep the config value — they don't use the layout.
+
+        This is read live (not cached) so a profile change mid-session takes
+        effect on the next request.
+        """
+        if active_profile().output_layout is OutputLayout.MARKDOWN_CODE:
+            return False
+        return self.config.json_mode
+
     def raw_complete(self, prompt: str, *, json_mode: bool = False) -> LLMResponse:
         """One-shot completion: send ``prompt`` and return the raw response.
 
@@ -2476,7 +2495,7 @@ class ResolutionEngine:
                 model=self.config.model,
                 temperature=temperature,
                 max_tokens=self.config.max_tokens,
-                json_mode=self.config.json_mode,
+                json_mode=self._request_json_mode(),
                 n=n,
             )
         except Exception as exc:  # noqa: BLE001 - fall back to thread pool
@@ -2716,7 +2735,7 @@ class ResolutionEngine:
                 model=self.config.model,
                 temperature=temperature,
                 max_tokens=self.config.max_tokens,
-                json_mode=self.config.json_mode,
+                json_mode=self._request_json_mode(),
             )
         except Exception as exc:  # noqa: BLE001 - degrade to retryable failure
             return _failed_candidate(

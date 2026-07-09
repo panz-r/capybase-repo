@@ -39,6 +39,10 @@ def _unit():
     )
 
 
+def _ctx():
+    return ContextBuilder().build(_unit())
+
+
 def _candidate(text="    return [0, 9"):
     from capybase.conflict_model import CandidateResolution
     return CandidateResolution(
@@ -266,3 +270,63 @@ def test_profile_from_env_legacy_variant_alias(monkeypatch):
     monkeypatch.delenv("CAPYBASE_PROMPT_LAYOUT", raising=False)
     prof = pp.profile_from_env()
     assert prof.outline is pp.OutlineMode.V3
+
+
+# ---------------------------------------------------------------------------
+# Output layout × json_mode: the markdown-code layout must disable json_mode
+# ---------------------------------------------------------------------------
+
+
+class _RecordingClient:
+    """Fake LLMClient that records the json_mode it was called with."""
+
+    def __init__(self, text='{"resolved_text": "x = 1"}'):
+        self.text = text
+        self.json_mode_received: list[bool] = []
+
+    def complete(self, messages, **kw):
+        self.json_mode_received.append(kw.get("json_mode"))
+        from capybase.adapters.llm_openai import LLMResponse
+        return LLMResponse(text=self.text, raw={"_accumulated": {"finish_reason": "stop"}})
+
+
+def test_markdown_code_layout_forces_json_mode_false():
+    """json_mode=True structurally forbids fenced code blocks (JSON-only output),
+    so the markdown-code layout must send json_mode=False even when the config
+    says True — otherwise the model can never produce the format the prompt asks
+    for and every candidate scores 0."""
+    from capybase.adapters.llm_openai import LLMResponse
+    from capybase.config import ModelConfig
+    from capybase.resolution_engine import ResolutionEngine
+
+    cfg = ModelConfig(model="m", json_mode=True)
+    client = _RecordingClient()
+    engine = ResolutionEngine(cfg, client=client)
+
+    # Default layout → config value (True).
+    assert engine._request_json_mode() is True
+    engine.propose(_unit(), _ctx())
+    assert client.json_mode_received[-1] is True
+
+    # Markdown-code layout → forced False despite config=True.
+    pp.set_active_profile(pp.PromptProfile(output_layout=pp.OutputLayout.MARKDOWN_CODE))
+    try:
+        assert engine._request_json_mode() is False
+        engine.propose(_unit(), _ctx())
+        assert client.json_mode_received[-1] is False
+    finally:
+        pp.set_active_profile(None)
+
+
+def test_json_v6_layout_respects_config_json_mode():
+    """The default JSON layout honors the config's json_mode (no override)."""
+    from capybase.config import ModelConfig
+    from capybase.resolution_engine import ResolutionEngine
+
+    for configured in (True, False):
+        cfg = ModelConfig(model="m", json_mode=configured)
+        client = _RecordingClient()
+        engine = ResolutionEngine(cfg, client=client)
+        assert engine._request_json_mode() is configured
+        engine.propose(_unit(), _ctx())
+        assert client.json_mode_received[-1] is configured
