@@ -3536,41 +3536,36 @@ def _enabled_for(cfg: ValidationConfig, name: str) -> bool:
 
 
 def _blank_markers(text: str, language: str | None = None) -> str:
-    """Replace conflict-marker lines with comments so the baseline parses.
+    """Replace conflict-marker blocks with comments so the baseline parses.
 
     The pre-conflict ``original`` (the worktree with raw markers) isn't valid
-    Python/Rust. For the LSP/cargo/clippy baseline we only need it to parse so
-    we can collect pre-existing diagnostics outside the conflict — blanking
-    each marker line to a COMMENT preserves line numbers and lets the parser
-    recover. The comment syntax is language-appropriate: ``//`` for Rust (a
-    bare ``#`` is an attribute, not a comment, and breaks the Rust parse),
-    ``#`` otherwise (Python). When ``language`` is None, defaults to ``#``
-    (the original behavior, kept for any direct callers).
+    Python/Rust. For per-unit validation (syntax check, AST fingerprint, LSP
+    baseline) we need it to parse so we can collect diagnostics OUTSIDE the
+    conflict. This function neutralizes each conflict block by:
+
+    - Keeping the **first** side's body lines as-is (live code).
+    - **Commenting out** the second side's body lines (so they don't produce
+      duplicate definitions / consecutive-expression errors).
+    - Replacing marker lines (``<<<<<<<``, ``=======``, ``>>>>>>>``) with
+      comments.
+
+    Line numbers are preserved (each line maps 1:1). The comment syntax is
+    language-appropriate: ``//`` for Rust (a bare ``#`` is an attribute, not a
+    comment, and breaks the Rust parse), ``#`` otherwise. When ``language`` is
+    None, defaults to ``#``.
+
+    **Why the second side is commented out, not just the markers**: in a
+    multi-hunk file, a sibling conflict block's BOTH sides left as live code
+    produces invalid syntax — e.g. two consecutive ``format!()`` expressions
+    with no semicolon (Rust: ``expected ';', found 'format'``), or two
+    duplicate function definitions. Commenting out the second side's body
+    eliminates these false errors while keeping one valid copy of the code so
+    the file parses. (Previously this function only blanked the marker LINES,
+    leaving both bodies as live code — a bug that caused false-positive syntax
+    rejections on correct candidates in multi-hunk files.)
     """
     from capybase.adapters.language import adapter_for
     comment = adapter_for(language).comment_prefix
-    out = []
-    for line in text.split("\n"):
-        if line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
-            out.append(f"{comment} conflict-marker")
-        else:
-            out.append(line)
-    return "\n".join(out)
-
-
-def _blank_markers_one_side(text: str, language: str | None = None) -> str:
-    """Blank conflict blocks to ONE side so the baseline parses as valid code.
-
-    ``_blank_markers`` keeps BOTH sides' content (just marking the fences),
-    which produces a duplicate-definition compile error in Rust (two ``fn
-    new()`` bodies) that masks the real baseline lints — so any pre-existing
-    clippy finding suppressed by that error reads as "new". For a quality
-    baseline (clippy) we need valid code: keep the upstream (first) side's
-    lines and comment out the replayed (second) side's lines. Line numbers are
-    NOT preserved here (the second side is dropped), but clippy findings are
-    compared by message, not line — so position shifts don't matter.
-    """
-    comment = "//" if language == "rust" else "#"
     out: list[str] = []
     state = "code"  # code | in_first_side | in_second_side
     for line in text.split("\n"):
@@ -3587,11 +3582,24 @@ def _blank_markers_one_side(text: str, language: str | None = None) -> str:
             out.append(f"{comment} conflict-marker")
             continue
         if state == "in_second_side":
-            # Drop the second side (comment it out) so only one definition remains.
+            # Comment out the second side's body so it doesn't produce
+            # duplicate-definition / consecutive-expression syntax errors.
+            # Preserve the line (1:1 line-number mapping) as a comment.
             out.append(f"{comment} {line}" if line.strip() else line)
             continue
         out.append(line)
     return "\n".join(out)
+
+
+def _blank_markers_one_side(text: str, language: str | None = None) -> str:
+    """Blank conflict blocks to ONE side so the baseline parses as valid code.
+
+    Historically distinct from :func:`_blank_markers` (which kept both sides'
+    bodies as live code). Now that ``_blank_markers`` also comments out the
+    second side's body, the two functions are identical — this is kept as a
+    thin alias for backward compatibility with existing call sites.
+    """
+    return _blank_markers(text, language)
 
 
 def _locate_shadow_test(path: str, repo_root: str) -> tuple[str, str] | None:
