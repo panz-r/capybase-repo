@@ -797,6 +797,21 @@ def probe_prompt_profile(
 # ---------------------------------------------------------------------------
 
 
+def _progress(msg: str) -> None:
+    """Print a calibration progress line to stderr, flushed immediately.
+
+    The calibration report is buffered to stdout and printed only at the end,
+    which makes a multi-hour corpus sweep on a slow model a black box. This
+    emits phase markers to stderr (so it interleaves correctly when stdout is
+    redirected to a file) with flush=True so each line appears live. Disabled
+    when stderr isn't a tty? No — always emit: a redirected run greps the log
+    for progress too. Quiet under --json is the caller's job (it suppresses
+    stderr separately if needed).
+    """
+    import sys
+    print(msg, file=sys.stderr, flush=True)
+
+
 def _gen_timeout_from_latency(
     latencies_ms: list[float],
     *,
@@ -931,7 +946,10 @@ def run_calibration(
     mech_cfg = e2e_cfg
     choices = MechanismChoices()
     if run_mechanisms:
+        _progress("calibrate: mechanism A/B sweep (resolves the corpus ~14×; this is the long phase)...")
         mech_result, choices = probe_mechanisms(client, model_cfg, base_cfg=mech_cfg)
+        _progress(f"calibrate: mechanism A/B done — samples={choices.samples}, "
+                  f"{'on: ' + ', '.join(f for f in ('two_pass','plan_search','prompt_variants','diverse_sampling','enable_self_consistency') if getattr(choices, f)) if any(getattr(choices, f) for f in ('two_pass','plan_search','prompt_variants','diverse_sampling','enable_self_consistency')) else 'all off'}")
     else:
         mech_result = ProbeResult(
             "mechanisms", ok=False,
@@ -948,9 +966,11 @@ def run_calibration(
     from capybase.prompt_profile import DEFAULT_PROFILE as _DEFAULT_PROMPT
     prompt_winner = _DEFAULT_PROMPT
     if run_prompt_profile:
+        _progress("calibrate: prompt-rendering A/B sweep (default vs markdown-code layout)...")
         pp_result, prompt_winner = probe_prompt_profile(
             client, model_cfg, base_cfg=mech_cfg, existing=_DEFAULT_PROMPT,
         )
+        _progress(f"calibrate: prompt-rendering A/B done — layout={prompt_winner.output_layout.value}, position={prompt_winner.instruction_position.value}")
     else:
         pp_result = ProbeResult(
             "prompt_profile", ok=False,
