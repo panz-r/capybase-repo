@@ -86,33 +86,67 @@ def test_repair_prompt_includes_previous_attempt():
     assert "line: 1" in prompt  # structured detail
 
 
-def test_repair_prompt_structural_context_is_tentative():
-    """The structural-context annotation appears on the FIRST repair (attempt 0)
-    to orient the model, but is OMITTED on subsequent repairs (attempt >= 1).
-    Rationale: a small model can take the structural sketch too literally — some
-    correct merges are non-obvious combinations (inlining, splitting) that don't
-    match it. On a second repair the validator feedback + concrete code are the
-    right signal, not the structural framing."""
-    unit = _unit()
-    ctx = _ctx()
+def _multi_hunk_rust_unit():
+    """A multi-hunk Rust conflict (struct + impl): base is the full file, the
+    sides are narrow conflict-block fragments — the case that triggers the
+    multi-hunk file-structure-only annotation path in _structural_context_block.
+    Mirrors the rust_impl live-eval scenario."""
+    base = (
+        "pub struct Config {\n    pub name: String,\n    pub max_retries: u32,\n}\n\n"
+        "impl Config {\n    pub fn new() -> Self {\n        Config {\n"
+        '            name: "capybase".to_string(),\n            max_retries: 3,\n        }\n    }\n\n'
+        '    pub fn label(&self) -> String {\n'
+        '        format!("{} (retries={})", self.name, self.max_retries)\n    }\n}\n'
+    )
+    return ConflictUnit(
+        session_id="s", step_index=1, path="src/config.rs", language="rust",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="            max_retries: 5,"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="            max_retries: 3,\n            timeout_ms: 10000,"),
+        original_worktree_text=base, marker_span=(8, 10),
+    )
+
+
+def test_repair_preserve_directive_is_tentative_multihunk():
+    """The 'Required: preserve ALL units' DIRECTIVE is tentative: shown on the
+    first repair (attempt 0), omitted on subsequent repairs (attempt >= 1). But
+    the file-structure INVENTORY (unit list, enclosing unit) stays on all
+    attempts — it's orientation the model needs every time.
+
+    Only the preserve directive is gated, because a small model can take it too
+    literally on a second repair where the correct fix may legitimately
+    restructure a unit (inlining, splitting). The structure inventory doesn't
+    have that risk."""
+    unit = _multi_hunk_rust_unit()
+    ctx = ContextBuilder().build(unit)
     cand = _candidate()
     failures = _failures()
-    # First repair: structural context present (when the unit has structure).
     first = build_repair_prompt(unit, ctx, cand, failures, attempt=0)
-    # Second repair: structural context omitted.
     second = build_repair_prompt(unit, ctx, cand, failures, attempt=1)
-    # The first attempt's structural-context block (if any) must disappear on
-    # the second attempt. We compare the structural-context presence directly.
-    from capybase.resolution_engine import _structural_context_block
-    has_struct = bool(_structural_context_block(unit))
-    if has_struct:
-        assert "STRUCTURAL CONTEXT" in first
-        assert "STRUCTURAL CONTEXT" not in second
-    else:
-        # If the unit produces no structural context, both are empty — the
-        # tentative gate is a no-op, which is correct.
-        assert "STRUCTURAL CONTEXT" not in first
-        assert "STRUCTURAL CONTEXT" not in second
+    # Structure inventory present on BOTH attempts.
+    assert "STRUCTURAL CONTEXT" in first
+    assert "STRUCTURAL CONTEXT" in second
+    assert "File structure:" in first
+    assert "File structure:" in second
+    assert "This conflict is inside:" in first
+    assert "This conflict is inside:" in second
+    # Preserve directive: present on attempt 0, ABSENT on attempt 1.
+    assert "Required: preserve ALL units" in first
+    assert "Required: preserve ALL units" not in second
+
+
+def test_repair_structure_inventory_always_present():
+    """The structural-context BLOCK (file structure, unit changes) is always
+    shown regardless of attempt — only the preserve directive is tentative."""
+    unit = _multi_hunk_rust_unit()
+    ctx = ContextBuilder().build(unit)
+    cand = _candidate()
+    failures = _failures()
+    for attempt in (0, 1, 2, 3):
+        prompt = build_repair_prompt(unit, ctx, cand, failures, attempt=attempt)
+        assert "STRUCTURAL CONTEXT" in prompt, f"attempt {attempt} missing structure"
+        assert "File structure:" in prompt, f"attempt {attempt} missing file structure"
 
 
 def test_repair_prompt_says_fix_not_rewrite():

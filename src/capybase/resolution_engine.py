@@ -105,7 +105,7 @@ def _side_intent_block(unit: ConflictUnit) -> str:
     return "\n\n".join(parts) + "\n\n"
 
 
-def _structural_context_block(unit: ConflictUnit) -> str:
+def _structural_context_block(unit: ConflictUnit, *, attempt: int = 0) -> str:
     """3-way structural context annotation for the LLM prompt (Improvement #6).
 
     Shows which structural units exist in the file, which unit the conflict
@@ -122,6 +122,16 @@ def _structural_context_block(unit: ConflictUnit) -> str:
     highlight which unit the conflict is inside. This is the key signal for a
     multi-hunk merge — the model needs to know the file has struct Config, fn
     new, fn label, and its conflict is inside fn new (not fn label).
+
+    ``attempt`` is the repair index (0 = first attempt / fresh resolve, 1+ =
+    subsequent repair). The file-structure inventory (which units exist, where
+    the conflict is) is ALWAYS shown — it's orientation the model needs on every
+    attempt. The ``"Required: preserve ALL units"`` directive is TENTATIVE:
+    shown on attempt 0 only, omitted on subsequent repairs. A small model can
+    take that directive too literally — some correct merges are non-obvious
+    combinations (inlining a method, splitting a unit) that don't preserve every
+    unit verbatim. On a second repair the validator feedback + concrete code are
+    the right signal for what must change, not the preserve directive.
     """
     try:
         from capybase.adapters.abstract_parser import (
@@ -163,10 +173,19 @@ def _structural_context_block(unit: ConflictUnit) -> str:
                 enc = enclosing_unit(ir, unit.marker_span)
                 if enc and enc.name:
                     lines.append(f"This conflict is inside: {enc.kind.upper()} {enc.name}")
-                    lines.append(
-                        f"Required: preserve ALL units listed above in the merged output "
-                        f"(the file has {len(flat)} structural unit(s))."
-                    )
+                    # The preserve directive is TENTATIVE: shown on the first
+                    # attempt (attempt 0) to orient the model, OMITTED on
+                    # subsequent repairs. The file-structure inventory above is
+                    # always shown — it's orientation. But "preserve ALL units"
+                    # can over-constrain a small model on a second repair where
+                    # the correct fix may legitimately restructure a unit
+                    # (inlining, splitting). On a retry the validator feedback
+                    # is the authoritative signal for what must change.
+                    if attempt == 0:
+                        lines.append(
+                            f"Required: preserve ALL units listed above in the merged output "
+                            f"(the file has {len(flat)} structural unit(s))."
+                        )
             return "\n".join(lines) + "\n\n"
 
         # Single-hunk (or full-file sides): compute the full 3-way diff.
@@ -178,6 +197,15 @@ def _structural_context_block(unit: ConflictUnit) -> str:
         annotation = render_structural_context(diff, conflict_span=unit.marker_span)
         if not annotation:
             return ""
+        # Same tentative gate as the multi-hunk path: the "Required: preserve
+        # these units" directive is stripped on subsequent repairs (attempt >= 1)
+        # so it doesn't over-constrain a second repair. The structure/change
+        # inventory above it stays — that's orientation.
+        if attempt >= 1:
+            annotation = "\n".join(
+                ln for ln in annotation.splitlines()
+                if not ln.startswith("Required: preserve")
+            )
         return annotation + "\n\n"
     except Exception:  # noqa: BLE001 - advisory; never break the prompt
         return ""
@@ -1109,14 +1137,13 @@ def build_repair_prompt(
     symmetry with the other prompt builders.
 
     ``attempt`` is the repair index (0 = first repair, 1+ = subsequent). The
-    structural-context annotation is TENTATIVE: included on the first repair
-    (attempt 0) where it helps the model orient, but OMITTED on subsequent
-    repairs. Rationale: the structural instruction ("preserve these units",
-    "this conflict is inside METHOD X") can be taken too literally by a small
-    model — some correct merges are non-obvious combinations that don't match
-    the structural sketch (e.g. inlining a method, splitting a unit). On a
-    second repair the model should focus on the validator feedback and the
-    concrete code, not re-litigate the structural framing.
+    structural-context BLOCK is always included (file structure, unit changes,
+    where the conflict is) — but the ``"Required: preserve ALL/these units"``
+    DIRECTIVE within it is tentative: shown on attempt 0, omitted on subsequent
+    repairs. A small model can take that directive too literally — some correct
+    merges are non-obvious combinations (inlining a method, splitting a unit)
+    that don't preserve every unit verbatim. On a second repair the validator
+    feedback + concrete code are the authoritative signal for what must change.
 
     Repair-path few-shot (embeddings survey §2): a SINGLE high-trust retrieved
     example (``context.repair_retrieved_examples``, top-1, quality-filtered) is
@@ -1131,12 +1158,12 @@ def build_repair_prompt(
     feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
     cur_lines, _base_lines, rep_lines = _prompt_sides(unit)
     side_intent = _side_intent_block(unit)
-    # Structural context is TENTATIVE: shown on the first repair (attempt 0)
-    # to orient the model, omitted on subsequent repairs so it doesn't anchor
-    # the model to a structural sketch that a correct non-obvious merge might
-    # legitimately violate (inlining, splitting, combining units). On a second
-    # repair the validator feedback + concrete code are the right signal.
-    struct_ctx = _structural_context_block(unit) if attempt == 0 else ""
+    # Structural context: the block (file structure, unit inventory, change
+    # summary) is always shown. The "Required: preserve" DIRECTIVE inside it is
+    # tentative — gated on attempt == 0 inside _structural_context_block so the
+    # model gets orientation on every attempt but isn't over-constrained by the
+    # preserve directive on a second repair where the correct fix may restructure.
+    struct_ctx = _structural_context_block(unit, attempt=attempt)
     # Repair few-shot anchor (embeddings survey §2): top-1 quality-filtered
     # example. Rendered as a compact one-shot AFTER the feedback and BEFORE the
     # plan-first step so the model has a concrete resolution pattern in mind.
