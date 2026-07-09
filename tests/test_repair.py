@@ -57,7 +57,7 @@ def _ctx():
 def _candidate(text="    return [0, 9"):
     return CandidateResolution(
         candidate_id="c1", unit_id="u", model_name="m",
-        prompt_version="resolve_text_block.v5",
+        prompt_version="resolve_text_block.v6",
         resolved_text=text,
     )
 
@@ -343,4 +343,103 @@ def test_propose_uses_resolve_prompt_without_failures():
     cfg = ModelConfig(samples=1)
     engine = ResolutionEngine(cfg, client=client)
     cands = engine.propose(_unit(), _ctx())  # no failures, no prev_candidate
-    assert cands[0].prompt_version == "resolve_text_block.v5"
+    assert cands[0].prompt_version == "resolve_text_block.v6"
+
+
+# ---------------------------------------------------------------------------
+# CEGIS resilience: no-op edit detection, escape hatch, CoT ordering
+# ---------------------------------------------------------------------------
+
+
+def test_apply_search_replace_detects_noop_edit():
+    """A SEARCH/REPLACE where search == replace is a no-op — the model is
+    signaling it can't find anything to fix. The edit is skipped and a warning
+    is recorded so the caller can detect 'all edits were no-ops'."""
+    from capybase.resolution_engine import apply_search_replace
+    applied, warnings = apply_search_replace("hello world", [
+        {"search": "hello", "replace": "hello"},  # no-op
+        {"search": "world", "replace": "planet"},  # real
+    ])
+    assert applied == "hello planet"
+    assert any("no-op" in w for w in warnings)
+
+
+def test_apply_search_replace_all_noops_produces_warning():
+    """When every edit is a no-op, the result is unchanged and all warnings
+    carry the no-op marker — _apply_repair_edits reads this to set
+    failure_kind='no_op_repair'."""
+    from capybase.resolution_engine import apply_search_replace
+    applied, warnings = apply_search_replace("hello world", [
+        {"search": "hello", "replace": "hello"},
+        {"search": "world", "replace": "world"},
+    ])
+    assert applied == "hello world"
+    assert len(warnings) == 2
+    assert all("no-op" in w for w in warnings)
+
+
+def test_repair_prompt_has_validator_escape_hatch():
+    """The repair prompt includes the suspected_validator_error escape hatch
+    field and the validator-context explanation (HOW YOUR CODE IS TESTED)."""
+    prompt = build_repair_prompt(_unit(), _ctx(), _candidate(), _failures())
+    assert "suspected_validator_error" in prompt
+    assert "HOW YOUR CODE IS TESTED" in prompt
+    assert "VALIDATOR FEEDBACK ANOMALIES" in prompt
+
+
+def test_resolve_prompt_has_cot_before_code():
+    """The resolve schema puts merge_analysis BEFORE resolved_text so the model
+    reasons about the merge before generating code (front-loaded CoT)."""
+    from capybase.resolution_engine import build_resolve_prompt
+    prompt = build_resolve_prompt(_unit(), _ctx())
+    analysis_pos = prompt.find('"merge_analysis"')
+    resolved_pos = prompt.find('"resolved_text"')
+    assert analysis_pos > 0, "merge_analysis field missing from schema"
+    assert resolved_pos > 0, "resolved_text field missing from schema"
+    assert analysis_pos < resolved_pos, "merge_analysis must come before resolved_text"
+
+
+def test_candidate_parses_suspected_validator_error():
+    """The candidate parser extracts suspected_validator_error from the model's
+    JSON response."""
+    client = FakeClient([
+        '{"plan": "code is correct", "edits": [], "resolved_text": "    return 1", '
+        '"explanation": "snippet is valid", "suspected_validator_error": true, '
+        '"self_reported_confidence": 0.9}'
+    ])
+    cfg = ModelConfig(samples=1)
+    engine = ResolutionEngine(cfg, client=client)
+    cands = engine.propose(
+        _unit(), _ctx(),
+        failures=[VerificationFailure(validator="rust_syntax", message="error")],
+        prev_candidate=_candidate(),
+    )
+    assert cands[0].suspected_validator_error is True
+
+
+def test_risk_escalates_on_no_op_repair():
+    """The risk engine escalates immediately when failure_kind == 'no_op_repair'
+    — retrying would produce the identical candidate (infinite loop)."""
+    from capybase.risk import RiskEngine
+    from capybase.verification import VerificationResult
+    vr = VerificationResult(
+        candidate_id="c1", unit_id="u", passed=False,
+        hard_failures=[], warnings=[], features={"language": "rust"},
+    )
+    engine = RiskEngine()
+    decision = engine.decide(vr, retry_count=0, failure_kind="no_op_repair")
+    assert decision.action == "escalate"
+
+
+def test_risk_escalates_on_suspected_validator_error():
+    """The risk engine escalates immediately when the model flags
+    suspected_validator_error — the candidate is preserved for human review."""
+    from capybase.risk import RiskEngine
+    from capybase.verification import VerificationResult
+    vr = VerificationResult(
+        candidate_id="c1", unit_id="u", passed=False,
+        hard_failures=[], warnings=[], features={"language": "rust"},
+    )
+    engine = RiskEngine()
+    decision = engine.decide(vr, retry_count=0, suspected_validator_error=True)
+    assert decision.action == "escalate"

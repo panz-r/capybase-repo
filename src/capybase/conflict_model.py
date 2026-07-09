@@ -276,6 +276,13 @@ class CandidateResolution(BaseModel):
 
     assumptions: list[str] = Field(default_factory=list)
     needs_human: bool = False
+    # Escape hatch (CEGIS resilience): the model signals it believes its code is
+    # correct and the validator error is a false positive (e.g. an error from an
+    # unresolved sibling hunk in a multi-unit file). When True, the risk engine
+    # escalates immediately instead of retrying — preserving the candidate as
+    # the "last valid" resolution for human review. The justification (stored in
+    # ``explanation`` / ``repair_plan``) explains why the snippet is correct.
+    suspected_validator_error: bool = False
     self_reported_confidence: float = 0.0
 
     # TECP token-entropy (survey §4.1): the mean negative log-probability of the
@@ -291,9 +298,12 @@ class CandidateResolution(BaseModel):
     # transient/technical failure (``"request_failed"``, ``"parse_failed"``,
     # ``"truncated"``) — and an LSP/type-check failure (``"lsp_failed"``). Risk
     # policy retries technical and LSP failures but escalates genuine refusals.
-    # Empty when the candidate is well-formed.
+    # ``"no_op_repair"`` = the model's SEARCH/REPLACE was a no-op (search ==
+    # replace), producing a candidate identical to the previous one — an
+    # immediate-escalate signal (the loop is stuck). Empty when well-formed.
     failure_kind: Literal[
-        "", "model_refusal", "request_failed", "parse_failed", "truncated", "lsp_failed"
+        "", "model_refusal", "request_failed", "parse_failed", "truncated",
+        "lsp_failed", "no_op_repair",
     ] = ""
     # Token-window trims applied to the prompt that produced this candidate
     # (e.g. few-shot/deps/anchor dropped to fit the context window). Empty when

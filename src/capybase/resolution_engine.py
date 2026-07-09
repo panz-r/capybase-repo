@@ -53,8 +53,8 @@ from capybase.conflict_model import (
 from capybase.config import ModelConfig
 from capybase.consensus import ConsensusReport, rank_by_consensus
 
-PROMPT_RESOLVE = "resolve_text_block.v5"
-PROMPT_RETRY = "cegis_retry.v5"
+PROMPT_RESOLVE = "resolve_text_block.v6"
+PROMPT_RETRY = "cegis_retry.v6"
 # Two-pass prompting (Step 2): intent extraction then code generation.
 PROMPT_INTENT = "intent.v1"
 PROMPT_CODE = "code_from_intent.v1"
@@ -536,16 +536,18 @@ def _resolve_prompt_parts(
     contract = (
         "Your resolved_text REPLACES the whole conflict marker block (``<<<<<<<``\n"
         "through ``>>>>>>>``) and is spliced in verbatim. End with ONE ```json fenced\n"
-        "object having EXACTLY these keys:\n\n"
+        "object having EXACTLY these keys (emit them in this order — reason BEFORE\n"
+        "writing code):\n\n"
         "```json\n"
         "{\n"
+        '  "merge_analysis": "<1-2 sentences: what each side changed vs BASE and how you will combine them>",\n'
         '  "resolved_text": "<merged replacement text>",\n'
         '  "current_side_intent": ["..."],\n'
         '  "replayed_commit_intent": ["..."],\n'
         '  "preserved_current_side": true,\n'
         '  "preserved_replayed_commit_side": true,\n'
         '  "dropped_current_side_details": [],\n'
-        '  "dropped_replayed_commit_side_details": [],\n'
+        '  "dropped_replayed_side_details": [],\n'
         '  "assumptions": [],\n'
         '  "needs_human": false,\n'
         '  "self_reported_confidence": 0.0,\n'
@@ -1221,9 +1223,23 @@ YOUR PREVIOUS ATTEMPT (needs fixing):
 ### validator feedback (fix these specific issues)
 {feedback}
 
+HOW YOUR CODE IS TESTED: your snippet is spliced back into the full file and the
+entire file is compiled. If the file has OTHER unresolved conflict hunks (a
+multi-hunk conflict), the compiler may trip over those — NOT your snippet. If the
+error points to a line/symbol that is clearly ABSENT from your snippet above
+(e.g. a missing `;` or unbalanced bracket at a location not in your code), the
+error is likely from the surrounding file context, not your code.
+
 {repair_anchor}FIRST, reason about the fix: for each failure above, state in one short sentence
 WHY it happened and the specific edit you will make. Only AFTER you have a
 concrete plan, emit the correction.
+
+VALIDATOR FEEDBACK ANOMALIES:
+If you have rigorously checked your code and are CERTAIN it is syntactically valid
+and the validator error does not correspond to anything in your snippet, do NOT
+output a no-op edit (where "search" and "replace" are identical). Instead, set
+"suspected_validator_error": true and explain why in "explanation". This signals
+the orchestrator to escalate for human review rather than retrying the same code.
 
 OUTPUT MODE — choose ONE:
 
@@ -1239,6 +1255,7 @@ kept as-is.
     {{"search": "<exact verbatim snippet from your previous attempt>", "replace": "<corrected snippet>"}}
   ],
   "explanation": "<what you changed and why>",
+  "suspected_validator_error": false,
   "self_reported_confidence": 0.0
 }}
 
@@ -1248,6 +1265,7 @@ text, exact indentation.
   "plan": "<one sentence per failure: why + the fix>",
   "resolved_text": "<the full fixed replacement text, exact indentation>",
   "explanation": "<what you changed and why>",
+  "suspected_validator_error": false,
   "self_reported_confidence": 0.0
 }}
 
@@ -1329,6 +1347,16 @@ def apply_search_replace(
         if not search:
             warnings.append(f"edit {i}: empty search block; skipped")
             continue
+        # No-op detection (CEGIS resilience): when search == replace the model
+        # is signaling it can't find anything to fix — usually because the
+        # validator error is a false positive. Record it as a no-op warning so
+        # the caller can detect "all edits were no-ops" and escalate instead of
+        # feeding the identical candidate back into the validator (a guaranteed
+        # infinite loop). The edit IS still applied (it's a valid substitution)
+        # but the warning lets the caller break the loop.
+        if search == replace or _norm_ws(search) == _norm_ws(replace):
+            warnings.append(f"edit {i}: no-op (search == replace)")
+            continue
         # Exact substring match (first occurrence).
         idx = text.find(search)
         if idx != -1:
@@ -1388,6 +1416,14 @@ def _apply_repair_edits(
     if not edits:
         return cand  # full mode (resolved_text already set) or no edits
     applied, warnings = apply_search_replace(prev_candidate.resolved_text, edits)
+    # No-op detection (CEGIS resilience): if every edit was a no-op (search ==
+    # replace), the model is signaling it believes the code is already correct.
+    # This is the stuck-loop signature — mark it so the risk engine escalates
+    # instead of feeding the identical candidate back into the validator.
+    if warnings and all("no-op" in w for w in warnings):
+        cand.failure_kind = "no_op_repair"
+        cand.resolved_text = prev_candidate.resolved_text
+        return cand
     if warnings and applied == prev_candidate.resolved_text:
         # All edits missed → fall back to the model's full resolved_text if it
         # provided one, else keep the previous (no-op retry).
@@ -2559,6 +2595,7 @@ class ResolutionEngine:
             dropped_replayed_commit_details=list(data.get("dropped_replayed_commit_details", [])),
             assumptions=list(data.get("assumptions", [])),
             needs_human=needs_human,
+            suspected_validator_error=bool(data.get("suspected_validator_error", False)),
             self_reported_confidence=float(data.get("self_reported_confidence", 0.0)),
             # TECP: surface the API's per-token logprob signal onto the candidate
             # so the calibration seam can learn from model-side uncertainty.

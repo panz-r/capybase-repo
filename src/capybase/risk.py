@@ -130,6 +130,7 @@ class RiskEngine:
         consensus_agreement: float | None = None,
         critic_retry_count: int = 0,
         recovery_retry_count: int = 0,
+        suspected_validator_error: bool = False,
     ) -> RiskDecision:
         """Apply MVP rules in priority order.
 
@@ -150,6 +151,25 @@ class RiskEngine:
         # Used for every retryable branch below; the critic budget applies the
         # same role factor on top of its coverage scaling (see _critic_budget).
         budget = self._effective_budget(feats)
+
+        # --- immediate-escalate signals (CEGIS resilience) ---
+        # no_op_repair: the model's SEARCH/REPLACE was a no-op (search ==
+        # replace) — it's signaling it can't find anything to fix. Retrying
+        # with the identical candidate is a guaranteed infinite loop.
+        # suspected_validator_error: the model believes its code is correct
+        # and the validator error is a false positive (e.g. from an unresolved
+        # sibling hunk). Escalate immediately, preserving the candidate for
+        # human review. Both bypass the retry budget.
+        if failure_kind == "no_op_repair":
+            return _escalate(result, [
+                "repair was a no-op (search == replace) — model sees nothing to fix",
+                "retrying would produce the identical candidate (infinite loop)",
+            ])
+        if suspected_validator_error:
+            return _escalate(result, [
+                "model suspects the validator error is a false positive",
+                "candidate preserved for human review (suspected_validator_error=True)",
+            ])
 
         # --- technical failures: retry, then escalate ---
         # Includes LSP/type-check failures: a candidate that introduces new

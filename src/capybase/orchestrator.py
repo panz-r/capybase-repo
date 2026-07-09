@@ -85,6 +85,16 @@ class UnitOutcome:
     # None/False on accept; set together on an escalation return.
     escalated: bool = False
     reason: str | None = None
+    # Oscillation detection (CEGIS resilience): hashes of resolved_text seen
+    # across retries for this unit, mapped to how many times each was seen.
+    # If the same candidate appears 3+ times, the model is cycling (producing
+    # the same code every retry) and the loop escalates instead of burning
+    # more API tokens on a known-stuck state. Per-unit (not session-wide) so
+    # it resets for each conflict. The threshold of 3 allows: (1) the initial
+    # attempt, (2) one repair retry that legitimately confirms the same code
+    # (the model was right and the validator was wrong), (3) a third identical
+    # attempt = genuine stuck loop.
+    _seen_candidate_hashes: dict[str, int] = field(default_factory=dict)
     # Explainable-retrieval reasons (#9 step 5): one human-readable string per
     # retrieved few-shot example used in the prompt, recording WHY each was
     # chosen (same path/region kind/conflict shape, score, prior outcome). Empty
@@ -4779,6 +4789,22 @@ class Orchestrator:
                         break
             outcome.validation = validation
             outcome.attempts.append(cand)
+            # Track candidate hashes for oscillation detection (CEGIS resilience).
+            # The escalation check runs AFTER the risk decision below — only when
+            # the decision is "retry" — so it never fires before the normal budget.
+            # Empty resolved_text (parse failure / refusal) is excluded: a broken
+            # response repeating isn't "the model cycling on the same correct code"
+            # — it's a different failure class the existing retry budget handles.
+            import hashlib as _hashlib
+
+            cand_hash = ""
+            if cand.resolved_text:
+                cand_hash = _hashlib.sha256(
+                    cand.resolved_text.encode("utf-8")
+                ).hexdigest()[:16]
+                outcome._seen_candidate_hashes[cand_hash] = (
+                    outcome._seen_candidate_hashes.get(cand_hash, 0) + 1
+                )
             if self.config.journal.enabled and self.config.journal.store_candidates:
                 self.journal.store_candidate(cand)
             if self.config.journal.enabled and self.config.journal.store_raw_responses:
@@ -4788,6 +4814,7 @@ class Orchestrator:
                 validation,
                 retry_count=retry_count,
                 failure_kind=cand.failure_kind,
+                suspected_validator_error=cand.suspected_validator_error,
                 consensus_entropy=(
                     consensus_report.entropy if consensus_report else None
                 ),
@@ -4877,6 +4904,30 @@ class Orchestrator:
                 path=unit.path,
                 unit_id=unit.unit_id,
             )
+            # Oscillation backstop (CEGIS resilience): if the SAME resolved_text
+            # has been seen more times than the retry budget allows, the model is
+            # cycling — escalate instead of wasting more tokens. This fires only
+            # when the decision was already "retry" (so the budget hasn't been
+            # exhausted yet), as a backstop that cuts the loop early when the
+            # candidate is provably stuck (identical across attempts).
+            osc_count = outcome._seen_candidate_hashes.get(cand_hash, 0)
+            osc_budget = self.risk._effective_budget(validation.features)
+            if osc_count > osc_budget:
+                self.journal.emit(
+                    "candidate_rejected",
+                    {"candidate_id": cand.candidate_id,
+                     "action": "escalate", "via": "oscillation",
+                     "reason": f"identical candidate seen {osc_count} times (budget {osc_budget}) — loop is cycling",
+                     "retry_count": retry_count},
+                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                )
+                outcome.escalated = True
+                outcome.retry_count = retry_count
+                outcome.reason = (
+                    f"candidate oscillation (identical resolved_text {osc_count}×, "
+                    f"budget {osc_budget})"
+                )
+                return outcome
             # Seed the retry: hard failures PLUS the critic's verdict (if any) as
             # a synthesized VerificationFailure, so the repair prompt the model
             # sees on the next attempt carries the critic's concrete feedback

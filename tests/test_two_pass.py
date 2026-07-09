@@ -435,7 +435,7 @@ def test_prompt_variants_draws_one_sample_per_variant():
     assert len(client.calls) == 3  # one call per variant
     # Each candidate is tagged with its variant suffix on the base version.
     versions = sorted(c.prompt_version for c in cands if c.prompt_version)
-    assert versions == ["resolve_text_block.v5", "resolve_text_block.v5#v1", "resolve_text_block.v5#v2"]
+    assert versions == ["resolve_text_block.v6", "resolve_text_block.v6#v1", "resolve_text_block.v6#v2"]
     # The three calls used three distinct prompt texts (the variants).
     prompts = [c["messages"][-1]["content"] for c in client.calls]
     assert len(set(prompts)) == 3
@@ -466,7 +466,7 @@ def test_prompt_variants_off_keeps_single_prompt():
     cands = engine.propose(_unit(), _ctx())
     prompts = [c["messages"][-1]["content"] for c in client.calls]
     assert len(set(prompts)) == 1  # same prompt for all samples
-    assert all(c.prompt_version == "resolve_text_block.v5" for c in cands)
+    assert all(c.prompt_version == "resolve_text_block.v6" for c in cands)
 
 
 def test_prompt_variants_skipped_on_retry():
@@ -484,7 +484,7 @@ def test_prompt_variants_skipped_on_retry():
         failures=[VerificationFailure(validator="x", message="leaked")],
     )
     # Retry path: single cegis_retry version, no variant suffixes.
-    assert all(c.prompt_version == "cegis_retry.v5" for c in cands)
+    assert all(c.prompt_version == "cegis_retry.v6" for c in cands)
 
 
 def test_prompt_variants_skipped_when_samples_one():
@@ -494,7 +494,7 @@ def test_prompt_variants_skipped_when_samples_one():
     engine = ResolutionEngine(cfg, client=client)
     cands = engine.propose(_unit(), _ctx())
     assert len(cands) == 1
-    assert cands[0].prompt_version == "resolve_text_block.v5"  # no suffix
+    assert cands[0].prompt_version == "resolve_text_block.v6"  # no suffix
 
 
 # ---------------------------------------------------------------------------
