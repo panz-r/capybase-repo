@@ -869,6 +869,7 @@ def run_calibration(
     run_mechanisms: bool = True,
     run_prompt_profile: bool = True,
     embeddings_model: str = "",
+    existing_profile: "ModelProfile | None" = None,
 ) -> CalibrationReport:
     """Run every probe and assemble a :class:`ModelProfile`.
 
@@ -883,6 +884,14 @@ def run_calibration(
 
     ``run_prompt_profile=False`` likewise skips the prompt-rendering A/B (another
     corpus sweep). Defaults to the value of ``run_mechanisms`` when omitted...
+
+    ``existing_profile``: when a sweep is SKIPPED, its choices are seeded from
+    this prior profile (when its model matches) instead of falling back to
+    defaults — the "partial recalibrate preserves what wasn't re-probed"
+    contract. So a prompt-profile-only recalibrate (``run_mechanisms=False``)
+    keeps the model's known mechanism settings (e.g. diverse_sampling) rather
+    than silently resetting them to all-off. None (default) = the skipped
+    sections use their defaults (the original behavior).
 
     ``model_cfg`` is the active config (its ``model``/``base_url``/``api_key``
     identify the target). The returned profile's ``model`` is taken from
@@ -950,16 +959,35 @@ def run_calibration(
     # when run_mechanisms=False (the expensive corpus sweep; --dry-run elides it).
     mech_cfg = e2e_cfg
     choices = MechanismChoices()
+    # When the mechanism sweep is skipped, seed the choices from the existing
+    # profile (if it matches this model) so a partial recalibrate preserves the
+    # known mechanism settings rather than silently resetting them. The
+    # prompt-profile A/B then evaluates under the real calibrated config.
+    if not run_mechanisms and existing_profile is not None and existing_profile.model == model_cfg.model:
+        q = existing_profile.quality
+        choices = MechanismChoices(
+            samples=q.samples, two_pass=q.two_pass, plan_search=q.plan_search,
+            prompt_variants=q.prompt_variants, diverse_sampling=q.diverse_sampling,
+            enable_self_consistency=q.enable_self_consistency,
+        )
     if run_mechanisms:
         _progress("calibrate: mechanism A/B sweep (resolves the corpus ~14×; this is the long phase)...")
         mech_result, choices = probe_mechanisms(client, model_cfg, base_cfg=mech_cfg)
         _progress(f"calibrate: mechanism A/B done — samples={choices.samples}, "
                   f"{'on: ' + ', '.join(f for f in ('two_pass','plan_search','prompt_variants','diverse_sampling','enable_self_consistency') if getattr(choices, f)) if any(getattr(choices, f) for f in ('two_pass','plan_search','prompt_variants','diverse_sampling','enable_self_consistency')) else 'all off'}")
     else:
-        mech_result = ProbeResult(
-            "mechanisms", ok=False,
-            detail="skipped (--dry-run: capability-only, mechanism sweep elided)",
-        )
+        if choices.samples > 1 or any(getattr(choices, f) for f, _ in _CANDIDATE_MECHANISMS):
+            mech_result = ProbeResult(
+                "mechanisms", ok=False,
+                detail=f"skipped (sweep elided); preserved existing choices: "
+                       f"samples={choices.samples}, "
+                       f"{', '.join(f for f in ('two_pass','plan_search','prompt_variants','diverse_sampling','enable_self_consistency') if getattr(choices, f)) or 'all mechanisms off'}",
+            )
+        else:
+            mech_result = ProbeResult(
+                "mechanisms", ok=False,
+                detail="skipped (sweep elided); no existing choices to preserve",
+            )
     results.append(mech_result)
 
     # Carry the winning mechanism choices onto the config the prompt-profile A/B
