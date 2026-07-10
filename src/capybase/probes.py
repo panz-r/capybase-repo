@@ -938,7 +938,10 @@ def probe_two_phase(
     p1_design = fractional_factorial_2k(factors)
     p1_scores: list[Any] = []
     for i, point in enumerate(p1_design):
-        p1_scores.append(_eval_point(point))
+        _progress(f"calibrate: Phase 1 point {i+1}/{len(p1_design)} ({point.tag() or 'baseline'})...")
+        score = _eval_point(point)
+        p1_scores.append(score)
+        _progress(f"calibrate:   -> {score.n_correct}/{score.total} correct")
     # Score for effect estimation: correctness fraction (robust to corpus size).
     p1_correct = [s.n_correct / max(1, s.total) for s in p1_scores]
     ranking = rank_factors(p1_correct, p1_design, factors)
@@ -987,7 +990,10 @@ def probe_two_phase(
                 p2_design.append(_merge_point(top_levels))
             _progress(f"calibrate: Phase 2 focused refinement "
                       f"({len(p2_factors)} top factors, {len(p2_design)} runs)...")
-            p2_scores: list[Any] = [_eval_point(point) for point in p2_design]
+            p2_scores: list[Any] = []
+            for j, point in enumerate(p2_design):
+                _progress(f"calibrate: Phase 2 point {j+1}/{len(p2_design)} ({point.tag() or 'baseline'})...")
+                p2_scores.append(_eval_point(point))
             best_i, best_score = select_best_point(
                 p2_design, p2_scores, _compare_quality,
             )
