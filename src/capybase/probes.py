@@ -31,6 +31,7 @@ a profile (and the CLI reports which knobs it could not tune).
 
 from __future__ import annotations
 
+import itertools
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -798,6 +799,256 @@ def probe_prompt_profile(
 
 
 # ---------------------------------------------------------------------------
+# Two-phase screening design (replaces the independent A/B probes)
+# ---------------------------------------------------------------------------
+
+
+def _two_phase_factors(base_cfg: ModelConfig) -> list:
+    """The factor set Phase 1 screens: 4 prompt axes + 3 mechanism/sampling axes.
+
+    Every factor is sampled at two levels (low/high) by the fractional-factorial
+    design. The mechanism levels are derived from the base config's current
+    values so the screening explores VARIATIONS of the known-good config: the
+    'low' level is the current setting, the 'high' level is the alternative.
+    """
+    from capybase.calibration_design import Factor
+    from capybase.prompt_profile import (
+        HistoryFraming, InstructionPosition, OutputLayout, PromptProfile,
+    )
+
+    base_profile = PromptProfile()  # the axes' low = current production default
+    return [
+        # --- Prompt-rendering axes (persisted in the profile's prompt section) ---
+        Factor("output_layout", OutputLayout.JSON_V6, OutputLayout.MARKDOWN_CODE),
+        Factor("instruction_position", InstructionPosition.BOTTOM, InstructionPosition.TOP_HEAVY),
+        Factor("history_framing", HistoryFraming.UNTRUSTED, HistoryFraming.NEUTRAL),
+        Factor("example_limit", 2, 1),
+        # --- Mechanism axes (persisted in the profile's quality section).
+        # Only profile-persisted knobs are screened — temperature is NOT (it's a
+        # user-set ModelConfig field the profile doesn't overlay), so calibrating
+        # it would have no effect.
+        Factor("samples", max(1, base_cfg.samples), max(3, base_cfg.samples)),
+        Factor("diverse_sampling", bool(base_cfg.diverse_sampling), not bool(base_cfg.diverse_sampling)),
+        Factor("prompt_variants", bool(base_cfg.prompt_variants), not bool(base_cfg.prompt_variants)),
+    ]
+
+
+def _apply_design_point(
+    base_cfg: ModelConfig, point, *, n_reps: int = 1
+) -> tuple[ModelConfig, "PromptProfile"]:
+    """Encode a DesignPoint's levels onto a (ModelConfig, PromptProfile).
+
+    The design point carries the factor settings for one experimental run; this
+    applies them to a fresh copy of the base config + a fresh PromptProfile.
+    Mechanism/sampling axes mutate the ModelConfig; prompt axes mutate the
+    PromptProfile (and the process-global active profile is set so the engine
+    renders under it).
+    """
+    from capybase.prompt_profile import PromptProfile, set_active_profile
+
+    levels = point.levels
+    # Mechanism/sampling axes → ModelConfig fields.
+    cfg_updates = {}
+    if "samples" in levels:
+        cfg_updates["samples"] = int(levels["samples"])
+    if "diverse_sampling" in levels:
+        cfg_updates["diverse_sampling"] = bool(levels["diverse_sampling"])
+    if "prompt_variants" in levels:
+        cfg_updates["prompt_variants"] = bool(levels["prompt_variants"])
+    cfg = base_cfg.model_copy(update=cfg_updates) if cfg_updates else base_cfg
+    # Prompt axes → PromptProfile.
+    profile = PromptProfile(
+        output_layout=levels.get("output_layout", PromptProfile().output_layout),
+        instruction_position=levels.get("instruction_position", PromptProfile().instruction_position),
+        history_framing=levels.get("history_framing", PromptProfile().history_framing),
+        example_limit=int(levels.get("example_limit", 2)),
+    )
+    set_active_profile(profile if profile != PromptProfile() else None)
+    return cfg, profile
+
+
+def probe_two_phase(
+    client: Any,
+    model_cfg: ModelConfig,
+    *,
+    existing_choices: "MechanismChoices | None" = None,
+    existing_profile: "PromptProfile | None" = None,
+    n_reps: int = 1,
+    run_phase2: bool = True,
+) -> tuple[ProbeResult, "MechanismChoices", "PromptProfile"]:
+    """Two-phase designed calibration: screen all factors, then refine the winners.
+
+    Phase 1 (screening): a Resolution-IV fractional-factorial design samples all
+    factor variations (prompt axes + mechanism/sampling) in 16 runs. Main
+    effects + standardized effects rank which dimensions genuinely drive
+    performance. Each design point is evaluated with replication (majority vote)
+    so noisy thinking models get trustworthy scores.
+
+    Phase 2 (focused refinement): a full 2^k factorial on the top-3 factors
+    explores their interactions and selects the best design point by
+    compare_scores (correctness → proxy → latency).
+
+    Replaces the prior independent A/B-per-knob (probe_mechanisms +
+    probe_prompt_profile). Returns the winning MechanismChoices + PromptProfile
+    plus a ProbeResult carrying the Phase-1 factor ranking as detail.
+
+    Below ``_MIN_CORPUS_FOR_MECHANISM_SELECTION`` the probe refuses and returns
+    the existing choices/profile (or defaults), preserving a hand-tuned config
+    through a recalibrate on a small corpus.
+    """
+    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
+    from capybase.calibration_design import (
+        fractional_factorial_2k, full_factorial, rank_factors, select_best_point,
+    )
+    from capybase.prompt_profile import DEFAULT_PROFILE, PromptProfile
+    from capybase.quality import evaluate_setting_replicated
+
+    decisions: list[str] = []
+    choices = existing_choices if existing_choices is not None else MechanismChoices()
+    winner_profile = existing_profile if existing_profile is not None else DEFAULT_PROFILE
+
+    if len(CALIBRATION_CONFLICTS) < _MIN_CORPUS_FOR_MECHANISM_SELECTION:
+        n = len(CALIBRATION_CONFLICTS)
+        decisions.append(
+            f"corpus too small for two-phase selection ({n} < "
+            f"{_MIN_CORPUS_FOR_MECHANISM_SELECTION} min); keeping existing config"
+        )
+        return (
+            ProbeResult("two_phase", ok=False, detail="; ".join(decisions)),
+            choices, winner_profile,
+        )
+
+    factors = _two_phase_factors(model_cfg)
+
+    def _eval_point(point) -> Any:
+        cfg, _prof = _apply_design_point(model_cfg, point, n_reps=n_reps)
+
+        def resolve_one(conflict, context, c):
+            w, lat = _resolve_under_config(client, c, conflict, context)
+            if w is None:
+                raise RuntimeError("no candidate produced")
+            return w, None, lat
+
+        return evaluate_setting_replicated(resolve_one, cfg, n_reps=n_reps)
+
+    # --- Phase 1: screening ---
+    _progress(f"calibrate: Phase 1 screening ({len(factors)} factors, "
+              f"{len(fractional_factorial_2k(factors))} design points"
+              f"{f', {n_reps} reps/point' if n_reps > 1 else ''})...")
+    p1_design = fractional_factorial_2k(factors)
+    p1_scores: list[Any] = []
+    for i, point in enumerate(p1_design):
+        p1_scores.append(_eval_point(point))
+    # Score for effect estimation: correctness fraction (robust to corpus size).
+    p1_correct = [s.n_correct / max(1, s.total) for s in p1_scores]
+    ranking = rank_factors(p1_correct, p1_design, factors)
+    rank_summary = "; ".join(
+        f"{r.name}({r.direction},|t|={abs(r.tstat):.1f})" for r in ranking[:4]
+    )
+    decisions.append(f"Phase 1 ranking: {rank_summary}")
+    _progress(f"calibrate: Phase 1 done — top factors: {rank_summary}")
+
+    # --- Phase 2: focused refinement on the top factors ---
+    # Default: keep the existing config (Phase 2 only overrides if a design
+    # point beats it). Seed with the existing choices' score.
+    best_cfg_kwargs = {
+        "samples": choices.samples, "two_pass": choices.two_pass,
+        "plan_search": choices.plan_search, "prompt_variants": choices.prompt_variants,
+        "diverse_sampling": choices.diverse_sampling,
+        "enable_self_consistency": choices.enable_self_consistency,
+    }
+    best_profile = winner_profile
+
+    if run_phase2:
+        top_factors = ranking[:3]
+        # Build Phase-2 Factor objects for the top-ranked dimensions.
+        factor_by_name = {f.name: f for f in factors}
+        p2_factors = [factor_by_name[r.name] for r in top_factors if r.name in factor_by_name]
+        if p2_factors:
+            # The existing config's level for every factor — Phase-2 points
+            # inherit these for their non-top factors so each point is a complete
+            # config (not a partial one that defaults the rest to PromptProfile
+            # defaults). This makes the existing-baseline comparison apples-to-
+            # apples: a Phase-2 point differs from existing ONLY on the top factors.
+            from capybase.calibration_design import DesignPoint
+            existing_levels = {f.name: f.low for f in factors}
+
+            def _merge_point(top_levels: dict) -> DesignPoint:
+                merged = dict(existing_levels)
+                merged.update(top_levels)
+                return DesignPoint(config_id="p2", levels=merged)
+
+            # Map each sign combo to actual factor levels (high for +1, low for -1).
+            p2_design = []
+            for combo in itertools.product((-1, 1), repeat=len(p2_factors)):
+                top_levels = {}
+                for j, factor in enumerate(p2_factors):
+                    top_levels[factor.name] = factor.high if combo[j] > 0 else factor.low
+                p2_design.append(_merge_point(top_levels))
+            _progress(f"calibrate: Phase 2 focused refinement "
+                      f"({len(p2_factors)} top factors, {len(p2_design)} runs)...")
+            p2_scores: list[Any] = [_eval_point(point) for point in p2_design]
+            best_i, best_score = select_best_point(
+                p2_design, p2_scores, _compare_quality,
+            )
+            # The existing baseline: the current config with NO factor changed.
+            existing_point = _merge_point({})
+            existing_score = _eval_point(existing_point)
+            # Only adopt the Phase-2 winner if it STRICTLY beats the existing
+            # baseline on CORRECTNESS then PROXY (no latency — latency is noisy
+            # and must never flip an adoption decision on its own, matching the
+            # mechanism probe's _compare_quality rule). A tie keeps the existing
+            # config — the conservative "don't change what works" principle.
+            if _compare_quality(best_score, existing_score) > 0:
+                levels = best_i.levels
+                # Decode the winning levels back into MechanismChoices + PromptProfile.
+                # Only profile-persisted knobs are decoded (temperature etc. are
+                # not calibration factors — see _two_phase_factors).
+                if "samples" in levels:
+                    best_cfg_kwargs["samples"] = int(levels["samples"])
+                if "diverse_sampling" in levels:
+                    best_cfg_kwargs["diverse_sampling"] = bool(levels["diverse_sampling"])
+                if "prompt_variants" in levels:
+                    best_cfg_kwargs["prompt_variants"] = bool(levels["prompt_variants"])
+                best_profile = PromptProfile(
+                    output_layout=levels.get("output_layout", DEFAULT_PROFILE.output_layout),
+                    instruction_position=levels.get("instruction_position", DEFAULT_PROFILE.instruction_position),
+                    history_framing=levels.get("history_framing", DEFAULT_PROFILE.history_framing),
+                    example_limit=int(levels.get("example_limit", 2)),
+                )
+                decisions.append(
+                    f"Phase 2 winner: {best_i.config_id} "
+                    f"({best_score.n_correct}/{best_score.total} correct)"
+                )
+            else:
+                if _compare_quality(best_score, existing_score) == 0:
+                    decisions.append(
+                        f"Phase 2: design point ties existing "
+                        f"({existing_score.n_correct}/{existing_score.total} correct); "
+                        f"keeping existing (no strict improvement)"
+                    )
+                else:
+                    decisions.append(
+                        f"Phase 2: existing config beats all design points "
+                        f"({existing_score.n_correct}/{existing_score.total} correct); keeping it"
+                    )
+            _progress(f"calibrate: Phase 2 done — best {best_score.n_correct}/{best_score.total} correct")
+
+    choices = MechanismChoices(**best_cfg_kwargs)
+    from capybase.prompt_profile import set_active_profile
+    set_active_profile(best_profile if best_profile != DEFAULT_PROFILE else None)
+    ok = (
+        choices.samples > 1
+        or any(getattr(choices, f) for f, _ in _CANDIDATE_MECHANISMS)
+        or best_profile != DEFAULT_PROFILE
+    )
+    return (
+        ProbeResult("two_phase", ok=ok, detail="; ".join(decisions)),
+        choices, best_profile,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -868,6 +1119,8 @@ def run_calibration(
     *,
     run_mechanisms: bool = True,
     run_prompt_profile: bool = True,
+    n_reps: int = 1,
+    run_phase2: bool = True,
     embeddings_model: str = "",
     existing_profile: "ModelProfile | None" = None,
 ) -> CalibrationReport:
@@ -878,20 +1131,26 @@ def run_calibration(
     report the failure and exit non-zero without writing). max_tokens is probed
     before json_mode/logprobs/end-to-end so those probes use a tuned budget.
 
-    ``run_mechanisms=False`` skips the empirical mechanism A/B sweep — the
-    expensive phase (resolves the whole corpus ~14×). Used by ``--dry-run`` so a
-    dry run is a quick capability check, not a multi-hour corpus evaluation.
+    The mechanism + prompt-rendering selection is now a single **two-phase
+    designed experiment** (``probe_two_phase``): a Resolution-IV fractional-
+    factorial screening of all factors (prompt axes + mechanism/sampling) →
+    focused full-factorial refinement on the top factors. ``run_mechanisms`` /
+    ``run_prompt_profile`` both gate this single probe (either False skips the
+    whole sweep). Used by ``--dry-run`` so a dry run is a quick capability
+    check, not a multi-hour corpus evaluation.
 
-    ``run_prompt_profile=False`` likewise skips the prompt-rendering A/B (another
-    corpus sweep). Defaults to the value of ``run_mechanisms`` when omitted...
+    ``n_reps`` is the replication count for each design point's corpus eval
+    (majority vote across reps) — the noise-robustness fix for thinking models.
+    Default 1 (single-pass, for fast/stable models).
 
-    ``existing_profile``: when a sweep is SKIPPED, its choices are seeded from
-    this prior profile (when its model matches) instead of falling back to
-    defaults — the "partial recalibrate preserves what wasn't re-probed"
-    contract. So a prompt-profile-only recalibrate (``run_mechanisms=False``)
-    keeps the model's known mechanism settings (e.g. diverse_sampling) rather
-    than silently resetting them to all-off. None (default) = the skipped
-    sections use their defaults (the original behavior).
+    ``run_phase2=False`` runs only the Phase-1 screening and reports the factor
+    ranking without committing to a Phase-2 selection (keeps existing config) —
+    useful on slow models to read which dimensions matter before paying for
+    refinement.
+
+    ``existing_profile``: when the sweep is SKIPPED, its choices are seeded from
+    this prior profile (when its model matches) so a partial recalibrate
+    preserves the known settings rather than silently resetting them.
 
     ``model_cfg`` is the active config (its ``model``/``base_url``/``api_key``
     identify the target). The returned profile's ``model`` is taken from
@@ -952,30 +1211,53 @@ def run_calibration(
     e2e_result = probe_end_to_end(client, e2e_cfg)
     results.append(e2e_result)
 
-    # Mechanism calibration: empirically A/B-select resolution strategies on the
-    # blessed corpus. Uses the tuned budget + detected json_mode so the eval
-    # reflects the settings we'd actually run with. Degrades gracefully (any
-    # error leaves mechanisms at defaults); never aborts calibration. Skipped
-    # when run_mechanisms=False (the expensive corpus sweep; --dry-run elides it).
+    # Two-phase designed calibration: a single fractional-factorial screening of
+    # all factors (prompt axes + mechanism/sampling) → focused refinement on the
+    # top factors. Replaces the prior independent mechanism + prompt-profile
+    # A/Bs. Uses the tuned budget + detected json_mode so the eval reflects the
+    # settings we'd actually run with. Degrades gracefully (any error leaves the
+    # config at defaults/existing); never aborts calibration. Skipped under
+    # --dry-run (run_mechanisms/run_prompt_profile both gate it). n_reps makes
+    # each design point's score noise-robust (majority vote) for thinking models.
     mech_cfg = e2e_cfg
     choices = MechanismChoices()
-    # When the mechanism sweep is skipped, seed the choices from the existing
-    # profile (if it matches this model) so a partial recalibrate preserves the
-    # known mechanism settings rather than silently resetting them. The
-    # prompt-profile A/B then evaluates under the real calibrated config.
-    if not run_mechanisms and existing_profile is not None and existing_profile.model == model_cfg.model:
+    existing_prompt = None
+    if existing_profile is not None and existing_profile.model == model_cfg.model:
         q = existing_profile.quality
         choices = MechanismChoices(
             samples=q.samples, two_pass=q.two_pass, plan_search=q.plan_search,
             prompt_variants=q.prompt_variants, diverse_sampling=q.diverse_sampling,
             enable_self_consistency=q.enable_self_consistency,
         )
-    if run_mechanisms:
-        _progress("calibrate: mechanism A/B sweep (resolves the corpus ~14×; this is the long phase)...")
-        mech_result, choices = probe_mechanisms(client, model_cfg, base_cfg=mech_cfg)
-        _progress(f"calibrate: mechanism A/B done — samples={choices.samples}, "
-                  f"{'on: ' + ', '.join(f for f in ('two_pass','plan_search','prompt_variants','diverse_sampling','enable_self_consistency') if getattr(choices, f)) if any(getattr(choices, f) for f in ('two_pass','plan_search','prompt_variants','diverse_sampling','enable_self_consistency')) else 'all off'}")
+        existing_prompt = existing_profile.prompt.profile
+
+    from capybase.prompt_profile import DEFAULT_PROFILE as _DEFAULT_PROMPT
+
+    if run_mechanisms and run_prompt_profile:
+        tp_result, choices, prompt_winner = probe_two_phase(
+            client, mech_cfg,
+            existing_choices=choices, existing_profile=existing_prompt,
+            n_reps=n_reps, run_phase2=run_phase2,
+        )
+        results.append(tp_result)
+        mech_result = ProbeResult(
+            "mechanisms", ok=(
+                choices.samples > 1 or any(
+                    getattr(choices, f) for f, _ in _CANDIDATE_MECHANISMS
+                )
+            ),
+            detail=f"samples={choices.samples}, "
+                   f"{', '.join(f for f in ('two_pass','plan_search','prompt_variants','diverse_sampling','enable_self_consistency') if getattr(choices, f)) or 'all mechanisms off'}",
+        )
+        results.append(mech_result)
+        pp_result = ProbeResult(
+            "prompt_profile",
+            ok=(prompt_winner != _DEFAULT_PROMPT),
+            detail=f"layout={prompt_winner.output_layout.value}, position={prompt_winner.instruction_position.value}",
+        )
+        results.append(pp_result)
     else:
+        prompt_winner = existing_prompt if existing_prompt is not None else _DEFAULT_PROMPT
         if choices.samples > 1 or any(getattr(choices, f) for f, _ in _CANDIDATE_MECHANISMS):
             mech_result = ProbeResult(
                 "mechanisms", ok=False,
@@ -988,42 +1270,12 @@ def run_calibration(
                 "mechanisms", ok=False,
                 detail="skipped (sweep elided); no existing choices to preserve",
             )
-    results.append(mech_result)
-
-    # Carry the winning mechanism choices onto the config the prompt-profile A/B
-    # evaluates under, so the layout comparison reflects the real calibrated
-    # settings (samples, two_pass, etc.) rather than the pre-mechanism defaults.
-    # Without this, a calibration that picks samples=3 would still evaluate the
-    # prompt layouts at samples=1.
-    mech_cfg = mech_cfg.model_copy(update={
-        "samples": choices.samples,
-        "two_pass": choices.two_pass,
-        "plan_search": choices.plan_search,
-        "prompt_variants": choices.prompt_variants,
-        "diverse_sampling": choices.diverse_sampling,
-        "enable_self_consistency": choices.enable_self_consistency,
-    })
-
-    # Prompt-rendering profile A/B: empirically select the output layout /
-    # instruction position on the blessed corpus. Reuses the same tuned budget
-    # (mech_cfg now carries the selected samples/mechanisms so the eval reflects
-    # the settings we'd actually run with). Degrades gracefully (any error
-    # leaves the profile at default); never aborts calibration. Skipped under
-    # --dry-run alongside the mechanism sweep (it's another corpus pass).
-    from capybase.prompt_profile import DEFAULT_PROFILE as _DEFAULT_PROMPT
-    prompt_winner = _DEFAULT_PROMPT
-    if run_prompt_profile:
-        _progress("calibrate: prompt-rendering A/B sweep (default vs markdown-code layout)...")
-        pp_result, prompt_winner = probe_prompt_profile(
-            client, model_cfg, base_cfg=mech_cfg, existing=_DEFAULT_PROMPT,
-        )
-        _progress(f"calibrate: prompt-rendering A/B done — layout={prompt_winner.output_layout.value}, position={prompt_winner.instruction_position.value}")
-    else:
+        results.append(mech_result)
         pp_result = ProbeResult(
             "prompt_profile", ok=False,
             detail="skipped (--dry-run: prompt-rendering sweep elided)",
         )
-    results.append(pp_result)
+        results.append(pp_result)
 
     notes: list[str] = []
     if not jm_result.ok:

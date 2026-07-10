@@ -295,9 +295,9 @@ def test_run_calibration_assembles_profile_for_healthy_server():
     assert p.capture_token_entropy is True
     assert p.generation_timeout_seconds >= _MIN_GEN_TIMEOUT
     # All nine probes ran (context_window discovery + embeddings capability +
-    # mechanisms + prompt-rendering empirical A/B). context_window is 0 because
-    # the test's fake server doesn't serve /v1/models, so the probe reports
-    # not-ok (disabled).
+    # The two-phase designed calibration: screening + refinement, plus the
+    # derived mechanism/prompt-profile summary rows. context_window is 0 because
+    # the test's fake server doesn't serve /v1/models.
     assert [r.name for r in report.results] == [
         "reachability",
         "max_tokens",
@@ -306,6 +306,7 @@ def test_run_calibration_assembles_profile_for_healthy_server():
         "logprobs",
         "embeddings",
         "end_to_end",
+        "two_phase",
         "mechanisms",
         "prompt_profile",
     ]
@@ -643,15 +644,16 @@ def test_probe_prompt_profile_baseline_error_returns_default(monkeypatch):
 
 
 def test_run_calibration_writes_prompt_section():
-    """The assembled ModelProfile carries the probe's winning prompt profile."""
+    """The assembled ModelProfile carries the two-phase probe's winning prompt profile."""
     from capybase.probes import run_calibration
     import capybase.prompt_profile as pp
 
     pp.set_active_profile(None)
-    client = _LayoutSensitiveClient()  # markdown_code wins
+    client = _LayoutSensitiveClient()  # markdown_code is the dominant factor
+    # The two-phase probe unifies mechanism + prompt selection; running it
+    # (the default) discovers markdown_code via the screening design.
     report = run_calibration(
         client, ModelConfig(model="vibethink"),
-        run_mechanisms=False,  # skip the mechanism sweep (independent)
     )
     assert report.profile.prompt.profile.output_layout is pp.OutputLayout.MARKDOWN_CODE
     pp.set_active_profile(None)
@@ -686,35 +688,161 @@ def test_resolve_under_config_self_consistency_unpacks_tuple():
     assert winner.resolved_text == "merged"  # not an AttributeError
 
 
-def test_prompt_profile_ab_uses_calibrated_mechanism_cfg(monkeypatch):
-    """The prompt-profile A/B must run under the calibrated config (carrying the
-    mechanism choices), not the pre-mechanism defaults. Regression: mech_cfg was
-    never updated with the winning choices, so a calibration that picked
-    samples=3 would still eval the layouts at samples=1."""
-    from capybase import probes
-    from capybase.probes import run_calibration
+def test_evaluate_setting_replicated_majority_votes():
+    """A noisy model that resolves a conflict correctly 2/3 reps → majority
+    correct. This is the noise-robustness fix for thinking models whose
+    per-call success is a coin-flip."""
+    from capybase.quality import evaluate_setting_replicated
+    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
+    from capybase.context_builder import ContextBuilder
+    from capybase.conflict_model import CandidateResolution, VerificationResult
+
+    # Per-conflict call counter so the alternating pattern is reset for each
+    # conflict (rep 1,3 correct; rep 2 wrong → 2/3 majority correct).
+    call_counts: dict[str, int] = {}
+
+    class _FlakyClient:
+        def complete(self, messages, **kw):
+            from capybase.calibration_corpus import CALIBRATION_CONFLICTS as CC
+            user = next((m["content"] for m in messages if m["role"] == "user"), "")
+            for c in CC:
+                if c.unit.replayed.text[:20] in user:
+                    key = c.unit.unit_id
+                    call_counts[key] = call_counts.get(key, 0) + 1
+                    # Reps 1,3 → correct (odd); rep 2 → wrong (even).
+                    correct = (call_counts[key] % 2 == 1)
+                    return LLMResponse(
+                        text=_json_text(c.expected_text if correct else "WRONG"),
+                        raw={"_accumulated": {"finish_reason": "stop"}},
+                    )
+            return LLMResponse(text=_json_text("WRONG"), raw={"_accumulated": {"finish_reason": "stop"}})
+
+    def resolve_one(conflict, context, cfg):
+        from capybase.probes import _resolve_under_config
+        winner, lat = _resolve_under_config(client, cfg, conflict, context)
+        if winner is None:
+            raise RuntimeError("no candidate")
+        return winner, None, lat
+
+    client = _FlakyClient()
+    cfg = ModelConfig(model="m")
+    triple = evaluate_setting_replicated(resolve_one, cfg, n_reps=3)
+    assert triple.reps == 3
+    assert len(triple.per_conflict_agreement) == triple.total
+    # Every conflict was correct in the majority (2/3 = 0.67 > 0.5).
+    assert all(a >= 0.5 for a in triple.per_conflict_agreement), triple.per_conflict_agreement
+    # And the majority-vote n_correct reflects all-correct (each conflict 2/3).
+    assert triple.n_correct == triple.total
+
+
+def test_evaluate_setting_replicated_single_rep_matches_evaluate_setting():
+    """n_reps=1 is byte-identical to evaluate_setting (the default for stable models)."""
+    from capybase.quality import evaluate_setting, evaluate_setting_replicated
+
+    def resolve_one(conflict, context, cfg):
+        cand = CandidateResolution(
+            candidate_id="c", unit_id=conflict.unit.unit_id, model_name="m",
+            prompt_version="x", resolved_text=conflict.expected_text,
+        )
+        return cand, None, 100.0
+
+    cfg = ModelConfig(model="m")
+    a = evaluate_setting(resolve_one, cfg)
+    b = evaluate_setting_replicated(resolve_one, cfg, n_reps=1)
+    assert a.n_correct == b.n_correct
+    assert a.proxy_sum == b.proxy_sum
+    assert b.reps == 1
+
+
+def test_two_phase_evals_under_complete_configs():
+    """Each two-phase design point is a COMPLETE config (mechanism + prompt axes
+    together), so the layout comparison always runs under the point's own
+    mechanism settings — the regression the old test guarded against is now
+    structurally guaranteed by the unified design. This pins it by asserting a
+    design point carrying samples=3 actually resolves at samples=3."""
+    from capybase.probes import _two_phase_factors, _apply_design_point
+    from capybase.calibration_design import DesignPoint
+
+    cfg = ModelConfig(model="m", samples=1)
+    # A design point that sets samples=3 (the high level).
+    point = DesignPoint(config_id="test", levels={"samples": 3})
+    applied_cfg, _ = _apply_design_point(cfg, point)
+    assert applied_cfg.samples == 3, "design point's samples must reach the config"
+
+
+# ---------------------------------------------------------------------------
+# probe_two_phase — screening design + focused refinement
+# ---------------------------------------------------------------------------
+
+
+def test_probe_two_phase_finds_dominant_layout_factor():
+    """When output_layout is the ONLY factor that drives correctness, Phase 1
+    ranks it #1 and Phase 2 selects the markdown_code layout."""
+    from capybase.probes import probe_two_phase
     import capybase.prompt_profile as pp
 
     pp.set_active_profile(None)
-    seen_samples: list[int] = []
+    client = _LayoutSensitiveClient()  # correct only under markdown_code
+    cfg = ModelConfig(model="vibethink")
+    result, choices, profile = probe_two_phase(client, cfg)
+    # The dominant factor should be output_layout, and it should win.
+    assert profile.output_layout is pp.OutputLayout.MARKDOWN_CODE, (
+        f"expected markdown_code, got {profile.output_layout}"
+    )
+    assert "Phase 1 ranking" in result.detail
+    assert result.ok  # a non-default profile was selected
+    pp.set_active_profile(None)
 
-    real_eval = probes._evaluate_mechanism_setting
 
-    def _spy(client, model_cfg):
-        seen_samples.append(model_cfg.samples)
-        return real_eval(client, model_cfg)
+def test_probe_two_phase_keeps_default_when_nothing_helps():
+    """When the model is correct regardless of layout (CorpusAwareClient), no
+    factor is significant → Phase 2 keeps the default, samples=1."""
+    from capybase.probes import probe_two_phase
+    import capybase.prompt_profile as pp
 
-    monkeypatch.setattr(probes, "_evaluate_mechanism_setting", _spy)
-    # Force multi-sampling on by shrinking the min-corpus floor isn't enough;
-    # instead pin samples via a client that's correct at samples=3. Use the
-    # always-correct CorpusAwareClient so multi-sampling ties (samples stays 1).
-    # The assertion here is narrower: confirm the prompt-profile probe receives
-    # a base_cfg whose samples matches the mechanism choices (1, since nothing
-    # beats the perfect baseline).
+    pp.set_active_profile(None)
+    client = CorpusAwareClient()  # always correct
+    cfg = ModelConfig(model="vibethink")
+    result, choices, profile = probe_two_phase(client, cfg)
+    # Nothing beats the perfect baseline → default profile, samples=1.
+    assert profile == pp.DEFAULT_PROFILE
+    assert choices.samples == 1
+    pp.set_active_profile(None)
+
+
+def test_probe_two_phase_small_corpus_preserves_existing(monkeypatch):
+    """Below the min-corpus floor, the probe refuses and returns existing."""
+    from capybase import probes
+    from capybase.probes import probe_two_phase, MechanismChoices
+    import capybase.prompt_profile as pp
+
+    monkeypatch.setattr(probes, "_MIN_CORPUS_FOR_MECHANISM_SELECTION", 10 ** 9)
+    pp.set_active_profile(None)
+    existing_choices = MechanismChoices(samples=3, diverse_sampling=True)
+    existing_profile = pp.PromptProfile(output_layout=pp.OutputLayout.MARKDOWN_CODE)
     client = CorpusAwareClient()
-    report = run_calibration(client, ModelConfig(model="vibethink"))
-    # The last two evals are the prompt-profile A/B (default + markdown). Both
-    # must run at samples == choices.samples (1 here), proving mech_cfg was
-    # propagated rather than left at the e2e default.
-    assert seen_samples[-2:] == [1, 1], seen_samples[-4:]
+    cfg = ModelConfig(model="vibethink")
+    result, choices, profile = probe_two_phase(
+        client, cfg,
+        existing_choices=existing_choices, existing_profile=existing_profile,
+    )
+    assert choices is existing_choices  # preserved
+    assert profile is existing_profile  # preserved
+    assert "too small" in result.detail
+    pp.set_active_profile(None)
+
+
+def test_probe_two_phase_phase1_only_reports_ranking():
+    """run_phase2=False runs only the screening and reports the factor ranking
+    without committing to a Phase-2 selection (keeps existing config)."""
+    from capybase.probes import probe_two_phase
+    import capybase.prompt_profile as pp
+
+    pp.set_active_profile(None)
+    client = _LayoutSensitiveClient()
+    cfg = ModelConfig(model="vibethink")
+    result, choices, profile = probe_two_phase(client, cfg, run_phase2=False)
+    assert "Phase 1 ranking" in result.detail
+    # Phase 2 didn't run → default config retained.
+    assert choices.samples == 1
     pp.set_active_profile(None)

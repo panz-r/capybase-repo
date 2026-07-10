@@ -185,6 +185,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run the probes and print results, but do not write the profile",
     )
+    cal_p.add_argument(
+        "--calibrate-reps",
+        type=int,
+        default=1,
+        metavar="N",
+        help="replication count for each two-phase design point (majority vote "
+             "across N corpus passes); the noise-robustness fix for thinking "
+             "models whose per-call success is a coin-flip. Default 1 (single-pass)",
+    )
+    cal_p.add_argument(
+        "--calibrate-phase1-only",
+        action="store_true",
+        help="run only the Phase-1 screening and report the factor ranking, "
+             "without committing to a Phase-2 selection (useful on slow models "
+             "to read which dimensions matter before paying for refinement)",
+    )
 
     sub.add_parser(
         "recalibrate",
@@ -267,6 +283,8 @@ def _run_calibrate(
     *,
     json_output: bool = False,
     dry_run: bool = False,
+    calibrate_reps: int = 1,
+    calibrate_phase1_only: bool = False,
     out=sys.stdout,
     err=sys.stderr,
     client_factory: Callable[[ModelConfig], object] | None = None,
@@ -286,14 +304,17 @@ def _run_calibrate(
         if client_factory is not None
         else _real_client(config.model)
     )
-    # --dry-run skips the expensive mechanism + prompt-rendering A/B sweeps
-    # (each resolves the corpus ~14×); it's a quick capability check
-    # (max_tokens/json_mode/logprobs) only.
+    # --dry-run skips the expensive two-phase sweep (resolves the corpus many
+    # times); it's a quick capability check (max_tokens/json_mode/logprobs) only.
+    # --calibrate-reps N makes each design point noise-robust (majority vote).
+    # --calibrate-phase1-only runs the screening without Phase-2 refinement.
     report = run_calibration(
         client,
         config.model,
         run_mechanisms=not dry_run,
         run_prompt_profile=not dry_run,
+        n_reps=max(1, calibrate_reps),
+        run_phase2=not calibrate_phase1_only,
         embeddings_model=config.memory.embeddings_model,
     )
 
@@ -745,6 +766,8 @@ def main(argv: list[str] | None = None) -> int:
             profile_path=profile_path,
             json_output=getattr(args, "json", False),
             dry_run=getattr(args, "dry_run", False),
+            calibrate_reps=getattr(args, "calibrate_reps", 1),
+            calibrate_phase1_only=getattr(args, "calibrate_phase1_only", False),
         )
 
     if args.command == "calibrate-embeddings":

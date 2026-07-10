@@ -156,15 +156,22 @@ class SettingScore:
     proxy_sum: float
     mean_latency_ms: float
     per_conflict: list[ConflictScore] = field(default_factory=list)
+    # Replication metadata (two-phase calibration): when this score aggregates
+    # multiple corpus passes, ``reps`` is the count and ``per_conflict_agreement``
+    # is the fraction of reps each conflict was resolved correctly in (1.0 =
+    # stable, <1.0 = noisy). Empty/zero when single-pass (n_reps=1).
+    reps: int = 1
+    per_conflict_agreement: list[float] = field(default_factory=list)
 
     @property
     def total(self) -> int:
         return len(self.per_conflict)
 
     def __repr__(self) -> str:
+        rep = f", reps={self.reps}" if self.reps > 1 else ""
         return (
             f"SettingScore(correct={self.n_correct}/{self.total}, "
-            f"proxy={self.proxy_sum:.1f}, mean_lat={self.mean_latency_ms:.0f}ms)"
+            f"proxy={self.proxy_sum:.1f}, mean_lat={self.mean_latency_ms:.0f}ms{rep})"
         )
 
 
@@ -210,4 +217,66 @@ def evaluate_setting(
         proxy_sum=sum(s.proxy for s in per),
         mean_latency_ms=sum(latencies) / len(latencies) if latencies else 0.0,
         per_conflict=per,
+    )
+
+
+def evaluate_setting_replicated(
+    resolve_one: Callable[[CalibrationConflict, ContextBundle, ModelConfig], tuple[CandidateResolution, VerificationResult | None, float]],
+    model_cfg: ModelConfig,
+    *,
+    n_reps: int = 1,
+) -> SettingScore:
+    """Resolve the corpus ``n_reps`` times and aggregate with majority voting.
+
+    The noise-robust variant of :func:`evaluate_setting` for thinking models
+    whose per-call success is a coin-flip. Each conflict is resolved ``n_reps``
+    times; a conflict counts as correct iff the MAJORITY of reps resolve it
+    correctly (the stable signal, not the single-sample lottery). The
+    per-conflict agreement (fraction of reps correct) is surfaced on the
+    returned score so the report can show stability.
+
+    ``n_reps=1`` is byte-identical to ``evaluate_setting`` (the default, for
+    fast/stable models). The proxy and latency are means across reps.
+    """
+    if n_reps <= 1:
+        return evaluate_setting(resolve_one, model_cfg)
+
+    corpus = conflicts_with_context()
+    per: list[ConflictScore] = []
+    agreement: list[float] = []
+    all_latencies: list[float] = []
+    for conflict, context in corpus:
+        rep_correct = 0
+        rep_proxy = 0.0
+        rep_latencies: list[float] = []
+        rep_detail = ""
+        for _ in range(n_reps):
+            try:
+                candidate, verification, latency_ms = resolve_one(conflict, context, model_cfg)
+            except Exception as exc:  # noqa: BLE001 - a failed rep is a miss
+                rep_latencies.append(0.0)
+                continue
+            cs = score_candidate(candidate, conflict, verification, latency_ms)
+            rep_correct += int(cs.correct)
+            rep_proxy += cs.proxy
+            rep_latencies.append(latency_ms)
+            if not rep_detail:
+                rep_detail = cs.detail
+        # Majority vote: correct iff > half the reps resolved it correctly.
+        agree = rep_correct / n_reps
+        majority_correct = rep_correct > n_reps / 2.0
+        agreement.append(agree)
+        mean_lat = sum(rep_latencies) / len(rep_latencies) if rep_latencies else 0.0
+        all_latencies.append(mean_lat)
+        per.append(ConflictScore(
+            conflict.title, majority_correct, rep_proxy / n_reps, mean_lat,
+            f"{rep_detail} [{rep_correct}/{n_reps} reps correct]",
+        ))
+    return SettingScore(
+        n_correct=sum(1 for s in per if s.correct),
+        proxy_sum=sum(s.proxy for s in per),
+        mean_latency_ms=sum(all_latencies) / len(all_latencies) if all_latencies else 0.0,
+        per_conflict=per,
+        reps=n_reps,
+        per_conflict_agreement=agreement,
     )
