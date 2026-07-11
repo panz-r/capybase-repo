@@ -854,6 +854,158 @@ def test_probe_two_phase_phase1_only_reports_ranking():
 
 
 # ---------------------------------------------------------------------------
+# Multi-fidelity epoch calibration: anytime halt + successive refinement
+# ---------------------------------------------------------------------------
+
+
+def test_fidelity_schedule():
+    """The schedule produces evenly-spaced corpus prefixes; last epoch is full."""
+    from capybase.probes import _fidelity_schedule
+
+    # 15-conflict corpus, 3 epochs → (5, 10, 15).
+    assert _fidelity_schedule(15) == (5, 10, 15)
+    # 12-conflict corpus → (4, 8, 12).
+    assert _fidelity_schedule(12) == (4, 8, 12)
+    # Small corpus (< n_epochs): floored at full size (no artificial subsampling).
+    assert _fidelity_schedule(2) == (2, 2, 2)
+    # 3-conflict corpus: just enough to subsample minimally.
+    assert _fidelity_schedule(3) == (1, 2, 3)
+    # Empty corpus.
+    assert _fidelity_schedule(0) == ()
+
+
+def test_epoch_tracker_best_so_far():
+    """The tracker returns the best point from the highest epoch with data."""
+    from capybase.probes import _EpochTracker
+    from capybase.calibration_design import DesignPoint
+
+    def _score(n_correct, total=10, proxy=0.0):
+        from capybase.quality import SettingScore
+        return SettingScore(n_correct=n_correct, proxy_sum=proxy,
+                            mean_latency_ms=100.0, per_conflict=[{}] * total)
+
+    tr = _EpochTracker()
+    p_a = DesignPoint("a", {"samples": 1})
+    p_b = DesignPoint("b", {"samples": 3})
+    # Epoch 1: point a is better.
+    tr.record(p_a, _score(3), epoch=1)
+    tr.record(p_b, _score(1), epoch=1)
+    best1 = tr.best_so_far
+    assert best1 is not None
+    assert best1[0].config_id == "a"
+    # Epoch 2: point b is now better at higher fidelity.
+    tr.record(p_b, _score(8, total=15), epoch=2)
+    tr.record(p_a, _score(5, total=15), epoch=2)
+    best2 = tr.best_so_far
+    assert best2 is not None
+    assert best2[0].config_id == "b"  # highest epoch wins
+    # Top-k within an epoch.
+    top = tr.top_k(2, epoch=1)
+    assert top[0][0].config_id == "a"
+    assert top[1][0].config_id == "b"
+
+
+def test_evaluate_setting_replicated_with_corpus_subset():
+    """The corpus= param evaluates on a subset; total reflects the subset size."""
+    from capybase.calibration_corpus import conflicts_with_context
+    from capybase.quality import evaluate_setting_replicated
+
+    subset = conflicts_with_context()[:3]
+
+    def resolve_one(conflict, context, cfg):
+        from capybase.conflict_model import CandidateResolution
+        cand = CandidateResolution(
+            candidate_id="c", unit_id=conflict.unit.unit_id,
+            model_name="m", prompt_version="t", resolved_text=conflict.expected_text,
+        )
+        return cand, None, 10.0
+
+    score = evaluate_setting_replicated(
+        resolve_one, ModelConfig(model="m"), n_reps=1, corpus=subset,
+    )
+    assert score.total == 3
+    assert score.n_correct == 3
+
+
+def test_probe_two_phase_multifidelity_finds_layout():
+    """The epoch loop still finds the dominant layout factor end-to-end."""
+    from capybase.probes import probe_two_phase
+    import capybase.prompt_profile as pp
+
+    pp.set_active_profile(None)
+    client = _LayoutSensitiveClient()
+    cfg = ModelConfig(model="vibethink")
+    result, choices, profile = probe_two_phase(client, cfg)
+    assert profile.output_layout is pp.OutputLayout.MARKDOWN_CODE
+    assert "Phase 1 ranking" in result.detail
+    assert result.ok
+    pp.set_active_profile(None)
+
+
+class _InterruptingClient(_LayoutSensitiveClient):
+    """Raises KeyboardInterrupt ONCE after ``raise_after`` complete() calls —
+    simulates a user Ctrl-C mid-calibration (a real signal fires momentarily,
+    not on every subsequent call). After the raise, behaves normally so the
+    finalize path can complete. Subclasses _LayoutSensitiveClient so the epoch-1
+    best-so-far is the markdown_code point (correct under that layout)."""
+
+    def __init__(self, raise_after):
+        super().__init__()
+        self._raise_after = raise_after
+        self._n = 0
+        self._fired = False
+
+    def complete(self, messages, **kw):
+        self._n += 1
+        if not self._fired and self._n > self._raise_after:
+            self._fired = True
+            raise KeyboardInterrupt("simulated user interrupt")
+        return super().complete(messages, **kw)
+
+
+def test_probe_two_phase_interrupted_after_epoch1_adopts_best(monkeypatch):
+    """Ctrl-C after Epoch 1 completes → best-so-far (markdown_code) is adopted."""
+    from capybase import probes
+    from capybase.probes import probe_two_phase
+    import capybase.prompt_profile as pp
+
+    # Force epoch 1 to use just 2 conflicts (cheaper → fewer calls to interrupt
+    # past). The default 7-factor design × 16 points: ~half have samples=3.
+    monkeypatch.setattr(probes, "_fidelity_schedule",
+                        lambda n, **kw: (2, 5, n))
+    pp.set_active_profile(None)
+    # Epoch 1 = 16 points × 2 conflicts × (8×1 + 8×3) = 64 calls. Raise on the
+    # 65th to interrupt at the first epoch-2 call (epoch 1 fully completed).
+    client = _InterruptingClient(raise_after=64)
+    cfg = ModelConfig(model="vibethink")
+    result, choices, profile = probe_two_phase(client, cfg)
+    # Didn't crash — returned normally with best-so-far.
+    assert "INTERRUPTED" in result.detail
+    # The epoch-1 best (markdown_code layout) was adopted.
+    assert profile.output_layout is pp.OutputLayout.MARKDOWN_CODE
+    assert result.ok
+    pp.set_active_profile(None)
+
+
+def test_probe_two_phase_interrupted_mid_epoch_keeps_existing():
+    """Ctrl-C mid-Epoch-1 (before any point fully scored) → graceful, keeps
+    existing config (no best-so-far to adopt)."""
+    from capybase.probes import probe_two_phase
+    import capybase.prompt_profile as pp
+
+    pp.set_active_profile(None)
+    # Raise after 3 calls — the first design point needs 5+ calls to complete,
+    # so nothing is fully scored when the interrupt fires.
+    client = _InterruptingClient(raise_after=3)
+    cfg = ModelConfig(model="vibethink")
+    result, choices, profile = probe_two_phase(client, cfg)
+    # No crash; existing (default) config retained since nothing was scored.
+    assert "INTERRUPTED" in result.detail
+    assert profile == pp.DEFAULT_PROFILE
+    pp.set_active_profile(None)
+
+
+# ---------------------------------------------------------------------------
 # Structured capability probe + early-exit + adaptive factor selection
 # ---------------------------------------------------------------------------
 

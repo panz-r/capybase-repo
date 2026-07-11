@@ -1045,6 +1045,161 @@ def _apply_design_point(
     return cfg, profile
 
 
+# ---------------------------------------------------------------------------
+# Multi-fidelity epoch calibration: anytime, haltable, successive refinement
+# (replaces the fixed two-phase batch with a sequence of cheap-to-deep epochs)
+# ---------------------------------------------------------------------------
+
+
+# How many configurations survive into Epoch 2 (carried forward from Epoch 1's
+# top performers, alongside the factorial on the top-3 factors). Keeps the
+# epoch-2 pool bounded while guaranteeing the epoch-1 best isn't dropped before
+# it can be re-evaluated at higher fidelity.
+_EPOCH2_SURVIVORS = 3
+
+# How many finalists Epoch 3 evaluates head-to-head on the full corpus when
+# Epoch 2 couldn't separate them.
+_EPOCH3_FINALISTS = 2
+
+# Epoch-3 fires only when the Epoch-2 top-2 finalists are within this margin:
+# equal correctness AND proxy within this delta. A wider gap means Epoch 2
+# already identified the winner and Epoch 3 would be pure confirmation cost.
+_TIEBREAKER_PROXY_EPS = 1.0
+
+
+def _fidelity_schedule(corpus_size: int, *, n_epochs: int = 3) -> tuple[int, ...]:
+    """Evenly-spaced corpus-prefix sizes for the multi-fidelity epochs.
+
+    For a 15-conflict corpus and 3 epochs: ``(5, 10, 15)`` — Epoch 1 screens
+    cheaply on a third of the corpus, Epoch 2 refines on two-thirds, Epoch 3
+    validates finalists on the full corpus. The last epoch is always the full
+    corpus so the final adoption decision reflects full-corpus quality.
+
+    Small corpora are floored at their full size (no artificial subsampling
+    below ~3 conflicts — a 1-2 conflict "epoch" is pure noise): a 2-conflict
+    corpus yields ``(2, 2, 2)`` (all epochs full). A 3-conflict corpus yields
+    ``(1, 2, 3)``.
+    """
+    if corpus_size <= 0:
+        return ()
+    # For tiny corpora, just repeat the full size — multi-fidelity only helps
+    # when there's room to subsample meaningfully.
+    if corpus_size < n_epochs:
+        return tuple(corpus_size for _ in range(n_epochs))
+    # Evenly-spaced fractions: i/n_epochs of the corpus, rounded, floored at 1.
+    # The last entry is clamped to the full size (not a rounding artifact).
+    sizes: list[int] = []
+    for i in range(1, n_epochs + 1):
+        s = max(1, round(corpus_size * i / n_epochs))
+        sizes.append(min(s, corpus_size))
+    sizes[-1] = corpus_size
+    return tuple(sizes)
+
+
+@dataclass
+class _EpochTracker:
+    """Tracks per-point scores across epochs for anytime best-so-far selection.
+
+    Scores are keyed by ``(config_id, epoch)`` because the SAME configuration
+    may be re-evaluated at different fidelities (a survivor from Epoch 1 is
+    re-scored in Epoch 2 on a larger corpus). All comparisons are WITHIN a
+    single epoch (same corpus size → same ``n_correct`` denominator); cross-
+    epoch comparison is invalid because ``_compare_quality`` uses absolute
+    counts. The ``best_so_far`` property sidesteps this by always returning the
+    best point from the HIGHEST epoch that has any data (highest fidelity wins).
+    """
+
+    scores: dict[tuple[str, int], Any] = field(default_factory=dict)
+    points_by_id: dict[str, Any] = field(default_factory=dict)
+    _max_epoch: int = 0
+
+    def record(self, point, score, *, epoch: int) -> None:
+        """Record a point's score at a given epoch (fidelity level)."""
+        self.scores[(point.config_id, epoch)] = score
+        self.points_by_id[point.config_id] = point
+        if epoch > self._max_epoch:
+            self._max_epoch = epoch
+
+    def best_in_epoch(self, epoch: int):
+        """Return (best point, its score) in a single epoch, or None if empty.
+
+        "Best" is by ``_compare_quality`` (correctness → proxy, no latency).
+        Ties pick the first-recorded (deterministic)."""
+        entries = [
+            (pid, self.scores[(pid, epoch)])
+            for pid in self.points_by_id
+            if (pid, epoch) in self.scores
+        ]
+        if not entries:
+            return None
+        best_pid, best_score = entries[0]
+        for pid, score in entries[1:]:
+            if _compare_quality(score, best_score) > 0:
+                best_pid, best_score = pid, score
+        return self.points_by_id[best_pid], best_score
+
+    @property
+    def best_so_far(self):
+        """The best point from the highest epoch that has any completed scores.
+
+        Highest-fidelity epoch wins because cross-epoch comparison is invalid
+        (different corpus sizes). Returns None when nothing has been recorded."""
+        for epoch in range(self._max_epoch, 0, -1):
+            best = self.best_in_epoch(epoch)
+            if best is not None:
+                return best
+        return None
+
+    def top_k(self, k: int, *, epoch: int):
+        """Return the top-k (point, score) pairs in an epoch, best-first."""
+        entries = [
+            (self.points_by_id[pid], self.scores[(pid, epoch)])
+            for pid in self.points_by_id
+            if (pid, epoch) in self.scores
+        ]
+        # Sort by _compare_quality descending (a > b → a first). Stable on ties.
+        for i in range(1, len(entries)):
+            j = i
+            while j > 0 and _compare_quality(entries[j][1], entries[j - 1][1]) > 0:
+                entries[j], entries[j - 1] = entries[j - 1], entries[j]
+                j -= 1
+        return entries[:k]
+
+
+def _decode_point(point) -> tuple[dict, "PromptProfile"]:
+    """Decode a DesignPoint's levels into (MechanismChoices kwargs, PromptProfile).
+
+    Extracted from the inline Phase-2 decode so any epoch's winning point can
+    be decoded uniformly. Only profile-persisted knobs are extracted (mech
+    fields → MechanismChoices kwargs; prompt axes → PromptProfile). Factors not
+    present in the point's levels fall back to DEFAULT_PROFILE / default mech.
+    """
+    from capybase.prompt_profile import DEFAULT_PROFILE, PromptProfile
+
+    levels = point.levels
+    cfg_kwargs: dict[str, Any] = {}
+    if "samples" in levels:
+        cfg_kwargs["samples"] = int(levels["samples"])
+    if "diverse_sampling" in levels:
+        cfg_kwargs["diverse_sampling"] = bool(levels["diverse_sampling"])
+    if "prompt_variants" in levels:
+        cfg_kwargs["prompt_variants"] = bool(levels["prompt_variants"])
+    if "enable_self_consistency" in levels:
+        cfg_kwargs["enable_self_consistency"] = bool(levels["enable_self_consistency"])
+    profile = PromptProfile(
+        output_layout=levels.get("output_layout", DEFAULT_PROFILE.output_layout),
+        instruction_position=levels.get("instruction_position", DEFAULT_PROFILE.instruction_position),
+        history_framing=levels.get("history_framing", DEFAULT_PROFILE.history_framing),
+        example_limit=int(levels.get("example_limit", DEFAULT_PROFILE.example_limit)),
+        rule_emphasis=levels.get("rule_emphasis", DEFAULT_PROFILE.rule_emphasis),
+        conflict_summary_mode=levels.get("conflict_summary_mode", DEFAULT_PROFILE.conflict_summary_mode),
+        side_ordering=levels.get("side_ordering", DEFAULT_PROFILE.side_ordering),
+        parse_repair_mode=levels.get("parse_repair_mode", DEFAULT_PROFILE.parse_repair_mode),
+        retry_schedule=levels.get("retry_schedule", DEFAULT_PROFILE.retry_schedule),
+    )
+    return cfg_kwargs, profile
+
+
 def probe_two_phase(
     client: Any,
     model_cfg: ModelConfig,
@@ -1056,31 +1211,45 @@ def probe_two_phase(
     capabilities: "ModelCapability | None" = None,
     force_factors: tuple[str, ...] = (),
 ) -> tuple[ProbeResult, "MechanismChoices", "PromptProfile"]:
-    """Two-phase designed calibration: screen all factors, then refine the winners.
+    """Multi-fidelity epoch calibration: screen, refine, tie-break — anytime.
 
-    Phase 1 (screening): a Resolution-IV fractional-factorial design samples all
-    factor variations (prompt axes + mechanism/sampling) in 16 runs. Main
-    effects + standardized effects rank which dimensions genuinely drive
-    performance. Each design point is evaluated with replication (majority vote)
-    so noisy thinking models get trustworthy scores.
+    A sequence of cheap-to-deep epochs, each a valid stopping point:
 
-    Phase 2 (focused refinement): a full 2^k factorial on the top-3 factors
-    explores their interactions and selects the best design point by
-    compare_scores (correctness → proxy → latency).
+    - **Epoch 1 (screening)**: the Resolution-IV fractional-factorial design
+      samples all factor variations on a SMALL corpus prefix. Main effects +
+      t-stats rank which dimensions drive performance. The epoch-1 best point is
+      a usable (if rough) profile — the first "anytime" output.
+    - **Epoch 2 (refinement)**: a full 2^k factorial on the top-3 factors (de-
+      aliases their interactions) PLUS the top-3 epoch-1 survivors (re-evaluated
+      at higher fidelity), on a LARGER corpus prefix. Discovers configurations
+      the screening couldn't represent.
+    - **Epoch 3 (tie-breaker)**: the top-2 epoch-2 finalists on the FULL corpus.
+      Runs ONLY when epoch 2 couldn't separate them (within ``_TIEBREAKER_PROXY_EPS``).
 
-    Replaces the prior independent A/B-per-knob (probe_mechanisms +
-    probe_prompt_profile). Returns the winning MechanismChoices + PromptProfile
-    plus a ProbeResult carrying the Phase-1 factor ranking as detail.
+    **Anytime halt**: at any point after the first completed eval, the caller
+    can interrupt (Ctrl-C → ``KeyboardInterrupt``). The probe catches it,
+    finalizes from the highest-fidelity epoch's best point, and returns normally
+    so the CLI persists the best-so-far profile. A completed run is unaffected.
+
+    Multi-fidelity: ``_compare_quality`` uses absolute ``n_correct``, so cross-
+    corpus-size comparison is invalid. The ``_EpochTracker`` therefore compares
+    only WITHIN an epoch (same denominator) and selects best-so-far from the
+    highest epoch reached (highest fidelity wins).
 
     Below ``_MIN_CORPUS_FOR_MECHANISM_SELECTION`` the probe refuses and returns
     the existing choices/profile (or defaults), preserving a hand-tuned config
     through a recalibrate on a small corpus.
+
+    ``run_phase2=False`` runs only Epoch 1 (screening) and reports the factor
+    ranking without adopting — useful on slow models to read which dimensions
+    matter before paying for refinement (same semantics as the old ``--calibrate-
+    phase1-only``).
     """
-    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
+    from capybase.calibration_corpus import CALIBRATION_CONFLICTS, conflicts_with_context
     from capybase.calibration_design import (
-        fractional_factorial_2k, full_factorial, rank_factors, select_best_point,
+        DesignPoint, fractional_factorial_2k, rank_factors,
     )
-    from capybase.prompt_profile import DEFAULT_PROFILE, PromptProfile
+    from capybase.prompt_profile import DEFAULT_PROFILE, PromptProfile, set_active_profile
     from capybase.quality import evaluate_setting_replicated
 
     decisions: list[str] = []
@@ -1101,8 +1270,17 @@ def probe_two_phase(
     factors = _two_phase_factors(model_cfg, capabilities=capabilities,
                                  force_factors=force_factors)
 
-    def _eval_point(point) -> Any:
+    full_corpus = conflicts_with_context()
+    schedule = _fidelity_schedule(len(full_corpus))
+    n_epochs = len(schedule)
+
+    def _corpus_for(epoch: int):  # epoch is 1-based
+        k = schedule[min(epoch - 1, n_epochs - 1)] if schedule else len(full_corpus)
+        return full_corpus[:k]
+
+    def _eval_point(point, *, epoch: int) -> Any:
         cfg, _prof = _apply_design_point(model_cfg, point, n_reps=n_reps)
+        subset = _corpus_for(epoch)
 
         def resolve_one(conflict, context, c):
             w, lat = _resolve_under_config(client, c, conflict, context)
@@ -1110,31 +1288,128 @@ def probe_two_phase(
                 raise RuntimeError("no candidate produced")
             return w, None, lat
 
-        return evaluate_setting_replicated(resolve_one, cfg, n_reps=n_reps)
+        return evaluate_setting_replicated(resolve_one, cfg, n_reps=n_reps, corpus=subset)
 
-    # --- Phase 1: screening ---
-    _progress(f"calibrate: Phase 1 screening ({len(factors)} factors, "
-              f"{len(fractional_factorial_2k(factors))} design points"
-              f"{f', {n_reps} reps/point' if n_reps > 1 else ''})...")
-    p1_design = fractional_factorial_2k(factors)
-    p1_scores: list[Any] = []
-    for i, point in enumerate(p1_design):
-        _progress(f"calibrate: Phase 1 point {i+1}/{len(p1_design)} ({point.tag() or 'baseline'})...")
-        score = _eval_point(point)
-        p1_scores.append(score)
-        _progress(f"calibrate:   -> {score.n_correct}/{score.total} correct")
-    # Score for effect estimation: correctness fraction (robust to corpus size).
-    p1_correct = [s.n_correct / max(1, s.total) for s in p1_scores]
-    ranking = rank_factors(p1_correct, p1_design, factors)
-    rank_summary = "; ".join(
-        f"{r.name}({r.direction},|t|={abs(r.tstat):.1f})" for r in ranking[:4]
-    )
-    decisions.append(f"Phase 1 ranking: {rank_summary}")
-    _progress(f"calibrate: Phase 1 done — top factors: {rank_summary}")
+    tracker = _EpochTracker()
+    ranking: list = []
+    interrupted = False
+    last_epoch_completed = 0
 
-    # --- Phase 2: focused refinement on the top factors ---
-    # Default: keep the existing config (Phase 2 only overrides if a design
-    # point beats it). Seed with the existing choices' score.
+    try:
+        # --- Epoch 1: screening on a small corpus prefix ---
+        p1_design = fractional_factorial_2k(factors)
+        k1 = len(_corpus_for(1))
+        _progress(f"calibrate: Epoch 1/{n_epochs} screening ({len(factors)} factors, "
+                  f"{len(p1_design)} points, {k1} conflicts"
+                  f"{f', {n_reps} reps/point' if n_reps > 1 else ''})...")
+        for i, point in enumerate(p1_design):
+            _progress(f"calibrate: Epoch 1 point {i+1}/{len(p1_design)} "
+                      f"({point.tag() or 'baseline'})...")
+            score = _eval_point(point, epoch=1)
+            tracker.record(point, score, epoch=1)
+            _progress(f"calibrate:   -> {score.n_correct}/{score.total} correct")
+        last_epoch_completed = 1
+        # Score for effect estimation: correctness fraction (robust to corpus size).
+        p1_scores = [tracker.scores[(p.config_id, 1)] for p in p1_design]
+        p1_correct = [s.n_correct / max(1, s.total) for s in p1_scores]
+        ranking = rank_factors(p1_correct, p1_design, factors)
+        rank_summary = "; ".join(
+            f"{r.name}({r.direction},|t|={abs(r.tstat):.1f})" for r in ranking[:4]
+        )
+        decisions.append(f"Phase 1 ranking: {rank_summary}")
+        _progress(f"calibrate: Epoch 1 done — top factors: {rank_summary}")
+
+        if run_phase2 and ranking:
+            # --- Epoch 2: factorial refinement + survivors on a larger prefix ---
+            top_factors = ranking[:3]
+            factor_by_name = {f.name: f for f in factors}
+            p2_factors = [factor_by_name[r.name] for r in top_factors if r.name in factor_by_name]
+            if p2_factors:
+                # The existing config's level for every factor — refinement points
+                # inherit these for their non-top factors so each point is a complete
+                # config. Makes the existing-baseline comparison apples-to-apples.
+                existing_levels = {f.name: f.low for f in factors}
+
+                def _merge_point(top_levels: dict, *, cid: str = "p2") -> DesignPoint:
+                    merged = dict(existing_levels)
+                    merged.update(top_levels)
+                    return DesignPoint(config_id=cid, levels=merged)
+
+                # Factorial on the top-3 factors (de-aliases their interactions).
+                factorial_points: list[DesignPoint] = []
+                for combo in itertools.product((-1, 1), repeat=len(p2_factors)):
+                    top_levels = {
+                        factor.name: factor.high if combo[j] > 0 else factor.low
+                        for j, factor in enumerate(p2_factors)
+                    }
+                    factorial_points.append(_merge_point(top_levels, cid=f"e2-f{len(factorial_points)+1}"))
+
+                # Survivors carried forward from Epoch 1 (re-evaluated at higher
+                # fidelity). Ordered best-first so a mid-epoch interrupt retains
+                # the most promising points. Deduped against the factorial set
+                # (same levels → skip the re-eval).
+                survivors = tracker.top_k(_EPOCH2_SURVIVORS, epoch=1)
+                survivor_points: list[DesignPoint] = []
+                seen_levels = {tuple(sorted(p.levels.items(), key=lambda kv: kv[0]))
+                               for p in factorial_points}
+                for spt, _sscore in survivors:
+                    key = tuple(sorted(spt.levels.items(), key=lambda kv: kv[0]))
+                    if key not in seen_levels:
+                        survivor_points.append(DesignPoint(
+                            config_id=f"e2-s{spt.config_id}", levels=dict(spt.levels),
+                        ))
+                        seen_levels.add(key)
+
+                e2_pool = survivor_points + factorial_points
+                k2 = len(_corpus_for(2))
+                _progress(f"calibrate: Epoch 2/{n_epochs} refinement "
+                          f"({len(e2_pool)} points: {len(survivor_points)} survivors + "
+                          f"{len(factorial_points)} factorial, {k2} conflicts)...")
+                for j, point in enumerate(e2_pool):
+                    _progress(f"calibrate: Epoch 2 point {j+1}/{len(e2_pool)} "
+                              f"({point.tag() or 'baseline'})...")
+                    score = _eval_point(point, epoch=2)
+                    tracker.record(point, score, epoch=2)
+                    _progress(f"calibrate:   -> {score.n_correct}/{score.total} correct")
+                last_epoch_completed = 2
+                _progress(f"calibrate: Epoch 2 done")
+
+                # --- Epoch 3: tie-breaker (only if epoch 2 top-2 are close) ---
+                finalists = tracker.top_k(_EPOCH3_FINALISTS, epoch=2)
+                if len(finalists) >= 2:
+                    _s1, sc1 = finalists[0]
+                    _s2, sc2 = finalists[1]
+                    close = (
+                        sc1.n_correct == sc2.n_correct
+                        and abs(sc1.proxy_sum - sc2.proxy_sum) <= _TIEBREAKER_PROXY_EPS
+                    )
+                    if close and n_epochs >= 3:
+                        k3 = len(_corpus_for(3))
+                        e3_points = [
+                            DesignPoint(config_id=f"e3-{fpt.config_id}",
+                                        levels=dict(fpt.levels))
+                            for fpt, _ in finalists
+                        ]
+                        _progress(f"calibrate: Epoch 3/{n_epochs} tie-breaker "
+                                  f"({len(e3_points)} finalists, {k3} conflicts)...")
+                        for j, point in enumerate(e3_points):
+                            _progress(f"calibrate: Epoch 3 point {j+1}/{len(e3_points)} "
+                                      f"({point.tag() or 'baseline'})...")
+                            score = _eval_point(point, epoch=3)
+                            tracker.record(point, score, epoch=3)
+                            _progress(f"calibrate:   -> {score.n_correct}/{score.total} correct")
+                        last_epoch_completed = 3
+                        _progress(f"calibrate: Epoch 3 done")
+                    elif close:
+                        _progress("calibrate: top-2 close but no Epoch 3 in schedule; "
+                                  "keeping Epoch 2 winner")
+    except KeyboardInterrupt:
+        interrupted = True
+        _progress(f"calibrate: interrupted after epoch {last_epoch_completed} "
+                  f"— using best-so-far")
+
+    # --- Finalize: adopt best-so-far if it beats the existing baseline ---
+    best = tracker.best_so_far
     best_cfg_kwargs = {
         "samples": choices.samples, "two_pass": choices.two_pass,
         "plan_search": choices.plan_search, "prompt_variants": choices.prompt_variants,
@@ -1143,93 +1418,96 @@ def probe_two_phase(
     }
     best_profile = winner_profile
 
-    if run_phase2:
-        top_factors = ranking[:3]
-        # Build Phase-2 Factor objects for the top-ranked dimensions.
-        factor_by_name = {f.name: f for f in factors}
-        p2_factors = [factor_by_name[r.name] for r in top_factors if r.name in factor_by_name]
-        if p2_factors:
-            # The existing config's level for every factor — Phase-2 points
-            # inherit these for their non-top factors so each point is a complete
-            # config (not a partial one that defaults the rest to PromptProfile
-            # defaults). This makes the existing-baseline comparison apples-to-
-            # apples: a Phase-2 point differs from existing ONLY on the top factors.
-            from capybase.calibration_design import DesignPoint
-            existing_levels = {f.name: f.low for f in factors}
+    if best is not None and run_phase2:
+        best_point, best_score = best
+        # Evaluate the existing baseline at the SAME fidelity (corpus size) as the
+        # best-so-far so the adoption comparison is valid (same n_correct
+        # denominator). ``best_score.total`` is the corpus size at the winning
+        # epoch — slice the full corpus to match.
+        existing_point = DesignPoint(
+            config_id="existing",
+            levels={f.name: f.low for f in factors},
+        )
+        existing_subset = full_corpus[:best_score.total]
+        _apply_design_point(model_cfg, existing_point, n_reps=n_reps)
 
-            def _merge_point(top_levels: dict) -> DesignPoint:
-                merged = dict(existing_levels)
-                merged.update(top_levels)
-                return DesignPoint(config_id="p2", levels=merged)
+        def _resolve_existing(conflict, context, c):
+            w, lat = _resolve_under_config(client, c, conflict, context)
+            if w is None:
+                raise RuntimeError("no candidate produced")
+            return w, None, lat
 
-            # Map each sign combo to actual factor levels (high for +1, low for -1).
-            p2_design = []
-            for combo in itertools.product((-1, 1), repeat=len(p2_factors)):
-                top_levels = {}
-                for j, factor in enumerate(p2_factors):
-                    top_levels[factor.name] = factor.high if combo[j] > 0 else factor.low
-                p2_design.append(_merge_point(top_levels))
-            _progress(f"calibrate: Phase 2 focused refinement "
-                      f"({len(p2_factors)} top factors, {len(p2_design)} runs)...")
-            p2_scores: list[Any] = []
-            for j, point in enumerate(p2_design):
-                _progress(f"calibrate: Phase 2 point {j+1}/{len(p2_design)} ({point.tag() or 'baseline'})...")
-                p2_scores.append(_eval_point(point))
-            best_i, best_score = select_best_point(
-                p2_design, p2_scores, _compare_quality,
+        # The baseline eval is itself a corpus sweep — protect it from a second
+        # interruption (or any eval failure). When the baseline can't be scored,
+        # adopt best-so-far ONLY if it showed positive correctness (it resolved
+        # SOMETHING; keeping a config we can't even evaluate would be guessing).
+        # This keeps the anytime promise: an interrupted run returns the best
+        # data it has, never crashes.
+        try:
+            existing_score = evaluate_setting_replicated(
+                _resolve_existing, model_cfg, n_reps=n_reps, corpus=existing_subset,
             )
-            # The existing baseline: the current config with NO factor changed.
-            existing_point = _merge_point({})
-            existing_score = _eval_point(existing_point)
-            # Only adopt the Phase-2 winner if it STRICTLY beats the existing
-            # baseline on CORRECTNESS then PROXY (no latency — latency is noisy
-            # and must never flip an adoption decision on its own, matching the
-            # mechanism probe's _compare_quality rule). A tie keeps the existing
-            # config — the conservative "don't change what works" principle.
+            baseline_available = True
+        except KeyboardInterrupt:
+            interrupted = True
+            baseline_available = False
+            _progress("calibrate: interrupted during baseline comparison "
+                      "— adopting best-so-far without baseline gate")
+        except Exception as exc:  # noqa: BLE001 - never crash on finalize
+            baseline_available = False
+            decisions.append(f"baseline eval failed ({exc}); adopting best-so-far")
+
+        if baseline_available:
+            # Adopt ONLY on a strict improvement (correctness → proxy, no latency).
             if _compare_quality(best_score, existing_score) > 0:
-                levels = best_i.levels
-                # Decode the winning levels back into MechanismChoices + PromptProfile.
-                # Only profile-persisted knobs are decoded (temperature etc. are
-                # not calibration factors — see _two_phase_factors).
-                if "samples" in levels:
-                    best_cfg_kwargs["samples"] = int(levels["samples"])
-                if "diverse_sampling" in levels:
-                    best_cfg_kwargs["diverse_sampling"] = bool(levels["diverse_sampling"])
-                if "prompt_variants" in levels:
-                    best_cfg_kwargs["prompt_variants"] = bool(levels["prompt_variants"])
-                if "enable_self_consistency" in levels:
-                    best_cfg_kwargs["enable_self_consistency"] = bool(levels["enable_self_consistency"])
-                best_profile = PromptProfile(
-                    output_layout=levels.get("output_layout", DEFAULT_PROFILE.output_layout),
-                    instruction_position=levels.get("instruction_position", DEFAULT_PROFILE.instruction_position),
-                    history_framing=levels.get("history_framing", DEFAULT_PROFILE.history_framing),
-                    example_limit=int(levels.get("example_limit", DEFAULT_PROFILE.example_limit)),
-                    rule_emphasis=levels.get("rule_emphasis", DEFAULT_PROFILE.rule_emphasis),
-                    conflict_summary_mode=levels.get("conflict_summary_mode", DEFAULT_PROFILE.conflict_summary_mode),
-                    side_ordering=levels.get("side_ordering", DEFAULT_PROFILE.side_ordering),
-                    parse_repair_mode=levels.get("parse_repair_mode", DEFAULT_PROFILE.parse_repair_mode),
-                    retry_schedule=levels.get("retry_schedule", DEFAULT_PROFILE.retry_schedule),
-                )
+                decoded_kwargs, best_profile = _decode_point(best_point)
+                best_cfg_kwargs.update(decoded_kwargs)
                 decisions.append(
-                    f"Phase 2 winner: {best_i.config_id} "
-                    f"({best_score.n_correct}/{best_score.total} correct)"
+                    f"Epoch {last_epoch_completed} winner: {best_point.config_id} "
+                    f"({best_score.n_correct}/{best_score.total} correct"
+                    f"{f', {n_reps} reps' if n_reps > 1 else ''})"
                 )
             else:
-                if _compare_quality(best_score, existing_score) == 0:
+                cmp = _compare_quality(best_score, existing_score)
+                if cmp == 0:
                     decisions.append(
-                        f"Phase 2: design point ties existing "
-                        f"({existing_score.n_correct}/{existing_score.total} correct); "
-                        f"keeping existing (no strict improvement)"
+                        f"best-so-far ties existing ({existing_score.n_correct}/"
+                        f"{existing_score.total} correct); keeping existing"
                     )
                 else:
                     decisions.append(
-                        f"Phase 2: existing config beats all design points "
-                        f"({existing_score.n_correct}/{existing_score.total} correct); keeping it"
+                        f"existing beats best-so-far ({existing_score.n_correct}/"
+                        f"{existing_score.total} correct); keeping it"
                     )
-            _progress(f"calibrate: Phase 2 done — best {best_score.n_correct}/{best_score.total} correct")
+        else:
+            # Baseline unavailable: adopt best-so-far iff it has positive
+            # correctness; else keep existing (don't adopt a zero-score config
+            # we couldn't validate against the baseline).
+            if best_score.n_correct > 0:
+                decoded_kwargs, best_profile = _decode_point(best_point)
+                best_cfg_kwargs.update(decoded_kwargs)
+                decisions.append(
+                    f"adopted best-so-far {best_point.config_id} "
+                    f"({best_score.n_correct}/{best_score.total} correct) "
+                    f"without baseline comparison"
+                )
+            else:
+                decisions.append(
+                    "keeping existing (best-so-far has no correct resolutions "
+                    "and baseline unavailable)"
+                )
+    elif best is not None and not run_phase2:
+        decisions.append("Phase 1 only (screening); keeping existing config")
+    elif interrupted:
+        decisions.append("interrupted before any epoch completed; keeping existing config")
+
+    if interrupted:
+        decisions.append(
+            f"INTERRUPTED after epoch {last_epoch_completed} "
+            f"(profile reflects best-so-far, may be less refined)"
+        )
 
     choices = MechanismChoices(**best_cfg_kwargs)
-    from capybase.prompt_profile import set_active_profile
     set_active_profile(best_profile if best_profile != DEFAULT_PROFILE else None)
     ok = (
         choices.samples > 1

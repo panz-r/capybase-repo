@@ -199,6 +199,8 @@ def compare_scores(a: SettingScore, b: SettingScore) -> int:
 def evaluate_setting(
     resolve_one: Callable[[CalibrationConflict, ContextBundle, ModelConfig], tuple[CandidateResolution, VerificationResult | None, float]],
     model_cfg: ModelConfig,
+    *,
+    corpus: list[tuple[CalibrationConflict, ContextBundle]] | None = None,
 ) -> SettingScore:
     """Resolve every corpus conflict under ``model_cfg`` and aggregate.
 
@@ -208,10 +210,17 @@ def evaluate_setting(
     module independent of the ResolutionEngine/client plumbing — the caller
     decides HOW to resolve (single-sample, consensus, two-pass), this module
     only scores the result.
+
+    ``corpus`` (multi-fidelity calibration): when given, iterate it instead of
+    the full ``conflicts_with_context()`` corpus. This lets the epoch-based
+    search evaluate design points on a small corpus prefix (cheap early epochs)
+    and deepen to the full corpus later. ``None`` (the default) = the standard
+    full-corpus behavior, byte-identical to pre-epoch calibration.
     """
+    eval_corpus = corpus if corpus is not None else conflicts_with_context()
     per: list[ConflictScore] = []
     latencies: list[float] = []
-    for conflict, context in conflicts_with_context():
+    for conflict, context in eval_corpus:
         try:
             candidate, verification, latency_ms = resolve_one(conflict, context, model_cfg)
         except Exception as exc:  # noqa: BLE001 - a failed resolution is a miss
@@ -238,6 +247,7 @@ def evaluate_setting_replicated(
     model_cfg: ModelConfig,
     *,
     n_reps: int = 1,
+    corpus: list[tuple[CalibrationConflict, ContextBundle]] | None = None,
 ) -> SettingScore:
     """Resolve the corpus ``n_reps`` times and aggregate with majority voting.
 
@@ -250,17 +260,21 @@ def evaluate_setting_replicated(
 
     ``n_reps=1`` is byte-identical to ``evaluate_setting`` (the default, for
     fast/stable models). The proxy and latency are means across reps.
+
+    ``corpus`` (multi-fidelity calibration): when given, iterate it instead of
+    the full ``conflicts_with_context()`` corpus, so early epochs can screen on
+    a small prefix. ``None`` (the default) = the standard full-corpus behavior.
     """
     if n_reps <= 1:
-        return evaluate_setting(resolve_one, model_cfg)
+        return evaluate_setting(resolve_one, model_cfg, corpus=corpus)
 
-    corpus = conflicts_with_context()
+    eval_corpus = corpus if corpus is not None else conflicts_with_context()
     per: list[ConflictScore] = []
     agreement: list[float] = []
     all_latencies: list[float] = []
     pass_at_k_count = 0
     pass_all_k_count = 0
-    for conflict, context in corpus:
+    for conflict, context in eval_corpus:
         rep_correct = 0
         rep_proxy = 0.0
         rep_latencies: list[float] = []

@@ -11,10 +11,13 @@ happens to be running.
 
 ## The Factor Set
 
-capybase's two-phase calibration screens seven factors in a single designed
-experiment (a Resolution-IV fractional factorial — 16 runs that sample all
-factor combinations). Each factor has two experimental levels ("low" and
-"high"); the calibration discovers which level helps and by how much.
+capybase's calibration screens seven factors in a multi-fidelity epoch loop
+(a Resolution-IV fractional factorial — 16 runs that sample all factor
+combinations). Each factor has two experimental levels ("low" and "high"); the
+calibration discovers which level helps and by how much. The search runs in
+three epochs of increasing corpus fidelity, each a valid stopping point — so a
+calibration can be halted at any time (Ctrl-C) and still produce a usable
+profile from the best-so-far results.
 
 The factors fall into two groups: **prompt-rendering axes** (how the prompt is
 arranged and framed) and **mechanism/sampling axes** (how the engine draws and
@@ -269,16 +272,15 @@ The same system, three very different adaptations:
 - **VT3B:** the prompt structure is the lever — top_heavy gives the thinking
   model a target, and multi-sampling compensates for its low per-call success.
 
-The two-phase calibration discovers which lever matters for each model through a
-single 16-run designed experiment, rather than brute-force enumeration of all
-combinations.
+The calibration discovers which lever matters for each model through a 16-run
+designed experiment, rather than brute-force enumeration of all combinations.
 
 ---
 
 ## How to Calibrate Your Model
 
 ```bash
-# Full calibration (capability probes + two-phase screening + refinement):
+# Full calibration (capability probes + multi-fidelity epoch sweep):
 capybase calibrate
 
 # Noise-robust calibration for thinking models (3 reps per design point):
@@ -291,6 +293,28 @@ capybase calibrate --calibrate-phase1-only
 # Quick capability check (no corpus sweep):
 capybase calibrate --dry-run
 ```
+
+### Anytime halt
+
+Calibration runs in three epochs of increasing corpus fidelity (screening →
+refinement → tie-breaker). **You can Ctrl-C at any point after the first
+completed evaluation** — the probe catches the interrupt, finalizes from the
+best-so-far configuration at the highest fidelity reached, and persists it
+normally. This turns a multi-hour calibration on a slow model into something
+you can stop early with a defensible profile:
+
+```
+calibrate: Epoch 1/3 screening (16 points, 5 conflicts)...
+calibrate:   -> 3/5 correct
+...
+^C
+calibrate: interrupted after epoch 1 — using best-so-far
+wrote profile to: .rebase-agent/memory/model_profile.json
+```
+
+The earlier the halt, the less refined the profile (an Epoch-1 halt has only
+screened on a small corpus prefix), but every epoch boundary is a valid
+stopping point. A full run is unaffected.
 
 The calibrated profile is written to `~/.config/capybase/model_profile.json`
 and applied automatically on every `capybase rebase` run when the model name
