@@ -738,6 +738,35 @@ def _apply_model_profile(config: Config, repo_root: Path, journal: Journal) -> C
     # Prompt-rendering profile: applies the calibrated PromptProfile section as
     # the process-wide active profile. Env override wins (see _apply_prompt_profile).
     _apply_prompt_profile(profile)
+    # Safety profile: overlays calibrated retry budgets + escalation thresholds
+    # onto PolicyConfig so retry/escalation policy is per-model rather than
+    # config-only (feedback §2.1). Only applies when the section is non-default.
+    config = _apply_safety_profile(config, profile)
+    return config
+
+
+def _apply_safety_profile(config: Config, profile: "object") -> Config:
+    """Overlay the profile's safety section onto PolicyConfig.
+
+    When the calibrated SafetyProfile is non-default, its retry budgets +
+    escalation threshold override the config's [policy] values. This makes
+    retry/escalation policy profile-calibrated (per-model) rather than
+    config-only. A default section (or a missing one) is a no-op.
+    """
+    safety = getattr(profile, "safety", None)
+    if safety is None or getattr(safety, "is_default", True):
+        return config
+    updates = {}
+    if safety.max_retries_per_unit != 2:
+        updates["max_retries_per_unit"] = safety.max_retries_per_unit
+    if safety.max_critic_retries_per_unit != 0:
+        updates["max_critic_retries_per_unit"] = safety.max_critic_retries_per_unit
+    if safety.max_recovery_retries_per_unit != 1:
+        updates["max_recovery_retries_per_unit"] = safety.max_recovery_retries_per_unit
+    if safety.critic_confidence_escalate_threshold != 0.8:
+        updates["critic_confidence_escalate_threshold"] = safety.critic_confidence_escalate_threshold
+    if updates:
+        config = config.model_copy(update={"policy": config.policy.model_copy(update=updates)})
     return config
 
 
@@ -5288,6 +5317,20 @@ class Orchestrator:
                         # (#9 step 4) can match structurally.
                         region_kind=self._region_kind_for(unit),
                         conflict_shape=self._conflict_shape_for(unit),
+                        # Telemetry (feedback §5.1): structured per-task outcome
+                        # signals for future online-adaptation work.
+                        parse_success=(
+                            accepted is not None
+                            and getattr(accepted, "failure_kind", "") != "parse_failed"
+                        ),
+                        layout_used=(
+                            getattr(accepted, "prompt_version", "")
+                            or (getattr(outcome.attempts[-1], "prompt_version", "")
+                                if outcome.attempts else "")
+                        ),
+                        samples_used=int(getattr(
+                            getattr(outcome, "consensus", None), "n_samples", 1
+                        ) or 1),
                     )
                 )
                 # #11: refresh the retriever so step N+1 sees step N's accepted

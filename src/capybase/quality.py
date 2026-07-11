@@ -162,6 +162,13 @@ class SettingScore:
     # stable, <1.0 = noisy). Empty/zero when single-pass (n_reps=1).
     reps: int = 1
     per_conflict_agreement: list[float] = field(default_factory=list)
+    # Pass@k / Pass^k (feedback §7.2): Pass@k = fraction of conflicts where at
+    # least 1 of k reps succeeded; Pass^k = fraction where ALL k reps succeeded.
+    # With k=1 (single-rep), both equal n_correct/total. With k>1, the gap
+    # between Pass@k and Pass^k shows how much multi-sampling rescues a noisy
+    # model vs how stable it is. 0.0 when single-pass and not computed.
+    pass_at_k: float = 0.0
+    pass_all_k: float = 0.0
 
     @property
     def total(self) -> int:
@@ -212,11 +219,17 @@ def evaluate_setting(
             continue
         latencies.append(latency_ms)
         per.append(score_candidate(candidate, conflict, verification, latency_ms))
+    n_correct = sum(1 for s in per if s.correct)
+    total = len(per)
+    frac = n_correct / total if total else 0.0
     return SettingScore(
-        n_correct=sum(1 for s in per if s.correct),
+        n_correct=n_correct,
         proxy_sum=sum(s.proxy for s in per),
         mean_latency_ms=sum(latencies) / len(latencies) if latencies else 0.0,
         per_conflict=per,
+        # With k=1: Pass@1 = Pass^1 = n_correct/total.
+        pass_at_k=frac,
+        pass_all_k=frac,
     )
 
 
@@ -245,6 +258,8 @@ def evaluate_setting_replicated(
     per: list[ConflictScore] = []
     agreement: list[float] = []
     all_latencies: list[float] = []
+    pass_at_k_count = 0
+    pass_all_k_count = 0
     for conflict, context in corpus:
         rep_correct = 0
         rep_proxy = 0.0
@@ -266,12 +281,19 @@ def evaluate_setting_replicated(
         agree = rep_correct / n_reps
         majority_correct = rep_correct > n_reps / 2.0
         agreement.append(agree)
+        # Pass@k / Pass^k accumulators (feedback §7.2):
+        # Pass@k = at least 1 of k reps succeeded; Pass^k = all k succeeded.
+        if rep_correct >= 1:
+            pass_at_k_count += 1
+        if rep_correct == n_reps:
+            pass_all_k_count += 1
         mean_lat = sum(rep_latencies) / len(rep_latencies) if rep_latencies else 0.0
         all_latencies.append(mean_lat)
         per.append(ConflictScore(
             conflict.title, majority_correct, rep_proxy / n_reps, mean_lat,
             f"{rep_detail} [{rep_correct}/{n_reps} reps correct]",
         ))
+    total = len(per)
     return SettingScore(
         n_correct=sum(1 for s in per if s.correct),
         proxy_sum=sum(s.proxy for s in per),
@@ -279,4 +301,6 @@ def evaluate_setting_replicated(
         per_conflict=per,
         reps=n_reps,
         per_conflict_agreement=agreement,
+        pass_at_k=pass_at_k_count / total if total else 0.0,
+        pass_all_k=pass_all_k_count / total if total else 0.0,
     )

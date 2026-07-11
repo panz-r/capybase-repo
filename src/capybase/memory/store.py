@@ -53,6 +53,12 @@ class Experience:
     # can match prior resolutions structurally. Both empty for old lines.
     region_kind: str = ""
     conflict_shape: str = ""
+    # Telemetry fields (feedback §5.1): structured per-task outcome signals for
+    # future online-adaptation work. All default to safe values so old JSONL
+    # lines load unchanged.
+    parse_success: bool = True
+    layout_used: str = ""       # the accepted candidate's prompt_version
+    samples_used: int = 1       # how many samples were drawn (1 unless consensus)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +75,9 @@ class Experience:
             "provenance": self.provenance,
             "region_kind": self.region_kind,
             "conflict_shape": self.conflict_shape,
+            "parse_success": self.parse_success,
+            "layout_used": self.layout_used,
+            "samples_used": self.samples_used,
         }
 
     @classmethod
@@ -87,6 +96,9 @@ class Experience:
             provenance=str(d.get("provenance", "")),
             region_kind=str(d.get("region_kind", "")),
             conflict_shape=str(d.get("conflict_shape", "")),
+            parse_success=bool(d.get("parse_success", True)),
+            layout_used=str(d.get("layout_used", "")),
+            samples_used=int(d.get("samples_used", 1)),
         )
 
 

@@ -949,6 +949,9 @@ def _two_phase_factors(
                                         ConflictSummaryMode.FULL, ConflictSummaryMode.INTENT_ONLY),
         "side_ordering": Factor("side_ordering",
                                 SideOrdering.CURRENT_FIRST, SideOrdering.BASE_FIRST),
+        # self_consistency as a DOE factor (feedback §3.2): opt-in via
+        # --enable-factor or when capabilities signal semantic disagreements.
+        "enable_self_consistency": Factor("enable_self_consistency", False, True),
     }
 
     # Default: screen the standard 7 factors (backward compat when no
@@ -987,6 +990,7 @@ def _two_phase_factors(
     order = [
         "output_layout", "instruction_position", "history_framing",
         "example_limit", "samples", "diverse_sampling", "prompt_variants",
+        "enable_self_consistency",
         "rule_emphasis", "conflict_summary_mode", "side_ordering",
     ]
     return [all_factors[name] for name in order if name in selected]
@@ -1014,6 +1018,8 @@ def _apply_design_point(
         cfg_updates["diverse_sampling"] = bool(levels["diverse_sampling"])
     if "prompt_variants" in levels:
         cfg_updates["prompt_variants"] = bool(levels["prompt_variants"])
+    if "enable_self_consistency" in levels:
+        cfg_updates["enable_self_consistency"] = bool(levels["enable_self_consistency"])
     cfg = base_cfg.model_copy(update=cfg_updates) if cfg_updates else base_cfg
     # Prompt axes → PromptProfile. All axes default to PromptProfile()'s defaults
     # so a design point that doesn't set an axis keeps the production value.
@@ -1183,6 +1189,8 @@ def probe_two_phase(
                     best_cfg_kwargs["diverse_sampling"] = bool(levels["diverse_sampling"])
                 if "prompt_variants" in levels:
                     best_cfg_kwargs["prompt_variants"] = bool(levels["prompt_variants"])
+                if "enable_self_consistency" in levels:
+                    best_cfg_kwargs["enable_self_consistency"] = bool(levels["enable_self_consistency"])
                 best_profile = PromptProfile(
                     output_layout=levels.get("output_layout", DEFAULT_PROFILE.output_layout),
                     instruction_position=levels.get("instruction_position", DEFAULT_PROFILE.instruction_position),

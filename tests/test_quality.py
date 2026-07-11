@@ -228,3 +228,71 @@ def test_evaluate_setting_treats_exception_as_a_miss():
     score = evaluate_setting(resolve_one, ModelConfig())
     assert score.n_correct == 0
     assert all("error" in s.detail for s in score.per_conflict)
+
+
+# ---------------------------------------------------------------------------
+# Pass@k / Pass^k (feedback §7.2)
+# ---------------------------------------------------------------------------
+
+
+def test_pass_at_k_single_rep_equals_n_correct_fraction():
+    """With k=1: Pass@1 = Pass^1 = n_correct/total."""
+    from capybase.quality import evaluate_setting
+    from capybase.config import ModelConfig
+
+    def resolve_one(conflict, context, cfg):
+        from capybase.conflict_model import CandidateResolution
+        # Alternate correct/wrong so n_correct < total.
+        idx = conflict.unit.unit_id
+        text = conflict.expected_text if idx.endswith("0") else "WRONG"
+        return CandidateResolution(
+            candidate_id="c", unit_id=idx, model_name="m",
+            prompt_version="x", resolved_text=text,
+        ), None, 100.0
+
+    score = evaluate_setting(resolve_one, ModelConfig())
+    frac = score.n_correct / score.total
+    assert score.pass_at_k == frac
+    assert score.pass_all_k == frac
+
+
+def test_pass_at_k_replicated_all_correct():
+    """When all reps succeed for every conflict: Pass@k = Pass^k = 1.0."""
+    from capybase.quality import evaluate_setting_replicated
+    from capybase.config import ModelConfig
+
+    def resolve_one(conflict, context, cfg):
+        from capybase.conflict_model import CandidateResolution
+        return CandidateResolution(
+            candidate_id="c", unit_id=conflict.unit.unit_id, model_name="m",
+            prompt_version="x", resolved_text=conflict.expected_text,
+        ), None, 100.0
+
+    score = evaluate_setting_replicated(resolve_one, ModelConfig(), n_reps=3)
+    assert score.pass_at_k == 1.0
+    assert score.pass_all_k == 1.0
+
+
+def test_pass_at_k_replicated_partial():
+    """When a conflict succeeds on 1-of-3 reps: Pass@k includes it, Pass^k doesn't."""
+    from capybase.quality import evaluate_setting_replicated
+    from capybase.config import ModelConfig
+
+    call_counts: dict[str, int] = {}
+
+    def resolve_one(conflict, context, cfg):
+        from capybase.conflict_model import CandidateResolution
+        key = conflict.unit.unit_id
+        call_counts[key] = call_counts.get(key, 0) + 1
+        # Rep 1 correct, reps 2-3 wrong.
+        text = conflict.expected_text if call_counts[key] == 1 else "WRONG"
+        return CandidateResolution(
+            candidate_id="c", unit_id=key, model_name="m",
+            prompt_version="x", resolved_text=text,
+        ), None, 100.0
+
+    score = evaluate_setting_replicated(resolve_one, ModelConfig(), n_reps=3)
+    # Every conflict had at least 1 success → Pass@3 = 1.0.
+    assert score.pass_at_k == 1.0
+    # No conflict had all 3 succeed → Pass^3 = 0.0.
+    assert score.pass_all_k == 0.0

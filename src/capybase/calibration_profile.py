@@ -156,6 +156,38 @@ class TaskOverridesProfile:
         return self.overrides.get(task_type)
 
 
+@dataclass
+class SafetyProfile:
+    """Safety / escalation policy calibration (feedback §2.1).
+
+    Carries the retry budgets and escalation thresholds so they're profile-
+    calibrated (per-model) rather than config-only. The orchestrator overlays
+    these onto ``PolicyConfig`` when the model name matches, before constructing
+    the ``RiskEngine``. Defaults match the built-in ``PolicyConfig`` values so a
+    profile that omits the section is fully backward-compatible.
+    """
+
+    max_retries_per_unit: int = 2
+    max_critic_retries_per_unit: int = 0   # 0 = mirror max_retries (RiskEngine convention)
+    max_recovery_retries_per_unit: int = 1
+    critic_confidence_escalate_threshold: float = 0.8
+    escalation_on_parse_failure: bool = True
+
+    def problems(self) -> list[str]:
+        return []  # advisory; a bad value degrades to the default
+
+    @property
+    def is_default(self) -> bool:
+        """True when every field matches the default (no override to apply)."""
+        return (
+            self.max_retries_per_unit == 2
+            and self.max_critic_retries_per_unit == 0
+            and self.max_recovery_retries_per_unit == 1
+            and self.critic_confidence_escalate_threshold == 0.8
+            and self.escalation_on_parse_failure is True
+        )
+
+
 class ModelProfile:
     """Calibrated runtime settings for one model — a composite of four sections.
 
@@ -186,6 +218,7 @@ class ModelProfile:
         retrieval: RetrievalProfile | None = None,
         prompt: PromptProfileSection | None = None,
         task_overrides: TaskOverridesProfile | None = None,
+        safety: SafetyProfile | None = None,
         probed_at: str = "",
         capybase_version: str = "",
         notes: list[str] | None = None,
@@ -227,6 +260,7 @@ class ModelProfile:
         )
         self.prompt = prompt if prompt is not None else PromptProfileSection()
         self.task_overrides = task_overrides if task_overrides is not None else TaskOverridesProfile()
+        self.safety = safety if safety is not None else SafetyProfile()
         self.probed_at = probed_at
         self.capybase_version = capybase_version
         self.notes = notes if isinstance(notes, list) else (
@@ -249,6 +283,7 @@ class ModelProfile:
             and self.retrieval == other.retrieval
             and self.prompt == other.prompt
             and self.task_overrides == other.task_overrides
+            and self.safety == other.safety
             and self.probed_at == other.probed_at
             and self.capybase_version == other.capybase_version
             and self.notes == other.notes
@@ -353,6 +388,7 @@ class ModelProfile:
             "retrieval": ret,
             "prompt": self.prompt.profile.to_dict(),
             "task_overrides": asdict(self.task_overrides),
+            "safety": asdict(self.safety),
             # Flat keys (legacy) — mirror the sections for backward compat.
             **{k: v for k, v in cap.items()},
             **{k: v for k, v in qual.items()},
@@ -372,6 +408,7 @@ class ModelProfile:
             *self.retrieval.problems(),
             *self.prompt.problems(),
             *self.task_overrides.problems(),
+            *self.safety.problems(),
         ]
 
     @classmethod
@@ -438,6 +475,21 @@ class ModelProfile:
             overrides = raw_to.get("overrides")
             if isinstance(overrides, dict):
                 task_overrides_section = TaskOverridesProfile(overrides=overrides)
+        # The safety section: retry budgets + escalation thresholds.
+        # Graceful-absence: a missing/corrupt section → defaults.
+        safety_section = SafetyProfile()
+        raw_safety = d.get("safety")
+        if isinstance(raw_safety, dict):
+            try:
+                safety_section = SafetyProfile(
+                    max_retries_per_unit=int(raw_safety.get("max_retries_per_unit", 2)),
+                    max_critic_retries_per_unit=int(raw_safety.get("max_critic_retries_per_unit", 0)),
+                    max_recovery_retries_per_unit=int(raw_safety.get("max_recovery_retries_per_unit", 1)),
+                    critic_confidence_escalate_threshold=float(raw_safety.get("critic_confidence_escalate_threshold", 0.8)),
+                    escalation_on_parse_failure=bool(raw_safety.get("escalation_on_parse_failure", True)),
+                )
+            except (TypeError, ValueError):  # noqa: BLE001 - graceful absence
+                pass
         profile = cls(
             model=str(d.get("model", "")),
             capability=cap,
@@ -445,6 +497,7 @@ class ModelProfile:
             retrieval=ret,
             prompt=prompt_section,
             task_overrides=task_overrides_section,
+            safety=safety_section,
             probed_at=str(d.get("probed_at", "")),
             capybase_version=str(d.get("capybase_version", "")),
             notes=[str(n) for n in notes],

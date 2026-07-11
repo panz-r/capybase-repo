@@ -982,3 +982,48 @@ def test_task_overrides_missing_is_empty():
     mp = ModelProfile.from_dict({"model": "x", "max_tokens": 4096})
     assert mp.task_overrides.overrides == {}
     assert mp.task_overrides.get("config_merge") is None
+
+
+# ---------------------------------------------------------------------------
+# self_consistency as a DOE factor (feedback §3.2) + SafetyProfile (§2.1)
+# ---------------------------------------------------------------------------
+
+
+def test_self_consistency_factor_forced():
+    """--enable-factor enable_self_consistency adds it to the screening."""
+    from capybase.probes import _two_phase_factors, _apply_design_point
+    factors = _two_phase_factors(ModelConfig(model="m"),
+                                 force_factors=("enable_self_consistency",))
+    names = [f.name for f in factors]
+    assert "enable_self_consistency" in names
+
+
+def test_apply_design_point_threads_self_consistency():
+    """A design point setting enable_self_consistency=True reaches the config."""
+    from capybase.probes import _apply_design_point
+    from capybase.calibration_design import DesignPoint
+    cfg = ModelConfig(model="m")
+    point = DesignPoint(config_id="t", levels={"enable_self_consistency": True})
+    applied, _ = _apply_design_point(cfg, point)
+    assert applied.enable_self_consistency is True
+
+
+def test_safety_profile_round_trip():
+    """SafetyProfile round-trips through to_dict/from_dict."""
+    from capybase.calibration_profile import ModelProfile, SafetyProfile
+    mp = ModelProfile(model="m", max_tokens=4096,
+                      safety=SafetyProfile(max_retries_per_unit=5,
+                                           escalation_on_parse_failure=False))
+    d = mp.to_dict()
+    assert d["safety"]["max_retries_per_unit"] == 5
+    mp2 = ModelProfile.from_dict(d)
+    assert mp2 == mp
+    assert mp2.safety.max_retries_per_unit == 5
+    assert mp2.safety.escalation_on_parse_failure is False
+
+
+def test_safety_profile_missing_is_default():
+    """A profile without a safety section loads with defaults (backward compat)."""
+    from capybase.calibration_profile import ModelProfile
+    mp = ModelProfile.from_dict({"model": "x", "max_tokens": 4096})
+    assert mp.safety.is_default is True

@@ -214,3 +214,35 @@ def test_absent_prompt_section_leaves_default_active(repo: Path):
     # section's profile, which is a distinct equal object).
     assert pp.active_profile() == pp.DEFAULT_PROFILE
     set_active_profile(None)
+
+
+# ---------------------------------------------------------------------------
+# SafetyProfile application (feedback §2.1)
+# ---------------------------------------------------------------------------
+
+
+def test_safety_profile_overrides_retry_budget(repo: Path, monkeypatch):
+    """A non-default SafetyProfile overrides PolicyConfig retry budgets at init."""
+    from capybase.calibration_profile import SafetyProfile
+
+    for v in ("CAPYBASE_PROMPT_LAYOUT", "CAPYBASE_PROMPT_HISTORY",
+              "CAPYBASE_PROMPT_POSITION", "CAPYBASE_PROMPT_OUTLINE",
+              "CAPYBASE_PROMPT_EXAMPLES", "CAPYBASE_PROMPT_VARIANT"):
+        monkeypatch.delenv(v, raising=False)
+
+    _write_profile(repo, _profile(safety=SafetyProfile(max_retries_per_unit=7)))
+    cfg = _cfg_with_profile_path(repo)
+    original = cfg.policy.max_retries_per_unit
+
+    orch = Orchestrator(cfg, repo=str(repo))
+    assert orch.config.policy.max_retries_per_unit == 7  # overlaid
+
+
+def test_safety_profile_default_is_noop(repo: Path):
+    """A default SafetyProfile leaves PolicyConfig unchanged."""
+    _write_profile(repo, _profile())  # safety section is default
+    cfg = _cfg_with_profile_path(repo)
+    original = cfg.policy.max_retries_per_unit
+
+    orch = Orchestrator(cfg, repo=str(repo))
+    assert orch.config.policy.max_retries_per_unit == original  # unchanged
