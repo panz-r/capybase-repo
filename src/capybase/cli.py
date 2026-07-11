@@ -320,7 +320,10 @@ def _run_calibrate(
 
     resolved = resolve_profile_path(repo, profile_path)
     written = False
-    if report.ok and not dry_run:
+    # Phase-1-only is a read-only diagnostic (it reports the factor ranking but
+    # doesn't commit to a Phase-2 selection); never write the profile in that
+    # mode, same as --dry-run. A full calibration (with Phase 2) writes.
+    if report.ok and not dry_run and not calibrate_phase1_only:
         # Preserve the embeddings calibration across an LLM re-tune: the two
         # commands co-own this file, so a fresh ``calibrate`` must not silently
         # wipe the model-specific ``embedding_min_similarity`` + envelope that
