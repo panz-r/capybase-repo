@@ -251,7 +251,7 @@ def splice_all_resolutions(
 
 
 def parse_resolution_json(
-    raw: str, *, layout: str | None = None
+    raw: str, *, layout: str | None = None, repair_mode: str = "auto_repair"
 ) -> tuple[dict, list[str]]:
     """Parse a model response into a resolution dict + parse warnings.
 
@@ -316,22 +316,24 @@ def parse_resolution_json(
         data, ok = _try_json(fenced)
         if ok:
             return _as_dict(data, warnings)
-        # Tier 2: lenient repair on the fenced block.
-        data, ok = _try_repair(fenced)
-        if ok:
-            warnings.append("fenced block salvaged via json-repair")
-            return _as_dict(data, warnings)
+        # Tier 2: lenient repair on the fenced block (skipped under strict mode).
+        if repair_mode != "strict":
+            data, ok = _try_repair(fenced)
+            if ok:
+                warnings.append("fenced block salvaged via json-repair")
+                return _as_dict(data, warnings)
         warnings.append("fenced block was not valid JSON; falling back to scan")
 
     # 2. Direct parse of the whole response.
     data, ok = _try_json(preprocessed.strip())
     if ok:
         return _as_dict(data, warnings)
-    # Tier 2: lenient repair on the whole response.
-    data, ok = _try_repair(preprocessed.strip())
-    if ok:
-        warnings.append("response salvaged via json-repair")
-        return _as_dict(data, warnings)
+    # Tier 2: lenient repair on the whole response (skipped under strict mode).
+    if repair_mode != "strict":
+        data, ok = _try_repair(preprocessed.strip())
+        if ok:
+            warnings.append("response salvaged via json-repair")
+            return _as_dict(data, warnings)
 
     # 3. Scan for balanced top-level objects; keep the last parseable one.
     warnings.append("strict JSON parse failed; scanning for embedded object")
@@ -340,7 +342,8 @@ def parse_resolution_json(
         data, ok = _try_json(cand)
         if ok:
             return _as_dict(data, warnings)
-        data, ok = _try_repair(cand)
+        if repair_mode != "strict":
+            data, ok = _try_repair(cand)
         if ok:
             warnings.append("embedded object salvaged via json-repair")
             return _as_dict(data, warnings)

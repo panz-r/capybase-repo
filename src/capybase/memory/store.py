@@ -59,6 +59,7 @@ class Experience:
     parse_success: bool = True
     layout_used: str = ""       # the accepted candidate's prompt_version
     samples_used: int = 1       # how many samples were drawn (1 unless consensus)
+    failure_mode: str = ""      # categorized failure type (json_escape/no_parse/timeout/wrong_merge/...)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +79,7 @@ class Experience:
             "parse_success": self.parse_success,
             "layout_used": self.layout_used,
             "samples_used": self.samples_used,
+            "failure_mode": self.failure_mode,
         }
 
     @classmethod
@@ -99,6 +101,7 @@ class Experience:
             parse_success=bool(d.get("parse_success", True)),
             layout_used=str(d.get("layout_used", "")),
             samples_used=int(d.get("samples_used", 1)),
+            failure_mode=str(d.get("failure_mode", "")),
         )
 
 

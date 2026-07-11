@@ -2825,8 +2825,12 @@ class ResolutionEngine:
                 "model output truncated (finish_reason=length); increase max_tokens",
                 resp.text, failure_kind="truncated",
             )
+        _profile = active_profile()
         data, warnings = coerce_candidate_dict(
-            resp.text, layout=active_profile().output_layout.value
+            resp.text,
+            layout=_profile.output_layout.value,
+            repair_mode=_profile.parse_repair_mode.value
+            if hasattr(_profile, "parse_repair_mode") else "auto_repair",
         )
         has_edits = isinstance(data, dict) and bool(data.get("edits"))
         if not data or ("resolved_text" not in data and not has_edits):

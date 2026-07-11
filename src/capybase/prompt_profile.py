@@ -144,6 +144,36 @@ class SideOrdering(Enum):
     BASE_FIRST = "base_first"
 
 
+class ParseRepairMode(Enum):
+    """Whether the lenient json-repair tier runs on parse failures.
+
+    - ``AUTO_REPAIR``: the default — run json_repair when strict json.loads
+      fails (today's behavior). Salvages trailing commas, missing brackets,
+      single quotes, stray prose.
+    - ``STRICT``: skip the repair tier. Useful for calibration to surface the
+      model's TRUE parse-failure rate (without the safety net), or when the
+      repair tier produces subtly wrong salvage (feedback §3.2
+      ``parse_repair_mode``).
+    """
+
+    AUTO_REPAIR = "auto_repair"
+    STRICT = "strict"
+
+
+class RetrySchedule(Enum):
+    """The CEGIS re-prompt budget preset.
+
+    - ``STANDARD``: today's default (max_retries_per_unit=2).
+    - ``LIGHT``: fewer retries (1) — for models where retries rarely help.
+    - ``AGGRESSIVE``: more retries (3) — for models with transient failures
+      that a re-prompt can fix (feedback §3.2 ``retry_schedule``).
+    """
+
+    STANDARD = "standard"
+    LIGHT = "light"
+    AGGRESSIVE = "aggressive"
+
+
 #: The five outline variants that carry a prompt-version tag, in order.
 _OUTLINE_TAGGED: tuple[OutlineMode, ...] = (
     OutlineMode.V1, OutlineMode.V2, OutlineMode.V3, OutlineMode.V4, OutlineMode.V5,
@@ -173,6 +203,8 @@ class PromptProfile:
     rule_emphasis: RuleEmphasis = RuleEmphasis.PLAIN
     conflict_summary_mode: ConflictSummaryMode = ConflictSummaryMode.FULL
     side_ordering: SideOrdering = SideOrdering.CURRENT_FIRST
+    parse_repair_mode: ParseRepairMode = ParseRepairMode.AUTO_REPAIR
+    retry_schedule: RetrySchedule = RetrySchedule.STANDARD
 
     def tag(self) -> str:
         """A short suffix recording the non-default axes, for ``prompt_version``.
@@ -206,6 +238,10 @@ class PromptProfile:
             parts.append("summary-none")
         if self.side_ordering is SideOrdering.BASE_FIRST:
             parts.append("base-first")
+        if self.parse_repair_mode is ParseRepairMode.STRICT:
+            parts.append("strict")
+        if self.retry_schedule is not RetrySchedule.STANDARD:
+            parts.append(f"retry-{self.retry_schedule.value}")
         return ("#" + "+".join(parts)) if parts else ""
 
     # --- serialization (ready for the calibration section) ---
@@ -220,6 +256,8 @@ class PromptProfile:
             "rule_emphasis": self.rule_emphasis.value,
             "conflict_summary_mode": self.conflict_summary_mode.value,
             "side_ordering": self.side_ordering.value,
+            "parse_repair_mode": self.parse_repair_mode.value,
+            "retry_schedule": self.retry_schedule.value,
         }
 
     @classmethod
@@ -252,6 +290,8 @@ class PromptProfile:
             rule_emphasis=_enum(RuleEmphasis, "rule_emphasis", RuleEmphasis.PLAIN),
             conflict_summary_mode=_enum(ConflictSummaryMode, "conflict_summary_mode", ConflictSummaryMode.FULL),
             side_ordering=_enum(SideOrdering, "side_ordering", SideOrdering.CURRENT_FIRST),
+            parse_repair_mode=_enum(ParseRepairMode, "parse_repair_mode", ParseRepairMode.AUTO_REPAIR),
+            retry_schedule=_enum(RetrySchedule, "retry_schedule", RetrySchedule.STANDARD),
         )
 
 

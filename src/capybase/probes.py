@@ -923,7 +923,7 @@ def _two_phase_factors(
     from capybase.calibration_design import Factor
     from capybase.prompt_profile import (
         ConflictSummaryMode, HistoryFraming, InstructionPosition, OutputLayout,
-        PromptProfile, RuleEmphasis, SideOrdering,
+        ParseRepairMode, PromptProfile, RetrySchedule, RuleEmphasis, SideOrdering,
     )
 
     # Build the full factor catalog; we select from it based on capabilities.
@@ -952,6 +952,11 @@ def _two_phase_factors(
         # self_consistency as a DOE factor (feedback §3.2): opt-in via
         # --enable-factor or when capabilities signal semantic disagreements.
         "enable_self_consistency": Factor("enable_self_consistency", False, True),
+        # Mechanism-factor parity (feedback §3.2):
+        "parse_repair_mode": Factor("parse_repair_mode",
+                                    ParseRepairMode.AUTO_REPAIR, ParseRepairMode.STRICT),
+        "retry_schedule": Factor("retry_schedule",
+                                 RetrySchedule.STANDARD, RetrySchedule.LIGHT),
     }
 
     # Default: screen the standard 7 factors (backward compat when no
@@ -992,6 +997,7 @@ def _two_phase_factors(
         "example_limit", "samples", "diverse_sampling", "prompt_variants",
         "enable_self_consistency",
         "rule_emphasis", "conflict_summary_mode", "side_ordering",
+        "parse_repair_mode", "retry_schedule",
     ]
     return [all_factors[name] for name in order if name in selected]
 
@@ -1032,6 +1038,8 @@ def _apply_design_point(
         rule_emphasis=levels.get("rule_emphasis", _d.rule_emphasis),
         conflict_summary_mode=levels.get("conflict_summary_mode", _d.conflict_summary_mode),
         side_ordering=levels.get("side_ordering", _d.side_ordering),
+        parse_repair_mode=levels.get("parse_repair_mode", _d.parse_repair_mode),
+        retry_schedule=levels.get("retry_schedule", _d.retry_schedule),
     )
     set_active_profile(profile if profile != PromptProfile() else None)
     return cfg, profile
@@ -1195,7 +1203,12 @@ def probe_two_phase(
                     output_layout=levels.get("output_layout", DEFAULT_PROFILE.output_layout),
                     instruction_position=levels.get("instruction_position", DEFAULT_PROFILE.instruction_position),
                     history_framing=levels.get("history_framing", DEFAULT_PROFILE.history_framing),
-                    example_limit=int(levels.get("example_limit", 2)),
+                    example_limit=int(levels.get("example_limit", DEFAULT_PROFILE.example_limit)),
+                    rule_emphasis=levels.get("rule_emphasis", DEFAULT_PROFILE.rule_emphasis),
+                    conflict_summary_mode=levels.get("conflict_summary_mode", DEFAULT_PROFILE.conflict_summary_mode),
+                    side_ordering=levels.get("side_ordering", DEFAULT_PROFILE.side_ordering),
+                    parse_repair_mode=levels.get("parse_repair_mode", DEFAULT_PROFILE.parse_repair_mode),
+                    retry_schedule=levels.get("retry_schedule", DEFAULT_PROFILE.retry_schedule),
                 )
                 decisions.append(
                     f"Phase 2 winner: {best_i.config_id} "

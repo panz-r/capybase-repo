@@ -581,7 +581,7 @@ def _from_non_stream(raw: dict[str, Any]) -> LLMResponse:
 
 
 def coerce_candidate_dict(
-    raw_text: str, *, layout: str | None = None
+    raw_text: str, *, layout: str | None = None, repair_mode: str = "auto_repair"
 ) -> tuple[dict, list[str]]:
     """Parse + lightly normalize the model's response into candidate fields.
 
@@ -590,8 +590,12 @@ def coerce_candidate_dict(
     forwarded to :func:`parse_resolution_json` so the markdown-code layout's
     raw-code-block response is extracted correctly. ``None`` (default) keeps
     the legacy JSON path.
+
+    ``repair_mode`` (``"auto_repair"`` / ``"strict"``) gates the lenient
+    json-repair tier. ``"strict"`` skips it; ``"auto_repair"`` (the default)
+    is today's behavior.
     """
-    data, warnings = parse_resolution_json(raw_text, layout=layout)
+    data, warnings = parse_resolution_json(raw_text, layout=layout, repair_mode=repair_mode)
     if not data:
         return data, warnings
     # Normalize common alternate spellings.

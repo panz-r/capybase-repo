@@ -848,6 +848,62 @@ def _reconstruct_calibration(config: Config) -> "object | None":
         return None
 
 
+def _categorize_failure_mode(accepted, outcome) -> str:
+    """Derive a categorical failure-mode from the accepted/last candidate + outcome.
+
+    Used by the telemetry layer (feedback §5.1 ``failure_mode``) so future
+    online-adaptation rules can target specific failure types (e.g., switch
+    layout when json_escape spikes, increase samples when wrong_merge spikes).
+    Returns ``""`` for accepted outcomes (no failure).
+
+    Modes:
+    - ``""`` — accepted (no failure).
+    - ``json_escape`` — the repair tier salvaged malformed JSON (parse_warnings
+      contain "salvaged via json-repair").
+    - ``no_parse`` — failure_kind == "parse_failed" (no resolved_text extracted).
+    - ``timeout`` — failure_kind == "truncated" or "request_failed".
+    - ``model_refusal`` — failure_kind == "model_refusal" (needs_human).
+    - ``wrong_merge`` — parsed but validation flagged hard failures (markers,
+      brace imbalance, dropped intent).
+    - ``escalated`` — escalated with no specific category.
+    """
+    # Accepted → no failure.
+    if accepted is not None and not getattr(accepted, "needs_human", False):
+        # Even accepted candidates can have had repair-tier salvage; surface that.
+        warnings = getattr(accepted, "parse_warnings", None) or []
+        if any("salvaged via json-repair" in w for w in warnings):
+            return "json_escape"
+        return ""
+
+    # Escalated or rejected — categorize the failure.
+    cand = accepted if accepted is not None else (
+        outcome.attempts[-1] if getattr(outcome, "attempts", None) else None
+    )
+    if cand is None:
+        return "escalated"
+
+    fk = getattr(cand, "failure_kind", "") or ""
+    if fk == "parse_failed":
+        return "no_parse"
+    if fk in ("truncated", "request_failed"):
+        return "timeout"
+    if fk == "model_refusal":
+        return "model_refusal"
+
+    # Parsed but validation flagged hard failures.
+    validation = getattr(outcome, "validation", None)
+    if validation is not None:
+        hard = getattr(validation, "hard_failures", None)
+        if hard:
+            return "wrong_merge"
+
+    warnings = getattr(cand, "parse_warnings", None) or []
+    if any("salvaged via json-repair" in w for w in warnings):
+        return "json_escape"
+
+    return "escalated"
+
+
 class Orchestrator:
     def __init__(
         self,
@@ -5331,6 +5387,7 @@ class Orchestrator:
                         samples_used=int(getattr(
                             getattr(outcome, "consensus", None), "n_samples", 1
                         ) or 1),
+                        failure_mode=_categorize_failure_mode(accepted, outcome),
                     )
                 )
                 # #11: refresh the retriever so step N+1 sees step N's accepted
