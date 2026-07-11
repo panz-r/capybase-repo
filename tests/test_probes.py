@@ -258,6 +258,47 @@ def test_context_window_no_data_list_returns_zero():
     assert not r.ok and window == 0
 
 
+def test_context_window_discovered_from_meta_n_ctx():
+    """Newer llama.cpp builds put the window in meta.n_ctx, not a top-level
+    field. Without this fallback, a real server reports context_window=0."""
+    from unittest.mock import patch
+    body = (b'{"data":[{"id":"vibethink","meta":{"n_ctx":32768,"n_vocab":151936}},'
+            b'{"id":"other","meta":{"n_ctx":4096}}]}')
+    with patch("urllib.request.urlopen", return_value=_models_resp(body)):
+        r, window = probe_context_window(_cfg())
+    assert r.ok and window == 32768
+    assert "meta.n_ctx" in r.detail
+
+
+def test_context_window_falls_back_to_props():
+    """Older single-model builds don't populate /v1/models' context fields at
+    all; the window is only in /props n_ctx. The probe falls back to /props."""
+    from unittest.mock import patch
+    # /v1/models: model listed but no window field (direct or meta.n_ctx).
+    models_body = b'{"data":[{"id":"vibethink"}]}'
+    # /props: the actual server ctx-size.
+    props_body = b'{"default_generation_settings":{"params":{"n_ctx":8192}}}'
+    # The probe calls /v1/models first, then /props on fallback.
+    with patch("urllib.request.urlopen",
+               side_effect=[_models_resp(models_body), _models_resp(props_body)]):
+        r, window = probe_context_window(_cfg())
+    assert r.ok and window == 8192
+    assert "/props" in r.detail
+
+
+def test_context_window_props_router_zero_is_not_a_window():
+    """A router/multi-model build reports n_ctx:0 in /props (it doesn't know any
+    one model's window). A 0 return from /props means 'not found', not a real
+    window — the probe must not adopt it."""
+    from unittest.mock import patch
+    models_body = b'{"data":[{"id":"vibethink"}]}'
+    props_body = b'{"default_generation_settings":{"params":{"n_ctx":0}}}'
+    with patch("urllib.request.urlopen",
+               side_effect=[_models_resp(models_body), _models_resp(props_body)]):
+        r, window = probe_context_window(_cfg())
+    assert not r.ok and window == 0
+
+
 # ---------------------------------------------------------------------------
 # end-to-end
 # ---------------------------------------------------------------------------

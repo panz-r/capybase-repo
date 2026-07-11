@@ -201,22 +201,97 @@ def probe_reachability(client: Any, model_cfg: ModelConfig) -> ProbeResult:
     return ProbeResult("reachability", ok=True, detail=f"replied: {(resp.text or '')[:40]!r}")
 
 
-def probe_context_window(model_cfg: ModelConfig) -> tuple[ProbeResult, int]:
-    """Discover the model's context window from the server's ``/v1/models`` list.
+def _read_window_from_entry(entry: dict) -> tuple[int, str] | None:
+    """Read a context window from one /v1/models model entry.
 
-    llama-server (and other OpenAI-compatible servers) expose each model's
-    ``context_length`` via ``GET /v1/models``. We find the entry whose ``id``
-    matches ``model_cfg.model`` and read its size, accepting the common field
-    aliases (``context_length``, ``max_context_length``, ``context_window``).
+    Returns (window, source_field) when found, None when the entry carries no
+    usable value. Tries the direct field aliases first (the OpenAI shape), then
+    llama.cpp's nested ``meta.n_ctx`` (newer builds put the window there when
+    the top-level fields are absent).
+    """
+    for field in ("context_length", "max_context_length", "context_window"):
+        val = entry.get(field)
+        if isinstance(val, (int, float)) and val > 0:
+            return int(val), field
+    # llama.cpp newer builds: the window lives in meta.n_ctx, not a top-level
+    # field. The top-level aliases are absent on these builds, so without this
+    # fallback a perfectly-capable server reports context_window=0 (disabled).
+    meta = entry.get("meta")
+    if isinstance(meta, dict):
+        n_ctx = meta.get("n_ctx")
+        if isinstance(n_ctx, (int, float)) and n_ctx > 0:
+            return int(n_ctx), "meta.n_ctx"
+    return None
+
+
+def _read_window_from_props(model_cfg: ModelConfig) -> int:
+    """Read the context window from llama-server's /props endpoint.
+
+    Older single-model llama-server builds don't expose ``context_length`` in
+    /v1/models at all (the field is absent, not 0). Their /props endpoint
+    reports the actual server ``--ctx-size`` as
+    ``default_generation_settings.params.n_ctx``. A router/multi-model build
+    reports ``n_ctx: 0`` here (it doesn't know any one model's window), so a 0
+    return means "not found" — never a real window. Returns 0 when /props is
+    absent, unreachable, or carries no positive value.
+    """
+    import json
+    import urllib.request
+
+    # /props is a sibling of /v1 — strip the trailing /v1 (or /v1/) from base_url.
+    base = model_cfg.base_url.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    url = base + "/props"
+    req = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001 - /props is best-effort
+        return 0
+    if not isinstance(raw, dict):
+        return 0
+    settings = raw.get("default_generation_settings")
+    if not isinstance(settings, dict):
+        return 0
+    # params is null on router builds (n_ctx is also at top level as 0 there);
+    # only a real params dict with a positive n_ctx is a usable window.
+    params = settings.get("params")
+    if isinstance(params, dict):
+        n_ctx = params.get("n_ctx")
+        if isinstance(n_ctx, (int, float)) and n_ctx > 0:
+            return int(n_ctx)
+    return 0
+
+
+def probe_context_window(model_cfg: ModelConfig) -> tuple[ProbeResult, int]:
+    """Discover the model's context window from the server.
+
+    Tries three sources in order (each a cheap GET, no generation slot):
+
+    1. ``/v1/models`` — the model entry's ``context_length`` /
+       ``max_context_length`` / ``context_window`` field (the OpenAI shape).
+    2. ``/v1/models`` — llama.cpp's nested ``meta.n_ctx`` (newer builds expose
+       the window here when the top-level fields are absent).
+    3. ``/props`` — ``default_generation_settings.params.n_ctx`` (older single-
+       model llama-server builds that don't populate /v1/models' fields at all).
+
+    The fallbacks matter because llama.cpp is inconsistent across builds: a
+    router build puts the window in ``meta.n_ctx`` (32768 on VT3B), an older
+    single-model build only in /props (8192 on E4B), and the bare top-level
+    fields are absent on both. Without them, two real servers report
+    ``context_window=0`` (trimming disabled) — silently unbounded.
 
     Returns ``(ProbeResult, context_window_tokens)``. On any failure — endpoint
-    missing, the field absent, the model not listed, a network error — returns
-    ``(ok=False, 0)``. A 0 window means "unknown/disabled": the resolve prompt
-    is sent unbounded (no trimming), the backward-compatible default. Never
-    raises; mirrors :func:`probe_embeddings`'s report-don't-abort contract.
-
-    Direct urllib GET (not a chat completion), so this doesn't consume a
-    generation slot and is cheap enough to always run during calibration.
+    missing, the field absent everywhere, the model not listed, a network error
+    — returns ``(ok=False, 0)``. A 0 window means "unknown/disabled": the
+    resolve prompt is sent unbounded (no trimming), the backward-compatible
+    default. Never raises; mirrors :func:`probe_embeddings`'s report-don't-abort
+    contract.
     """
     import json
     import urllib.request
@@ -234,6 +309,14 @@ def probe_context_window(model_cfg: ModelConfig) -> tuple[ProbeResult, int]:
         with urllib.request.urlopen(req, timeout=30) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:  # noqa: BLE001 - report, never abort calibrate
+        # /v1/models unreachable — still try /props before giving up.
+        props_window = _read_window_from_props(model_cfg)
+        if props_window > 0:
+            return ProbeResult(
+                "context_window", ok=True,
+                detail=f"{model_cfg.model!r} n_ctx={props_window} (/props; "
+                       f"/v1/models unreachable: {exc})",
+            ), props_window
         return ProbeResult(
             "context_window", ok=False,
             detail=f"/v1/models unreachable: {exc}",
@@ -242,32 +325,61 @@ def probe_context_window(model_cfg: ModelConfig) -> tuple[ProbeResult, int]:
     # The OpenAI shape is {"data": [{"id": ..., "context_length": N}, ...]}.
     # Some servers use a top-level list; tolerate both.
     models = raw.get("data") if isinstance(raw, dict) else raw
-    if not isinstance(models, list):
-        return ProbeResult(
-            "context_window", ok=False,
-            detail="/v1/models returned no model list",
-        ), 0
-    for entry in models:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("id") != model_cfg.model:
-            continue
-        # Accept the common aliases; servers are inconsistent here.
-        for field in ("context_length", "max_context_length", "context_window"):
-            val = entry.get(field)
-            if isinstance(val, (int, float)) and val > 0:
-                window = int(val)
+    if isinstance(models, list):
+        for entry in models:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("id") != model_cfg.model:
+                continue
+            # Found the model — read its window (direct fields then meta.n_ctx).
+            hit = _read_window_from_entry(entry)
+            if hit is not None:
+                window, field = hit
                 return ProbeResult(
                     "context_window", ok=True,
                     detail=f"{model_cfg.model!r} context_length={window} ({field})",
                 ), window
+            # The model is listed but carries no window field. Try /props as a
+            # fallback (older single-model build) before declaring failure.
+            props_window = _read_window_from_props(model_cfg)
+            if props_window > 0:
+                return ProbeResult(
+                    "context_window", ok=True,
+                    detail=f"{model_cfg.model!r} n_ctx={props_window} (/props)",
+                ), props_window
+            return ProbeResult(
+                "context_window", ok=False,
+                detail=f"{model_cfg.model!r} listed but no context_length field; "
+                       f"set [model] context_window manually",
+            ), 0
+        not_found = True
+    else:
+        not_found = True
+
+    # Model not in /v1/models (or no model list at all). As a last resort, try
+    # /props — a single-model server may still report n_ctx there even when the
+    # /v1/models list is empty or missing our model by id.
+    props_window = _read_window_from_props(model_cfg)
+    if props_window > 0:
+        return ProbeResult(
+            "context_window", ok=True,
+            detail=f"{model_cfg.model!r} n_ctx={props_window} (/props)",
+        ), props_window
+    if not_found:
+        # Distinguish "no model list" from "model not listed" for the message.
+        if not isinstance(models, list):
+            return ProbeResult(
+                "context_window", ok=False,
+                detail="/v1/models returned no model list",
+            ), 0
         return ProbeResult(
             "context_window", ok=False,
-            detail=f"{model_cfg.model!r} listed but no context_length field; set [model] context_window manually",
+            detail=f"{model_cfg.model!r} not found in /v1/models; "
+                   f"set [model] context_window manually",
         ), 0
     return ProbeResult(
         "context_window", ok=False,
-        detail=f"{model_cfg.model!r} not found in /v1/models; set [model] context_window manually",
+        detail="/v1/models returned no model list",
     ), 0
 
 
