@@ -201,6 +201,31 @@ def build_parser() -> argparse.ArgumentParser:
              "without committing to a Phase-2 selection (useful on slow models "
              "to read which dimensions matter before paying for refinement)",
     )
+    cal_p.add_argument(
+        "--enable-factor",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="force a factor into the two-phase screening (bypasses the "
+             "capability-driven selection). Available: output_layout, "
+             "instruction_position, history_framing, example_limit, samples, "
+             "diverse_sampling, prompt_variants, rule_emphasis, "
+             "conflict_summary_mode, side_ordering. Repeatable",
+    )
+    cal_p.add_argument(
+        "--task",
+        type=str,
+        default=None,
+        metavar="FAMILY",
+        help="calibrate a specific task family (config_merge, test_port, "
+             "merge_conflict_resolution). The winning profile is stored as a "
+             "task-specific override rather than the global default",
+    )
+    cal_p.add_argument(
+        "--list-tasks",
+        action="store_true",
+        help="list available task families and their corpus sizes, then exit",
+    )
 
     sub.add_parser(
         "recalibrate",
@@ -285,6 +310,8 @@ def _run_calibrate(
     dry_run: bool = False,
     calibrate_reps: int = 1,
     calibrate_phase1_only: bool = False,
+    enable_factors: tuple[str, ...] = (),
+    task: str | None = None,
     out=sys.stdout,
     err=sys.stderr,
     client_factory: Callable[[ModelConfig], object] | None = None,
@@ -315,6 +342,8 @@ def _run_calibrate(
         run_prompt_profile=not dry_run,
         n_reps=max(1, calibrate_reps),
         run_phase2=not calibrate_phase1_only,
+        force_factors=tuple(enable_factors),
+        task=task,
         embeddings_model=config.memory.embeddings_model,
     )
 
@@ -763,6 +792,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # calibrate / recalibrate don't need an orchestrator or a git repo session.
     if args.command in ("calibrate", "recalibrate"):
+        # --list-tasks: print available task families + corpus sizes, then exit.
+        if getattr(args, "list_tasks", False):
+            from capybase.calibration_corpus import ALL_CONFLICTS_BY_TASK
+            lines = ["available task families:"]
+            for family, corpus in sorted(ALL_CONFLICTS_BY_TASK.items()):
+                lines.append(f"  {family:30s}  ({len(corpus)} conflicts)")
+            print("\n".join(lines))
+            return 0
         return _run_calibrate(
             config,
             repo=args.repo,
@@ -771,6 +808,8 @@ def main(argv: list[str] | None = None) -> int:
             dry_run=getattr(args, "dry_run", False),
             calibrate_reps=getattr(args, "calibrate_reps", 1),
             calibrate_phase1_only=getattr(args, "calibrate_phase1_only", False),
+            enable_factors=tuple(getattr(args, "enable_factor", []) or []),
+            task=getattr(args, "task", None),
         )
 
     if args.command == "calibrate-embeddings":

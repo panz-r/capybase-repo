@@ -135,6 +135,27 @@ class PromptProfileSection:
         return []  # prompt rendering has no load-bearing knobs that break resolution
 
 
+@dataclass
+class TaskOverridesProfile:
+    """Per-task-family profile overrides (feedback §4 task families).
+
+    Holds a ``{task_type → {samples: int, prompt_profile: dict}}`` mapping. When
+    the orchestrator resolves a conflict whose ``task_type`` matches a key here,
+    it applies the override's ``samples`` + ``PromptProfile`` instead of the
+    global profile. Falls back to the global profile when no override exists
+    (the common case). Advisory — ``problems()`` always returns ``[]``.
+    """
+
+    overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def problems(self) -> list[str]:
+        return []
+
+    def get(self, task_type: str) -> dict[str, Any] | None:
+        """The override for ``task_type``, or None when no override exists."""
+        return self.overrides.get(task_type)
+
+
 class ModelProfile:
     """Calibrated runtime settings for one model — a composite of four sections.
 
@@ -164,6 +185,7 @@ class ModelProfile:
         quality: QualityProfile | None = None,
         retrieval: RetrievalProfile | None = None,
         prompt: PromptProfileSection | None = None,
+        task_overrides: TaskOverridesProfile | None = None,
         probed_at: str = "",
         capybase_version: str = "",
         notes: list[str] | None = None,
@@ -204,6 +226,7 @@ class ModelProfile:
             fusion_method=fusion_method,
         )
         self.prompt = prompt if prompt is not None else PromptProfileSection()
+        self.task_overrides = task_overrides if task_overrides is not None else TaskOverridesProfile()
         self.probed_at = probed_at
         self.capybase_version = capybase_version
         self.notes = notes if isinstance(notes, list) else (
@@ -225,6 +248,7 @@ class ModelProfile:
             and self.quality == other.quality
             and self.retrieval == other.retrieval
             and self.prompt == other.prompt
+            and self.task_overrides == other.task_overrides
             and self.probed_at == other.probed_at
             and self.capybase_version == other.capybase_version
             and self.notes == other.notes
@@ -328,6 +352,7 @@ class ModelProfile:
             "quality": qual,
             "retrieval": ret,
             "prompt": self.prompt.profile.to_dict(),
+            "task_overrides": asdict(self.task_overrides),
             # Flat keys (legacy) — mirror the sections for backward compat.
             **{k: v for k, v in cap.items()},
             **{k: v for k, v in qual.items()},
@@ -346,6 +371,7 @@ class ModelProfile:
             *self.quality.problems(),
             *self.retrieval.problems(),
             *self.prompt.problems(),
+            *self.task_overrides.problems(),
         ]
 
     @classmethod
@@ -404,12 +430,21 @@ class ModelProfile:
                 prompt_section = PromptProfileSection(profile=PromptProfile.from_dict(raw_prompt))
             except Exception:  # noqa: BLE001 - graceful absence
                 pass
+        # The task_overrides section: a nested dict {task_type → {samples, ...}}.
+        # Graceful-absence: a missing/corrupt section → empty overrides.
+        task_overrides_section = TaskOverridesProfile()
+        raw_to = d.get("task_overrides")
+        if isinstance(raw_to, dict):
+            overrides = raw_to.get("overrides")
+            if isinstance(overrides, dict):
+                task_overrides_section = TaskOverridesProfile(overrides=overrides)
         profile = cls(
             model=str(d.get("model", "")),
             capability=cap,
             quality=qual,
             retrieval=ret,
             prompt=prompt_section,
+            task_overrides=task_overrides_section,
             probed_at=str(d.get("probed_at", "")),
             capybase_version=str(d.get("capybase_version", "")),
             notes=[str(n) for n in notes],

@@ -44,11 +44,15 @@ class CalibrationConflict:
 
     ``expected_text`` is the canonical merged block-interior. ``title`` is a
     short label for the calibration report (what conflict shape this exercises).
+    ``task_type`` tags the conflict's family (feedback §4): the default is
+    ``"merge_conflict_resolution"``; new task families (config_merge, test_port)
+    carry their own tag so calibration can evaluate per-task profiles.
     """
 
     title: str
     unit: ConflictUnit
     expected_text: str
+    task_type: str = "merge_conflict_resolution"
 
 
 def _side(label: SideLabel, text: str) -> ConflictSide:
@@ -73,11 +77,14 @@ def _unit(unit_id: str, path: str, language: str,
 def _conflict(
     title: str, unit_id: str, path: str, language: str,
     base: str, current: str, replayed: str, original: str, expected: str,
+    *,
+    task_type: str = "merge_conflict_resolution",
 ) -> CalibrationConflict:
     return CalibrationConflict(
         title=title,
         unit=_unit(unit_id, path, language, base, current, replayed, original),
         expected_text=expected,
+        task_type=task_type,
     )
 
 
@@ -277,7 +284,100 @@ CALIBRATION_CONFLICTS: list[CalibrationConflict] = [
 ]
 
 
-def conflicts_with_context() -> list[tuple[CalibrationConflict, ContextBundle]]:
+#: The active task-type filter for calibration, or None for the default corpus.
+#: Set by ``run_calibration(task=...)`` so the un-parameterized
+#: ``conflicts_with_context()`` call inside ``evaluate_setting`` picks it up
+#: without threading the task through every function signature.
+_active_task_type: str | None = None
+
+
+def set_active_task_type(task_type: str | None) -> None:
+    """Set the process-wide active task-type filter for calibration."""
+    global _active_task_type
+    _active_task_type = task_type
+
+
+def conflicts_with_context(
+    task_type: str | None = None,
+) -> list[tuple[CalibrationConflict, ContextBundle]]:
     """Return each conflict paired with its (minimal) ContextBundle, ready to
-    pass to ``ResolutionEngine.propose``."""
-    return [(c, _context(c.unit)) for c in CALIBRATION_CONFLICTS]
+    pass to ``ResolutionEngine.propose``.
+
+    ``task_type`` filters to a specific task family (feedback §4). None (the
+    default) reads the process-wide ``_active_task_type`` (set by
+    ``run_calibration``); when that's also None, returns the standard
+    ``merge_conflict_resolution`` corpus — the backward-compatible behavior.
+    """
+    if task_type is None:
+        task_type = _active_task_type or "merge_conflict_resolution"
+    corpus = ALL_CONFLICTS_BY_TASK.get(task_type, CALIBRATION_CONFLICTS)
+    return [(c, _context(c.unit)) for c in corpus]
+
+
+# ---------------------------------------------------------------------------
+# Task families (feedback §4): additional corpora beyond the standard
+# merge-conflict-resolution set. Each is a small, focused corpus for a distinct
+# conflict shape, so calibration can produce per-task profile overrides.
+# ---------------------------------------------------------------------------
+
+#: The config_merge family: TOML/INI-style key conflicts with semantic
+#: constraints (both sides add/update keys; the merge must keep all).
+CONFIG_MERGE_CONFLICTS: list[CalibrationConflict] = [
+    _conflict(
+        title="config-add-key",
+        unit_id="cfg-add", path="app.toml", language="toml",
+        base='timeout = 30\nretries = 3',
+        current='timeout = 30\nretries = 3\nverbose = true',
+        replayed='timeout = 30\nretries = 3\nlog_level = "debug"',
+        original='timeout = 30\nretries = 3',
+        expected='timeout = 30\nretries = 3\nverbose = true\nlog_level = "debug"',
+        task_type="config_merge",
+    ),
+    _conflict(
+        title="config-update-value",
+        unit_id="cfg-upd", path="settings.ini", language="ini",
+        base='max_connections = 10',
+        current='max_connections = 20',
+        replayed='max_connections = 15',
+        original='max_connections = 10',
+        expected='max_connections = 20',
+        task_type="config_merge",
+    ),
+]
+
+#: The test_port family: test files that must move in lockstep with impl
+#: changes (the merge must preserve the test's assertions while adopting the
+#: impl's new API).
+TEST_PORT_CONFLICTS: list[CalibrationConflict] = [
+    _conflict(
+        title="test-rename-assertion",
+        unit_id="test-rn", path="test_service.py", language="python",
+        base='assert service.get_name() == "old"',
+        current='assert service.get_name() == "old"',
+        replayed='assert service.name == "old"',
+        original='assert service.get_name() == "old"',
+        expected='assert service.name == "old"',
+        task_type="test_port",
+    ),
+    _conflict(
+        title="test-new-param",
+        unit_id="test-param", path="test_api.py", language="python",
+        base='result = api.call("endpoint")',
+        current='result = api.call("endpoint", timeout=30)',
+        replayed='result = api.call("endpoint")',
+        original='result = api.call("endpoint")',
+        expected='result = api.call("endpoint", timeout=30)',
+        task_type="test_port",
+    ),
+]
+
+#: All task families, keyed by task_type. Used by conflicts_with_context and
+#: the CLI's --list-tasks.
+ALL_CONFLICTS_BY_TASK: dict[str, list[CalibrationConflict]] = {
+    "merge_conflict_resolution": CALIBRATION_CONFLICTS,
+    "config_merge": CONFIG_MERGE_CONFLICTS,
+    "test_port": TEST_PORT_CONFLICTS,
+}
+
+#: The known task-family names (for --list-tasks and validation).
+TASK_FAMILIES: tuple[str, ...] = tuple(ALL_CONFLICTS_BY_TASK.keys())

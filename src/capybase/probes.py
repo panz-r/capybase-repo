@@ -467,6 +467,97 @@ def probe_end_to_end(client: Any, model_cfg: ModelConfig) -> ProbeResult:
 
 
 # ---------------------------------------------------------------------------
+# Structured capability probe (adaptive calibration §5): measures CoT length,
+# JSON success rate, and instruction-following to drive factor selection + early-exit
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ModelCapability:
+    """Structured capability signals from the pre-calibration probe.
+
+    Advisory data that drives (1) adaptive factor selection — WHICH factors the
+    two-phase DOE screens — and (2) the early-exit for near-perfect models. Not
+    a profile section; lives on the CalibrationReport as diagnostic context.
+    """
+
+    json_success_rate: float = 0.0   # fraction of probe calls that parsed to resolved_text
+    mean_cot_chars: int = 0          # mean response-text length across probe calls
+    is_thinking_model: bool = False  # <think>/</think> tags detected
+    follows_instructions: bool = True  # no conflict markers in any response
+    n_samples: int = 0               # how many calls were made
+
+    @property
+    def is_strong_model(self) -> bool:
+        """A near-perfect model: high JSON success, follows instructions, not a
+        thinking model. Triggers the early-exit (skip the DOE, lock in baseline)."""
+        return (
+            self.json_success_rate >= 0.95
+            and self.follows_instructions
+            and not self.is_thinking_model
+        )
+
+
+def probe_capabilities_detailed(
+    client: Any, model_cfg: ModelConfig, *, n_samples: int = 5
+) -> tuple[ProbeResult, ModelCapability]:
+    """Run N quick resolve-prompt calls and measure structured capability signals.
+
+    Replaces the single-shot binary end-to-end probe with an N-of-M diagnostic
+    that captures: JSON success rate (fraction that parse to resolved_text),
+    CoT length (mean response length + thinking-tag detection), and
+    instruction-following (whether conflict markers leak into responses). These
+    signals drive the adaptive factor selection and the early-exit.
+
+    Uses the REAL resolve prompt (same as probe_end_to_end) so the parseability
+    bar matches real resolutions. Degrades gracefully: any call failure counts
+    as a miss (not a crash). Returns ``(ProbeResult, ModelCapability)``.
+    """
+    from capybase.adapters.parsers import contains_markers as _has_markers
+
+    messages = _resolve_probe_messages()
+    cap = ModelCapability(n_samples=n_samples)
+    successes = 0
+    total_chars = 0
+    saw_think_tag = False
+    leaked_markers = False
+
+    for _ in range(n_samples):
+        try:
+            resp = client.complete(
+                messages,
+                model=model_cfg.model,
+                temperature=model_cfg.temperature,
+                max_tokens=model_cfg.max_tokens,
+                json_mode=model_cfg.json_mode,
+            )
+        except Exception:  # noqa: BLE001 - a failed call is a miss
+            continue
+        text = resp.text or ""
+        total_chars += len(text)
+        if "<think>" in text.lower() or "</think>" in text.lower():
+            saw_think_tag = True
+        if _has_markers(text):
+            leaked_markers = True
+        data, _w = coerce_candidate_dict(text)
+        if data and data.get("resolved_text") and _finish_reason(resp) != "length":
+            successes += 1
+
+    cap.json_success_rate = successes / n_samples if n_samples else 0.0
+    cap.mean_cot_chars = int(total_chars / n_samples) if n_samples else 0
+    cap.is_thinking_model = saw_think_tag
+    cap.follows_instructions = not leaked_markers
+
+    detail = (
+        f"json_success={cap.json_success_rate:.0%} ({successes}/{n_samples}), "
+        f"mean_chars={cap.mean_cot_chars}, "
+        f"thinking_model={cap.is_thinking_model}, "
+        f"follows_instructions={cap.follows_instructions}"
+    )
+    return ProbeResult("capabilities", ok=True, detail=detail), cap
+
+
+# ---------------------------------------------------------------------------
 # Mechanism calibration: empirically A/B-select resolution strategies
 # ---------------------------------------------------------------------------
 
@@ -803,34 +894,102 @@ def probe_prompt_profile(
 # ---------------------------------------------------------------------------
 
 
-def _two_phase_factors(base_cfg: ModelConfig) -> list:
-    """The factor set Phase 1 screens: 4 prompt axes + 3 mechanism/sampling axes.
+def _two_phase_factors(
+    base_cfg: ModelConfig,
+    *,
+    capabilities: "ModelCapability | None" = None,
+    force_factors: tuple[str, ...] = (),
+) -> list:
+    """The factor set Phase 1 screens, adaptively chosen from the model's
+    measured capabilities.
 
     Every factor is sampled at two levels (low/high) by the fractional-factorial
     design. The mechanism levels are derived from the base config's current
     values so the screening explores VARIATIONS of the known-good config: the
     'low' level is the current setting, the 'high' level is the alternative.
+
+    ``capabilities`` (from :func:`probe_capabilities_detailed`) adapts WHICH
+    factors are screened to the model's actual weaknesses (feedback §5):
+    - Low JSON success (< 0.5) → include output_layout + rule_emphasis (formatting
+      matters when the model is escaping-broken).
+    - Thinking model (CoT detected) → include instruction_position, example_limit,
+      samples (structure + budget matter for verbose reasoners).
+    - Strong model (high success, not thinking) → minimal set (samples,
+      diverse_sampling); don't waste runs on factors that won't move.
+
+    ``force_factors`` (from ``--enable-factor``) forces specific factors in
+    regardless of the capability signals, for manual exploration.
     """
     from capybase.calibration_design import Factor
     from capybase.prompt_profile import (
-        HistoryFraming, InstructionPosition, OutputLayout, PromptProfile,
+        ConflictSummaryMode, HistoryFraming, InstructionPosition, OutputLayout,
+        PromptProfile, RuleEmphasis, SideOrdering,
     )
 
-    base_profile = PromptProfile()  # the axes' low = current production default
-    return [
-        # --- Prompt-rendering axes (persisted in the profile's prompt section) ---
-        Factor("output_layout", OutputLayout.JSON_V6, OutputLayout.MARKDOWN_CODE),
-        Factor("instruction_position", InstructionPosition.BOTTOM, InstructionPosition.TOP_HEAVY),
-        Factor("history_framing", HistoryFraming.UNTRUSTED, HistoryFraming.NEUTRAL),
-        Factor("example_limit", 2, 1),
-        # --- Mechanism axes (persisted in the profile's quality section).
-        # Only profile-persisted knobs are screened — temperature is NOT (it's a
-        # user-set ModelConfig field the profile doesn't overlay), so calibrating
-        # it would have no effect.
-        Factor("samples", max(1, base_cfg.samples), max(3, base_cfg.samples)),
-        Factor("diverse_sampling", bool(base_cfg.diverse_sampling), not bool(base_cfg.diverse_sampling)),
-        Factor("prompt_variants", bool(base_cfg.prompt_variants), not bool(base_cfg.prompt_variants)),
+    # Build the full factor catalog; we select from it based on capabilities.
+    # The three new axes (rule_emphasis, conflict_summary_mode, side_ordering)
+    # are opt-in via --enable-factor or the low-JSON-success branch; they're NOT
+    # in the default set to keep the DOE bounded (≤7 factors → 16 runs).
+    all_factors = {
+        "output_layout": Factor("output_layout",
+                                OutputLayout.JSON_V6, OutputLayout.MARKDOWN_CODE),
+        "instruction_position": Factor("instruction_position",
+                                       InstructionPosition.BOTTOM, InstructionPosition.TOP_HEAVY),
+        "history_framing": Factor("history_framing",
+                                  HistoryFraming.UNTRUSTED, HistoryFraming.NEUTRAL),
+        "example_limit": Factor("example_limit", 2, 1),
+        "samples": Factor("samples", max(1, base_cfg.samples), max(3, base_cfg.samples)),
+        "diverse_sampling": Factor("diverse_sampling",
+                                   bool(base_cfg.diverse_sampling), not bool(base_cfg.diverse_sampling)),
+        "prompt_variants": Factor("prompt_variants",
+                                  bool(base_cfg.prompt_variants), not bool(base_cfg.prompt_variants)),
+        # New axes (feedback §3.1) — opt-in only:
+        "rule_emphasis": Factor("rule_emphasis", RuleEmphasis.PLAIN, RuleEmphasis.FORMATTED),
+        "conflict_summary_mode": Factor("conflict_summary_mode",
+                                        ConflictSummaryMode.FULL, ConflictSummaryMode.INTENT_ONLY),
+        "side_ordering": Factor("side_ordering",
+                                SideOrdering.CURRENT_FIRST, SideOrdering.BASE_FIRST),
+    }
+
+    # Default: screen the standard 7 factors (backward compat when no
+    # capabilities given). The three new axes (rule_emphasis,
+    # conflict_summary_mode, side_ordering) are opt-in via --enable-factor or
+    # the capability-driven branches below; they're NOT in the default set to
+    # keep the DOE bounded (≤8 factors → 16 runs via the Res-IV design).
+    selected: set[str] = {
+        "output_layout", "instruction_position", "history_framing",
+        "example_limit", "samples", "diverse_sampling", "prompt_variants",
+    }
+
+    if capabilities is not None:
+        selected.clear()
+        # Always include the core mechanism levers.
+        selected |= {"samples", "diverse_sampling"}
+        if capabilities.json_success_rate < 0.5:
+            # The model struggles with JSON — the layout + rule formatting matter.
+            selected |= {"output_layout", "instruction_position"}
+        elif capabilities.is_thinking_model:
+            # A verbose reasoner — structure + budget + few-shot density matter.
+            selected |= {"instruction_position", "example_limit", "samples",
+                         "output_layout", "history_framing"}
+        elif capabilities.json_success_rate >= 0.8:
+            # A strong model — minimal set; don't waste runs.
+            pass  # just the core {samples, diverse_sampling}
+        else:
+            # Middle ground — screen the standard prompt axes.
+            selected |= {"output_layout", "instruction_position", "example_limit"}
+
+    # Force-in factors from --enable-factor.
+    selected |= set(force_factors)
+
+    # Preserve a stable ordering (prompt axes first, then mechanism, then the
+    # new opt-in axes) for deterministic design-matrix construction.
+    order = [
+        "output_layout", "instruction_position", "history_framing",
+        "example_limit", "samples", "diverse_sampling", "prompt_variants",
+        "rule_emphasis", "conflict_summary_mode", "side_ordering",
     ]
+    return [all_factors[name] for name in order if name in selected]
 
 
 def _apply_design_point(
@@ -856,12 +1015,17 @@ def _apply_design_point(
     if "prompt_variants" in levels:
         cfg_updates["prompt_variants"] = bool(levels["prompt_variants"])
     cfg = base_cfg.model_copy(update=cfg_updates) if cfg_updates else base_cfg
-    # Prompt axes → PromptProfile.
+    # Prompt axes → PromptProfile. All axes default to PromptProfile()'s defaults
+    # so a design point that doesn't set an axis keeps the production value.
+    _d = PromptProfile()
     profile = PromptProfile(
-        output_layout=levels.get("output_layout", PromptProfile().output_layout),
-        instruction_position=levels.get("instruction_position", PromptProfile().instruction_position),
-        history_framing=levels.get("history_framing", PromptProfile().history_framing),
-        example_limit=int(levels.get("example_limit", 2)),
+        output_layout=levels.get("output_layout", _d.output_layout),
+        instruction_position=levels.get("instruction_position", _d.instruction_position),
+        history_framing=levels.get("history_framing", _d.history_framing),
+        example_limit=int(levels.get("example_limit", _d.example_limit)),
+        rule_emphasis=levels.get("rule_emphasis", _d.rule_emphasis),
+        conflict_summary_mode=levels.get("conflict_summary_mode", _d.conflict_summary_mode),
+        side_ordering=levels.get("side_ordering", _d.side_ordering),
     )
     set_active_profile(profile if profile != PromptProfile() else None)
     return cfg, profile
@@ -875,6 +1039,8 @@ def probe_two_phase(
     existing_profile: "PromptProfile | None" = None,
     n_reps: int = 1,
     run_phase2: bool = True,
+    capabilities: "ModelCapability | None" = None,
+    force_factors: tuple[str, ...] = (),
 ) -> tuple[ProbeResult, "MechanismChoices", "PromptProfile"]:
     """Two-phase designed calibration: screen all factors, then refine the winners.
 
@@ -918,7 +1084,8 @@ def probe_two_phase(
             choices, winner_profile,
         )
 
-    factors = _two_phase_factors(model_cfg)
+    factors = _two_phase_factors(model_cfg, capabilities=capabilities,
+                                 force_factors=force_factors)
 
     def _eval_point(point) -> Any:
         cfg, _prof = _apply_design_point(model_cfg, point, n_reps=n_reps)
@@ -1127,6 +1294,8 @@ def run_calibration(
     run_prompt_profile: bool = True,
     n_reps: int = 1,
     run_phase2: bool = True,
+    force_factors: tuple[str, ...] = (),
+    task: str | None = None,
     embeddings_model: str = "",
     existing_profile: "ModelProfile | None" = None,
 ) -> CalibrationReport:
@@ -1170,6 +1339,12 @@ def run_calibration(
     """
     results: list[ProbeResult] = []
 
+    # Set the active task-type filter so conflicts_with_context() (called inside
+    # evaluate_setting) uses the right task family's corpus. None = the default
+    # merge_conflict_resolution corpus (backward compat).
+    from capybase.calibration_corpus import set_active_task_type
+    set_active_task_type(task)
+
     reach = probe_reachability(client, model_cfg)
     results.append(reach)
     if not reach.ok:
@@ -1212,10 +1387,15 @@ def run_calibration(
     # End-to-end uses the DETECTED json_mode (not the config default): if the
     # server rejects response_format, exercising it here would only re-prove
     # the failure we already recorded. The e2e probe checks parseability of a
-    # real resolution under the settings we'll actually run with.
+    # real resolution under the settings we'll actually run with. The structured
+    # capability probe (§5) runs alongside it: N quick calls measuring JSON
+    # success rate, CoT length, and instruction-following — the signals that
+    # drive adaptive factor selection (Part 1b) and the early-exit (Part 2).
     e2e_cfg = tuned_cfg.model_copy(update={"json_mode": jm_result.ok})
     e2e_result = probe_end_to_end(client, e2e_cfg)
     results.append(e2e_result)
+    cap_result, capabilities = probe_capabilities_detailed(client, e2e_cfg)
+    results.append(cap_result)
 
     # Two-phase designed calibration: a single fractional-factorial screening of
     # all factors (prompt axes + mechanism/sampling) → focused refinement on the
@@ -1225,6 +1405,8 @@ def run_calibration(
     # config at defaults/existing); never aborts calibration. Skipped under
     # --dry-run (run_mechanisms/run_prompt_profile both gate it). n_reps makes
     # each design point's score noise-robust (majority vote) for thinking models.
+    # The capability signals adapt WHICH factors are screened (Part 1b) and can
+    # short-circuit the DOE for near-perfect models (Part 2).
     mech_cfg = e2e_cfg
     choices = MechanismChoices()
     existing_prompt = None
@@ -1239,11 +1421,38 @@ def run_calibration(
 
     from capybase.prompt_profile import DEFAULT_PROFILE as _DEFAULT_PROMPT
 
-    if run_mechanisms and run_prompt_profile:
+    # Early-exit (Part 2): a near-perfect model (high JSON success, follows
+    # instructions, not a thinking model) doesn't need the DOE — lock in the
+    # cheap baseline and skip the expensive corpus sweep. This turns a strong
+    # model's calibration from hours to minutes.
+    if (
+        run_mechanisms and run_prompt_profile
+        and capabilities.is_strong_model
+        and not force_factors
+    ):
+        results.append(ProbeResult(
+            "two_phase", ok=False,
+            detail="early-exit: model scored near-perfect on capability probe "
+                   f"(json_success={capabilities.json_success_rate:.0%}); "
+                   "DOE skipped, cheap baseline locked in",
+        ))
+        prompt_winner = existing_prompt if existing_prompt is not None else _DEFAULT_PROMPT
+        mech_result = ProbeResult(
+            "mechanisms", ok=False,
+            detail="skipped (early-exit: near-perfect model); samples=1, all off",
+        )
+        results.append(mech_result)
+        pp_result = ProbeResult(
+            "prompt_profile", ok=(prompt_winner != _DEFAULT_PROMPT),
+            detail=f"skipped (early-exit); layout={prompt_winner.output_layout.value}",
+        )
+        results.append(pp_result)
+    elif run_mechanisms and run_prompt_profile:
         tp_result, choices, prompt_winner = probe_two_phase(
             client, mech_cfg,
             existing_choices=choices, existing_profile=existing_prompt,
             n_reps=n_reps, run_phase2=run_phase2,
+            capabilities=capabilities, force_factors=force_factors,
         )
         results.append(tp_result)
         mech_result = ProbeResult(

@@ -475,17 +475,54 @@ def _render_history_framing(profile: PromptProfile, history: str) -> str:
     return body  # STRIPPED
 
 
-def _render_output_contract(profile: PromptProfile) -> tuple[str, str]:
-    """Return ``(contract, rules)`` for the profile's output layout.
+def _render_rules(profile: PromptProfile, base_rules: str) -> str:
+    """Apply the profile's ``rule_emphasis`` axis to the rules block.
 
-    The default (``JSON_V6``) returns the verbatim ``v6`` strings so production
-    is byte-identical. ``MARKDOWN_CODE`` returns the fenced-code-then-JSON
-    contract — the model emits raw code (no escaping) plus a small metadata
-    object, and the parser extracts the code block as ``resolved_text``.
+    ``PLAIN`` (the default) returns the rules unchanged (byte-identical to v6).
+    ``FORMATTED`` re-renders them with an uppercase header and bold key terms —
+    visual salience that may help small/reasoning models follow the output
+    contract (feedback §3.1 ``rule_emphasis``). The transform is purely
+    presentational: the rules' semantic content is invariant.
+    """
+    from capybase.prompt_profile import RuleEmphasis
+
+    if profile.rule_emphasis is RuleEmphasis.FORMATTED:
+        # Promote the header and bold the key directive in each bullet.
+        lines = base_rules.split("\n")
+        out = []
+        for line in lines:
+            if line.startswith("CRITICAL rules:"):
+                out.append("### OUTPUT RULES (follow exactly)")
+            elif line.startswith("- "):
+                # Bold the first phrase (up to the first period or colon).
+                bullet = line[2:]
+                # Find a natural split point for bolding the key term.
+                for sep in (".", ":"):
+                    idx = bullet.find(sep)
+                    if 0 < idx < 60:
+                        out.append(f"- **{bullet[:idx + 1]}**{bullet[idx + 1:]}")
+                        break
+                else:
+                    out.append(f"- **{bullet}**")
+            else:
+                out.append(line)
+        return "\n".join(out)
+    return base_rules
+
+
+def _render_output_contract(profile: PromptProfile) -> tuple[str, str]:
+    """Return ``(contract, rules)`` for the profile's output layout + emphasis.
+
+    The default (``JSON_V6`` + ``PLAIN``) returns the verbatim ``v6`` strings so
+    production is byte-identical. ``MARKDOWN_CODE`` returns the fenced-code-then-
+    JSON contract. The ``rule_emphasis`` axis (``_render_rules``) then transforms
+    the rules block for visual salience if the profile requests it.
     """
     if profile.output_layout is OutputLayout.MARKDOWN_CODE:
-        return _RESOLVE_CONTRACT_MD, _RESOLVE_RULES_MD
-    return _RESOLVE_CONTRACT_JSON_V6, _RESOLVE_RULES_JSON_V6
+        contract, rules = _RESOLVE_CONTRACT_MD, _RESOLVE_RULES_MD
+    else:
+        contract, rules = _RESOLVE_CONTRACT_JSON_V6, _RESOLVE_RULES_JSON_V6
+    return contract, _render_rules(profile, rules)
 
 
 def _compose_resolve_prompt(
@@ -748,11 +785,31 @@ def _resolve_prompt_parts(
     # and which units must survive the merge. Directly addresses the "dropped
     # replayed side" failure: the model sees unit boundaries explicitly.
     struct_ctx = _structural_context_block(unit)
+    # ConflictSummaryMode (feedback §3.1): gate which context blocks surface.
+    # FULL = today (all blocks); INTENT_ONLY = just side_intent; NONE = strip all.
+    # Reduces context density for models that drown in structural detail.
+    from capybase.prompt_profile import ConflictSummaryMode as _CSM
+    if profile.conflict_summary_mode is _CSM.INTENT_ONLY:
+        struct_ctx = ""
+        semantic_change = ""
+        value_resolution = ""
+    elif profile.conflict_summary_mode is _CSM.NONE:
+        struct_ctx = ""
+        side_intent = ""
+        semantic_change = ""
+        value_resolution = ""
+    # SideOrdering (feedback §3.1): the order the three sides appear.
+    # CURRENT_FIRST = today (CURRENT → REPLAYED → BASE); BASE_FIRST = BASE first.
+    from capybase.prompt_profile import SideOrdering as _SO
+    _cur_block = f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
+    _rep_block = f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
+    _base_block = f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
+    if profile.side_ordering is _SO.BASE_FIRST:
+        _sides = _base_block + _cur_block + _rep_block
+    else:
+        _sides = _cur_block + _rep_block + _base_block
     sides_text = (
-        f"{struct_ctx}{side_intent}{semantic_change}{value_resolution}"
-        f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
-        f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
-        f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
+        f"{struct_ctx}{side_intent}{semantic_change}{value_resolution}{_sides}"
     )
     anchor_t, siblings_t, deps_t, few_shot_t, primary_t, history_t, obls_t, trims = _fit_to_budget(
         budget=budget,
@@ -773,9 +830,7 @@ def _resolve_prompt_parts(
     # together. Obligations render early (high priority) so the model sees them.
     data_block = (
         f"{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{struct_ctx}{side_intent}{semantic_change}{value_resolution}"
-        f"CURRENT_UPSTREAM_SIDE body (exact, including leading spaces):\n{cur_lines}\n\n"
-        f"REPLAYED_COMMIT_SIDE body (exact, including leading spaces):\n{rep_lines}\n\n"
-        f"BASE (common ancestor) body, for context:\n{base_lines}\n\n"
+        f"{_sides}"
         f"Surrounding file context:\n{primary_t}\n\n"
     )
     return {"intro": intro, "data": data_block, "contract": contract, "rules": rules, "trims": trims}

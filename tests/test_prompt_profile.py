@@ -330,3 +330,56 @@ def test_json_v6_layout_respects_config_json_mode():
         assert engine._request_json_mode() is configured
         engine.propose(_unit(), _ctx())
         assert client.json_mode_received[-1] is configured
+
+
+# ---------------------------------------------------------------------------
+# New axes: RuleEmphasis, ConflictSummaryMode, SideOrdering (feedback §3.1)
+# ---------------------------------------------------------------------------
+
+
+def test_rule_emphasis_formatted_promotes_header_and_bolds():
+    """FORMATTED rules have an uppercase header + bold key terms; PLAIN is byte-identical."""
+    from capybase.resolution_engine import _render_rules, _RESOLVE_RULES_JSON_V6
+    from capybase.prompt_profile import RuleEmphasis
+
+    # PLAIN = byte-identical
+    plain = _render_rules(pp.PromptProfile(rule_emphasis=RuleEmphasis.PLAIN), _RESOLVE_RULES_JSON_V6)
+    assert plain == _RESOLVE_RULES_JSON_V6
+
+    # FORMATTED = header promoted + bold present
+    formatted = _render_rules(pp.PromptProfile(rule_emphasis=RuleEmphasis.FORMATTED), _RESOLVE_RULES_JSON_V6)
+    assert "### OUTPUT RULES" in formatted
+    assert "**" in formatted
+    assert pp.PromptProfile(rule_emphasis=RuleEmphasis.FORMATTED).tag() == "#rules-bold"
+
+
+def test_conflict_summary_mode_strips_blocks():
+    """INTENT_ONLY keeps side_intent but strips struct_ctx; NONE strips both."""
+    u, ctx = _unit(), ContextBuilder().build(_unit())
+
+    pp.set_active_profile(pp.PromptProfile(conflict_summary_mode=pp.ConflictSummaryMode.NONE))
+    prompt_none = build_resolve_prompt(u, ctx)
+    pp.set_active_profile(pp.PromptProfile(conflict_summary_mode=pp.ConflictSummaryMode.INTENT_ONLY))
+    prompt_intent = build_resolve_prompt(u, ctx)
+    pp.set_active_profile(None)
+    prompt_full = build_resolve_prompt(u, ctx)
+
+    # FULL has the most content; NONE has the least.
+    assert len(prompt_full) >= len(prompt_intent) >= len(prompt_none)
+    # The sides always appear regardless of summary mode.
+    assert "CURRENT_UPSTREAM_SIDE body" in prompt_none
+
+
+def test_side_ordering_base_first():
+    """BASE_FIRST puts BASE before CURRENT; CURRENT_FIRST is the default order."""
+    u, ctx = _unit(), ContextBuilder().build(_unit())
+
+    pp.set_active_profile(pp.PromptProfile(side_ordering=pp.SideOrdering.BASE_FIRST))
+    prompt_bf = build_resolve_prompt(u, ctx)
+    pp.set_active_profile(None)
+    prompt_cf = build_resolve_prompt(u, ctx)
+
+    # BASE_FIRST: BASE appears before CURRENT
+    assert prompt_bf.index("BASE (common ancestor)") < prompt_bf.index("CURRENT_UPSTREAM_SIDE body")
+    # CURRENT_FIRST (default): CURRENT appears before BASE
+    assert prompt_cf.index("CURRENT_UPSTREAM_SIDE body") < prompt_cf.index("BASE (common ancestor)")

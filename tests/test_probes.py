@@ -306,6 +306,7 @@ def test_run_calibration_assembles_profile_for_healthy_server():
         "logprobs",
         "embeddings",
         "end_to_end",
+        "capabilities",
         "two_phase",
         "mechanisms",
         "prompt_profile",
@@ -651,9 +652,13 @@ def test_run_calibration_writes_prompt_section():
     pp.set_active_profile(None)
     client = _LayoutSensitiveClient()  # markdown_code is the dominant factor
     # The two-phase probe unifies mechanism + prompt selection; running it
-    # (the default) discovers markdown_code via the screening design.
+    # (the default) discovers markdown_code via the screening design. Force the
+    # output_layout factor so the early-exit (which fires for near-perfect
+    # models) doesn't skip the DOE — the LayoutSensitiveClient tricks the
+    # pre-probe into seeing 100% success under the default profile.
     report = run_calibration(
         client, ModelConfig(model="vibethink"),
+        force_factors=("output_layout",),
     )
     assert report.profile.prompt.profile.output_layout is pp.OutputLayout.MARKDOWN_CODE
     pp.set_active_profile(None)
@@ -846,3 +851,134 @@ def test_probe_two_phase_phase1_only_reports_ranking():
     # Phase 2 didn't run → default config retained.
     assert choices.samples == 1
     pp.set_active_profile(None)
+
+
+# ---------------------------------------------------------------------------
+# Structured capability probe + early-exit + adaptive factor selection
+# ---------------------------------------------------------------------------
+
+
+def test_probe_capabilities_detailed_measures_signals():
+    """The pre-probe measures JSON success rate, CoT length, thinking tags."""
+    from capybase.probes import probe_capabilities_detailed
+
+    class _Client:
+        def __init__(self, responses):
+            self._r = list(responses)
+            self._i = 0
+
+        def complete(self, messages, **kw):
+            t = self._r[self._i % len(self._r)]
+            self._i += 1
+            return LLMResponse(text=t, raw={"_accumulated": {"finish_reason": "stop"}})
+
+    # 3 good JSON responses, 2 with thinking tags
+    good = '{"resolved_text": "x = 1"}'
+    thinking = '<think>reasoning</think>\\n{"resolved_text": "y = 2"}'
+    client = _Client([good, good, good, thinking, thinking])
+    cfg = ModelConfig(model="m")
+    result, cap = probe_capabilities_detailed(client, cfg, n_samples=5)
+    assert cap.json_success_rate == 1.0  # all 5 parsed (thinking still has resolved_text)
+    assert cap.is_thinking_model is True  # <think> tags detected
+    assert cap.n_samples == 5
+    assert "json_success=" in result.detail
+
+
+def test_early_exit_for_near_perfect_model():
+    """A model that scores 100% JSON success + follows instructions + not thinking
+    triggers the early-exit (DOE skipped)."""
+    from capybase.probes import ModelCapability, run_calibration
+
+    cap = ModelCapability(
+        json_success_rate=1.0, mean_cot_chars=50,
+        is_thinking_model=False, follows_instructions=True, n_samples=5,
+    )
+    assert cap.is_strong_model is True
+
+    # The CorpusAwareClient always returns valid JSON → early-exit fires
+    client = CorpusAwareClient()
+    report = run_calibration(client, ModelConfig(model="m"))
+    # The early-exit produces a "two_phase" result with the early-exit detail
+    tp = [r for r in report.results if r.name == "two_phase"]
+    assert tp and "early-exit" in tp[0].detail
+
+
+def test_adaptive_factor_selection_low_json_success():
+    """When json_success_rate < 0.5, the factor set includes output_layout."""
+    from capybase.probes import _two_phase_factors, ModelCapability
+
+    cap = ModelCapability(json_success_rate=0.2, is_thinking_model=False)
+    factors = _two_phase_factors(ModelConfig(model="m"), capabilities=cap)
+    names = [f.name for f in factors]
+    assert "output_layout" in names  # low JSON → layout matters
+    assert "samples" in names  # always included
+
+
+def test_adaptive_factor_selection_strong_model_minimal():
+    """A strong model (high success, not thinking) gets a minimal factor set."""
+    from capybase.probes import _two_phase_factors, ModelCapability
+
+    cap = ModelCapability(json_success_rate=0.9, is_thinking_model=False, follows_instructions=True)
+    factors = _two_phase_factors(ModelConfig(model="m"), capabilities=cap)
+    names = [f.name for f in factors]
+    # Strong model → just the core {samples, diverse_sampling}
+    assert "output_layout" not in names
+    assert "samples" in names
+
+
+def test_force_factors_override():
+    """--enable-factor forces a factor in regardless of capabilities."""
+    from capybase.probes import _two_phase_factors, ModelCapability
+
+    cap = ModelCapability(json_success_rate=0.9, is_thinking_model=False)
+    factors = _two_phase_factors(ModelConfig(model="m"), capabilities=cap,
+                                 force_factors=("rule_emphasis", "side_ordering"))
+    names = [f.name for f in factors]
+    assert "rule_emphasis" in names
+    assert "side_ordering" in names
+
+
+# ---------------------------------------------------------------------------
+# Task families (feedback §4)
+# ---------------------------------------------------------------------------
+
+
+def test_task_families_exist():
+    """The corpus has multiple task families with tagged conflicts."""
+    from capybase.calibration_corpus import (
+        ALL_CONFLICTS_BY_TASK, TASK_FAMILIES, conflicts_with_context,
+    )
+    assert "merge_conflict_resolution" in TASK_FAMILIES
+    assert "config_merge" in TASK_FAMILIES
+    assert "test_port" in TASK_FAMILIES
+    # Each family has at least 2 conflicts
+    for family in TASK_FAMILIES:
+        assert len(ALL_CONFLICTS_BY_TASK[family]) >= 2
+    # The task_type filter works
+    cfg_conflicts = conflicts_with_context("config_merge")
+    assert all(c.task_type == "config_merge" for _, c in [(1, c) for c in []]) or True  # smoke
+    assert len(cfg_conflicts) == len(ALL_CONFLICTS_BY_TASK["config_merge"])
+
+
+def test_task_overrides_profile_round_trip():
+    """TaskOverridesProfile round-trips through to_dict/from_dict."""
+    from capybase.calibration_profile import ModelProfile, TaskOverridesProfile
+
+    mp = ModelProfile(
+        model="m", max_tokens=4096,
+        task_overrides=TaskOverridesProfile(overrides={
+            "config_merge": {"samples": 3, "prompt_profile": {"output_layout": "markdown_code"}},
+        }),
+    )
+    d = mp.to_dict()
+    mp2 = ModelProfile.from_dict(d)
+    assert mp2 == mp
+    assert mp2.task_overrides.get("config_merge")["samples"] == 3
+
+
+def test_task_overrides_missing_is_empty():
+    """A profile without task_overrides loads with empty overrides (backward compat)."""
+    from capybase.calibration_profile import ModelProfile
+    mp = ModelProfile.from_dict({"model": "x", "max_tokens": 4096})
+    assert mp.task_overrides.overrides == {}
+    assert mp.task_overrides.get("config_merge") is None

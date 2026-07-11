@@ -100,6 +100,50 @@ class OutlineMode(Enum):
     V5 = "v5"
 
 
+class RuleEmphasis(Enum):
+    """The emphasis/formatting of the critical-rules block.
+
+    - ``PLAIN``: today's text bullets (the default).
+    - ``FORMATTED``: uppercase header + bold key terms + tighter bullets. Tests
+      whether visual salience helps small/reasoning models follow the output
+      contract (feedback §3.1 ``rule_emphasis``).
+    """
+
+    PLAIN = "plain"
+    FORMATTED = "formatted"
+
+
+class ConflictSummaryMode(Enum):
+    """Which structural-context blocks surface before the conflict sides.
+
+    - ``FULL``: today's behavior — side-intent + structural-context + semantic-
+      change blocks (the default).
+    - ``INTENT_ONLY``: just the side-intent block (the short "what each side
+      did" summary), stripping the heavier AST/semantic blocks.
+    - ``NONE``: strip all context blocks; show only the raw sides. Reduces
+      context density for models that drown in detail (feedback §3.1
+      ``conflict_summary_mode``).
+    """
+
+    FULL = "full"
+    INTENT_ONLY = "intent_only"
+    NONE = "none"
+
+
+class SideOrdering(Enum):
+    """The order the three conflict sides appear in the prompt.
+
+    - ``CURRENT_FIRST``: CURRENT → REPLAYED → BASE (the default; BASE last as
+      "for context").
+    - ``BASE_FIRST``: BASE → CURRENT → REPLAYED. Some models anchor on the
+      first side they see; showing BASE first may reduce bias toward one side
+      (feedback §3.1 ``side_ordering``).
+    """
+
+    CURRENT_FIRST = "current_first"
+    BASE_FIRST = "base_first"
+
+
 #: The five outline variants that carry a prompt-version tag, in order.
 _OUTLINE_TAGGED: tuple[OutlineMode, ...] = (
     OutlineMode.V1, OutlineMode.V2, OutlineMode.V3, OutlineMode.V4, OutlineMode.V5,
@@ -126,6 +170,9 @@ class PromptProfile:
     instruction_position: InstructionPosition = InstructionPosition.BOTTOM
     outline: OutlineMode = OutlineMode.NONE
     example_limit: int = 2
+    rule_emphasis: RuleEmphasis = RuleEmphasis.PLAIN
+    conflict_summary_mode: ConflictSummaryMode = ConflictSummaryMode.FULL
+    side_ordering: SideOrdering = SideOrdering.CURRENT_FIRST
 
     def tag(self) -> str:
         """A short suffix recording the non-default axes, for ``prompt_version``.
@@ -151,6 +198,14 @@ class PromptProfile:
             parts.append(f"outline-{self.outline.value}")
         if self.example_limit != 2:
             parts.append(f"ex{self.example_limit}")
+        if self.rule_emphasis is RuleEmphasis.FORMATTED:
+            parts.append("rules-bold")
+        if self.conflict_summary_mode is ConflictSummaryMode.INTENT_ONLY:
+            parts.append("summary-intent")
+        elif self.conflict_summary_mode is ConflictSummaryMode.NONE:
+            parts.append("summary-none")
+        if self.side_ordering is SideOrdering.BASE_FIRST:
+            parts.append("base-first")
         return ("#" + "+".join(parts)) if parts else ""
 
     # --- serialization (ready for the calibration section) ---
@@ -162,6 +217,9 @@ class PromptProfile:
             "instruction_position": self.instruction_position.value,
             "outline": self.outline.value,
             "example_limit": self.example_limit,
+            "rule_emphasis": self.rule_emphasis.value,
+            "conflict_summary_mode": self.conflict_summary_mode.value,
+            "side_ordering": self.side_ordering.value,
         }
 
     @classmethod
@@ -191,6 +249,9 @@ class PromptProfile:
             instruction_position=_enum(InstructionPosition, "instruction_position", InstructionPosition.BOTTOM),
             outline=_enum(OutlineMode, "outline", OutlineMode.NONE),
             example_limit=example_limit,
+            rule_emphasis=_enum(RuleEmphasis, "rule_emphasis", RuleEmphasis.PLAIN),
+            conflict_summary_mode=_enum(ConflictSummaryMode, "conflict_summary_mode", ConflictSummaryMode.FULL),
+            side_ordering=_enum(SideOrdering, "side_ordering", SideOrdering.CURRENT_FIRST),
         )
 
 
