@@ -1532,82 +1532,97 @@ def probe_two_phase(
 
     if best is not None and run_phase2:
         best_point, best_score = best
-        # Evaluate the existing baseline at the SAME fidelity (corpus size) as the
-        # best-so-far so the adoption comparison is valid (same n_correct
-        # denominator). ``best_score.total`` is the corpus size at the winning
-        # epoch — slice the full corpus to match.
-        existing_point = DesignPoint(
-            config_id="existing",
-            levels={f.name: f.low for f in factors},
-        )
-        existing_subset = full_corpus[:best_score.total]
-        _apply_design_point(model_cfg, existing_point, n_reps=n_reps)
 
-        def _resolve_existing(conflict, context, c):
-            w, lat = _resolve_under_config(client, c, conflict, context)
-            if w is None:
-                raise RuntimeError("no candidate produced")
-            return w, None, lat
-
-        # The baseline eval is itself a corpus sweep — protect it from a second
-        # interruption (or any eval failure). When the baseline can't be scored,
-        # adopt best-so-far ONLY if it showed positive correctness (it resolved
-        # SOMETHING; keeping a config we can't even evaluate would be guessing).
-        # This keeps the anytime promise: an interrupted run returns the best
-        # data it has, never crashes.
-        try:
-            existing_score = evaluate_setting_replicated(
-                _resolve_existing, model_cfg, n_reps=n_reps, corpus=existing_subset,
-            )
-            baseline_available = True
-        except KeyboardInterrupt:
-            interrupted = True
-            baseline_available = False
-            _progress("calibrate: interrupted during baseline comparison "
-                      "— adopting best-so-far without baseline gate")
-        except Exception as exc:  # noqa: BLE001 - never crash on finalize
-            baseline_available = False
-            decisions.append(f"baseline eval failed ({exc}); adopting best-so-far")
-
-        if baseline_available:
-            # Adopt ONLY on a strict improvement (correctness → proxy, no latency).
-            if _compare_quality(best_score, existing_score) > 0:
-                decoded_kwargs, best_profile = _decode_point(best_point)
-                best_cfg_kwargs.update(decoded_kwargs)
-                decisions.append(
-                    f"Epoch {last_epoch_completed} winner: {best_point.config_id} "
-                    f"({best_score.n_correct}/{best_score.total} correct"
-                    f"{f', {n_reps} reps' if n_reps > 1 else ''})"
-                )
-            else:
-                cmp = _compare_quality(best_score, existing_score)
-                if cmp == 0:
-                    decisions.append(
-                        f"best-so-far ties existing ({existing_score.n_correct}/"
-                        f"{existing_score.total} correct); keeping existing"
-                    )
-                else:
-                    decisions.append(
-                        f"existing beats best-so-far ({existing_score.n_correct}/"
-                        f"{existing_score.total} correct); keeping it"
-                    )
-        else:
-            # Baseline unavailable: adopt best-so-far iff it has positive
-            # correctness; else keep existing (don't adopt a zero-score config
-            # we couldn't validate against the baseline).
+        if interrupted:
+            # FAST FINALIZE: on interrupt, skip the baseline re-eval entirely.
+            # The baseline comparison is a corpus sweep that can take as long as
+            # a full epoch on a slow model — exactly the wrong thing to do when
+            # the user just said "stop". Adopt best-so-far directly when it has
+            # positive correctness (it resolved SOMETHING during the epoch); keep
+            # existing when nothing scored. This makes the anytime halt truly
+            # prompt: finalize in milliseconds, not minutes.
             if best_score.n_correct > 0:
                 decoded_kwargs, best_profile = _decode_point(best_point)
                 best_cfg_kwargs.update(decoded_kwargs)
                 decisions.append(
                     f"adopted best-so-far {best_point.config_id} "
                     f"({best_score.n_correct}/{best_score.total} correct) "
-                    f"without baseline comparison"
+                    f"on interrupt (no baseline re-eval)"
                 )
             else:
                 decisions.append(
-                    "keeping existing (best-so-far has no correct resolutions "
-                    "and baseline unavailable)"
+                    "keeping existing on interrupt "
+                    "(best-so-far has no correct resolutions)"
                 )
+        else:
+            # Completed run: evaluate the existing baseline at the SAME fidelity
+            # (corpus size) as the best-so-far so the adoption comparison is valid
+            # (same n_correct denominator). ``best_score.total`` is the corpus size
+            # at the winning epoch — slice the full corpus to match.
+            existing_point = DesignPoint(
+                config_id="existing",
+                levels={f.name: f.low for f in factors},
+            )
+            existing_subset = full_corpus[:best_score.total]
+            _apply_design_point(model_cfg, existing_point, n_reps=n_reps)
+
+            def _resolve_existing(conflict, context, c):
+                w, lat = _resolve_under_config(client, c, conflict, context)
+                if w is None:
+                    raise RuntimeError("no candidate produced")
+                return w, None, lat
+
+            # The baseline eval is itself a corpus sweep — protect it from a
+            # failure. When the baseline can't be scored, adopt best-so-far ONLY
+            # if it showed positive correctness.
+            try:
+                existing_score = evaluate_setting_replicated(
+                    _resolve_existing, model_cfg, n_reps=n_reps, corpus=existing_subset,
+                )
+                baseline_available = True
+            except Exception as exc:  # noqa: BLE001 - never crash on finalize
+                baseline_available = False
+                decisions.append(f"baseline eval failed ({exc}); adopting best-so-far")
+
+            if baseline_available:
+                # Adopt ONLY on a strict improvement (correctness → proxy, no
+                # latency). A tie keeps existing — the conservative principle.
+                if _compare_quality(best_score, existing_score) > 0:
+                    decoded_kwargs, best_profile = _decode_point(best_point)
+                    best_cfg_kwargs.update(decoded_kwargs)
+                    decisions.append(
+                        f"Epoch {last_epoch_completed} winner: {best_point.config_id} "
+                        f"({best_score.n_correct}/{best_score.total} correct"
+                        f"{f', {n_reps} reps' if n_reps > 1 else ''})"
+                    )
+                else:
+                    cmp = _compare_quality(best_score, existing_score)
+                    if cmp == 0:
+                        decisions.append(
+                            f"best-so-far ties existing ({existing_score.n_correct}/"
+                            f"{existing_score.total} correct); keeping existing"
+                        )
+                    else:
+                        decisions.append(
+                            f"existing beats best-so-far ({existing_score.n_correct}/"
+                            f"{existing_score.total} correct); keeping it"
+                        )
+            else:
+                # Baseline unavailable: adopt best-so-far iff it has positive
+                # correctness; else keep existing.
+                if best_score.n_correct > 0:
+                    decoded_kwargs, best_profile = _decode_point(best_point)
+                    best_cfg_kwargs.update(decoded_kwargs)
+                    decisions.append(
+                        f"adopted best-so-far {best_point.config_id} "
+                        f"({best_score.n_correct}/{best_score.total} correct) "
+                        f"without baseline comparison"
+                    )
+                else:
+                    decisions.append(
+                        "keeping existing (best-so-far has no correct resolutions "
+                        "and baseline unavailable)"
+                    )
     elif best is not None and not run_phase2:
         decisions.append("Phase 1 only (screening); keeping existing config")
     elif interrupted:

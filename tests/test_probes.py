@@ -988,24 +988,30 @@ class _InterruptingClient(_LayoutSensitiveClient):
     simulates a user Ctrl-C mid-calibration (a real signal fires momentarily,
     not on every subsequent call). After the raise, behaves normally so the
     finalize path can complete. Subclasses _LayoutSensitiveClient so the epoch-1
-    best-so-far is the markdown_code point (correct under that layout)."""
+    best-so-far is the markdown_code point (correct under that layout).
+
+    ``call_count_at_interrupt`` records how many calls were made when the
+    interrupt fired — finalize-fast must NOT add any calls beyond this."""
 
     def __init__(self, raise_after):
         super().__init__()
         self._raise_after = raise_after
         self._n = 0
         self._fired = False
+        self.call_count_at_interrupt = 0
 
     def complete(self, messages, **kw):
         self._n += 1
         if not self._fired and self._n > self._raise_after:
             self._fired = True
+            self.call_count_at_interrupt = self._n
             raise KeyboardInterrupt("simulated user interrupt")
         return super().complete(messages, **kw)
 
 
 def test_probe_two_phase_interrupted_after_epoch1_adopts_best(monkeypatch):
-    """Ctrl-C after Epoch 1 completes → best-so-far (markdown_code) is adopted."""
+    """Ctrl-C after Epoch 1 completes → best-so-far (markdown_code) is adopted,
+    with NO baseline re-eval (fast finalize: no extra client calls)."""
     from capybase import probes
     from capybase.probes import probe_two_phase
     import capybase.prompt_profile as pp
@@ -1022,6 +1028,9 @@ def test_probe_two_phase_interrupted_after_epoch1_adopts_best(monkeypatch):
     result, choices, profile = probe_two_phase(client, cfg)
     # Didn't crash — returned normally with best-so-far.
     assert "INTERRUPTED" in result.detail
+    # Fast finalize: no baseline re-eval. (A few in-flight parallel-sample
+    # calls may complete after the interrupt, but finalize starts NO new eval.)
+    assert "no baseline re-eval" in result.detail
     # The epoch-1 best (markdown_code layout) was adopted.
     assert profile.output_layout is pp.OutputLayout.MARKDOWN_CODE
     assert result.ok
@@ -1043,6 +1052,35 @@ def test_probe_two_phase_interrupted_mid_epoch_keeps_existing():
     # No crash; existing (default) config retained since nothing was scored.
     assert "INTERRUPTED" in result.detail
     assert profile == pp.DEFAULT_PROFILE
+    pp.set_active_profile(None)
+
+
+def test_probe_two_phase_fast_finalize_no_extra_calls(monkeypatch):
+    """On interrupt, finalize makes ZERO new client calls — no baseline
+    re-eval. Isolates the fast-finalize path by disabling parallel sampling
+    (so no in-flight calls complete after the interrupt)."""
+    from capybase import probes
+    from capybase.probes import probe_two_phase
+    import capybase.prompt_profile as pp
+
+    # Tiny epoch-1 corpus + samples=1 throughout (no parallel in-flight calls).
+    monkeypatch.setattr(probes, "_fidelity_schedule",
+                        lambda n, **kw: (2, 5, n))
+    pp.set_active_profile(None)
+    # samples=1 + parallel_samples=False → fully sequential, so the call count
+    # is exact (no threads completing after the interrupt).
+    cfg = ModelConfig(model="vibethink", samples=1, parallel_samples=False)
+    # Epoch 1 with the forced 2-conflict corpus: each point is 2 calls (samples=1).
+    # The design includes samples=3 points which raise the count, so pick a
+    # raise_after past epoch 1. Use the tracking field to verify zero growth.
+    client = _InterruptingClient(raise_after=100)  # past all of epoch 1
+    result, choices, profile = probe_two_phase(client, cfg)
+    # The interrupt fired somewhere in epoch 2; finalize added 0 new calls.
+    assert client.call_count_at_interrupt > 0
+    assert client._n == client.call_count_at_interrupt, (
+        f"fast finalize made {client._n - client.call_count_at_interrupt} "
+        f"extra calls after interrupt (expected 0 with sequential sampling)"
+    )
     pp.set_active_profile(None)
 
 
