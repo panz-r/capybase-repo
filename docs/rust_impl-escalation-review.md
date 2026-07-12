@@ -2,17 +2,13 @@
 
 ## Status
 
-**Root cause identified.** The `rust_impl` scenario escalates consistently
-(gemma-4-E4B on NOVA DESKTOP:8086, reproduced across 3 independent runs) because
-a **validator false positive** traps the CEGIS loop: the model produces a correct
-candidate on every attempt, but the per-unit Rust syntax check reports a spurious
-`error: expected ';', found 'format'` that originates in an *unresolved sibling
-hunk*, not in the candidate. The model cannot fix an error that isn't in its code,
-so it exhausts its retry budget and escalates.
+**Fixed.** The root cause — a validator false positive from unresolved sibling
+hunks — was diagnosed and fixed in `_blank_markers` (`verification.py`).
+The function now comments out the second side's body lines (not just the marker
+lines), so sibling-hunk bodies can no longer produce spurious syntax errors in
+the per-unit compile. The `rust_impl` escalation scenario no longer reproduces.
 
-This document contains the verbatim prompts sent to the LLM (captured via the new
-`--log-prompts` / `CAPYBASE_LOG_PROMPTS` feature), the model's responses, and the
-diagnosis of why the validator rejects a correct candidate.
+The body below is retained as the historical record of the problem and the fix.
 
 ---
 
@@ -431,20 +427,22 @@ Two consecutive `format!` expressions, no `;` after the first → `rustc` report
 
 ---
 
-## Proposed fix (for the design discussion, not yet implemented)
+## The fix (implemented)
 
-The `_blank_markers` function needs to blank the **entire conflict block** (marker
-lines AND the body lines between them), not just the marker lines. Two approaches:
+The `_blank_markers` function now runs a state machine (`code` /
+`in_first_side` / `in_second_side`) over the file lines:
 
-1. **Blank to one side**: replace each sibling conflict block with just one side's
-   body (e.g. the BASE side, or the first side). This is what
-   `_blank_markers_one_side` already does — but it's not used by the Rust syntax
-   validator. Switching the Rust validator to use `_blank_markers_one_side`
-   instead of `_blank_markers` would eliminate the double-body problem.
+- `<<<<<<<` → comment, state `in_first_side` (first side's body stays live)
+- `=======` → comment, state `in_second_side` (second side's body is commented out)
+- `>>>>>>>` → comment, state `code`
+- Lines in `in_second_side` are commented out
 
-2. **Comment out the whole block**: replace every line from `<<<<<<<` through
-   `>>>>>>>` with a comment. This is the most conservative — it removes the
-   sibling hunk entirely from the compile, so its body can't produce errors.
+This keeps the first side's body as live code (so the file parses with one valid
+copy of the sibling region) while eliminating the consecutive-expression /
+duplicate-definition false positive that the second side's body caused. The
+per-unit compile now reflects only the candidate's hunk plus one valid copy of
+each surrounding region.
 
-Either approach makes the per-unit compile reflect only the candidate's hunk +
-valid surrounding code, which is the intended semantics.
+`_blank_markers_one_side` is retained as a thin alias (it delegates to
+`_blank_markers`) for backward compatibility with call sites that referenced it
+by name.
