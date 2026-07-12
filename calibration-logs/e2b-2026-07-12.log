@@ -1,0 +1,80 @@
+calibrate: Epoch 1/3 screening (3 factors, 8 points, 5 conflicts)...
+calibrate: Epoch 1 point 1/8 (#diverse_sampling=False,output_layout=json_v6,samples=1)...
+calibrate:   -> 4/5 correct
+calibrate: Epoch 1 point 2/8 (#diverse_sampling=True,output_layout=json_v6,samples=1)...
+calibrate:   -> 4/5 correct
+calibrate: Epoch 1 point 3/8 (#diverse_sampling=False,output_layout=json_v6,samples=3)...
+calibrate:   -> 4/5 correct
+calibrate: Epoch 1 point 4/8 (#diverse_sampling=True,output_layout=json_v6,samples=3)...
+calibrate:   -> 4/5 correct
+calibrate: Epoch 1 point 5/8 (#diverse_sampling=False,output_layout=markdown_code,samples=1)...
+calibrate:   -> 3/5 correct
+calibrate: Epoch 1 point 6/8 (#diverse_sampling=True,output_layout=markdown_code,samples=1)...
+calibrate:   -> 4/5 correct
+calibrate: Epoch 1 point 7/8 (#diverse_sampling=False,output_layout=markdown_code,samples=3)...
+calibrate:   -> 4/5 correct
+calibrate: Epoch 1 point 8/8 (#diverse_sampling=True,output_layout=markdown_code,samples=3)...
+calibrate:   -> 5/5 correct
+calibrate: Epoch 1 done — top factors: samples(high,|t|=2.0); diverse_sampling(high,|t|=2.0); output_layout(≈,|t|=0.0)
+calibrate: Epoch 2/3 refinement (8 points: 0 survivors + 8 factorial, 10 conflicts)...
+calibrate: Epoch 2 point 1/8 (#diverse_sampling=False,output_layout=json_v6,samples=1)...
+calibrate:   -> 9/10 correct
+calibrate: Epoch 2 point 2/8 (#diverse_sampling=False,output_layout=markdown_code,samples=1)...
+calibrate:   -> 9/10 correct
+calibrate: Epoch 2 point 3/8 (#diverse_sampling=True,output_layout=json_v6,samples=1)...
+calibrate:   -> 10/10 correct
+calibrate: Epoch 2 point 4/8 (#diverse_sampling=True,output_layout=markdown_code,samples=1)...
+calibrate:   -> 10/10 correct
+calibrate: Epoch 2 point 5/8 (#diverse_sampling=False,output_layout=json_v6,samples=3)...
+calibrate:   -> 8/10 correct
+calibrate: Epoch 2 point 6/8 (#diverse_sampling=False,output_layout=markdown_code,samples=3)...
+calibrate:   -> 8/10 correct
+calibrate: Epoch 2 point 7/8 (#diverse_sampling=True,output_layout=json_v6,samples=3)...
+calibrate:   -> 8/10 correct
+calibrate: Epoch 2 point 8/8 (#diverse_sampling=True,output_layout=markdown_code,samples=3)...
+calibrate:   -> 9/10 correct
+calibrate: Epoch 2 done
+calibrate: Epoch 3/3 tie-breaker (2 finalists, 15 conflicts)...
+calibrate: Epoch 3 point 1/2 (#diverse_sampling=True,output_layout=json_v6,samples=1)...
+calibrate:   -> 13/15 correct
+calibrate: Epoch 3 point 2/2 (#diverse_sampling=True,output_layout=markdown_code,samples=1)...
+calibrate:   -> 15/15 correct
+calibrate: Epoch 3 done
+capybase calibrate — model: google/gemma-4-e2b
+status: ok
+
+probes:
+  ✓ reachability   replied: 'ok'
+  ✓ max_tokens     smallest sufficient budget: 2048; with 50% headroom -> 4096 (tried [1024, 2048])
+  ✗ context_window 'google/gemma-4-e2b' listed but no context_length field; set [model] context_window manually
+  ✓ json_mode      server honors response_format
+  ✗ logprobs       server returned no logprobs
+  ✗ embeddings     endpoint does not support embeddings (start llama-server with --embeddings)
+  ✓ end_to_end     model produced a valid candidate
+  ✓ capabilities   json_success=100% (5/5), mean_chars=943, thinking_model=False, follows_instructions=True
+  ✓ two_phase      Phase 1 ranking: samples(high,|t|=2.0); diverse_sampling(high,|t|=2.0); output_layout(≈,|t|=0.0); Epoch 3 winner: e3-e2-f4 (15/15 correct)
+  ✓ mechanisms     samples=1, diverse_sampling
+  ✓ prompt_profile layout=markdown_code, position=bottom
+
+tuned profile:
+  max_tokens                = 4096
+  json_mode                 = True
+  capture_token_entropy     = False
+  generation_timeout_seconds= 316
+  avg_latency_ms            = 52602.2
+
+mechanisms (corpus A/B):
+  samples                   = 1
+  two_pass                  = off
+  plan_search               = off
+  prompt_variants           = off
+  diverse_sampling          = on
+  enable_self_consistency   = off
+
+notes:
+  - logprobs unavailable; capture_token_entropy off
+  - context window not discovered: 'google/gemma-4-e2b' listed but no context_length field; set [model] context_window manually
+  - embeddings unavailable; RAG stays lexical (BM25)
+
+profile knobs: max_tokens, json_mode, capture_token_entropy, generation_timeout_seconds, context_window, samples, two_pass, plan_search, prompt_variants, diverse_sampling, enable_self_consistency
+wrote profile to: /home/panz/.config/capybase/model_profile.json

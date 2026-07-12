@@ -1,0 +1,93 @@
+calibrate: Epoch 1/3 screening (4 factors, 16 points, 5 conflicts)...
+calibrate: Epoch 1 point 1/16 (#diverse_sampling=False,instruction_position=bottom,output_layout=json_v6,samples=1)...
+calibrate:   -> 1/5 correct
+calibrate: Epoch 1 point 2/16 (#diverse_sampling=True,instruction_position=bottom,output_layout=json_v6,samples=1)...
+calibrate:   -> 0/5 correct
+calibrate: Epoch 1 point 3/16 (#diverse_sampling=False,instruction_position=bottom,output_layout=json_v6,samples=3)...
+calibrate:   -> 1/5 correct
+calibrate: Epoch 1 point 4/16 (#diverse_sampling=True,instruction_position=bottom,output_layout=json_v6,samples=3)...
+calibrate:   -> 2/5 correct
+calibrate: Epoch 1 point 5/16 (#diverse_sampling=False,instruction_position=top_heavy,output_layout=json_v6,samples=1)...
+calibrate:   -> 0/5 correct
+calibrate: Epoch 1 point 6/16 (#diverse_sampling=True,instruction_position=top_heavy,output_layout=json_v6,samples=1)...
+calibrate:   -> 0/5 correct
+calibrate: Epoch 1 point 7/16 (#diverse_sampling=False,instruction_position=top_heavy,output_layout=json_v6,samples=3)...
+calibrate:   -> 3/5 correct
+calibrate: Epoch 1 point 8/16 (#diverse_sampling=True,instruction_position=top_heavy,output_layout=json_v6,samples=3)...
+calibrate:   -> 0/5 correct
+calibrate: Epoch 1 point 9/16 (#diverse_sampling=False,instruction_position=bottom,output_layout=markdown_code,samples=1)...
+calibrate:   -> 1/5 correct
+calibrate: Epoch 1 point 10/16 (#diverse_sampling=True,instruction_position=bottom,output_layout=markdown_code,samples=1)...
+calibrate:   -> 0/5 correct
+calibrate: Epoch 1 point 11/16 (#diverse_sampling=False,instruction_position=bottom,output_layout=markdown_code,samples=3)...
+calibrate:   -> 0/5 correct
+calibrate: Epoch 1 point 12/16 (#diverse_sampling=True,instruction_position=bottom,output_layout=markdown_code,samples=3)...
+calibrate:   -> 2/5 correct
+calibrate: Epoch 1 point 13/16 (#diverse_sampling=False,instruction_position=top_heavy,output_layout=markdown_code,samples=1)...
+calibrate:   -> 0/5 correct
+calibrate: Epoch 1 point 14/16 (#diverse_sampling=True,instruction_position=top_heavy,output_layout=markdown_code,samples=1)...
+calibrate:   -> 0/5 correct
+calibrate: Epoch 1 point 15/16 (#diverse_sampling=False,instruction_position=top_heavy,output_layout=markdown_code,samples=3)...
+calibrate:   -> 2/5 correct
+calibrate: Epoch 1 point 16/16 (#diverse_sampling=True,instruction_position=top_heavy,output_layout=markdown_code,samples=3)...
+calibrate:   -> 1/5 correct
+calibrate: Epoch 1 done — top factors: samples(high,|t|=3.9); diverse_sampling(low,|t|=1.1); instruction_position(low,|t|=0.3); output_layout(low,|t|=0.3)
+calibrate: Epoch 2/3 refinement (9 points: 1 survivors + 8 factorial, 10 conflicts)...
+calibrate: Epoch 2 point 1/9 (#diverse_sampling=True,instruction_position=bottom,output_layout=markdown_code,samples=3)...
+calibrate:   -> 1/10 correct
+calibrate: Epoch 2 point 2/9 (#diverse_sampling=False,instruction_position=bottom,output_layout=json_v6,samples=1)...
+calibrate:   -> 3/10 correct
+calibrate: Epoch 2 point 3/9 (#diverse_sampling=False,instruction_position=top_heavy,output_layout=json_v6,samples=1)...
+calibrate:   -> 2/10 correct
+calibrate: Epoch 2 point 4/9 (#diverse_sampling=True,instruction_position=bottom,output_layout=json_v6,samples=1)...
+calibrate:   -> 1/10 correct
+calibrate: Epoch 2 point 5/9 (#diverse_sampling=True,instruction_position=top_heavy,output_layout=json_v6,samples=1)...
+calibrate:   -> 1/10 correct
+calibrate: Epoch 2 point 6/9 (#diverse_sampling=False,instruction_position=bottom,output_layout=json_v6,samples=3)...
+calibrate:   -> 3/10 correct
+calibrate: Epoch 2 point 7/9 (#diverse_sampling=False,instruction_position=top_heavy,output_layout=json_v6,samples=3)...
+calibrate:   -> 8/10 correct
+calibrate: Epoch 2 point 8/9 (#diverse_sampling=True,instruction_position=bottom,output_layout=json_v6,samples=3)...
+calibrate:   -> 0/10 correct
+calibrate: Epoch 2 point 9/9 (#diverse_sampling=True,instruction_position=top_heavy,output_layout=json_v6,samples=3)...
+calibrate:   -> 2/10 correct
+calibrate: Epoch 2 done
+capybase calibrate — model: chat
+status: ok
+
+probes:
+  ✓ reachability   replied: 'We need to respond with a single word: "'
+  ✓ max_tokens     smallest sufficient budget: 16384; with 50% headroom -> 32768 (tried [1024, 2048, 4096, 8192, 16384])
+  ✓ context_window 'chat' context_length=32768 (meta.n_ctx)
+  ✗ json_mode      json_mode accepted but output unparseable; disabling
+  ✗ logprobs       server returned no logprobs
+  ✓ embeddings     server serves /v1/embeddings
+  ✓ end_to_end     model produced a valid candidate
+  ✓ capabilities   json_success=40% (2/5), mean_chars=11304, thinking_model=False, follows_instructions=False
+  ✓ two_phase      Phase 1 ranking: samples(high,|t|=3.9); diverse_sampling(low,|t|=1.1); instruction_position(low,|t|=0.3); output_layout(low,|t|=0.3); Epoch 2 winner: e2-f6 (8/10 correct)
+  ✓ mechanisms     samples=3, all mechanisms off
+  ✓ prompt_profile layout=json_v6, position=top_heavy
+
+tuned profile:
+  max_tokens                = 32768
+  json_mode                 = False
+  capture_token_entropy     = False
+  generation_timeout_seconds= 284
+  avg_latency_ms            = 47258.6
+
+mechanisms (corpus A/B):
+  samples                   = 3
+  two_pass                  = off
+  plan_search               = off
+  prompt_variants           = off
+  diverse_sampling          = off
+  enable_self_consistency   = off
+
+notes:
+  - json_mode disabled (server rejected or mishandled response_format)
+  - logprobs unavailable; capture_token_entropy off
+  - context window 32768 tokens; prompt trimming enabled
+  - embeddings available; semantic RAG enabled
+
+profile knobs: max_tokens, json_mode, capture_token_entropy, generation_timeout_seconds, context_window, samples, two_pass, plan_search, prompt_variants, diverse_sampling, enable_self_consistency
+wrote profile to: /home/panz/.config/capybase/model_profile.json
