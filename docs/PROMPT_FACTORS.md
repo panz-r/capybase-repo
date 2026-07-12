@@ -372,7 +372,7 @@ calibrate:   -> 3/5 correct
 ...
 ^C
 calibrate: interrupted after epoch 1 — using best-so-far
-wrote profile to: .rebase-agent/memory/model_profile.json
+wrote profile to: ~/.config/capybase/model_profile.json
 ```
 
 The earlier the halt, the less refined the profile, but every epoch boundary is
@@ -380,8 +380,10 @@ a valid stopping point. A full run is unaffected.
 
 ### Profile location
 
-The calibrated profile is written to `.rebase-agent/memory/model_profile.json`
-(or `[calibration] model_profile_path` if set) and applied automatically on
+The calibrated profile is written to `~/.config/capybase/model_profile.json`
+(the shared config dir, so it's available across all repos on the machine — the
+model doesn't vary by directory). Override with `[calibration]
+model_profile_path` or `--profile`. The profile is applied automatically on
 every `capybase rebase` run when the model name matches. An explicit env-var
 override (`CAPYBASE_PROMPT_LAYOUT=markdown_code` etc.) always wins over the
 calibrated profile — useful for A/B testing.

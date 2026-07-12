@@ -15,14 +15,14 @@
 [model]
 # OpenAI-compatible local endpoint (e.g. llama-server).
 provider = "openai_compatible"
-base_url = "http://DESKTOP-NOVA.local:8085/v1"
+base_url = "http://localhost:1234/v1"
 api_key = "sk-local"
 # The model id the llama-server reports in /v1/models. capybase sends this
 # verbatim in every completion request, so it must match what the server knows.
 # DESKTOP-NOVA runs a multi-model llama-server that serves models under ALIASES
 # (chat / embed / default), not the raw GGUF filenames — so use "chat" here.
 # `capybase calibrate` keys the stored profile off this name, so keep it stable.
-model = "chat"
+model = "google/gemma-4-e2b"
 temperature = 0.2
 # Samples per fresh resolve. Default 1 (single draw): best-of-N + self-
 # consistency is OPT-IN (raise samples AND set enable_self_consistency=true).
@@ -283,6 +283,10 @@ model_path = ".rebase-agent/memory/calibration.json"
 # Model capability profile written by `capybase calibrate` / `recalibrate`.
 # When its model name matches [model] model, its tuned knobs override the [model]
 # settings at runtime ("Profile wins"). Absent/mismatched/corrupt = no-op.
+# The default path (".rebase-agent/memory/model_profile.json") is a sentinel:
+# at load time it is relocated to the shared config dir (~/.config/capybase/) so
+# the profile is available across all repos — the model does not vary by
+# directory. Set an absolute or different relative path here to override.
 model_profile_path = ".rebase-agent/memory/model_profile.json"
 escalate_threshold = 0.7
 min_examples_for_calibration = 50

@@ -62,10 +62,12 @@ and mechanism axes (`samples`, `diverse_sampling`, `prompt_variants`,
 `enable_self_consistency`). The capability signals drive which subset is
 screened; `--enable-factor` forces specific factors for manual exploration.
 
-The profile is written to `.rebase-agent/memory/model_profile.json` and applied
-on every run when the model name matches. For noise-robust calibration on
-thinking models, use `--calibrate-reps 3` (majority vote across replicated
-evals). See `docs/PROMPT_FACTORS.md` for the factor reference.
+The profile is written to `~/.config/capybase/model_profile.json` (the shared
+config dir, so it's available across all repos — the model doesn't vary by
+directory) and applied on every run when the model name matches. For
+noise-robust calibration on thinking models, use `--calibrate-reps 3` (majority
+vote across replicated evals). See `docs/PROMPT_FACTORS.md` for the factor
+reference.
 
 ### 3. (Optional) Calibrate embeddings RAG
 

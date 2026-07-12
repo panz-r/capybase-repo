@@ -35,7 +35,8 @@ from capybase import __version__
 from capybase.config import Config, ModelConfig
 from capybase.orchestrator import Orchestrator
 
-# Default profile location (sibling of the risk calibration.json under memory/).
+# Default profile path sentinel. At load time this is relocated to the shared
+# config dir (~/.config/capybase/) so the profile is available across all repos.
 DEFAULT_PROFILE_PATH = ".rebase-agent/memory/model_profile.json"
 
 
