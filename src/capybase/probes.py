@@ -598,16 +598,58 @@ class ModelCapability:
     is_thinking_model: bool = False  # <think>/</think> tags detected
     follows_instructions: bool = True  # no conflict markers in any response
     n_samples: int = 0               # how many calls were made
+    # Corpus spot-check (feedback: early-exit was too aggressive — the trivial
+    # probe only checks parseability, never correctness). A small stratified
+    # sample of REAL corpus conflicts is resolved under the default config and
+    # scored against their expected_text. ``corpus_correct_rate`` is the fraction
+    # correct; it gates ``is_strong_model`` so a model that merely emits valid
+    # JSON (but gets merges wrong) does NOT skip the DOE — as E2B demonstrated
+    # (100% parseability, 80% real-correctness; the DOE found diverse_sampling
+    # lifted it to 15/15).
+    corpus_correct_rate: float = 0.0
+    corpus_spotcheck_n: int = 0
 
     @property
     def is_strong_model(self) -> bool:
-        """A near-perfect model: high JSON success, follows instructions, not a
-        thinking model. Triggers the early-exit (skip the DOE, lock in baseline)."""
+        """A near-perfect model: highly parseable AND highly correct on real
+        conflicts. Triggers the early-exit (skip the DOE, lock in baseline).
+
+        Both conditions are required: ``json_success_rate`` alone is necessary
+        but not sufficient — a model can emit valid JSON with wrong merges.
+        The ``corpus_correct_rate`` gate (from the spot-check) ensures the DOE
+        only skips when the model is genuinely near-perfect on real conflicts,
+        leaving no room for the DOE to find improvements."""
         return (
             self.json_success_rate >= 0.95
             and self.follows_instructions
             and not self.is_thinking_model
+            and self.corpus_correct_rate >= 0.95
         )
+
+
+def _corpus_spotcheck_conflicts():
+    """A stratified 3-conflict sample from CALIBRATION_CONFLICTS for the spot-check.
+
+    Picks one conflict of each shape so the spot-check isn't biased toward one
+    merge pattern:
+    - **combine**: both sides add distinct elements (union-merge pattern).
+    - **pick**: semantically-incompatible same-line edit (the model must choose).
+    - **structural**: multi-line structural merge (indentation/field complexity).
+
+    Deterministic (fixed titles, not random) so calibration is reproducible.
+    Falls back to the first 3 conflicts if the named titles aren't found (keeps
+    it robust to corpus edits)."""
+    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
+
+    by_title = {c.title: c for c in CALIBRATION_CONFLICTS}
+    picks = []
+    for title in ("list-combine", "same-line-pick", "rust-struct-fields"):
+        if title in by_title:
+            picks.append(by_title[title])
+    if len(picks) < 3:
+        # Fallback: fill from the head of the corpus (robust to renames).
+        picks = list(CALIBRATION_CONFLICTS[:3])
+    return picks
 
 
 def probe_capabilities_detailed(
@@ -660,11 +702,41 @@ def probe_capabilities_detailed(
     cap.is_thinking_model = saw_think_tag
     cap.follows_instructions = not leaked_markers
 
+    # --- Corpus spot-check: resolve a few REAL conflicts and score correctness.
+    # The parseability probe above uses a trivial unresolvable conflict (x=1/2/3)
+    # that only checks "does the model emit JSON?", never "is the merge RIGHT?".
+    # A model can score 100% parseable yet fail badly on real merges (E2B did:
+    # 100% parseable, 80% correct — the DOE found diverse_sampling lifted it to
+    # 15/15). The spot-check resolves 3 stratified corpus conflicts under the
+    # default config and scores them against expected_text, so ``is_strong_model``
+    # fires only when the model is genuinely near-perfect on BOTH axes.
+    from capybase.conflict_model import ContextBundle
+    from capybase.quality import score_candidate
+
+    spotcheck = _corpus_spotcheck_conflicts()
+    spot_correct = 0
+    for conflict in spotcheck:
+        try:
+            winner, _lat = _resolve_under_config(
+                client, model_cfg, conflict, ContextBundle(primary_text=""),
+            )
+        except Exception:  # noqa: BLE001 - a failed resolve is a miss
+            continue
+        if winner is None:
+            continue
+        cs = score_candidate(winner, conflict)
+        if cs.correct:
+            spot_correct += 1
+    cap.corpus_spotcheck_n = len(spotcheck)
+    cap.corpus_correct_rate = spot_correct / len(spotcheck) if spotcheck else 0.0
+
     detail = (
         f"json_success={cap.json_success_rate:.0%} ({successes}/{n_samples}), "
         f"mean_chars={cap.mean_cot_chars}, "
         f"thinking_model={cap.is_thinking_model}, "
-        f"follows_instructions={cap.follows_instructions}"
+        f"follows_instructions={cap.follows_instructions}, "
+        f"corpus_correct={cap.corpus_correct_rate:.0%} "
+        f"({spot_correct}/{cap.corpus_spotcheck_n} spot-check)"
     )
     return ProbeResult("capabilities", ok=True, detail=detail), cap
 
@@ -1858,8 +1930,10 @@ def run_calibration(
     ):
         results.append(ProbeResult(
             "two_phase", ok=False,
-            detail="early-exit: model scored near-perfect on capability probe "
-                   f"(json_success={capabilities.json_success_rate:.0%}); "
+            detail="early-exit: near-perfect on probe AND corpus spot-check "
+                   f"(json_success={capabilities.json_success_rate:.0%}, "
+                   f"corpus_correct={capabilities.corpus_correct_rate:.0%} "
+                   f"of {capabilities.corpus_spotcheck_n} spot-check); "
                    "DOE skipped, cheap baseline locked in",
         ))
         prompt_winner = existing_prompt if existing_prompt is not None else _DEFAULT_PROMPT

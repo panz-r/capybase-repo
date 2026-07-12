@@ -1116,22 +1116,79 @@ def test_probe_capabilities_detailed_measures_signals():
 
 
 def test_early_exit_for_near_perfect_model():
-    """A model that scores 100% JSON success + follows instructions + not thinking
-    triggers the early-exit (DOE skipped)."""
+    """A model that scores 100% JSON success + 100% corpus correctness +
+    follows instructions + not thinking triggers the early-exit (DOE skipped)."""
     from capybase.probes import ModelCapability, run_calibration
 
     cap = ModelCapability(
         json_success_rate=1.0, mean_cot_chars=50,
         is_thinking_model=False, follows_instructions=True, n_samples=5,
+        corpus_correct_rate=1.0, corpus_spotcheck_n=3,
     )
     assert cap.is_strong_model is True
 
-    # The CorpusAwareClient always returns valid JSON → early-exit fires
+    # The CorpusAwareClient returns correct merges for corpus conflicts (it
+    # matches expected_text) AND valid JSON for the trivial probe → early-exit
+    # fires on both axes.
     client = CorpusAwareClient()
     report = run_calibration(client, ModelConfig(model="m"))
     # The early-exit produces a "two_phase" result with the early-exit detail
     tp = [r for r in report.results if r.name == "two_phase"]
     assert tp and "early-exit" in tp[0].detail
+
+
+def test_early_exit_does_not_fire_when_corpus_imperfect():
+    """A model that parses fine (100% on the trivial probe) but gets corpus
+    conflicts wrong does NOT trigger the early-exit — the DOE should run to
+    find improvements. This is the E2B scenario: 100% parseable, 80% correct."""
+    from capybase.probes import ModelCapability
+
+    # 100% parseable, but only 80% correct on the spot-check (4/5).
+    cap = ModelCapability(
+        json_success_rate=1.0, follows_instructions=True,
+        is_thinking_model=False, corpus_correct_rate=0.8, corpus_spotcheck_n=5,
+    )
+    assert not cap.is_strong_model, (
+        "a model with 80% corpus correctness should NOT early-exit — "
+        "the DOE has room to find improvements (E2B: 80% → 100%)"
+    )
+    # And it's the corpus_correct_rate that blocks it, not the parseability.
+    cap_perfect_corpus = ModelCapability(
+        json_success_rate=1.0, follows_instructions=True,
+        is_thinking_model=False, corpus_correct_rate=1.0, corpus_spotcheck_n=5,
+    )
+    assert cap_perfect_corpus.is_strong_model
+
+
+def test_corpus_spotcheck_uses_representative_conflicts():
+    """The spot-check picks combine + pick + structural shapes (one of each),
+    not three of the same type."""
+    from capybase.probes import _corpus_spotcheck_conflicts
+
+    picks = _corpus_spotcheck_conflicts()
+    assert len(picks) == 3
+    titles = [c.title for c in picks]
+    # The stratified selection: combine, pick, structural.
+    assert "list-combine" in titles, f"expected a combine shape, got {titles}"
+    assert "same-line-pick" in titles, f"expected a pick shape, got {titles}"
+    assert "rust-struct-fields" in titles, f"expected a structural shape, got {titles}"
+
+
+def test_probe_capabilities_measures_corpus_correctness():
+    """The capability probe resolves real corpus conflicts and reports the
+    correctness rate, not just parseability."""
+    from capybase.probes import probe_capabilities_detailed
+
+    # CorpusAwareClient returns correct merges for corpus conflicts.
+    client = CorpusAwareClient()
+    cfg = ModelConfig(model="m")
+    result, cap = probe_capabilities_detailed(client, cfg, n_samples=3)
+    assert cap.corpus_spotcheck_n == 3
+    # CorpusAwareClient matches expected_text for corpus conflicts → 100%.
+    assert cap.corpus_correct_rate == 1.0, (
+        f"expected 100% corpus correctness, got {cap.corpus_correct_rate}"
+    )
+    assert "corpus_correct" in result.detail
 
 
 def test_adaptive_factor_selection_low_json_success():
