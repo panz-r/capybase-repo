@@ -3,6 +3,9 @@ build/
 dist/
 *.egg-info/
 
+# compiled C extensions (platform-specific; rebuilt from .c via setup.py)
+*.so
+
 # python
 __pycache__/
 *.py[cod]
