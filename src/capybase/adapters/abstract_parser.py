@@ -895,9 +895,11 @@ _A_CLASS_KEYWORDS = (
 # ``struct Config`` definition under the same (class, "Config") identity.
 _A_CONTAINER_KEYWORDS = ("impl", "mod", "namespace", "module")
 # ``def`` appears here for Python-in-JS-template edge cases and is harmless;
-# the canonical Family-A function keywords lead.
+# the canonical Family-A function keywords lead. ``fun`` (G8) covers Kotlin —
+# without it every top-level Kotlin function was dropped (the keywordless
+# heuristic only accepts C free functions at file scope).
 _A_FUNC_KEYWORDS = (
-    "fn", "func", "function", "def", "async", "pub", "export",
+    "fn", "func", "fun", "function", "def", "async", "pub", "export",
 )
 # Field-like (top-level bindings): ``const``/``static``/``type``/``var``/``let``
 # declarations without a following ``{`` (so they don't open a scope) — detected
@@ -1161,12 +1163,30 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             i += 1
             continue
         if ch == "'":
-            # Rust/JS char-literal vs lifetime/attribute — treat as string start
-            # only when it plausibly opens a char (next char isn't part of an
-            # identifier). Conservative: skip if preceded by alnum/_ (lifetime).
+            # Rust char-literal vs lifetime (and JS/Python quoted strings which
+            # never reach here as a bare ``'`` outside a string). A char literal
+            # is ``'X'`` (single content char + closing ``'``); a lifetime is
+            # ``'ident`` with NO closing ``'`` (e.g. ``'a``, ``'static``).
+            # Discriminator (R3): a ``'`` followed by an identifier char where
+            # the char AFTER the identifier run is NOT a closing ``'`` is a
+            # lifetime — skip it entirely. This is robust across all the
+            # contexts lifetimes appear (``&'a``, ``x: &'static``, ``<'a>``,
+            # ``('a)``) because none of them are preceded by alnum/_ (the old
+            # rule), and they're all followed by an identifier longer than one
+            # char OR a single identifier char followed by a non-``'`` token.
+            nxt1 = src[i + 1] if i + 1 < n else ""
+            nxt2 = src[i + 2] if i + 2 < n else ""
             prev = src[i - 1] if i > 0 else ""
-            if prev.isalnum() or prev == "_":
-                # Likely a Rust lifetime ('a) — don't enter string state.
+            # Lifetime: ' + identifier-start char, NOT immediately closed by '.
+            # ``'a'`` (char lit) → nxt1='a', nxt2='\'' → NOT a lifetime.
+            # ``'a`` / ``'static`` (lifetime) → nxt1 ident, nxt2 != '\'' → lifetime.
+            # ``'\n'`` (char lit) → nxt1='\\' → not ident → falls to char path.
+            if (
+                (nxt1.isalpha() or nxt1 == "_")
+                and nxt2 != "'"
+                and not (prev.isalnum() or prev == "_")
+            ):
+                # Rust lifetime ('a / 'static) — don't enter string state.
                 i += 1
                 continue
             in_str = "char"
@@ -1287,8 +1307,14 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                                 fingerprint=unit_body_fingerprint(body),
                             )
                         )
-            # A ``;`` ends the statement; the next one starts after it.
-            stmt_start_byte = i + 1
+            # A ``;`` ends the statement; the next one starts after it. Only
+            # advance at TOP LEVEL (R2): a ``;`` inside braces (e.g. the
+            # ``return 1;`` inside ``const f = function() { ... };``) must NOT
+            # move the tracker, or the outer ``;`` would slice from mid-statement
+            # and the field name recovery would fail. The tracker is only
+            # meaningful for top-level statements.
+            if brace_depth == 0:
+                stmt_start_byte = i + 1
             buf = ""
             i += 1
             continue
@@ -1567,26 +1593,57 @@ def _classify_a_brace(
     toks = b.split()
     if not toks:
         return None
-    # R1: an initializer brace — ``const P = Point { ... }``, ``let m = Map { ... }``
-    # — is an object/struct literal inside a field declaration, NOT a scope-opening
-    # declaration. A buffer containing a field keyword + ``=`` before the ``{`` is
-    # a braced initializer; return None so it's treated as depth-only (the field
-    # is emitted at the terminating ``;``). Without this, ``Point { ... }`` is
-    # misclassified as a keyword-less method/function and absorbs the statement.
+    # R1 + G7: an initializer brace — ``const P = Point { ... }``, ``let m = Map { ... }``,
+    # ``const cfg = { ... }`` — is an object/struct literal inside a field declaration,
+    # NOT a scope-opening declaration. A buffer containing a field keyword + ``=`` whose
+    # token after ``=`` is an object/struct literal start (a bare ``{`` or a capitalized
+    # type name) is a braced initializer; return None so it's treated as depth-only
+    # (the field is emitted at the terminating ``;``).
+    #
+    # G7: this is NARROWER than the original R1 guard (which fired for any
+    # ``field-kw + =``). The old guard also rejected function/class/arrow
+    # expressions assigned to a binding — ``const f = function() { ... }``,
+    # ``const C = class { ... }``, ``const h = () => { ... }`` — silently dropping
+    # the whole declaration. Those must fall through to normal classification (the
+    # ``{`` IS a real declaration brace for the inner function/class). So the guard
+    # only fires when the token after ``=`` is NOT a function/class keyword and NOT
+    # a ``(`` (arrow function), i.e. it's genuinely an object/struct literal.
+    #
+    # Note: tokens are whitespace-split, so ``function()`` may be a single token
+    # (no space) — match by prefix, not equality.
     if "=" in toks and any(t in _A_FIELD_KEYWORDS for t in toks):
-        return None
-    # Find the LAST declaration keyword in the buffer.
+        eq_idx = toks.index("=")
+        after_eq = toks[eq_idx + 1 :] if eq_idx + 1 < len(toks) else []
+        first_after = after_eq[0] if after_eq else ""
+        # ``= function`` / ``= function()`` / ``= class`` → a function/class
+        # EXPRESSION; let it classify. ``= ( ... ) =>`` → arrow function; let it
+        # classify (``= (`` is the tell — the ``=>`` isn't in the buffer at ``{``).
+        if (
+            first_after.startswith("function")
+            or first_after.startswith("class")
+            or first_after.startswith("(")
+        ):
+            pass  # function/class/arrow expression — NOT an initializer literal
+        else:
+            return None  # genuine object/struct-literal initializer
+    # Find the LAST declaration keyword in the buffer. A keyword may be glued
+    # to the following ``(`` / ``<`` / ``:`` in the whitespace-normalized
+    # tokens (``function()`` / ``fn<T>``), so match by prefix: a token whose
+    # head (before the first ``(``/``<``/``:``) is a declaration keyword counts.
     last_kw_idx = -1
     last_kw = ""
     for idx in range(len(toks) - 1, -1, -1):
         t = toks[idx]
+        head = re.split(r"[<(:\[{]", t, maxsplit=1)[0]
         if (
             t in _A_CLASS_KEYWORDS
             or t in _A_FUNC_KEYWORDS
             or t in _A_CONTAINER_KEYWORDS
+            or (head != t and head in _A_FUNC_KEYWORDS)
+            or (head != t and head in _A_CLASS_KEYWORDS)
         ):
             last_kw_idx = idx
-            last_kw = t
+            last_kw = head if head != t else t
             break
     if last_kw_idx < 0:
         # No declaration keyword. Try the keyword-less method heuristic — the
@@ -1606,6 +1663,17 @@ def _classify_a_brace(
         cand = cand.strip(" \t")
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
             name = cand
+
+    # G7: function/class EXPRESSION assigned to a binding —
+    # ``const NAME = function() {`` / ``let NAME = class {``. The keyword is
+    # ``function``/``class`` and the name after it is empty (anonymous) or the
+    # expression's own name (e.g. ``class Inner``), but the entity the binding
+    # defines is NAME. Recover it by scanning BACKWARDS from the keyword for a
+    # ``field-kw NAME =`` shape. This makes ``const Foo = class {...}`` produce
+    # CLASS ``Foo`` (not an anonymous class), so the binding is tracked as an
+    # entity for merge identity.
+    if name is None and last_kw in ("function", "class"):
+        name = _binding_name_before(toks, last_kw_idx)
 
     # Go-specific name recovery (fixes #4 and #5): Go puts names in positions the
     # generic after-keyword lookup misses. ``go_is_receiver`` signals a receiver
@@ -1751,29 +1819,47 @@ def _find_decl_start(src: str, brace_idx: int, line_start: int) -> int:
     return cut
 
 
-def _find_stmt_start(src: str, term_idx: int, line_index: list[int] | None = None) -> int:
-    """Byte offset where the statement ending at ``term_idx`` (a ``;``) begins.
-
-    Like :func:`_find_decl_start` but for ``;``-terminated field declarations:
-    walks back past the previous ``;``/``}``/``{`` separator and leading
-    whitespace. Used by the in-main-pass field emitter (fix #10) to slice the
-    field body from the source at the ``;`` terminator.
-    """
-    cut = max(
-        src.rfind(";", 0, term_idx),
-        src.rfind("}", 0, term_idx),
-        src.rfind("{", 0, term_idx),
-        0,
-    )
-    if cut > 0:
-        cut += 1
-    while cut < term_idx and src[cut] in " \t\r\n":
-        cut += 1
-    return cut
-
-
 def _buf_has_field_keyword(buf: str) -> bool:
     return any(kw in buf.split() for kw in _A_FIELD_KEYWORDS)
+
+
+def _binding_name_before(toks: list[str], kw_idx: int) -> str | None:
+    """Recover the binding name for a ``field-kw NAME = function/class {`` shape.
+
+    Used by :func:`_classify_a_brace` (G7) when a function/class EXPRESSION is
+    assigned to a binding (``const Foo = class { ... }``, ``let h = function() {``).
+    The keyword after ``=`` is ``function``/``class``; the entity the merge cares
+    about is the binding NAME, not the (often anonymous) expression. Scans
+    backwards from ``kw_idx`` looking for ``... NAME =`` immediately before the
+    ``=`` that precedes the keyword, where NAME follows a field keyword
+    (``const``/``let``/``var``/``static``/``final``). Returns ``None`` when the
+    shape doesn't match (the keyword wasn't part of a binding expression).
+    """
+    # Walk back from the keyword: expect ``=`` right before it (possibly with
+    # the expression's own name between, e.g. ``const Foo = class Inner {``).
+    # Find the ``=`` that opens the expression.
+    eq_idx = -1
+    for j in range(kw_idx - 1, -1, -1):
+        if toks[j] == "=":
+            eq_idx = j
+            break
+        # Stop at a statement boundary / another declaration — no binding here.
+        if toks[j] in (";", "}", "{") or toks[j] in _A_FUNC_KEYWORDS:
+            return None
+    if eq_idx < 1:
+        return None  # nothing before the ``=``
+    # NAME is the token immediately before ``=``.
+    name_tok = toks[eq_idx - 1]
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
+        return None
+    # Require a field keyword somewhere before the NAME (so ``a = function()`` —
+    # a reassignment, not a binding — isn't misread). Look back a few tokens.
+    for j in range(eq_idx - 2, -1, -1):
+        if toks[j] in _A_FIELD_KEYWORDS or toks[j] in ("export", "pub", "public"):
+            return name_tok
+        if toks[j] in (";", "}", "{"):
+            break  # statement boundary — no field keyword found
+    return None
 
 
 #: Regex matching a top-level field declaration's accumulated token buffer, e.g.

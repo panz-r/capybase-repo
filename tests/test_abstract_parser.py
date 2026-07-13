@@ -1770,3 +1770,224 @@ def test_family_mismatch_does_not_crash():
     py_src = "def foo():\n    return 1\n"
     ir = ap.parse_file(py_src, language="rust")
     assert ir is not None  # didn't crash; produced some FileIR
+
+
+# ---------------------------------------------------------------------------
+# Third-pass review fixes: R2 (stmt_start_byte), R3 (Rust lifetimes),
+# G7 (initializer-brace guard), G8 (Kotlin fun + return-type heuristic).
+# ---------------------------------------------------------------------------
+
+
+def _field_named(ir, name):
+    """True when ``ir`` contains a top-level FIELD unit named ``name``."""
+    return any(u.kind == ap.KIND_FIELD and u.name == name for u in ap._all_units_flat(ir))
+
+
+def _unit_named(ir, name):
+    """True when ``ir`` contains a unit named ``name`` (any kind)."""
+    return any(u.name == name for u in ap._all_units_flat(ir))
+
+
+# --- R2: stmt_start_byte must only advance at top-level ; ---
+
+
+def test_r2_field_with_function_expression_initializer():
+    """R2: ``const f = function() { ... };`` — the in-brace ``;`` (after
+    ``return 1``) must NOT advance ``stmt_start_byte``; the outer ``;`` must
+    slice the full statement. Previously the inner ``;`` reset the tracker,
+    so the outer ``;`` sliced just ``} ;`` and the whole declaration was
+    silently dropped.
+
+    Post-G7 the function expression is classified as a FUNCTION ``f`` (the
+    binding name is recovered); the original R2 concern — silent drop — is
+    what this guards against. Either a FUNCTION or FIELD ``f`` is acceptable."""
+    src = "const f = function() {\n    return 1;\n};\n"
+    ir = ap.parse_family_a(src, language="javascript")
+    assert _unit_named(ir, "f"), (
+        f"const=function(){{...}}; must emit a unit named 'f'; got "
+        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+    )
+
+
+def test_r2_field_with_arrow_function_initializer():
+    """R2 regression: same bug for arrow-function bindings (very common in
+    TS/JS). ``const h = () => { ... };`` — the inner ``;`` must not corrupt
+    ``stmt_start_byte``. Post-G7 an arrow expression falls through to the
+    keywordless path (the ``=>`` isn't captured at the ``{``); either way the
+    binding must not be silently dropped."""
+    src = "const h = () => {\n    return 2;\n};\n"
+    ir = ap.parse_family_a(src, language="typescript")
+    flat = ap._all_units_flat(ir)
+    assert any(u.name == "h" for u in flat) or any(
+        u.kind == ap.KIND_FIELD for u in flat
+    ), (
+        f"const=()=>{{...}}; must not be silently dropped; got "
+        f"{[(u.kind, u.name) for u in flat]}"
+    )
+
+
+def test_r2_field_with_struct_literal_still_works():
+    """R2 regression guard: the original R1 case (Rust struct literal) must
+    still emit a field. The fix must not regress the case it was added for."""
+    src = "pub const P: Point = Point {\n    x: 0,\n    y: 0,\n};\n"
+    ir = ap.parse_family_a(src, language="rust")
+    assert _field_named(ir, "P"), (
+        f"Rust struct literal must still emit FIELD 'P'; got "
+        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+    )
+
+
+# --- R3: Rust lifetimes preceded by & / , / ( corrupt the parse ---
+
+
+def test_r3_rust_static_lifetime_in_return_type():
+    """R3: ``pub fn f() -> &'static str`` — the ``'`` of ``'static`` is
+    preceded by ``&`` (not alnum/_), so the parser misread it as a char-literal
+    opener and never closed it, corrupting the rest of the file → 0 units.
+    A lifetime is ``'`` followed by an identifier; recognize it and skip."""
+    src = 'pub fn f() -> &\'static str {\n    "x"\n}\n'
+    ir = ap.parse_family_a(src, language="rust")
+    assert _unit_named(ir, "f"), (
+        f"fn with &'static return type must be detected; got "
+        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+    )
+
+
+def test_r3_rust_generic_lifetime_param():
+    """R3: ``fn f<'a>(x: &'a str)`` — lifetime in generic params and a ref
+    type. Both ``'a`` occurrences are preceded by ``<`` / ``&``."""
+    src = "pub fn f<'a>(x: &'a str) {\n    todo!()\n}\n"
+    ir = ap.parse_family_a(src, language="rust")
+    assert _unit_named(ir, "f"), (
+        f"fn with lifetime generic must be detected; got "
+        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+    )
+
+
+def test_r3_rust_lifetime_in_body_not_corrupted():
+    """R3: a lifetime appearing in the function body (``let y: &'static str``)
+    must not corrupt the parse either — the function still parses, and a
+    following sibling is still detected."""
+    src = (
+        'pub fn first() {\n    let y: \'static str = "hi";\n}\n'
+        'pub fn second() {\n    1\n}\n'
+    )
+    ir = ap.parse_family_a(src, language="rust")
+    names = [u.name for u in ap._all_units_flat(ir)]
+    assert "first" in names and "second" in names, (
+        f"lifetimes in body must not corrupt following siblings; got {names}"
+    )
+
+
+def test_r3_rust_char_literal_still_works():
+    """R3 regression guard: genuine Rust char literals (``'a'``, ``'\\n'``)
+    must still be handled — they are NOT lifetimes. A char literal has the
+    ``'`` followed by content then a closing ``'``; a lifetime is ``'`` + an
+    identifier with no closing ``'``. The string with an embedded char literal
+    must not unbalance the brace scan."""
+    src = "pub fn f() {\n    let c = 'a';\n    let nl = '\\\\n';\n}\n"
+    ir = ap.parse_family_a(src, language="rust")
+    assert _unit_named(ir, "f"), (
+        f"char literals must still parse; got "
+        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+    )
+
+
+# --- G7: initializer-brace guard too broad (const=function/class/arrow) ---
+
+
+def test_g7_const_function_expression_emits_function():
+    """G7: ``const f = function() { ... }`` (no semicolon, JS style) — the
+    R1 initializer guard rejected every ``const X = {`` shape, including
+    function/class expressions. With G7 tightening + R2 fix, the function
+    body brace must be classified as a FUNCTION (the guard lets ``= function``
+    through to normal classification)."""
+    src = "const named = function() {\n    return 42;\n}\n"
+    ir = ap.parse_family_a(src, language="javascript")
+    kinds = [(u.kind, u.name) for u in ap._all_units_flat(ir)]
+    # Either a FUNCTION 'named' or a FIELD 'named' is acceptable; the silent
+    # DROP (empty) is the bug. Post-G7 with the keyword path it should be a
+    # function unit.
+    assert kinds, (
+        f"const=function(){{...}} must not be silently dropped; got {kinds}"
+    )
+    assert _unit_named(ir, "named"), f"expected unit 'named'; got {kinds}"
+
+
+def test_g7_const_class_expression_detected():
+    """G7: ``const C = class { ... }`` — a class expression assigned to a
+    const. Must not be silently dropped."""
+    src = "const Foo = class {\n    bar() {\n        return 1;\n    }\n};\n"
+    ir = ap.parse_family_a(src, language="javascript")
+    kinds = [(u.kind, u.name) for u in ap._all_units_flat(ir)]
+    assert _unit_named(ir, "Foo"), f"class expression must be detected; got {kinds}"
+
+
+def test_g7_rust_struct_literal_still_field():
+    """G7 regression guard: the genuine initializer-literal case the guard was
+    added for (Rust ``const P = Point { ... };``) must STILL return None from
+    classification (so the field is emitted at the ``;``), not be
+    misclassified as a function."""
+    src = "pub const P: Point = Point { x: 0, y: 0 };\n"
+    ir = ap.parse_family_a(src, language="rust")
+    kinds = [(u.kind, u.name) for u in ap._all_units_flat(ir)]
+    # Must be a FIELD (not a phantom FUNCTION/CLASS 'Point').
+    assert _field_named(ir, "P"), f"struct literal must be FIELD 'P'; got {kinds}"
+    # And no phantom 'Point' function/class should appear.
+    assert not _unit_named(ir, "Point"), (
+        f"struct literal must not emit phantom 'Point' unit; got {kinds}"
+    )
+
+
+def test_g7_object_literal_initializer_still_field():
+    """G7 regression guard: a plain object-literal initializer
+    (``const cfg = { ... };``) must remain a FIELD — the guard still applies
+    when the token after ``=`` is ``{`` (an object literal), just not when
+    it's ``function``/``class``/``(`` (an expression)."""
+    src = "const cfg = {\n    port: 8080,\n    host: 'x',\n};\n"
+    ir = ap.parse_family_a(src, language="javascript")
+    assert _field_named(ir, "cfg"), (
+        f"object literal must be FIELD 'cfg'; got "
+        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+    )
+
+
+# --- G8: Kotlin 'fun' missing + return-type-after-params breaks heuristic ---
+
+
+def test_g8_kotlin_top_level_fun():
+    """G8: Kotlin's ``fun`` keyword is missing from ``_A_FUNC_KEYWORDS``, so
+    every top-level Kotlin function was dropped (the keywordless heuristic
+    only accepts C free functions at file scope). Adding ``fun`` fixes this."""
+    src = "fun topLevel(x: Int): Int {\n    return x + 1\n}\n"
+    ir = ap.parse_family_a(src, language="kotlin")
+    kinds = [(u.kind, u.name) for u in ap._all_units_flat(ir)]
+    assert _unit_named(ir, "topLevel"), (
+        f"Kotlin top-level fun must be detected; got {kinds}"
+    )
+
+
+def test_g8_kotlin_method_with_return_type():
+    """G8: a Kotlin method ``fun m(): Int { ... }`` inside a class. Even with
+    ``fun`` added, the return type ``: Int`` after the params would break the
+    keywordless-method heuristic (it requires the buffer to end in ``)``).
+    But the keyword path (``fun`` recognized) handles this — the name comes
+    from after the keyword, not from the heuristic."""
+    src = "class Widget {\n    fun area(): Int {\n        return 1\n    }\n}\n"
+    ir = ap.parse_family_a(src, language="kotlin")
+    kinds = [(u.kind, u.name) for u in ap._all_units_flat(ir)]
+    method = [u for u in ap._all_units_flat(ir) if u.kind == ap.KIND_METHOD]
+    assert any(m.name == "area" for m in method), (
+        f"Kotlin method with return type must be detected as METHOD 'area'; got {kinds}"
+    )
+
+
+def test_g8_kotlin_top_level_fun_no_return_type():
+    """G8: a Kotlin ``fun`` with no return type (``fun f() { }``) — the simple
+    case. Must also be detected once ``fun`` is in the keyword set."""
+    src = "fun simple() {\n    println()\n}\n"
+    ir = ap.parse_family_a(src, language="kotlin")
+    assert _unit_named(ir, "simple"), (
+        f"Kotlin fun (no return type) must be detected; got "
+        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+    )
