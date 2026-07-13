@@ -300,3 +300,93 @@ def test_r5_refactoring_merge_declines_on_duplicate_identities():
         "refactoring-merge must decline (None) when base has duplicate "
         "identities, escalating to LLM instead of silently dropping one"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fifth-pass: R6 — _rebuild_container double-wraps a bare-function conflict.
+# When the enclosing node is a top-level FUNCTION (not a class/impl container),
+# both _try_entity_disjoint and _try_refactoring_aware_merge produced malformed
+# output: the function header was kept AND the entities spliced inside it,
+# nesting ``def foo():`` inside ``def foo():``.
+# ---------------------------------------------------------------------------
+
+from capybase.structural_resolver import (  # noqa: E402
+    _try_entity_disjoint,
+    _try_refactoring_aware_merge,
+)
+
+
+def _assert_valid_python_unit(text, label):
+    """The resolved text for a single top-level entity must be ONE unit, not a
+    nested/recursive structure. Asserts the text parses as valid Python and
+    contains exactly one top-level def/class (no doubled headers)."""
+    import ast
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as e:
+        raise AssertionError(f"{label}: output is not valid Python: {e}\n{text!r}")
+    top_defs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+    assert len(top_defs) == 1, (
+        f"{label}: expected exactly 1 top-level def/class, got {len(top_defs)}\n{text!r}"
+    )
+
+
+def test_r6_entity_disjoint_bare_function_not_double_wrapped():
+    """R6: ``_try_entity_disjoint`` on a bare top-level function conflict (both
+    sides add DISTINCT methods to a function, not a class) used to produce
+    ``def foo():\\n    def foo():\\n    ...`` — the function header kept AND the
+    entities nested inside. After R6, the enclosing function is recognized as
+    the entity itself (not a container), so the output is a flat list of defs."""
+    base = "def foo():\n    return 1\n"
+    cur = "def foo():\n    return 1\n\ndef bar():\n    return 2\n"
+    rep = "def foo():\n    return 1\n\ndef baz():\n    return 3\n"
+    result = _try_entity_disjoint(_unit(base, cur, rep))
+    assert result is not None, "entity_disjoint should resolve distinct adds"
+    # The output must NOT contain a doubled/nested 'def foo()' header.
+    assert result.count("def foo()") <= 1, (
+        f"output double-wraps the function header;\n{result!r}"
+    )
+    # bar and baz (the distinct adds) must be present as flat top-level defs.
+    assert "def bar()" in result and "def baz()" in result
+    # No line should be MORE indented than the body indent (the nested malformation
+    # produced '    def foo()' — a def at body-indent depth).
+    for ln in result.split("\n"):
+        if ln.strip().startswith("def "):
+            assert not ln.startswith("    def "), (
+                f"nested def at body-indent (the malformation);\n{result!r}"
+            )
+
+
+def test_r6_refactoring_aware_bare_function_not_double_wrapped():
+    """R6: ``_try_refactoring_aware_merge`` on a bare-function rename+modify
+    (one side renames foo→bar, other modifies foo's body) used to produce
+    ``def foo():\\n    def bar():\\n    ...``. After R6 the output is the single
+    composed function (bar's header + modified body), no wrapper."""
+    base = "def foo():\n    return 1\n    return 2\n"
+    cur = "def bar():\n    return 1\n    return 2\n"   # rename foo→bar
+    rep = "def foo():\n    return 1\n    return 99\n"  # modify foo's body
+    result = _try_refactoring_aware_merge(_unit(base, cur, rep))
+    assert result is not None, "refactoring merge should resolve rename+modify"
+    # The composed output: bar's header (renamed) + the modified body (return 99).
+    assert "def bar()" in result, f"renamed header must appear;\n{result!r}"
+    assert "99" in result, f"modified body must appear;\n{result!r}"
+    # No doubled header: 'def foo()' should NOT appear (it was renamed away).
+    assert "def foo()" not in result, (
+        f"old header must not be kept after rename;\n{result!r}"
+    )
+
+
+def test_r6_class_container_still_wraps_correctly():
+    """R6 regression guard: the class-container case (where _rebuild_container's
+    framing logic IS correct) must still work. A rename+modify inside a class
+    should produce ``class C:\\n    def bar(self):...``, with the class header
+    kept and the method composed inside."""
+    base = "class C:\n    def foo(self):\n        return 1\n"
+    cur = "class C:\n    def bar(self):\n        return 1\n"
+    rep = "class C:\n    def foo(self):\n        return 99\n"
+    result = _try_refactoring_aware_merge(_unit(base, cur, rep))
+    assert result is not None
+    assert result.startswith("class C:"), (
+        f"class container header must be kept;\n{result!r}"
+    )
+    assert "def bar(self)" in result and "99" in result

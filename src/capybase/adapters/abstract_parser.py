@@ -916,9 +916,17 @@ _A_CONTROL_FLOW_KEYWORDS = frozenset({
     "if", "else", "while", "for", "switch", "case", "catch", "do", "try",
     "finally", "synchronized", "lock", "using", "with", "unsafe",
 })
-# Import-like top-level statements.
+# Import-like top-level statements. The first pattern matches declaration-led
+# forms (``use``/``import``/``#include`` leading the line). The second (G12)
+# matches CommonJS ``require()`` as an EXPRESSION — ``const fs = require('fs')``
+# — where ``require`` doesn't lead the line. Both are gated by the depth-0 +
+# line-start check at the call site, so a ``require()`` inside a function body
+# (brace_depth > 0) is correctly NOT detected as an import.
 _A_IMPORT_PATTERNS = (
     re.compile(r"^\s*(?:use\s+\S|import\s+\S|export\s+\{[^}]*\}\s+from|require\s*\(|#include\s+)"),
+    # G12: ``<binding> = require('...')`` — require as a RHS expression. Allows
+    # any prefix (const/let/var/export NAME =, or bare NAME =) before require.
+    re.compile(r"^\s*(?:\w+\s+)*\w+\s*=\s*require\s*\(\s*['\"]"),
 )
 
 
@@ -2060,6 +2068,12 @@ def _extract_a_import_name(line: str) -> str:
     if m:
         return m.group(1)
     m = re.match(r"require\s*\(\s*[\"']([^\"']+)", s)
+    if m:
+        return m.group(1)
+    # G12: CommonJS require-as-expression — ``const fs = require('fs')``.
+    # Extract the module path (the import surface tracks dependencies, so the
+    # path is the useful name; the binding name ``fs`` is incidental).
+    m = re.search(r"require\s*\(\s*[\"']([^\"']+)", s)
     if m:
         return m.group(1)
     return "<import>"

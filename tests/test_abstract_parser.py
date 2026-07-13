@@ -2191,3 +2191,247 @@ def test_g11_js_arrow_function_with_semicolon_still_works():
         f"arrow fn with semi must still work; got "
         f"{[(u.kind, u.name) for u in flat]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fifth-pass: G12 (require() expression import) + coverage-hardening tests
+# for untested-but-working paths (block comments, char literals, byte strings,
+# backtick templates, C preprocessor, import-name variants, parse_file
+# robustness, deleted-by-one-side alignment).
+# ---------------------------------------------------------------------------
+
+
+# --- G12: CommonJS require() as an expression is an import ---
+
+
+def test_g12_require_expression_is_module_stmt():
+    """G12: ``const fs = require('fs')`` — Node.js/CommonJS require as an
+    expression (not leading the line) was not detected: the import regex
+    required ``require`` to lead the line. The require-as-expression form is
+    ubiquitous in Node code. After G12 it produces a MODULE_STMT named ``fs``."""
+    src = "const fs = require('fs');\nfunction f() {\n    return 1\n}\n"
+    ir = ap.parse_family_a(src, language="javascript")
+    flat = ap._all_units_flat(ir)
+    imports = [u for u in flat if u.kind == ap.KIND_MODULE_STMT]
+    assert any(u.name == "fs" for u in imports), (
+        f"require('fs') must be a MODULE_STMT named 'fs'; got "
+        f"{[(u.kind, u.name) for u in flat]}"
+    )
+
+
+def test_g12_require_not_at_line_start():
+    """G12 regression: a ``require()`` nested inside a function body (not at
+    top-level / brace_depth 0) must NOT be detected as an import — it's a
+    runtime call, not a module dependency."""
+    src = "function f() {\n    const x = require('dyn');\n    return x\n}\n"
+    ir = ap.parse_family_a(src, language="javascript")
+    flat = ap._all_units_flat(ir)
+    imports = [u for u in flat if u.kind == ap.KIND_MODULE_STMT]
+    assert not any(u.name == "dyn" for u in imports), (
+        f"require() inside a function body must not be an import; got "
+        f"{[(u.kind, u.name) for u in flat]}"
+    )
+
+
+def test_g12_leading_require_still_works():
+    """G12 regression guard: the original form (``require('fs')`` leading the
+    line, e.g. ``require('fs')`` alone) must still be detected."""
+    src = "require('fs');\nfunction f() {}\n"
+    ir = ap.parse_family_a(src, language="javascript")
+    flat = ap._all_units_flat(ir)
+    assert any(u.kind == ap.KIND_MODULE_STMT and u.name == "fs" for u in flat), (
+        f"leading require('fs') must still work; got "
+        f"{[(u.kind, u.name) for u in flat]}"
+    )
+
+
+# --- Coverage: block comment with a fake declaration inside ---
+
+
+def test_cov_block_comment_with_fake_class_inside():
+    """A block comment ``/* ... */`` spanning lines with a ``class Fake {`` inside
+    must not produce a phantom CLASS unit. Pins the in_block_comment state path
+    (lines 1087-1093), which was untested."""
+    src = (
+        "/* this is a\n"
+        "   multi-line comment\n"
+        "   with class Fake { void m() {} } inside */\n"
+        "fn real() {\n    1\n}\n"
+    )
+    ir = ap.parse_family_a(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    names = [u.name for u in flat]
+    assert "Fake" not in names, f"block-comment phantom class leaked; got {names}"
+    assert "real" in names
+
+
+def test_cov_line_comment_terminates_token_buffer():
+    """A line comment ``//`` mid-statement ends the token buffer run (a
+    declaration following on the next line must not concatenate with the
+    pre-comment tokens). Pins the line-comment buffer-reset path."""
+    src = (
+        "let x = 1 // trailing comment\n"
+        "pub fn real() {\n    1\n}\n"
+    )
+    ir = ap.parse_family_a(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    assert _unit_named(ir, "real"), (
+        f"fn after a // comment must be detected (no buffer concat); got "
+        f"{[(u.kind, u.name) for u in flat]}"
+    )
+
+
+# --- Coverage: Rust char-literal variants close correctly ---
+
+
+def test_cov_rust_char_literal_variants():
+    """Rust char literals (``'x'``, ``'\\n'``, ``'\\''``, ``'\\\\'``) must close
+    correctly without corrupting the brace scan. Pins the in_str == 'char' close
+    path (lines 1101-1104), which was untested."""
+    src = (
+        "pub fn f() {\n"
+        "    let a = 'x';\n"
+        "    let b = '\\\\n';\n"
+        "    let c = '\\\\\\\\';\n"
+        "    let d = '\\\\'';\n"
+        "}\n"
+    )
+    ir = ap.parse_family_a(src, language="rust")
+    assert _unit_named(ir, "f"), (
+        f"char literals must not corrupt the parse; got "
+        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+    )
+
+
+# --- Coverage: Rust byte string b"..." ---
+
+
+def test_cov_rust_byte_string_prefix():
+    """A Rust byte string ``b"..."`` must not corrupt the brace scan (the ``b``
+    prefix is recognized by ``_match_string_prefix``). Pins the byte-string
+    prefix branch (lines 994-995)."""
+    src = 'pub fn f() {\n    let bytes = b"hello";\n    let raw = br#"hi"#;\n}\n'
+    ir = ap.parse_family_a(src, language="rust")
+    assert _unit_named(ir, "f"), (
+        f"byte string b\"...\" must not corrupt; got "
+        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+    )
+
+
+# --- Coverage: JS/TS backtick template literal ---
+
+
+def test_cov_js_backtick_template_literal():
+    """A JS/TS template literal `` `...${expr}...` `` containing braces must not
+    corrupt the brace count (the ``${...}`` interpolation has braces). Pins the
+    backtick-string state path (lines 1161-1164), which was untested."""
+    src = (
+        "function tag() {\n"
+        "    const q = `value is ${1 + 2} and ${obj.prop}`;\n"
+        "    return q;\n"
+        "}\n"
+    )
+    ir = ap.parse_family_a(src, language="javascript")
+    assert _unit_named(ir, "tag"), (
+        f"backtick template with ${{}} must not corrupt brace count; got "
+        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+    )
+
+
+# --- Coverage: C preprocessor #include / #define ---
+
+
+def test_cov_c_preprocessor_include_and_define():
+    """C ``#include`` and ``#define`` at depth 0 must produce MODULE_STMT units.
+    Pins the preprocessor-line handler (lines 1326-1354), which was untested."""
+    src = (
+        "#include <stdio.h>\n"
+        '#include "myhdr.h"\n'
+        "#define MAX 100\n"
+        "int main() {\n"
+        "    return 0;\n"
+        "}\n"
+    )
+    ir = ap.parse_family_a(src, language="c")
+    flat = ap._all_units_flat(ir)
+    import_names = [u.name for u in flat if u.kind == ap.KIND_MODULE_STMT]
+    assert "stdio.h" in import_names, f"#include <stdio.h> missing; got {import_names}"
+    assert "myhdr.h" in import_names, f'#include "myhdr.h" missing; got {import_names}'
+    assert "MAX" in import_names, f"#define MAX missing; got {import_names}"
+
+
+# --- Coverage: import-name extraction variants ---
+
+
+def test_cov_go_import_quoted_path():
+    """Go ``import \"fmt\"`` → MODULE_STMT named ``fmt``. Pins the Go import-name
+    regex branch in ``_extract_a_import_name``."""
+    src = 'package main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println()\n}\n'
+    ir = ap.parse_family_a(src, language="go")
+    flat = ap._all_units_flat(ir)
+    assert any(u.kind == ap.KIND_MODULE_STMT and u.name == "fmt" for u in flat), (
+        f'Go import "fmt" must be named fmt; got '
+        f"{[(u.kind, u.name) for u in flat if u.kind == ap.KIND_MODULE_STMT]}"
+    )
+
+
+def test_cov_js_export_braces_from():
+    """JS ``export { foo, bar } from './mod'`` → MODULE_STMT named ``./mod``.
+    Pins the export-from import-name regex branch."""
+    src = "export { foo, bar } from './mod';\nfunction f() {}\n"
+    ir = ap.parse_family_a(src, language="javascript")
+    flat = ap._all_units_flat(ir)
+    assert any(u.kind == ap.KIND_MODULE_STMT and u.name == "./mod" for u in flat), (
+        f"export {{}} from must extract the path; got "
+        f"{[(u.kind, u.name) for u in flat if u.kind == ap.KIND_MODULE_STMT]}"
+    )
+
+
+# --- Coverage: parse_file never raises on malformed input ---
+
+
+def test_cov_parse_file_survives_deeply_nested_braces():
+    """``parse_file`` must never raise — deeply nested braces (malformed/merge
+    artifact) yield a low-confidence FileIR, not an exception. Pins the
+    exception-path return (lines 2129-2136)."""
+    src = "{" * 500 + "}" * 500
+    ir = ap.parse_file(src, language="rust")
+    assert ir is not None
+    assert ir.parse_confidence == 0.0  # minified/garbage → low confidence
+
+
+def test_cov_parse_file_survives_null_bytes():
+    """Null bytes in source (binary content mistakenly fed in) must not raise."""
+    src = "fn f() {\n\x00\x00\n}\n"
+    ir = ap.parse_file(src, language="rust")
+    assert ir is not None  # didn't raise
+
+
+# --- Coverage: deleted-by-one-side alignment (one deletes, other modifies) ---
+
+
+def test_cov_alignment_deleted_right_when_left_modifies():
+    """When base has foo, left MODIFIES foo, and right DELETES foo, the alignment
+    is ``deleted_right`` (right deleted it; left kept a modified version). Pins
+    the has_b + has_l + not_has_r branch (line 2500-2502), which was untested."""
+    base = "def foo():\n    return 1\n    return 2\n"
+    left = "def foo():\n    return 99\n    return 2\n"   # modified
+    right = "pass\n"                                      # deleted foo
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    kinds = {a.change_kind for a in diff.aligned}
+    assert ap._CHANGE_KIND_DELETED_RIGHT in kinds, (
+        f"expected deleted_right (left modifies, right deletes); got {kinds}"
+    )
+
+
+def test_cov_alignment_deleted_left_when_right_modifies():
+    """Mirror: base has foo, right MODIFIES, left DELETES → ``deleted_left``.
+    Pins the has_b + not_has_l + has_r branch (line 2272), which was untested."""
+    base = "def foo():\n    return 1\n    return 2\n"
+    left = "pass\n"                                       # deleted foo
+    right = "def foo():\n    return 99\n    return 2\n"   # modified
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    kinds = {a.change_kind for a in diff.aligned}
+    assert ap._CHANGE_KIND_DELETED_LEFT in kinds, (
+        f"expected deleted_left (right modifies, left deletes); got {kinds}"
+    )

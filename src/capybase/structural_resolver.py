@@ -1440,6 +1440,19 @@ def _rebuild_container(enclosing_text: str, entity_bodies: list[str], language: 
     enc_lines = enclosing_text.split("\n")
     if not enc_lines:
         return None
+    # R6: when the enclosing node is itself a FUNCTION (``def``/``fn``/``func``/
+    # ``fun``/``function`` leading the header), the conflict is inside a bare
+    # top-level function — NOT a class/impl container. The entity bodies ARE the
+    # whole output (joined at module level), and the function's own header must
+    # NOT be re-emitted as a wrapper (that produced ``def foo():\\n    def
+    # foo():`` — a nested/recursive malformation). Only a real container
+    # (class/impl/struct) warrants the header+trailer splice below.
+    header_line = enc_lines[0].lstrip()
+    _ENTITY_HEADER_TOKENS = ("def ", "fn ", "func ", "fun ", "function ", "async def ", "async fn ")
+    if any(header_line.startswith(tok) for tok in _ENTITY_HEADER_TOKENS):
+        # Bare-function conflict: emit the entity bodies flat, separated by a
+        # blank line (module-level convention), no wrapper.
+        return "\n\n".join(entity_bodies) if entity_bodies else ""
     # The body indent is the leading whitespace of the first body line (the
     # convention under which the container's entities nest). tree-sitter's entity
     # body slice EXCLUDES this leading indent on the def/header line but KEEPS
