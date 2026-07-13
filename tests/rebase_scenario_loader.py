@@ -37,6 +37,10 @@ _GIT_HISTORY_CLONE_SUBDIR = {
     "clap-history": "clap",
     "tokio-history": "tokio",
     "pydantic-history": "pydantic",
+    "requests-history": "requests",
+    "flask-history": "flask",
+    "rayon-history": "rayon",
+    "axum-history": "axum",
 }
 
 

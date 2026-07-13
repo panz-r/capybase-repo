@@ -165,6 +165,46 @@ DATASETS: dict[str, Dataset] = {
         # Adds Python-language real-world cases to complement the Rust-only corpus.
         merge_limit=200,
     ),
+    "requests-history": Dataset(
+        id="requests-history",
+        kind="git-history",
+        url="https://github.com/psf/requests.git",
+        extract_subdir="requests",
+        extractor="git_history",
+        license="Apache-2.0",
+        source_url="https://github.com/psf/requests",
+        merge_limit=200,
+    ),
+    "flask-history": Dataset(
+        id="flask-history",
+        kind="git-history",
+        url="https://github.com/pallets/flask.git",
+        extract_subdir="flask",
+        extractor="git_history",
+        license="MIT",
+        source_url="https://github.com/pallets/flask",
+        merge_limit=200,
+    ),
+    "rayon-history": Dataset(
+        id="rayon-history",
+        kind="git-history",
+        url="https://github.com/rayon-rs/rayon.git",
+        extract_subdir="rayon",
+        extractor="git_history",
+        license="MIT OR Apache-2.0",
+        source_url="https://github.com/rayon-rs/rayon",
+        merge_limit=200,
+    ),
+    "axum-history": Dataset(
+        id="axum-history",
+        kind="git-history",
+        url="https://github.com/tokio-rs/axum.git",
+        extract_subdir="axum",
+        extractor="git_history",
+        license="MIT",
+        source_url="https://github.com/tokio-rs/axum",
+        merge_limit=200,
+    ),
 }
 
 
@@ -608,6 +648,13 @@ def process(dataset: Dataset, *, language: str | None = "rust", limit: int | Non
         # Regenerate authentic markers from A/O/B. Skip clean merges.
         marker_original = build_markers(ct.base, ct.current, ct.replayed)
         if marker_original is None:
+            continue
+        # Skip cases where the human merge M still contains conflict markers.
+        # This happens when M is a docs file (RST ``=======`` underlines look
+        # like markers) or a genuinely unresolved merge — either way it's not a
+        # usable oracle.
+        from capybase.adapters.parsers import contains_markers as _has_markers
+        if _has_markers(ct.merged):
             continue
         ext = _LANG_EXT.get(lang, "txt")
         idx = len(cases) + 1
