@@ -76,6 +76,19 @@ coincident signals → `hard`; one → `medium`; zero → `easy`. The band drive
 routing (trivial conflicts short-circuit through the deterministic cascade;
 hard conflicts may get elevated sample counts).
 
+### Operation signatures (ConGra-style, §3.3)
+
+The feature spine (`conflict_extractor.conflict_features`) carries per-entity
+operation counts derived from the BASE→REPLAYED entity diff:
+`ops_added`, `ops_removed`, `ops_modified` (signature + body changes),
+`ops_renamed`, `ops_moved`. These give the difficulty classifier a
+discriminative operation view (pure-rename vs heavy body-modify vs additive).
+The entity diff is computed **once per unit** and cached on
+`structural_metadata["entity_changes"]`, shared by the commit-change-type
+classifier, the operation counts, and the LLM prompt's semantic-change block —
+so the BASE→current and BASE→replayed parses happen at most twice per unit, not
+re-parsed by every consumer.
+
 ### Conflict-shape hash (`memory/shape.py`)
 
 A content-agnostic 12-character SHA1 of per-side (added, removed, changed) line
@@ -145,13 +158,33 @@ it bails.
 ### Rule 6 — `entity_disjoint`
 Both sides touched structural entities (functions, methods, structs — for
 Python/Rust) in an enclosing container, on **disjoint entity sets**. Enumerates
-entities via tree-sitter or a grammar-free fallback, computes per-side touched
-identities (added, modified, renamed). Includes **rename detection**: if an
-entity was renamed on one side (new name is similar to a gone old name,
-similarity ≥ 0.6), the rename is tracked and the renamed entity is treated as
-touched only by that side. Declines if any canonical entity is touched by both
-sides (unless both made the identical rename). Reconstructs the container with
-all entities from both sides.
+entities via a grammar-free abstract parser (a state-machine parser covering
+brace-delimited and indentation-delimited languages — no tree-sitter dependency),
+computes per-side touched identities (added, modified, renamed). Includes
+**rename detection**: if an entity was renamed on one side (body content
+identical to base, old name gone, new name similar), the rename is tracked and
+the renamed entity is treated as touched only by that side. Declines if any
+canonical entity is touched by both sides (unless both made the identical
+rename). Reconstructs the container with all entities from both sides.
+
+### Rule 6b — `refactoring_aware_merge` (RefMerge pattern)
+Fires when `entity_disjoint` **declined on overlap**, but the overlap decomposes
+into a clean **rename + body-modify partition**. For each entity touched by both
+sides, the rule classifies each side's touch:
+
+- **Pure rename**: the entity's header line changed but its body content is
+  identical to base (detected via `_detect_renames`).
+- **Body-only modify**: the entity's header line is identical to base but its
+  body content changed (header unchanged rules out a signature change).
+
+If every overlapping entity is a clean {rename, modify} pair (one side renamed,
+the other modified the body — never both modified, both renamed, or a signature
+change), the rule **composes**: takes the renamer's header + the modifier's
+body. This preserves both intents (the rename and the body change). Declines on
+any pair that isn't a clean partition. This is the RefMerge
+normalize→merge→reapply pattern specialized to renames; it runs only on the
+overlap tail (after `entity_disjoint` declined), so its cost is paid only on the
+hard cases.
 
 ### Rule 7 — `token_disjoint`
 A fine-grained token-level merge for small conflicts (≤12 lines). Tokenizes each
@@ -197,28 +230,46 @@ concatenations, so it refuses to propose.
 lists — each side's lines keep their relative order, but the two sides may merge
 arbitrarily. The count is C(m+n, m) where m and n are the side lengths.
 
-**Fitness function.** Mean `difflib.SequenceMatcher` similarity of the candidate
-to each parent (the two conflict sides). This correlates with developer-judged
-merge quality (~0.64 correlation per the cited survey literature).
+**Fitness function.** Mean **character-level Gestalt similarity** of the
+candidate to each parent: `2·|LCS|/(|a|+|b|)` over the joined text, computed via
+`difflib.SequenceMatcher.ratio()` on the joined strings. Character-level LCS
+(mean-aggregated) reaches median Spearman ≈0.79 to developer-chosen resolutions,
+outperforming line-level and token-level alternatives. The search is
+**constrained to full unions** (every candidate contains all lines from both
+sides): char-level mean similarity has a length bias — a shorter candidate has
+proportionally fewer non-matching chars and scores spuriously high — so the
+fitness must be a tie-breaker *over orderings of the union*, not a selector over
+subsets.
 
 **Search strategy:**
-- **Exhaustive** when C(m+n, m) ≤ 1024: tries every interleaving, returns the
-  highest-fitness.
-- **Random-restart hill climbing** for larger spaces. Operators: ADD a
-  not-yet-present line, REMOVE an included line, EXCHANGE two positions.
-  First-improvement move selection. Two termination criteria: a hard budget
-  (default 2000 evaluations) and a stagnation limit (default 64 consecutive
-  non-improving evaluations).
+- **Exhaustive** when C(m+n, m) ≤ 1024: tries every interleaving (each is a full
+  union by construction), returns the highest-fitness.
+- **Random-restart hill climbing** for larger spaces. The neighborhood is
+  **adjacent cross-side swaps**: swapping two adjacent lines that originate from
+  different sides. This preserves each side's internal order (the
+  order-preserving invariant) while exploring exactly the interleaving space,
+  keeping every candidate a full union. First-improvement move selection. Three
+  termination criteria: a hard budget (`sbcr_max_iterations`, default 2000
+  evaluations), a stagnation limit (`sbcr_stagnation_limit`, default 10
+  consecutive non-improving evaluations), and a wall-clock budget
+  (`sbcr_max_time_seconds`, default 15s).
 
-**Acceptance threshold.** The best candidate must clear a fitness floor (default
-0.6). Below this, the candidate is essentially one-sided (drops most of a side)
+**Acceptance threshold.** The best candidate must clear a fitness floor
+(`sbcr_floor`, default 0.6). Below this, the candidate is essentially one-sided
 and is rejected.
+
+**Shrinkage guard.** A candidate shorter than `sbcr_min_candidate_ratio`
+(default 0.5) of the larger side is rejected — it has dropped too much of a side
+to be a genuine combination. (This is a backstop; the union-constrained search
+already keeps every line, but the guard documents the invariant and protects
+against future neighborhood changes.)
 
 **Balance routing.** Even when SBCR resolves, a balance check
 (`min(cur_lines, rep_lines) / max(...)`) decides whether to accept. If the
 conflict is imbalanced (one side much larger) and routing is enabled with a
 non-zero `min_balance_for_sbcr_accept`, SBCR declines and defers to the LLM
-(which handles imbalanced conflicts better). Default threshold 0.0 accepts
+(which handles imbalanced conflicts better). Default threshold 0.15 (a
+conservative floor vs the research's ~0.2 crossover); set to 0.0 to accept
 whenever SBCR resolves.
 
 ---
@@ -293,8 +344,8 @@ through the same validation before it is applied to the worktree:
    conflict markers are blanked (first side's body kept live, second side's
    commented out) so the compile reflects the candidate's hunk in context.
 4. **Syntax / AST preservation** — the merge didn't drop unchanged structural
-   entities (requires the `structural` extra for tree-sitter, else a
-   grammar-free fallback).
+   entities (parsed via the grammar-free abstract parser — no tree-sitter
+   dependency).
 5. **Both-sides-represented** — a side's additions weren't silently dropped.
 6. **Verifier-model critic** (default on) — an LLM judge checks semantic intent
    preservation.
@@ -313,7 +364,7 @@ order):
 
 | Provenance | Meaning |
 |---|---|
-| `deterministic_structural` | Structural resolver (rules 1–10) |
+| `deterministic_structural` | Structural resolver (rules 1–11, incl. `refactoring_aware_merge`) |
 | `deterministic_brace_repair` | Whole-file post-splice brace repair |
 | `exact_history_reuse` | Verbatim replay of a prior accepted resolution |
 | `combination_search` | SBCR order-preserving interleaving search |
@@ -335,20 +386,43 @@ so drift signals are only evaluated for LLM-produced resolutions.
 
 ---
 
+## Decline-reason journaling (§5.3)
+
+Every pre-LLM layer records a uniform `resolution_attempt` event
+(`{mechanism, decision, reason}`) on BOTH accept and decline — so a skip is
+never invisible and the reason a layer passed is debuggable. Exact-history reuse
+was always fully instrumented; structural and SBCR now emit the same shape:
+
+- **Structural declines** — `reason` is `"no rule applied"`, `"failed
+  validation"`, or `"strictness declined"`.
+- **SBCR declines** — a dedicated `combination_declined` event carries the
+  `fitness` of the best-seen candidate and a populated `reason` naming the
+  decline cause: `"modification conflict (non-empty base)"`, `"fitness X < floor
+  Y"`, `"shrinkage: N candidate lines < R% of larger side"`, `"one side empty"`,
+  or `"balance X < threshold Y"`.
+
+This gives the audit log a complete picture of why each conflict reached (or was
+resolved before) the LLM.
+
+---
+
 ## Recreating this system
 
 A minimal re-implementation of the deterministic cascade needs:
 
 1. **Side classification** — diff each side against base to classify as
    unchanged/added/deleted/modified, then classify the conflict direction.
-2. **A structural rule engine** — the 10 rules above, tried in priority order,
+2. **A structural rule engine** — the 11 rules above, tried in priority order,
    each returning `None` on any doubt. The critical rules for coverage are
-   `disjoint_edits`, `entity_disjoint` (with rename detection), and
+   `disjoint_edits`, `entity_disjoint` (with rename detection),
+   `refactoring_aware_merge` (rename + body-modify composition), and
    `insertion_union` — these handle the majority of real-world mergeable
    conflicts.
 3. **An interleaving search** — for pure-addition conflicts, search
-   order-preserving interleavings by mean similarity to both parents,
-   exhaustive for small spaces and hill-climbed for large ones.
+   order-preserving interleavings of the **full union** by mean
+   **character-level similarity** to both parents, exhaustive for small spaces
+   and hill-climbed over adjacent cross-side swaps for large ones, with a
+   shrinkage guard and fitness floor.
 4. **Validation** — a compile floor (splice + compile the whole file), plus
    both-sides-represented and splice-scope checks, applied to every candidate
    before acceptance.
