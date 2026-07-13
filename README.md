@@ -11,7 +11,26 @@ Apache-2.0.
 
 ## Setup
 
-### 1. Configure the endpoint
+### 1. Install
+
+```bash
+git clone <repo> && cd capybase
+python -m venv .venv && . .venv/bin/activate
+pip install -e ".[dev]"          # installs capybase + test/embedding deps
+```
+
+The diff core (`capybase._cdiff`) is a C extension built automatically during
+install. It accelerates the histogram diff and character-level LCS ratio used
+by the structural resolver and SBCR fitness. If the build succeeds, the `.so`
+lands next to the package; if a C compiler is unavailable, capybase falls back
+to a pure-Python implementation (correct, slower on large conflicts). After
+pulling changes to `_cdiff.c`, rebuild:
+
+```bash
+pip install -e . --force-reinstall --no-build-isolation
+```
+
+### 2. Configure the endpoint
 
 Runtime config lives in `capybase.toml` (a template ships in this repo; the
 canonical location is `~/.config/capybase/`). Set at minimum:
@@ -24,7 +43,7 @@ api_key  = "sk-local"
 model    = "chat"          # the id /v1/models reports
 ```
 
-### 2. Calibrate for your model
+### 3. Calibrate for your model
 
 `max_tokens`, JSON-mode, context window, generation timeout, sample count, and
 the prompt-rendering layout all depend on the model behind the endpoint.
@@ -69,7 +88,7 @@ noise-robust calibration on thinking models, use `--calibrate-reps 3` (majority
 vote across replicated evals). See `docs/PROMPT_FACTORS.md` for the factor
 reference.
 
-### 3. (Optional) Calibrate embeddings RAG
+### 4. (Optional) Calibrate embeddings RAG
 
 If your endpoint serves `/v1/embeddings`, `capybase calibrate` detects it and
 enables semantic retrieval. `capybase calibrate-embeddings` fits the similarity
@@ -149,10 +168,11 @@ Every accepted resolution passes through:
 ### Language support
 
 **Python and Rust** are first-class — both get the layered pipeline and
-compile-checked verification. With the optional `structural` extra,
-tree-sitter resolves the enclosing AST node (`def`/`fn`/`impl`/`struct`) for
-entity-level merge context. LSP diagnostics (`rust-analyzer`, `pyright`) are
-available as a deeper check via `validation.enable_lsp_diagnostics`.
+compile-checked verification. A grammar-free abstract parser (no tree-sitter
+dependency) resolves the enclosing AST node (`def`/`fn`/`impl`/`struct`) for
+entity-level merge context across ~13 languages. LSP diagnostics
+(`rust-analyzer`, `pyright`) are available as a deeper check via
+`validation.enable_lsp_diagnostics`.
 
 ### Reasoning models
 
@@ -168,5 +188,6 @@ emit long thinking chains. Three knobs matter:
 
 Python and Rust are fully supported end to end. The verifier-model critic is
 wired and default-on. RAG experience replay (`[memory]`) and self-consistency
-are wired but off by default. Structural context requires the optional
-`structural` extra. Mutation testing is a stub.
+are wired but off by default. The deterministic resolution layers (structural
+rules, SBCR combination search, refactoring-aware merge) run model-free before
+the LLM. Mutation testing is a stub.
