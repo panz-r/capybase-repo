@@ -270,8 +270,21 @@ def _semantic_change_block(unit: ConflictUnit) -> str:
     cur = unit.current.text or ""
     rep = unit.replayed.text or ""
     try:
-        cur_changes = structural.semantic_diff(base, cur, lang)
-        rep_changes = structural.semantic_diff(base, rep, lang)
+        # Read the cached entity diffs (computed once by conflict_features) so
+        # the BASE→current and BASE→replayed parses are shared with the feature
+        # spine and the operation counts, not re-done here. Falls back to a live
+        # parse only when the cache wasn't populated.
+        cached = unit.structural_metadata.get("entity_changes")
+        if isinstance(cached, dict):
+            cur_changes = cached.get("current")
+            rep_changes = cached.get("replayed")
+            if cur_changes is None:
+                cur_changes = structural.semantic_diff(base, cur, lang)
+            if rep_changes is None:
+                rep_changes = structural.semantic_diff(base, rep, lang)
+        else:
+            cur_changes = structural.semantic_diff(base, cur, lang)
+            rep_changes = structural.semantic_diff(base, rep, lang)
         # The replayed commit's semantic role (survey §5.2): tells the model what
         # "correct" means for this commit (bugfix = preserve behavior; feature =
         # new behavior acceptable; refactor = behavior-preserving). Read off the

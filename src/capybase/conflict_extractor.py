@@ -528,6 +528,15 @@ def conflict_features(unit: ConflictUnit) -> dict[str, float | int | str | bool]
         for k in ("enclosing_node_text", "enclosing_node_signature")
     )
 
+    # Entity-level operation counts (ConGra-style operation signatures, §3.3):
+    # derived from the BASE→REPLAYED entity diff. Computed ONCE here and cached
+    # on structural_metadata["entity_changes"] so every downstream consumer
+    # (_commit_change_type_of, the LLM prompt's _semantic_change_block, and these
+    # counts) reads from one parse instead of re-parsing 3-4× per unit. The diff
+    # is None when the parser is unavailable → counts degrade to 0.
+    rep_changes = _cached_entity_diff(unit, "replayed")
+    cur_changes = _cached_entity_diff(unit, "current")
+
     return {
         "hunk_size": size,
         "current_side_lines": cur_n,
@@ -539,7 +548,7 @@ def conflict_features(unit: ConflictUnit) -> dict[str, float | int | str | bool]
         "sibling_count": int(unit.structural_metadata.get("sibling_count", 0) or 0),
         "severity": unit.severity,
         "language": unit.language or "unknown",
-        # Merge-intent classification (modify/delete disambiguation): the conflict
+        # Merge-intent classification (modify/Delete disambiguation): the conflict
         # shape from :func:`merge_intent.direction`. Read off structural_metadata
         # when already computed at extraction (avoids re-diffing); fall back to a
         # live computation so this stays a pure function of the unit.
@@ -550,8 +559,19 @@ def conflict_features(unit: ConflictUnit) -> dict[str, float | int | str | bool]
         # classified deterministically from path + the BASE→REPLAYED entity diff.
         # Grounds retry budgets (bugfix→more retries, refactor→fewer) and the LLM
         # prompt ("this is a bugfix — preserve behavior") in the commit's role.
-        # Degrades to "unknown" when the structural parser is unavailable.
-        "commit_change_type": _commit_change_type_of(unit),
+        # Degrades to "unknown" when the structural parser is unavailable. Fed
+        # the CACHED replayed diff so the BASE→REPLAYED parse happens once per
+        # unit, not twice.
+        "commit_change_type": _commit_change_type_of(unit, rep_changes),
+        # Operation signatures (ConGra §3.3): per-entity change-type counts over
+        # the BASE→REPLAYED diff. Gives the difficulty classifier and any future
+        # learned router a discriminative operation view (pure-rename vs heavy
+        # body-modify vs additive). 0 across the board when the parser is down.
+        "ops_added": _count_change(rep_changes, "added"),
+        "ops_removed": _count_change(rep_changes, "removed"),
+        "ops_modified": _count_change(rep_changes, ("signature_changed", "body_changed")),
+        "ops_renamed": _count_change(rep_changes, "renamed"),
+        "ops_moved": _count_change(rep_changes, "moved"),
         # Value-resolution classification: when both sides preserve the SAME
         # statement shape (a return, an assignment to the same target) and only a
         # value/expression diverged, picking either side is the CORRECT merge
@@ -605,7 +625,9 @@ def _merge_kind_of(unit: ConflictUnit) -> str:
         return "both_modify"
 
 
-def _commit_change_type_of(unit: ConflictUnit) -> str:
+def _commit_change_type_of(
+    unit: ConflictUnit, rep_changes: list | None = None,
+) -> str:
     """The semantic ROLE of ``unit``'s replayed commit (survey §5.2).
 
     Classifies the replayed commit (test_only/config_update/feature/bugfix/
@@ -614,6 +636,10 @@ def _commit_change_type_of(unit: ConflictUnit) -> str:
     being replayed, so its diff against base captures what the commit changed.
     Returns ``"unknown"`` on any failure (advisory; must never crash the feature
     spine). Pure function of the unit.
+
+    ``rep_changes`` optionally supplies a pre-computed BASE→REPLAYED entity diff
+    (cached by :func:`conflict_features`) so the parse is shared with the
+    operation-count features. When ``None`` the diff is computed here.
     """
     try:
         from capybase.adapters import structural
@@ -621,9 +647,56 @@ def _commit_change_type_of(unit: ConflictUnit) -> str:
         return structural.classify_commit_change(
             unit.base.text or "", unit.replayed.text or "",
             unit.path, unit.language or "",
+            changes=rep_changes,
         )
     except Exception:  # noqa: BLE001 - advisory feature
         return "unknown"
+
+
+def _cached_entity_diff(unit: ConflictUnit, side: str) -> list | None:
+    """The BASE→``side`` entity diff, memoized on ``structural_metadata``.
+
+    ``side`` is ``"current"`` or ``"replayed"``. The diff is computed once (by
+    :func:`structural.semantic_diff`) and cached under
+    ``structural_metadata["entity_changes"][side]`` so the feature spine, the
+    commit-change-type classifier, and the LLM prompt's semantic-change block all
+    share one parse per side instead of re-parsing 3-4× per unit. Returns ``None``
+    when the parser is unavailable or the side fails to parse (callers degrade to
+    zero-counts / "unknown").
+    """
+    meta = unit.structural_metadata
+    cache = meta.get("entity_changes")
+    if not isinstance(cache, dict):
+        cache = {}
+        meta["entity_changes"] = cache
+    if side in cache:
+        return cache[side]
+    try:
+        from capybase.adapters import structural
+
+        side_text = unit.current.text if side == "current" else unit.replayed.text
+        changes = structural.semantic_diff(
+            unit.base.text or "", side_text or "", unit.language or "",
+        )
+    except Exception:  # noqa: BLE001 - advisory
+        changes = None
+    # Cache even None so a repeated call doesn't re-attempt a failing parse.
+    cache[side] = changes
+    return changes
+
+
+def _count_change(changes: list | None, types) -> int:
+    """Count entity-diff entries whose ``change_type`` is in ``types``.
+
+    ``types`` is a single change_type string or a tuple of them. Returns 0 when
+    the diff is None (parser unavailable) — the operation counts degrade to zero,
+    which downstream consumers (the classifier) treat as "no signal".
+    """
+    if not changes:
+        return 0
+    if isinstance(types, str):
+        types = (types,)
+    return sum(1 for c in changes if c.change_type in types)
 
 
 def _value_resolution_of(unit: ConflictUnit) -> str:

@@ -1287,7 +1287,8 @@ def _is_public_name(name: str) -> bool:
 
 
 def classify_commit_change(
-    base_text: str, replayed_text: str, path: str, language: str
+    base_text: str, replayed_text: str, path: str, language: str,
+    *, changes: list[EntityChange] | None = None,
 ) -> str:
     """Classify the SEMANTIC ROLE of a replayed commit (survey §5.2).
 
@@ -1313,11 +1314,20 @@ def classify_commit_change(
 
     Pure and deterministic. Never raises — a parse failure degrades to
     ``unknown`` (callers treat ``unknown`` as the neutral default budget).
+
+    ``changes`` optionally supplies a pre-computed BASE→REPLAYED entity diff so
+    the caller can cache it (``conflict_features`` computes it once per unit and
+    feeds both this function and the operation-count features from one parse).
+    When ``None`` the diff is computed here.
     """
     # Config files: classify by extension before any parse attempt.
     if _is_config_path(path):
         return COMMIT_CONFIG_UPDATE
-    changes = semantic_diff(base_text, replayed_text, language)
+    # Use a pre-computed entity diff when the caller already paid for it
+    # (conflict_features caches the BASE→REPLAYED diff so it's computed once
+    # per unit, not re-parsed by every consumer).
+    if changes is None:
+        changes = semantic_diff(base_text, replayed_text, language)
     if changes is None:
         # Couldn't parse → if it's a test path, that's a safe structural signal;
         # otherwise we can't tell the role.

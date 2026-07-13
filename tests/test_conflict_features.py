@@ -231,6 +231,86 @@ def test_conflict_features_take_precedence_on_collision():
 
 
 # ---------------------------------------------------------------------------
+# Operation-count features (ConGra §3.3) + entity-diff caching (B1/B2)
+# ---------------------------------------------------------------------------
+
+
+def test_operation_counts_present_in_spine():
+    """The five operation-count keys are always present (0 when the parser is
+    unavailable). They give the classifier a discriminative operation view."""
+    cf = conflict_features(_unit("x = 1\n", "x = 2\n", "x = 3\n"))
+    for key in ("ops_added", "ops_removed", "ops_modified", "ops_renamed", "ops_moved"):
+        assert key in cf, f"missing operation-count key: {key}"
+        assert isinstance(cf[key], int)
+
+
+def test_operation_counts_detect_added_entity():
+    """A side that adds a new function shows ops_added ≥ 1."""
+    base = "def f():\n    return 1\n"
+    replayed = "def f():\n    return 1\n\ndef g():\n    return 2\n"
+    cf = conflict_features(_unit(base, base, replayed))
+    assert cf["ops_added"] >= 1  # g() was added
+
+
+def test_operation_counts_detect_rename():
+    """A pure rename (same body, new name, old name gone) shows ops_renamed ≥ 1."""
+    base = "def loadData():\n    rows = fetch()\n    return rows\n"
+    replayed = "def fetchData():\n    rows = fetch()\n    return rows\n"
+    cf = conflict_features(_unit(base, base, replayed))
+    assert cf["ops_renamed"] >= 1
+
+
+def test_entity_diff_cached_not_reparsed(monkeypatch):
+    """conflict_features computes each BASE→side diff ONCE and caches it. The
+    cache must be hit on a second read so downstream consumers don't re-parse."""
+    from capybase.adapters import structural
+    from capybase.conflict_extractor import _cached_entity_diff
+
+    calls = {"n": 0}
+    real = structural.semantic_diff
+
+    def counting(old, new, lang):
+        calls["n"] += 1
+        return real(old, new, lang)
+
+    monkeypatch.setattr(structural, "semantic_diff", counting)
+    base = "def f():\n    return 1\n"
+    replayed = "def f():\n    return 2\n"
+    unit = _unit(base, base, replayed)
+    # First call computes + caches both diffs.
+    _ = conflict_features(unit)
+    first = calls["n"]
+    # Second read of the cached diff must NOT re-parse.
+    _ = _cached_entity_diff(unit, "replayed")
+    _ = _cached_entity_diff(unit, "current")
+    assert calls["n"] == first, (
+        f"cache miss: semantic_diff called {calls['n']} times, expected {first}"
+    )
+    # The cache is populated on structural_metadata.
+    assert "entity_changes" in unit.structural_metadata
+    assert "replayed" in unit.structural_metadata["entity_changes"]
+
+
+def test_cached_entity_diff_survives_parser_unavailable():
+    """When the parser is unavailable, the cache stores None so a repeated call
+    doesn't re-attempt a failing parse (and the counts degrade to 0)."""
+    from capybase.conflict_extractor import _cached_entity_diff
+
+    # An unrecognized language → semantic_diff returns None.
+    unit = _unit("x\n", "y\n", "z\n")
+    unit.language = None
+    unit.structural_metadata.clear()
+    changes = _cached_entity_diff(unit, "replayed")
+    assert changes is None
+    # A repeat read returns the cached None without re-attempting the parse.
+    again = _cached_entity_diff(unit, "replayed")
+    assert again is None
+    # And the counts derived from a None diff are all zero.
+    from capybase.conflict_extractor import _count_change
+    assert _count_change(None, "added") == 0
+
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
