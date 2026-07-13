@@ -278,6 +278,18 @@ def unit_body_fingerprint(body: str) -> str:
     return f"l{meaningful}:{digest}"
 
 
+def _fingerprint_has_content(fingerprint: str) -> bool:
+    """True when a body fingerprint carries a content digest (not just a count).
+
+    Fingerprints are ``l{count}`` for content-less bodies (only blank/comment
+    lines after the header) or ``l{count}:{digest}`` for bodies with real code.
+    The content-less form is shared by many distinct empty bodies (``pass``-only
+    methods, docstring-only functions) and must NOT be used for rename pairing —
+    two unrelated empty methods would otherwise pair as a false rename. Fix #13.
+    """
+    return bool(fingerprint) and ":" in fingerprint
+
+
 #: Matches a comment-only line (Python ``#``, Rust/JS/Go/C ``//``, block ``/* */``).
 _COMMENT_LINE_RE = re.compile(
     r"^\s*(?:#|//|/\*|\*/).*$"
@@ -1848,6 +1860,26 @@ def _all_units_flat(ir: FileIR) -> list[StructuralUnit]:
     return out
 
 
+def _has_duplicate_identities(units) -> bool:
+    """True when ``units`` contains two entries with the same ``.identity``.
+
+    Duplicate identities (e.g. two ``(method, "f")`` from Java/C++/Python
+    overloads or re-definitions) collide silently in the identity-keyed dicts
+    of :func:`compute_structural_diff_3way` and the entity_disjoint rule,
+    dropping all but one unit — a silent missed-conflict data-loss bug (fix #3).
+    Callers use this to detect the collision and decline (escalate to the LLM
+    path) rather than silently truncating. Works on any objects with an
+    ``.identity`` attribute (``StructuralUnit`` or the public ``Entity``).
+    """
+    seen: set = set()
+    for u in units:
+        ident = u.identity
+        if ident in seen:
+            return True
+        seen.add(ident)
+    return False
+
+
 def enclosing_unit(ir: FileIR, span: tuple[int, int]) -> StructuralUnit | None:
     """The DEEPEST unit enclosing ``span[0]`` (the container/scope for the span).
 
@@ -1957,6 +1989,10 @@ _CHANGE_KIND_MODIFIED_BOTH = "modified_both"
 _CHANGE_KIND_ADDED_LEFT = "added_left"
 _CHANGE_KIND_ADDED_RIGHT = "added_right"
 _CHANGE_KIND_ADDED_BOTH = "added_both"
+#: Both sides added a unit of the same name with DIFFERENT bodies — a genuine
+#: conflict (each side's addition is incompatible). Distinct from
+#: ``added_both`` (identical bodies, an agreed addition). Fix #7.
+_CHANGE_KIND_ADDED_BOTH_CONFLICT = "added_both_conflict"
 _CHANGE_KIND_DELETED_LEFT = "deleted_left"
 _CHANGE_KIND_DELETED_RIGHT = "deleted_right"
 _CHANGE_KIND_DELETED_BOTH = "deleted_both"
@@ -1982,8 +2018,12 @@ class StructuralDiff3Way:
 
     @property
     def structural_conflicts(self) -> list[AlignedUnit]:
-        """Alignments where BOTH sides modified the SAME unit (potential conflict)."""
-        return [a for a in self.aligned if a.change_kind == _CHANGE_KIND_MODIFIED_BOTH]
+        """Alignments where BOTH sides modified the SAME unit, or both sides
+        added the same name with conflicting bodies (potential conflict)."""
+        return [
+            a for a in self.aligned
+            if a.change_kind in (_CHANGE_KIND_MODIFIED_BOTH, _CHANGE_KIND_ADDED_BOTH_CONFLICT)
+        ]
 
     @property
     def required_units(self) -> list[str]:
@@ -1994,7 +2034,8 @@ class StructuralDiff3Way:
                 _CHANGE_KIND_UNCHANGED, _CHANGE_KIND_MODIFIED_LEFT,
                 _CHANGE_KIND_MODIFIED_RIGHT, _CHANGE_KIND_MODIFIED_BOTH,
                 _CHANGE_KIND_ADDED_LEFT, _CHANGE_KIND_ADDED_RIGHT,
-                _CHANGE_KIND_ADDED_BOTH, _CHANGE_KIND_RENAMED,
+                _CHANGE_KIND_ADDED_BOTH, _CHANGE_KIND_ADDED_BOTH_CONFLICT,
+                _CHANGE_KIND_RENAMED,
             ):
                 if a.name != "<anon>":
                     out.append(a.name)
@@ -2057,6 +2098,17 @@ def compute_structural_diff_3way(
     base_units = _all_units_flat(ir_base)
     left_units = _all_units_flat(ir_left)
     right_units = _all_units_flat(ir_right)
+
+    # Decline on duplicate identities (fix #3): two units sharing an identity
+    # (e.g. Java/C++/Python method overloads, re-definitions) would collide
+    # silently in the identity-keyed dicts below, dropping all but one — a
+    # missed-conflict data-loss bug. Decline so the caller escalates to the LLM.
+    if (
+        _has_duplicate_identities(base_units)
+        or _has_duplicate_identities(left_units)
+        or _has_duplicate_identities(right_units)
+    ):
+        return None
 
     # Index by identity (kind, name) for O(1) lookup.
     base_by_id = {u.identity: u for u in base_units}
@@ -2124,6 +2176,12 @@ def _classify_alignment(
             return _CHANGE_KIND_MODIFIED_RIGHT
         return _CHANGE_KIND_UNCHANGED
     if not has_b and has_l and has_r:
+        # Both sides added a unit of this name. Sub-classify: identical bodies
+        # = an agreed addition (not a conflict); differing bodies = a genuine
+        # conflict (fix #7 — previously both were ``added_both`` and neither was
+        # flagged as a structural conflict, silently missing the clash).
+        if _bodies_differ(left, right):
+            return _CHANGE_KIND_ADDED_BOTH_CONFLICT
         return _CHANGE_KIND_ADDED_BOTH
     if not has_b and has_l and not has_r:
         return _CHANGE_KIND_ADDED_LEFT
@@ -2152,10 +2210,14 @@ def _detect_renames(
     was NOT identity-matched is a rename. This is conservative — it only pairs
     on exact body-fingerprint match (the header-stripped digest), so a rename +
     heavy body edit won't pair (it'll appear as added+removed, which is safe)."""
-    # Index base units by body fingerprint for lookup.
+    # Index base units by body fingerprint for lookup. Skip content-less bodies
+    # (fingerprint ``l{count}`` with no ``:digest``): many distinct empty bodies
+    # (pass-only methods, docstring-only functions) share ``l0`` and would pair
+    # as false renames. Fix #13 — the old guard ``f"l{body.count(chr(10))}"`` was
+    # already broken (it compared against the wrong count and never matched).
     base_by_fp: dict[str, StructuralUnit] = {}
     for u in base_units:
-        if u.fingerprint and u.fingerprint != f"l{u.body.count(chr(10))}":
+        if _fingerprint_has_content(u.fingerprint):
             base_by_fp[u.fingerprint] = u
 
     # Find base units already matched by identity (so we don't re-pair them).
@@ -2207,6 +2269,7 @@ _CHANGE_LABELS = {
     _CHANGE_KIND_ADDED_LEFT: "ADDED by current/upstream",
     _CHANGE_KIND_ADDED_RIGHT: "ADDED by replayed",
     _CHANGE_KIND_ADDED_BOTH: "ADDED BY BOTH SIDES",
+    _CHANGE_KIND_ADDED_BOTH_CONFLICT: "ADDED BY BOTH SIDES (different bodies)",
     _CHANGE_KIND_DELETED_LEFT: "deleted by current/upstream",
     _CHANGE_KIND_DELETED_RIGHT: "deleted by replayed",
     _CHANGE_KIND_DELETED_BOTH: "deleted by both",

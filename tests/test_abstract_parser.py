@@ -1236,3 +1236,115 @@ def test_rust_type_alias_still_a_field():
     flat = ap._all_units_flat(ir)
     fields = [u.name for u in flat if u.kind == "field"]
     assert "Foo" in fields, f"Rust type alias not a field: {fields}"
+
+
+# ---------------------------------------------------------------------------
+# Cross-cutting regression suite — identity collisions, added_both conflicts,
+# and the fingerprint guard. Each pins one bug found in the review.
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_method_names_decline_diff():
+    """Fix #3: two units with the same identity (e.g. two ``(method, "f")`` —
+    Java/C++/Python overloads, re-definitions) used to collide silently in the
+    identity-keyed dicts, dropping one unit and missing any conflict on it.
+    The diff now declines (returns None) so the conflict escalates to the LLM
+    path instead of being silently truncated."""
+    base = (
+        "class C:\n"
+        "    def f(self):\n"
+        "        return 1\n"
+        "    def f(self, x):\n"
+        "        return x\n"
+    )
+    left = base.replace("return 1", "return 10")
+    right = base.replace("return x", "return x + 1")
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    assert diff is None, "duplicate-identity parse must decline (return None)"
+
+
+def test_duplicate_names_decline_at_entity_disjoint():
+    """Fix #3 at the entity_disjoint rule: when the inner entity enumeration
+    produces a duplicate identity, the rule declines (returns None) so the
+    conflict escalates rather than silently dropping a unit mid-merge."""
+    from capybase.adapters import structural
+
+    # A class with two methods of the same name — re-enumerated inside the body.
+    base = (
+        "class C:\n"
+        "    def f(self):\n"
+        "        return 1\n"
+        "    def f(self, x):\n"
+        "        return x\n"
+        "    def g(self):\n"
+        "        return 3\n"
+    )
+    # Re-enumerate inside the body — the duplicate f appears in the entity list.
+    ents = structural.enumerate_entities(base, "python", container_span=(1, 1))
+    assert ents is not None
+    assert ap._has_duplicate_identities(ents), (
+        "duplicate detector must flag the two f-methods"
+    )
+
+
+def test_no_duplicate_identities_for_distinct_units():
+    """Fix #3 regression guard: the duplicate detector must NOT flag a normal
+    file with all-distinct entity names."""
+    src = (
+        "class C:\n"
+        "    def a(self): pass\n"
+        "    def b(self): pass\n"
+        "    def c(self): pass\n"
+    )
+    ir = ap.parse_family_b(src)
+    flat = ap._all_units_flat(ir)
+    assert not ap._has_duplicate_identities(flat)
+
+
+def test_added_both_different_bodies_is_conflict():
+    """Fix #7: when both sides ADD a unit of the same name with DIFFERENT
+    bodies, that's a genuine conflict (each side's addition is incompatible).
+    Previously classified as ``added_both`` and NOT counted as a structural
+    conflict — a silent miss. Now sub-classified as a conflict so the model is
+    told to synthesize."""
+    base = "pass\n"
+    left = "def f():\n    return 1\n"
+    right = "def f():\n    return 2\n"  # same name, different body
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    assert diff is not None
+    conflicts = diff.structural_conflicts
+    names = {a.name for a in conflicts}
+    assert "f" in names, (
+        f"added_both with different bodies must be a conflict: {names}"
+    )
+
+
+def test_added_both_same_body_not_conflict():
+    """Fix #7 regression guard: when both sides add the SAME unit (identical
+    body), it's an agreed addition — NOT a conflict. The sub-classification
+    must not over-fire."""
+    base = "pass\n"
+    added = "def f():\n    return 1\n"
+    diff = ap.compute_structural_diff_3way(base, added, added, language="python")
+    assert diff is not None
+    assert len(diff.structural_conflicts) == 0, "identical addition is not a conflict"
+
+
+def test_rename_detector_ignores_contentless_fingerprints():
+    """Fix #13: two content-less bodies (``pass``-only methods, docstring-only
+    functions) share the fingerprint ``l0`` (no digest). The rename detector
+    used a broken guard (``fingerprint != f"l{count}"``) that never skipped,
+    so two unrelated empty methods could pair as a false rename. The guard now
+    skips fingerprints with no ``:digest`` (the content-less marker)."""
+    # Two pass-only functions with the SAME fingerprint shape but different
+    # names — must NOT be paired as a rename.
+    base = "def original():\n    pass\n"
+    left = "def renamed():\n    pass\n"
+    right = base  # right unchanged
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    assert diff is not None
+    renamed = [a for a in diff.aligned if a.change_kind == ap._CHANGE_KIND_RENAMED]
+    # The content-less body must not produce a false rename pairing.
+    assert renamed == [], (
+        f"content-less bodies falsely paired as rename: {[(a.name) for a in renamed]}"
+    )

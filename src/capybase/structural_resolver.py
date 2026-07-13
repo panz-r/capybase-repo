@@ -1038,6 +1038,21 @@ def _try_entity_disjoint(unit: ConflictUnit) -> str | None:
             cur_ents = structural.enumerate_entities(unit.current.text or "", lang, container_span=span) or cur_ents
             rep_ents = structural.enumerate_entities(unit.replayed.text or "", lang, container_span=span) or rep_ents
 
+    # Decline on duplicate identities (fix #3): two entities sharing an identity
+    # (e.g. Java/C++/Python method overloads, re-definitions) collide silently in
+    # the identity-keyed dicts below, dropping all but one — a missed-conflict
+    # data-loss bug. Decline so the conflict escalates to the line/LLM resolvers.
+    try:
+        from capybase.adapters.abstract_parser import _has_duplicate_identities
+    except Exception:  # noqa: BLE001
+        return None
+    if (
+        _has_duplicate_identities(base_ents)
+        or _has_duplicate_identities(cur_ents)
+        or _has_duplicate_identities(rep_ents)
+    ):
+        return None
+
     base_by_id = {e.identity: e for e in base_ents}
 
     # Rename detection (s3m rename handler, survey §2.2): a base entity whose
