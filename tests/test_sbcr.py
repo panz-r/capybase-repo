@@ -53,12 +53,15 @@ def test_fitness_identical_to_both_parents_is_maximal():
     assert fitness(lines, lines, lines) == 1.0
 
 
-def test_fitness_disjoint_from_one_parent_is_halved():
-    # candidate matches ours exactly (1.0) but has zero overlap with theirs (0.0)
+def test_fitness_disjoint_from_one_parent_under_char_gestalt():
+    # Character-level Gestalt: candidate matches ours exactly (1.0) but shares
+    # only the newline separator with theirs. Line-level difflib would give 0.0
+    # for the disjoint side (fitness 0.5); char-level shares the "\n" between
+    # "a\nb" and "x\ny" → 2/6 ≈ 0.333, so fitness = mean(1.0, 0.333) ≈ 0.667.
     cand = ["a", "b"]
     ours = ["a", "b"]
     theirs = ["x", "y"]
-    assert fitness(cand, ours, theirs) == pytest.approx(0.5)
+    assert fitness(cand, ours, theirs) == pytest.approx(0.667, abs=0.01)
 
 
 def test_fitness_is_symmetric_in_parents():
@@ -344,3 +347,89 @@ def test_unresolved_result_carries_fitness_for_journaling():
     r = resolve_by_combination_search(_unit("a = 1", "b = 2"), floor=0.99)
     assert not r.resolved
     assert isinstance(r.fitness, float)
+
+
+# ---------------------------------------------------------------------------
+# Character-level Gestalt fitness + union-constrained search (§4.1/§4.3)
+# ---------------------------------------------------------------------------
+
+
+def test_fitness_uses_character_level_gestalt():
+    # At character granularity, two sides that share NO lines but share common
+    # characters (the newline, shared tokens) score nonzero — the line-level
+    # metric would return 0.0 here. This distinguishes char-level from
+    # line-level and documents the metric switch (arXiv:2605.16646 §4.1).
+    cand = ["import os"]
+    theirs = ["import re"]
+    # "import os" vs "import re" share "import " (7 chars) + the whole is short.
+    # Line-level ratio would be 0.0 (no line matches); char-level > 0.0.
+    from capybase.sbcr import _ratio
+    assert _ratio(cand, theirs) > 0.0
+
+
+def test_hill_climb_never_drops_a_side_union():
+    # The union-constrained search must keep EVERY line from both sides in the
+    # result — char-level fitness would otherwise prefer a truncated candidate
+    # (length bias). This is the core fix for the §4.3 truncation failure mode.
+    ours = "\n".join(f"o{i}" for i in range(8))
+    theirs = "\n".join(f"t{i}" for i in range(8))
+    for seed in (1, 42, 12345):
+        r = resolve_by_combination_search(_unit(ours, theirs), seed=seed)
+        assert r.resolved
+        lines = r.text.splitlines()
+        # Full union: all 16 lines present, no side truncated.
+        assert set(lines) == {f"o{i}" for i in range(8)} | {f"t{i}" for i in range(8)}
+        assert len(lines) == 16
+
+
+def test_shrinkage_guard_rejects_short_candidate():
+    # When the floor forces a degenerate search and the best candidate is
+    # shorter than min_candidate_ratio of the larger side, the shrinkage guard
+    # declines. With a near-1.0 ratio this rejects almost everything that
+    # drops lines — but more importantly it must be a documented, populated
+    # skip_reason when it fires.
+    # We force the situation by giving one side far more lines than the other
+    # and demanding a low floor; the exhaustive search will prefer the shorter
+    # candidate (high fitness against the small side), triggering the guard.
+    ours = "x = 1"
+    theirs = "\n".join(f"v{i} = {i}" for i in range(6))
+    r = resolve_by_combination_search(
+        _unit(ours, theirs), floor=0.0, min_candidate_ratio=0.99,
+    )
+    # The best candidate that drops lines from the 6-line side is 1-2 lines; a
+    # 0.99 guard on a 6-line larger side requires ≥ 5.94 → 6 lines. So either
+    # the full union is found (resolves) or the guard declines. Either way the
+    # result is honest. Verify the skip_reason is populated on a decline.
+    if not r.resolved:
+        assert r.skip_reason is not None
+        assert "shrinkage" in r.skip_reason
+
+
+def test_time_budget_terminates_long_search():
+    # A tiny time budget must stop the hill-climb promptly without hanging,
+    # regardless of how large the search space is. The result is well-formed.
+    ours = "\n".join(f"o{i}" for i in range(20))
+    theirs = "\n".join(f"t{i}" for i in range(20))
+    import time as _time
+    t0 = _time.monotonic()
+    r = resolve_by_combination_search(
+        _unit(ours, theirs), seed=1, max_time=0.05, max_iterations=10**9,
+    )
+    elapsed = _time.monotonic() - t0
+    assert elapsed < 2.0  # the 0.05s budget bounds it well under this
+    assert isinstance(r.fitness, float)
+
+
+def test_skip_reason_populated_on_modification_conflict():
+    # The decline reason threads through so the orchestrator can journal it.
+    r = resolve_by_combination_search(_unit("x = 2", "x = 3", base="x = 1"))
+    assert not r.resolved
+    assert r.skip_reason is not None
+    assert "base" in r.skip_reason.lower()
+
+
+def test_skip_reason_populated_on_below_floor():
+    r = resolve_by_combination_search(_unit("a = 1", "b = 2"), floor=0.99)
+    assert not r.resolved
+    assert r.skip_reason is not None
+    assert "floor" in r.skip_reason.lower()

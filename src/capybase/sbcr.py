@@ -8,10 +8,10 @@ combination resolutions contain no newly-invented lines, so this search space
 covers the overwhelming majority of "both sides added / both sides restructured"
 conflicts that have no single correct side.
 
-Fitness (the evaluation function) is the **mean textual similarity of the
-candidate to both parents** (survey: correlation ~0.64 with developer-chosen
-resolution quality). Similarity uses stdlib ``difflib`` — no training, no model,
-no new dependencies.
+Fitness (the evaluation function) is the **mean character-level similarity
+(Gestalt) of the candidate to both parents** (arXiv:2605.16646 §4.1: median
+Spearman ≈0.79 to developer-chosen resolutions). Similarity uses stdlib
+``difflib`` — no training, no model, no new dependencies.
 
 Search strategy:
 - **Exhaustive** enumeration of all order-preserving interleavings when the
@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import difflib
 import random
+import time
 from dataclasses import dataclass
 from math import comb
 from typing import Iterator
@@ -67,11 +68,15 @@ class CombinationResolution:
     ``resolved_text`` — splices identically). ``None`` means no candidate was
     found (the search space was empty or every candidate was rejected as
     degenerate). ``fitness`` is the candidate's mean similarity to the two
-    parents, recorded for journaling/tuning.
+    parents, recorded for journaling/tuning. ``skip_reason`` is a short human
+    phrase naming WHY the search declined (empty base, below floor, shrinkage
+    guard, …) so the orchestrator can journal a meaningful decline rather than
+    a silent fall-through.
     """
 
     text: str | None
     fitness: float
+    skip_reason: str | None = None
 
     @property
     def resolved(self) -> bool:
@@ -128,18 +133,33 @@ def balance(unit: ConflictUnit) -> float:
 
 
 def _ratio(a: list[str], b: list[str]) -> float:
-    """``difflib`` similarity ratio over line lists. 1.0 for identical."""
+    """Character-level Gestalt similarity over two side line lists.
+
+    The lines are joined before measuring, so the ratio is computed at
+    *character* granularity (``2·|LCS|/(|a|+|b|)``) rather than line
+    granularity. Empirical SBCR tuning work (camposjunior2025 / arXiv:2605.16646
+    §4.1) found character-level LCS (Gestalt) the best similarity metric for the
+    SBCR fitness function, with the mean aggregation here reaching median
+    Spearman ≈0.79 to human resolutions — above line-level and token-level
+    alternatives. ``difflib.SequenceMatcher.ratio()`` on two strings IS the
+    Gestalt ratio, so we feed it the joined text. ``autojunk=False`` keeps the
+    autojunk heuristic off (it can distort ratios on code with repeated tokens).
+    Returns 1.0 for identical; 0.0 only when the two share no characters at all.
+    """
     if not a and not b:
         return 1.0
-    return difflib.SequenceMatcher(a=a, b=b, autojunk=False).ratio()
+    return difflib.SequenceMatcher(
+        a="\n".join(a), b="\n".join(b), autojunk=False
+    ).ratio()
 
 
 def fitness(candidate: list[str], ours: list[str], theirs: list[str]) -> float:
-    """Mean similarity of the candidate to each parent.
+    """Mean character-level similarity of the candidate to each parent.
 
     This is the survey's evaluation function: a good combination is close in
     text to BOTH sides (it contains lines from both, in a sensible order).
-    Correlation ~0.64 with developer resolution quality, per the survey.
+    Character-level Gestalt + mean aggregation reaches median Spearman ≈0.79
+    with developer-chosen resolutions (arXiv:2605.16646 §4.1).
     """
     return (_ratio(candidate, ours) + _ratio(candidate, theirs)) / 2.0
 
@@ -211,58 +231,72 @@ def _hill_climb_best(
     floor: float,
     max_iterations: int,
     rng: random.Random,
-    stagnation_limit: int = 64,
+    stagnation_limit: int = 10,
+    max_time: float = 15.0,
 ) -> tuple[list[str] | None, float]:
-    """Random-restart hill climbing over the interleaving space (survey §4.1).
+    """Random-restart hill climbing over the order-preserving union space.
 
-    Operators: ADD a not-yet-included line, REMOVE an included line, EXCHANGE
-    two positions. Restart from a random valid interleaving when stuck. Two
-    termination criteria from the survey §2.2:
+    SBCR's scope is addition conflicts (empty base), so every candidate is the
+    UNION of both sides' lines — the search is over *orderings* of that union,
+    not over subsets. This is critical for the character-level Gestalt fitness:
+    a shorter candidate has proportionally fewer non-matching characters and so
+    scores spuriously high under mean similarity. Constraining the search to
+    full unions makes the fitness a tie-breaker over orderings (its strength,
+    Spearman ≈0.79) rather than a length-biased selector.
 
-    - ``max_iterations``: a hard budget on total fitness evaluations (predictable
-      cost on large blocks).
-    - ``stagnation_limit``: stop the ENTIRE search after this many consecutive
-      non-improving evaluations. Once fitness has plateaued, further restarts
-      only re-find the same local optima, so continuing wastes the budget. This
-      bounds the pathological case where the iteration budget would otherwise be
-      spent churning an already-converged search.
+    The neighborhood is **adjacent cross-side swaps**: swapping two adjacent
+    lines that originate from different sides. This preserves each side's
+    internal order (the order-preserving invariant) while exploring exactly the
+    interleaving space that ``_interleavings`` enumerates exhaustively. Random
+    restarts sample fresh orderings when a local optimum is reached.
+
+    Three termination criteria (survey §2.2 / arXiv:2605.16646 §4.1):
+    - ``max_iterations``: hard budget on fitness evaluations.
+    - ``stagnation_limit``: stop after this many consecutive non-improving evals.
+    - ``max_time``: wall-clock budget in seconds.
 
     Returns the best candidate found above ``floor``, else (None, score).
     """
-    pool = ours + theirs  # the universe of lines; an interleaving draws from it
+    pool = ours + theirs  # the union; every candidate uses all of it
     if not pool:
         return None, -1.0
+    deadline = time.monotonic() + max_time if max_time > 0 else None
 
-    def _random_interleaving() -> list[str]:
-        # Start from a random shuffle that respects each side's order: merge the
-        # two ordered lists choosing at random which side to draw from next.
+    # Origin tags: which side each line in the union came from (Ours=True).
+    # Needed so the neighborhood only swaps adjacent lines from DIFFERENT sides
+    # (a same-side swap would violate the order-preserving invariant).
+    origins = [True] * len(ours) + [False] * len(theirs)
+
+    def _random_interleaving() -> tuple[list[str], list[bool]]:
+        # Merge the two ordered lists, choosing at random which side to draw
+        # from next. Returns the merged lines AND their origins.
         merged: list[str] = []
+        m_orig: list[bool] = []
         i = j = 0
         while i < len(ours) and j < len(theirs):
             if rng.random() < 0.5:
-                merged.append(ours[i]); i += 1
+                merged.append(ours[i]); m_orig.append(True); i += 1
             else:
-                merged.append(theirs[j]); j += 1
-        merged.extend(ours[i:]); merged.extend(theirs[j:])
-        return merged
+                merged.append(theirs[j]); m_orig.append(False); j += 1
+        while i < len(ours):
+            merged.append(ours[i]); m_orig.append(True); i += 1
+        while j < len(theirs):
+            merged.append(theirs[j]); m_orig.append(False); j += 1
+        return merged, m_orig
 
-    def _neighbors(cand: list[str]) -> Iterator[list[str]]:
-        # REMOVE: drop any line (yield each single removal).
-        for k in range(len(cand)):
-            yield cand[:k] + cand[k + 1:]
-        # ADD: insert any not-yet-present line at any position that keeps each
-        # side's order. We only insert lines absent from cand.
-        present = set(cand)  # note: lines are unique by identity here only if so
-        remaining = [ln for ln in pool if ln not in cand]
-        for ln in remaining:
-            for pos in range(len(cand) + 1):
-                yield cand[:pos] + [ln] + cand[pos:]
-        # EXCHANGE: swap any two positions.
-        for a in range(len(cand)):
-            for b in range(a + 1, len(cand)):
-                nb = list(cand)
-                nb[a], nb[b] = nb[b], nb[a]
-                yield nb
+    def _neighbors(cand: list[str], orig: list[bool]) -> Iterator[tuple[list[str], list[bool]]]:
+        # Adjacent cross-side swap: swap positions k, k+1 where origins differ.
+        # This is the minimal move that changes the interleaving while keeping
+        # each side's internal order intact. Every order-preserving interleaving
+        # is reachable from any other via a sequence of these swaps.
+        for k in range(len(cand) - 1):
+            if orig[k] == orig[k + 1]:
+                continue  # same side → swapping would violate order preservation
+            nb = list(cand)
+            nb[k], nb[k + 1] = nb[k + 1], nb[k]
+            no = list(orig)
+            no[k], no[k + 1] = no[k + 1], no[k]
+            yield nb, no
 
     best: list[str] | None = None
     best_fit = -1.0
@@ -270,8 +304,12 @@ def _hill_climb_best(
     # Consecutive non-improving evaluations since the last global best improved.
     # When this exceeds stagnation_limit, the search has plateaued → stop.
     stagnation = 0
-    while iters < max_iterations and stagnation < stagnation_limit:
-        current = _random_interleaving()
+
+    def _time_up() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
+    while iters < max_iterations and stagnation < stagnation_limit and not _time_up():
+        current, cur_orig = _random_interleaving()
         current_fit = fitness(current, ours, theirs)
         iters += 1
         if current_fit > best_fit:
@@ -281,20 +319,20 @@ def _hill_climb_best(
             stagnation += 1
         # Climb until no neighbor improves (first-improvement move).
         improved = True
-        while improved and iters < max_iterations and stagnation < stagnation_limit:
+        while improved and iters < max_iterations and stagnation < stagnation_limit and not _time_up():
             improved = False
-            for nb in _neighbors(current):
-                if iters >= max_iterations or stagnation >= stagnation_limit:
+            for nb, no in _neighbors(current, cur_orig):
+                if iters >= max_iterations or stagnation >= stagnation_limit or _time_up():
                     break
                 iters += 1
                 f = fitness(nb, ours, theirs)
                 if f > best_fit:
-                    best_fit, best = list(nb), f
+                    best_fit, best = f, list(nb)
                     stagnation = 0
                 else:
                     stagnation += 1
                 if f > current_fit:
-                    current, current_fit = nb, f
+                    current, cur_orig, current_fit = nb, no, f
                     improved = True
                     break  # first-improvement: re-scan neighbors from the new current
         # random restart (stagnation carries across restarts, bounding churn)
@@ -313,7 +351,9 @@ def resolve_by_combination_search(
     *,
     floor: float = 0.6,
     max_iterations: int = 2000,
-    stagnation_limit: int = 64,
+    stagnation_limit: int = 10,
+    max_time: float = 15.0,
+    min_candidate_ratio: float = 0.5,
     seed: int | None = None,
 ) -> CombinationResolution:
     """Attempt a search-based combination resolution of ``unit``.
@@ -335,8 +375,20 @@ def resolve_by_combination_search(
         blocks (survey §2.2 termination).
     stagnation_limit : int
         Stop the hill-climb search after this many consecutive non-improving
-        evaluations (survey §2.2 stagnation). Once fitness plateaus, further
-        restarts re-find the same local optima, so continuing wastes budget.
+        evaluations (survey §2.2 stagnation; arXiv:2605.16646 §4.1 tunes to 10).
+        Once fitness plateaus, further restarts re-find the same local optima,
+        so continuing wastes budget.
+    max_time : float
+        Wall-clock budget in seconds for hill climbing on large blocks
+        (arXiv:2605.16646 §4.1 tunes to 15s). 0 disables the time budget. The
+        exhaustive path is already bounded by ``EXHAUSTIVE_THRESHOLD`` and
+        ignores this.
+    min_candidate_ratio : float
+        Shrinkage guard (arXiv:2605.16646 §4.3): reject a candidate whose line
+        count is below this fraction of the LARGER side. Prevents a one-sided
+        merge (silently dropping most of a side) from scoring high on fitness
+        against the kept side. 0.5 = the candidate must keep at least half of
+        the bigger side's lines.
     seed : int | None
         RNG seed for reproducible hill climbing (tests pass a fixed seed).
 
@@ -361,30 +413,56 @@ def resolve_by_combination_search(
         # combination search space is unsafe here (see module docstring), so we
         # refuse to propose. The structural resolver already declined (it runs
         # first); the LLM will handle this.
-        return CombinationResolution(text=None, fitness=0.0)
+        return CombinationResolution(
+            text=None, fitness=0.0,
+            skip_reason="modification conflict (non-empty base)",
+        )
     ours = (unit.current.text or "").splitlines()
     theirs = (unit.replayed.text or "").splitlines()
     if not ours and not theirs:
-        return CombinationResolution(text=None, fitness=0.0)
+        return CombinationResolution(
+            text=None, fitness=0.0, skip_reason="both sides empty",
+        )
     # The trivial degenerate cases: if one side is empty, the only interleaving
     # is the other side verbatim — that's a one-sided resolution the structural
     # resolver already handles (and the LLM would too). SBCR adds no value, so
     # decline rather than echo a side back.
     if not ours or not theirs:
-        return CombinationResolution(text=None, fitness=0.0)
+        return CombinationResolution(
+            text=None, fitness=0.0, skip_reason="one side empty",
+        )
 
     space = _interleaving_count(len(ours), len(theirs))
     if space == 0:
-        return CombinationResolution(text=None, fitness=0.0)
+        return CombinationResolution(
+            text=None, fitness=0.0, skip_reason="empty search space",
+        )
 
     if space <= EXHAUSTIVE_THRESHOLD:
         best, best_fit = _exhaustive_best(ours, theirs, floor=floor)
     else:
         best, best_fit = _hill_climb_best(
             ours, theirs, floor=floor, max_iterations=max_iterations,
-            stagnation_limit=stagnation_limit, rng=random.Random(seed),
+            stagnation_limit=stagnation_limit, max_time=max_time,
+            rng=random.Random(seed),
         )
 
     if best is None:
-        return CombinationResolution(text=None, fitness=best_fit)
+        return CombinationResolution(
+            text=None, fitness=best_fit,
+            skip_reason=f"fitness {best_fit:.3f} < floor {floor:.2f}",
+        )
+    # Shrinkage guard: a candidate shorter than ``min_candidate_ratio`` of the
+    # larger side has dropped too much of a side to be a genuine combination —
+    # it's a one-sided merge wearing a high fitness score. Decline (defer to the
+    # LLM) rather than propose it.
+    larger = max(len(ours), len(theirs))
+    if larger > 0 and len(best) < min_candidate_ratio * larger:
+        return CombinationResolution(
+            text=None, fitness=best_fit,
+            skip_reason=(
+                f"shrinkage: {len(best)} candidate lines < "
+                f"{min_candidate_ratio:.0%} of larger side ({larger})"
+            ),
+        )
     return CombinationResolution(text="\n".join(best), fitness=best_fit)

@@ -145,3 +145,91 @@ def test_restamp_is_a_named_path_with_reason(repo: Path):
     ]
     if augmented:
         assert "history-augmented" in augmented[0].payload.get("reason", "")
+
+
+# ---------------------------------------------------------------------------
+# Decline-reason journaling (survey §5.3): structural + SBCR declines were
+# previously SILENT (no resolution_attempt event). exact-reuse was already
+# instrumented. These tests pin the new parity so a skip is never invisible.
+# ---------------------------------------------------------------------------
+
+
+def test_structural_decline_records_attempt(repo: Path):
+    """When the structural resolver finds NO applicable rule, it now journals a
+    resolution_attempt with decision=skip + reason (previously a bare `return None`).
+
+    Built so every structural rule declines: both sides modify the SAME single
+    line of a one-line function differently (no disjoint span, no entity
+    boundary, no token-disjoint small hunk that survives). The LLM then resolves.
+    """
+    from tests.test_rust_cross_file import PathAwareClient
+    from capybase.resolution_engine import ResolutionEngine
+    # A pure value conflict at the same line: base=return 1, current=return 2,
+    # replayed=return 3. identical_sides fails, one_sided fails, disjoint/zealous
+    # fail (same line), entity_disjoint fails (no container), token_disjoint
+    # fails (the change is to the same token). → structural declines.
+    build_multistep_rebase(
+        repo,
+        base_files={"cfg.py": "x = 1\n"},
+        feat_commits=[CommitEdit("feat: x=2", {"cfg.py": "x = 2\n"})],
+        main_commits=[CommitEdit("main: x=3", {"cfg.py": "x = 3\n"})],
+        stop_early=True,
+    )
+    cfg = _base_cfg(repo)
+    client = PathAwareClient({"cfg.py": "x = 2\n"})
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    orch.run()
+    attempts = _attempt_events(orch)
+    structural_skips = [
+        a for a in attempts
+        if a.payload.get("mechanism") == "structural"
+        and a.payload.get("decision") == "skip"
+    ]
+    assert structural_skips, (
+        "expected a structural skip attempt; got "
+        f"{[(a.payload['mechanism'], a.payload['decision']) for a in attempts]}"
+    )
+    # The reason is populated (not empty).
+    assert structural_skips[0].payload.get("reason"), "skip reason must be populated"
+
+
+def test_sbcr_decline_records_attempt_with_reason(repo: Path):
+    """An SBCR decline (modification conflict → non-empty base) now journals a
+    combination_declined event + a resolution_attempt with the skip_reason."""
+    from tests.test_rust_cross_file import PathAwareClient
+    from capybase.resolution_engine import ResolutionEngine
+    # Same one-line value conflict: non-empty base → SBCR declines on scope.
+    build_multistep_rebase(
+        repo,
+        base_files={"cfg.py": "x = 1\n"},
+        feat_commits=[CommitEdit("feat: x=2", {"cfg.py": "x = 2\n"})],
+        main_commits=[CommitEdit("main: x=3", {"cfg.py": "x = 3\n"})],
+        stop_early=True,
+    )
+    cfg = _base_cfg(repo)
+    client = PathAwareClient({"cfg.py": "x = 2\n"})
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    orch.run()
+    # The combination_declined event carries the fitness + reason.
+    declines = [e for e in orch.journal.read_events()
+                if e.event_type == "combination_declined"]
+    assert declines, "expected a combination_declined event"
+    reason = declines[0].payload.get("reason", "")
+    assert reason, "combination_declined reason must be populated"
+    # On a modification conflict the reason names the non-empty base.
+    assert "base" in reason.lower()
+    # And the uniform resolution_attempt shape is emitted too.
+    attempts = _attempt_events(orch)
+    sbcr_skips = [
+        a for a in attempts
+        if a.payload.get("mechanism") == "sbcr"
+        and a.payload.get("decision") == "skip"
+    ]
+    assert sbcr_skips, (
+        "expected an sbcr skip attempt; got "
+        f"{[(a.payload['mechanism'], a.payload['decision']) for a in attempts]}"
+    )

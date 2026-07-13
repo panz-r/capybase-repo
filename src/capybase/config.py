@@ -551,6 +551,26 @@ class FutureConfig(BaseModel):
     # and falls through to the LLM. Default ON; only fires when the structural
     # resolver declined, so the cheap provably-safe rules always run first.
     enable_combination_search: bool = True
+    # SBCR (combination-search) tuning. The fitness is character-level Gestalt
+    # similarity, mean-aggregated over both parents (arXiv:2605.16646 §4.1).
+    # These knobs make the research-tuned parameters configurable without code
+    # changes; the defaults are the survey's recommended values.
+    # Minimum fitness for SBCR to accept a candidate. Below this the candidate
+    # is essentially one-sided and is left to the LLM.
+    sbcr_floor: float = 0.6
+    # Shrinkage guard (§4.3): reject a candidate whose line count is below this
+    # fraction of the LARGER side — prevents a one-sided merge from scoring high
+    # on fitness against the kept side.
+    sbcr_min_candidate_ratio: float = 0.5
+    # Stop the hill-climb search after this many consecutive non-improving
+    # fitness evaluations (§2.2 stagnation; §4.1 tunes to 10).
+    sbcr_stagnation_limit: int = 10
+    # Wall-clock budget (seconds) for hill climbing on large blocks (§4.1 tunes
+    # to 15s). The exhaustive path (≤ EXHAUSTIVE_THRESHOLD candidates) is
+    # already bounded and ignores this.
+    sbcr_max_time_seconds: float = 15.0
+    # Hard budget on total fitness evaluations for hill climbing (§2.2).
+    sbcr_max_iterations: int = 2000
     # Block-capture resolution (large modify/delete): when one side deleted a
     # large block and the keeper side kept/modified it, the model can't reliably
     # reproduce the block as an escaped JSON string (placeholder collapse +
@@ -749,10 +769,11 @@ class RoutingConfig(BaseModel):
     # Minimum conflict balance for SBCR to ACCEPT outright (survey §4.2). Balance
     # = min/max of the two sides' non-blank line counts (1.0 = equal, →0 =
     # heavily imbalanced). SBCR wins on balanced conflicts and loses to the LLM
-    # on imbalanced ones, so below this threshold an SBCR result is NOT
-    # short-circuited — the LLM runs instead. 0.0 = always accept SBCR when it
-    # resolves (the conservative default: don't change behavior unless tuned).
-    min_balance_for_sbcr_accept: float = 0.0
+    # on imbalanced ones (arXiv:2605.16646 §4.2), so below this threshold an SBCR
+    # result is NOT short-circuited — the LLM runs instead. 0.15 is a slightly
+    # conservative floor vs the research's ~0.2 crossover; 0.0 disables the guard
+    # (always accept SBCR when it resolves).
+    min_balance_for_sbcr_accept: float = 0.15
 
 
 class Config(BaseModel):

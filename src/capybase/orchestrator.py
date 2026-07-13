@@ -1932,6 +1932,10 @@ class Orchestrator:
 
         result = resolve_structurally(unit)
         if not result.resolved or result.text is None:
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="structural",
+                decision="skip", reason="no rule applied",
+            )
             return None
         cand = CandidateResolution(
             candidate_id=f"{unit.unit_id}:structural",
@@ -1958,8 +1962,18 @@ class Orchestrator:
             # The deterministic guess failed validation — discard and let the
             # model handle it. This is the safety net: structural resolution can
             # only help, never apply an invalid merge.
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="structural",
+                candidate=cand, validation=validation,
+                decision="skip", reason="failed validation",
+            )
             return None
         if self._strictness_blocks_pre_llm(unit, cand, validation, "structural"):
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="structural",
+                candidate=cand, validation=validation,
+                decision="skip", reason="strictness declined",
+            )
             return None  # strict mode declines to auto-accept; fall through to LLM
         outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
         outcome.accepted = cand
@@ -1989,19 +2003,44 @@ class Orchestrator:
         """
         from capybase.sbcr import balance, resolve_by_combination_search
 
-        result = resolve_by_combination_search(unit)
+        fut = self.config.future
+        result = resolve_by_combination_search(
+            unit,
+            floor=fut.sbcr_floor,
+            max_iterations=fut.sbcr_max_iterations,
+            stagnation_limit=fut.sbcr_stagnation_limit,
+            max_time=fut.sbcr_max_time_seconds,
+            min_candidate_ratio=fut.sbcr_min_candidate_ratio,
+        )
         if not result.resolved or result.text is None:
+            # The search declined (modification conflict, below floor, shrinkage
+            # guard, …). Journal the reason + fitness so a skip isn't silent and
+            # the fitness that was computed isn't thrown away (matches how
+            # _try_exact_reuse instruments its declines).
+            reason = result.skip_reason or "no candidate found"
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="sbcr",
+                decision="skip", reason=reason,
+            )
+            self.journal.emit(
+                "combination_declined",
+                {"fitness": round(result.fitness, 4), "reason": reason},
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
             return None
         # Balance-aware routing (survey §4.2): SBCR wins on BALANCED conflicts
         # and loses to the LLM on imbalanced ones (one side changed far more).
         # When routing is on and the conflict is more imbalanced than the
         # configured threshold, do NOT short-circuit — decline so the LLM runs,
-        # which is the stronger engine there. Conservative default (0.0) keeps
-        # SBCR accepting whenever it resolves; this only diverts imbalanced
-        # conflicts when explicitly tuned.
+        # which is the stronger engine there.
         bal = balance(unit)
         threshold = self.config.routing.min_balance_for_sbcr_accept
         if self.config.routing.enabled and bal < threshold:
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="sbcr",
+                decision="skip",
+                reason=f"balance {bal:.2f} < threshold {threshold:.2f}",
+            )
             self.journal.emit(
                 "combination_resolved",
                 {
@@ -2046,8 +2085,18 @@ class Orchestrator:
             # The combination guess failed validation (e.g. contradictory lines
             # concatenated into invalid code). Discard and let the model handle
             # it. This is why SBCR is safe despite a heuristic fitness function.
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="sbcr",
+                candidate=cand, validation=validation,
+                decision="skip", reason="failed validation",
+            )
             return None
         if self._strictness_blocks_pre_llm(unit, cand, validation, "sbcr"):
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="sbcr",
+                candidate=cand, validation=validation,
+                decision="skip", reason="strictness declined",
+            )
             return None  # strict mode declines to auto-accept; fall through to LLM
         outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
         outcome.accepted = cand

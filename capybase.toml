@@ -307,8 +307,9 @@ max_simple_side_chars = 1200      # combined side text longer → complex
 # SBCR wins on balanced conflicts, loses to the LLM on imbalanced ones (§4.2).
 # balance = min/max of the two sides' non-blank line counts (1.0=equal). Below
 # this threshold an SBCR result is NOT short-circuited — the LLM runs instead.
-# 0.0 = always accept SBCR when it resolves (the conservative default).
-min_balance_for_sbcr_accept = 0.0
+# 0.15 = a conservative floor vs the research's ~0.2 crossover (the default).
+# 0.0 = always accept SBCR when it resolves (disable the guard).
+min_balance_for_sbcr_accept = 0.15
 
 # [future] documents planned seams — most are parsed, some are now wired.
 [future]
@@ -329,6 +330,14 @@ enable_structural_resolver = true
 # candidate is validated before acceptance; an invalid combination (e.g.
 # contradictory lines concatenated) is rejected and falls through to the model.
 enable_combination_search = true
+# SBCR tuning (arXiv:2605.16646 §4.1). Fitness is char-level Gestalt, mean-
+# aggregated over both parents; the search is union-constrained (every candidate
+# keeps all lines from both sides). These knobs expose the research-tuned params.
+sbcr_floor = 0.6                  # min fitness to accept a candidate
+sbcr_min_candidate_ratio = 0.5    # reject candidates < this fraction of the larger side (shrinkage guard)
+sbcr_stagnation_limit = 10        # stop hill-climb after N consecutive non-improving evals
+sbcr_max_time_seconds = 15.0      # wall-clock budget for hill-climb on large blocks
+sbcr_max_iterations = 2000        # hard budget on fitness evaluations
 
 
 # ---------------------------------------------------------------------------
