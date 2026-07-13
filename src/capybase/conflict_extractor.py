@@ -443,8 +443,6 @@ def compute_severity(unit: "ConflictUnit") -> str:
     overlap; otherwise "medium". These are hand-sensible defaults; the goal is a
     stable pre-resolution triage signal, not a precise oracle.
     """
-    import difflib
-
     base = (unit.base.text or "").splitlines()
     cur = (unit.current.text or "").splitlines()
     rep = (unit.replayed.text or "").splitlines()
@@ -461,19 +459,10 @@ def compute_severity(unit: "ConflictUnit") -> str:
     )
 
     # Signal 3: both sides changed the SAME base lines (real overlap). Use
-    # difflib to map each side's edits onto base line indices; if they intersect,
-    # it's a genuine same-line conflict (harder) vs a disjoint case (easier).
-    def _base_changed(base_lines, other_lines):
-        changed = set()
-        for tag, i1, i2, _j1, _j2 in difflib.SequenceMatcher(
-            a=base_lines, b=other_lines, autojunk=False
-        ).get_opcodes():
-            if tag != "equal":
-                changed.update(range(i1, i2))
-        return changed
-
-    cur_changed = _base_changed(base, cur)
-    rep_changed = _base_changed(base, rep)
+    # histogram diff to map each side's edits onto base line indices; if they
+    # intersect, it's a genuine same-line conflict (harder) vs a disjoint case.
+    cur_changed = _changed_base_line_indices(base, cur)
+    rep_changed = _changed_base_line_indices(base, rep)
     same_line_overlap = bool(cur_changed & rep_changed)
 
     if large and touches_def:
@@ -591,18 +580,25 @@ def _same_line_overlap(base, cur, rep) -> bool:
     harder than a disjoint-edits case. Extracted so the feature spine and the
     severity grader agree on the definition.
     """
-    import difflib
+    return bool(
+        _changed_base_line_indices(base, cur) & _changed_base_line_indices(base, rep)
+    )
 
-    def _base_changed(base_lines, other_lines):
-        changed = set()
-        for tag, i1, i2, _j1, _j2 in difflib.SequenceMatcher(
-            a=base_lines, b=other_lines, autojunk=False
-        ).get_opcodes():
-            if tag != "equal":
-                changed.update(range(i1, i2))
-        return changed
 
-    return bool(_base_changed(base, cur) & _base_changed(base, rep))
+def _changed_base_line_indices(base_lines: list[str], other_lines: list[str]) -> set[int]:
+    """The set of ``base_lines`` indices that ``other_lines`` modifies.
+
+    Shared by :func:`compute_severity` and :func:`_same_line_overlap`: a real
+    same-line conflict is harder than a disjoint-edits case. Uses histogram diff
+    (:mod:`capybase.diff`) to map each side's edits onto base line indices.
+    """
+    from capybase.diff import line_matcher
+
+    changed: set[int] = set()
+    for tag, i1, i2, _j1, _j2 in line_matcher(base_lines, other_lines).get_opcodes():
+        if tag != "equal":
+            changed.update(range(i1, i2))
+    return changed
 
 
 def _merge_kind_of(unit: ConflictUnit) -> str:

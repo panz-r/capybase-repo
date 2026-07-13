@@ -48,8 +48,9 @@ Two classification systems feed routing and the structural rules.
 
 ### Per-side intent classification (`merge_intent.py`)
 
-`classify_side(base, side)` uses `difflib` opcode analysis on line lists to
-classify each side as `unchanged`, `added`, `deleted`, or `modified`:
+`classify_side(base, side)` uses histogram-diff opcode analysis on line lists
+(`capybase.diff.HistogramMatcher`) to classify each side as `unchanged`,
+`added`, `deleted`, or `modified`:
 
 - Identical to base → `unchanged`
 - Base empty, side non-empty → `added`

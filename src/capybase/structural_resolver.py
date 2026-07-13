@@ -28,7 +28,8 @@ can never produce a worse merge than the model would. A wrong guess is caught
 and discarded, not applied.
 
 All functions are pure (no I/O, no model, no git) so the rules are exhaustively
-unit-testable. Line-diffing uses stdlib ``difflib`` — no new dependencies.
+unit-testable. Line-diffing uses histogram diff (:mod:`capybase.diff`) — no new
+dependencies.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from capybase.conflict_model import ConflictUnit
+from capybase.diff import line_matcher
 from capybase.merge_intent import classify_side, direction
 
 Rule = Literal[
@@ -89,13 +91,13 @@ def _normalize(text: str) -> str:
 def _changed_line_indices(base: str, other: str) -> set[int]:
     """Line indices (0-based, into ``other``) where ``other`` differs from ``base``.
 
-    Uses ``difflib`` opcodes to find replace/insert/delete blocks relative to the
-    other side, mapping them onto the other side's line numbers. Pure line diff.
+    Uses histogram-diff opcodes to find replace/insert/delete blocks relative
+    to the other side, mapping them onto the other side's line numbers.
     """
     base_lines = base.splitlines()
     other_lines = other.splitlines()
     changed: set[int] = set()
-    matcher = difflib.SequenceMatcher(a=base_lines, b=other_lines, autojunk=False)
+    matcher = line_matcher(base_lines, other_lines)
     for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             continue
@@ -299,7 +301,7 @@ def _base_changed_lines(base: list[str], other: list[str]) -> set[int]:
     """Base line indices (0-based) that ``other`` modifies (replace/delete/insert
     affecting that base line). Used to test whether two sides' edits overlap."""
     changed: set[int] = set()
-    matcher = difflib.SequenceMatcher(a=base, b=other, autojunk=False)
+    matcher = line_matcher(base, other)
     for tag, i1, i2, _j1, _j2 in matcher.get_opcodes():
         if tag == "equal":
             continue
@@ -345,7 +347,7 @@ def _token_change_ops(base_toks: list[str], other_toks: list[str]) -> list[tuple
     so a disjoint merge can splice each side's replacement into base in one pass.
     """
     ops: list[tuple[int, int, list[str]]] = []
-    matcher = difflib.SequenceMatcher(a=base_toks, b=other_toks, autojunk=False)
+    matcher = line_matcher(base_toks, other_toks)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag != "equal":
             ops.append((i1, i2, other_toks[j1:j2]))
@@ -706,16 +708,14 @@ def _pure_insertion_runs(
     """Map each base-line index to the RUN of lines ``side`` inserted before it.
 
     Returns None if ``side`` is not a pure insertion (it modified or deleted a
-    base line). Uses difflib to align ``side_lines`` against ``base_lines``:
+    base line). Uses histogram diff to align ``side_lines`` against ``base_lines``:
     every base line must appear unchanged and in order; the only allowed
     difference is ``insert`` opcodes, each recorded as a run keyed by the base
     index it precedes. A run anchored at ``len(base_lines)`` is a trailing
     insertion (after the last base line). This run-based model (vs. per-line
     keys) correctly handles multi-line insertion blocks.
     """
-    import difflib
-
-    sm = difflib.SequenceMatcher(a=base_lines, b=side_lines, autojunk=False)
+    sm = line_matcher(base_lines, side_lines)
     runs: dict[int, list[str]] = {}
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "equal":
@@ -732,7 +732,7 @@ def _pure_insertion_runs(
 def _try_zealous_merge(base: str, current: str, replayed: str) -> str | None:
     """Per-base-line 3-way merge (survey §1.4 zealous refinement).
 
-    Aligns each side against base line-by-line via ``difflib``. For every base
+    Aligns each side against base line-by-line via histogram diff. For every base
     region, resolves it as:
 
     - **agreed** — both sides made the same replacement → emit it.
@@ -807,7 +807,7 @@ def _change_regions(
     """
     regions: dict[int, tuple[int, list[str]]] = {}
     has_insert = False
-    matcher = difflib.SequenceMatcher(a=base, b=other, autojunk=False)
+    matcher = line_matcher(base, other)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             continue
@@ -868,7 +868,7 @@ def _regions_against_base(base: list[str], other: list[str]) -> dict[int, tuple[
     insertions (i1==i2) are omitted — their base anchor is ambiguous for merging.
     """
     regions: dict[int, tuple[int, list[str]]] = {}
-    matcher = difflib.SequenceMatcher(a=base, b=other, autojunk=False)
+    matcher = line_matcher(base, other)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             continue

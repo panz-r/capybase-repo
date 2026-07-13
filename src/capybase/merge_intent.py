@@ -24,15 +24,16 @@ failure modes:
 
 Everything here is a pure function of text — no git, no model, no I/O — so the
 hard logic is exhaustively unit-testable without a repository. Line diffing
-uses stdlib ``difflib`` (no new dependencies), the same approach
+uses histogram diff (:mod:`capybase.diff`, no new dependencies), the same approach
 :mod:`structural_resolver` and :mod:`conflict_extractor` already use.
 """
 
 from __future__ import annotations
 
-import difflib
 from dataclasses import dataclass, field
 from typing import Literal
+
+from capybase.diff import line_matcher
 
 SideKind = Literal["unchanged", "added", "deleted", "modified"]
 
@@ -139,7 +140,7 @@ def classify_side(base: str, side: str) -> SideKind:
     if nb_side == 0:
         return "deleted"
 
-    matcher = difflib.SequenceMatcher(a=base_lines, b=side_lines, autojunk=False)
+    matcher = line_matcher(base_lines, side_lines)
     deleted = 0  # base lines removed
     added = 0  # side lines introduced (insert or replace's b-half)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
@@ -246,8 +247,8 @@ def _removed_regions(base: str, ours: str) -> list[tuple[int, int, list[str]]]:
     base_lines = base.splitlines()
     ours_lines = ours.splitlines()
     regions: list[tuple[int, int, list[str]]] = []
-    for tag, i1, i2, _j1, _j2 in difflib.SequenceMatcher(
-        a=base_lines, b=ours_lines, autojunk=False
+    for tag, i1, i2, _j1, _j2 in line_matcher(
+        base_lines, ours_lines
     ).get_opcodes():
         if tag == "delete" and i2 > i1:
             regions.append((i1, i2, base_lines[i1:i2]))
@@ -264,7 +265,7 @@ def _coverage_against(block_lines: list[str], result_lines: list[str]) -> float:
     """
     if not block_lines:
         return 0.0
-    matcher = difflib.SequenceMatcher(a=block_lines, b=result_lines, autojunk=False)
+    matcher = line_matcher(block_lines, result_lines)
     matched = sum(m.size for m in matcher.get_matching_blocks())
     return matched / len(block_lines)
 

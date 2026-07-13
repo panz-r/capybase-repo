@@ -44,13 +44,13 @@ def _side_shape(base_norm: str, side_norm: str) -> tuple[int, int, int]:
     ``changed`` = replace-opcode pairs. These three numbers capture the edit
     structure independent of the actual content.
     """
-    import difflib
+    from capybase.diff import line_matcher
 
     if not side_norm and not base_norm:
         return (0, 0, 0)
     b_lines = base_norm.split("\n") if base_norm else []
     s_lines = side_norm.split("\n") if side_norm else []
-    sm = difflib.SequenceMatcher(a=b_lines, b=s_lines, autojunk=False)
+    sm = line_matcher(b_lines, s_lines)
     added = removed = changed = 0
     for tag, i1, i2, j1, j2 in sm.get_opcodes():
         if tag == "insert":

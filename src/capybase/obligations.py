@@ -30,8 +30,9 @@ the older validators structurally cannot see.
 
 from __future__ import annotations
 
-import difflib
 from dataclasses import dataclass, field
+
+from capybase.diff import line_matcher
 
 
 @dataclass(frozen=True)
@@ -130,7 +131,7 @@ def extract_obligations(unit: "object") -> Obligations:
 def _side_obligations(base: str, side: str) -> SideObligations:
     """What ``side`` did to ``base``, as added/changed/removed line content.
 
-    Walks :class:`difflib.SequenceMatcher` opcodes on the line lists:
+    Walks histogram-diff (:func:`capybase.diff.line_matcher`) opcodes on the line lists:
     - ``insert`` → ``added`` (the side's new lines).
     - ``delete`` → ``removed`` (base lines the side dropped).
     - ``replace`` → ``changed`` (paired old/new lines). A multi-line replace is
@@ -146,7 +147,7 @@ def _side_obligations(base: str, side: str) -> SideObligations:
     changed: list[tuple[str, str]] = []
     removed: list[str] = []
 
-    matcher = difflib.SequenceMatcher(a=base_lines, b=side_lines, autojunk=False)
+    matcher = line_matcher(base_lines, side_lines)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             continue
