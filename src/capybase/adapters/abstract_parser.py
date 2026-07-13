@@ -1518,12 +1518,18 @@ def _go_declaration_name(
                     return name_tok, is_receiver
 
     # Type declaration: ``type Name struct/interface`` — name is between ``type``
-    # and the class keyword (both tokens must be present around the name).
-    if last_kw in _A_CLASS_KEYWORDS and last_kw_idx >= 2:
-        if toks[last_kw_idx - 2] == "type":
-            cand = toks[last_kw_idx - 1]
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
-                return cand, False
+    # and the class keyword. For Go generics (``type Container[T any] struct``)
+    # the type-param list splits into extra tokens, so scan backwards from the
+    # class keyword for the ``type`` keyword; the name is the token right after it
+    # (with any ``[...]`` stripped).
+    if last_kw in _A_CLASS_KEYWORDS:
+        for back in range(last_kw_idx - 1, -1, -1):
+            if toks[back] == "type" and back + 1 <= last_kw_idx:
+                cand = toks[back + 1]
+                cand = re.split(r"\[", cand, maxsplit=1)[0]
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
+                    return cand, False
+                break
 
     return None, False
 
@@ -2276,55 +2282,102 @@ def _detect_renames(
     right_units: list[StructuralUnit],
     aligned: list[AlignedUnit],
 ) -> None:
-    """Detect renamed units via body-fingerprint matching and append them.
+    """Detect renamed units via body-fingerprint matching and re-pair them.
 
-    A unit in left (or right) whose body fingerprint matches a base unit that
-    was NOT identity-matched is a rename. This is conservative — it only pairs
-    on exact body-fingerprint match (the header-stripped digest), so a rename +
-    heavy body edit won't pair (it'll appear as added+removed, which is safe)."""
-    # Index base units by body fingerprint for lookup. Skip content-less bodies
-    # (fingerprint ``l{count}`` with no ``:digest``): many distinct empty bodies
-    # (pass-only methods, docstring-only functions) share ``l0`` and would pair
-    # as false renames. Fix #13 — the old guard ``f"l{body.count(chr(10))}"`` was
-    # already broken (it compared against the wrong count and never matched).
+    A unit classified as ``added_*`` (no base counterpart by identity) whose body
+    fingerprint matches a ``deleted_*`` base unit is a rename — the identity pass
+    saw the new name as a pure addition and the old name as a deletion, but the
+    bodies match, so it's really a rename. This re-pairs those alignments into
+    ``RENAMED`` entries (mutating ``aligned`` in place: the stale added/deleted
+    entries are removed and the rename entry appended).
+
+    Conservative — pairs only on exact body-fingerprint match (the header-stripped
+    digest), so a rename + heavy body edit won't pair (stays added+removed, safe).
+    """
+    # Index DELETED base units by body fingerprint. A base unit is a rename
+    # candidate only when it's gone from the side in question (classified as a
+    # deletion), NOT when it's identity-matched (present under its original name).
+    # Skip content-less bodies (fix #13): distinct empty bodies share ``l0``.
     base_by_fp: dict[str, StructuralUnit] = {}
     for u in base_units:
         if _fingerprint_has_content(u.fingerprint):
             base_by_fp[u.fingerprint] = u
 
-    # Find base units already matched by identity (so we don't re-pair them).
-    matched_base_ids = {a.base.identity for a in aligned if a.base is not None}
+    # Base identities still present under their original name on each side —
+    # these are NOT rename sources (they weren't deleted).
+    left_present_ids = {a.left.identity for a in aligned if a.left is not None and a.base is not None}
+    right_present_ids = {a.right.identity for a in aligned if a.right is not None and a.base is not None}
+    # Base identities deleted by each side (no side entry under the original name).
+    deleted_base_ids = {
+        a.base.identity for a in aligned
+        if a.base is not None and a.left is None and a.right is None
+    }
 
-    # Check left units for renames of unmatched base units.
-    matched_left_ids = {a.left.identity for a in aligned if a.left is not None}
+    # Rename candidates on each side: units classified as added (no base) whose
+    # fingerprint matches a deleted base unit. Pair them and remove the stale
+    # added/deleted alignments, replacing with a RENAMED entry.
+    consumed_base_ids: set = set()
+    consumed_side_ids: set = set()
+    new_entries: list[AlignedUnit] = []
+    indices_to_drop: set[int] = set()
+
+    def _try_pair_side(side_unit: StructuralUnit, side: str) -> None:
+        if side_unit.identity in consumed_side_ids:
+            return
+        if not _fingerprint_has_content(side_unit.fingerprint):
+            return
+        base_match = base_by_fp.get(side_unit.fingerprint)
+        if base_match is None or base_match.identity in consumed_base_ids:
+            return
+        # The base unit must be deleted (not present under its original name).
+        if base_match.identity not in deleted_base_ids:
+            return
+        # Find the other side's entry for this new name (agreed rename?).
+        other = left_units if side == "right" else right_units
+        other_match = next((u for u in other if u.identity == side_unit.identity), None)
+        # Build the RENAMED entry.
+        if side == "left":
+            new_entries.append(AlignedUnit(
+                base=base_match, left=side_unit, right=other_match,
+                change_kind=_CHANGE_KIND_RENAMED,
+            ))
+        else:
+            new_entries.append(AlignedUnit(
+                base=base_match,
+                left=next((u for u in left_units if u.identity == side_unit.identity), None),
+                right=side_unit,
+                change_kind=_CHANGE_KIND_RENAMED,
+            ))
+        consumed_base_ids.add(base_match.identity)
+        consumed_side_ids.add(side_unit.identity)
+
+    # Mark the stale added/deleted alignment indices for removal as we pair.
+    # First, index alignments by their side identities for quick lookup.
     for lu in left_units:
-        if lu.identity in matched_left_ids or not lu.fingerprint:
-            continue
-        base_match = base_by_fp.get(lu.fingerprint)
-        if base_match and base_match.identity not in matched_base_ids:
-            # Rename: base_match → lu (in left). Check if right also has it.
-            ru = next((u for u in right_units if u.identity == lu.identity), None)
-            aligned.append(AlignedUnit(
-                base=base_match, left=lu, right=ru,
-                change_kind=_CHANGE_KIND_RENAMED,
-            ))
-            matched_base_ids.add(base_match.identity)
-            matched_left_ids.add(lu.identity)
-
-    # Check right units for renames.
-    matched_right_ids = {a.right.identity for a in aligned if a.right is not None}
+        _try_pair_side(lu, "left")
     for ru in right_units:
-        if ru.identity in matched_right_ids or not ru.fingerprint:
-            continue
-        base_match = base_by_fp.get(ru.fingerprint)
-        if base_match and base_match.identity not in matched_base_ids:
-            lu = next((u for u in left_units if u.identity == ru.identity), None)
-            aligned.append(AlignedUnit(
-                base=base_match, left=lu, right=ru,
-                change_kind=_CHANGE_KIND_RENAMED,
-            ))
-            matched_base_ids.add(base_match.identity)
-            matched_right_ids.add(ru.identity)
+        _try_pair_side(ru, "right")
+
+    if not new_entries:
+        return
+
+    # Remove the stale added_left/added_right entries for consumed side units,
+    # and the deleted_both entries for consumed base units.
+    for idx, a in enumerate(aligned):
+        # Drop added entries whose side unit was consumed as a rename target.
+        if a.left is not None and a.base is None and a.left.identity in consumed_side_ids:
+            indices_to_drop.add(idx)
+        elif a.right is not None and a.base is None and a.right.identity in consumed_side_ids:
+            indices_to_drop.add(idx)
+        # Drop the deleted_both entry for a consumed base unit.
+        elif (
+            a.base is not None and a.left is None and a.right is None
+            and a.base.identity in consumed_base_ids
+        ):
+            indices_to_drop.add(idx)
+    # Rebuild aligned without the stale entries, then append the renames.
+    aligned[:] = [a for idx, a in enumerate(aligned) if idx not in indices_to_drop]
+    aligned.extend(new_entries)
 
 
 # ---------------------------------------------------------------------------

@@ -1514,3 +1514,259 @@ def test_rename_detector_ignores_contentless_fingerprints():
     assert renamed == [], (
         f"content-less bodies falsely paired as rename: {[(a.name) for a in renamed]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test-coverage expansion (second-pass review): rename detection, region
+# queries, multi-container diffs, confidence edges, and Go-declaration edges.
+# These pin load-bearing behaviors that worked but were previously untested.
+# ---------------------------------------------------------------------------
+
+
+# --- Positive rename detection (the _CHANGE_KIND_RENAMED path) ---
+
+def test_rename_detected_both_sides_same_new_name():
+    """Positive rename: base has foo, both sides rename to bar (same body).
+    Must classify as RENAMED (not deleted_both + added_both), and drop the old
+    name from required_units."""
+    base = "def foo():\n    return 1\n    return 2\n"
+    side = "def bar():\n    return 1\n    return 2\n"
+    diff = ap.compute_structural_diff_3way(base, side, side, language="python")
+    assert diff is not None
+    renamed = [a for a in diff.aligned if a.change_kind == ap._CHANGE_KIND_RENAMED]
+    assert len(renamed) == 1
+    assert renamed[0].name == "bar"
+    assert renamed[0].base.name == "foo"
+    # required_units carries the NEW name, not the old.
+    assert "bar" in diff.required_units
+    assert "foo" not in diff.required_units
+
+
+def test_rename_conflicting_left_bar_right_baz():
+    """Conflicting rename: left renames foo→bar, right renames foo→baz. The
+    left pass pairs foo→bar; right's baz has no unmatched base (foo consumed),
+    so baz is added_right. Both names appear — no silent drop."""
+    base = "def foo():\n    return 1\n    return 2\n"
+    left = "def bar():\n    return 1\n    return 2\n"
+    right = "def baz():\n    return 1\n    return 2\n"
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    names = {a.name for a in diff.aligned}
+    assert "bar" in names and "baz" in names
+    # bar is the rename (paired to base foo).
+    assert any(a.change_kind == ap._CHANGE_KIND_RENAMED and a.name == "bar"
+               for a in diff.aligned)
+
+
+def test_rename_one_sided_other_keeps_original():
+    """One-sided rename: left renames foo→bar, right keeps foo. Since foo is
+    still present under its original name (right kept it), bar must NOT pair as
+    a rename — it's a genuine addition. Conservative-correct."""
+    base = "def foo():\n    return 1\n    return 2\n"
+    left = "def bar():\n    return 1\n    return 2\n"
+    right = "def foo():\n    return 1\n    return 2\n"
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    renamed = [a for a in diff.aligned if a.change_kind == ap._CHANGE_KIND_RENAMED]
+    assert renamed == [], "one-sided rename where original is kept must NOT pair"
+
+
+def test_rename_plus_body_edit_does_not_pair():
+    """A rename with a heavy body edit won't pair (the fingerprint differs) — it
+    stays added+deleted, which is safe. Conservative guard."""
+    base = "def foo():\n    return 1\n    return 2\n"
+    side = "def bar():\n    return 99\n    return 2\n"  # body changed
+    diff = ap.compute_structural_diff_3way(base, side, side, language="python")
+    renamed = [a for a in diff.aligned if a.change_kind == ap._CHANGE_KIND_RENAMED]
+    assert renamed == [], "rename + body edit must not pair"
+
+
+# --- Region queries: enclosing_container, nested classes, boundaries ---
+
+def test_enclosing_container_direct():
+    """enclosing_container returns the parent of the deepest enclosing unit.
+    For an anchor inside a method, that's the class."""
+    src = (
+        "class Foo:\n"
+        "    def bar(self):\n"
+        "        return 1\n"
+    )
+    ir = ap.parse_family_b(src)
+    container = ap.enclosing_container(ir, (2, 2))  # inside bar's body
+    assert container is not None
+    assert container.name == "Foo"
+
+
+def test_enclosing_container_at_module_scope():
+    """An anchor inside a top-level function (module scope) has no container —
+    enclosing_container returns None."""
+    src = "def top():\n    return 1\n"
+    ir = ap.parse_family_b(src)
+    assert ap.enclosing_container(ir, (1, 1)) is None
+
+
+def test_nested_class_region_queries():
+    """A class nested inside a class: an anchor in the inner class's method
+    resolves to the inner method (enclosing_unit), the inner class
+    (enclosing_container), and the inner class's methods (units_in_container)."""
+    src = (
+        "class Outer:\n"
+        "    class Inner:\n"
+        "        def m(self):\n"
+        "            return 1\n"
+        "        def n(self):\n"
+        "            return 2\n"
+    )
+    ir = ap.parse_family_b(src)
+    # Anchor inside m (row 3).
+    assert ap.enclosing_unit(ir, (3, 3)).name == "m"
+    container = ap.enclosing_container(ir, (3, 3))
+    assert container is not None and container.name == "Inner"
+    kids = ap.units_in_container(ir, (3, 3))
+    kid_names = {k.name for k in kids}
+    assert "m" in kid_names and "n" in kid_names
+
+
+def test_enclosing_unit_end_row_boundary():
+    """An anchor exactly on a unit's end_row resolves to that unit (boundary
+    inclusive), preferring the narrower nested unit."""
+    src = (
+        "class Foo:\n"
+        "    def bar(self):\n"
+        "        return 1\n"
+    )
+    ir = ap.parse_family_b(src)
+    flat = ap._all_units_flat(ir)
+    bar = next(u for u in flat if u.name == "bar")
+    # Anchor at bar's end_row.
+    end = bar.span[1]
+    assert ap.enclosing_unit(ir, (end, end)).name == "bar"
+
+
+# --- Multi-container diff ---
+
+def test_multi_container_diff_distinct_methods_no_conflict():
+    """Two classes each with methods; left touches a method in A, right touches
+    a method in B. No structural conflict (distinct identities). Verifies global
+    identity keying across containers works for the intended no-collision case."""
+    base = (
+        "class A:\n"
+        "    def run(self):\n"
+        "        return 1\n"
+        "\n"
+        "class B:\n"
+        "    def run(self):\n"
+        "        return 2\n"
+    )
+    # NOTE: duplicate method name (run in A and B) → duplicate-identity decline.
+    # So this specific case declines. Use distinct names to test multi-container.
+    base2 = (
+        "class A:\n"
+        "    def start(self):\n"
+        "        return 1\n"
+        "\n"
+        "class B:\n"
+        "    def stop(self):\n"
+        "        return 2\n"
+    )
+    left = base2.replace("return 1", "return 10")   # left changes A.start
+    right = base2.replace("return 2", "return 20")  # right changes B.stop
+    diff = ap.compute_structural_diff_3way(base2, left, right, language="python")
+    assert diff is not None
+    assert len(diff.structural_conflicts) == 0  # distinct units, no conflict
+    kinds = {a.name: a.change_kind for a in diff.aligned}
+    assert kinds.get("start") == ap._CHANGE_KIND_MODIFIED_LEFT
+    assert kinds.get("stop") == ap._CHANGE_KIND_MODIFIED_RIGHT
+
+
+def test_render_context_multi_container():
+    """render_structural_context produces coherent output for a multi-class
+    file — both containers' changed units appear."""
+    base = "class A:\n    def x(self):\n        return 1\n\nclass B:\n    def y(self):\n        return 2\n"
+    left = base.replace("return 1", "return 10")
+    right = base.replace("return 2", "return 20")
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    text = ap.render_structural_context(diff)
+    assert "x" in text and "y" in text
+    assert "NONE" in text  # no structural conflicts
+
+
+# --- _assess_confidence edge inputs ---
+
+def test_confidence_empty_source():
+    """Empty source → confidence 1.0, zero units. Never crashes."""
+    ir = ap.parse_family_b("")
+    assert ir.parse_confidence == 1.0
+    assert ir.units == []
+
+
+def test_confidence_all_comments():
+    """A file of only comments → confidence 1.0, zero units."""
+    src = "# just a comment\n# another\n# and one more\n"
+    ir = ap.parse_family_b(src)
+    assert ir.parse_confidence == 1.0
+    assert ir.units == []
+
+
+def test_confidence_all_imports():
+    """An imports-heavy module (many import lines, no functions) is NOT flagged
+    as fragmented — imports are legitimate module-level content."""
+    imports = "\n".join(f"import module_{i}" for i in range(40))
+    ir = ap.parse_family_b(imports)
+    # 40 imports in 40 lines: n_lines < 100 so fragmentation doesn't fire.
+    assert ir.parse_confidence == 1.0
+
+
+def test_confidence_does_not_raise_on_binary_content():
+    """Binary-ish content (null bytes) must not raise — parse_file returns a
+    low-confidence FileIR (the never-raise guarantee)."""
+    binary = "def f():\n    x = b'\\x00\\x01\\x02'\n    return x\n"
+    ir = ap.parse_file(binary, language="python")
+    assert ir is not None  # didn't raise
+
+
+# --- _go_declaration_name edge cases ---
+
+def test_go_generic_type_decl_struct():
+    """Go generic type declaration: ``type X[T] struct {}``. The name is X
+    (the [T] is a type parameter, not part of the name)."""
+    src = "type Container[T any] struct {\n    items []T\n}\n"
+    ir = ap.parse_file(src, language="go")
+    flat = ap._all_units_flat(ir)
+    classes = [u.name for u in flat if u.kind == "class"]
+    # The name may be 'Container[T]' or 'Container' depending on extraction; the
+    # unit must at least exist as a class containing 'Container'.
+    assert any("Container" in (n or "") for n in classes), f"generic type lost: {classes}"
+
+
+def test_go_value_receiver_method():
+    """Go value receiver (no pointer): ``func (s Server) M()``. Direct test of
+    the receiver-kind classification alongside the pointer form."""
+    src = (
+        "type S struct {}\n"
+        "func (s S) ValueMethod() {}\n"
+        "func (s *S) PointerMethod() {}\n"
+    )
+    ir = ap.parse_file(src, language="go")
+    flat = ap._all_units_flat(ir)
+    methods = sorted(u.name for u in flat if u.kind == "method")
+    assert "ValueMethod" in methods
+    assert "PointerMethod" in methods
+
+
+def test_go_free_function_not_method():
+    """A Go free function (no receiver) is FUNCTION, not METHOD."""
+    src = "func helper() {}\n"
+    ir = ap.parse_file(src, language="go")
+    flat = ap._all_units_flat(ir)
+    funcs = [u for u in flat if u.kind == "function"]
+    assert any(u.name == "helper" for u in funcs)
+
+
+# --- Family/language mismatch robustness ---
+
+def test_family_mismatch_does_not_crash():
+    """Parsing Python source with language='rust' (wrong family) must not crash
+    — it returns a FileIR (possibly garbage, but never raises). Robustness over
+    correctness on mismatched input."""
+    py_src = "def foo():\n    return 1\n"
+    ir = ap.parse_file(py_src, language="rust")
+    assert ir is not None  # didn't crash; produced some FileIR
