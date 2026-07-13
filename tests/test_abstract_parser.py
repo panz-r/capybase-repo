@@ -1069,3 +1069,170 @@ def test_fragmentation_still_flags_non_test_garbage():
     ir = ap.parse_family_b(src)
     # Heuristic still fires for non-test fragmentation.
     assert ir.parse_confidence < 1.0, "non-test fragmentation should be flagged"
+
+
+# ---------------------------------------------------------------------------
+# Family A regression suite — Go receiver methods, Go type-struct, raw/verbatim
+# strings, and field-detection-fold correctness. Each pins one bug from review.
+# ---------------------------------------------------------------------------
+
+
+def test_go_receiver_method_name_recovered():
+    """Fix #4: Go receiver methods ``func (recv) Name()`` lost their name (the
+    keyword path took the token after ``func`` — ``(`` — which stripped to
+    empty). The name is the identifier before the final param list."""
+    src = (
+        "package main\n"
+        "\n"
+        "type Server struct { port int }\n"
+        "\n"
+        "func (s *Server) Start() {\n"
+        "    s.run()\n"
+        "}\n"
+        "\n"
+        "func (s Server) Stop() {\n"
+        "    s.halt()\n"
+        "}\n"
+    )
+    ir = ap.parse_file(src, language="go")
+    flat = ap._all_units_flat(ir)
+    methods = sorted(u.name for u in flat if u.kind == "method")
+    assert "Start" in methods, f"receiver method name lost: {methods}"
+    assert "Stop" in methods
+
+
+def test_go_type_struct_is_class_not_field():
+    """Fix #5: ``type X struct {}`` put the name BEFORE ``struct``, so the
+    class-keyword path (which expects the name AFTER) found none, and the
+    field-emitter (keying on ``type``) misclassified it as a FIELD. Must be a
+    CLASS named after the type."""
+    src = "type Server struct {\n    port int\n}\n"
+    ir = ap.parse_file(src, language="go")
+    flat = ap._all_units_flat(ir)
+    classes = [u for u in flat if u.kind == "class"]
+    assert any(u.name == "Server" for u in classes), (
+        f"Server not a class: {[(u.kind, u.name) for u in flat]}"
+    )
+    # And NOT double-counted as a field.
+    fields = [u for u in flat if u.kind == "field" and u.name == "Server"]
+    assert fields == [], "type-struct double-counted as field"
+
+
+def test_go_type_interface_is_class():
+    """Fix #5 for ``type X interface``: same name-before-keyword shape."""
+    src = (
+        "type Reader interface {\n"
+        "    Read(p []byte) (n int, err error)\n"
+        "}\n"
+    )
+    ir = ap.parse_file(src, language="go")
+    flat = ap._all_units_flat(ir)
+    classes = [u.name for u in flat if u.kind == "class"]
+    assert "Reader" in classes
+
+
+def test_rust_hash_raw_string_with_braces():
+    """Fix #9: Rust raw strings with hash delimiters ``r#\"...\"#`` close on
+    \"# (not \"), so a ``{`` or ``}`` inside must not perturb brace depth. A
+    method following the raw string must still be detected correctly."""
+    src = (
+        "impl C {\n"
+        "    fn a() {\n"
+        '        let s = r#"\n'
+        "        { not a scope }\n"
+        '        "#;\n'
+        "    }\n"
+        "    fn b() {\n"
+        "        return 2;\n"
+        "    }\n"
+        "}\n"
+    )
+    ir = ap.parse_file(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    methods = sorted(u.name for u in flat if u.kind == "method")
+    # Both methods detected; the raw string braces didn't corrupt depth tracking.
+    assert "a" in methods and "b" in methods, f"methods: {methods}"
+
+
+def test_rust_raw_string_embedded_quote_does_not_close():
+    """Fix #9 (stronger): a Rust raw string whose CONTENT contains a ``"`` must
+    not close the string early. Before the fix, an embedded ``"`` followed by
+    unbalanced braces corrupted depth tracking and absorbed following functions
+    into the string's owner."""
+    src = (
+        "fn f() {\n"
+        '    let a = r#"x " y { { {"#;\n'
+        "}\n"
+        "fn g() {\n"
+        "    return 2;\n"
+        "}\n"
+    )
+    ir = ap.parse_file(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    names = {u.name for u in flat}
+    assert "g" in names, (
+        f"function g lost — raw string embedded quote closed early: {names}"
+    )
+
+
+def test_csharp_verbatim_string_multiline():
+    """Fix #9: C# verbatim strings ``@\"...\"`` span lines and may contain
+    braces. A method after a multi-line verbatim string must still be found."""
+    src = (
+        "class C {\n"
+        '    string query = @"\n'
+        "    SELECT * FROM t\n"
+        "    WHERE x = {0}\n"
+        '    ";\n'
+        "    void M() {}\n"
+        "}\n"
+    )
+    ir = ap.parse_file(src, language="csharp")
+    flat = ap._all_units_flat(ir)
+    methods = [u.name for u in flat if u.kind == "method"]
+    assert "M" in methods, f"method after verbatim string lost: {methods}"
+
+
+def test_field_detection_top_level_const():
+    """Fix #10 regression guard: a top-level ``pub const N: u32 = 5;`` is still
+    detected as a FIELD unit after folding field detection into the main pass
+    (removing the second whole-file re-scan)."""
+    src = (
+        "pub const N: u32 = 5;\n"
+        "\n"
+        "pub fn main() {\n"
+        "    let _ = N;\n"
+        "}\n"
+    )
+    ir = ap.parse_file(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    fields = [u.name for u in flat if u.kind == "field"]
+    assert "N" in fields, f"top-level const not a field: {fields}"
+
+
+def test_field_inside_function_body_not_top_level():
+    """Fix #10: a ``const``/``let`` INSIDE a function body must NOT be emitted
+    as a top-level field unit — only depth-0 declarations are entities."""
+    src = (
+        "fn main() {\n"
+        "    const INNER: u32 = 42;\n"
+        "    let x = 1;\n"
+        "}\n"
+    )
+    ir = ap.parse_file(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    fields = [u.name for u in flat if u.kind == "field"]
+    # INNER is inside main's body, not top-level — must not be a field entity.
+    assert "INNER" not in fields, f"body-local const leaked as field: {fields}"
+    assert "x" not in fields
+
+
+def test_rust_type_alias_still_a_field():
+    """Fix #10/B2 regression guard: Rust ``type X = Y;`` (a type alias, NOT a
+    Go ``type X struct``) is still a FIELD — the backward-name-lookup for Go
+    must not misfire on Rust type aliases."""
+    src = "type Foo = Bar;\n\nfn main() {}\n"
+    ir = ap.parse_file(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    fields = [u.name for u in flat if u.kind == "field"]
+    assert "Foo" in fields, f"Rust type alias not a field: {fields}"

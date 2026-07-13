@@ -901,6 +901,52 @@ class _OpenAUnit:
     attr_start_row: int | None = None
 
 
+#: String-prefix runes that introduce a non-plain string literal whose closing
+#: quote rule differs from a bare ``"``. Used by :func:`_match_string_prefix` to
+#: recover Rust raw strings (``r``/``b``/``rb``/``br`` + optional ``#`` run),
+#: where an embedded ``"`` in the content must NOT close the string (fix #9).
+_RAW_PREFIX_RUNES = frozenset("rRbB")
+
+
+def _match_string_prefix(src: str, quote_idx: int) -> int | None:
+    """Detect a string prefix ending at ``src[quote_idx] == '"'``.
+
+    Returns the number of trailing ``#`` chars for a Rust raw string
+    (``r#"..."#`` → N; ``r"..."`` → 0), or ``0`` for a recognized prefix that
+    still closes on a plain ``"`` (byte strings ``b"..."``, ordinary ``"``).
+    Returns ``None`` when no prefix is present (the caller treats it as a plain
+    quote with hash count 0).
+
+    Recognized Rust raw forms: ``r#*"`` / ``b"`` / ``br#*"`` / ``rb#*"`` — the
+    rune ``r`` (possibly preceded by ``b``) optionally followed by 1+ ``#``.
+    A raw string's closer is ``"`` + the same number of ``#``.
+    """
+    j = quote_idx - 1
+    # Count trailing ``#`` (the raw-string hash count).
+    hash_count = 0
+    while j >= 0 and src[j] == "#":
+        hash_count += 1
+        j -= 1
+    # Collect the identifier-run of prefix runes (r, b, br, rb — only these).
+    runes = []
+    while j >= 0 and src[j] in _RAW_PREFIX_RUNES:
+        runes.append(src[j])
+        j -= 1
+    if not runes:
+        # No prefix rune. ``#`` before a bare ``"`` (e.g. ``#"``) isn't a raw
+        # string — treat as plain quote.
+        return 0
+    prefix = "".join(reversed(runes)).lower()
+    # Valid raw-string prefixes: ``r`` or ``br``/``rb`` (raw / byte-raw). A bare
+    # ``b`` is a byte string that closes on a plain ``"`` (hash_count must be 0).
+    if prefix in ("r", "br", "rb"):
+        return hash_count
+    if prefix == "b" and hash_count == 0:
+        return 0
+    # Unrecognized rune combination — treat as plain (no special closer).
+    return 0
+
+
 def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
     r"""Parse a brace-delimited (Family A) source into a :class:`FileIR`.
 
@@ -932,6 +978,10 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
     paren_depth = 0  # track () so we don't misread a ``{`` inside a call
     # String/comment state machine.
     in_str: str | None = None  # one of "'", '"', "`", "char", or None
+    # When in_str == '"' and str_hash_count > 0, we're inside a Rust raw string
+    # (``r#"..."#``) that closes on ``"`` followed by exactly this many ``#``.
+    # A bare ``"`` in the content does NOT close it (fix #9). 0 = ordinary quote.
+    str_hash_count = 0
     in_line_comment = False
     in_block_comment = False
     # Pending attribute/macro line (#[...] / @decorator) preceding a decl.
@@ -986,6 +1036,11 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             continue
         if in_str is not None:
             if ch == "\\":
+                # Escapes only apply to NON-raw strings. A raw string (hash
+                # count > 0) treats backslash literally — skip the escape skip.
+                if in_str == '"' and str_hash_count > 0:
+                    i += 1
+                    continue
                 i += 2  # skip escaped char
                 continue
             if in_str == "char" and ch == "'":
@@ -997,6 +1052,19 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 i += 1
                 continue
             if in_str == '"' and ch == '"':
+                # Raw string closer: ``"`` must be followed by exactly
+                # ``str_hash_count`` ``#`` chars (fix #9). An embedded ``"`` in
+                # the content (with no matching ``#`` run) does NOT close it.
+                if str_hash_count > 0:
+                    tail = src[i + 1 : i + 1 + str_hash_count]
+                    if len(tail) == str_hash_count and tail == "#" * str_hash_count:
+                        in_str = None
+                        str_hash_count = 0
+                        i += 1 + str_hash_count
+                        continue
+                    # Not the closer — content quote. Fall through to advance.
+                    i += 1
+                    continue
                 in_str = None
                 i += 1
                 continue
@@ -1017,7 +1085,20 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             i += 2
             continue
         if ch == '"':
-            in_str = '"'
+            # Detect raw/byte raw strings (Rust) and other prefixed strings so
+            # the closer matches the opener (fix #9). A Rust raw string
+            # ``r#"..."#`` closes on ``"`` + N ``#``; without this, an embedded
+            # ``"`` in the content closes early and corrupts brace counting.
+            # Look back at the run of identifier chars / ``#`` preceding ``"``.
+            prefix = _match_string_prefix(src, i)
+            if prefix is not None:
+                # prefix is (kind, hash_count). kind "raw" → hash_count ``#``;
+                # we model all as ordinary ``"`` strings with an optional hash.
+                in_str = '"'
+                str_hash_count = prefix
+            else:
+                in_str = '"'
+                str_hash_count = 0
             i += 1
             continue
         if ch == "`":
@@ -1111,6 +1192,31 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
 
         # Statement terminators reset the token buffer (a new statement begins).
         if ch == ";":
+            # In-main-pass field detection (fix #10): at top level, a buffer
+            # ending in ``;`` that matches the field-declaration shape emits a
+            # FIELD unit here — no second whole-file re-scan needed. This
+            # replaces the divergent ``_emit_a_field_units`` post-pass.
+            if brace_depth == 0 and not stack:
+                fname = _field_name_from_buf(buf)
+                if fname is not None and language not in (None, "c", "h"):
+                    # Compute the statement's byte range (statement start → this ``;``).
+                    decl_start = _find_stmt_start(src, i, _line_index)
+                    end_row = cur_row_at(i)
+                    start_row_f = cur_row_at(decl_start)
+                    body = src[decl_start : i + 1]
+                    # Dedup against already-emitted units (a brace-opened decl
+                    # with the same name, e.g. a Go ``type X struct``).
+                    existing_f = {u.name for u in units if u.name}
+                    if fname not in existing_f:
+                        units.append(
+                            StructuralUnit(
+                                kind=KIND_FIELD,
+                                name=fname,
+                                span=(start_row_f, end_row),
+                                body=body,
+                                fingerprint=unit_body_fingerprint(body),
+                            )
+                        )
             buf = ""
             i += 1
             continue
@@ -1197,9 +1303,8 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
     while stack:
         _close_a_unit(stack.pop(), n, src, units, stack, _line_index)
 
-    # Sweep: emit FIELD units for top-level ``const``/``static``/``type`` decls
-    # that didn't open a brace (``pub const N: u32 = 5;``). Re-scan line-based.
-    _emit_a_field_units(units, src, language)
+    # Field units are now emitted in the main scan at the ``;`` terminator (fix
+    # #10), so no second whole-file re-scan is needed here.
 
     confidence = _assess_confidence(source, units)
     imports, exports = _extract_imports_exports_a(source, units)
@@ -1286,6 +1391,67 @@ def _close_a_unit(
         units.append(su)
 
 
+def _go_declaration_name(
+    toks: list[str], last_kw_idx: int, last_kw: str,
+) -> tuple[str | None, bool]:
+    """Recover the declaration name for Go-specific signature shapes (fixes #4, #5).
+
+    Go diverges from the generic after-keyword name lookup in two common cases:
+
+    - **Receiver method** (fix #4): ``func (recv) Name(...)`` — the token after
+      ``func`` is ``(`` (the receiver), not the name. The real name is the
+      identifier just before the final parameter-list ``(...)``. A Go receiver
+      method is syntactically top-level (not nested in the type body), but
+      semantically a method of the receiver's type — so this returns
+      ``is_receiver_method=True`` so the caller classifies it as METHOD.
+
+    - **Type declaration** (fix #5): ``type Name struct/interface{...}`` — Go
+      puts the name BEFORE ``struct``/``interface`` (the class keyword), so the
+      generic lookup finds nothing after the keyword. The name is the token
+      between ``type`` and the keyword.
+
+    Returns ``(name, is_receiver_method)``. ``name`` is None when no Go-specific
+    shape applies (leaving the generic name in place).
+    """
+    # Receiver method: ``func (recv) Name (params)`` — only for func keywords.
+    if last_kw in ("func",):
+        joined = " ".join(toks)
+        # Find the last balanced ``(...)`` run ending the buffer.
+        paren_open = -1
+        depth_p = 0
+        for idx in range(len(joined) - 1, -1, -1):
+            c = joined[idx]
+            if c == ")":
+                depth_p += 1
+            elif c == "(":
+                if depth_p > 0:
+                    depth_p -= 1
+                    if depth_p == 0:
+                        paren_open = idx
+                        break
+        # Receiver shape: ``func ( recv ) Name (params)`` — TWO paren groups.
+        # The non-receiver ``func Name(params)`` has ONE. Detect the receiver by
+        # checking whether the token right after ``func`` is ``(``.
+        after_kw = toks[last_kw_idx + 1 :] if last_kw_idx + 1 < len(toks) else []
+        is_receiver = bool(after_kw) and after_kw[0].startswith("(")
+        if paren_open > 0:
+            before = joined[:paren_open].rstrip()
+            if before:
+                name_tok = before.split()[-1]
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
+                    return name_tok, is_receiver
+
+    # Type declaration: ``type Name struct/interface`` — name is between ``type``
+    # and the class keyword (both tokens must be present around the name).
+    if last_kw in _A_CLASS_KEYWORDS and last_kw_idx >= 2:
+        if toks[last_kw_idx - 2] == "type":
+            cand = toks[last_kw_idx - 1]
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
+                return cand, False
+
+    return None, False
+
+
 def _classify_a_brace(
     buf: str, stack: list[_OpenAUnit], language: str | None,
     brace_depth: int = 0,
@@ -1351,6 +1517,16 @@ def _classify_a_brace(
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
             name = cand
 
+    # Go-specific name recovery (fixes #4 and #5): Go puts names in positions the
+    # generic after-keyword lookup misses. ``go_is_receiver`` signals a receiver
+    # method (``func (recv) Name()``), which is top-level syntactically but
+    # semantically a METHOD of the receiver's type.
+    go_is_receiver = False
+    if language == "go":
+        go_name, go_is_receiver = _go_declaration_name(toks, last_kw_idx, last_kw)
+        if go_name is not None:
+            name = go_name
+
     # Container-only keywords (impl/mod/namespace): open a scope but emit nothing.
     if last_kw in _A_CONTAINER_KEYWORDS:
         # Mark as class-kind for span/body purposes; container_only suppresses
@@ -1361,12 +1537,14 @@ def _classify_a_brace(
     if last_kw in _A_CLASS_KEYWORDS:
         kind = KIND_CLASS
         return (kind, name, False)
-    # FUNCTION unless nested inside an open CLASS or container → METHOD.
+    # FUNCTION unless nested inside an open CLASS or container, OR a Go receiver
+    # method (top-level syntactically, but a method semantically) → METHOD.
     in_container = any(
         (u.kind == KIND_CLASS or u.container_only) for u in reversed(stack)
     )
-    kind = KIND_METHOD if in_container else KIND_FUNCTION
-    return (kind, name, False)
+    if go_is_receiver or in_container:
+        return (KIND_METHOD, name, False)
+    return (KIND_FUNCTION, name, False)
 
 
 def _classify_keywordless_method(
@@ -1483,102 +1661,55 @@ def _find_decl_start(src: str, brace_idx: int, line_start: int) -> int:
     return cut
 
 
+def _find_stmt_start(src: str, term_idx: int, line_index: list[int] | None = None) -> int:
+    """Byte offset where the statement ending at ``term_idx`` (a ``;``) begins.
+
+    Like :func:`_find_decl_start` but for ``;``-terminated field declarations:
+    walks back past the previous ``;``/``}``/``{`` separator and leading
+    whitespace. Used by the in-main-pass field emitter (fix #10) to slice the
+    field body from the source at the ``;`` terminator.
+    """
+    cut = max(
+        src.rfind(";", 0, term_idx),
+        src.rfind("}", 0, term_idx),
+        src.rfind("{", 0, term_idx),
+        0,
+    )
+    if cut > 0:
+        cut += 1
+    while cut < term_idx and src[cut] in " \t\r\n":
+        cut += 1
+    return cut
+
+
 def _buf_has_field_keyword(buf: str) -> bool:
     return any(kw in buf.split() for kw in _A_FIELD_KEYWORDS)
 
 
-def _emit_a_field_units(
-    units: list[StructuralUnit], src: str, language: str | None
-) -> None:
-    """Emit top-level FIELD units for ``const``/``static``/``type`` declarations.
+#: Regex matching a top-level field declaration's accumulated token buffer, e.g.
+#: ``pub const N : u32 = 5`` or ``let x = 1`` or ``type Foo = Bar``. Captures the
+#: declared name. Used by the in-main-pass field emitter (fix #10) — mirrors the
+#: line-regex the old ``_emit_a_field_units`` re-scan used, but operates on the
+#: whitespace-normalized buffer at the ``;`` terminator.
+_A_FIELD_RE = re.compile(
+    r"^(?:(?:pub|export|public|private|static|final|readonly|unsafe|inline)\s+)*"
+    r"(?:const|static|type|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\b"
+)
 
-    These don't open a brace, so the brace machine doesn't see them. We re-scan
-    line-by-line at depth 0 (heuristic: a line starting with an optional
-    ``pub``/``export`` modifier + a field keyword + a name + a ``;`` or ``=``).
-    Only runs for languages that have such constructs (rust/go/ts/js). Emitted
-    FIELD units are appended after the brace-detected ones; callers that rely on
-    source order tolerate this (identity is by name, not position).
+
+def _field_name_from_buf(buf: str) -> str | None:
+    """The declared field name in a token buffer ending at ``;``, or ``None``.
+
+    Returns the name when the buffer matches a top-level field-declaration shape
+    (optional modifiers + a field keyword + an identifier); ``None`` otherwise.
+    Used by the in-main-pass field emitter (fix #10) so fields are detected in
+    the same scan that tracks brace depth, eliminating the second whole-file
+    re-scan (``_emit_a_field_units``) and its divergent string-state tracker.
     """
-    if language in (None, "c", "h"):
-        # C ``#define`` already handled; plain C top-level vars are rare and
-        # not entity-level-merge-relevant. Skip to avoid noise.
-        return
-    field_re = re.compile(
-        r"^\s*(?:(?:pub|export|public|private|static|final|readonly|unsafe|inline)\s+)*"
-        r"(?:const|static|type|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\b"
-    )
-    existing_names = {u.name for u in units if u.kind == KIND_FIELD}
-    lines = src.split("\n")
-    depth = 0
-    in_s: str | None = None
-    in_lc = False
-    in_bc = False
-    for idx, line in enumerate(lines):
-        # Cheap depth tracker over the whole file so we only emit at top level.
-        # (Re-uses the same string/comment rules but line-coarse.)
-        stripped = line.strip()
-        if in_bc:
-            if "*/" in stripped:
-                in_bc = False
-            continue
-        if in_lc:
-            in_lc = False
-        if in_s is not None:
-            # crude: a string open from a previous line — close on this line.
-            if in_s in stripped:
-                in_s = None
-            continue
-        if stripped.startswith("//"):
-            in_lc = True
-            continue
-        if stripped.startswith("/*"):
-            if "*/" not in stripped:
-                in_bc = True
-            continue
-        if depth == 0:
-            m = field_re.match(line)
-            if m and m.group(1) not in existing_names:
-                existing_names.add(m.group(1))
-                units.append(
-                    StructuralUnit(
-                        kind=KIND_FIELD,
-                        name=m.group(1),
-                        span=(idx, idx),
-                        body=line,
-                        fingerprint=unit_body_fingerprint(line),
-                    )
-                )
-        # Update depth from this line's braces (string-aware-ish).
-        for c in _strip_strings_line(stripped):
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth = max(0, depth - 1)
-
-
-def _strip_strings_line(line: str) -> str:
-    """Remove string/char literals from a single line (cheap depth tracking)."""
-    out = []
-    i = 0
-    n = len(line)
-    q: str | None = None
-    while i < n:
-        c = line[i]
-        if q is not None:
-            if c == "\\":
-                i += 2
-                continue
-            if c == q:
-                q = None
-            i += 1
-            continue
-        if c in ('"', "'", "`"):
-            q = c
-            i += 1
-            continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+    m = _A_FIELD_RE.match(buf.strip().rstrip(";").strip())
+    if m:
+        return m.group(1)
+    return None
 
 
 def _extract_a_import_name(line: str) -> str:
