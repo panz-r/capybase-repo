@@ -34,6 +34,7 @@ from capybase.conflict_model import (
     VerificationFailure,
     VerificationResult,
     VerificationWarning,
+    estimate_tokens,
 )
 from capybase.context_builder import ContextBuilder
 from capybase.escalation import write_review_bundle
@@ -1774,6 +1775,41 @@ class Orchestrator:
             return classify(unit).band  # type: ignore[arg-type]
         except Exception:  # noqa: BLE001 - advisory for the strictness gate
             return None
+
+    def _llm_oversized_for_window(self, unit: ConflictUnit) -> tuple[bool, int, int]:
+        """Whether the conflict's essential content exceeds the model's window.
+
+        The "protect-the-conflict" prompt policy sends the three sides even when
+        they alone blow the context window (dropping all augmentation). That's a
+        wasted call: an oversized prompt truncates server-side and the model
+        fails anyway. This guard detects that case up front so the LLM loop can
+        be skipped in favor of escalation (the deterministic layers + block
+        capture already ran and declined).
+
+        Returns ``(oversized, essential_tokens, available_tokens)``.
+        ``oversized`` is False when the window is unconfigured (0 = disabled) —
+        without a window we can't judge "too large", so the guard is a no-op and
+        the historical "send it anyway" behavior is preserved.
+        """
+        window = int(getattr(self.config.model, "context_window", 0) or 0)
+        if window <= 0:
+            return False, 0, 0  # unconfigured → no guard
+        reserve = int(getattr(self.config.model, "completion_reserve", 1024) or 1024)
+        available = max(0, window - reserve)
+        # Essential content = the three conflict sides (the untrimmable core).
+        # The prompt's fixed overhead (intro/contract/rules, ~200-400 tokens) and
+        # all augmentation sections ARE trimmable by _fit_to_budget, so we do NOT
+        # fold them in here — a tight window that forces augmentation trimming is
+        # the documented, tested behavior, not a hopeless case. This guard fires
+        # only when the SIDES THEMSELVES don't fit: the prompt can't be made
+        # valid by any amount of trimming, so the LLM call is doomed. estimate_tokens
+        # is ~4 chars/token.
+        sides = (
+            (unit.base.text or "") + (unit.current.text or "")
+            + (unit.replayed.text or "")
+        )
+        essential = estimate_tokens(sides)
+        return essential > available, essential, available
 
     def _try_exact_reuse(self, unit: ConflictUnit) -> UnitOutcome | None:
         """Attempt a verbatim replay of a prior accepted resolution (#9 step 4).
@@ -4699,9 +4735,26 @@ class Orchestrator:
         # the model. Only on a FRESH resolve. Gated by [future]
         # enable_combination_search.
         if failures is None and self.config.future.enable_combination_search:
-            early = self._try_combination_search(unit)
-            if early is not None:
-                return early  # accepted via combination search; LLM loop skipped
+            # Difficulty-aware SBCR skip (survey §5.2): SBCR is addition-only
+            # (empty-base scope), and hard conflicts are overwhelmingly
+            # modification conflicts where SBCR's search would decline on scope
+            # anyway (the corpus measurement showed 0/209 hard cases fire). Skip
+            # the search cost when the band is hard AND routing is on. When
+            # routing is off (band unknown), run SBCR as before.
+            if self.config.routing.enabled and self._classification_band(unit) == "hard":
+                self._record_resolution_attempt(
+                    UnitOutcome(unit=unit), mechanism="sbcr",
+                    decision="skip", reason="hard conflict (skip addition-only search)",
+                )
+                self.journal.emit(
+                    "combination_declined",
+                    {"fitness": 0.0, "reason": "hard conflict (skip addition-only search)"},
+                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                )
+            else:
+                early = self._try_combination_search(unit)
+                if early is not None:
+                    return early  # accepted via combination search; LLM loop skipped
 
         # Test-gated side picker: when both pre-LLM resolvers decline a conflict
         # where taking either side verbatim is plausible, try each side and let
@@ -4732,6 +4785,32 @@ class Orchestrator:
             early = self._try_block_capture(unit)
             if early is not None:
                 return early  # accepted via block-capture; LLM loop skipped
+
+        # LLM size guard (survey §4.2/§7): if the essential conflict content
+        # alone exceeds the model's context window, the LLM call is doomed (the
+        # server truncates, the model fails). Skip it and escalate rather than
+        # wasting the call. Only on a FRESH resolve (failures is None) — a CEGIS
+        # retry is already engaged on this unit and the guard already passed on
+        # the first attempt. No-op when the window is unconfigured (0).
+        if failures is None:
+            oversized, essential_t, available_t = self._llm_oversized_for_window(unit)
+            if oversized:
+                outcome.escalated = True
+                outcome.reason = (
+                    f"conflict too large for model window "
+                    f"(essential ~{essential_t}t > available {available_t}t)"
+                )
+                self._record_resolution_attempt(
+                    outcome, mechanism="llm",
+                    decision="skip",
+                    reason=f"oversized: {essential_t}t > {available_t}t available",
+                )
+                self.journal.emit(
+                    "llm_skipped_oversized",
+                    {"essential_tokens": essential_t, "available_tokens": available_t},
+                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                )
+                return outcome
 
         while True:
             # Wall-clock deadline (outermost budget): if this unit has run past

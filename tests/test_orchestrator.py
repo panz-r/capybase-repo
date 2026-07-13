@@ -42,8 +42,10 @@ class CyclingClient:
 
     def __init__(self, responses: list[str]):
         self.responses = list(responses)
+        self.calls = 0
 
     def complete(self, messages, *, model, temperature, max_tokens, json_mode):
+        self.calls += 1
         if len(self.responses) > 1:
             return LLMResponse(text=self.responses.pop(0))
         return LLMResponse(text=self.responses[0])
@@ -215,6 +217,69 @@ def test_run_no_prompt_trims_when_context_window_disabled(conflicted_repo):
             d = json.loads(line)
             if d["event_type"] == "candidate_generated":
                 assert not d.get("prompt_trims"), "no trims when window disabled"
+
+
+def test_run_skips_llm_when_conflict_oversized_for_window(conflicted_repo):
+    """When the conflict SIDES alone exceed the available context window, the
+    LLM call is doomed (server truncates) — skip it and escalate instead of
+    wasting the call. An llm_skipped_oversized event is journaled and no
+    candidate_generated event appears."""
+    repo = conflicted_repo["repo"]
+    cfg = _config(repo)
+    # A window so tiny that even the small test conflict's sides don't fit.
+    # completion_reserve=1 → available = 5 - 1 = 4 tokens; the sides are ~30+
+    # tokens → oversized. (The trim test uses 350 which fits the sides; here we
+    # go below the sides to trigger the hopeless case.)
+    cfg.model.context_window = 5
+    cfg.model.completion_reserve = 1
+    payload = _make_resolved_payload("    return 'hi' + 'howdy'")
+    client = CyclingClient([payload])
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    orch.run()
+    events = {}
+    for line in orch.paths.journal.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            d = json.loads(line)
+            events[d["event_type"]] = d.get("payload", {})
+    # The oversized-skip event fired.
+    assert "llm_skipped_oversized" in events, "expected llm_skipped_oversized event"
+    assert events["llm_skipped_oversized"]["essential_tokens"] > events["llm_skipped_oversized"]["available_tokens"]
+    # No LLM candidate was generated (the call was skipped).
+    assert "candidate_generated" not in events, "LLM should not have been called"
+    # The fake client was never asked to complete (the call was skipped pre-loop).
+    assert client.calls == 0, f"LLM client should not have been called, got {client.calls} calls"
+
+
+def test_run_does_not_skip_llm_when_window_disabled(conflicted_repo):
+    """context_window=0 (default) → the size guard is a no-op; the LLM runs
+    normally even for large conflicts (historical behavior)."""
+    repo = conflicted_repo["repo"]
+    cfg = _config(repo)
+    assert cfg.model.context_window == 0  # disabled
+    payload = _make_resolved_payload("    return 'hi' + 'howdy'")
+    engine = ResolutionEngine(cfg.model, client=CyclingClient([payload]))
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    orch.run()
+    has_oversized = False
+    has_candidate = False
+    for line in orch.paths.journal.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            d = json.loads(line)
+            if d["event_type"] == "llm_skipped_oversized":
+                has_oversized = True
+            if d["event_type"] == "candidate_generated":
+                has_candidate = True
+    assert not has_oversized, "size guard must not fire when window is disabled"
+    assert has_candidate, "LLM should run normally when window is disabled"
 
 
 def test_run_escalates_when_model_returns_markers(conflicted_repo):
