@@ -215,10 +215,15 @@ def enumerate_entities(
         # so the existing drop/coverage/unattributed analyzers (calibrated on
         # that set) must not see them. Imports surface via referenced_symbols/
         # find_symbol_definitions, not entity enumeration.
+        # Also skip container-scope units (impl/mod/namespace) in the whole-
+        # module path (Consumer fix): they're distinct scopes, not entities,
+        # and emitting them diverged from _all_flat_entities + duplicate_definitions
+        # (which both skip them). Their children are still walked separately.
         return [
             _unit_to_entity(u)
             for u in units
             if u.kind != abstract_parser.KIND_MODULE_STMT
+            and not u.is_container_scope
         ]
 
     if container_span is None:

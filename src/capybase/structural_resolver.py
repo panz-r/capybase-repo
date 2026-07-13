@@ -913,12 +913,23 @@ def _body_content(body: str) -> str:
     leaves the body content identical. Rename detection must therefore compare
     bodies with the HEADER STRIPPED — otherwise the renamed signature line makes
     every rename look like a body change, and no base entity matches.
+
+    R4: the normalization now strips inline comments and blanks string literals
+    (reusing the parser's ``_normalize_body``) so a rename that picked up an
+    incidental comment (``# cached``) or a changed string value (``"v1"``→``"v2"``)
+    still pairs with its base original. This AGREES with the parser's
+    ``unit_body_fingerprint`` (which the 3-way diff's rename detection uses), so
+    the two rename algorithms no longer disagree on the comment/string-stability
+    the fingerprint was designed for. A genuine body change (``fetch()``→
+    ``save()``) still differs and correctly does NOT pair.
     """
     if not body:
         return ""
     lines = body.split("\n")
-    # Drop the first line (the def/fn/struct header); normalize the rest.
-    return _normalize("\n".join(lines[1:]))
+    # Drop the first line (the def/fn/struct header); normalize the rest with
+    # the parser's comment/string-aware normalization (R4).
+    from capybase.adapters.abstract_parser import _normalize_body
+    return _normalize_body("\n".join(lines[1:]))
 
 
 def _detect_renames(
@@ -1268,6 +1279,22 @@ def _try_refactoring_aware_merge(unit: ConflictUnit) -> str | None:
             base_ents = structural.enumerate_entities(unit.base.text or "", lang, container_span=span) or base_ents
             cur_ents = structural.enumerate_entities(unit.current.text or "", lang, container_span=span) or cur_ents
             rep_ents = structural.enumerate_entities(unit.replayed.text or "", lang, container_span=span) or rep_ents
+
+    # Decline on duplicate identities (R5, mirroring fix #3 in entity_disjoint):
+    # two entities sharing an identity (e.g. Python @property + @x.setter both
+    # named ``x``, or Java/C++ overloads) collide silently in the identity-keyed
+    # ``base_by_id`` dict below, dropping all but one — a data-loss bug. Decline
+    # so the conflict escalates to the LLM path instead of truncating.
+    try:
+        from capybase.adapters.abstract_parser import _has_duplicate_identities
+    except Exception:  # noqa: BLE001
+        return None
+    if (
+        _has_duplicate_identities(base_ents)
+        or _has_duplicate_identities(cur_ents)
+        or _has_duplicate_identities(rep_ents)
+    ):
+        return None
 
     base_by_id = {e.identity: e for e in base_ents}
 

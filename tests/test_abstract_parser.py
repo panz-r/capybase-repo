@@ -1991,3 +1991,203 @@ def test_g8_kotlin_top_level_fun_no_return_type():
         f"Kotlin fun (no return type) must be detected; got "
         f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fourth-pass review fixes: G9 (Kotlin coverage), G10 (Go generics),
+# G11 (JS/TS arrow functions), Consumer (container-scope leak).
+# ---------------------------------------------------------------------------
+
+# --- G9: Kotlin object / data class / init blocks / extension functions ---
+
+
+def test_g9_kotlin_object_singleton():
+    """G9: ``object Config { ... }`` — Kotlin's singleton declaration. ``object``
+    was missing from ``_A_CLASS_KEYWORDS``; the block was dropped entirely.
+    The singleton's ``fun``/``val`` members should be detected."""
+    src = (
+        'object Config {\n'
+        '    val name = "x"\n'
+        '    fun load(): String {\n'
+        '        return name\n'
+        '    }\n'
+        '}\n'
+    )
+    ir = ap.parse_family_a(src, language="kotlin")
+    flat = ap._all_units_flat(ir)
+    kinds = [(u.kind, u.name) for u in flat]
+    assert _unit_named(ir, "Config"), f"object Config must be detected as a CLASS; got {kinds}"
+    assert _unit_named(ir, "load"), f"object member fun load must be detected; got {kinds}"
+
+
+def test_g9_kotlin_data_class():
+    """G9: ``data class Point(val x: Int, val y: Int)`` — a bodyless data class.
+    ``data`` was not recognized; the class (a primary Kotlin construct) was
+    dropped. At minimum the CLASS ``Point`` must be detected."""
+    src = "data class Point(val x: Int, val y: Int)\n"
+    ir = ap.parse_family_a(src, language="kotlin")
+    flat = ap._all_units_flat(ir)
+    # Either 'Point' is detected as a class, or at least the unit isn't dropped.
+    # Bodyless classes have no '{' so the brace machine can't fire — but the
+    # parser should still surface SOMETHING (or we accept this as a known gap
+    # and the test documents it). Acceptance: 'Point' appears as a unit.
+    assert _unit_named(ir, "Point"), (
+        f"data class Point must be detected; got "
+        f"{[(u.kind, u.name) for u in flat]}"
+    )
+
+
+def test_g9_kotlin_init_block_not_swallowed_silently():
+    """G9: a Kotlin ``init { ... }`` block inside a class. ``init`` isn't a
+    declaration keyword, so the block was absorbed into the enclosing class
+    with no separate unit. This test documents the expectation: the class is
+    still detected, and sibling ``fun`` declarations are not lost."""
+    src = (
+        "class C(val x: Int) {\n"
+        "    init {\n"
+        "        println(x)\n"
+        "    }\n"
+        "    fun m(): Int {\n"
+        "        return x\n"
+        "    }\n"
+        "}\n"
+    )
+    ir = ap.parse_family_a(src, language="kotlin")
+    flat = ap._all_units_flat(ir)
+    kinds = [(u.kind, u.name) for u in flat]
+    assert _unit_named(ir, "C"), f"class C must be detected; got {kinds}"
+    assert _unit_named(ir, "m"), f"sibling fun m must not be lost behind init; got {kinds}"
+
+
+def test_g9_kotlin_companion_object():
+    """G9: ``companion object { ... }`` inside a class — Kotlin's static-like
+    block. Its members (``fun factory``) must be reachable."""
+    src = (
+        "class C {\n"
+        "    companion object {\n"
+        "        val PI = 3.14\n"
+        "        fun factory(): C = C()\n"
+        "    }\n"
+        "}\n"
+    )
+    ir = ap.parse_family_a(src, language="kotlin")
+    flat = ap._all_units_flat(ir)
+    kinds = [(u.kind, u.name) for u in flat]
+    # The companion's fun with a brace body should be detected.
+    assert _unit_named(ir, "factory"), (
+        f"companion object fun factory must be detected; got {kinds}"
+    )
+
+
+# --- G10: Go generic function name mis-extraction ---
+
+
+def test_g10_go_generic_function_name():
+    """G10: ``func Map[T, U any](in []T, f func(T) U) []U { ... }`` — a Go 1.18+
+    generic function. The type-param list ``[T, U any]`` between ``func`` and
+    the params confused ``_go_declaration_name``'s receiver detection: it found
+    the last balanced ``(...)`` (the params), then took the token before it
+    (``]`` from the ``[]U`` return type) as the name → name=None. The real name
+    is ``Map`` (right after ``func``)."""
+    src = (
+        "func Map[T, U any](in []T, f func(T) U) []U {\n"
+        "    return nil\n"
+        "}\n"
+    )
+    ir = ap.parse_family_a(src, language="go")
+    flat = ap._all_units_flat(ir)
+    kinds = [(u.kind, u.name) for u in flat]
+    assert _unit_named(ir, "Map"), f"generic func Map must be detected by name; got {kinds}"
+
+
+def test_g10_go_generic_function_two_params():
+    """G10 regression breadth: a generic function with a simpler signature."""
+    src = "func First[T any](xs []T) T {\n    return xs[0]\n}\n"
+    ir = ap.parse_family_a(src, language="go")
+    flat = ap._all_units_flat(ir)
+    assert _unit_named(ir, "First"), (
+        f"generic func First must be detected; got "
+        f"{[(u.kind, u.name) for u in flat]}"
+    )
+
+
+def test_g10_go_non_generic_function_still_works():
+    """G10 regression guard: a plain (non-generic) Go function name must still
+    be recovered correctly after the generic-aware fix."""
+    src = "func process(items []int) int {\n    return len(items)\n}\n"
+    ir = ap.parse_family_a(src, language="go")
+    flat = ap._all_units_flat(ir)
+    assert _unit_named(ir, "process"), (
+        f"non-generic func must still work; got "
+        f"{[(u.kind, u.name) for u in flat]}"
+    )
+
+
+def test_g10_go_generic_receiver_method():
+    """G10 regression: a generic receiver method (``func (s Stack[T]) ...``).
+    Both the receiver-with-generics AND the method name must be handled."""
+    src = (
+        "type Stack[T any] struct {\n"
+        "    items []T\n"
+        "}\n"
+        "func (s Stack[T]) Push(v T) {\n"
+        "    s.items = append(s.items, v)\n"
+        "}\n"
+    )
+    ir = ap.parse_family_a(src, language="go")
+    flat = ap._all_units_flat(ir)
+    kinds = [(u.kind, u.name) for u in flat]
+    assert _unit_named(ir, "Push"), f"generic receiver method Push must be detected; got {kinds}"
+
+
+# --- G11: JS/TS arrow functions with block body and no semicolon ---
+
+
+def test_g11_js_arrow_function_block_no_semicolon():
+    """G11: ``const f = () => { ... }`` (no trailing ``;``) — the dominant
+    modern JS/TS function form under no-semicolon style (Standard, Airbnb).
+    The G7 fix let ``= (`` through the initializer guard, but the keywordless
+    heuristic then failed (buffer ends in ``=>``, not ``)``) → the whole
+    declaration was dropped. G11 recognizes ``=>`` before ``{`` as a
+    function-body opener and recovers the binding name."""
+    src = "const handler = () => {\n    return 1\n}\n"
+    ir = ap.parse_family_a(src, language="javascript")
+    flat = ap._all_units_flat(ir)
+    kinds = [(u.kind, u.name) for u in flat]
+    assert _unit_named(ir, "handler"), (
+        f"arrow fn (block body, no semi) must be detected; got {kinds}"
+    )
+
+
+def test_g11_js_arrow_function_with_params():
+    """G11: an arrow function with params and a block body, no semicolon."""
+    src = "const add = (a, b) => {\n    return a + b\n}\n"
+    ir = ap.parse_family_a(src, language="javascript")
+    flat = ap._all_units_flat(ir)
+    assert _unit_named(ir, "add"), (
+        f"arrow fn with params must be detected; got "
+        f"{[(u.kind, u.name) for u in flat]}"
+    )
+
+
+def test_g11_ts_arrow_function_with_return_type():
+    """G11: a TypeScript arrow with an explicit return type before ``=>``."""
+    src = "const get = (x: number): number => {\n    return x + 1\n}\n"
+    ir = ap.parse_family_a(src, language="typescript")
+    flat = ap._all_units_flat(ir)
+    assert _unit_named(ir, "get"), (
+        f"TS arrow fn with return type must be detected; got "
+        f"{[(u.kind, u.name) for u in flat]}"
+    )
+
+
+def test_g11_js_arrow_function_with_semicolon_still_works():
+    """G11 regression guard: the previously-working case (arrow + block + ``;``)
+    must still produce a unit for the binding."""
+    src = "const handler = () => {\n    return 1\n};\n"
+    ir = ap.parse_family_a(src, language="javascript")
+    flat = ap._all_units_flat(ir)
+    assert _unit_named(ir, "handler"), (
+        f"arrow fn with semi must still work; got "
+        f"{[(u.kind, u.name) for u in flat]}"
+    )

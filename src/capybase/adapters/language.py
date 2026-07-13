@@ -298,10 +298,26 @@ class LanguageAdapterRegistry:
     """Maps a language string to its :class:`LanguageAdapter`.
 
     Constructed once with the built-in adapters; :meth:`get` returns the
-    matching adapter or :class:`NullAdapter` for unknown languages. Adding a
-    language is :meth:`register` (or a new adapter class + a registration line),
+    matching adapter or :class:`NullAdapter` for unknown languages. Adding
+    a language is :meth:`register` (or a new adapter class + a registration line),
     not edits scattered across the verifier.
+
+    Short-form aliases (``js``, ``ts``, ``c++``, ``cs``, ...) are normalized to
+    their canonical language before lookup, so a caller passing the short form
+    gets the correct adapter (not NullAdapter with the wrong ``comment_prefix``).
     """
+
+    #: Short-form aliases → canonical language name. Mirrors the aliases in
+    #: ``abstract_parser._LANG_FAMILY`` so every parser-supported language
+    #: resolves to a real adapter.
+    _ALIASES: dict[str, str] = {
+        "js": "javascript",
+        "ts": "typescript",
+        "jsx": "javascript",
+        "tsx": "typescript",
+        "c++": "cpp",
+        "cs": "csharp",
+    }
 
     def __init__(self) -> None:
         self._adapters: dict[str, LanguageAdapter] = {}
@@ -310,11 +326,16 @@ class LanguageAdapterRegistry:
     def register(self, adapter: LanguageAdapter) -> None:
         self._adapters[adapter.name] = adapter
 
+    def _canonicalize(self, language: str) -> str:
+        """Resolve a (possibly aliased) language name to its canonical form."""
+        return self._ALIASES.get(language, language)
+
     def get(self, language: str | None) -> LanguageAdapter:
         """The adapter for ``language``, or the NullAdapter when unsupported/None."""
         if language is None:
             return self._null
-        return self._adapters.get(language, self._null)
+        canonical = self._canonicalize(language)
+        return self._adapters.get(canonical, self._null)
 
     @property
     def supported(self) -> tuple[str, ...]:

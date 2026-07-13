@@ -371,3 +371,42 @@ def test_context_builder_surfaces_enclosing_node():
     ctx = ContextBuilder(context_lines=5).build(unit)
     assert ctx.structural_view.get("enclosing_node_type") == "function"
     assert ctx.structural_view.get("enclosing_node_signature") == "def greet():"
+
+
+# ---------------------------------------------------------------------------
+# Fourth-pass: Consumer-side container-scope leak in enumerate_entities.
+# ---------------------------------------------------------------------------
+
+
+@needs_ts
+def test_enumerate_entities_skips_container_scope_at_module_level():
+    """The whole-module path (``container_span=None``) of enumerate_entities
+    used to emit top-level ``impl``/``mod``/``namespace`` container-scope units
+    as entities — whereas ``_all_flat_entities`` and ``duplicate_definitions``
+    both skip them. Same container block, three different answers. After the
+    fix, the whole-module path also skips container-scope units (an impl is a
+    distinct scope, not an entity). The whole-module path returns top-level
+    units only (children are surfaced via container_span queries), so we assert
+    the impl is absent and the top-level struct is present."""
+    from capybase.adapters import abstract_parser
+    src = (
+        "impl Config {\n"
+        "    fn new() -> Self { Self {} }\n"
+        "    fn load(&self) -> i32 { 0 }\n"
+        "}\n"
+        "\n"
+        "pub struct Config {\n"
+        "    name: String,\n"
+        "}\n"
+    )
+    ents = S.enumerate_entities(src, "rust", container_span=None)
+    assert ents is not None
+    names = [e.name for e in ents]
+    kinds = [e.kind for e in ents]
+    # The impl block (container-scope) must NOT appear as an entity — neither
+    # under a name nor as an anonymous None entity.
+    assert "impl Config" not in names and None not in names, (
+        f"container-scope impl must not be emitted as an entity; got names={names} kinds={kinds}"
+    )
+    # The top-level struct Config IS an entity.
+    assert "Config" in names, f"struct Config must be an entity; got {names}"

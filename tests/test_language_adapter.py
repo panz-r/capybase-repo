@@ -229,3 +229,44 @@ def test_all_brace_adapters_deprecated_tree_sitter():
     deprecated tree_sitter_language → None (no grammar loading)."""
     for lang in ("go", "java", "cpp", "typescript", "kotlin"):
         assert adapter_for(lang).tree_sitter_language() is None
+
+
+# ---------------------------------------------------------------------------
+# Fourth-pass: alias languages (js/ts/jsx/tsx/c++/cs) must resolve to a real
+# adapter, not NullAdapter. Latent today (extensions map to canonical names),
+# but a caller passing the short form directly hit the wrong comment_prefix.
+# ---------------------------------------------------------------------------
+
+
+def test_alias_languages_get_real_adapter_not_null():
+    """The 6 language aliases in ``_LANG_FAMILY`` (js, ts, jsx, tsx, c++, cs)
+    fell through to NullAdapter (comment_prefix '#', empty definition
+    patterns) because the registry only iterated canonical names. A caller
+    passing the short form directly got wrong comment-line detection. After
+    the fix each alias resolves to a brace-family adapter with comment_prefix
+    '//' matching its canonical language."""
+    for alias in ("js", "ts", "jsx", "tsx", "c++", "cs"):
+        ad = adapter_for(alias)
+        assert not isinstance(ad, NullAdapter), (
+            f"alias {alias!r} must resolve to a real adapter, not NullAdapter"
+        )
+        assert ad.comment_prefix == "//", (
+            f"alias {alias!r} must use '//' comments (brace language); "
+            f"got comment_prefix={ad.comment_prefix!r}"
+        )
+
+
+def test_alias_adapter_matches_canonical_behavior():
+    """An alias adapter must behave like its canonical language: same
+    comment_prefix and (non-empty) definition patterns. ``js``↔``javascript``,
+    ``c++``↔``cpp``, ``cs``↔``csharp``."""
+    pairs = [("js", "javascript"), ("ts", "typescript"), ("c++", "cpp"), ("cs", "csharp")]
+    for alias, canon in pairs:
+        a = adapter_for(alias)
+        c = adapter_for(canon)
+        assert a.comment_prefix == c.comment_prefix, (
+            f"{alias} comment_prefix {a.comment_prefix!r} != {canon} {c.comment_prefix!r}"
+        )
+        assert a.definition_patterns == c.definition_patterns, (
+            f"{alias} definition_patterns != {canon}"
+        )

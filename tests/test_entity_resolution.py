@@ -210,3 +210,93 @@ def test_no_entities_touched_declines():
     # rules or entity rule decline; we don't assert which, just that it doesn't
     # produce a wrong entity merge.
     assert result.text is None or "def a" in result.text
+
+
+# ---------------------------------------------------------------------------
+# Fourth-pass: R4 (resolver rename detection vs parser fingerprint consistency)
+# and R5 (refactoring-aware merge duplicate-identity guard).
+# ---------------------------------------------------------------------------
+
+from capybase.structural_resolver import _detect_renames, _body_content  # noqa: E402
+
+
+def _entity(kind, name, body, span=(0, 1)):
+    """Build a structural.Entity for rename-detection unit tests."""
+    return S.Entity(kind=kind, name=name, body=body, span=span)
+
+
+def test_r4_rename_with_inline_comment_drift_is_detected():
+    """R4: a rename where the body picked up an inline comment (or a changed
+    string literal) MUST still be detected. The resolver's ``_body_content``
+    used whitespace-collapse-only normalization (keeping comments/strings),
+    while the parser's ``unit_body_fingerprint`` strips comments and blanks
+    strings. The two algorithms disagreed: the parser paired the rename, the
+    resolver missed it → the merge emitted the old name AND the new name as a
+    duplicate. After R4, ``_body_content`` strips inline comments so the
+    rename pairs. ``loadData``→``fetchData`` with ``# cached`` added."""
+    base_body = "def loadData():\n    return fetch()"
+    renamed_body = "def fetchData():\n    return fetch()  # cached"
+    base_ent = _entity("function", "loadData", base_body)
+    renamed_ent = _entity("function", "fetchData", renamed_body)
+    renames, removed = _detect_renames([renamed_ent], [base_ent])
+    assert ("function", "fetchData") in renames, (
+        f"rename loadData→fetchData (with comment drift) must be detected; "
+        f"got renames={renames}"
+    )
+    assert ("function", "loadData") in removed
+
+
+def test_r4_rename_with_string_literal_drift_is_detected():
+    """R4: a rename where a string literal value changed (but no real body
+    change) must still pair. The parser's fingerprint blanks strings for
+    exactly this reason; the resolver must match."""
+    base_body = 'def loadData():\n    return fetch("v1")'
+    renamed_body = 'def fetchData():\n    return fetch("v2")'
+    base_ent = _entity("function", "loadData", base_body)
+    renamed_ent = _entity("function", "fetchData", renamed_body)
+    renames, _ = _detect_renames([renamed_ent], [base_ent])
+    assert ("function", "fetchData") in renames, (
+        f"rename with string-literal drift must be detected; got {renames}"
+    )
+
+
+def test_r4_real_body_change_still_not_a_rename():
+    """R4 regression guard: a genuine body change (not just comment/string
+    drift) must NOT pair as a rename — that would conflate two distinct
+    functions. After R4 the line ``return fetch()`` vs ``return save()``
+    still differs under the comment/string-stripping normalization."""
+    base_body = "def loadData():\n    return fetch()"
+    renamed_body = "def fetchData():\n    return save()"
+    base_ent = _entity("function", "loadData", base_body)
+    renamed_ent = _entity("function", "fetchData", renamed_body)
+    renames, _ = _detect_renames([renamed_ent], [base_ent])
+    assert renames == {}, (
+        f"a real body change must not pair as a rename; got {renames}"
+    )
+
+
+def test_r5_refactoring_merge_declines_on_duplicate_identities():
+    """R5: ``_try_refactoring_aware_merge`` builds ``base_by_id`` without the
+    duplicate-identity guard that ``_try_entity_disjoint`` has (fix #3). A
+    base with two entities sharing an identity (Python ``@property`` +
+    ``@x.setter`` both named ``x``) would silently drop one in the dict. After
+    R5, the path declines (returns None) on duplicate identities, escalating
+    to the LLM path — mirroring entity_disjoint."""
+    from capybase.structural_resolver import _try_refactoring_aware_merge
+    base = (
+        "class C:\n"
+        "    @property\n"
+        "    def x(self):\n"
+        "        return self._x\n"
+        "\n"
+        "    @x.setter\n"
+        "    def x(self, v):\n"
+        "        self._x = v\n"
+    )
+    # Same name 'x' twice → duplicate identity in base.
+    unit = _unit(base, base, base)
+    result = _try_refactoring_aware_merge(unit)
+    assert result is None, (
+        "refactoring-merge must decline (None) when base has duplicate "
+        "identities, escalating to LLM instead of silently dropping one"
+    )

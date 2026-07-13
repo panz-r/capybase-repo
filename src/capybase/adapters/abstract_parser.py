@@ -885,7 +885,7 @@ def _extract_import_name(line: str) -> str:
 # these patterns. ``class``-like keywords → CLASS; function-like → FUNCTION
 # (METHOD when nested inside a CLASS or container).
 _A_CLASS_KEYWORDS = (
-    "class", "struct", "interface", "trait", "enum", "union",
+    "class", "struct", "interface", "trait", "enum", "union", "object",
 )
 # Container-only keywords: ``impl``/``mod`` open a scope whose children are the
 # real entities (methods/fields), but the container itself is NOT emitted as an
@@ -1408,6 +1408,13 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
     # Field units are now emitted in the main scan at the ``;`` terminator (fix
     # #10), so no second whole-file re-scan is needed here.
 
+    # G9: newline/expression-body declarations the brace machine can't catch
+    # (Kotlin ``data class Name(...)`` with no body, ``fun m() = expr`` with an
+    # expression body instead of a block). These have no ``{`` so the brace scan
+    # never fires. A guarded line-scan supplements them — deduped against the
+    # brace-machine units so a ``fun`` with a block body isn't double-counted.
+    _emit_a_expression_body_units(source, units, language, _line_index)
+
     confidence = _assess_confidence(source, units)
     imports, exports = _extract_imports_exports_a(source, units)
     return FileIR(
@@ -1536,12 +1543,39 @@ def _go_declaration_name(
         # checking whether the token right after ``func`` is ``(``.
         after_kw = toks[last_kw_idx + 1 :] if last_kw_idx + 1 < len(toks) else []
         is_receiver = bool(after_kw) and after_kw[0].startswith("(")
-        if paren_open > 0:
-            before = joined[:paren_open].rstrip()
-            if before:
-                name_tok = before.split()[-1]
-                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
-                    return name_tok, is_receiver
+        if is_receiver:
+            # Receiver method: name is the identifier just before the param list.
+            if paren_open > 0:
+                before = joined[:paren_open].rstrip()
+                if before:
+                    name_tok = before.split()[-1]
+                    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
+                        return name_tok, is_receiver
+        else:
+            # Non-receiver: ``func Name(params)`` or generic ``func Name[T any](params)``.
+            # The name is the identifier right after ``func``. For generics the
+            # type-param list ``[T any]`` may be glued to the name
+            # (``Map[T``) — strip it. G10: the previous code used the
+            # "last balanced ()" + take-token-before approach, which misread
+            # generic signatures (the inner ``func(T) U`` param type's parens
+            # confused the scan → name=None). The name is always the token
+            # directly after ``func``.
+            #
+            # G10 subtlety: the reverse keyword scan in the caller may have
+            # found an INNER ``func`` (from a param type like ``f func(T) U``)
+            # rather than the declaration's ``func``. The declaration's ``func``
+            # is the FIRST ``func`` token in the buffer (it leads the statement).
+            # Find it and take the name right after.
+            decl_func_idx = last_kw_idx
+            for k, t in enumerate(toks):
+                if t == "func" or re.split(r"[<(:\[{]", t, maxsplit=1)[0] == "func":
+                    decl_func_idx = k
+                    break
+            if decl_func_idx + 1 < len(toks):
+                cand = toks[decl_func_idx + 1]
+                cand = re.split(r"\[", cand, maxsplit=1)[0]
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
+                    return cand, False
 
     # Type declaration: ``type Name struct/interface`` — name is between ``type``
     # and the class keyword. For Go generics (``type Container[T any] struct``)
@@ -1626,6 +1660,29 @@ def _classify_a_brace(
             pass  # function/class/arrow expression — NOT an initializer literal
         else:
             return None  # genuine object/struct-literal initializer
+    # G11: JS/TS arrow function with a block body — ``const f = (...) => {`` or
+    # ``const f = () => {``. The buffer ends in ``=>`` (the arrow), with a
+    # binding name before ``=``. No declaration keyword is present, so the
+    # keyword path and the keywordless heuristic (which requires ``)`` at the
+    # end) both miss it. Recognize the arrow shape explicitly and recover the
+    # binding name via ``_binding_name_before`` (treating ``=>`` as the
+    # pseudo-keyword position).
+    if toks and toks[-1] == "=>" and "=" in toks:
+        eq_idx = toks.index("=")
+        # The name is the token before ``=`` (recovered only if it's a binding).
+        if eq_idx >= 1:
+            cand = toks[eq_idx - 1]
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
+                # Require a field keyword before the name (so it's a binding,
+                # not a reassignment ``x = (...) => {``).
+                for j in range(eq_idx - 2, -1, -1):
+                    if toks[j] in _A_FIELD_KEYWORDS or toks[j] in ("export", "pub", "public"):
+                        kind = KIND_METHOD if stack and any(
+                            (u.kind == KIND_CLASS or u.container_only) for u in reversed(stack)
+                        ) else KIND_FUNCTION
+                        return (kind, cand, False)
+                    if toks[j] in (";", "}", "{"):
+                        break
     # Find the LAST declaration keyword in the buffer. A keyword may be glued
     # to the following ``(`` / ``<`` / ``:`` in the whitespace-normalized
     # tokens (``function()`` / ``fn<T>``), so match by prefix: a token whose
@@ -1874,7 +1931,7 @@ _A_FIELD_RE = re.compile(
 
 
 def _field_name_from_buf(buf: str) -> str | None:
-    """The declared field name in a token buffer ending at ``;``, or ``None``.
+    """The declared name in a token buffer ending at ``;``, or ``None``.
 
     Returns the name when the buffer matches a top-level field-declaration shape
     (optional modifiers + a field keyword + an identifier); ``None`` otherwise.
@@ -1886,6 +1943,90 @@ def _field_name_from_buf(buf: str) -> str | None:
     if m:
         return m.group(1)
     return None
+
+
+#: Patterns for newline/expression-body declarations the brace machine misses
+#: (G9). These have no ``{`` (bodyless or expression-body), so the brace scan
+#: never fires. Matched at line start (after optional modifiers). Each pattern
+#: captures the declared name. Only applied for languages whose syntax uses
+#: these forms (Kotlin, Scala) — the brace machine handles the rest.
+_A_EXPR_BODY_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    # Kotlin/Scala expression-body fun: ``fun name(...) [: Type] = expr``
+    # (no block body — those are caught by the brace machine).
+    ("function", re.compile(
+        r"^\s*(?:public\s+|private\s+|protected\s+|internal\s+|open\s+|abstract\s+|override\s+|suspend\s+|inline\s+)*"
+        r"fun\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)[^=]*=\s*\S"
+    )),
+    # Kotlin data class (bodyless): ``data class Name(...)`` — no ``{``.
+    ("class", re.compile(
+        r"^\s*(?:public\s+|private\s+|protected\s+|internal\s+|open\s+|abstract\s+|sealed\s+)*"
+        r"data\s+class\s+([A-Za-z_][A-Za-z0-9_]*)\s*[\({:]"
+    )),
+    # Kotlin/Scala bodyless class: ``class Name(...)`` with NO following ``{``
+    # on the same line (a one-line primary-constructor-only class). The brace
+    # machine catches multi-line ``class Name {``; this catches the bodyless
+    # form. The caller's dedup ensures a braced class isn't double-counted.
+    ("class", re.compile(
+        r"^\s*(?:public\s+|private\s+|protected\s+|internal\s+|open\s+|abstract\s+|sealed\s+|final\s+)*"
+        r"class\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^)]*\)\s*(?::\s*[^{=]+)?(?=\s*(?:$|//[^\n]*))"
+    )),
+]
+
+
+def _emit_a_expression_body_units(
+    source: str,
+    units: list[StructuralUnit],
+    language: str | None,
+    line_index: list[int],
+) -> None:
+    """Supplement the brace machine with newline/expression-body declarations.
+
+    The brace scanner only fires on ``{`` — it cannot see declarations with no
+    block body: Kotlin ``data class Point(...)``, ``fun m(): Int = expr``, or a
+    bodyless ``class C(val x)``. These are common in idiomatic Kotlin. This
+    line-scan catches them via :data:`_A_EXPR_BODY_PATTERNS` and appends them to
+    ``units`` (mutating in place), deduped against the brace-machine units by
+    ``(kind, name)`` so a ``fun``/``class`` WITH a block body (already emitted)
+    isn't double-counted. Only runs for Kotlin/Scala; a no-op for other langs.
+    """
+    if language not in ("kotlin", "scala"):
+        return
+    lines = source.split("\n")
+    # Existing identities (brace-machine units, top-level + nested) — dedup key
+    # so a ``fun``/``class`` WITH a block body isn't double-counted.
+    existing: set[tuple[str, str]] = set()
+
+    def _collect(us: list[StructuralUnit]) -> None:
+        for u in us:
+            existing.add(u.identity)
+            if u.children:
+                _collect(u.children)
+
+    _collect(units)
+    for row, line in enumerate(lines):
+        # Skip lines inside a string/comment heuristically — a ``fun`` inside a
+        # multi-line string would be a false positive. Best-effort: require the
+        # match to start at the line's first non-space token.
+        for kind, pat in _A_EXPR_BODY_PATTERNS:
+            m = pat.match(line)
+            if not m:
+                continue
+            name = m.group(1)
+            ident = (kind, name)
+            if ident in existing:
+                continue  # brace machine already caught this (block body)
+            body = line
+            units.append(
+                StructuralUnit(
+                    kind=kind,
+                    name=name,
+                    span=(row, row),
+                    body=body,
+                    fingerprint=unit_body_fingerprint(body),
+                )
+            )
+            existing.add(ident)
+            break  # one declaration per line
 
 
 def _extract_a_import_name(line: str) -> str:
