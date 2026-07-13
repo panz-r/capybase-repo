@@ -211,3 +211,94 @@ def test_rename_resolution_is_valid_python():
     )
     r = resolve_structurally(_unit(base, cur, rep))
     ast.parse(r.text)
+
+
+# ---------------------------------------------------------------------------
+# Refactoring-aware composition (survey §3.2 RefMerge): when entity_disjoint
+# DECLINES on overlap, but the overlap is a clean rename + body-modify, compose.
+# Tests the _try_refactoring_aware_merge rule directly (it runs only on the
+# overlap tail where the earlier line/entity rules declined).
+# ---------------------------------------------------------------------------
+
+from capybase.structural_resolver import _try_refactoring_aware_merge  # noqa: E402
+
+
+def _overlap_unit(base, cur, rep, *, lang="python"):
+    """A unit where the line-level rules DECLINE (both sides change overlapping
+    lines) so the dispatch reaches entity_disjoint → refactoring_aware. We test
+    the refactoring rule directly to isolate its logic."""
+    u = _unit(base, cur, rep, lang=lang)
+    return u
+
+
+def test_refactoring_aware_resolves_rename_plus_body_modify():
+    """Core case: side A renames foo→bar (pure rename), side B modifies foo's
+    body. The composition takes the renamed header + the modified body."""
+    base = "class C:\n    def foo():\n        x = 1\n        return x"
+    cur = "class C:\n    def bar():\n        x = 1\n        return x"  # pure rename
+    rep = "class C:\n    def foo():\n        x = 2\n        return x"  # body modify
+    result = _try_refactoring_aware_merge(_overlap_unit(base, cur, rep))
+    assert result is not None
+    assert "def bar():" in result      # renamed header
+    assert "x = 2" in result           # modified body
+    assert "return x" in result        # unchanged tail
+    # The composed entity is valid Python.
+    ast.parse(result)
+
+
+def test_refactoring_aware_compose_works_both_directions():
+    """Whichever side renamed, the composition uses that side's header."""
+    base = "class C:\n    def foo():\n        x = 1\n        return x"
+    # Now the REPLAYED side renames, CURRENT modifies the body.
+    cur = "class C:\n    def foo():\n        x = 2\n        return x"  # body modify
+    rep = "class C:\n    def bar():\n        x = 1\n        return x"  # pure rename
+    result = _try_refactoring_aware_merge(_overlap_unit(base, cur, rep))
+    assert result is not None
+    assert "def bar():" in result      # renamed header (from replayed)
+    assert "x = 2" in result           # modified body (from current)
+
+
+def test_refactoring_aware_declines_on_double_body_modify():
+    """Both sides modify the body (no rename) → genuine conflict → decline."""
+    base = "class C:\n    def foo():\n        x = 1\n        return x"
+    cur = "class C:\n    def foo():\n        x = 2\n        return x"
+    rep = "class C:\n    def foo():\n        x = 3\n        return x"
+    assert _try_refactoring_aware_merge(_overlap_unit(base, cur, rep)) is None
+
+
+def test_refactoring_aware_declines_on_rename_plus_signature_change():
+    """A rename on one side + a SIGNATURE change on the other (header differs
+    beyond the name) → can't safely compose → decline."""
+    base = "class C:\n    def foo():\n        x = 1\n        return x"
+    cur = "class C:\n    def bar():\n        x = 1\n        return x"        # rename
+    rep = "class C:\n    def foo(a, b):\n        x = 1\n        return x"  # sig change
+    assert _try_refactoring_aware_merge(_overlap_unit(base, cur, rep)) is None
+
+
+def test_refactoring_aware_declines_on_conflicting_renames():
+    """Both sides rename the same entity to different names → conflict → decline."""
+    base = "class C:\n    def foo():\n        x = 1\n        return x"
+    cur = "class C:\n    def bar():\n        x = 1\n        return x"  # foo->bar
+    rep = "class C:\n    def baz():\n        x = 1\n        return x"  # foo->baz
+    assert _try_refactoring_aware_merge(_overlap_unit(base, cur, rep)) is None
+
+
+def test_refactoring_aware_resolves_rust_rename_plus_body_modify():
+    """The rule covers Rust too (brace-family via the abstract parser)."""
+    base = "impl S {\n    fn foo(&self) -> i32 {\n        let x = 1;\n        x\n    }\n}"
+    cur = "impl S {\n    fn bar(&self) -> i32 {\n        let x = 1;\n        x\n    }\n}"  # rename
+    rep = "impl S {\n    fn foo(&self) -> i32 {\n        let x = 2;\n        x\n    }\n}"  # body modify
+    result = _try_refactoring_aware_merge(_overlap_unit(base, cur, rep, lang="rust"))
+    assert result is not None
+    assert "fn bar(" in result
+    assert "let x = 2;" in result
+
+
+def test_refactoring_aware_resolution_is_valid_python():
+    """The composed container must parse cleanly (the validator double-checks)."""
+    base = "class S:\n    def compute(self):\n        return self.value * 2"
+    cur = "class S:\n    def calculate(self):\n        return self.value * 2"  # rename
+    rep = "class S:\n    def compute(self):\n        return self.value * 3"  # body modify
+    result = _try_refactoring_aware_merge(_overlap_unit(base, cur, rep))
+    assert result is not None
+    ast.parse(result)

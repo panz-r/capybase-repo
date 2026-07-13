@@ -43,6 +43,10 @@ from capybase.merge_intent import classify_side, direction
 Rule = Literal[
     "identical_sides", "one_sided_change", "disjoint_edits", "zealous_merge",
     "entity_disjoint", "token_disjoint", "delete_side",
+    # Refactoring-aware composition (survey §3.2 RefMerge): when entity_disjoint
+    # DECLINED on overlap, but the overlap is entirely a clean rename-vs-body-
+    # modify partition, compose the renamer's header with the modifier's body.
+    "refactoring_aware_merge",
     # Easy-merge union rules (the gap every prior rule declines): both sides
     # append distinct items to a collection, or insert distinct lines at the
     # same anchor. An opinionated, deterministic ordering (current-appends
@@ -170,6 +174,18 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         merged = _try_entity_disjoint(unit)
         if merged is not None:
             return StructuralResolution(rule="entity_disjoint", text=merged)
+
+        # Rule 6b: refactoring-aware composition (survey §3.2 RefMerge). Fires
+        # when entity_disjoint DECLINED on overlap, but the overlap is entirely a
+        # clean rename-vs-body-modify partition: one side renamed an entity (pure
+        # header change, body content identical to base), the other modified its
+        # body (header line identical to base, body content changed). Composing
+        # the renamer's header with the modifier's body preserves BOTH intents.
+        # Declines the moment any overlapping pair isn't a clean partition (both
+        # modified the body, both renamed differently, a signature change, …).
+        merged = _try_refactoring_aware_merge(unit)
+        if merged is not None:
+            return StructuralResolution(rule="refactoring_aware_merge", text=merged)
 
         # Rule 7: token-level disjoint resolution (survey §4.2 Summer, layer 3).
         # Runs AFTER entity resolution so multi-entity conflicts (renames, adds)
@@ -1133,6 +1149,215 @@ def _try_entity_disjoint(unit: ConflictUnit) -> str | None:
     # Reconstruct the container text. The enclosing node's text is the source of
     # truth for its non-entity framing (class header, impl braces, indentation).
     # We splice the merged entity bodies back into that framing.
+    return _rebuild_container(enc_text, [e.body for e in merged_ids], lang)
+
+
+def _entity_header_line(body: str) -> str:
+    """The first (header/signature) line of an entity body, stripped.
+
+    A rename changes this line (``def foo`` → ``def bar``); a body-only modify
+    leaves it identical to base. So the header line is the discriminator between
+    a rename and a body modification. Stripped so incidental indentation doesn't
+    mask a match.
+    """
+    for line in (body or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _compose_entity(renamer, modifier) -> "Entity":
+    """Build a composed entity: ``renamer``'s header line + ``modifier``'s body.
+
+    The result has the NEW name (from the renamer's header) and the MODIFIED body
+    content (from the modifier). The modifier's header line is replaced by the
+    renamer's; the rest of the modifier's body (the changed lines) is kept
+    verbatim. Returns a new Entity with the composed body and the renamer's
+    identity. ``span`` is carried from the modifier (the body's position).
+    """
+    from capybase.adapters.structural import Entity
+
+    ren_header = _entity_header_line(renamer.body)
+    mod_lines = (modifier.body or "").split("\n")
+    # Replace the modifier's header line (the first non-blank line) with the
+    # renamer's, preserving the modifier's indentation on that line.
+    composed: list[str] = []
+    replaced = False
+    indent = ""
+    for ln in mod_lines:
+        if not replaced and ln.strip():
+            indent = ln[: len(ln) - len(ln.lstrip(" "))]
+            composed.append(indent + ren_header if ren_header else ln)
+            replaced = True
+        else:
+            composed.append(ln)
+    if not replaced:
+        composed = [ren_header]
+    new_body = "\n".join(composed)
+    return Entity(
+        kind=renamer.kind, name=renamer.name, body=new_body,
+        span=modifier.span,
+    )
+
+
+def _try_refactoring_aware_merge(unit: ConflictUnit) -> str | None:
+    """Compose a rename + body-modify that both touch the SAME entity (§3.2 RefMerge).
+
+    ``_try_entity_disjoint`` resolves when the two sides touch DIFFERENT entities.
+    It DECLINES when they touch the SAME canonical entity (overlap) — that's a
+    genuine conflict for the line/LLM resolvers UNLESS the overlap decomposes into
+    orthogonal refactoring intents:
+
+      - Side A RENAMED an entity (new header, body content identical to base).
+      - Side B MODIFIED that entity's body (header identical to base, body changed).
+
+    Both touch the same canonical identity → overlap. But the changes are
+    orthogonal (one moved the name, one changed the body), so they compose: take
+    the renamer's header + the modifier's body. This is exactly the RefMerge
+    pattern (normalize → merge → reapply), specialized to renames.
+
+    Declines (returns None) when:
+      - the parser/container is unavailable (same preconditions as entity_disjoint),
+      - the overlap is NOT a clean {rename, modify} partition (both modified the
+        body, both renamed differently, a signature change touched the header on
+        both, or an entity was touched in an unclassifiable way),
+      - composition would be ambiguous.
+
+    The algorithm reuses ``_detect_renames`` for rename detection and the same
+    entity enumeration as entity_disjoint. It runs ONLY when entity_disjoint
+    already declined (it's dispatched immediately after), so its re-parse cost is
+    paid only on the hard overlap tail.
+    """
+    try:
+        from capybase.adapters import structural
+    except Exception:  # noqa: BLE001
+        return None
+    lang = unit.language
+    if lang not in ("python", "rust"):
+        return None
+    meta = unit.structural_metadata
+    enc_text = meta.get("enclosing_node_text")
+    if not enc_text:
+        return None  # no enclosing container → can't enumerate / rebuild
+
+    base_ents = structural.enumerate_entities(unit.base.text or "", lang)
+    cur_ents = structural.enumerate_entities(unit.current.text or "", lang)
+    rep_ents = structural.enumerate_entities(unit.replayed.text or "", lang)
+    if base_ents is None or cur_ents is None or rep_ents is None:
+        return None
+
+    # Descend into the container's body if the top-level enumeration returned only
+    # the container itself (mirrors entity_disjoint's anchor logic).
+    if len(base_ents) <= 1 and len(cur_ents) <= 1 and len(rep_ents) <= 1:
+        span = _inner_anchor(enc_text)
+        if span is not None:
+            base_ents = structural.enumerate_entities(unit.base.text or "", lang, container_span=span) or base_ents
+            cur_ents = structural.enumerate_entities(unit.current.text or "", lang, container_span=span) or cur_ents
+            rep_ents = structural.enumerate_entities(unit.replayed.text or "", lang, container_span=span) or rep_ents
+
+    base_by_id = {e.identity: e for e in base_ents}
+
+    # Rename maps per side: side identity (kind, new_name) → base identity it
+    # replaced. A rename is "pure" only if the body CONTENT equals base's.
+    cur_renames, _ = _detect_renames(cur_ents, base_ents)
+    rep_renames, _ = _detect_renames(rep_ents, base_ents)
+
+    def _is_pure_rename(side_ents, renames, ent):
+        """True if ``ent`` is a rename whose body content == the base entity's."""
+        if ent.identity not in renames:
+            return False
+        base_id = renames[ent.identity]
+        base_e = base_by_id.get(base_id)
+        if base_e is None:
+            return False
+        return _body_content(ent.body) == _body_content(base_e.body)
+
+    def _is_body_modify(ent):
+        """True if ``ent`` has the same identity as a base entity, the same header
+        line, but changed body content (a body-only modification — NOT a signature
+        change)."""
+        base_e = base_by_id.get(ent.identity)
+        if base_e is None:
+            return False  # not a base entity → it's an addition, not a modify
+        if _entity_header_line(ent.body) != _entity_header_line(base_e.body):
+            return False  # header changed → signature change, not body-only
+        return _body_content(ent.body) != _body_content(base_e.body)
+
+    def _touched(side_ents, renames):
+        """Canonical base identities a side touched (rename-aware), as Entity objs
+        keyed by canonical id — reusing entity_disjoint's notion of 'touched'."""
+        out = {}
+        for e in side_ents:
+            canon = renames.get(e.identity, e.identity)
+            if e.identity in renames:
+                out[canon] = e
+                continue
+            prev = base_by_id.get(canon)
+            if prev is None or e.body != prev.body:
+                out[canon] = e
+        return out
+
+    cur_touched = _touched(cur_ents, cur_renames)
+    rep_touched = _touched(rep_ents, rep_renames)
+    overlap = set(cur_touched) & set(rep_touched)
+    if not overlap:
+        return None  # no overlap → entity_disjoint already handled (or declined for other reasons)
+
+    # For each overlapping entity, classify the pair and build a composition.
+    # If ANY overlapping entity can't be cleanly composed, decline entirely.
+    compositions: dict = {}  # base_id → composed Entity
+    for base_id in overlap:
+        cur_e = cur_touched[base_id]
+        rep_e = rep_touched[base_id]
+        cur_rename = _is_pure_rename(cur_ents, cur_renames, cur_e)
+        rep_rename = _is_pure_rename(rep_ents, rep_renames, rep_e)
+        cur_modify = _is_body_modify(cur_e)
+        rep_modify = _is_body_modify(rep_e)
+        # Need exactly one rename and one body-modify.
+        if cur_rename and rep_modify and not rep_rename and not cur_modify:
+            compositions[base_id] = _compose_entity(cur_e, rep_e)
+        elif rep_rename and cur_modify and not cur_rename and not rep_modify:
+            compositions[base_id] = _compose_entity(rep_e, cur_e)
+        else:
+            # Both modified body, both renamed, a signature change, an addition,
+            # or an unclassifiable touch → genuine conflict, decline.
+            return None
+
+    # All overlapping entities composed cleanly. Now build the merged container
+    # the same way entity_disjoint does, substituting composed entities for the
+    # overlapping ones and taking single-side touches otherwise. Non-overlapping
+    # touched entities and additions flow through unchanged from entity_disjoint's
+    # logic (we re-derive the walk here for clarity, since this path only fires on
+    # the overlap tail).
+    seen: set = set()
+    merged_ids: list = []
+    # Walk base entities in order; substitute composed/touched versions.
+    for e in base_ents:
+        ident = e.identity
+        if ident in compositions:
+            merged_ids.append(compositions[ident])
+            seen.add(ident)
+        elif ident in cur_touched and ident not in rep_touched:
+            merged_ids.append(cur_touched[ident])
+            seen.add(ident)
+        elif ident in rep_touched and ident not in cur_touched:
+            merged_ids.append(rep_touched[ident])
+            seen.add(ident)
+        else:
+            merged_ids.append(e)
+            seen.add(ident)
+    # Append additions (entities in a side not in base and not seen).
+    for e in cur_ents:
+        canon = cur_renames.get(e.identity, e.identity)
+        if canon not in base_by_id and canon not in seen:
+            merged_ids.append(e)
+            seen.add(canon)
+    for e in rep_ents:
+        canon = rep_renames.get(e.identity, e.identity)
+        if canon not in base_by_id and canon not in seen:
+            merged_ids.append(e)
+            seen.add(canon)
+
     return _rebuild_container(enc_text, [e.body for e in merged_ids], lang)
 
 
