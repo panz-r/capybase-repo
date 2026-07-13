@@ -368,6 +368,91 @@ def _is_conflict_marker_line(line: str) -> bool:
     )
 
 
+#: Brackets whose unclosed state makes a line a continuation of the previous
+#: logical line (PEP 8 line-wrapping, default-arg lists, collection literals).
+#: A line inside an unclosed ``(`` / ``[`` / ``{`` must not be treated as a
+#: scope boundary even when it dedents — the ``) -> bool:`` closing line of a
+#: multi-line signature sits at indent 0 but belongs to the signature.
+_OPEN_BRACKETS = "([{"
+_CLOSE_BRACKETS = ")]}"
+
+
+def _line_bracket_delta(raw: str) -> int:
+    """Net bracket change on a line (string-literal-aware).
+
+    ``opens - closes`` for ``()``/``[]``/``{}``, ignoring brackets inside string
+    literals (string content is blanked first). Used by Family B to track whether
+    a line continues a multi-line signature/collection (``delta`` doesn't return
+    to zero until the final closing line).
+    """
+    blanked = _STRING_LIT_RE.sub("'_'", raw)
+    delta = 0
+    for ch in blanked:
+        if ch in _OPEN_BRACKETS:
+            delta += 1
+        elif ch in _CLOSE_BRACKETS:
+            delta -= 1
+    return delta
+
+
+_TRIPLE_QUOTES = ('"""', "'''")
+
+
+def _update_triple_quote_state(raw: str, open_triple: str | None) -> str | None:
+    """Advance the multi-line triple-quote state across one line.
+
+    ``open_triple`` is the currently-open triple-quote marker (three double or
+    three single quotes) carried from a previous line, or ``None`` when no
+    multi-line string is open. Returns the new state: ``None`` when the string
+    closed on this line (or no string was open and none opened), else the
+    still-open marker. A line is "inside a triple-quote string" when the
+    returned state is non-None OR the line itself opened a string that didn't
+    close.
+
+    Single-line triple-quotes (opening and closing on one line) open AND close
+    on the same line → net no state change.
+    """
+    i = 0
+    n = len(raw)
+    state = open_triple
+    while i < n:
+        # If a string is open, look for its closer; everything until then is string content.
+        if state is not None:
+            idx = raw.find(state, i)
+            if idx < 0:
+                # Closer not on this line — string continues.
+                return state
+            # Closer found: string ends here, resume normal scanning after it.
+            i = idx + len(state)
+            state = None
+            continue
+        # No string open: scan for a triple-quote opener.
+        # Find the earliest of the two markers at/after i.
+        earliest = -1
+        opened = None
+        for mq in _TRIPLE_QUOTES:
+            j = raw.find(mq, i)
+            if j >= 0 and (earliest < 0 or j < earliest):
+                earliest = j
+                opened = mq
+        if earliest < 0:
+            return None  # nothing more on this line
+        i = earliest + len(opened)
+        state = opened
+        # Loop continues: the opener may be closed later on the same line.
+    return state
+
+
+def _line_opens_or_continues_triple(raw: str, open_triple: str | None) -> bool:
+    """True if, after this line, a triple-quote string is still open.
+
+    Captures both "was already open and stays open" and "opens fresh and
+    doesn't close on this line". A line for which this is True is a
+    continuation — its content is string literal, not declarations.
+    """
+    return _update_triple_quote_state(raw, open_triple) is not None
+
+
 def _indent_width(line: str) -> int:
     """Leading-whitespace column count (tabs = 8, per Python convention)."""
     n = 0
@@ -523,6 +608,14 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
     last_line_row = -1
     pending_decorator_indent: int | None = None
     pending_decorator_start: int | None = None
+    # Continuation tracking (fix #1 + #6): a line is a continuation when unclosed
+    # brackets (``def f(`` … ``) -> bool:``) or an open triple-quote string span
+    # it across newlines. Such lines are absorbed into the enclosing unit's body
+    # (computed by source slice) and never trigger a dedent/close — the
+    # ``) -> bool:`` of a wrapped signature sits at indent 0 but belongs to the
+    # signature, and a ``class Fake:`` inside a docstring is string content.
+    cont_depth = 0  # net unclosed ``() [] {}`` carried from prior lines
+    open_triple: str | None = None  # open multi-line triple-quote marker, if any
 
     def close_units_at_or_below(indent: int, end_row: int) -> None:
         # Close any open unit whose opening indent is >= indent (scope ended).
@@ -542,8 +635,20 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
             pending_decorator_indent = None
             pending_decorator_start = None
             last_line_row = i - 1
+            # Reset continuation state — a conflict marker is a hard boundary.
+            cont_depth = 0
+            open_triple = None
             continue
         if _is_blank_or_comment(raw, language):
+            continue
+
+        # Triple-quote continuation: if a multi-line string is open from a prior
+        # line, this line is string content (even if it looks like ``class X:``).
+        # Advance the state and absorb the line; do NOT close units or detect
+        # declarations. The closing line of the string is absorbed too (it's
+        # still part of the string literal until the closer is consumed).
+        if open_triple is not None:
+            open_triple = _update_triple_quote_state(raw, open_triple)
             continue
 
         indent = _indent_width(raw)
@@ -553,9 +658,42 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
         last_line_row = i
 
         if _B_DECORATOR_RE.match(raw):
+            # A decorator belongs to the NEXT declaration. It is a scope boundary
+            # for the PREVIOUS unit at the same indent: close that unit against
+            # the prior meaningful row so it doesn't absorb this decorator (fix
+            # #2 — previously the previous unit's end advanced through the next
+            # unit's decorator). Do NOT advance last_line_row past this line.
+            if stack and stack[-1].indent >= indent:
+                close_units_at_or_below(indent, prev_line_row)
+            last_line_row = prev_line_row  # this line is not a body line
             if pending_decorator_indent is None:
                 pending_decorator_indent = indent
                 pending_decorator_start = i
+            continue
+
+        # Bracket continuation (fix #1): a line is a continuation when brackets
+        # were ALREADY open coming into it (``was_continuing``). The signature
+        # opener ``def f(`` itself is processed normally (it opens the unit) and
+        # leaves ``cont_depth > 0``; subsequent lines — including the closing
+        # ``) -> bool:`` at indent 0 — are absorbed until brackets close.
+        delta = _line_bracket_delta(raw)
+        was_continuing = cont_depth > 0
+        cont_depth = max(0, cont_depth + delta)
+        # A line is a continuation (not a scope boundary) when brackets were
+        # already open coming in. The opener line (which leaves cont_depth > 0
+        # after its own delta) is NOT a continuation — it must be classified.
+        is_continuation = was_continuing
+        # If a multi-line triple-quote OPENS on this line (and doesn't close),
+        # every following line is a continuation until the closer. The opener
+        # line itself is still processed (e.g. a ``x = \"\"\"`` assignment).
+        new_open_triple = _update_triple_quote_state(raw, None)
+        if new_open_triple is not None:
+            open_triple = new_open_triple
+
+        if is_continuation:
+            # Absorb into the enclosing unit; do not close or open scopes. The
+            # body is reconstructed by source slice, so we only need the
+            # last_line_row (already advanced above) to extend the unit's span.
             continue
 
         # A dedent below a pending decorator ⇒ the decorator was standalone.
@@ -1496,8 +1634,10 @@ def _assess_confidence(source: str, units: list[StructuralUnit]) -> float:
     """Heuristic confidence in the parse (survey §"Robustness over correctness").
 
     - Minified/generated (median line length > 200) → 0.0 (fall back to LSP).
-    - Pathological fragmentation (> lines/5 top-level units on a sizable file)
-      → 0.3 (suspicious; likely mis-detection).
+    - Pathological fragmentation (> lines/5 NON-test top-level units on a sizable
+      file) → 0.3 (suspicious; likely mis-detection). ``is_test`` units are
+      excluded: a large test module with many small ``test_*`` functions is
+      normal, not fragmentation (fix #8).
     - Otherwise 1.0.
     """
     if not source:
@@ -1510,7 +1650,10 @@ def _assess_confidence(source: str, units: list[StructuralUnit]) -> float:
     n_lines = len(line_lens)
     # Only flag fragmentation on substantial files (small files legitimately have
     # many short units — a test file with 8 tiny functions at 40 lines is fine).
-    if n_lines >= 100 and len(units) > max(1, n_lines // _FRAGMENTATION_RATIO):
+    # Exclude test units: a 60-test module is a legitimate test file, not
+    # pathological fragmentation (fix #8 — previously flagged at confidence 0.3).
+    non_test = [u for u in units if not u.is_test]
+    if n_lines >= 100 and len(non_test) > max(1, n_lines // _FRAGMENTATION_RATIO):
         return 0.3
     return 1.0
 

@@ -872,3 +872,200 @@ def test_render_context_no_import_block_when_only_code_changed():
     diff = ap.compute_structural_diff_3way(base, left, right, language="python")
     text = ap.render_structural_context(diff)
     assert "Import surface" not in text
+
+
+# ---------------------------------------------------------------------------
+# Family B regression suite — multi-line signatures, decorator spans,
+# triple-quoted-string phantoms, fragmentation false-positives.
+# Each test pins one of the silent-wrong-output bugs found in the parser review.
+# ---------------------------------------------------------------------------
+
+
+def test_multiline_python_signature_body_included():
+    """Fix #1: a PEP 8 line-wrapped signature must NOT close the function at the
+    ``) -> bool:`` line. The body (``return True``) must be inside the unit."""
+    src = (
+        "def long_function_name(\n"
+        "    arg_one: int,\n"
+        "    arg_two: str,\n"
+        ") -> bool:\n"
+        "    return True\n"
+    )
+    ir = ap.parse_family_b(src)
+    assert len(ir.units) == 1
+    f = ir.units[0]
+    assert f.name == "long_function_name"
+    assert f.kind == "function"
+    # The span must cover the body line (row 4), not stop at the closing paren (row 3).
+    assert f.span[1] >= 4, f"span {f.span} does not cover the body"
+    assert "return True" in f.body, "body lost the return statement"
+
+
+def test_multiline_signature_with_nested_call():
+    """Fix #1 regression guard: continuation through nested parentheses and a
+    bracket list — none of these mid-signature brackets close the function."""
+    src = (
+        "def f(\n"
+        "    a=dict(b=[1, 2]),\n"
+        "    c=(x for x in []),\n"
+        ") -> None:\n"
+        "    pass\n"
+    )
+    ir = ap.parse_family_b(src)
+    assert len(ir.units) == 1
+    assert ir.units[0].name == "f"
+    assert "pass" in ir.units[0].body
+
+
+def test_multiline_signature_then_sibling_function():
+    """Fix #1: after a multi-line signature function closes normally at EOF, a
+    following sibling function at the same indent is a separate unit."""
+    src = (
+        "def first(\n"
+        "    a,\n"
+        "):\n"
+        "    return 1\n"
+        "\n"
+        "def second():\n"
+        "    return 2\n"
+    )
+    ir = ap.parse_family_b(src)
+    names = {u.name for u in ir.units}
+    assert names == {"first", "second"}, f"got {[u.name for u in ir.units]}"
+
+
+def test_decorator_does_not_extend_previous_unit():
+    """Fix #2: a decorator belongs to the NEXT declaration. The previous unit
+    must NOT absorb the next unit's decorator line into its span/body.
+
+    Before the fix, the first ``x`` greedily extended its span through the
+    second ``x``'s ``@x.setter`` decorator."""
+    src = (
+        "class C:\n"
+        "    @property\n"
+        "    def x(self):\n"
+        "        return self._x\n"
+        "\n"
+        "    @x.setter\n"
+        "    def x(self, v):\n"
+        "        self._x = v\n"
+    )
+    ir = ap.parse_family_b(src)
+    flat = ap._all_units_flat(ir)
+    methods = [u for u in flat if u.kind == "method" and u.name == "x"]
+    assert len(methods) == 2, f"expected 2 x-methods, got {len(methods)}"
+    # The first method's span must end at the ``return`` line (row 3), NOT reach
+    # the second method's decorator (row 5).
+    first, second = sorted(methods, key=lambda u: u.span[0])
+    assert first.span[1] <= 3, f"first method span {first.span} ate the next decorator"
+    assert "@x.setter" not in first.body, "first method absorbed the second's decorator"
+    # The second method starts at its own decorator (row 5).
+    assert second.span[0] == 5, f"second method span {second.span} should start at @x.setter"
+
+
+def test_stacked_decorators_on_one_function():
+    """Fix #2 regression guard: two or more decorators on the SAME function
+    still fold into that function's span (existing behavior unchanged)."""
+    src = (
+        "@deco1\n"
+        "@deco2\n"
+        "def f():\n"
+        "    return 1\n"
+        "\n"
+        "def g():\n"
+        "    return 2\n"
+    )
+    ir = ap.parse_family_b(src)
+    by_name = {u.name: u for u in ir.units}
+    f = by_name["f"]
+    assert f.span == (0, 3), f"f span {f.span}"
+    assert "@deco1" in f.body and "@deco2" in f.body
+    assert by_name["g"].span == (5, 6)
+
+
+def test_decorator_on_class_method():
+    """Fix #2 in the class context: a decorated method must not steal the next
+    sibling method's body."""
+    src = (
+        "class C:\n"
+        "    @staticmethod\n"
+        "    def make():\n"
+        "        return C()\n"
+        "\n"
+        "    def helper(self):\n"
+        "        return 1\n"
+    )
+    ir = ap.parse_family_b(src)
+    flat = ap._all_units_flat(ir)
+    make = next(u for u in flat if u.name == "make")
+    helper = next(u for u in flat if u.name == "helper")
+    # make ends at its return line (row 3), not into helper.
+    assert make.span[1] <= 3
+    assert "def helper" not in make.body
+    assert helper.span[0] == 5
+
+
+def test_triple_quoted_docstring_no_phantom_units():
+    """Fix #6: a multi-line triple-quoted docstring containing class/def-shaped
+    text must NOT produce phantom nested units. Family B had no string-state
+    awareness, so ``class Fake:`` inside a docstring was parsed as a real unit."""
+    src = (
+        "def foo():\n"
+        '    """docs\n'
+        "    class Fake:\n"
+        "        def method(self): pass\n"
+        '    """\n'
+        "    return 1\n"
+    )
+    ir = ap.parse_family_b(src)
+    flat = ap._all_units_flat(ir)
+    names = {u.name for u in flat}
+    assert "Fake" not in names, "phantom class from docstring"
+    assert "method" not in names, "phantom method from docstring"
+    assert "foo" in names
+    # foo's body must include the return (the docstring didn't close it early).
+    foo = next(u for u in flat if u.name == "foo")
+    assert "return 1" in foo.body
+
+
+def test_triple_quoted_string_module_level():
+    """Fix #6: a module-level multi-line triple-quoted string (module docstring
+    or constant) with class-like content must not spawn phantom units."""
+    src = (
+        '"""\n'
+        "class Fake:\n"
+        "    def m(self): pass\n"
+        '"""\n'
+        "\n"
+        "def real():\n"
+        "    return 1\n"
+    )
+    ir = ap.parse_family_b(src)
+    flat = ap._all_units_flat(ir)
+    names = {u.name for u in flat}
+    assert "Fake" not in names
+    assert "real" in names
+
+
+def test_fragmentation_not_triggered_for_test_file():
+    """Fix #8: a large test module with many small ``test_*`` functions is
+    normal, not pathological fragmentation. Must parse at confidence 1.0."""
+    tests = [f"def test_{i}():\n    assert {i} < 100\n" for i in range(60)]
+    src = "\n".join(tests)
+    n_lines = len(src.split("\n"))
+    ir = ap.parse_family_b(src)
+    assert len(ir.units) == 60
+    assert ir.parse_confidence == 1.0, (
+        f"test file flagged as fragmented ({len(ir.units)} units / {n_lines} lines)"
+    )
+
+
+def test_fragmentation_still_flags_non_test_garbage():
+    """Fix #8 regression guard: genuinely fragmented code (many small NON-test
+    functions in little space) is still flagged as low-confidence."""
+    # 40 tiny non-test functions in ~120 lines.
+    fns = [f"def fn{i}():\n    x = {i}\n" for i in range(40)]
+    src = "\n".join(fns)
+    ir = ap.parse_family_b(src)
+    # Heuristic still fires for non-test fragmentation.
+    assert ir.parse_confidence < 1.0, "non-test fragmentation should be flagged"
