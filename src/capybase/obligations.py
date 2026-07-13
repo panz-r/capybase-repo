@@ -19,7 +19,7 @@ serves two purposes:
 
 Everything here is a pure function of the three side texts (base/current/
 replayed) — no git, no model, no I/O — so it's exhaustively unit-testable. The
-diff is :mod:`difflib`-based (no new dependencies), matching the resolver and
+diff is histogram-based (:mod:`capybase.diff`, no new dependencies), matching the resolver and
 :mod:`merge_intent`.
 
 The replace-opcode gap: no existing helper returns BOTH the removed base lines
@@ -88,7 +88,7 @@ class Obligations:
 def extract_obligations(unit: "object") -> Obligations:
     """Derive the per-side obligation contract for a conflict unit.
 
-    Diffs each side against the base via :mod:`difflib`. Pure; never raises
+    Diffs each side against the base via :mod:`capybase.diff`. Pure; never raises
     (a unit with missing side text yields empty obligations).
 
     **Base scoping** (critical for multi-hunk files): ``unit.base.text`` is the

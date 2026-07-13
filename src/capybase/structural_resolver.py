@@ -34,12 +34,11 @@ dependencies.
 
 from __future__ import annotations
 
-import difflib
 from dataclasses import dataclass
 from typing import Literal
 
 from capybase.conflict_model import ConflictUnit
-from capybase.diff import line_matcher
+from capybase.diff import char_ratio, line_matcher
 from capybase.merge_intent import classify_side, direction
 
 Rule = Literal[
@@ -898,13 +897,13 @@ RENAME_SIMILARITY_THRESHOLD = 0.6
 def _name_similarity(a: str, b: str) -> float:
     """Levenshtein-style similarity ratio of two entity names in [0, 1].
 
-    Uses ``difflib.SequenceMatcher`` (no new dependency) — the same measure s3m
-    applies via Levenshtein string similarity for its rename handler. 1.0 = same
-    name; →0 = unrelated.
+    Uses :func:`capybase.diff.char_ratio` (character-level LCS ratio,
+    C-accelerated) — the same measure s3m applies via Levenshtein string
+    similarity for its rename handler. 1.0 = same name; →0 = unrelated.
     """
     if not a or not b:
         return 0.0
-    return difflib.SequenceMatcher(a=a, b=b, autojunk=False).ratio()
+    return char_ratio(a, b)
 
 
 def _body_content(body: str) -> str:

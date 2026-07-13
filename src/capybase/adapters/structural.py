@@ -865,12 +865,12 @@ _RENAME_NAME_SIMILARITY_THRESHOLD = 0.6
 
 
 def _name_similarity(a: str, b: str) -> float:
-    """String similarity ratio in [0, 1] via difflib (no new dependency)."""
+    """String similarity ratio in [0, 1] via character-level LCS (C-accelerated)."""
     if not a or not b:
         return 0.0
-    import difflib
+    from capybase.diff import char_ratio
 
-    return difflib.SequenceMatcher(a=a, b=b, autojunk=False).ratio()
+    return char_ratio(a, b)
 
 
 def _body_is_substantial(body_fp: str) -> bool:

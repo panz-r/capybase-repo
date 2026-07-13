@@ -10,8 +10,9 @@ conflicts that have no single correct side.
 
 Fitness (the evaluation function) is the **mean character-level similarity
 (Gestalt) of the candidate to both parents** (arXiv:2605.16646 §4.1: median
-Spearman ≈0.79 to developer-chosen resolutions). Similarity uses stdlib
-``difflib`` — no training, no model, no new dependencies.
+Spearman ≈0.79 to developer-chosen resolutions). Similarity uses
+:func:`capybase.diff.char_ratio` (C-accelerated LCS) — no training, no model,
+no external dependencies.
 
 Search strategy:
 - **Exhaustive** enumeration of all order-preserving interleavings when the
@@ -45,12 +46,13 @@ unit-testable.
 
 from __future__ import annotations
 
-import difflib
 import random
 import time
 from dataclasses import dataclass
 from math import comb
 from typing import Iterator
+
+from capybase.diff import char_ratio
 
 from capybase.conflict_model import ConflictUnit
 
@@ -141,16 +143,13 @@ def _ratio(a: list[str], b: list[str]) -> float:
     §4.1) found character-level LCS (Gestalt) the best similarity metric for the
     SBCR fitness function, with the mean aggregation here reaching median
     Spearman ≈0.79 to human resolutions — above line-level and token-level
-    alternatives. ``difflib.SequenceMatcher.ratio()`` on two strings IS the
-    Gestalt ratio, so we feed it the joined text. ``autojunk=False`` keeps the
-    autojunk heuristic off (it can distort ratios on code with repeated tokens).
-    Returns 1.0 for identical; 0.0 only when the two share no characters at all.
+    alternatives. Uses :func:`capybase.diff.char_ratio` (C-accelerated) on the
+    joined text. Returns 1.0 for identical; 0.0 only when the two share no
+    characters at all.
     """
     if not a and not b:
         return 1.0
-    return difflib.SequenceMatcher(
-        a="\n".join(a), b="\n".join(b), autojunk=False
-    ).ratio()
+    return char_ratio("\n".join(a), "\n".join(b))
 
 
 def fitness(candidate: list[str], ours: list[str], theirs: list[str]) -> float:

@@ -12,10 +12,13 @@ for ~62.6% of files (ConGra §5.1; large-scale diff studies of 163k diffs).
 
 This module exposes :class:`HistogramMatcher`, a drop-in replacement for
 ``difflib.SequenceMatcher`` over line/token *lists* exposing the API surface
-capybase uses: ``get_opcodes()``, ``get_matching_blocks()``, ``ratio()``. The
-three call sites that diff whole *strings* for character-level similarity
-(entity-name matching, SBCR's Gestalt fitness) stay on ``difflib`` — histogram
-diff is a sequence-element algorithm, not a character-level one.
+capybase uses: ``get_opcodes()``, ``get_matching_blocks()``, ``ratio()``. It also
+exposes :func:`char_ratio` — the character-level Gestalt similarity
+(``2·|LCS|/(|a|+|b|)``) used by SBCR's fitness and entity-name matching. The hot
+paths (char ratio + histogram matching) are C-accelerated via the ``_cdiff``
+extension; a pure-Python fallback keeps the module correct without a compiler.
+
+This module is fully self-contained — capybase has no ``difflib`` dependency.
 
 Algorithm (per raygard's reconstruction of git's xdiffhistogram):
 
@@ -41,8 +44,67 @@ construction.
 
 from __future__ import annotations
 
-import difflib
+from collections import namedtuple
 from typing import Hashable, Sequence
+
+# The C-accelerated core. When the extension is unavailable (no compiler / failed
+# build), we fall back to the pure-Python implementations below — capybase.diff
+# is correct either way; the C path is the performance optimization for the hot
+# SBCR fitness and name-similarity paths.
+try:
+    from capybase import _cdiff as _c
+    _HAS_C = True
+except ImportError:  # pragma: no cover - exercised only without the .so
+    _HAS_C = False
+    _c = None
+
+# Our own Match namedtuple (the type get_matching_blocks returns). Field names
+# mirror difflib.Match (a, b, size) so callers using .size work unchanged; we no
+# longer depend on difflib for the type.
+Match = namedtuple("Match", ["a", "b", "size"])
+
+
+def char_ratio(a: str, b: str) -> float:
+    """Character-level Gestalt similarity: ``2·|LCS|/(|a|+|b|)``.
+
+    The metric SBCR's fitness and entity-name similarity use. Computes the TRUE
+    maximal character LCS (correct where difflib's greedy matching undercounts).
+    C-accelerated when the ``_cdiff`` extension is available; otherwise a
+    pure-Python O(n·m) DP (correct but slower on large inputs).
+
+    Returns 1.0 for identical, 0.0 for disjoint (no shared characters), in
+    ``[0, 1]``. Both-empty → 1.0; one-empty → 0.0.
+    """
+    if _HAS_C:
+        return _c.char_ratio(a, b)
+    return _char_ratio_py(a, b)
+
+
+def _char_ratio_py(a: str, b: str) -> float:
+    """Pure-Python fallback for :func:`char_ratio`: O(n·m) LCS DP.
+
+    Two-row DP over the byte strings (memory O(min(n,m))). Used only when the C
+    extension is unavailable — correct but slower on large inputs.
+    """
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    la, lb = len(a), len(b)
+    # Outer over the longer, rows sized to the shorter (keeps the DP table small).
+    outer, inner = (a, b) if la >= lb else (b, a)
+    n_outer, n_inner = max(la, lb), min(la, lb)
+    prev = [0] * (n_inner + 1)
+    for i in range(n_outer - 1, -1, -1):
+        cur = [0] * (n_inner + 1)
+        oc = outer[i]
+        for j in range(n_inner - 1, -1, -1):
+            if oc == inner[j]:
+                cur[j] = prev[j + 1] + 1
+            else:
+                cur[j] = prev[j] if prev[j] >= cur[j + 1] else cur[j + 1]
+        prev = cur
+    return 2.0 * prev[0] / (la + lb)
 
 
 class HistogramMatcher:
@@ -98,12 +160,12 @@ class HistogramMatcher:
         matches = self._matching_pairs()
         return _matches_to_opcodes(self._a, self._b, matches)
 
-    def get_matching_blocks(self) -> list[difflib.Match]:
-        """The matching regions as ``difflib.Match(i, j, n)`` namedtuples.
+    def get_matching_blocks(self) -> list[Match]:
+        """The matching regions as ``Match(i, j, n)`` namedtuples.
 
         ``a[i:i+n] == b[j:j+n]``. The list is terminated by the sentinel
-        ``Match(len(a), len(b), 0)``, matching ``difflib``'s convention exactly
-        (callers using ``.size`` / ``.a`` / ``.b`` work unchanged).
+        ``Match(len(a), len(b), 0)``. Field names mirror difflib's so callers
+        using ``.size`` / ``.a`` / ``.b`` work unchanged.
         """
         matches = self._matching_pairs()
         return _matches_to_matching_blocks(self._a, self._b, matches)
@@ -111,9 +173,9 @@ class HistogramMatcher:
     def ratio(self) -> float:
         """Similarity in [0, 1]: ``2*M/T`` where M = matched, T = len(a)+len(b).
 
-        Same formula as ``difflib.SequenceMatcher.ratio``. Note: this is a
+        Same formula as difflib's ``SequenceMatcher.ratio``. Note: this is a
         *line/token-level* ratio over the list inputs; for character-level
-        Gestalt similarity use ``difflib`` directly on the joined strings.
+        Gestalt similarity use :func:`char_ratio` on the joined strings.
         """
         matches = self._matching_pairs()
         total = len(self._a) + len(self._b)
@@ -124,9 +186,19 @@ class HistogramMatcher:
     # -- core ----------------------------------------------------------------
 
     def _matching_pairs(self) -> list[tuple[int, int]]:
-        """The memoized LCS as a sorted list of ``(a_index, b_index)`` pairs."""
+        """The memoized LCS as a sorted list of ``(a_index, b_index)`` pairs.
+
+        C-accelerated when the ``_cdiff`` extension is available; otherwise the
+        pure-Python ``_histogram_diff``. Both produce the same maximal monotone
+        matching — the C path is the hot default.
+        """
         if self._matches is None:
-            self._matches = _histogram_diff(self._a, self._b)
+            if _HAS_C:
+                raw = _c.histogram_match(self._a, self._b)
+                # The C path already includes gap refinement; sort for stability.
+                self._matches = sorted(raw) if raw else []
+            else:
+                self._matches = _histogram_diff(self._a, self._b)
         return self._matches
 
 
@@ -275,21 +347,18 @@ def _refine_gaps(
 
 
 def _lcs_pairs(a: list, b: list) -> list[tuple[int, int]]:
-    """LCS matching pairs of two sublists via difflib.
+    """LCS matching pairs of two sublists (gap refinement, pure-Python path).
 
     Used only on the small gap regions between histogram anchors (typically a
-    handful of lines). difflib's Myers is fine here: these are small, and the
-    anchors have already resolved the ambiguity that makes pure-Myers produce
-    unintuitive diffs on large regions.
+    handful of lines). Uses the same histogram matching recursively — no difflib.
+    The anchors have already resolved the ambiguity; this catches the remaining
+    common elements within each gap.
     """
     if not a or not b:
         return []
-    m = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
-    pairs: list[tuple[int, int]] = []
-    for i, j, n in m.get_matching_blocks():
-        for k in range(n):
-            pairs.append((i + k, j + k))
-    return pairs
+    if _HAS_C:
+        return _c.histogram_match(a, b)
+    return _histogram_diff(a, b)
 
 
 # ---------------------------------------------------------------------------
@@ -350,16 +419,15 @@ def _gap_opcode(
 
 def _matches_to_matching_blocks(
     a: list, b: list, matches: list[tuple[int, int]],
-) -> list[difflib.Match]:
-    """Convert matching pairs to difflib-style matching blocks.
+) -> list[Match]:
+    """Convert matching pairs to matching blocks (``Match`` namedtuples).
 
-    Returns ``difflib.Match(a=i, b=j, size=n)`` namedtuples — the exact type
-    ``difflib.SequenceMatcher.get_matching_blocks`` returns — so callers using
-    ``.size`` / ``.a`` / ``.b`` work unchanged. Coalesces consecutive
-    ``(i+k, j+k)`` pairs into a single block of length ``n``, terminated by the
-    sentinel ``Match(len(a), len(b), 0)`` per difflib's convention.
+    Returns ``Match(a=i, b=j, size=n)`` namedtuples (field names mirror
+    difflib's so callers using ``.size`` / ``.a`` / ``.b`` work unchanged).
+    Coalesces consecutive ``(i+k, j+k)`` pairs into a single block of length
+    ``n``, terminated by the sentinel ``Match(len(a), len(b), 0)``.
     """
-    blocks: list[difflib.Match] = []
+    blocks: list[Match] = []
     idx = 0
     while idx < len(matches):
         i, j = matches[idx]
@@ -371,6 +439,6 @@ def _matches_to_matching_blocks(
         ):
             n += 1
             idx += 1
-        blocks.append(difflib.Match(i, j, n))
-    blocks.append(difflib.Match(len(a), len(b), 0))  # sentinel
+        blocks.append(Match(i, j, n))
+    blocks.append(Match(len(a), len(b), 0))  # sentinel
     return blocks

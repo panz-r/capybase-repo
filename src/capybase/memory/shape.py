@@ -39,7 +39,7 @@ def _normalize(text: str) -> str:
 def _side_shape(base_norm: str, side_norm: str) -> tuple[int, int, int]:
     """The (added, removed, changed) line counts of a side vs base.
 
-    Uses difflib on the normalized lines (cheap; the sides are small blocks).
+    Uses histogram diff on the normalized lines (cheap; the sides are small blocks).
     ``added`` = lines in side not in base; ``removed`` = base lines not in side;
     ``changed`` = replace-opcode pairs. These three numbers capture the edit
     structure independent of the actual content.

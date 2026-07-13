@@ -287,3 +287,114 @@ def test_isjunk_and_autojunk_accepted_but_ignored():
     m1 = HistogramMatcher(None, ["a", "b"], ["a", "c"], autojunk=False)
     m2 = HistogramMatcher(lambda x: False, ["a", "b"], ["a", "c"], autojunk=True)
     assert m1.get_opcodes() == m2.get_opcodes()
+
+
+# ---------------------------------------------------------------------------
+# char_ratio: character-level Gestalt similarity (replaces difflib .ratio())
+# ---------------------------------------------------------------------------
+
+from capybase.diff import char_ratio, _HAS_C  # noqa: E402
+
+
+def test_char_ratio_identical():
+    assert char_ratio("hello", "hello") == 1.0
+
+
+def test_char_ratio_disjoint():
+    assert char_ratio("abc", "xyz") == 0.0
+
+
+def test_char_ratio_both_empty():
+    assert char_ratio("", "") == 1.0
+
+
+def test_char_ratio_one_empty():
+    assert char_ratio("abc", "") == 0.0
+    assert char_ratio("", "abc") == 0.0
+
+
+def test_char_ratio_matches_gestalt_formula():
+    """char_ratio IS 2*|LCS|/(len(a)+len(b)) — the Gestalt ratio. Verify against
+    a DP ground-truth on a case with known LCS."""
+    # "hello" vs "hallo": LCS is "hllo" (h, l, l, o) = 4. 2*4/(5+5) = 0.8
+    assert char_ratio("hello", "hallo") == pytest.approx(0.8)
+    # "abcdef" vs "af": LCS is "af" = 2. 2*2/(6+2) = 0.5
+    assert char_ratio("abcdef", "af") == pytest.approx(0.5)
+
+
+def test_char_ratio_is_maximal():
+    """Our char_ratio computes the TRUE maximal LCS, so it's >= difflib's greedy
+    ratio on cases where difflib undercounts (the correctness improvement)."""
+    import difflib
+    # A case where difflib's greedy matching is non-maximal.
+    a = "ababab"
+    b = "bababa"
+    ours = char_ratio(a, b)
+    theirs = difflib.SequenceMatcher(a=a, b=b, autojunk=False).ratio()
+    # Both are valid ratios in [0,1]; ours is the true maximal LCS ratio.
+    assert ours >= theirs
+
+
+def test_char_ratio_random_matches_dp_ground_truth():
+    """char_ratio matches the DP ground-truth LCS ratio over random strings."""
+    import random
+    rng = random.Random(99)
+    for _ in range(500):
+        n, m = rng.randint(0, 20), rng.randint(0, 20)
+        a = "".join(rng.choice("abc") for _ in range(n))
+        b = "".join(rng.choice("abc") for _ in range(m))
+        # DP ground truth.
+        dp = [[0] * (m + 1) for _ in range(n + 1)]
+        for i in range(n - 1, -1, -1):
+            for j in range(m - 1, -1, -1):
+                if a[i] == b[j]:
+                    dp[i][j] = dp[i + 1][j + 1] + 1
+                else:
+                    dp[i][j] = max(dp[i + 1][j], dp[i][j + 1])
+        expected = 2.0 * dp[0][0] / (n + m) if (n + m) > 0 else 1.0
+        assert char_ratio(a, b) == pytest.approx(expected, abs=1e-9)
+
+
+@pytest.mark.skipif(not _HAS_C, reason="C extension not available")
+def test_char_ratio_performance():
+    """The C char_ratio must handle SBCR-scale inputs fast: 1000 calls on
+    2000-char strings should complete in well under 5s (the pure-Python DP would
+    take minutes). This catches a catastrophic perf regression."""
+    import time
+    text = "x = some_function(arg1, arg2)\n" * 70  # ~2000 chars
+    t0 = time.monotonic()
+    for _ in range(1000):
+        char_ratio(text, text)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 5.0, f"char_ratio too slow: {elapsed:.1f}s for 1000 calls"
+
+
+# ---------------------------------------------------------------------------
+# C extension parity: C histogram_match vs pure-Python _histogram_diff
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not _HAS_C, reason="C extension not available")
+def test_c_histogram_match_matches_python_maximality():
+    """The C histogram_match produces the same LCS LENGTH as the pure-Python
+    _histogram_diff over random inputs (both maximal). The exact pairs may
+    differ (multiple maximal LCS exist), but the length must match."""
+    import random
+    from capybase.diff import _histogram_diff
+    from capybase import _cdiff
+    rng = random.Random(2025)
+    for _ in range(300):
+        vocab = [f"v{i}" for i in range(rng.randint(2, 10))]
+        a = [rng.choice(vocab) for _ in range(rng.randint(0, 25))]
+        b = [rng.choice(vocab) for _ in range(rng.randint(0, 25))]
+        c_len = len(_cdiff.histogram_match(a, b))
+        py_len = len(_histogram_diff(a, b))
+        assert c_len == py_len, f"C={c_len} != py={py_len} on a={a}, b={b}"
+
+
+def test_match_namedtuple_has_size_field():
+    """Our Match namedtuple supports .size (the field callers depend on)."""
+    from capybase.diff import Match
+    m = Match(0, 0, 5)
+    assert m.size == 5
+    assert m.a == 0
+    assert m.b == 0
