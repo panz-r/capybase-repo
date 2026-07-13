@@ -38,6 +38,11 @@ import re
 from bisect import bisect_right
 from dataclasses import dataclass, field
 
+# Single source of truth for extension → language (fix #11). Aliased locally so
+# the family dispatch reads naturally; the authoritative map lives in
+# ``language.EXTENSION_TO_LANGUAGE``.
+from capybase.adapters.language import EXTENSION_TO_LANGUAGE as _EXT_LANG
+
 # ---------------------------------------------------------------------------
 # Coarse unit-kind vocabulary
 # ---------------------------------------------------------------------------
@@ -89,33 +94,8 @@ _LANG_FAMILY: dict[str, str] = {
     "php": FAMILY_A,
 }
 
-#: File extension → language (fallback when ``language`` is None).
-_EXT_LANG: dict[str, str] = {
-    ".py": "python",
-    ".rs": "rust",
-    ".js": "javascript",
-    ".mjs": "javascript",
-    ".cjs": "javascript",
-    ".jsx": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".go": "go",
-    ".java": "java",
-    ".c": "c",
-    ".h": "c",
-    ".cpp": "cpp",
-    ".cc": "cpp",
-    ".cxx": "cpp",
-    ".hpp": "cpp",
-    ".hh": "cpp",
-    ".cs": "csharp",
-    ".kt": "kotlin",
-    ".kts": "kotlin",
-    ".swift": "swift",
-    ".scala": "scala",
-    ".dart": "dart",
-    ".php": "php",
-}
+#: File extension → language: now the single source of truth in
+#: ``language.EXTENSION_TO_LANGUAGE`` (fix #11). Re-exported above as ``_EXT_LANG``.
 
 #: Languages capybase advertises structural support for. Family A (brace-
 #: delimited: Rust, JS, TS, Go, Java, C/C++, C#, Kotlin, Swift, Scala, Dart,

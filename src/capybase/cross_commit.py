@@ -68,12 +68,25 @@ def _language_for_path(path: str) -> str | None:
     every language the grammar-free parser recognizes (Family A + Family B).
     Returns None for unrecognized extensions — callers treat that as "no
     structural signal, skip this file" (the guardian degrades gracefully).
+
+    Also gates on ``detect_family``: text/config formats (markdown, json, yaml,
+    toml, shell) are in the consolidated extension map for language-tagging but
+    have no structural family, so the guardian skips them — there are no
+    definitions to track in a markdown file. Fix #11 made the map the single
+    source of truth, which surfaced this distinction.
     """
     _ensure_lang_maps()
     dot = path.rfind(".")
     if dot < 0:
         return None
-    return _LANG_BY_EXT.get(path[dot:].lower())  # type: ignore[union-attr]
+    lang = _LANG_BY_EXT.get(path[dot:].lower())  # type: ignore[union-attr]
+    if lang is None:
+        return None
+    # Only scan languages the parser can structurally parse (have a family).
+    from capybase.adapters import abstract_parser
+    if abstract_parser.detect_family(lang, path) is None:
+        return None
+    return lang
 
 
 @dataclass(frozen=True)

@@ -35,8 +35,12 @@ def test_adapter_for_returns_the_right_adapter():
 
 
 def test_adapter_for_unknown_returns_null():
-    """Unknown / None languages get the NullAdapter (safe defaults), not None."""
-    assert isinstance(adapter_for("go"), NullAdapter)
+    """Unknown / None languages get the NullAdapter (safe defaults), not None.
+
+    Fix #12 changed this: Go (and the other parser-supported brace languages)
+    now have real adapters. Use a genuinely-unrecognized language to exercise
+    the NullAdapter fallback."""
+    assert isinstance(adapter_for("cobol"), NullAdapter)
     assert isinstance(adapter_for(None), NullAdapter)
 
 
@@ -146,3 +150,82 @@ def test_verification_blank_markers_uses_adapter():
     rust = _blank_markers(marked, "rust")
     assert "# conflict-marker" in py
     assert "// conflict-marker" in rust
+
+
+# ---------------------------------------------------------------------------
+# Fix #11 + #12 regression suite — consolidated language map and adapters for
+# all parser-supported languages (not just python/rust).
+# ---------------------------------------------------------------------------
+
+
+def test_brace_languages_have_correct_comment_prefix():
+    """Fix #12: every parser-supported brace language now has a real adapter
+    with comment_prefix '//'. Before this, they all fell through to NullAdapter
+    (comment_prefix '#') — wrong for every brace language, which uses '//'.
+    That silently broke comment-line detection in consensus/context-building."""
+    brace_langs = (
+        "rust", "javascript", "typescript", "go", "java",
+        "c", "cpp", "csharp", "kotlin", "swift", "scala", "dart", "php",
+    )
+    for lang in brace_langs:
+        a = adapter_for(lang)
+        assert a.comment_prefix == "//", (
+            f"{lang} comment_prefix is {a.comment_prefix!r}, expected '//'"
+        )
+        assert a.container_has_braces is True
+        # Not the NullAdapter fallback.
+        assert not isinstance(a, NullAdapter), f"{lang} fell through to NullAdapter"
+
+
+def test_go_definition_patterns():
+    """Fix #12: the Go adapter's definition patterns find Go declarations
+    (func/type/var/const), enabling _find_definition_span symbol search."""
+    go = adapter_for("go")
+    assert "func {name}" in go.definition_patterns()
+    assert "type {name}" in go.definition_patterns()
+    assert go.source_extension == ".go"
+
+
+def test_java_and_cpp_adapters_shape():
+    """Fix #12: Java and C++ adapters carry their keyword-specific definition
+    patterns (class/void for Java; class/template/void for C++)."""
+    java = adapter_for("java")
+    assert "class {name}" in java.definition_patterns()
+    assert java.source_extension == ".java"
+    cpp = adapter_for("cpp")
+    assert "class {name}" in cpp.definition_patterns()
+    assert cpp.source_extension == ".cpp"
+
+
+def test_ruby_still_uses_null_adapter():
+    """Fix #12 regression guard: Ruby is NOT in the brace-language set (it's
+    Family B, indentation-delimited), so it still gets the NullAdapter. Ruby
+    support would need its own adapter (comment_prefix '#', no braces)."""
+    assert isinstance(adapter_for("ruby"), NullAdapter)
+
+
+def test_language_map_single_source_of_truth():
+    """Fix #11: the extractor's map and the parser's map are now the SAME object
+    (language.EXTENSION_TO_LANGUAGE), so an extension added in one place is
+    recognized everywhere — previously .cc/.kt/.swift were parser-known but
+    extractor-unknown, and .rb/.sh/.json were extractor-known but parser-unknown."""
+    from capybase.adapters import abstract_parser as ap
+    from capybase.adapters.language import EXTENSION_TO_LANGUAGE
+    from capybase.conflict_extractor import detect_language
+
+    assert ap._EXT_LANG is EXTENSION_TO_LANGUAGE  # same object
+    # Extensions the old extractor map missed but the parser knew:
+    assert detect_language("foo.cc") == "cpp"
+    assert detect_language("foo.kt") == "kotlin"
+    assert detect_language("foo.swift") == "swift"
+    assert detect_language("foo.mjs") == "javascript"
+    # Extensions the old parser map missed but the extractor knew:
+    assert ap._EXT_LANG.get(".rb") == "ruby"
+    assert ap._EXT_LANG.get(".toml") == "toml"
+
+
+def test_all_brace_adapters_deprecated_tree_sitter():
+    """Fix #12 regression guard: every newly-registered adapter inherits the
+    deprecated tree_sitter_language → None (no grammar loading)."""
+    for lang in ("go", "java", "cpp", "typescript", "kotlin"):
+        assert adapter_for(lang).tree_sitter_language() is None

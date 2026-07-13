@@ -25,31 +25,11 @@ from capybase.git_backend import (
 if TYPE_CHECKING:
     from capybase.config import StructuralConfig
 
-# Naive but dependency-free language inference from the file extension. Good
-# enough for the MVP's syntax-validation gating; structural merge (later) will
-# replace this with abstract-parser autodetection.
-_EXT_LANG = {
-    ".py": "python",
-    ".js": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".jsx": "javascript",
-    ".rs": "rust",
-    ".go": "go",
-    ".java": "java",
-    ".c": "c",
-    ".h": "c",
-    ".cpp": "cpp",
-    ".hpp": "cpp",
-    ".rb": "ruby",
-    ".sh": "shell",
-    ".bash": "shell",
-    ".json": "json",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-    ".toml": "toml",
-    ".md": "markdown",
-}
+# Language inference from file extension. The single source of truth is
+# ``language.EXTENSION_TO_LANGUAGE`` (fix #11 — previously this module carried a
+# divergent copy that disagreed with the abstract parser's map). Aliased here as
+# ``_EXT_LANG`` for backward compatibility with any internal/test references.
+from capybase.adapters.language import EXTENSION_TO_LANGUAGE as _EXT_LANG
 
 
 def detect_language(path: str) -> str | None:
