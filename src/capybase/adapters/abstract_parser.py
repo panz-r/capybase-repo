@@ -361,23 +361,27 @@ def _is_conflict_marker_line(line: str) -> bool:
 
 
 #: Brackets whose unclosed state makes a line a continuation of the previous
-#: logical line (PEP 8 line-wrapping, default-arg lists, collection literals).
-#: A line inside an unclosed ``(`` / ``[`` / ``{`` must not be treated as a
-#: scope boundary even when it dedents — the ``) -> bool:`` closing line of a
-#: multi-line signature sits at indent 0 but belongs to the signature.
-_OPEN_BRACKETS = "([{"
-_CLOSE_BRACKETS = ")]}"
+#: logical line. Only ``()`` counts (G2): signatures wrap inside parens
+#: (``def f(\n  a,\n) -> bool:``), but ``{``/``[`` on their own lines are
+#: collection literals, not continuation triggers — a malformed dangling ``{``
+#: (a merge artifact) must not swallow the next declaration.
+_OPEN_BRACKETS = "("
+_CLOSE_BRACKETS = ")"
 
 
 def _line_bracket_delta(raw: str) -> int:
-    """Net bracket change on a line (string-literal-aware).
+    """Net parenthesis change on a line (string- and comment-aware).
 
-    ``opens - closes`` for ``()``/``[]``/``{}``, ignoring brackets inside string
-    literals (string content is blanked first). Used by Family B to track whether
-    a line continues a multi-line signature/collection (``delta`` doesn't return
-    to zero until the final closing line).
+    ``opens - closes`` for ``()`` only, ignoring parens inside string literals
+    (blanked first) and inside inline comments (stripped first, G1 — a comment
+    like ``# see func(`` would otherwise corrupt the continuation depth). Used by
+    Family B to track whether a line continues a multi-line signature (``delta``
+    doesn't return to zero until the final closing ``)``).
     """
-    blanked = _STRING_LIT_RE.sub("'_'", raw)
+    # Strip inline comments first (G1): a ``# ...`` / ``// ...`` comment may
+    # contain unbalanced brackets that must not count.
+    stripped = _strip_inline_comment(raw)
+    blanked = _STRING_LIT_RE.sub("'_'", stripped)
     delta = 0
     for ch in blanked:
         if ch in _OPEN_BRACKETS:
@@ -385,6 +389,28 @@ def _line_bracket_delta(raw: str) -> int:
         elif ch in _CLOSE_BRACKETS:
             delta -= 1
     return delta
+
+
+def _ends_with_backslash_continuation(raw: str) -> bool:
+    """True when a line ends with a backslash line-continuation (G4).
+
+    Python (and shell) treat a trailing ``\\`` (not escaped, not in a comment or
+    string) as joining the next logical line. An odd run of trailing backslashes
+    continues; an even run is an escaped backslash (no continuation). String- and
+    comment-aware so a ``\\`` inside a string literal or comment doesn't count.
+    """
+    # Blank strings/comments first so a trailing ``\\`` in those contexts is ignored.
+    stripped = _strip_inline_comment(raw)
+    blanked = _STRING_LIT_RE.sub("'_'", stripped).rstrip()
+    if not blanked or not blanked.endswith("\\"):
+        return False
+    # Count the trailing backslash run; odd = continuation.
+    n = 0
+    k = len(blanked) - 1
+    while k >= 0 and blanked[k] == "\\":
+        n += 1
+        k -= 1
+    return n % 2 == 1
 
 
 _TRIPLE_QUOTES = ('"""', "'''")
@@ -606,8 +632,10 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
     # (computed by source slice) and never trigger a dedent/close — the
     # ``) -> bool:`` of a wrapped signature sits at indent 0 but belongs to the
     # signature, and a ``class Fake:`` inside a docstring is string content.
-    cont_depth = 0  # net unclosed ``() [] {}`` carried from prior lines
+    cont_depth = 0  # net unclosed ``()`` carried from prior lines (signature wrap)
     open_triple: str | None = None  # open multi-line triple-quote marker, if any
+    pending_backslash = False  # prior line ended with a ``\`` continuation (G4)
+    join_buffer = ""  # accumulated text of a ``\``-continued line (G4)
 
     def close_units_at_or_below(indent: int, end_row: int) -> None:
         # Close any open unit whose opening indent is >= indent (scope ended).
@@ -620,6 +648,27 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
             _finalize_unit(u, u_end, lines, units, stack)
 
     for i, raw in enumerate(lines):
+        # G4: backslash line-continuation. A prior line ending in ``\`` is joined
+        # to this one so the def/class regexes see the full logical line
+        # (``def \\<newline>foo():`` → ``def foo():``). The joined text drives
+        # detection; span/body use the real source (the ``\\`` line's index is
+        # the unit's start). Only the ``def``/``class`` keyword need be on the
+        # prior line; the continuation carries the name.
+        if pending_backslash:
+            # Strip the trailing backslash from the accumulated text and join.
+            raw = join_buffer + raw.lstrip()
+            pending_backslash = False
+        else:
+            join_buffer = ""
+        # If this line itself ends with a continuation, buffer it and move on —
+        # the NEXT line will be the joined detection target.
+        if _ends_with_backslash_continuation(raw):
+            join_buffer = raw[:-1]  # drop the trailing backslash
+            pending_backslash = True
+            # Still advance last_line_row so a prior open unit's span covers it.
+            last_line_row = i
+            continue
+
         if _is_conflict_marker_line(raw):
             # Close against the last meaningful row (before this marker).
             close_units_at_or_below(0, last_line_row)
@@ -928,6 +977,13 @@ def _match_string_prefix(src: str, quote_idx: int) -> int | None:
         # No prefix rune. ``#`` before a bare ``"`` (e.g. ``#"``) isn't a raw
         # string — treat as plain quote.
         return 0
+    # Word-boundary check (G3): the rune run must be preceded by a non-identifier
+    # character (or start of input). Otherwise the runes are the tail of an
+    # identifier (``myr#"..."#`` — the ``r`` is part of ``myr``), not a prefix.
+    # Misreading it as a raw prefix corrupts the string state for the rest of
+    # the file (the scanner looks for a ``"#`` closer that never comes).
+    if j >= 0 and (src[j].isalnum() or src[j] == "_"):
+        return 0
     prefix = "".join(reversed(runes)).lower()
     # Valid raw-string prefixes: ``r`` or ``br``/``rb`` (raw / byte-raw). A bare
     # ``b`` is a byte string that closes on a plain ``"`` (hash_count must be 0).
@@ -976,6 +1032,13 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
     str_hash_count = 0
     in_line_comment = False
     in_block_comment = False
+    # Statement-start byte for the in-pass field emitter (R1). Tracks the start
+    # of the current top-level statement: advances past ``;`` and past a ``}``
+    # that closes back to depth 0, but NOT past ``{``/``}`` inside a statement
+    # (so a braced initializer ``const P = Point { ... };`` keeps its start at
+    # ``const``). Unlike the token buffer (reset at every brace), this survives
+    # internal braces so the field name can be recovered at the terminating ``;``.
+    stmt_start_byte = 0
     # Pending attribute/macro line (#[...] / @decorator) preceding a decl.
     pending_attr_row: int | None = None
     pending_attr_buf = ""
@@ -1165,8 +1228,17 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 brace_depth = 0  # unbalanced (malformed) — clamp, never crash.
             # Close any unit whose scope this brace ends. Pass the closing brace
             # index so the body slice can be computed precisely.
+            closed_unit = False
             while stack and brace_depth < stack[-1].open_brace_depth:
                 _close_a_unit(stack.pop(), i, src, units, stack, _line_index)
+                closed_unit = True
+            # When a ``}`` closes a top-level DECLARATION scope back to depth 0
+            # (a unit was popped), the next statement starts fresh. But a ``}``
+            # closing an object-literal inside a still-open statement (e.g.
+            # ``const P = Point { ... };``) must NOT advance the tracker — the
+            # statement continues to its ``;`` (R1).
+            if brace_depth == 0 and closed_unit:
+                stmt_start_byte = i + 1
             buf = ""
             i += 1
             continue
@@ -1184,18 +1256,24 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
 
         # Statement terminators reset the token buffer (a new statement begins).
         if ch == ";":
-            # In-main-pass field detection (fix #10): at top level, a buffer
-            # ending in ``;`` that matches the field-declaration shape emits a
-            # FIELD unit here — no second whole-file re-scan needed. This
-            # replaces the divergent ``_emit_a_field_units`` post-pass.
-            if brace_depth == 0 and not stack:
-                fname = _field_name_from_buf(buf)
-                if fname is not None and language not in (None, "c", "h"):
-                    # Compute the statement's byte range (statement start → this ``;``).
-                    decl_start = _find_stmt_start(src, i, _line_index)
+            # In-main-pass field detection (fix #10 + R1): at top level, a
+            # statement ending in ``;`` that matches the field-declaration shape
+            # emits a FIELD unit here — no second whole-file re-scan needed.
+            #
+            # R1: extract the name from the SOURCE SLICE (stmt_start_byte → ``;``),
+            # NOT the token buffer — the buffer is reset at every ``{``/``}``,
+            # so a const with a braced initializer (``const P = Point { ... };``)
+            # would lose its keyword by the ``;`` and be silently dropped.
+            # ``stmt_start_byte`` survives internal braces (only advances at ``;``
+            # or when a ``}`` closes to depth 0), so it always points at the
+            # declaration keyword.
+            if brace_depth == 0 and not stack and language not in (None, "c", "h"):
+                stmt_text = src[stmt_start_byte : i + 1]
+                fname = _field_name_from_buf(stmt_text)
+                if fname is not None:
                     end_row = cur_row_at(i)
-                    start_row_f = cur_row_at(decl_start)
-                    body = src[decl_start : i + 1]
+                    start_row_f = cur_row_at(stmt_start_byte)
+                    body = stmt_text
                     # Dedup against already-emitted units (a brace-opened decl
                     # with the same name, e.g. a Go ``type X struct``).
                     existing_f = {u.name for u in units if u.name}
@@ -1209,6 +1287,8 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                                 fingerprint=unit_body_fingerprint(body),
                             )
                         )
+            # A ``;`` ends the statement; the next one starts after it.
+            stmt_start_byte = i + 1
             buf = ""
             i += 1
             continue
@@ -1238,6 +1318,8 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 )
             buf = ""
             i = line_end + 1
+            # A ``#``-line is a complete statement; the next starts after it (R1).
+            stmt_start_byte = i
             row += 1
             # Guard the bounds: when the ``#`` line was the last line (no trailing
             # newline), ``line_end == n`` and ``src[line_end]`` would overflow.
@@ -1266,6 +1348,8 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 )
                 buf = ""
                 i = line_end + 1
+                # An import line is a complete statement; the next starts after (R1).
+                stmt_start_byte = i
                 row += 1
                 # When the import was the last line (no trailing newline),
                 # ``line_end == n`` and ``src[line_end]`` would overflow; guard it.
@@ -1476,6 +1560,14 @@ def _classify_a_brace(
         return None
     toks = b.split()
     if not toks:
+        return None
+    # R1: an initializer brace — ``const P = Point { ... }``, ``let m = Map { ... }``
+    # — is an object/struct literal inside a field declaration, NOT a scope-opening
+    # declaration. A buffer containing a field keyword + ``=`` before the ``{`` is
+    # a braced initializer; return None so it's treated as depth-only (the field
+    # is emitted at the terminating ``;``). Without this, ``Point { ... }`` is
+    # misclassified as a keyword-less method/function and absorbs the statement.
+    if "=" in toks and any(t in _A_FIELD_KEYWORDS for t in toks):
         return None
     # Find the LAST declaration keyword in the buffer.
     last_kw_idx = -1

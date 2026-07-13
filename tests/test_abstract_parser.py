@@ -1239,6 +1239,172 @@ def test_rust_type_alias_still_a_field():
 
 
 # ---------------------------------------------------------------------------
+# Second-pass review fixes — R1 (field-drop regression) + G1–G6 (edge cases in
+# the bracket/string/continuation machinery introduced by the first round).
+# ---------------------------------------------------------------------------
+
+
+def test_field_with_struct_literal_initializer():
+    """R1: a top-level ``const``/``static`` whose initializer contains a braced
+    struct literal must still be detected as a FIELD. The in-pass emitter (fix
+    #10) reset the token buffer at every ``{``/``}``, so by the ``;`` the
+    declaration keyword was gone and the field was silently dropped. This is a
+    very common Rust pattern."""
+    src = "pub const P: Point = Point { x: 1, y: 2 };\nfn main() {}\n"
+    ir = ap.parse_file(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    fields = [u.name for u in flat if u.kind == "field"]
+    assert "P" in fields, f"struct-literal const dropped: {fields}"
+
+
+def test_field_with_macro_brace_initializer():
+    """R1 (macro form): ``vec!{...}`` / ``format!{...}`` braced macros in a
+    top-level const initializer must not lose the field."""
+    src = "const V: Vec<u8> = vec!{1, 2, 3};\nfn main() {}\n"
+    ir = ap.parse_file(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    fields = [u.name for u in flat if u.kind == "field"]
+    assert "V" in fields, f"macro-brace const dropped: {fields}"
+
+
+def test_field_with_brace_no_regression_on_plain_const():
+    """R1 regression guard: a plain const (no braces) is still detected."""
+    src = "pub const N: u32 = 5;\nfn main() {}\n"
+    ir = ap.parse_file(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    assert "N" in [u.name for u in flat if u.kind == "field"]
+
+
+def test_inline_comment_unbalanced_bracket_no_continuation():
+    """G1: an inline comment containing an unbalanced bracket must NOT corrupt
+    the continuation depth. ``_line_bracket_delta`` must strip comments before
+    counting brackets."""
+    src = (
+        "x = 1  # see func(\n"
+        "def real():\n"
+        "    return 2\n"
+    )
+    ir = ap.parse_family_b(src)
+    names = {u.name for u in ir.units}
+    assert "real" in names, f"comment-paren swallowed the next def: {names}"
+
+
+def test_dangling_open_brace_does_not_swallow_next_def():
+    """G2: a malformed dangling ``{`` (a merge artifact) must not absorb the
+    next declaration as a continuation. Only ``(`` opens a signature
+    continuation; ``{``/``[`` (collection literals) at depth 0 are not
+    declaration-relevant."""
+    src = (
+        "d = {\n"
+        "def foo():\n"
+        "    pass\n"
+        "}\n"
+    )
+    ir = ap.parse_family_b(src)
+    names = {u.name for u in ir.units}
+    # foo must be detected even though a dangling { precedes it.
+    assert "foo" in names, f"dangling brace swallowed foo: {names}"
+
+
+def test_multiline_signature_still_uses_paren_continuation():
+    """G2 regression guard: the multi-line signature fix (#1) must still work —
+    ``(`` IS a continuation trigger, so the closing ``) -> bool:`` is absorbed."""
+    src = (
+        "def long(\n"
+        "    a,\n"
+        ") -> bool:\n"
+        "    return True\n"
+    )
+    ir = ap.parse_family_b(src)
+    assert len(ir.units) == 1
+    assert "return True" in ir.units[0].body
+
+
+def test_identifier_ending_in_r_before_string_not_raw():
+    """G3: an identifier ending in ``r``/``b`` immediately before a string
+    literal must NOT be misread as a raw-string prefix. ``myr#\"...\"#`` — the
+    ``r`` is part of ``myr``, not a prefix. The fix is a word-boundary check in
+    ``_match_string_prefix``: the rune run must be preceded by a non-identifier
+    char (or start of input). Tested at the unit level (the precise fix site)
+    plus a parse-level check that a following function is detected."""
+    # Unit level — the precise behavior the fix corrects.
+    assert ap._match_string_prefix('ambr#"', 5) == 0   # 'm' before 'rb' → not a prefix
+    assert ap._match_string_prefix('myr"', 3) == 0     # 'y' before 'r' → not a prefix
+    assert ap._match_string_prefix('r#"', 2) == 1      # start of input → real raw
+    assert ap._match_string_prefix(' r#"', 3) == 1     # space boundary → real raw
+    assert ap._match_string_prefix('=r#"', 3) == 1     # '=' boundary → real raw
+    assert ap._match_string_prefix('br"', 2) == 0      # real byte-raw (closes on ")
+    # Parse level: an identifier ending in 'r' before a plain string must not
+    # send the scanner into a bogus raw-string state. Both functions detected.
+    src = (
+        "fn f() {\n"
+        '    let s = our"plain";\n'   # 'our' — r is part of the identifier
+        "}\n"
+        "fn g() {\n"
+        "    return 2;\n"
+        "}\n"
+    )
+    ir = ap.parse_file(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    names = {u.name for u in flat}
+    assert "g" in names, f"identifier-before-quote corrupted string state: {names}"
+
+
+def test_real_raw_string_prefix_still_works():
+    """G3 regression guard: a genuine ``r#\"...\"#`` (with a word boundary
+    before ``r``) is still recognized as a raw string and closes on ``\"#``."""
+    src = (
+        "fn f() {\n"
+        '    let s = r#"has a quote \" here"#;\n'
+        "}\n"
+        "fn g() {\n"
+        "    return 2;\n"
+        "}\n"
+    )
+    ir = ap.parse_file(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    names = {u.name for u in flat}
+    assert "g" in names, f"genuine raw string no longer recognized: {names}"
+
+
+def test_backslash_line_continuation_def():
+    """G4: an explicit backslash line-continuation in a signature is handled —
+    ``def \\<newline>foo():`` still detects ``foo``. Rare but PEP 8-legal."""
+    src = "def \\\nfoo():\n    pass\n"
+    ir = ap.parse_family_b(src)
+    names = {u.name for u in ir.units}
+    assert "foo" in names, f"backslash-continued def missed: {names}"
+
+
+def test_unterminated_string_does_not_corrupt_continuation():
+    """G5: an unterminated single-line ``\"`` on one line must not leave the
+    bracket counter seeing raw brackets on subsequent lines. The string state
+    should reset at the newline (Family B is line-oriented)."""
+    # A signature line with an unterminated string then a real def after.
+    # The unterminated " is malformed, but the parser must still find ``real``.
+    src = (
+        'x = "oops\n'
+        "def real():\n"
+        "    return 2\n"
+    )
+    ir = ap.parse_family_b(src)
+    names = {u.name for u in ir.units}
+    assert "real" in names, f"unterminated string corrupted scan: {names}"
+
+
+def test_csharp_verbatim_string_doubled_quotes():
+    """G6: C# verbatim strings ``@\"...\"`` escape a literal quote by doubling
+    it (``\"\"``). The scanner must not close the string at the first ``\"\"``."""
+    src = (
+        "class C {\n"
+        '    string s = @"he said ""hi"" end";\n'
+        "    void M() {}\n"
+        "}\n"
+    )
+    ir = ap.parse_file(src, language="csharp")
+    flat = ap._all_units_flat(ir)
+    methods = [u.name for u in flat if u.kind == "method"]
+    assert "M" in methods, f"verbatim doubled-quote closed early: {methods}"
 # Cross-cutting regression suite — identity collisions, added_both conflicts,
 # and the fingerprint guard. Each pins one bug found in the review.
 # ---------------------------------------------------------------------------
