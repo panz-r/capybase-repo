@@ -92,6 +92,13 @@ def classify(unit: "object", config: "object | None" = None) -> ConflictClassifi
     merge_kind = str(feats.get("merge_kind") or "both_modify")
     modify_delete = bool(feats.get("modify_delete"))
     det_mergeable = _deterministically_mergeable(unit)
+    # Operation-signature counts (ConGra §3.3): per-entity change-type counts
+    # over the BASE→REPLAYED diff. A pure-rename signature is the refactoring-
+    # aware rule's domain (a likely deterministic resolve); heavy multi-entity
+    # body-modify is a strong "hard" signal. 0 across the board when the parser
+    # is unavailable (no signal — degrade silently).
+    ops_renamed = _as_int(feats.get("ops_renamed"))
+    ops_modified = _as_int(feats.get("ops_modified"))
 
     # --- Trivial: no judgment needed ----------------------------------------
     # Identical/near-identical sides, one-sided change, or a deterministic union
@@ -114,6 +121,8 @@ def classify(unit: "object", config: "object | None" = None) -> ConflictClassifi
             severity=severity,
             merge_kind=merge_kind,
             modify_delete=modify_delete,
+            ops_renamed=ops_renamed,
+            ops_modified=ops_modified,
             reasons=reasons,
         )
 
@@ -135,6 +144,8 @@ def _classify_nontrivial(
     severity: str,
     merge_kind: str,
     modify_delete: bool,
+    ops_renamed: int = 0,
+    ops_modified: int = 0,
     reasons: list[str],
 ) -> Band:
     """Band a conflict that needs *some* judgment (not deterministically trivial).
@@ -142,6 +153,14 @@ def _classify_nontrivial(
     Hard is reserved for the cases a small model is most likely to get wrong:
     large + definition-touching + same-symbol overlap, or a modify/delete whose
     keeper *modified* (a genuine keep-vs-delete judgment, not an auto-accept).
+
+    Operation-signature counts (ConGra §3.3) add two soft signals:
+    - A *pure-rename* signature (ops_renamed > 0, no body modifications) is the
+      refactoring-aware rule's domain — a likely deterministic resolve, so it
+      nudges the band DOWN one step (hard→medium, medium→easy) rather than up.
+    - *Heavy multi-entity modify* (≥3 entities with body/signature changes on a
+      definition-touching conflict) is a supplementary strong signal that can
+      help promote to hard.
     """
     # Hard signals (accumulate reasons; any one can promote to hard).
     hard = False
@@ -165,6 +184,13 @@ def _classify_nontrivial(
     if modify_delete and merge_kind == "modify_delete":
         reasons.append("modify/delete with a modified keeper (keep-vs-delete judgment)")
         hard = True
+    # Heavy multi-entity body/signature modify on a definition-touching conflict
+    # (ConGra §3.3): the more existing entities both sides restructure, the more
+    # likely a small model drops or duplicates one. Counts as a strong signal.
+    heavy_modify = touches_def and ops_modified >= _HEAVY_MODIFY_ENTITIES
+    if heavy_modify:
+        reasons.append(f"heavy multi-entity modify ({ops_modified} entities changed)")
+        hard = True
 
     # Promote to hard only when multiple strong signals coincide (a single
     # large-but-disjoint hunk is medium, not hard). The structural resolver's
@@ -176,16 +202,29 @@ def _classify_nontrivial(
             size >= _HARD_HUNK_LINES, touches_def, same_symbol_overlap,
             same_line_overlap, severity == "high",
             modify_delete and merge_kind == "modify_delete",
+            heavy_modify,
         ) if s
     )
     if strong >= 2:
+        # Pure-rename nudge (§3.3): a clean rename-only signature is the
+        # refactoring-aware rule's domain, so even with two coincident signals a
+        # pure rename isn't "hard". Demote hard→medium.
+        if _is_pure_rename(ops_renamed, ops_modified):
+            reasons.append("pure-rename signature (refactoring-aware rule may resolve)")
+            return "medium"
         return "hard"
 
     # Medium: definition-touching, same-line/same-symbol overlap, or moderate size.
     if touches_def or same_line_overlap or same_symbol_overlap:
+        if _is_pure_rename(ops_renamed, ops_modified):
+            reasons.append("pure-rename signature (refactoring-aware rule may resolve)")
+            return "easy"
         return "medium"
     if size >= _MEDIUM_HUNK_LINES:
         reasons.append(f"hunk is moderate ({size} lines)")
+        if _is_pure_rename(ops_renamed, ops_modified):
+            reasons.append("pure-rename signature (refactoring-aware rule may resolve)")
+            return "easy"
         return "medium"
     if severity == "medium":
         reasons.append("graded medium-severity")
@@ -194,6 +233,17 @@ def _classify_nontrivial(
     # Easy: small, disjoint, no shared-symbol tension.
     reasons.append("small disjoint edits, no shared-symbol tension")
     return "easy"
+
+
+# Threshold for the heavy-modify strong signal: ≥3 entities with body/signature
+# changes on a definition-touching conflict (ConGra §3.3 operation complexity).
+_HEAVY_MODIFY_ENTITIES = 3
+
+
+def _is_pure_rename(ops_renamed: int, ops_modified: int) -> bool:
+    """A pure-rename signature: at least one rename and NO body/signature
+    modifications (the refactor is a clean rename, not a rename + body edit)."""
+    return ops_renamed > 0 and ops_modified == 0
 
 
 # ---------------------------------------------------------------------------

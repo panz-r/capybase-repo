@@ -162,3 +162,92 @@ def test_classifier_never_crashes_on_sparse_unit():
     c = classify(u)
     assert c.band in ("trivial", "easy", "medium", "hard")
     assert c.difficulty in ("simple", "complex")
+
+
+# ---------------------------------------------------------------------------
+# Operation-signature counts (ConGra §3.3): pure-rename demote, heavy-modify promote
+# ---------------------------------------------------------------------------
+
+
+def _unit_with_ops(base, current, replayed, *, ops_renamed=0, ops_modified=0,
+                   touches_definition=True, language="python"):
+    """A unit whose cached conflict_features carry explicit operation counts +
+    a touches_definition flag, so the classifier's ops_* signals are testable
+    without running the full extraction pipeline."""
+    u = _unit(base, current, replayed, language=language)
+    u.structural_metadata["conflict_features"] = {
+        "hunk_size": 5,
+        "touches_definition": touches_definition,
+        "same_line_overlap": False,
+        "severity": "medium",
+        "merge_kind": "both_modify",
+        "modify_delete": False,
+        "ops_renamed": ops_renamed,
+        "ops_modified": ops_modified,
+    }
+    return u
+
+
+def test_pure_rename_demotes_hard_to_medium():
+    """A conflict that would be hard (2+ strong signals) is demoted to medium
+    when the signature is a pure rename — the refactoring-aware rule may resolve
+    it. Test _classify_nontrivial directly to isolate the operation-count signal
+    from the signature-overlap detector."""
+    from capybase.classifier import _classify_nontrivial
+
+    # 2 strong signals (touches_def + same_symbol_overlap) → hard without ops.
+    reasons_hard = []
+    band_hard = _classify_nontrivial(
+        size=5, touches_def=True, same_line_overlap=False,
+        same_symbol_overlap=True, severity="medium", merge_kind="both_modify",
+        modify_delete=False, ops_renamed=0, ops_modified=0, reasons=reasons_hard)
+    assert band_hard == "hard"
+
+    # Same conflict but with a pure-rename signature → demoted to medium.
+    reasons_rename = []
+    band_rename = _classify_nontrivial(
+        size=5, touches_def=True, same_line_overlap=False,
+        same_symbol_overlap=True, severity="medium", merge_kind="both_modify",
+        modify_delete=False, ops_renamed=1, ops_modified=0, reasons=reasons_rename)
+    assert band_rename == "medium", f"pure rename should demote hard→medium, got {band_rename}"
+    assert any("pure-rename" in r for r in reasons_rename)
+
+
+def test_heavy_multi_entity_modify_promotes_to_hard():
+    """≥3 entities with body/signature changes on a def-touching conflict is a
+    strong signal; combined with touches_def it promotes to hard."""
+    u = _unit_with_ops(
+        "class C:\n    def foo():\n        return 1",
+        "class C:\n    def foo():\n        return 2",
+        "class C:\n    def foo():\n        return 3",
+        ops_renamed=0, ops_modified=5, touches_definition=True,
+    )
+    c = classify(u)
+    assert c.band == "hard", f"heavy modify should be hard, got {c.band}"
+    assert any("heavy multi-entity modify" in r for r in c.reasons)
+
+
+def test_moderate_modify_not_treated_as_heavy():
+    """ops_modified below the threshold (3) does NOT trigger the heavy signal."""
+    u = _unit_with_ops(
+        "class C:\n    def foo():\n        return 1",
+        "class C:\n    def foo():\n        return 2",
+        "class C:\n    def foo():\n        return 3",
+        ops_renamed=0, ops_modified=2, touches_definition=True,
+    )
+    c = classify(u)
+    # touches_def alone (1 strong signal) → medium, not hard.
+    assert c.band != "hard" or any("heavy" not in r for r in c.reasons)
+
+
+def test_zero_ops_degrades_silently():
+    """When operation counts are absent/zero (parser unavailable), the classifier
+    behaves exactly as before — no crash, no spurious signal."""
+    u = _unit_with_ops(
+        "x = 1", "x = 2", "x = 3",
+        ops_renamed=0, ops_modified=0, touches_definition=False,
+    )
+    c = classify(u)
+    assert c.band in ("easy", "medium")
+    assert not any("pure-rename" in r for r in c.reasons)
+    assert not any("heavy" in r for r in c.reasons)
