@@ -2369,6 +2369,33 @@ _CHANGE_KIND_DELETED_RIGHT = "deleted_right"
 _CHANGE_KIND_DELETED_BOTH = "deleted_both"
 _CHANGE_KIND_RENAMED = "renamed"
 
+#: All change kinds. The single source of truth — ``required_units`` and
+#: ``structural_conflicts`` derive from this (and ``_CHANGE_LABELS`` in
+#: structural_context asserts its keys match), so adding a new kind is a
+#: one-line append here, not a parallel-list edit in three places.
+_ALL_CHANGE_KINDS = frozenset({
+    _CHANGE_KIND_UNCHANGED,
+    _CHANGE_KIND_MODIFIED_LEFT,
+    _CHANGE_KIND_MODIFIED_RIGHT,
+    _CHANGE_KIND_MODIFIED_BOTH,
+    _CHANGE_KIND_ADDED_LEFT,
+    _CHANGE_KIND_ADDED_RIGHT,
+    _CHANGE_KIND_ADDED_BOTH,
+    _CHANGE_KIND_ADDED_BOTH_CONFLICT,
+    _CHANGE_KIND_DELETED_LEFT,
+    _CHANGE_KIND_DELETED_RIGHT,
+    _CHANGE_KIND_DELETED_BOTH,
+    _CHANGE_KIND_RENAMED,
+})
+#: Change kinds whose unit SURVIVES in the merge (everything except
+#: ``deleted_both`` — the only case where the unit is truly gone). Drives
+#: ``StructuralDiff3Way.required_units``.
+_SURVIVING_CHANGE_KINDS = _ALL_CHANGE_KINDS - {_CHANGE_KIND_DELETED_BOTH}
+#: Change kinds that count as a structural conflict (both sides touched the
+#: same unit, or both added the same name with incompatible bodies). Drives
+#: ``StructuralDiff3Way.structural_conflicts``.
+_CONFLICT_CHANGE_KINDS = frozenset({_CHANGE_KIND_MODIFIED_BOTH, _CHANGE_KIND_ADDED_BOTH_CONFLICT})
+
 
 @dataclass(frozen=True)
 class StructuralDiff3Way:
@@ -2393,7 +2420,7 @@ class StructuralDiff3Way:
         added the same name with conflicting bodies (potential conflict)."""
         return [
             a for a in self.aligned
-            if a.change_kind in (_CHANGE_KIND_MODIFIED_BOTH, _CHANGE_KIND_ADDED_BOTH_CONFLICT)
+            if a.change_kind in _CONFLICT_CHANGE_KINDS
         ]
 
     @property
@@ -2406,19 +2433,10 @@ class StructuralDiff3Way:
         Excluding them risked the LLM dropping a surviving unit. Only
         ``deleted_both`` (both sides removed it) is truly absent from the merge.
         """
-        out: list[str] = []
-        for a in self.aligned:
-            if a.change_kind in (
-                _CHANGE_KIND_UNCHANGED, _CHANGE_KIND_MODIFIED_LEFT,
-                _CHANGE_KIND_MODIFIED_RIGHT, _CHANGE_KIND_MODIFIED_BOTH,
-                _CHANGE_KIND_ADDED_LEFT, _CHANGE_KIND_ADDED_RIGHT,
-                _CHANGE_KIND_ADDED_BOTH, _CHANGE_KIND_ADDED_BOTH_CONFLICT,
-                _CHANGE_KIND_DELETED_LEFT, _CHANGE_KIND_DELETED_RIGHT,
-                _CHANGE_KIND_RENAMED,
-            ):
-                if a.name != "<anon>":
-                    out.append(a.name)
-        return out
+        return [
+            a.name for a in self.aligned
+            if a.change_kind in _SURVIVING_CHANGE_KINDS and a.name != "<anon>"
+        ]
 
 
 def _normalize_body_ws_only(text: str) -> str:

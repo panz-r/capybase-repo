@@ -21,6 +21,7 @@ from __future__ import annotations
 from capybase.adapters.abstract_parser import (
     KIND_MODULE_STMT,
     StructuralDiff3Way,
+    _ALL_CHANGE_KINDS,
     _CHANGE_KIND_ADDED_BOTH,
     _CHANGE_KIND_ADDED_BOTH_CONFLICT,
     _CHANGE_KIND_ADDED_LEFT,
@@ -50,6 +51,13 @@ _CHANGE_LABELS = {
     _CHANGE_KIND_DELETED_BOTH: "deleted by both",
     _CHANGE_KIND_RENAMED: "RENAMED",
 }
+# Enforce that every change kind has a label — adding a kind to
+# ``_ALL_CHANGE_KINDS`` without a label here fails loudly at import (the
+# parallel-list smell is now an enforced invariant, not a silent drift risk).
+assert set(_CHANGE_LABELS) == _ALL_CHANGE_KINDS, (
+    f"_CHANGE_LABELS keys {set(_CHANGE_LABELS)!r} != _ALL_CHANGE_KINDS "
+    f"{set(_ALL_CHANGE_KINDS)!r} — every change kind needs a label"
+)
 
 
 def _render_import_surface(diff: StructuralDiff3Way) -> str:
