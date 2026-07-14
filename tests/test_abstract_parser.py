@@ -15,6 +15,52 @@ from capybase.adapters import structural_diff as sd
 
 
 # ---------------------------------------------------------------------------
+# Shared helpers — parse-and-flatten shortcuts used across the suite
+# ---------------------------------------------------------------------------
+
+
+def _flat(src: str, lang: str = "python"):
+    """Parse ``src`` and return its flat unit list (top-level + nested children).
+
+    The single most common two-line idiom in the suite (``ir = parse_file(...);
+    flat = all_units_flat(ir)``) collapsed to one call. Returns the flat list
+    directly so assertions read ``names = [u.name for u in _flat(src, "rust")]``.
+    """
+    ir = ap.parse_file(src, language=lang)
+    assert ir is not None, f"parse_file returned None for {lang!r}"
+    return ap.all_units_flat(ir)
+
+
+def _kinds(src: str, lang: str = "python") -> list[tuple[str, str]]:
+    """``[(kind, name), ...]`` for ``src``, in source order.
+
+    Used both for assertions (``assert ("method", "foo") in _kinds(src, "java")``)
+    and for error messages (``f"got {_kinds(src)}"``), replacing the 37× repeated
+    inline ``_kinds_of(ir)`` pattern.
+    """
+    return [(u.kind, u.name) for u in _flat(src, lang)]
+
+
+def _kinds_of(ir) -> list[tuple[str, str]]:
+    """``[(kind, name), ...]`` for an already-parsed ``FileIR``.
+
+    The error-message variant: tests that use ``parse_family_a``/``parse_family_b``
+    directly (not ``parse_file``) already have ``ir`` in scope, so this takes the
+    IR rather than raw source. Replaces the 37× ``[(u.kind, u.name) for u in
+    ap.all_units_flat(ir)]`` inline pattern.
+    """
+    return [(u.kind, u.name) for u in ap.all_units_flat(ir)]
+
+
+def _names_by_kind(flat: list, kind: str) -> list[str]:
+    """Names of units of ``kind`` in an already-flattened list.
+
+    Replaces the repeated ``_names_by_kind(flat, "method")`` idiom.
+    """
+    return [u.name for u in flat if u.kind == kind]
+
+
+# ---------------------------------------------------------------------------
 # Family dispatch
 # ---------------------------------------------------------------------------
 
@@ -484,7 +530,7 @@ def test_java_parsing():
     assert "Main" in classes
     # The keyword-less method is now a child of the class.
     flat = ap.all_units_flat(ir)
-    methods = [u.name for u in flat if u.kind == "method"]
+    methods = _names_by_kind(flat, "method")
     assert "main" in methods
 
 
@@ -562,7 +608,7 @@ def test_control_flow_not_misclassified_as_methods():
     )
     ir = ap.parse_file(src, language="java")
     flat = ap.all_units_flat(ir)
-    methods = [u.name for u in flat if u.kind == "method"]
+    methods = _names_by_kind(flat, "method")
     # Only ``m`` is a method — the if/while/for/switch blocks are NOT entities.
     assert methods == ["m"], f"control flow leaked as methods: {methods}"
 
@@ -1191,7 +1237,7 @@ def test_csharp_verbatim_string_multiline():
     )
     ir = ap.parse_file(src, language="csharp")
     flat = ap.all_units_flat(ir)
-    methods = [u.name for u in flat if u.kind == "method"]
+    methods = _names_by_kind(flat, "method")
     assert "M" in methods, f"method after verbatim string lost: {methods}"
 
 
@@ -1405,7 +1451,7 @@ def test_csharp_verbatim_string_doubled_quotes():
     )
     ir = ap.parse_file(src, language="csharp")
     flat = ap.all_units_flat(ir)
-    methods = [u.name for u in flat if u.kind == "method"]
+    methods = _names_by_kind(flat, "method")
     assert "M" in methods, f"verbatim doubled-quote closed early: {methods}"
 # Cross-cutting regression suite — identity collisions, added_both conflicts,
 # and the fingerprint guard. Each pins one bug found in the review.
@@ -1807,7 +1853,7 @@ def test_r2_field_with_function_expression_initializer():
     ir = ap.parse_family_a(src, language="javascript")
     assert _unit_named(ir, "f"), (
         f"const=function(){{...}}; must emit a unit named 'f'; got "
-        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
+        f"{_kinds_of(ir)}"
     )
 
 
@@ -1835,7 +1881,7 @@ def test_r2_field_with_struct_literal_still_works():
     ir = ap.parse_family_a(src, language="rust")
     assert _field_named(ir, "P"), (
         f"Rust struct literal must still emit FIELD 'P'; got "
-        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
+        f"{_kinds_of(ir)}"
     )
 
 
@@ -1851,7 +1897,7 @@ def test_r3_rust_static_lifetime_in_return_type():
     ir = ap.parse_family_a(src, language="rust")
     assert _unit_named(ir, "f"), (
         f"fn with &'static return type must be detected; got "
-        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
+        f"{_kinds_of(ir)}"
     )
 
 
@@ -1862,7 +1908,7 @@ def test_r3_rust_generic_lifetime_param():
     ir = ap.parse_family_a(src, language="rust")
     assert _unit_named(ir, "f"), (
         f"fn with lifetime generic must be detected; got "
-        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
+        f"{_kinds_of(ir)}"
     )
 
 
@@ -1891,7 +1937,7 @@ def test_r3_rust_char_literal_still_works():
     ir = ap.parse_family_a(src, language="rust")
     assert _unit_named(ir, "f"), (
         f"char literals must still parse; got "
-        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
+        f"{_kinds_of(ir)}"
     )
 
 
@@ -1906,7 +1952,7 @@ def test_g7_const_function_expression_emits_function():
     through to normal classification)."""
     src = "const named = function() {\n    return 42;\n}\n"
     ir = ap.parse_family_a(src, language="javascript")
-    kinds = [(u.kind, u.name) for u in ap.all_units_flat(ir)]
+    kinds = _kinds_of(ir)
     # Either a FUNCTION 'named' or a FIELD 'named' is acceptable; the silent
     # DROP (empty) is the bug. Post-G7 with the keyword path it should be a
     # function unit.
@@ -1921,7 +1967,7 @@ def test_g7_const_class_expression_detected():
     const. Must not be silently dropped."""
     src = "const Foo = class {\n    bar() {\n        return 1;\n    }\n};\n"
     ir = ap.parse_family_a(src, language="javascript")
-    kinds = [(u.kind, u.name) for u in ap.all_units_flat(ir)]
+    kinds = _kinds_of(ir)
     assert _unit_named(ir, "Foo"), f"class expression must be detected; got {kinds}"
 
 
@@ -1932,7 +1978,7 @@ def test_g7_rust_struct_literal_still_field():
     misclassified as a function."""
     src = "pub const P: Point = Point { x: 0, y: 0 };\n"
     ir = ap.parse_family_a(src, language="rust")
-    kinds = [(u.kind, u.name) for u in ap.all_units_flat(ir)]
+    kinds = _kinds_of(ir)
     # Must be a FIELD (not a phantom FUNCTION/CLASS 'Point').
     assert _field_named(ir, "P"), f"struct literal must be FIELD 'P'; got {kinds}"
     # And no phantom 'Point' function/class should appear.
@@ -1950,7 +1996,7 @@ def test_g7_object_literal_initializer_still_field():
     ir = ap.parse_family_a(src, language="javascript")
     assert _field_named(ir, "cfg"), (
         f"object literal must be FIELD 'cfg'; got "
-        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
+        f"{_kinds_of(ir)}"
     )
 
 
@@ -1963,7 +2009,7 @@ def test_g8_kotlin_top_level_fun():
     only accepts C free functions at file scope). Adding ``fun`` fixes this."""
     src = "fun topLevel(x: Int): Int {\n    return x + 1\n}\n"
     ir = ap.parse_family_a(src, language="kotlin")
-    kinds = [(u.kind, u.name) for u in ap.all_units_flat(ir)]
+    kinds = _kinds_of(ir)
     assert _unit_named(ir, "topLevel"), (
         f"Kotlin top-level fun must be detected; got {kinds}"
     )
@@ -1977,7 +2023,7 @@ def test_g8_kotlin_method_with_return_type():
     from after the keyword, not from the heuristic."""
     src = "class Widget {\n    fun area(): Int {\n        return 1\n    }\n}\n"
     ir = ap.parse_family_a(src, language="kotlin")
-    kinds = [(u.kind, u.name) for u in ap.all_units_flat(ir)]
+    kinds = _kinds_of(ir)
     method = [u for u in ap.all_units_flat(ir) if u.kind == ap.KIND_METHOD]
     assert any(m.name == "area" for m in method), (
         f"Kotlin method with return type must be detected as METHOD 'area'; got {kinds}"
@@ -1991,7 +2037,7 @@ def test_g8_kotlin_top_level_fun_no_return_type():
     ir = ap.parse_family_a(src, language="kotlin")
     assert _unit_named(ir, "simple"), (
         f"Kotlin fun (no return type) must be detected; got "
-        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
+        f"{_kinds_of(ir)}"
     )
 
 
@@ -2301,7 +2347,7 @@ def test_cov_rust_char_literal_variants():
     ir = ap.parse_family_a(src, language="rust")
     assert _unit_named(ir, "f"), (
         f"char literals must not corrupt the parse; got "
-        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
+        f"{_kinds_of(ir)}"
     )
 
 
@@ -2316,7 +2362,7 @@ def test_cov_rust_byte_string_prefix():
     ir = ap.parse_family_a(src, language="rust")
     assert _unit_named(ir, "f"), (
         f"byte string b\"...\" must not corrupt; got "
-        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
+        f"{_kinds_of(ir)}"
     )
 
 
@@ -2336,7 +2382,7 @@ def test_cov_js_backtick_template_literal():
     ir = ap.parse_family_a(src, language="javascript")
     assert _unit_named(ir, "tag"), (
         f"backtick template with ${{}} must not corrupt brace count; got "
-        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
+        f"{_kinds_of(ir)}"
     )
 
 
