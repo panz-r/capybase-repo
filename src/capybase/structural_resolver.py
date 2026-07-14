@@ -38,7 +38,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from capybase.conflict_model import ConflictUnit
-from capybase.diff import char_ratio, line_matcher
+from capybase.diff import line_matcher
 from capybase.merge_intent import classify_side, direction
 
 Rule = Literal[
@@ -890,20 +890,8 @@ def _regions_against_base(base: list[str], other: list[str]) -> dict[int, tuple[
 # catches loadData→fetchData, load→fetch, parse_thing→parse_item, but won't
 # conflate unrelated short names. A rename ALSO requires the body to match
 # (normalized), so a coincidentally-similar name with different content isn't
-# misread as a rename.
-RENAME_SIMILARITY_THRESHOLD = 0.6
-
-
-def _name_similarity(a: str, b: str) -> float:
-    """Levenshtein-style similarity ratio of two entity names in [0, 1].
-
-    Thin delegate to the canonical :func:`abstract_parser.name_similarity`
-    (consolidation #2) — kept locally so the resolver's existing call sites and
-    test imports don't all change at once.
-    """
-    if not a or not b:
-        return 0.0
-    return char_ratio(a, b)
+# misread as a rename. The threshold and name-similarity now live canonically
+# in abstract_parser (RENAME_NAME_SIMILARITY_THRESHOLD / name_similarity).
 
 
 def _body_content(body: str) -> str:

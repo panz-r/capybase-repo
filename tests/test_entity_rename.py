@@ -23,11 +23,11 @@ needs_ts = pytest.mark.skipif(
     reason="abstract parser unavailable for python",
 )
 
+from capybase.adapters.abstract_parser import name_similarity
 from capybase.conflict_model import ConflictSide, ConflictUnit
 from capybase.structural_resolver import (
     _body_content,
     _detect_renames,
-    _name_similarity,
     resolve_structurally,
 )
 
@@ -51,11 +51,11 @@ def _unit(base, cur, rep, *, lang="python", path="app.py"):
 
 
 def test_name_similarity_identical():
-    assert _name_similarity("loadData", "loadData") == 1.0
+    assert name_similarity("loadData", "loadData") == 1.0
 
 
 def test_name_similarity_unrelated():
-    assert _name_similarity("loadData", "xyz") < 0.5
+    assert name_similarity("loadData", "xyz") < 0.5
 
 
 def test_body_content_strips_signature():
