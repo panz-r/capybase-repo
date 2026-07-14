@@ -870,12 +870,14 @@ _RENAME_NAME_SIMILARITY_THRESHOLD = 0.6
 
 
 def _name_similarity(a: str, b: str) -> float:
-    """String similarity ratio in [0, 1] via character-level LCS (C-accelerated)."""
-    if not a or not b:
-        return 0.0
-    from capybase.diff import char_ratio
+    """String similarity ratio in [0, 1] via character-level LCS.
 
-    return char_ratio(a, b)
+    Thin delegate to the canonical :func:`abstract_parser.name_similarity`
+    (consolidation #2) — one name-similarity measure, shared with the resolver
+    and the rename-detection core. Accepts ``None`` (returns 0.0).
+    """
+    from capybase.adapters.abstract_parser import name_similarity
+    return name_similarity(a, b)
 
 
 def _body_is_substantial(body_fp: str) -> bool:
@@ -938,72 +940,23 @@ def _split_header_body(entity: Entity) -> tuple[str, str]:
 def _scope_opener_brace(line: str) -> int:
     """Index of the first ``{`` opening a body, or -1.
 
-    Skips braces inside strings/char-literals and inside ``()``/``[]`` (e.g. an
-    array literal ``[1, 2]`` or a generic ``Vec<{...}>`` — rare on a header line).
-    The first brace at paren/bracket depth 0 is the body opener.
+    Delegate to the canonical :func:`abstract_parser._scope_opener_brace`
+    (consolidation #2) — one scope-opener implementation, shared with the
+    canonical ``split_header_body``.
     """
-    depth = 0
-    i = 0
-    n = len(line)
-    quote: str | None = None
-    while i < n:
-        c = line[i]
-        if quote is not None:
-            if c == "\\":
-                i += 2
-                continue
-            if c == quote:
-                quote = None
-            i += 1
-            continue
-        if c in ('"', "'", "`"):
-            quote = c
-            i += 1
-            continue
-        if c in "([":
-            depth += 1
-        elif c in ")]":
-            depth = max(0, depth - 1)
-        elif c == "{" and depth == 0:
-            return i
-        i += 1
-    return -1
+    from capybase.adapters.abstract_parser import _scope_opener_brace as _impl
+    return _impl(line)
 
 
 def _scope_opener_colon(line: str) -> int:
     """Index of the first ``:`` at bracket-depth 0, or -1.
 
-    For a Family-B one-liner (``def foo(a: int) -> str: body``) the body-opening
-    colon is the first ``:`` NOT inside ``()``/``[]``/``{}`` — so type-annotation
-    colons inside the parameter list are skipped. Returns -1 when there is none
-    at depth 0 (e.g. ``const N = 5;``), leaving the caller's fallback in charge.
+    Delegate to the canonical :func:`abstract_parser._scope_opener_colon`
+    (consolidation #2) — one scope-opener implementation, shared with the
+    canonical ``split_header_body``.
     """
-    depth = 0
-    i = 0
-    n = len(line)
-    quote: str | None = None
-    while i < n:
-        c = line[i]
-        if quote is not None:
-            if c == "\\":
-                i += 2
-                continue
-            if c == quote:
-                quote = None
-            i += 1
-            continue
-        if c in ('"', "'", "`"):
-            quote = c
-            i += 1
-            continue
-        if c in "([{":
-            depth += 1
-        elif c in ")]}":
-            depth = max(0, depth - 1)
-        elif c == ":" and depth == 0:
-            return i
-        i += 1
-    return -1
+    from capybase.adapters.abstract_parser import _scope_opener_colon as _impl
+    return _impl(line)
 
 
 def _norm(text: str) -> str:
