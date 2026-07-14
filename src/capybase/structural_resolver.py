@@ -897,9 +897,9 @@ RENAME_SIMILARITY_THRESHOLD = 0.6
 def _name_similarity(a: str, b: str) -> float:
     """Levenshtein-style similarity ratio of two entity names in [0, 1].
 
-    Uses :func:`capybase.diff.char_ratio` (character-level LCS ratio,
-    C-accelerated) — the same measure s3m applies via Levenshtein string
-    similarity for its rename handler. 1.0 = same name; →0 = unrelated.
+    Thin delegate to the canonical :func:`abstract_parser.name_similarity`
+    (consolidation #2) — kept locally so the resolver's existing call sites and
+    test imports don't all change at once.
     """
     if not a or not b:
         return 0.0
@@ -909,27 +909,14 @@ def _name_similarity(a: str, b: str) -> float:
 def _body_content(body: str) -> str:
     """The body with its signature/header line removed, normalized.
 
-    A rename changes the def/fn header (``def loadData`` → ``def fetchData``) but
-    leaves the body content identical. Rename detection must therefore compare
-    bodies with the HEADER STRIPPED — otherwise the renamed signature line makes
-    every rename look like a body change, and no base entity matches.
-
-    R4: the normalization now strips inline comments and blanks string literals
-    (reusing the parser's ``normalize_body``) so a rename that picked up an
-    incidental comment (``# cached``) or a changed string value (``"v1"``→``"v2"``)
-    still pairs with its base original. This AGREES with the parser's
-    ``unit_body_fingerprint`` (which the 3-way diff's rename detection uses), so
-    the two rename algorithms no longer disagree on the comment/string-stability
-    the fingerprint was designed for. A genuine body change (``fetch()``→
-    ``save()``) still differs and correctly does NOT pair.
+    Thin delegate to the canonical :func:`abstract_parser.entity_body_content`
+    (consolidation #2). Both strip the header line and normalize the rest via
+    the parser's comment/string-aware :func:`normalize_body` (R4), so the
+    resolver's rename signal AGREES with the parser's ``unit_body_fingerprint``
+    by construction — no longer by manually-maintained coincidence.
     """
-    if not body:
-        return ""
-    lines = body.split("\n")
-    # Drop the first line (the def/fn/struct header); normalize the rest with
-    # the parser's comment/string-aware normalization (R4).
-    from capybase.adapters.abstract_parser import normalize_body
-    return normalize_body("\n".join(lines[1:]))
+    from capybase.adapters.abstract_parser import entity_body_content
+    return entity_body_content(body)
 
 
 def _detect_renames(
@@ -937,60 +924,15 @@ def _detect_renames(
 ) -> tuple[dict, dict]:
     """Detect renames of base entities on one side (s3m rename handler, §2.2).
 
-    A rename is: a base entity whose OLD name is GONE from ``side_ents``, but
-    whose body CONTENT (signature stripped) reappears under a NEW name on the
-    side. This is the false-merge source the survey flags: without it,
-    entity_disjoint treats a rename as "base keeps old + side added new" → a
-    duplicate method.
-
-    The body-content match is the strong signal (identical content under a new
-    name is near-certain evidence of a rename); the name-similarity check is a
-    secondary guard so two genuinely-different entities that happen to share a
-    body aren't conflated. Because the content match is exact, even a semantic
-    rename (loadData→fetchData, low string similarity) is recognized — the s3m
-    paper's finding that content-equality is the reliable rename signal.
-
-    Returns ``(renames, base_ids_removed)``:
-    - ``renames``: maps the side's NEW identity ``(kind, new_name)`` → the base
-      identity ``(kind, old_name)`` it replaced, so the merge can treat the
-      renamed entity as the same logical entity (no duplicate, old name dropped).
-    - ``base_ids_removed``: the base identities that disappeared because they
-      were renamed away (so the merge walk doesn't re-emit the old name).
+    Thin delegate to the canonical :func:`abstract_parser.detect_renames_2way`
+    (consolidation #2). The 2-way rename algorithm — index base by body-content,
+    find side entities whose old name is gone but whose body matches, apply the
+    name-similarity/substantial-body guard — now lives in ONE place
+    (``abstract_parser``), shared by this resolver, the 3-way diff, and
+    ``semantic_diff``. Returns ``(renames, base_ids_removed)`` unchanged.
     """
-    # Index base entities by (kind, body-content) for exact-content matching.
-    base_by_content = {}
-    for e in base_ents:
-        key = (e.kind, _body_content(e.body))
-        # If two base entities share body content, keep the first; renames are
-        # ambiguous in that case and we decline to guess.
-        base_by_content.setdefault(key, e)
-    side_names_by_kind = {}
-    for e in side_ents:
-        side_names_by_kind.setdefault(e.kind, set()).add(e.name)
-
-    renames: dict = {}
-    removed: set = set()
-    for e in side_ents:
-        # Look for a base entity with the same (kind, body-content) whose name
-        # is NOT present on this side (it was renamed away).
-        key = (e.kind, _body_content(e.body))
-        base_match = base_by_content.get(key)
-        if base_match is None or base_match.identity == e.identity:
-            continue
-        # The base entity's old name must be GONE from this side (renamed, not
-        # duplicated). If the old name still exists, this is a copy, not a rename.
-        if base_match.name in side_names_by_kind.get(e.kind, set()):
-            continue
-        # Identical body content under a new, gone-old-name is a rename. The
-        # name-similarity guard prevents conflating two distinct entities that
-        # coincidentally share an empty/trivial body (e.g. ``pass``/``{}``).
-        if _body_content(e.body) and (
-            _name_similarity(base_match.name, e.name) >= RENAME_SIMILARITY_THRESHOLD
-            or len(_body_content(e.body)) >= 8
-        ):
-            renames[e.identity] = base_match.identity
-            removed.add(base_match.identity)
-    return renames, removed
+    from capybase.adapters.abstract_parser import detect_renames_2way
+    return detect_renames_2way(base_ents, side_ents)
 
 
 def _try_entity_disjoint(unit: ConflictUnit) -> str | None:

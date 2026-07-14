@@ -1117,9 +1117,12 @@ def semantic_diff(
     change. ``moved`` (cross-file) is NOT detected here — it requires multi-file
     input (see ``detect_cross_file_moves``).
 
-    The rename-pairing logic generalizes ``structural_resolver._detect_renames``:
-    body-content equality is the strong signal, with a Jaccard fallback so a
-    rename that also touches the body is still recognized.
+    Rename pairing is delegated to the canonical
+    :func:`abstract_parser.detect_renames_2way` (consolidation #2): body-content
+    equality is the strong signal, with a Jaccard fallback (threshold 0.80) so a
+    rename that also touches the body is still recognized. The structural
+    resolver's rename detection and the 3-way diff share the same core, so the
+    three no longer maintain independent body-signal implementations.
     """
     old_ents = enumerate_entities(old_text, language)
     new_ents = enumerate_entities(new_text, language)
@@ -1129,22 +1132,19 @@ def semantic_diff(
     old_by_name: dict[tuple[str, str], Entity] = {(e.kind, e.name): e for e in old_ents}
     new_by_name: dict[tuple[str, str], Entity] = {(e.kind, e.name): e for e in new_ents}
 
-    # Index old entities by (kind, body-fingerprint) for rename pairing.
-    old_by_body: dict[tuple[str, str], Entity] = {}
-    old_body_tokens: dict[tuple[str, str], frozenset[str]] = {}
-    for e in old_ents:
-        bf = entity_body_fingerprint(e, language) or ""
-        key = (e.kind, bf)
-        if bf:  # skip empty bodies (ambiguous)
-            old_by_body.setdefault(key, e)
-            old_body_tokens[key] = frozenset(_token_set(bf))
-
-    new_names_by_kind: dict[str, set[str]] = {}
-    for e in new_ents:
-        new_names_by_kind.setdefault(e.kind, set()).add(e.name)
+    # Rename pairing is delegated to the canonical core
+    # (``abstract_parser.detect_renames_2way``) so the body signal, the
+    # name-similarity guard, and the Jaccard fallback live in ONE place —
+    # shared with the structural resolver and the 3-way diff. Previously this
+    # was re-implemented here with its own body-fingerprint (indent-sensitive,
+    # comment/string-preserving) that could silently diverge from the others.
+    # The fuzzy threshold enables the "rename + small body edit" fallback.
+    from capybase.adapters.abstract_parser import detect_renames_2way
+    renames, removed_old_ids = detect_renames_2way(
+        old_ents, new_ents, fuzzy_body_threshold=_RENAME_BODY_JACCARD_THRESHOLD,
+    )
 
     changes: list[EntityChange] = []
-    renamed_old_names: set[tuple[str, str]] = set()
 
     # Pass 1: classify NEW entities (added / renamed / signature_changed / body_changed).
     for e in new_ents:
@@ -1176,54 +1176,12 @@ def semantic_diff(
                         kind=e.kind, name=e.name, change_type="body_changed",
                     ))
             continue
-        # Name is new → either added OR a rename of an old entity.
-        bf = entity_body_fingerprint(e, language) or ""
-        rename_target: Entity | None = None
-        if bf:
-            exact = old_by_body.get((e.kind, bf))
-            # Exact body match: the old name must be GONE from new (renamed, not
-            # copied), and we need name-similarity OR a substantial body so a
-            # trivial shared body (``pass``/``return 1``) doesn't false-pair.
-            if (
-                exact is not None
-                and exact.name not in new_names_by_kind.get(e.kind, set())
-                and (
-                    _name_similarity(exact.name, e.name) >= _RENAME_NAME_SIMILARITY_THRESHOLD
-                    or _body_is_substantial(bf)
-                )
-            ):
-                rename_target = exact
-            else:
-                # Jaccard fallback: a renamed entity whose body also changed.
-                tk = frozenset(_token_set(bf))
-                best: tuple[float, Entity] | None = None
-                for key, oks in old_body_tokens.items():
-                    if key[0] != e.kind:
-                        continue
-                    old_e = old_by_body[key]
-                    # Old name must be gone from new (renamed away, not copied).
-                    if old_e.name in new_names_by_kind.get(e.kind, set()):
-                        continue
-                    inter = len(tk & oks)
-                    union = len(tk | oks)
-                    if union == 0:
-                        continue
-                    j = inter / union
-                    # Require a substantial body so trivial shared bodies don't
-                    # pair across distinct names.
-                    if (
-                        j >= _RENAME_BODY_JACCARD_THRESHOLD
-                        and _body_is_substantial(bf)
-                        and (best is None or j > best[0])
-                    ):
-                        best = (j, old_e)
-                if best is not None:
-                    rename_target = best[1]
-        if rename_target is not None:
-            renamed_old_names.add((rename_target.kind, rename_target.name))
+        # Name is new → either a rename (per the canonical pairing) or an add.
+        old_ident = renames.get(ident)
+        if old_ident is not None:
             changes.append(EntityChange(
                 kind=e.kind, name=e.name, change_type="renamed",
-                old_name=rename_target.name, new_name=e.name,
+                old_name=old_ident[1], new_name=e.name,
             ))
         else:
             changes.append(EntityChange(
@@ -1233,7 +1191,7 @@ def semantic_diff(
     # Pass 2: classify OLD entities not yet accounted for → removed.
     for e in old_ents:
         ident = (e.kind, e.name)
-        if ident in renamed_old_names:
+        if ident in removed_old_ids:
             continue  # renamed away (already reported as a rename)
         if ident not in new_by_name:
             changes.append(EntityChange(

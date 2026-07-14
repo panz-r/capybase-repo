@@ -497,3 +497,132 @@ def test_cov_entity_disjoint_renamed_away_emission():
         assert not ("def foo(self)" in result and "def bar(self)" in result), (
             f"must not emit both old and renamed name;\n{result!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Consolidation #2: the canonical rename-detection core
+# (``abstract_parser.detect_renames_2way`` + ``entity_body_content`` +
+# ``split_header_body``) is now shared by the resolver, the 3-way diff, and
+# ``semantic_diff``. These pin its contract directly so the shared path stays
+# correct independent of any one caller.
+# ---------------------------------------------------------------------------
+
+from capybase.adapters.abstract_parser import (  # noqa: E402
+    detect_renames_2way,
+    entity_body_content,
+    split_header_body,
+    RENAME_NAME_SIMILARITY_THRESHOLD,
+)
+
+
+def test_canonical_detect_renames_exact_body_match():
+    """The core signal: a renamed entity (same body, new name, old name gone)
+    pairs. Works on Entity objects (the resolver/semantic_diff path)."""
+    base = [_entity("function", "loadData", "def loadData():\n    return fetch()")]
+    side = [_entity("function", "fetchData", "def fetchData():\n    return fetch()")]
+    renames, removed = detect_renames_2way(base, side)
+    assert renames == {("function", "fetchData"): ("function", "loadData")}, renames
+    assert removed == {("function", "loadData")}
+
+
+def test_canonical_detect_renames_comment_drift_pairs():
+    """A rename whose body picked up an incidental comment still pairs — the
+    canonical body signal strips comments (this is the R4 contract, now baked
+    into entity_body_content rather than maintained separately)."""
+    base = [_entity("function", "loadData", "def loadData():\n    return fetch()")]
+    side = [_entity("function", "fetchData", "def fetchData():\n    return fetch()  # cached")]
+    renames, _ = detect_renames_2way(base, side)
+    assert ("function", "fetchData") in renames
+
+
+def test_canonical_detect_renames_real_body_change_does_not_pair():
+    """A genuine body change (not just rename drift) must NOT pair — that would
+    conflate two distinct entities."""
+    base = [_entity("function", "loadData", "def loadData():\n    return fetch()")]
+    side = [_entity("function", "fetchData", "def fetchData():\n    return save()")]
+    renames, _ = detect_renames_2way(base, side)
+    assert renames == {}
+
+
+def test_canonical_detect_renames_copy_not_rename():
+    """If the old name still exists on the side, it's a COPY, not a rename —
+    must not pair (would drop a genuine duplicate)."""
+    base = [_entity("function", "foo", "def foo():\n    return 1")]
+    side = [
+        _entity("function", "foo", "def foo():\n    return 1"),
+        _entity("function", "bar", "def foo():\n    return 1"),
+    ]
+    renames, _ = detect_renames_2way(base, side)
+    assert renames == {}
+
+
+def test_canonical_detect_renames_jaccard_fallback():
+    """With fuzzy_body_threshold set, a rename that ALSO edits the body still
+    pairs via token-Jaccard similarity (the semantic_diff path). Without the
+    threshold, the same case correctly does NOT pair (exact-only)."""
+    base = [_entity("function", "parse_item",
+                    "def parse_item():\n    x = read()\n    return transform(x)")]
+    side = [_entity("function", "parse_thing",
+                    "def parse_thing():\n    x = read()\n    return transform(x)\n    return None")]
+    # Exact-only: bodies differ → no pair.
+    r_exact, _ = detect_renames_2way(base, side)
+    assert r_exact == {}, r_exact
+    # Fuzzy: bodies share most tokens → pairs.
+    r_fuzzy, _ = detect_renames_2way(base, side, fuzzy_body_threshold=0.80)
+    assert ("function", "parse_thing") in r_fuzzy, r_fuzzy
+
+
+def test_canonical_detect_renames_trivial_body_guarded():
+    """Two entities sharing a trivial body (``pass``) with dissimilar names must
+    NOT pair — the name-similarity/substantial-body guard prevents false pairs."""
+    base = [_entity("function", "alpha", "def alpha():\n    pass")]
+    side = [_entity("function", "omega", "def omega():\n    pass")]
+    renames, _ = detect_renames_2way(base, side)
+    assert renames == {}
+
+
+def test_entity_body_content_oneliner_splits_at_scope():
+    """The canonical body signal splits single-line bodies at the scope opener
+    (``:`` for Python, ``{`` for brace langs) so the inline body isn't folded
+    into the header. Previously the canonical core dropped one-liner bodies
+    entirely (lines[1:] = empty); now it matches structural._split_header_body."""
+    assert entity_body_content("def foo(): return 1") == "return 1"
+    assert entity_body_content("fn foo() { 1 }") == "1"
+    # Multi-line: header is line 0, rest is normalized.
+    assert entity_body_content("def foo():\n    return 1") == "return 1"
+
+
+def test_split_header_body_returns_both_parts():
+    """split_header_body returns (header, rest) for signature + body use."""
+    hdr, rest = split_header_body("def foo(a: int) -> str: return a")
+    assert hdr == "def foo(a: int) -> str:"
+    assert rest == "return a"
+    # Multi-line
+    hdr2, rest2 = split_header_body("def foo():\n    return 1\n    return 2")
+    assert hdr2 == "def foo():"
+    assert "return 1" in rest2 and "return 2" in rest2
+
+
+def test_name_similarity_canonical():
+    """The canonical name-similarity is char_ratio-based; identical = 1.0."""
+    from capybase.adapters.abstract_parser import name_similarity
+    assert name_similarity("loadData", "loadData") == 1.0
+    assert name_similarity("loadData", "fetchData") < 1.0
+    assert name_similarity("", "x") == 0.0
+    assert name_similarity(None, "x") == 0.0
+    # The threshold is exposed for callers that need it.
+    assert RENAME_NAME_SIMILARITY_THRESHOLD == 0.6
+
+
+def test_canonical_core_works_on_structural_units():
+    """detect_renames_2way works on StructuralUnit too (the 3-way diff's unit
+    type), not just Entity — it relies only on .identity/.kind/.name/.body."""
+    from capybase.adapters.abstract_parser import StructuralUnit
+    base = [StructuralUnit(kind="function", name="old", span=(0, 1),
+                           body="def old():\n    return 1")]
+    side = [StructuralUnit(kind="function", name="new", span=(0, 1),
+                           body="def new():\n    return 1")]
+    renames, removed = detect_renames_2way(base, side)
+    assert renames == {("function", "new"): ("function", "old")}, renames
+    assert removed == {("function", "old")}
+

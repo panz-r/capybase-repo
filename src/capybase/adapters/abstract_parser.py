@@ -38,6 +38,12 @@ import re
 from bisect import bisect_right
 from dataclasses import dataclass, field
 
+# ``char_ratio`` is a leaf dependency (capybase.diff imports nothing from the
+# parser), so this creates no cycle. Used by the canonical rename-pairing core
+# (consolidation #2): one name-similarity measure, shared by the 3-way diff,
+# the structural resolver, and ``semantic_diff`` — previously each had its own.
+from capybase.diff import char_ratio as _char_ratio
+
 # Single source of truth for extension → language (fix #11). Aliased locally so
 # the family dispatch reads naturally; the authoritative map lives in
 # ``language.EXTENSION_TO_LANGUAGE``.
@@ -2525,6 +2531,316 @@ def _classify_alignment(
     return _CHANGE_KIND_UNCHANGED
 
 
+# ---------------------------------------------------------------------------
+# Rename detection — the CANONICAL core (consolidation #2)
+# ---------------------------------------------------------------------------
+#
+# Rename detection previously existed in THREE independent implementations,
+# each re-deriving the same "header-stripped normalized body" signal and the
+# same "old name gone + body matches + name-similarity guard" rule:
+#
+#   - ``abstract_parser._detect_renames`` (3-way, fingerprint-keyed)
+#   - ``structural_resolver._detect_renames`` (2-way, body-content-keyed)
+#   - ``structural.semantic_diff``          (2-way, body-content + Jaccard)
+#
+# They agreed only by coincidence (R4 manually aligned the resolver's
+# normalization to the parser's). This block is the single canonical core the
+# three callers now share. One body signal (``entity_body_content``), one
+# name-similarity measure (``_char_ratio``), one threshold.
+
+#: Minimum name-similarity (char_ratio) to confirm a body-content rename pair,
+#: OR the body must be substantial (>= this many chars) so two distinct entities
+#: sharing a trivial body (``pass`` / ``return 1``) don't false-pair. This is
+#: the single threshold; it replaces ``RENAME_SIMILARITY_THRESHOLD`` (resolver)
+#: and ``_RENAME_NAME_SIMILARITY_THRESHOLD`` (structural) which were both 0.6.
+RENAME_NAME_SIMILARITY_THRESHOLD = 0.6
+
+#: A body-content signal must be at least this long to count as "substantial"
+#: enough to confirm a rename without name similarity (mirrors the prior
+#: ``len(body) >= 8`` guard in the resolver and ``_body_is_substantial``).
+_RENAME_SUBSTANTIAL_BODY_MIN = 8
+
+
+def _scope_opener_brace(line: str) -> int:
+    """Index of the first ``{`` opening a body, or -1.
+
+    Skips braces inside strings/char-literals and inside ``()``/``[]`` (e.g. an
+    array literal ``[1, 2]`` or a generic ``Vec<{...}>`` — rare on a header line).
+    The first brace at paren/bracket depth 0 is the body opener. Used by
+    :func:`split_header_body` for single-line Family-A declarations.
+    """
+    depth = 0
+    i = 0
+    n = len(line)
+    quote: str | None = None
+    while i < n:
+        c = line[i]
+        if quote is not None:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ('"', "'", "`"):
+            quote = c
+            i += 1
+            continue
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth = max(0, depth - 1)
+        elif c == "{" and depth == 0:
+            return i
+        i += 1
+    return -1
+
+
+def _scope_opener_colon(line: str) -> int:
+    """Index of the first ``:`` at bracket-depth 0, or -1.
+
+    For a Family-B one-liner (``def foo(a: int) -> str: body``) the body-opening
+    colon is the first ``:`` NOT inside ``()``/``[]``/``{}`` — so type-annotation
+    colons inside the parameter list are skipped. Returns -1 when there is none
+    at depth 0 (e.g. ``const N = 5;``). Used by :func:`split_header_body`.
+    """
+    depth = 0
+    i = 0
+    n = len(line)
+    quote: str | None = None
+    while i < n:
+        c = line[i]
+        if quote is not None:
+            if c == "\\":
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ('"', "'", "`"):
+            quote = c
+            i += 1
+            continue
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth = max(0, depth - 1)
+        elif c == ":" and depth == 0:
+            return i
+        i += 1
+    return -1
+
+
+def split_header_body(body: str) -> tuple[str, str]:
+    """Split a unit's body text into (header, rest), whitespace-normalized.
+
+    The CANONICAL header/body split for rename detection (consolidation #2). A
+    rename changes the def/fn header (``def foo`` → ``def bar``) but leaves the
+    body content identical, so rename detection compares the header-STRIPPED
+    body. This replaces the two divergent splits that previously existed
+    (``structural_resolver._body_content`` and ``structural._split_header_body``).
+
+    For a MULTI-LINE body the header is ``lines[0]`` (the def/fn/class line) and
+    the rest is the body lines below it — the common case. For a SINGLE-LINE body
+    (``fn foo() { 1 }``, ``def foo(): return 1``) ``lines[0]`` is the WHOLE body,
+    so the naive split leaves ``rest=""`` — which makes every one-liner body edit
+    register as a signature change and breaks rename pairing. We instead split a
+    one-liner at its scope opener: the first ``{`` (Family A) or the first ``:``
+    at bracket-depth 0 (Family B), so the signature lands in the header and the
+    inline body lands in ``rest``. Detected from the text itself (no language
+    param); falls back to the whole-line-as-header when no opener is found.
+    """
+    body = body or ""
+    if not body:
+        return "", ""
+    lines = body.split("\n")
+    if len(lines) > 1:
+        # Multi-line: header is the declaration line, rest is the body below it.
+        header = lines[0]
+        rest = "\n".join(lines[1:])
+        return _normalize_header(header), normalize_body(rest)
+    # Single-line body: split at the scope opener so the body content isn't
+    # folded into the header. Family A opens with ``{``; Family B with ``:``.
+    line = lines[0]
+    brace = _scope_opener_brace(line)
+    if brace >= 0:
+        header = line[: brace + 1]
+        rest = line[brace + 1 :]
+        # Drop the single matching closing ``}`` (the function's own brace) so the
+        # rest is the body content, not ``... }``. Best-effort; nested braces in
+        # the body are left as-is (both sides compare identically regardless).
+        r = rest.rstrip()
+        if r.endswith("}"):
+            rest = r[:-1]
+        return _normalize_header(header), normalize_body(rest)
+    colon = _scope_opener_colon(line)
+    if colon >= 0:
+        header = line[: colon + 1]
+        rest = line[colon + 1 :]
+        return _normalize_header(header), normalize_body(rest)
+    # No opener found (e.g. a field ``const N = 5;``): keep prior behavior.
+    return _normalize_header(line), ""
+
+
+def entity_body_content(body: str) -> str:
+    """The header-stripped, comment/string-normalized body content.
+
+    A rename changes the def/fn/class header (``def loadData`` → ``def
+    fetchData``) but leaves the body content identical, so rename detection must
+    compare bodies with the HEADER STRIPPED. The remaining text is normalized
+    via :func:`normalize_body` (whitespace-collapsed, comments dropped, string
+    literals blanked) so a rename that picked up an incidental comment or a
+    changed string value still pairs with its base original — while a genuine
+    body change (``fetch()`` → ``save()``) still differs and correctly does NOT
+    pair.
+
+    This is the CANONICAL body signal for rename detection (consolidation #2).
+    It delegates the header/body split to :func:`split_header_body` (which is
+    one-liner-aware), then normalizes the body part. Works on the raw ``.body``
+    string any unit/entity carries.
+    """
+    if not body:
+        return ""
+    _, rest = split_header_body(body)
+    return rest
+
+
+def name_similarity(a: str | None, b: str | None) -> float:
+    """Character-level similarity ratio of two names in ``[0, 1]``.
+
+    Uses :func:`capybase.diff.char_ratio` (LCS-based, C-accelerated). 1.0 = same
+    name; →0 = unrelated. The canonical measure for the rename name-guard
+    (consolidation #2).
+    """
+    if not a or not b:
+        return 0.0
+    return _char_ratio(a, b)
+
+
+def detect_renames_2way(
+    base_units: list,
+    side_units: list,
+    *,
+    fuzzy_body_threshold: float | None = None,
+) -> tuple[dict, set]:
+    """Detect renames of base entities appearing on ONE side (canonical core).
+
+    A rename is: a base entity whose OLD name is GONE from ``side_units``, but
+    whose body content (header-stripped, normalized) reappears under a NEW name
+    on the side. This is the false-merge source the survey flags: without it, a
+    rename is treated as "base keeps old name + side adds new name" → a
+    duplicate entity.
+
+    The body-content match is the strong signal (identical content under a new
+    name is near-certain evidence of a rename); the name-similarity guard is a
+    secondary check so two genuinely-different entities that happen to share a
+    body aren't conflated. Because the content match is exact, even a semantic
+    rename (``loadData``→``fetchData``, low string similarity) is recognized —
+    content-equality is the reliable rename signal.
+
+    ``fuzzy_body_threshold`` (when not ``None``) enables a Jaccard fallback: a
+    side entity with no exact body match is paired to the base entity (whose old
+    name is gone) with the highest token-Jaccard similarity at or above the
+    threshold, provided the body is substantial. This lets a rename that ALSO
+    edits the body still pair — used by ``semantic_diff`` (threshold 0.80). The
+    resolver and 3-way diff leave it ``None`` (exact-only, conservative).
+
+    Works on ANY objects carrying ``.identity``, ``.kind``, ``.name``, and
+    ``.body`` (both :class:`StructuralUnit` and the public ``Entity``), so the
+    3-way diff, the structural resolver, and ``semantic_diff`` all share this
+    one implementation.
+
+    Returns ``(renames, base_ids_removed)``:
+    - ``renames``: maps the side's NEW identity ``(kind, new_name)`` → the base
+      identity ``(kind, old_name)`` it replaced.
+    - ``base_ids_removed``: the base identities that disappeared because they
+      were renamed away (so a merge walk doesn't re-emit the old name).
+    """
+    # Index base entities by (kind, body-content) for exact-content matching.
+    base_by_content: dict = {}
+    # For the Jaccard fallback: base entities with substantial content, keyed for
+    # token-set similarity. Only built when fuzzy matching is requested.
+    base_body_tokens: dict = {}
+    for e in base_units:
+        content = entity_body_content(e.body)
+        key = (e.kind, content)
+        # If two base entities share body content, keep the first; renames are
+        # ambiguous in that case and we decline to guess.
+        base_by_content.setdefault(key, e)
+        if (
+            fuzzy_body_threshold is not None
+            and content
+            and len(content) >= _RENAME_SUBSTANTIAL_BODY_MIN
+        ):
+            base_body_tokens.setdefault(key, frozenset(content.split()))
+    side_names_by_kind: dict = {}
+    for e in side_units:
+        side_names_by_kind.setdefault(e.kind, set()).add(e.name)
+
+    def _confirms_rename(base_match, side_entity, content: str) -> bool:
+        """The name/substantial-body guard: is this a real rename, not a
+        coincidental body-content collision between two distinct entities?"""
+        return bool(content) and (
+            name_similarity(base_match.name, side_entity.name) >= RENAME_NAME_SIMILARITY_THRESHOLD
+            or len(content) >= _RENAME_SUBSTANTIAL_BODY_MIN
+        )
+
+    renames: dict = {}
+    removed: set = set()
+    consumed_base_ids: set = set()
+    for e in side_units:
+        content = entity_body_content(e.body)
+        # 1) Exact body-content match (the primary, high-precision signal).
+        key = (e.kind, content)
+        base_match = base_by_content.get(key)
+        if base_match is not None and base_match.identity != e.identity:
+            # The base entity's old name must be GONE from this side (renamed,
+            # not duplicated). If the old name still exists, this is a copy.
+            if base_match.name in side_names_by_kind.get(e.kind, set()):
+                base_match = None
+        else:
+            base_match = None
+        # 2) Jaccard fallback: a rename that also edited the body. Only when no
+        # exact match fired and fuzzy matching is enabled.
+        if base_match is None and fuzzy_body_threshold is not None and content:
+            tk = frozenset(content.split())
+            best: tuple[float, object] | None = None
+            for bkey, oks in base_body_tokens.items():
+                if bkey[0] != e.kind:
+                    continue
+                b_unit = base_by_content[bkey]
+                if b_unit.identity in consumed_base_ids:
+                    continue
+                # Old name must be gone from this side (renamed away, not copied).
+                if b_unit.name in side_names_by_kind.get(e.kind, set()):
+                    continue
+                inter = len(tk & oks)
+                union = len(tk | oks)
+                if union == 0:
+                    continue
+                j = inter / union
+                if (
+                    j >= fuzzy_body_threshold
+                    and len(content) >= _RENAME_SUBSTANTIAL_BODY_MIN
+                    and (best is None or j > best[0])
+                ):
+                    best = (j, b_unit)
+            if best is not None:
+                base_match = best[1]
+        if base_match is None:
+            continue
+        if base_match.identity in consumed_base_ids:
+            continue
+        if not _confirms_rename(base_match, e, content):
+            continue
+        renames[e.identity] = base_match.identity
+        removed.add(base_match.identity)
+        consumed_base_ids.add(base_match.identity)
+    return renames, removed
+
+
 def _detect_renames(
     base_units: list[StructuralUnit],
     left_units: list[StructuralUnit],
@@ -2542,6 +2858,15 @@ def _detect_renames(
 
     Conservative — pairs only on exact body-fingerprint match (the header-stripped
     digest), so a rename + heavy body edit won't pair (stays added+removed, safe).
+
+    The body fingerprint is the hash of :func:`entity_body_content` (the canonical
+    rename signal, consolidation #2), so this 3-way pairing is consistent with the
+    2-way :func:`detect_renames_2way` the resolver and ``semantic_diff`` share —
+    fingerprint equality ⟺ body-content equality. This version keys on the
+    precomputed digest (cheaper: fingerprints are baked into the units at parse
+    time) and applies a 3-way-specific "deleted by BOTH sides" constraint that the
+    2-way core doesn't have, so it is kept as a distinct 3-way entry point rather
+    than forced through the 2-way signature.
     """
     # Index DELETED base units by body fingerprint. A base unit is a rename
     # candidate only when it's gone from the side in question (classified as a
