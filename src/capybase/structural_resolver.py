@@ -935,6 +935,113 @@ def _detect_renames(
     return detect_renames_2way(base_ents, side_ents)
 
 
+@dataclass
+class _EntityMergeCtx:
+    """Shared context for the entity-level merge strategies.
+
+    Both :func:`_try_entity_disjoint` and :func:`_try_refactoring_aware_merge`
+    need the same setup: enumerate entities in the enclosing container on all
+    three sides, detect renames, and build the base identity index. This
+    dataclass carries that context so the two strategies share ONE preamble
+    (extracted below) instead of ~40 lines of near-verbatim scaffolding each.
+    """
+
+    enc_text: str
+    lang: str
+    base_ents: list
+    cur_ents: list
+    rep_ents: list
+    base_by_id: dict
+    cur_renames: dict
+    cur_removed: set
+    rep_renames: dict
+    rep_removed: set
+
+
+def _prepare_entity_merge(unit: ConflictUnit) -> _EntityMergeCtx | None:
+    """The shared preamble for entity-level merge strategies.
+
+    Both :func:`_try_entity_disjoint` and :func:`_try_refactoring_aware_merge`
+    do the same setup — the only code that previously differed between their
+    ~40-line preambles was whitespace and comment wording. This consolidates it:
+
+      1. Guard: structural parser available, language is python/rust, an
+         enclosing container is known.
+      2. Enumerate entities (base/current/replayed), descending into the
+         container body when the top-level enumeration returned only the
+         container itself.
+      3. Decline on duplicate identities (fix #3 / R5).
+      4. Build the base identity index and detect per-side renames.
+
+    Returns the shared context, or ``None`` when any precondition fails (the
+    caller treats ``None`` as "decline — escalate to the next strategy").
+    """
+    try:
+        from capybase.adapters import structural
+    except Exception:  # noqa: BLE001
+        return None
+    lang = unit.language
+    if lang not in ("python", "rust"):
+        return None
+    meta = unit.structural_metadata
+    enc_text = meta.get("enclosing_node_text")
+    if not enc_text:
+        return None  # no enclosing container known → can't enumerate
+
+    base_ents = structural.enumerate_entities(unit.base.text or "", lang)
+    cur_ents = structural.enumerate_entities(unit.current.text or "", lang)
+    rep_ents = structural.enumerate_entities(unit.replayed.text or "", lang)
+    if base_ents is None or cur_ents is None or rep_ents is None:
+        return None  # parse failed on at least one side
+
+    # The enclosing node is a CONTAINER (class/impl/module). The conflict sides
+    # are the whole container's evolution, so a module-level enumeration returns
+    # the container itself (one "class Store" entity) — not the methods inside
+    # it. To get the inner entities (the actual unit of entity merge), re-enumerate
+    # anchored INSIDE the container body.
+    if len(base_ents) <= 1 and len(cur_ents) <= 1 and len(rep_ents) <= 1:
+        span = _inner_anchor(enc_text)
+        if span is not None:
+            base_ents = structural.enumerate_entities(unit.base.text or "", lang, container_span=span) or base_ents
+            cur_ents = structural.enumerate_entities(unit.current.text or "", lang, container_span=span) or cur_ents
+            rep_ents = structural.enumerate_entities(unit.replayed.text or "", lang, container_span=span) or rep_ents
+
+    # Decline on duplicate identities: two entities sharing an identity (e.g.
+    # Java/C++/Python method overloads, re-definitions) collide silently in the
+    # identity-keyed dicts below, dropping all but one — a missed-conflict
+    # data-loss bug. Decline so the conflict escalates to the line/LLM resolvers.
+    try:
+        from capybase.adapters.abstract_parser import has_duplicate_identities
+    except Exception:  # noqa: BLE001
+        return None
+    if (
+        has_duplicate_identities(base_ents)
+        or has_duplicate_identities(cur_ents)
+        or has_duplicate_identities(rep_ents)
+    ):
+        return None
+
+    base_by_id = {e.identity: e for e in base_ents}
+    # Rename detection per side (s3m rename handler, survey §2.2): a base entity
+    # whose body reappears under a NEW similar name on a side, with the old name
+    # gone, is a RENAME — not a base-kept + side-added pair.
+    cur_renames, cur_removed = _detect_renames(cur_ents, base_ents)
+    rep_renames, rep_removed = _detect_renames(rep_ents, base_ents)
+
+    return _EntityMergeCtx(
+        enc_text=enc_text,
+        lang=lang,
+        base_ents=base_ents,
+        cur_ents=cur_ents,
+        rep_ents=rep_ents,
+        base_by_id=base_by_id,
+        cur_renames=cur_renames,
+        cur_removed=cur_removed,
+        rep_renames=rep_renames,
+        rep_removed=rep_removed,
+    )
+
+
 def _try_entity_disjoint(unit: ConflictUnit) -> str | None:
     """Resolve when both sides add/modify DISTINCT entities in one container.
 
@@ -960,62 +1067,15 @@ def _try_entity_disjoint(unit: ConflictUnit) -> str | None:
     inside a parseable container, or any entity overlaps. Every resolution this
     produces is STILL validated by the orchestrator before acceptance.
     """
-    try:
-        from capybase.adapters import structural
-    except Exception:  # noqa: BLE001
+    ctx = _prepare_entity_merge(unit)
+    if ctx is None:
         return None
-    lang = unit.language
-    if lang not in ("python", "rust"):
-        return None
-    meta = unit.structural_metadata
-    enc_text = meta.get("enclosing_node_text")
-    if not enc_text:
-        return None  # no enclosing container known → can't enumerate
+    base_ents, cur_ents, rep_ents = ctx.base_ents, ctx.cur_ents, ctx.rep_ents
+    base_by_id = ctx.base_by_id
+    enc_text, lang = ctx.enc_text, ctx.lang
+    cur_renames, cur_removed = ctx.cur_renames, ctx.cur_removed
+    rep_renames, rep_removed = ctx.rep_renames, ctx.rep_removed
 
-    base_ents = structural.enumerate_entities(unit.base.text or "", lang)
-    cur_ents = structural.enumerate_entities(unit.current.text or "", lang)
-    rep_ents = structural.enumerate_entities(unit.replayed.text or "", lang)
-    if base_ents is None or cur_ents is None or rep_ents is None:
-        return None  # parse failed on at least one side
-
-    # The enclosing node is a CONTAINER (class/impl/module). The conflict sides
-    # are the whole container's evolution, so a module-level enumeration returns
-    # the container itself (one "class Store" entity) — not the methods inside
-    # it. To get the inner entities (the actual unit of entity merge), re-enumerate
-    # anchored INSIDE the container body. The first non-header line is a stable
-    # anchor that sits within the body for any non-empty class/impl.
-    if len(base_ents) <= 1 and len(cur_ents) <= 1 and len(rep_ents) <= 1:
-        span = _inner_anchor(enc_text)
-        if span is not None:
-            base_ents = structural.enumerate_entities(unit.base.text or "", lang, container_span=span) or base_ents
-            cur_ents = structural.enumerate_entities(unit.current.text or "", lang, container_span=span) or cur_ents
-            rep_ents = structural.enumerate_entities(unit.replayed.text or "", lang, container_span=span) or rep_ents
-
-    # Decline on duplicate identities (fix #3): two entities sharing an identity
-    # (e.g. Java/C++/Python method overloads, re-definitions) collide silently in
-    # the identity-keyed dicts below, dropping all but one — a missed-conflict
-    # data-loss bug. Decline so the conflict escalates to the line/LLM resolvers.
-    try:
-        from capybase.adapters.abstract_parser import has_duplicate_identities
-    except Exception:  # noqa: BLE001
-        return None
-    if (
-        has_duplicate_identities(base_ents)
-        or has_duplicate_identities(cur_ents)
-        or has_duplicate_identities(rep_ents)
-    ):
-        return None
-
-    base_by_id = {e.identity: e for e in base_ents}
-
-    # Rename detection (s3m rename handler, survey §2.2): a base entity whose
-    # body reappears under a NEW similar name on a side, with the old name gone,
-    # is a RENAME — not a base-kept + side-added pair. Without this, entity_disjoint
-    # emits a duplicate (old name AND new name). Detect per side, mapping the new
-    # identity back to the base identity so touched sets and the merge walk reason
-    # about logical entities.
-    cur_renames, cur_removed = _detect_renames(cur_ents, base_ents)
-    rep_renames, rep_removed = _detect_renames(rep_ents, base_ents)
     # Classify each renamed-away base entity:
     # - renamed by BOTH sides to the SAME new name → AGREED (not a conflict).
     # - renamed by BOTH sides to DIFFERENT new names → conflict → decline.
@@ -1195,55 +1255,13 @@ def _try_refactoring_aware_merge(unit: ConflictUnit) -> str | None:
     already declined (it's dispatched immediately after), so its re-parse cost is
     paid only on the hard overlap tail.
     """
-    try:
-        from capybase.adapters import structural
-    except Exception:  # noqa: BLE001
+    ctx = _prepare_entity_merge(unit)
+    if ctx is None:
         return None
-    lang = unit.language
-    if lang not in ("python", "rust"):
-        return None
-    meta = unit.structural_metadata
-    enc_text = meta.get("enclosing_node_text")
-    if not enc_text:
-        return None  # no enclosing container → can't enumerate / rebuild
-
-    base_ents = structural.enumerate_entities(unit.base.text or "", lang)
-    cur_ents = structural.enumerate_entities(unit.current.text or "", lang)
-    rep_ents = structural.enumerate_entities(unit.replayed.text or "", lang)
-    if base_ents is None or cur_ents is None or rep_ents is None:
-        return None
-
-    # Descend into the container's body if the top-level enumeration returned only
-    # the container itself (mirrors entity_disjoint's anchor logic).
-    if len(base_ents) <= 1 and len(cur_ents) <= 1 and len(rep_ents) <= 1:
-        span = _inner_anchor(enc_text)
-        if span is not None:
-            base_ents = structural.enumerate_entities(unit.base.text or "", lang, container_span=span) or base_ents
-            cur_ents = structural.enumerate_entities(unit.current.text or "", lang, container_span=span) or cur_ents
-            rep_ents = structural.enumerate_entities(unit.replayed.text or "", lang, container_span=span) or rep_ents
-
-    # Decline on duplicate identities (R5, mirroring fix #3 in entity_disjoint):
-    # two entities sharing an identity (e.g. Python @property + @x.setter both
-    # named ``x``, or Java/C++ overloads) collide silently in the identity-keyed
-    # ``base_by_id`` dict below, dropping all but one — a data-loss bug. Decline
-    # so the conflict escalates to the LLM path instead of truncating.
-    try:
-        from capybase.adapters.abstract_parser import has_duplicate_identities
-    except Exception:  # noqa: BLE001
-        return None
-    if (
-        has_duplicate_identities(base_ents)
-        or has_duplicate_identities(cur_ents)
-        or has_duplicate_identities(rep_ents)
-    ):
-        return None
-
-    base_by_id = {e.identity: e for e in base_ents}
-
-    # Rename maps per side: side identity (kind, new_name) → base identity it
-    # replaced. A rename is "pure" only if the body CONTENT equals base's.
-    cur_renames, _ = _detect_renames(cur_ents, base_ents)
-    rep_renames, _ = _detect_renames(rep_ents, base_ents)
+    base_ents, cur_ents, rep_ents = ctx.base_ents, ctx.cur_ents, ctx.rep_ents
+    base_by_id = ctx.base_by_id
+    enc_text, lang = ctx.enc_text, ctx.lang
+    cur_renames, rep_renames = ctx.cur_renames, ctx.rep_renames
 
     def _is_pure_rename(side_ents, renames, ent):
         """True if ``ent`` is a rename whose body content == the base entity's."""
