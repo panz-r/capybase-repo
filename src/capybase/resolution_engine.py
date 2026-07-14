@@ -166,7 +166,7 @@ def _structural_context_block(unit: ConflictUnit, *, attempt: int = 0) -> str:
     try:
         from capybase.adapters.abstract_parser import (
             compute_structural_diff_3way, render_structural_context,
-            parse_file, enclosing_unit, _all_units_flat,
+            parse_file, enclosing_unit, all_units_flat,
         )
         base_text = unit.base.text or ""
         current_text = unit.current.text or ""
@@ -185,7 +185,7 @@ def _structural_context_block(unit: ConflictUnit, *, attempt: int = 0) -> str:
             ir = parse_file(base_text, language=unit.language)
             if ir is None or not ir.units:
                 return ""
-            flat = _all_units_flat(ir)
+            flat = all_units_flat(ir)
             if not flat:
                 return ""
             lines = [f"STRUCTURAL CONTEXT (language-family: {unit.language or ir.family}/{ir.family}):"]

@@ -247,7 +247,7 @@ def unit_body_fingerprint(body: str) -> str:
     # Strip the header (first line: the def/fn/class signature) so a rename
     # (which only changes the header's name token) leaves the digest unchanged.
     rest = "\n".join(lines[1:])
-    norm = _normalize_body(rest)
+    norm = normalize_body(rest)
     # Count MEANINGFUL lines (non-blank, non-comment) so adding a comment line
     # doesn't perturb the digest — the fingerprint is stable under comment
     # additions (the AstPreservationValidator relies on this).
@@ -300,7 +300,7 @@ def _strip_inline_comment(line: str) -> str:
     return line
 
 
-def _normalize_body(text: str) -> str:
+def normalize_body(text: str) -> str:
     """Whitespace-collapse + string/comment-literal-neutralize a body region.
 
     ``" ".join(split())`` collapses all whitespace runs to single spaces (stable
@@ -2157,7 +2157,7 @@ def parse_file(
 # ---------------------------------------------------------------------------
 
 
-def _all_units_flat(ir: FileIR) -> list[StructuralUnit]:
+def all_units_flat(ir: FileIR) -> list[StructuralUnit]:
     """All non-container-scope units in ``ir`` (top-level + nested), source order.
 
     Container-scope units (impl/mod/namespace) are SKIPPED — they're distinct
@@ -2179,7 +2179,7 @@ def _all_units_flat(ir: FileIR) -> list[StructuralUnit]:
     return out
 
 
-def _has_duplicate_identities(units) -> bool:
+def has_duplicate_identities(units) -> bool:
     """True when ``units`` contains two entries with the same ``.identity``.
 
     Duplicate identities (e.g. two ``(method, "f")`` from Java/C++/Python
@@ -2216,7 +2216,7 @@ def enclosing_unit(ir: FileIR, span: tuple[int, int]) -> StructuralUnit | None:
             if best is None or (u.span[0] >= best.span[0] and u.span[1] <= best.span[1]):
                 best = u
 
-    for u in _all_units_flat(ir):
+    for u in all_units_flat(ir):
         consider(u)
     return best
 
@@ -2421,19 +2421,19 @@ def compute_structural_diff_3way(
     # Flatten to include nested children (methods inside classes/impls) so the
     # alignment operates at the entity level the LLM merges at — not just
     # top-level containers. Container-scope units (impl/mod) are skipped but
-    # their children are walked (mirrors _all_units_flat).
-    base_units = _all_units_flat(ir_base)
-    left_units = _all_units_flat(ir_left)
-    right_units = _all_units_flat(ir_right)
+    # their children are walked (mirrors all_units_flat).
+    base_units = all_units_flat(ir_base)
+    left_units = all_units_flat(ir_left)
+    right_units = all_units_flat(ir_right)
 
     # Decline on duplicate identities (fix #3): two units sharing an identity
     # (e.g. Java/C++/Python method overloads, re-definitions) would collide
     # silently in the identity-keyed dicts below, dropping all but one — a
     # missed-conflict data-loss bug. Decline so the caller escalates to the LLM.
     if (
-        _has_duplicate_identities(base_units)
-        or _has_duplicate_identities(left_units)
-        or _has_duplicate_identities(right_units)
+        has_duplicate_identities(base_units)
+        or has_duplicate_identities(left_units)
+        or has_duplicate_identities(right_units)
     ):
         return None
 

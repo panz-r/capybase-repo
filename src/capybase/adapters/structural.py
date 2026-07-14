@@ -134,7 +134,7 @@ def _all_flat_entities(ir) -> list[Entity]:
         from capybase.adapters import abstract_parser
     except Exception:  # noqa: BLE001
         return []
-    return [_unit_to_entity(u) for u in abstract_parser._all_units_flat(ir)]
+    return [_unit_to_entity(u) for u in abstract_parser.all_units_flat(ir)]
 
 
 # ---------------------------------------------------------------------------

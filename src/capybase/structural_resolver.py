@@ -915,7 +915,7 @@ def _body_content(body: str) -> str:
     every rename look like a body change, and no base entity matches.
 
     R4: the normalization now strips inline comments and blanks string literals
-    (reusing the parser's ``_normalize_body``) so a rename that picked up an
+    (reusing the parser's ``normalize_body``) so a rename that picked up an
     incidental comment (``# cached``) or a changed string value (``"v1"``→``"v2"``)
     still pairs with its base original. This AGREES with the parser's
     ``unit_body_fingerprint`` (which the 3-way diff's rename detection uses), so
@@ -928,8 +928,8 @@ def _body_content(body: str) -> str:
     lines = body.split("\n")
     # Drop the first line (the def/fn/struct header); normalize the rest with
     # the parser's comment/string-aware normalization (R4).
-    from capybase.adapters.abstract_parser import _normalize_body
-    return _normalize_body("\n".join(lines[1:]))
+    from capybase.adapters.abstract_parser import normalize_body
+    return normalize_body("\n".join(lines[1:]))
 
 
 def _detect_renames(
@@ -1054,13 +1054,13 @@ def _try_entity_disjoint(unit: ConflictUnit) -> str | None:
     # the identity-keyed dicts below, dropping all but one — a missed-conflict
     # data-loss bug. Decline so the conflict escalates to the line/LLM resolvers.
     try:
-        from capybase.adapters.abstract_parser import _has_duplicate_identities
+        from capybase.adapters.abstract_parser import has_duplicate_identities
     except Exception:  # noqa: BLE001
         return None
     if (
-        _has_duplicate_identities(base_ents)
-        or _has_duplicate_identities(cur_ents)
-        or _has_duplicate_identities(rep_ents)
+        has_duplicate_identities(base_ents)
+        or has_duplicate_identities(cur_ents)
+        or has_duplicate_identities(rep_ents)
     ):
         return None
 
@@ -1286,13 +1286,13 @@ def _try_refactoring_aware_merge(unit: ConflictUnit) -> str | None:
     # ``base_by_id`` dict below, dropping all but one — a data-loss bug. Decline
     # so the conflict escalates to the LLM path instead of truncating.
     try:
-        from capybase.adapters.abstract_parser import _has_duplicate_identities
+        from capybase.adapters.abstract_parser import has_duplicate_identities
     except Exception:  # noqa: BLE001
         return None
     if (
-        _has_duplicate_identities(base_ents)
-        or _has_duplicate_identities(cur_ents)
-        or _has_duplicate_identities(rep_ents)
+        has_duplicate_identities(base_ents)
+        or has_duplicate_identities(cur_ents)
+        or has_duplicate_identities(rep_ents)
     ):
         return None
 

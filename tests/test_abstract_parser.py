@@ -52,7 +52,7 @@ def test_family_b_top_level_function():
     """A module-level def is a FUNCTION with a faithful span/body."""
     src = "def greet():\n    return 'hello'\n"
     ir = ap.parse_family_b(src)
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     assert len(ir.units) == 1
     f = ir.units[0]
     assert f.kind == "function"
@@ -135,7 +135,7 @@ def test_family_b_nested_function_is_not_a_method():
     """A def nested inside another FUNCTION (not a CLASS) stays FUNCTION-kind."""
     src = "def outer():\n    def inner():\n        return 1\n    return inner()\n"
     ir = ap.parse_family_b(src)
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     kinds = {u.name: u.kind for u in flat}
     # inner is a nested function (parent is a function, not a class) — it may or
     # may not be enumerated depending on depth handling, but it must NEVER be a
@@ -200,7 +200,7 @@ def test_family_a_impl_is_container_only_not_emitted():
     the same (class, "Config") key.
     """
     ir = ap.parse_family_a(RUST_SAMPLE, "rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     # Exactly one "Config" entity (the struct), NOT two (struct + impl).
     config_entities = [u for u in flat if u.name == "Config"]
     assert len(config_entities) == 1
@@ -217,7 +217,7 @@ def test_family_a_methods_nest_as_children_of_impl():
     is at module scope). The methods must be present and METHOD-kind.
     """
     ir = ap.parse_family_a(RUST_SAMPLE, "rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     methods = [u for u in flat if u.kind == "method"]
     method_names = {u.name for u in methods}
     assert "new" in method_names
@@ -227,7 +227,7 @@ def test_family_a_methods_nest_as_children_of_impl():
 def test_family_a_free_function_is_function_not_method():
     """A module-level ``fn`` (not inside any impl) is FUNCTION-kind."""
     ir = ap.parse_family_a(RUST_SAMPLE, "rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     main = next(u for u in flat if u.name == "main")
     assert main.kind == "function"
 
@@ -255,7 +255,7 @@ def test_family_a_string_aware_brace_counting():
         '}\n'
     )
     ir = ap.parse_family_a(src, "rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     # Exactly one function (main); the string braces didn't create phantom units.
     assert sum(1 for u in flat if u.kind == "function") == 1
 
@@ -269,7 +269,7 @@ def test_family_a_object_literal_brace_is_expression_level():
         "}\n"
     )
     ir = ap.parse_family_a(src, "rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     # Only main; the object literals didn't become units.
     assert sum(1 for u in flat if u.kind in ("function", "method", "class")) == 1
 
@@ -316,7 +316,7 @@ def test_conflict_markers_close_open_units_family_a():
     )
     ir = ap.parse_family_a(src, "rust")
     assert ir is not None
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     assert any(u.name == "main" for u in flat)
 
 
@@ -372,7 +372,7 @@ def test_enclosing_unit_finds_deepest():
         "        return 1\n"
     )
     ir = ap.parse_family_b(src)
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     method = next(u for u in flat if u.name == "bar")
     # Anchor inside the method body (row 2).
     assert ap.enclosing_unit(ir, (2, 2)).name == "bar"
@@ -481,7 +481,7 @@ def test_java_parsing():
     classes = [u.name for u in ir.units if u.kind == "class"]
     assert "Main" in classes
     # The keyword-less method is now a child of the class.
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     methods = [u.name for u in flat if u.kind == "method"]
     assert "main" in methods
 
@@ -499,7 +499,7 @@ def test_java_keywordless_methods_extracted():
         "}\n"
     )
     ir = ap.parse_file(src, language="java")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     methods = sorted(u.name for u in flat if u.kind == "method")
     # Constructor + both methods recovered.
     assert "Service" in methods       # constructor (classname as method)
@@ -521,7 +521,7 @@ def test_cpp_methods_with_access_specifiers():
         "};\n"
     )
     ir = ap.parse_file(src, language="cpp")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     methods = sorted(u.name for u in flat if u.kind == "method")
     assert "Widget" in methods    # constructor
     assert "getCount" in methods
@@ -537,7 +537,7 @@ def test_csharp_methods_extracted():
         "}\n"
     )
     ir = ap.parse_file(src, language="csharp")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     methods = sorted(u.name for u in flat if u.kind == "method")
     assert "GetName" in methods
     assert "SetName" in methods
@@ -559,7 +559,7 @@ def test_control_flow_not_misclassified_as_methods():
         "}\n"
     )
     ir = ap.parse_file(src, language="java")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     methods = [u.name for u in flat if u.kind == "method"]
     # Only ``m`` is a method — the if/while/for/switch blocks are NOT entities.
     assert methods == ["m"], f"control flow leaked as methods: {methods}"
@@ -570,7 +570,7 @@ def test_c_free_functions_extracted_at_file_scope():
     units. The depth guard allows ``brace_depth == 0`` with no open container."""
     src = "int main() { return 0; }\nint helper(int x) { return x + 1; }\n"
     ir = ap.parse_file(src, language="c")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     funcs = sorted(u.name for u in flat if u.kind == "function")
     assert "main" in funcs
     assert "helper" in funcs
@@ -581,7 +581,7 @@ def test_js_class_method_shorthand_extracted():
     keyword) is now extracted as a METHOD. Previously absorbed into the class."""
     src = "class C {\n    m() { return 1; }\n    n() { return 2; }\n}\n"
     ir = ap.parse_file(src, language="javascript")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     methods = sorted(u.name for u in flat if u.kind == "method")
     assert "m" in methods and "n" in methods
 
@@ -591,7 +591,7 @@ def test_rust_keyword_extraction_unchanged_by_keywordless_heuristic():
     less method heuristic — keyword-prefixed classification still takes priority."""
     src = "impl C {\n    fn foo() {}\n    fn bar() {}\n}\n"
     ir = ap.parse_file(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     methods = sorted(u.name for u in flat if u.kind == "method")
     assert methods == ["bar", "foo"]
 
@@ -951,7 +951,7 @@ def test_decorator_does_not_extend_previous_unit():
         "        self._x = v\n"
     )
     ir = ap.parse_family_b(src)
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     methods = [u for u in flat if u.kind == "method" and u.name == "x"]
     assert len(methods) == 2, f"expected 2 x-methods, got {len(methods)}"
     # The first method's span must end at the ``return`` line (row 3), NOT reach
@@ -996,7 +996,7 @@ def test_decorator_on_class_method():
         "        return 1\n"
     )
     ir = ap.parse_family_b(src)
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     make = next(u for u in flat if u.name == "make")
     helper = next(u for u in flat if u.name == "helper")
     # make ends at its return line (row 3), not into helper.
@@ -1018,7 +1018,7 @@ def test_triple_quoted_docstring_no_phantom_units():
         "    return 1\n"
     )
     ir = ap.parse_family_b(src)
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     names = {u.name for u in flat}
     assert "Fake" not in names, "phantom class from docstring"
     assert "method" not in names, "phantom method from docstring"
@@ -1041,7 +1041,7 @@ def test_triple_quoted_string_module_level():
         "    return 1\n"
     )
     ir = ap.parse_family_b(src)
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     names = {u.name for u in flat}
     assert "Fake" not in names
     assert "real" in names
@@ -1095,7 +1095,7 @@ def test_go_receiver_method_name_recovered():
         "}\n"
     )
     ir = ap.parse_file(src, language="go")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     methods = sorted(u.name for u in flat if u.kind == "method")
     assert "Start" in methods, f"receiver method name lost: {methods}"
     assert "Stop" in methods
@@ -1108,7 +1108,7 @@ def test_go_type_struct_is_class_not_field():
     CLASS named after the type."""
     src = "type Server struct {\n    port int\n}\n"
     ir = ap.parse_file(src, language="go")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     classes = [u for u in flat if u.kind == "class"]
     assert any(u.name == "Server" for u in classes), (
         f"Server not a class: {[(u.kind, u.name) for u in flat]}"
@@ -1126,7 +1126,7 @@ def test_go_type_interface_is_class():
         "}\n"
     )
     ir = ap.parse_file(src, language="go")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     classes = [u.name for u in flat if u.kind == "class"]
     assert "Reader" in classes
 
@@ -1148,7 +1148,7 @@ def test_rust_hash_raw_string_with_braces():
         "}\n"
     )
     ir = ap.parse_file(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     methods = sorted(u.name for u in flat if u.kind == "method")
     # Both methods detected; the raw string braces didn't corrupt depth tracking.
     assert "a" in methods and "b" in methods, f"methods: {methods}"
@@ -1168,7 +1168,7 @@ def test_rust_raw_string_embedded_quote_does_not_close():
         "}\n"
     )
     ir = ap.parse_file(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     names = {u.name for u in flat}
     assert "g" in names, (
         f"function g lost — raw string embedded quote closed early: {names}"
@@ -1188,7 +1188,7 @@ def test_csharp_verbatim_string_multiline():
         "}\n"
     )
     ir = ap.parse_file(src, language="csharp")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     methods = [u.name for u in flat if u.kind == "method"]
     assert "M" in methods, f"method after verbatim string lost: {methods}"
 
@@ -1205,7 +1205,7 @@ def test_field_detection_top_level_const():
         "}\n"
     )
     ir = ap.parse_file(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     fields = [u.name for u in flat if u.kind == "field"]
     assert "N" in fields, f"top-level const not a field: {fields}"
 
@@ -1220,7 +1220,7 @@ def test_field_inside_function_body_not_top_level():
         "}\n"
     )
     ir = ap.parse_file(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     fields = [u.name for u in flat if u.kind == "field"]
     # INNER is inside main's body, not top-level — must not be a field entity.
     assert "INNER" not in fields, f"body-local const leaked as field: {fields}"
@@ -1233,7 +1233,7 @@ def test_rust_type_alias_still_a_field():
     must not misfire on Rust type aliases."""
     src = "type Foo = Bar;\n\nfn main() {}\n"
     ir = ap.parse_file(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     fields = [u.name for u in flat if u.kind == "field"]
     assert "Foo" in fields, f"Rust type alias not a field: {fields}"
 
@@ -1252,7 +1252,7 @@ def test_field_with_struct_literal_initializer():
     very common Rust pattern."""
     src = "pub const P: Point = Point { x: 1, y: 2 };\nfn main() {}\n"
     ir = ap.parse_file(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     fields = [u.name for u in flat if u.kind == "field"]
     assert "P" in fields, f"struct-literal const dropped: {fields}"
 
@@ -1262,7 +1262,7 @@ def test_field_with_macro_brace_initializer():
     top-level const initializer must not lose the field."""
     src = "const V: Vec<u8> = vec!{1, 2, 3};\nfn main() {}\n"
     ir = ap.parse_file(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     fields = [u.name for u in flat if u.kind == "field"]
     assert "V" in fields, f"macro-brace const dropped: {fields}"
 
@@ -1271,7 +1271,7 @@ def test_field_with_brace_no_regression_on_plain_const():
     """R1 regression guard: a plain const (no braces) is still detected."""
     src = "pub const N: u32 = 5;\nfn main() {}\n"
     ir = ap.parse_file(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     assert "N" in [u.name for u in flat if u.kind == "field"]
 
 
@@ -1345,7 +1345,7 @@ def test_identifier_ending_in_r_before_string_not_raw():
         "}\n"
     )
     ir = ap.parse_file(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     names = {u.name for u in flat}
     assert "g" in names, f"identifier-before-quote corrupted string state: {names}"
 
@@ -1362,7 +1362,7 @@ def test_real_raw_string_prefix_still_works():
         "}\n"
     )
     ir = ap.parse_file(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     names = {u.name for u in flat}
     assert "g" in names, f"genuine raw string no longer recognized: {names}"
 
@@ -1402,7 +1402,7 @@ def test_csharp_verbatim_string_doubled_quotes():
         "}\n"
     )
     ir = ap.parse_file(src, language="csharp")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     methods = [u.name for u in flat if u.kind == "method"]
     assert "M" in methods, f"verbatim doubled-quote closed early: {methods}"
 # Cross-cutting regression suite — identity collisions, added_both conflicts,
@@ -1448,7 +1448,7 @@ def test_duplicate_names_decline_at_entity_disjoint():
     # Re-enumerate inside the body — the duplicate f appears in the entity list.
     ents = structural.enumerate_entities(base, "python", container_span=(1, 1))
     assert ents is not None
-    assert ap._has_duplicate_identities(ents), (
+    assert ap.has_duplicate_identities(ents), (
         "duplicate detector must flag the two f-methods"
     )
 
@@ -1463,8 +1463,8 @@ def test_no_duplicate_identities_for_distinct_units():
         "    def c(self): pass\n"
     )
     ir = ap.parse_family_b(src)
-    flat = ap._all_units_flat(ir)
-    assert not ap._has_duplicate_identities(flat)
+    flat = ap.all_units_flat(ir)
+    assert not ap.has_duplicate_identities(flat)
 
 
 def test_added_both_different_bodies_is_conflict():
@@ -1634,7 +1634,7 @@ def test_enclosing_unit_end_row_boundary():
         "        return 1\n"
     )
     ir = ap.parse_family_b(src)
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     bar = next(u for u in flat if u.name == "bar")
     # Anchor at bar's end_row.
     end = bar.span[1]
@@ -1730,7 +1730,7 @@ def test_go_generic_type_decl_struct():
     (the [T] is a type parameter, not part of the name)."""
     src = "type Container[T any] struct {\n    items []T\n}\n"
     ir = ap.parse_file(src, language="go")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     classes = [u.name for u in flat if u.kind == "class"]
     # The name may be 'Container[T]' or 'Container' depending on extraction; the
     # unit must at least exist as a class containing 'Container'.
@@ -1746,7 +1746,7 @@ def test_go_value_receiver_method():
         "func (s *S) PointerMethod() {}\n"
     )
     ir = ap.parse_file(src, language="go")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     methods = sorted(u.name for u in flat if u.kind == "method")
     assert "ValueMethod" in methods
     assert "PointerMethod" in methods
@@ -1756,7 +1756,7 @@ def test_go_free_function_not_method():
     """A Go free function (no receiver) is FUNCTION, not METHOD."""
     src = "func helper() {}\n"
     ir = ap.parse_file(src, language="go")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     funcs = [u for u in flat if u.kind == "function"]
     assert any(u.name == "helper" for u in funcs)
 
@@ -1780,12 +1780,12 @@ def test_family_mismatch_does_not_crash():
 
 def _field_named(ir, name):
     """True when ``ir`` contains a top-level FIELD unit named ``name``."""
-    return any(u.kind == ap.KIND_FIELD and u.name == name for u in ap._all_units_flat(ir))
+    return any(u.kind == ap.KIND_FIELD and u.name == name for u in ap.all_units_flat(ir))
 
 
 def _unit_named(ir, name):
     """True when ``ir`` contains a unit named ``name`` (any kind)."""
-    return any(u.name == name for u in ap._all_units_flat(ir))
+    return any(u.name == name for u in ap.all_units_flat(ir))
 
 
 # --- R2: stmt_start_byte must only advance at top-level ; ---
@@ -1805,7 +1805,7 @@ def test_r2_field_with_function_expression_initializer():
     ir = ap.parse_family_a(src, language="javascript")
     assert _unit_named(ir, "f"), (
         f"const=function(){{...}}; must emit a unit named 'f'; got "
-        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
     )
 
 
@@ -1817,7 +1817,7 @@ def test_r2_field_with_arrow_function_initializer():
     binding must not be silently dropped."""
     src = "const h = () => {\n    return 2;\n};\n"
     ir = ap.parse_family_a(src, language="typescript")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     assert any(u.name == "h" for u in flat) or any(
         u.kind == ap.KIND_FIELD for u in flat
     ), (
@@ -1833,7 +1833,7 @@ def test_r2_field_with_struct_literal_still_works():
     ir = ap.parse_family_a(src, language="rust")
     assert _field_named(ir, "P"), (
         f"Rust struct literal must still emit FIELD 'P'; got "
-        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
     )
 
 
@@ -1849,7 +1849,7 @@ def test_r3_rust_static_lifetime_in_return_type():
     ir = ap.parse_family_a(src, language="rust")
     assert _unit_named(ir, "f"), (
         f"fn with &'static return type must be detected; got "
-        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
     )
 
 
@@ -1860,7 +1860,7 @@ def test_r3_rust_generic_lifetime_param():
     ir = ap.parse_family_a(src, language="rust")
     assert _unit_named(ir, "f"), (
         f"fn with lifetime generic must be detected; got "
-        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
     )
 
 
@@ -1873,7 +1873,7 @@ def test_r3_rust_lifetime_in_body_not_corrupted():
         'pub fn second() {\n    1\n}\n'
     )
     ir = ap.parse_family_a(src, language="rust")
-    names = [u.name for u in ap._all_units_flat(ir)]
+    names = [u.name for u in ap.all_units_flat(ir)]
     assert "first" in names and "second" in names, (
         f"lifetimes in body must not corrupt following siblings; got {names}"
     )
@@ -1889,7 +1889,7 @@ def test_r3_rust_char_literal_still_works():
     ir = ap.parse_family_a(src, language="rust")
     assert _unit_named(ir, "f"), (
         f"char literals must still parse; got "
-        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
     )
 
 
@@ -1904,7 +1904,7 @@ def test_g7_const_function_expression_emits_function():
     through to normal classification)."""
     src = "const named = function() {\n    return 42;\n}\n"
     ir = ap.parse_family_a(src, language="javascript")
-    kinds = [(u.kind, u.name) for u in ap._all_units_flat(ir)]
+    kinds = [(u.kind, u.name) for u in ap.all_units_flat(ir)]
     # Either a FUNCTION 'named' or a FIELD 'named' is acceptable; the silent
     # DROP (empty) is the bug. Post-G7 with the keyword path it should be a
     # function unit.
@@ -1919,7 +1919,7 @@ def test_g7_const_class_expression_detected():
     const. Must not be silently dropped."""
     src = "const Foo = class {\n    bar() {\n        return 1;\n    }\n};\n"
     ir = ap.parse_family_a(src, language="javascript")
-    kinds = [(u.kind, u.name) for u in ap._all_units_flat(ir)]
+    kinds = [(u.kind, u.name) for u in ap.all_units_flat(ir)]
     assert _unit_named(ir, "Foo"), f"class expression must be detected; got {kinds}"
 
 
@@ -1930,7 +1930,7 @@ def test_g7_rust_struct_literal_still_field():
     misclassified as a function."""
     src = "pub const P: Point = Point { x: 0, y: 0 };\n"
     ir = ap.parse_family_a(src, language="rust")
-    kinds = [(u.kind, u.name) for u in ap._all_units_flat(ir)]
+    kinds = [(u.kind, u.name) for u in ap.all_units_flat(ir)]
     # Must be a FIELD (not a phantom FUNCTION/CLASS 'Point').
     assert _field_named(ir, "P"), f"struct literal must be FIELD 'P'; got {kinds}"
     # And no phantom 'Point' function/class should appear.
@@ -1948,7 +1948,7 @@ def test_g7_object_literal_initializer_still_field():
     ir = ap.parse_family_a(src, language="javascript")
     assert _field_named(ir, "cfg"), (
         f"object literal must be FIELD 'cfg'; got "
-        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
     )
 
 
@@ -1961,7 +1961,7 @@ def test_g8_kotlin_top_level_fun():
     only accepts C free functions at file scope). Adding ``fun`` fixes this."""
     src = "fun topLevel(x: Int): Int {\n    return x + 1\n}\n"
     ir = ap.parse_family_a(src, language="kotlin")
-    kinds = [(u.kind, u.name) for u in ap._all_units_flat(ir)]
+    kinds = [(u.kind, u.name) for u in ap.all_units_flat(ir)]
     assert _unit_named(ir, "topLevel"), (
         f"Kotlin top-level fun must be detected; got {kinds}"
     )
@@ -1975,8 +1975,8 @@ def test_g8_kotlin_method_with_return_type():
     from after the keyword, not from the heuristic."""
     src = "class Widget {\n    fun area(): Int {\n        return 1\n    }\n}\n"
     ir = ap.parse_family_a(src, language="kotlin")
-    kinds = [(u.kind, u.name) for u in ap._all_units_flat(ir)]
-    method = [u for u in ap._all_units_flat(ir) if u.kind == ap.KIND_METHOD]
+    kinds = [(u.kind, u.name) for u in ap.all_units_flat(ir)]
+    method = [u for u in ap.all_units_flat(ir) if u.kind == ap.KIND_METHOD]
     assert any(m.name == "area" for m in method), (
         f"Kotlin method with return type must be detected as METHOD 'area'; got {kinds}"
     )
@@ -1989,7 +1989,7 @@ def test_g8_kotlin_top_level_fun_no_return_type():
     ir = ap.parse_family_a(src, language="kotlin")
     assert _unit_named(ir, "simple"), (
         f"Kotlin fun (no return type) must be detected; got "
-        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
     )
 
 
@@ -2014,7 +2014,7 @@ def test_g9_kotlin_object_singleton():
         '}\n'
     )
     ir = ap.parse_family_a(src, language="kotlin")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     kinds = [(u.kind, u.name) for u in flat]
     assert _unit_named(ir, "Config"), f"object Config must be detected as a CLASS; got {kinds}"
     assert _unit_named(ir, "load"), f"object member fun load must be detected; got {kinds}"
@@ -2026,7 +2026,7 @@ def test_g9_kotlin_data_class():
     dropped. At minimum the CLASS ``Point`` must be detected."""
     src = "data class Point(val x: Int, val y: Int)\n"
     ir = ap.parse_family_a(src, language="kotlin")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     # Either 'Point' is detected as a class, or at least the unit isn't dropped.
     # Bodyless classes have no '{' so the brace machine can't fire — but the
     # parser should still surface SOMETHING (or we accept this as a known gap
@@ -2053,7 +2053,7 @@ def test_g9_kotlin_init_block_not_swallowed_silently():
         "}\n"
     )
     ir = ap.parse_family_a(src, language="kotlin")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     kinds = [(u.kind, u.name) for u in flat]
     assert _unit_named(ir, "C"), f"class C must be detected; got {kinds}"
     assert _unit_named(ir, "m"), f"sibling fun m must not be lost behind init; got {kinds}"
@@ -2071,7 +2071,7 @@ def test_g9_kotlin_companion_object():
         "}\n"
     )
     ir = ap.parse_family_a(src, language="kotlin")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     kinds = [(u.kind, u.name) for u in flat]
     # The companion's fun with a brace body should be detected.
     assert _unit_named(ir, "factory"), (
@@ -2095,7 +2095,7 @@ def test_g10_go_generic_function_name():
         "}\n"
     )
     ir = ap.parse_family_a(src, language="go")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     kinds = [(u.kind, u.name) for u in flat]
     assert _unit_named(ir, "Map"), f"generic func Map must be detected by name; got {kinds}"
 
@@ -2104,7 +2104,7 @@ def test_g10_go_generic_function_two_params():
     """G10 regression breadth: a generic function with a simpler signature."""
     src = "func First[T any](xs []T) T {\n    return xs[0]\n}\n"
     ir = ap.parse_family_a(src, language="go")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     assert _unit_named(ir, "First"), (
         f"generic func First must be detected; got "
         f"{[(u.kind, u.name) for u in flat]}"
@@ -2116,7 +2116,7 @@ def test_g10_go_non_generic_function_still_works():
     be recovered correctly after the generic-aware fix."""
     src = "func process(items []int) int {\n    return len(items)\n}\n"
     ir = ap.parse_family_a(src, language="go")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     assert _unit_named(ir, "process"), (
         f"non-generic func must still work; got "
         f"{[(u.kind, u.name) for u in flat]}"
@@ -2135,7 +2135,7 @@ def test_g10_go_generic_receiver_method():
         "}\n"
     )
     ir = ap.parse_family_a(src, language="go")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     kinds = [(u.kind, u.name) for u in flat]
     assert _unit_named(ir, "Push"), f"generic receiver method Push must be detected; got {kinds}"
 
@@ -2152,7 +2152,7 @@ def test_g11_js_arrow_function_block_no_semicolon():
     function-body opener and recovers the binding name."""
     src = "const handler = () => {\n    return 1\n}\n"
     ir = ap.parse_family_a(src, language="javascript")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     kinds = [(u.kind, u.name) for u in flat]
     assert _unit_named(ir, "handler"), (
         f"arrow fn (block body, no semi) must be detected; got {kinds}"
@@ -2163,7 +2163,7 @@ def test_g11_js_arrow_function_with_params():
     """G11: an arrow function with params and a block body, no semicolon."""
     src = "const add = (a, b) => {\n    return a + b\n}\n"
     ir = ap.parse_family_a(src, language="javascript")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     assert _unit_named(ir, "add"), (
         f"arrow fn with params must be detected; got "
         f"{[(u.kind, u.name) for u in flat]}"
@@ -2174,7 +2174,7 @@ def test_g11_ts_arrow_function_with_return_type():
     """G11: a TypeScript arrow with an explicit return type before ``=>``."""
     src = "const get = (x: number): number => {\n    return x + 1\n}\n"
     ir = ap.parse_family_a(src, language="typescript")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     assert _unit_named(ir, "get"), (
         f"TS arrow fn with return type must be detected; got "
         f"{[(u.kind, u.name) for u in flat]}"
@@ -2186,7 +2186,7 @@ def test_g11_js_arrow_function_with_semicolon_still_works():
     must still produce a unit for the binding."""
     src = "const handler = () => {\n    return 1\n};\n"
     ir = ap.parse_family_a(src, language="javascript")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     assert _unit_named(ir, "handler"), (
         f"arrow fn with semi must still work; got "
         f"{[(u.kind, u.name) for u in flat]}"
@@ -2211,7 +2211,7 @@ def test_g12_require_expression_is_module_stmt():
     ubiquitous in Node code. After G12 it produces a MODULE_STMT named ``fs``."""
     src = "const fs = require('fs');\nfunction f() {\n    return 1\n}\n"
     ir = ap.parse_family_a(src, language="javascript")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     imports = [u for u in flat if u.kind == ap.KIND_MODULE_STMT]
     assert any(u.name == "fs" for u in imports), (
         f"require('fs') must be a MODULE_STMT named 'fs'; got "
@@ -2225,7 +2225,7 @@ def test_g12_require_not_at_line_start():
     runtime call, not a module dependency."""
     src = "function f() {\n    const x = require('dyn');\n    return x\n}\n"
     ir = ap.parse_family_a(src, language="javascript")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     imports = [u for u in flat if u.kind == ap.KIND_MODULE_STMT]
     assert not any(u.name == "dyn" for u in imports), (
         f"require() inside a function body must not be an import; got "
@@ -2238,7 +2238,7 @@ def test_g12_leading_require_still_works():
     line, e.g. ``require('fs')`` alone) must still be detected."""
     src = "require('fs');\nfunction f() {}\n"
     ir = ap.parse_family_a(src, language="javascript")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     assert any(u.kind == ap.KIND_MODULE_STMT and u.name == "fs" for u in flat), (
         f"leading require('fs') must still work; got "
         f"{[(u.kind, u.name) for u in flat]}"
@@ -2259,7 +2259,7 @@ def test_cov_block_comment_with_fake_class_inside():
         "fn real() {\n    1\n}\n"
     )
     ir = ap.parse_family_a(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     names = [u.name for u in flat]
     assert "Fake" not in names, f"block-comment phantom class leaked; got {names}"
     assert "real" in names
@@ -2274,7 +2274,7 @@ def test_cov_line_comment_terminates_token_buffer():
         "pub fn real() {\n    1\n}\n"
     )
     ir = ap.parse_family_a(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     assert _unit_named(ir, "real"), (
         f"fn after a // comment must be detected (no buffer concat); got "
         f"{[(u.kind, u.name) for u in flat]}"
@@ -2299,7 +2299,7 @@ def test_cov_rust_char_literal_variants():
     ir = ap.parse_family_a(src, language="rust")
     assert _unit_named(ir, "f"), (
         f"char literals must not corrupt the parse; got "
-        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
     )
 
 
@@ -2314,7 +2314,7 @@ def test_cov_rust_byte_string_prefix():
     ir = ap.parse_family_a(src, language="rust")
     assert _unit_named(ir, "f"), (
         f"byte string b\"...\" must not corrupt; got "
-        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
     )
 
 
@@ -2334,7 +2334,7 @@ def test_cov_js_backtick_template_literal():
     ir = ap.parse_family_a(src, language="javascript")
     assert _unit_named(ir, "tag"), (
         f"backtick template with ${{}} must not corrupt brace count; got "
-        f"{[(u.kind, u.name) for u in ap._all_units_flat(ir)]}"
+        f"{[(u.kind, u.name) for u in ap.all_units_flat(ir)]}"
     )
 
 
@@ -2353,7 +2353,7 @@ def test_cov_c_preprocessor_include_and_define():
         "}\n"
     )
     ir = ap.parse_family_a(src, language="c")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     import_names = [u.name for u in flat if u.kind == ap.KIND_MODULE_STMT]
     assert "stdio.h" in import_names, f"#include <stdio.h> missing; got {import_names}"
     assert "myhdr.h" in import_names, f'#include "myhdr.h" missing; got {import_names}'
@@ -2368,7 +2368,7 @@ def test_cov_go_import_quoted_path():
     regex branch in ``_extract_a_import_name``."""
     src = 'package main\n\nimport "fmt"\n\nfunc main() {\n    fmt.Println()\n}\n'
     ir = ap.parse_family_a(src, language="go")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     assert any(u.kind == ap.KIND_MODULE_STMT and u.name == "fmt" for u in flat), (
         f'Go import "fmt" must be named fmt; got '
         f"{[(u.kind, u.name) for u in flat if u.kind == ap.KIND_MODULE_STMT]}"
@@ -2380,7 +2380,7 @@ def test_cov_js_export_braces_from():
     Pins the export-from import-name regex branch."""
     src = "export { foo, bar } from './mod';\nfunction f() {}\n"
     ir = ap.parse_family_a(src, language="javascript")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     assert any(u.kind == ap.KIND_MODULE_STMT and u.name == "./mod" for u in flat), (
         f"export {{}} from must extract the path; got "
         f"{[(u.kind, u.name) for u in flat if u.kind == ap.KIND_MODULE_STMT]}"
@@ -2563,7 +2563,7 @@ def test_cov_rust_attribute_span_includes_attr_line():
     attribute). Pins the pending_attr_row + attr_start_row path."""
     src = "#[derive(Debug)]\npub struct Point {\n    x: i32,\n}\n"
     ir = ap.parse_family_a(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     pt = next((u for u in flat if u.name == "Point"), None)
     assert pt is not None, "struct Point must be detected"
     assert pt.span[0] == 0, (
@@ -2578,7 +2578,7 @@ def test_cov_rust_cfg_attribute_on_fn():
     """A ``#[cfg(test)]`` attribute on a function attaches to the fn."""
     src = "#[cfg(test)]\npub fn f() -> i32 {\n    1\n}\n"
     ir = ap.parse_family_a(src, language="rust")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     fn = next((u for u in flat if u.name == "f"), None)
     assert fn is not None and fn.span[0] == 0
 
@@ -2626,7 +2626,7 @@ def test_cov_binding_name_reassignment_returns_none():
     lines 1912-1927."""
     src = "x = function() {\n    return 1\n}\n"
     ir = ap.parse_family_a(src, language="javascript")
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     # The function IS detected (anonymous or via keywordless path), but the
     # binding-name recovery must NOT attach 'x' as the name (it's a reassignment).
     named_x = [u for u in flat if u.name == "x"]
@@ -2708,7 +2708,7 @@ def test_cov_tab_indented_python_method():
     ``_indent_width``."""
     src = "class C:\n\tdef m(self):\n\t\treturn 1\n"
     ir = ap.parse_family_b(src)
-    flat = ap._all_units_flat(ir)
+    flat = ap.all_units_flat(ir)
     assert _unit_named(ir, "m"), (
         f"tab-indented method must be detected; got "
         f"{[(u.kind, u.name) for u in flat]}"
