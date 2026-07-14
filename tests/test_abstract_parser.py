@@ -2634,3 +2634,98 @@ def test_cov_binding_name_reassignment_returns_none():
         f"reassignment target 'x' must not become a binding name; got "
         f"{[(u.kind, u.name) for u in flat]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Seventh-pass: coverage hardening for verified-working parser paths.
+# AlignedUnit fallbacks, enclosing_container module-root, fingerprint guard,
+# tab indentation, minified-side diff decline.
+# ---------------------------------------------------------------------------
+
+
+# --- Coverage: AlignedUnit.name / .kind all-None fallbacks (2293, 2301) ---
+
+
+def test_cov_aligned_unit_all_none_fallbacks():
+    """An AlignedUnit with base/left/right all None falls back to name
+    ``"<anon>"`` and kind ``unknown_block``. Pins the fallback properties
+    (lines 2293, 2301), which were untested."""
+    a = ap.AlignedUnit(base=None, left=None, right=None, change_kind=ap._CHANGE_KIND_UNCHANGED)
+    assert a.name == "<anon>", f"all-None name fallback; got {a.name!r}"
+    assert a.kind == ap.KIND_UNKNOWN, f"all-None kind fallback; got {a.kind!r}"
+
+
+def test_cov_aligned_unit_name_prefers_left():
+    """AlignedUnit.name returns the first non-None, non-empty name from
+    left/right/base. Pins the precedence order in the property."""
+    base_u = ap.StructuralUnit(kind="function", name="base", span=(0, 0), body="b")
+    left_u = ap.StructuralUnit(kind="function", name="left", span=(0, 0), body="l")
+    a = ap.AlignedUnit(base=base_u, left=left_u, right=None, change_kind=ap._CHANGE_KIND_MODIFIED_LEFT)
+    assert a.name == "left"
+
+
+# --- Coverage: enclosing_container returns None at module root (2234) ---
+
+
+def test_cov_enclosing_container_module_root_none():
+    """A span inside a top-level (module-scope) function has no enclosing
+    container — enclosing_container returns None. Pins the module-root
+    return (line 2234)."""
+    src = "def top():\n    return 1\n"
+    ir = ap.parse_family_b(src)
+    assert ap.enclosing_container(ir, (1, 1)) is None
+
+
+def test_cov_enclosing_container_finds_class_parent():
+    """A span inside a method resolves to the class as its container.
+    Pins the non-None path of enclosing_container."""
+    src = "class C:\n    def m(self):\n        return 1\n"
+    ir = ap.parse_family_b(src)
+    c = ap.enclosing_container(ir, (2, 2))  # inside m's body
+    assert c is not None and c.name == "C"
+
+
+# --- Coverage: _fingerprint_has_content guard ---
+
+
+def test_cov_fingerprint_has_content():
+    """``_fingerprint_has_content`` distinguishes content-less fingerprints
+    (``l0``, ``l3`` — just a line count) from content-bearing ones
+    (``l3:digest``). Used by rename detection to avoid pairing two unrelated
+    empty bodies. Pins all three branches."""
+    assert ap._fingerprint_has_content("l0") is False
+    assert ap._fingerprint_has_content("l3") is False
+    assert ap._fingerprint_has_content("") is False
+    assert ap._fingerprint_has_content("l3:abc123") is True
+
+
+# --- Coverage: tab-indented Python method (indent handling) ---
+
+
+def test_cov_tab_indented_python_method():
+    """A tab-indented method (tabs counted as 8 cols per Python convention)
+    must be detected as a method inside its class. Pins the tab-expansion in
+    ``_indent_width``."""
+    src = "class C:\n\tdef m(self):\n\t\treturn 1\n"
+    ir = ap.parse_family_b(src)
+    flat = ap._all_units_flat(ir)
+    assert _unit_named(ir, "m"), (
+        f"tab-indented method must be detected; got "
+        f"{[(u.kind, u.name) for u in flat]}"
+    )
+
+
+# --- Coverage: minified side declines the 3-way diff ---
+
+
+def test_cov_minified_side_declines_diff():
+    """When any side of the 3-way diff parses at confidence 0.0 (minified /
+    garbage), ``compute_structural_diff_3way`` returns None rather than
+    building an annotation from an untrustworthy parse. Pins the
+    confidence-decline guard."""
+    base = "def f():\n    return 1\n"
+    left = "def f():\n    return 1\n"
+    # A long single-line file (> 200 char median) → confidence 0.0.
+    right = "def f(): return 1; def g(): return 2; " * 20
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    assert diff is None, "minified side must decline the diff"
