@@ -2346,7 +2346,14 @@ class StructuralDiff3Way:
 
     @property
     def required_units(self) -> list[str]:
-        """Names of units that must appear in the merged output."""
+        """Names of units that must appear in the merged output.
+
+        Includes ``deleted_left`` / ``deleted_right`` (R7): those mean one side
+        deleted the unit but the OTHER side kept (and possibly modified) it —
+        so the unit SURVIVES in the merge as the keeping side's version.
+        Excluding them risked the LLM dropping a surviving unit. Only
+        ``deleted_both`` (both sides removed it) is truly absent from the merge.
+        """
         out: list[str] = []
         for a in self.aligned:
             if a.change_kind in (
@@ -2354,6 +2361,7 @@ class StructuralDiff3Way:
                 _CHANGE_KIND_MODIFIED_RIGHT, _CHANGE_KIND_MODIFIED_BOTH,
                 _CHANGE_KIND_ADDED_LEFT, _CHANGE_KIND_ADDED_RIGHT,
                 _CHANGE_KIND_ADDED_BOTH, _CHANGE_KIND_ADDED_BOTH_CONFLICT,
+                _CHANGE_KIND_DELETED_LEFT, _CHANGE_KIND_DELETED_RIGHT,
                 _CHANGE_KIND_RENAMED,
             ):
                 if a.name != "<anon>":

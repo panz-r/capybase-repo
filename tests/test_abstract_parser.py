@@ -2435,3 +2435,202 @@ def test_cov_alignment_deleted_left_when_right_modifies():
     assert ap._CHANGE_KIND_DELETED_LEFT in kinds, (
         f"expected deleted_left (right modifies, left deletes); got {kinds}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Sixth-pass: R7 (required_units drops surviving units) + coverage hardening
+# for untested-but-working paths (import-surface deletes, conflict-span in
+# nested units, Rust attributes, parse_file exception/unknown-lang, binding
+# reassignment guard, agreed rename).
+# ---------------------------------------------------------------------------
+
+# --- R7: required_units must include deleted-by-one-side (surviving units) ---
+
+
+def test_r7_required_units_includes_deleted_right_surviving():
+    """R7: when left deletes a unit and right MODIFIES it (deleted_right), the
+    unit survives in the merge as right's version. ``required_units`` used to
+    exclude deleted_left/deleted_right, risking the LLM dropping a unit that
+    should survive. After R7, deleted-by-one-side units ARE required; only
+    deleted_both (truly gone) is excluded."""
+    base = "def bar():\n    return 2\n"
+    left = "pass\n"                                      # deleted bar
+    right = "def bar():\n    return 99\n"                # modified bar
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    assert "bar" in diff.required_units, (
+        f"deleted_right (survives on right) must be in required_units; got "
+        f"{diff.required_units}"
+    )
+
+
+def test_r7_required_units_includes_deleted_left_surviving():
+    """R7 mirror: right deletes, left modifies-and-keeps → deleted_left, and
+    the unit survives as left's version → must be required."""
+    base = "def bar():\n    return 2\n"
+    left = "def bar():\n    return 99\n"                 # modified bar
+    right = "pass\n"                                     # deleted bar
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    assert "bar" in diff.required_units, (
+        f"deleted_left (survives on left) must be in required_units; got "
+        f"{diff.required_units}"
+    )
+
+
+def test_r7_required_units_excludes_deleted_both():
+    """R7 regression guard: a unit deleted by BOTH sides (deleted_both) is
+    truly gone from the merge → must NOT be in required_units."""
+    base = "def bar():\n    return 2\n"
+    left = "pass\n"                                      # deleted bar
+    right = "pass\n"                                     # deleted bar too
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    assert "bar" not in diff.required_units, (
+        f"deleted_both (truly removed) must not be required; got "
+        f"{diff.required_units}"
+    )
+
+
+def test_r7_required_units_annotation_renders_surviving():
+    """R7 end-to-end: the 'Required: preserve these units' annotation in
+    render_structural_context must include a deleted-by-one-side unit."""
+    base = "def foo():\n    return 1\n\ndef bar():\n    return 2\n"
+    left = "def foo():\n    return 10\n\ndef baz():\n    return 3\n"  # modify foo, delete bar, add baz
+    right = "def foo():\n    return 1\n\ndef bar():\n    return 20\n" # modify bar
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    ctx = ap.render_structural_context(diff)
+    assert "bar" in ctx, (
+        f"surviving unit 'bar' must appear in the Required annotation; got:\n{ctx}"
+    )
+
+
+# --- Coverage: import-surface delete rendering (lines 2690-2695) ---
+
+
+def test_cov_import_surface_renders_deletions():
+    """The import-surface block must render imports added by each side AND
+    compute the survivor union. Imports are identity-matched by name, so a
+    one-sided delete + other-side-keep classifies as ``unchanged`` (the unit
+    survives); a true delete-by-both is ``deleted_both``. This test pins the
+    add-rendering + survivor-union paths in ``_render_import_surface``."""
+    base = "import os\n"
+    left = "import os\nimport sys\n"                     # left added sys
+    right = "import os\nimport json\n"                   # right added json
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    ctx = ap.render_structural_context(diff)
+    import_block = [ln for ln in ctx.split("\n") if "Import surface" in ln or "merged imports" in ln]
+    block_text = "\n".join(import_block)
+    assert "sys" in block_text, f"left-added 'sys' must be in the surface;\n{block_text}"
+    assert "json" in block_text, f"right-added 'json' must be in the surface;\n{block_text}"
+    assert "os" in block_text, f"base import 'os' must be a survivor;\n{block_text}"
+
+
+# --- Coverage: conflict-span annotation inside a nested unit (2804-2811) ---
+
+
+def test_cov_conflict_span_inside_method():
+    """render_structural_context with conflict_span anchored inside a METHOD
+    must annotate 'This conflict is inside: METHOD name'. Pins the
+    conflict-span unit-lookup loop (lines 2804-2811), which was untested in
+    isolation for the nested case."""
+    base = "class C:\n    def foo(self):\n        return 1\n\ndef bar():\n    return 2\n"
+    left = "class C:\n    def foo(self):\n        return 10\n\ndef bar():\n    return 2\n"
+    right = "class C:\n    def foo(self):\n        return 1\n\ndef bar():\n    return 2\n"
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    ctx = ap.render_structural_context(diff, conflict_span=(1, 1))  # inside foo
+    assert "This conflict is inside: METHOD foo" in ctx, (
+        f"conflict inside method must be annotated;\n{ctx}"
+    )
+
+
+def test_cov_conflict_span_inside_class():
+    """conflict_span anchored on a class header annotates the CLASS (the
+    enclosing unit lookup finds the class, not a method)."""
+    base = "class C:\n    def foo(self):\n        return 1\n"
+    left = "class C:\n    def foo(self):\n        return 10\n"
+    right = "class C:\n    def foo(self):\n        return 1\n"
+    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    ctx = ap.render_structural_context(diff, conflict_span=(0, 0))  # class header
+    assert "This conflict is inside: CLASS C" in ctx, (
+        f"conflict inside class must be annotated;\n{ctx}"
+    )
+
+
+# --- Coverage: Rust attribute preceding a decl (1336, 1340, 1466-1468) ---
+
+
+def test_cov_rust_attribute_span_includes_attr_line():
+    """A Rust attribute (``#[derive(Debug)]`` / ``#[cfg(test)]``) preceding a
+    struct/fn must be included in the unit's span (start_row moves up to the
+    attribute). Pins the pending_attr_row + attr_start_row path."""
+    src = "#[derive(Debug)]\npub struct Point {\n    x: i32,\n}\n"
+    ir = ap.parse_family_a(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    pt = next((u for u in flat if u.name == "Point"), None)
+    assert pt is not None, "struct Point must be detected"
+    assert pt.span[0] == 0, (
+        f"span must start at the attribute line (row 0); got span={pt.span}"
+    )
+    assert "#[derive(Debug)]" in pt.body, (
+        f"attribute must be in the body; got body={pt.body!r}"
+    )
+
+
+def test_cov_rust_cfg_attribute_on_fn():
+    """A ``#[cfg(test)]`` attribute on a function attaches to the fn."""
+    src = "#[cfg(test)]\npub fn f() -> i32 {\n    1\n}\n"
+    ir = ap.parse_family_a(src, language="rust")
+    flat = ap._all_units_flat(ir)
+    fn = next((u for u in flat if u.name == "f"), None)
+    assert fn is not None and fn.span[0] == 0
+
+
+# --- Coverage: parse_file exception path (2143-2150) ---
+
+
+def test_cov_parse_file_returns_low_conf_on_exception():
+    """parse_file must NEVER raise — an internal parser exception yields a
+    zero-confidence FileIR (not a crash). Pins the except branch (2143-2150)
+    via a forced monkeypatch."""
+    import capybase.adapters.abstract_parser as apm
+    orig = apm.parse_family_a
+    apm.parse_family_a = lambda s, l=None: (_ for _ in ()).throw(RuntimeError("forced"))
+    try:
+        ir = apm.parse_file("fn f() {}", language="rust")
+        assert ir is not None
+        assert ir.parse_confidence == 0.0
+        assert ir.units == []
+    finally:
+        apm.parse_family_a = orig
+
+
+# --- Coverage: Family C / unknown language returns None (2151-2152) ---
+
+
+def test_cov_parse_file_unknown_language_returns_none():
+    """An unrecognized language (no family mapping) → parse_file returns None
+    (no structural signal). Pins the family-C-not-implemented / unknown path."""
+    assert ap.parse_file("some code", language="cobol") is None
+
+
+def test_cov_parse_file_no_language_no_path_returns_none():
+    """No language AND no path → can't determine family → None."""
+    assert ap.parse_file("x", language=None, path=None) is None
+
+
+# --- Coverage: _binding_name_before reassignment guard (1912-1927) ---
+
+
+def test_cov_binding_name_reassignment_returns_none():
+    """A bare reassignment ``x = function() { ... }`` (no let/const/var before
+    the name) must NOT be misread as a binding — _binding_name_before returns
+    None. The function is still detected (anonymous). Pins the guard at
+    lines 1912-1927."""
+    src = "x = function() {\n    return 1\n}\n"
+    ir = ap.parse_family_a(src, language="javascript")
+    flat = ap._all_units_flat(ir)
+    # The function IS detected (anonymous or via keywordless path), but the
+    # binding-name recovery must NOT attach 'x' as the name (it's a reassignment).
+    named_x = [u for u in flat if u.name == "x"]
+    assert not named_x, (
+        f"reassignment target 'x' must not become a binding name; got "
+        f"{[(u.kind, u.name) for u in flat]}"
+    )
