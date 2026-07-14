@@ -1337,64 +1337,34 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
         # via leading ``@`` are handled by the keyword buffer). At line start +
         # depth 0, ``#`` begins a preprocessor/attribute line.
         if ch == "#" and i == line_start and brace_depth == 0:
-            line_end = src.find("\n", i)
-            if line_end < 0:
-                line_end = n
-            attr_line = src[i:line_end]
-            if attr_line.strip().startswith("#[") or attr_line.strip().startswith("#!"):
-                # Rust attribute → attach to the following decl.
+            attr_line = src[i:src.find("\n", i)] if "\n" in src[i:] else src[i:]
+            stripped = attr_line.strip()
+            if stripped.startswith("#[") or stripped.startswith("#!"):
+                # Rust attribute → attach to the following decl (no unit emitted).
                 pending_attr_row = row
-            elif attr_line.strip().startswith("#include") or attr_line.strip().startswith("#define"):
-                # MODULE_STMT for #include / #define.
-                start_row = row
-                units.append(
-                    StructuralUnit(
-                        kind=KIND_MODULE_STMT,
-                        name=_extract_a_import_name(attr_line.strip()),
-                        span=(start_row, start_row),
-                        body=attr_line,
-                        fingerprint=unit_body_fingerprint(attr_line),
-                    )
-                )
-            buf = ""
-            i = line_end + 1
-            # A ``#``-line is a complete statement; the next starts after it (R1).
-            stmt_start_byte = i
-            row += 1
-            # Guard the bounds: when the ``#`` line was the last line (no trailing
-            # newline), ``line_end == n`` and ``src[line_end]`` would overflow.
-            if line_end < n and src[line_end] == "\n":
-                line_start = line_end + 1
-            continue
+            elif stripped.startswith("#include") or stripped.startswith("#define"):
+                # MODULE_STMT for #include / #define (emits + advances).
+                i, row, line_start = _emit_module_stmt_line(src, i, units, row, n)
+                buf = ""
+                stmt_start_byte = i
+                continue
+            else:
+                # Other ``#`` line (e.g. a lone shebang or malformed) — consume
+                # the whole line as a complete statement, no unit emitted.
+                i, row, line_start, _ = _consume_line_as_statement(src, i, n, row, line_start)
+                buf = ""
+                stmt_start_byte = i
+                continue
 
         # Import / use statements (depth 0): detect at line start.
         if brace_depth == 0 and paren_depth == 0 and i == line_start:
-            line_end = src.find("\n", i)
-            if line_end < 0:
-                line_end = n
-            line_text = src[i:line_end]
+            line_text = src[i:src.find("\n", i)] if "\n" in src[i:] else src[i:]
             if _A_IMPORT_PATTERNS[0].match(line_text) or any(
                 p.match(line_text) for p in _A_IMPORT_PATTERNS
             ):
-                start_row = row
-                units.append(
-                    StructuralUnit(
-                        kind=KIND_MODULE_STMT,
-                        name=_extract_a_import_name(line_text.strip()),
-                        span=(start_row, start_row),
-                        body=line_text,
-                        fingerprint=unit_body_fingerprint(line_text),
-                    )
-                )
+                i, row, line_start = _emit_module_stmt_line(src, i, units, row, n)
                 buf = ""
-                i = line_end + 1
-                # An import line is a complete statement; the next starts after (R1).
                 stmt_start_byte = i
-                row += 1
-                # When the import was the last line (no trailing newline),
-                # ``line_end == n`` and ``src[line_end]`` would overflow; guard it.
-                if line_end < n and src[line_end] == "\n":
-                    line_start = line_end + 1
                 continue
 
         # Field-like declarations at depth 0 without an opening brace: detect on
@@ -2083,6 +2053,82 @@ def _extract_a_import_name(line: str) -> str:
     if m:
         return m.group(1)
     return "<import>"
+
+
+def _emit_module_stmt_line(
+    src: str,
+    line_start_byte: int,
+    units: list[StructuralUnit],
+    row: int,
+    n: int,
+) -> tuple[int, int, int]:
+    """Emit a MODULE_STMT unit for one source line; return updated scan state.
+
+    Consolidates the duplicated "find line end → emit MODULE_STMT → advance"
+    sequence shared by the ``#``-preprocessor handler and the import/use handler
+    in :func:`parse_family_a` (consolidation #5). Both built a ``StructuralUnit``
+    from a single line and then did the same row/line_start/i advancement — now
+    the import handler calls this helper directly, and the ``#`` handler calls
+    it for the ``#include``/``#define`` MODULE_STMT case.
+
+    Args:
+        src: the full source text.
+        line_start_byte: byte offset where the line begins.
+        units: the accumulator to append the emitted unit to.
+        row: the current 0-based line number.
+        n: ``len(src)`` (for the no-trailing-newline bounds guard).
+
+    Returns:
+        ``(i, row, line_start_byte)`` — the updated scan position after the line
+        is consumed: ``i`` points past the newline, ``row`` is incremented, and
+        ``line_start_byte`` is the start of the next line (or unchanged when the
+        line had no trailing newline).
+    """
+    line_end = src.find("\n", line_start_byte)
+    if line_end < 0:
+        line_end = n
+    line_text = src[line_start_byte:line_end]
+    units.append(
+        StructuralUnit(
+            kind=KIND_MODULE_STMT,
+            name=_extract_a_import_name(line_text.strip()),
+            span=(row, row),
+            body=line_text,
+            fingerprint=unit_body_fingerprint(line_text),
+        )
+    )
+    i = line_end + 1
+    row += 1
+    # Guard the bounds: when the line was the last line (no trailing newline),
+    # ``line_end == n`` and ``src[line_end]`` would overflow.
+    if line_end < n and src[line_end] == "\n":
+        line_start_byte = line_end + 1
+    return i, row, line_start_byte
+
+
+def _consume_line_as_statement(
+    src: str,
+    i: int,
+    n: int,
+    row: int,
+    line_start: int,
+) -> tuple[int, int, int, int]:
+    """Advance the scan past the current line, treating it as a complete statement.
+
+    Returns ``(next_i, next_row, next_line_start, line_end)`` where ``line_end``
+    is the byte offset of the line's end (the newline, or ``n`` for the last
+    line). ``stmt_start_byte`` should be set to ``next_i`` by the caller (a
+    complete statement ends at the newline). Used by the ``#``-preprocessor
+    handler to advance past lines that are NOT MODULE_STMTs (Rust attributes)
+    but still consume the whole line + reset the statement tracker (R1).
+    """
+    line_end = src.find("\n", i)
+    if line_end < 0:
+        line_end = n
+    next_i = line_end + 1
+    next_row = row + 1
+    next_line_start = line_end + 1 if (line_end < n and src[line_end] == "\n") else line_start
+    return next_i, next_row, next_line_start, line_end
 
 
 # ---------------------------------------------------------------------------
