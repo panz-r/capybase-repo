@@ -165,9 +165,10 @@ def _structural_context_block(unit: ConflictUnit, *, attempt: int = 0) -> str:
     """
     try:
         from capybase.adapters.abstract_parser import (
-            compute_structural_diff_3way, render_structural_context,
             parse_file, enclosing_unit, all_units_flat,
         )
+        from capybase.adapters.structural_context import render_structural_context
+        from capybase.adapters.structural_diff import compute_structural_diff_3way
         base_text = unit.base.text or ""
         current_text = unit.current.text or ""
         replayed_text = unit.replayed.text or ""

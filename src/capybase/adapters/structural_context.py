@@ -13,13 +13,13 @@ existing ``ap.render_structural_context`` call sites keep working.
 
 from __future__ import annotations
 
-# The diff types and change-kind constants live in abstract_parser. This import
-# is one-directional (abstract_parser does not import this module at its top
-# level); abstract_parser re-exports ``render_structural_context`` from its
-# bottom, after all its own symbols are defined, so there is no cycle at
-# import time.
-from capybase.adapters.abstract_parser import (
-    KIND_MODULE_STMT,
+# KIND_MODULE_STMT is a parser constant (lives in abstract_parser). The diff
+# types (StructuralDiff3Way, _CHANGE_KIND_*) live in structural_diff. Both
+# imports are one-directional; abstract_parser re-exports
+# render_structural_context from its bottom (after its own symbols are defined),
+# so there is no import-time cycle.
+from capybase.adapters.abstract_parser import KIND_MODULE_STMT
+from capybase.adapters.structural_diff import (
     StructuralDiff3Way,
     _ALL_CHANGE_KINDS,
     _CHANGE_KIND_ADDED_BOTH,

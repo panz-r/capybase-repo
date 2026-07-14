@@ -2632,53 +2632,19 @@ def detect_renames_2way(
 
 
 # ---------------------------------------------------------------------------
-# 3-way diff — re-exported from structural_diff (consolidation #3)
+# Diff + rendering — re-exported from structural_diff / structural_context
 # ---------------------------------------------------------------------------
-# The 3-way alignment (``AlignedUnit``, ``StructuralDiff3Way``, the
-# ``_CHANGE_KIND_*`` constants + their sets, ``compute_structural_diff_3way``,
-# ``_classify_alignment``, ``_detect_renames`` 3-way, and the body-comparison
-# helpers) now lives in :mod:`capybase.adapters.structural_diff`, separated from
-# the parser/IR. Re-exported here so existing ``ap.compute_structural_diff_3way``
-# / ``ap.StructuralDiff3Way`` / ``ap._CHANGE_KIND_*`` call sites work unchanged.
-# This import runs at the BOTTOM of the module (after all parser symbols above
-# are defined); structural_diff imports only already-defined names, so there is
-# no import-time cycle.
+# The 3-way diff and prompt rendering now live in their own modules (split in
+# consolidation #3). The genuinely-public API is re-exported here for backward
+# compatibility (``ap.compute_structural_diff_3way`` etc.). Private internals
+# (``_CHANGE_KIND_*``, ``_CHANGE_LABELS``, ``_render_import_surface``) are NOT
+# re-exported — callers that need them import from the owning module directly.
+# These imports run at the BOTTOM of the module (after all parser symbols above
+# are defined); both modules import only already-defined names from here, so
+# there is no import-time cycle.
+from capybase.adapters.structural_context import render_structural_context  # noqa: E402,F401
 from capybase.adapters.structural_diff import (  # noqa: E402,F401
     AlignedUnit,
     StructuralDiff3Way,
     compute_structural_diff_3way,
-    _CHANGE_KIND_ADDED_BOTH,
-    _CHANGE_KIND_ADDED_BOTH_CONFLICT,
-    _CHANGE_KIND_ADDED_LEFT,
-    _CHANGE_KIND_ADDED_RIGHT,
-    _CHANGE_KIND_DELETED_BOTH,
-    _CHANGE_KIND_DELETED_LEFT,
-    _CHANGE_KIND_DELETED_RIGHT,
-    _CHANGE_KIND_MODIFIED_BOTH,
-    _CHANGE_KIND_MODIFIED_LEFT,
-    _CHANGE_KIND_MODIFIED_RIGHT,
-    _CHANGE_KIND_RENAMED,
-    _CHANGE_KIND_UNCHANGED,
-    _ALL_CHANGE_KINDS,
-    _SURVIVING_CHANGE_KINDS,
-    _CONFLICT_CHANGE_KINDS,
-)
-
-
-
-
-# ---------------------------------------------------------------------------
-# Rendering — re-exported from structural_context (consolidation #3)
-# ---------------------------------------------------------------------------
-# The prompt-annotation rendering (``render_structural_context`` and its
-# ``_render_import_surface`` / ``_CHANGE_LABELS`` helpers) now lives in
-# ``capybase.adapters.structural_context``, separated from the parser/diff
-# computation. Re-exported here so existing ``ap.render_structural_context``
-# call sites keep working without change. This import runs at the BOTTOM of the
-# module (after all symbols above are defined), and structural_context imports
-# only already-defined names from here, so there is no import-time cycle.
-from capybase.adapters.structural_context import (  # noqa: E402,F401
-    render_structural_context,
-    _render_import_surface,
-    _CHANGE_LABELS,
 )

@@ -10,6 +10,8 @@ tree-sitter, no model, no I/O.
 from __future__ import annotations
 
 from capybase.adapters import abstract_parser as ap
+from capybase.adapters import structural_context as sc
+from capybase.adapters import structural_diff as sd
 
 
 # ---------------------------------------------------------------------------
@@ -356,7 +358,7 @@ def test_low_confidence_parse_degrades_to_none_in_consumers():
     assert structural.enumerate_entities(minified, "javascript") is None
     # And the 3-way diff declines when any side is untrustworthy.
     normal = "function foo() { return 1; }"
-    assert ap.compute_structural_diff_3way(normal, normal, minified, language="javascript") is None
+    assert sd.compute_structural_diff_3way(normal, normal, minified, language="javascript") is None
 
 
 # ---------------------------------------------------------------------------
@@ -727,10 +729,10 @@ def test_family_a_row_at_matches_count():
 def test_structural_diff_no_changes():
     """All three versions identical → all units unchanged, no conflicts."""
     src = "def foo():\n    return 1\n\ndef bar():\n    return 2\n"
-    diff = ap.compute_structural_diff_3way(src, src, src, language="python")
+    diff = sd.compute_structural_diff_3way(src, src, src, language="python")
     assert diff is not None
     assert len(diff.aligned) == 2
-    assert all(a.change_kind == ap._CHANGE_KIND_UNCHANGED for a in diff.aligned)
+    assert all(a.change_kind == sd._CHANGE_KIND_UNCHANGED for a in diff.aligned)
     assert len(diff.structural_conflicts) == 0
 
 
@@ -739,10 +741,10 @@ def test_structural_diff_modified_both():
     base = "def foo():\n    return 1\n"
     left = "def foo():\n    return 2\n"  # left changed body
     right = "def foo():\n    return 3\n"  # right changed body differently
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
     assert diff is not None
     foo = next(a for a in diff.aligned if a.name == "foo")
-    assert foo.change_kind == ap._CHANGE_KIND_MODIFIED_BOTH
+    assert foo.change_kind == sd._CHANGE_KIND_MODIFIED_BOTH
     assert len(diff.structural_conflicts) == 1
 
 
@@ -751,7 +753,7 @@ def test_structural_distinct_additions_no_conflict():
     base = "def existing():\n    pass\n"
     left = "def existing():\n    pass\n\ndef left_new():\n    return 1\n"
     right = "def existing():\n    pass\n\ndef right_new():\n    return 2\n"
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
     assert diff is not None
     assert len(diff.structural_conflicts) == 0
     names = {a.name for a in diff.aligned}
@@ -763,7 +765,7 @@ def test_structural_diff_required_units():
     base = "def foo():\n    return 1\n"
     left = "def foo():\n    return 2\n\ndef added():\n    pass\n"
     right = "def foo():\n    return 3\n"
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
     assert diff is not None
     assert "foo" in diff.required_units
     assert "added" in diff.required_units
@@ -779,11 +781,11 @@ def test_structural_diff_rust_multi_unit():
     )
     left = base.replace('"".into()', '"x".into()')  # left changes new()
     right = base.replace('format!("hi")', 'format!("bye")')  # right changes label()
-    diff = ap.compute_structural_diff_3way(base, left, right, language="rust")
+    diff = sd.compute_structural_diff_3way(base, left, right, language="rust")
     assert diff is not None
     kinds = {a.name: a.change_kind for a in diff.aligned}
-    assert kinds.get("new") == ap._CHANGE_KIND_MODIFIED_LEFT
-    assert kinds.get("label") == ap._CHANGE_KIND_MODIFIED_RIGHT
+    assert kinds.get("new") == sd._CHANGE_KIND_MODIFIED_LEFT
+    assert kinds.get("label") == sd._CHANGE_KIND_MODIFIED_RIGHT
     assert len(diff.structural_conflicts) == 0  # different units, no conflict
 
 
@@ -797,8 +799,8 @@ def test_render_context_shows_changes():
     base = "def foo():\n    return 1\n"
     left = "def foo():\n    return 2\n"
     right = "def foo():\n    return 3\n"
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
-    text = ap.render_structural_context(diff)
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    text = sc.render_structural_context(diff)
     assert "STRUCTURAL CONTEXT" in text
     assert "MODIFIED BY BOTH" in text
     assert "foo" in text
@@ -808,8 +810,8 @@ def test_render_context_shows_changes():
 def test_render_context_no_changes_returns_empty():
     """No changes → empty annotation (nothing to tell the model)."""
     src = "def foo():\n    return 1\n"
-    diff = ap.compute_structural_diff_3way(src, src, src, language="python")
-    assert ap.render_structural_context(diff) == ""
+    diff = sd.compute_structural_diff_3way(src, src, src, language="python")
+    assert sc.render_structural_context(diff) == ""
 
 
 def test_render_context_distinct_additions_says_no_conflict():
@@ -817,8 +819,8 @@ def test_render_context_distinct_additions_says_no_conflict():
     base = "def existing():\n    pass\n"
     left = "def existing():\n    pass\n\ndef left_new():\n    pass\n"
     right = "def existing():\n    pass\n\ndef right_new():\n    pass\n"
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
-    text = ap.render_structural_context(diff)
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    text = sc.render_structural_context(diff)
     assert "NONE" in text
     assert "left_new" in text and "right_new" in text
 
@@ -837,8 +839,8 @@ def test_render_context_import_union_python():
     base = "import os"
     left = "import os\nimport json"
     right = "import os\nimport sys"
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
-    text = ap.render_structural_context(diff)
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    text = sc.render_structural_context(diff)
     assert "Import surface" in text
     assert "CURRENT adds json" in text
     assert "REPLAYED adds sys" in text
@@ -856,8 +858,8 @@ def test_render_context_import_union_rust_use():
     base = "use std::fs;"
     left = "use std::fs;\nuse std::io;"
     right = "use std::fs;\nuse std::path;"
-    diff = ap.compute_structural_diff_3way(base, left, right, language="rust")
-    text = ap.render_structural_context(diff)
+    diff = sd.compute_structural_diff_3way(base, left, right, language="rust")
+    text = sc.render_structural_context(diff)
     assert "Import surface" in text
     assert "std::io" in text and "std::path" in text
     assert "union" in text
@@ -869,8 +871,8 @@ def test_render_context_no_import_block_when_only_code_changed():
     base = "def foo():\n    return 1\n"
     left = "def foo():\n    return 2\n"
     right = "def foo():\n    return 3\n"
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
-    text = ap.render_structural_context(diff)
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    text = sc.render_structural_context(diff)
     assert "Import surface" not in text
 
 
@@ -1425,7 +1427,7 @@ def test_duplicate_method_names_decline_diff():
     )
     left = base.replace("return 1", "return 10")
     right = base.replace("return x", "return x + 1")
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
     assert diff is None, "duplicate-identity parse must decline (return None)"
 
 
@@ -1476,7 +1478,7 @@ def test_added_both_different_bodies_is_conflict():
     base = "pass\n"
     left = "def f():\n    return 1\n"
     right = "def f():\n    return 2\n"  # same name, different body
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
     assert diff is not None
     conflicts = diff.structural_conflicts
     names = {a.name for a in conflicts}
@@ -1491,7 +1493,7 @@ def test_added_both_same_body_not_conflict():
     must not over-fire."""
     base = "pass\n"
     added = "def f():\n    return 1\n"
-    diff = ap.compute_structural_diff_3way(base, added, added, language="python")
+    diff = sd.compute_structural_diff_3way(base, added, added, language="python")
     assert diff is not None
     assert len(diff.structural_conflicts) == 0, "identical addition is not a conflict"
 
@@ -1507,9 +1509,9 @@ def test_rename_detector_ignores_contentless_fingerprints():
     base = "def original():\n    pass\n"
     left = "def renamed():\n    pass\n"
     right = base  # right unchanged
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
     assert diff is not None
-    renamed = [a for a in diff.aligned if a.change_kind == ap._CHANGE_KIND_RENAMED]
+    renamed = [a for a in diff.aligned if a.change_kind == sd._CHANGE_KIND_RENAMED]
     # The content-less body must not produce a false rename pairing.
     assert renamed == [], (
         f"content-less bodies falsely paired as rename: {[(a.name) for a in renamed]}"
@@ -1531,9 +1533,9 @@ def test_rename_detected_both_sides_same_new_name():
     name from required_units."""
     base = "def foo():\n    return 1\n    return 2\n"
     side = "def bar():\n    return 1\n    return 2\n"
-    diff = ap.compute_structural_diff_3way(base, side, side, language="python")
+    diff = sd.compute_structural_diff_3way(base, side, side, language="python")
     assert diff is not None
-    renamed = [a for a in diff.aligned if a.change_kind == ap._CHANGE_KIND_RENAMED]
+    renamed = [a for a in diff.aligned if a.change_kind == sd._CHANGE_KIND_RENAMED]
     assert len(renamed) == 1
     assert renamed[0].name == "bar"
     assert renamed[0].base.name == "foo"
@@ -1549,11 +1551,11 @@ def test_rename_conflicting_left_bar_right_baz():
     base = "def foo():\n    return 1\n    return 2\n"
     left = "def bar():\n    return 1\n    return 2\n"
     right = "def baz():\n    return 1\n    return 2\n"
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
     names = {a.name for a in diff.aligned}
     assert "bar" in names and "baz" in names
     # bar is the rename (paired to base foo).
-    assert any(a.change_kind == ap._CHANGE_KIND_RENAMED and a.name == "bar"
+    assert any(a.change_kind == sd._CHANGE_KIND_RENAMED and a.name == "bar"
                for a in diff.aligned)
 
 
@@ -1564,8 +1566,8 @@ def test_rename_one_sided_other_keeps_original():
     base = "def foo():\n    return 1\n    return 2\n"
     left = "def bar():\n    return 1\n    return 2\n"
     right = "def foo():\n    return 1\n    return 2\n"
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
-    renamed = [a for a in diff.aligned if a.change_kind == ap._CHANGE_KIND_RENAMED]
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    renamed = [a for a in diff.aligned if a.change_kind == sd._CHANGE_KIND_RENAMED]
     assert renamed == [], "one-sided rename where original is kept must NOT pair"
 
 
@@ -1574,8 +1576,8 @@ def test_rename_plus_body_edit_does_not_pair():
     stays added+deleted, which is safe. Conservative guard."""
     base = "def foo():\n    return 1\n    return 2\n"
     side = "def bar():\n    return 99\n    return 2\n"  # body changed
-    diff = ap.compute_structural_diff_3way(base, side, side, language="python")
-    renamed = [a for a in diff.aligned if a.change_kind == ap._CHANGE_KIND_RENAMED]
+    diff = sd.compute_structural_diff_3way(base, side, side, language="python")
+    renamed = [a for a in diff.aligned if a.change_kind == sd._CHANGE_KIND_RENAMED]
     assert renamed == [], "rename + body edit must not pair"
 
 
@@ -1669,12 +1671,12 @@ def test_multi_container_diff_distinct_methods_no_conflict():
     )
     left = base2.replace("return 1", "return 10")   # left changes A.start
     right = base2.replace("return 2", "return 20")  # right changes B.stop
-    diff = ap.compute_structural_diff_3way(base2, left, right, language="python")
+    diff = sd.compute_structural_diff_3way(base2, left, right, language="python")
     assert diff is not None
     assert len(diff.structural_conflicts) == 0  # distinct units, no conflict
     kinds = {a.name: a.change_kind for a in diff.aligned}
-    assert kinds.get("start") == ap._CHANGE_KIND_MODIFIED_LEFT
-    assert kinds.get("stop") == ap._CHANGE_KIND_MODIFIED_RIGHT
+    assert kinds.get("start") == sd._CHANGE_KIND_MODIFIED_LEFT
+    assert kinds.get("stop") == sd._CHANGE_KIND_MODIFIED_RIGHT
 
 
 def test_render_context_multi_container():
@@ -1683,8 +1685,8 @@ def test_render_context_multi_container():
     base = "class A:\n    def x(self):\n        return 1\n\nclass B:\n    def y(self):\n        return 2\n"
     left = base.replace("return 1", "return 10")
     right = base.replace("return 2", "return 20")
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
-    text = ap.render_structural_context(diff)
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    text = sc.render_structural_context(diff)
     assert "x" in text and "y" in text
     assert "NONE" in text  # no structural conflicts
 
@@ -2417,9 +2419,9 @@ def test_cov_alignment_deleted_right_when_left_modifies():
     base = "def foo():\n    return 1\n    return 2\n"
     left = "def foo():\n    return 99\n    return 2\n"   # modified
     right = "pass\n"                                      # deleted foo
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
     kinds = {a.change_kind for a in diff.aligned}
-    assert ap._CHANGE_KIND_DELETED_RIGHT in kinds, (
+    assert sd._CHANGE_KIND_DELETED_RIGHT in kinds, (
         f"expected deleted_right (left modifies, right deletes); got {kinds}"
     )
 
@@ -2430,9 +2432,9 @@ def test_cov_alignment_deleted_left_when_right_modifies():
     base = "def foo():\n    return 1\n    return 2\n"
     left = "pass\n"                                       # deleted foo
     right = "def foo():\n    return 99\n    return 2\n"   # modified
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
     kinds = {a.change_kind for a in diff.aligned}
-    assert ap._CHANGE_KIND_DELETED_LEFT in kinds, (
+    assert sd._CHANGE_KIND_DELETED_LEFT in kinds, (
         f"expected deleted_left (right modifies, left deletes); got {kinds}"
     )
 
@@ -2456,7 +2458,7 @@ def test_r7_required_units_includes_deleted_right_surviving():
     base = "def bar():\n    return 2\n"
     left = "pass\n"                                      # deleted bar
     right = "def bar():\n    return 99\n"                # modified bar
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
     assert "bar" in diff.required_units, (
         f"deleted_right (survives on right) must be in required_units; got "
         f"{diff.required_units}"
@@ -2469,7 +2471,7 @@ def test_r7_required_units_includes_deleted_left_surviving():
     base = "def bar():\n    return 2\n"
     left = "def bar():\n    return 99\n"                 # modified bar
     right = "pass\n"                                     # deleted bar
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
     assert "bar" in diff.required_units, (
         f"deleted_left (survives on left) must be in required_units; got "
         f"{diff.required_units}"
@@ -2482,7 +2484,7 @@ def test_r7_required_units_excludes_deleted_both():
     base = "def bar():\n    return 2\n"
     left = "pass\n"                                      # deleted bar
     right = "pass\n"                                     # deleted bar too
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
     assert "bar" not in diff.required_units, (
         f"deleted_both (truly removed) must not be required; got "
         f"{diff.required_units}"
@@ -2495,8 +2497,8 @@ def test_r7_required_units_annotation_renders_surviving():
     base = "def foo():\n    return 1\n\ndef bar():\n    return 2\n"
     left = "def foo():\n    return 10\n\ndef baz():\n    return 3\n"  # modify foo, delete bar, add baz
     right = "def foo():\n    return 1\n\ndef bar():\n    return 20\n" # modify bar
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
-    ctx = ap.render_structural_context(diff)
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    ctx = sc.render_structural_context(diff)
     assert "bar" in ctx, (
         f"surviving unit 'bar' must appear in the Required annotation; got:\n{ctx}"
     )
@@ -2514,8 +2516,8 @@ def test_cov_import_surface_renders_deletions():
     base = "import os\n"
     left = "import os\nimport sys\n"                     # left added sys
     right = "import os\nimport json\n"                   # right added json
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
-    ctx = ap.render_structural_context(diff)
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    ctx = sc.render_structural_context(diff)
     import_block = [ln for ln in ctx.split("\n") if "Import surface" in ln or "merged imports" in ln]
     block_text = "\n".join(import_block)
     assert "sys" in block_text, f"left-added 'sys' must be in the surface;\n{block_text}"
@@ -2534,8 +2536,8 @@ def test_cov_conflict_span_inside_method():
     base = "class C:\n    def foo(self):\n        return 1\n\ndef bar():\n    return 2\n"
     left = "class C:\n    def foo(self):\n        return 10\n\ndef bar():\n    return 2\n"
     right = "class C:\n    def foo(self):\n        return 1\n\ndef bar():\n    return 2\n"
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
-    ctx = ap.render_structural_context(diff, conflict_span=(1, 1))  # inside foo
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    ctx = sc.render_structural_context(diff, conflict_span=(1, 1))  # inside foo
     assert "This conflict is inside: METHOD foo" in ctx, (
         f"conflict inside method must be annotated;\n{ctx}"
     )
@@ -2547,8 +2549,8 @@ def test_cov_conflict_span_inside_class():
     base = "class C:\n    def foo(self):\n        return 1\n"
     left = "class C:\n    def foo(self):\n        return 10\n"
     right = "class C:\n    def foo(self):\n        return 1\n"
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
-    ctx = ap.render_structural_context(diff, conflict_span=(0, 0))  # class header
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    ctx = sc.render_structural_context(diff, conflict_span=(0, 0))  # class header
     assert "This conflict is inside: CLASS C" in ctx, (
         f"conflict inside class must be annotated;\n{ctx}"
     )
@@ -2650,7 +2652,7 @@ def test_cov_aligned_unit_all_none_fallbacks():
     """An AlignedUnit with base/left/right all None falls back to name
     ``"<anon>"`` and kind ``unknown_block``. Pins the fallback properties
     (lines 2293, 2301), which were untested."""
-    a = ap.AlignedUnit(base=None, left=None, right=None, change_kind=ap._CHANGE_KIND_UNCHANGED)
+    a = sd.AlignedUnit(base=None, left=None, right=None, change_kind=sd._CHANGE_KIND_UNCHANGED)
     assert a.name == "<anon>", f"all-None name fallback; got {a.name!r}"
     assert a.kind == ap.KIND_UNKNOWN, f"all-None kind fallback; got {a.kind!r}"
 
@@ -2660,7 +2662,7 @@ def test_cov_aligned_unit_name_prefers_left():
     left/right/base. Pins the precedence order in the property."""
     base_u = ap.StructuralUnit(kind="function", name="base", span=(0, 0), body="b")
     left_u = ap.StructuralUnit(kind="function", name="left", span=(0, 0), body="l")
-    a = ap.AlignedUnit(base=base_u, left=left_u, right=None, change_kind=ap._CHANGE_KIND_MODIFIED_LEFT)
+    a = sd.AlignedUnit(base=base_u, left=left_u, right=None, change_kind=sd._CHANGE_KIND_MODIFIED_LEFT)
     assert a.name == "left"
 
 
@@ -2727,5 +2729,5 @@ def test_cov_minified_side_declines_diff():
     left = "def f():\n    return 1\n"
     # A long single-line file (> 200 char median) → confidence 0.0.
     right = "def f(): return 1; def g(): return 2; " * 20
-    diff = ap.compute_structural_diff_3way(base, left, right, language="python")
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
     assert diff is None, "minified side must decline the diff"
