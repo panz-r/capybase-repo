@@ -38,3 +38,6 @@ venv/
 # Tests skip cleanly when these are empty (data not downloaded).
 # (Contents are ignored by each dir's own .gitignore; listed here for visibility.)
 uv.lock
+
+# ZCode session artifacts
+.zcode/
