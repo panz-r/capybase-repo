@@ -337,6 +337,7 @@ _EMBEDDER_UNSET = object()
 def match_entities(
     sources: "list[Entity]", targets: "list[Entity]", *,
     embedder: "object | _EMBEDDER_UNSET | None" = _EMBEDDER_UNSET,
+    lang: str | None = None,
 ) -> list[EntityMatch]:
     """Classify each ``source`` entity against the ``targets`` set.
 
@@ -371,11 +372,17 @@ def match_entities(
     target_names_by_kind: dict[str, set[str]] = {}
     for e in targets:
         target_names_by_kind.setdefault(e.kind, set()).add(e.name)
-    # Index targets by (kind, body-fingerprint) for rename pairing.
+    # Index targets by (kind, body-content) for rename pairing. Uses the
+    # CANONICAL lang-aware body signal (entity_body_content — comment-stripping),
+    # matching detect_renames_2way, NOT the comment-preserving
+    # entity_body_fingerprint. Otherwise a Rust rename that edits a // comment
+    # pairs in the resolver/3-way-diff but NOT here, causing a false 'dropped'
+    # flag while the merge correctly recognized the rename.
+    from capybase.adapters.abstract_parser import entity_body_content as _body_content
     target_by_body: dict[tuple[str, str], Entity] = {}
     target_body_tokens: dict[tuple[str, str], frozenset[str]] = {}
     for e in targets:
-        bf = entity_body_fingerprint(e, "") or ""
+        bf = _body_content(e.body or "", lang=lang) or ""
         if bf:
             key = (e.kind, bf)
             target_by_body.setdefault(key, e)
@@ -388,8 +395,8 @@ def match_entities(
         if exact is not None:
             out.append(EntityMatch(source=src, target=exact, kind=MATCH_SAME_NAME))
             continue
-        # 2. Rename: body-fingerprint match across a different name.
-        bf = entity_body_fingerprint(src, "") or ""
+        # 2. Rename: body-content match across a different name.
+        bf = _body_content(src.body or "", lang=lang) or ""
         target: Entity | None = None
         if bf:
             direct = target_by_body.get((src.kind, bf))
@@ -592,7 +599,7 @@ def dropped_entities(
     # UNMATCHED in the resolution (neither same-name nor a recognized rename —
     # including a semantic rename when embedder is given), so a legitimate
     # rename survives rather than counting as a false drop.
-    matches = match_entities(side_ents, resolved_ents, embedder=embedder)
+    matches = match_entities(side_ents, resolved_ents, embedder=embedder, lang=language)
     dropped: list[Entity] = []
     for m in matches:
         if m.source.name not in base_names and m.kind == MATCH_UNMATCHED:
@@ -647,7 +654,7 @@ def preservation_coverage(
     # resolution (neither same-name nor a recognized rename — including a
     # semantic rename when embedder is given) are dropped; a rename is preserved
     # (survives under a new name) and so not counted dropped.
-    matches = match_entities(side_ents, resolved_ents, embedder=embedder)
+    matches = match_entities(side_ents, resolved_ents, embedder=embedder, lang=language)
     added: list[Entity] = []
     dropped: list[Entity] = []
     for m in matches:
@@ -699,7 +706,7 @@ def unattributed_entities(
     # rename via embedder — embeddings counts as attributed; only an
     # unmatched resolved entity is unattributed.
     sides = list(base_ents) + list(cur_ents) + list(rep_ents)
-    matches = match_entities(res_ents, sides, embedder=embedder)
+    matches = match_entities(res_ents, sides, embedder=embedder, lang=language)
     return [m.source for m in matches if m.kind == MATCH_UNMATCHED]
 
 

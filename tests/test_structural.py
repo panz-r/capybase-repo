@@ -410,3 +410,26 @@ def test_enumerate_entities_skips_container_scope_at_module_level():
     )
     # The top-level struct Config IS an entity.
     assert "Config" in names, f"struct Config must be an entity; got {names}"
+
+
+# --- D-1 (round 8): match_entities must agree with canonical rename core ---
+
+
+def test_r8_match_entities_rust_rename_with_comment():
+    r"""match_entities (used by dropped_entities / preservation_coverage /
+    unattributed_entities — the validator-facing rename path) must agree with
+    the canonical detect_renames_2way: a Rust rename that also drops a ``//``
+    comment must PAIR. Previously match_entities used the comment-PRESERVING
+    entity_body_fingerprint, so the comment difference broke pairing — causing
+    a false 'dropped entity' flag while the resolver/3-way-diff correctly
+    recognized the rename."""
+    from capybase.adapters.structural import Entity, match_entities
+    b = Entity(kind="function", name="loadData",
+               body="fn loadData() {\n    let x = 1; // note\n    x\n}", span=(0, 3))
+    s = Entity(kind="function", name="fetchData",
+               body="fn fetchData() {\n    let x = 1;\n    x\n}", span=(0, 3))
+    matches = match_entities([b], [s], lang="rust")
+    kinds = [m.kind for m in matches]
+    assert "renamed" in kinds or "possibly_renamed" in kinds, (
+        f"a Rust rename dropping a // comment must pair in match_entities; got {kinds}"
+    )
