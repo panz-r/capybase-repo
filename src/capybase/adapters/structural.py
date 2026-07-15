@@ -389,6 +389,10 @@ def match_entities(
             target_body_tokens[key] = frozenset(_token_set(bf))
 
     out: list[EntityMatch] = []
+    # Targets already claimed by an earlier source's rename pairing. Prevents
+    # two sources with identical bodies from both pairing to the same target
+    # (mirrors detect_renames_2way's consumed_base_ids).
+    consumed_targets: set[tuple[str, str]] = set()
     for src in sources:
         # 1. Exact (kind, name) match.
         exact = target_by_name.get((src.kind, src.name))
@@ -402,6 +406,7 @@ def match_entities(
             direct = target_by_body.get((src.kind, bf))
             if (
                 direct is not None
+                and (direct.kind, direct.name) not in consumed_targets
                 and src.name not in target_names_by_kind.get(src.kind, set())
                 and (
                     _name_similarity(direct.name, src.name) >= _RENAME_NAME_SIMILARITY_THRESHOLD
@@ -417,6 +422,8 @@ def match_entities(
                     if key[0] != src.kind:
                         continue
                     cand = target_by_body[key]
+                    if (cand.kind, cand.name) in consumed_targets:
+                        continue  # already claimed by an earlier source
                     if src.name in target_names_by_kind.get(src.kind, set()):
                         break  # source name still present → not a rename
                     inter = len(tk & oks)
@@ -433,6 +440,7 @@ def match_entities(
                 if best is not None:
                     target = best[1]
         if target is not None:
+            consumed_targets.add((target.kind, target.name))
             out.append(EntityMatch(source=src, target=target, kind=MATCH_RENAMED))
         elif embedder is not None:
             # 3. Semantic embedding tier : for an otherwise-

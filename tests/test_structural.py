@@ -433,3 +433,28 @@ def test_r8_match_entities_rust_rename_with_comment():
     assert "renamed" in kinds or "possibly_renamed" in kinds, (
         f"a Rust rename dropping a // comment must pair in match_entities; got {kinds}"
     )
+
+
+# --- D.2 (round 10): match_entities must not pair two sources to one target ---
+
+
+def test_r10_match_entities_no_double_pair_to_one_target():
+    r"""match_entities iterates sources and pairs each independently — nothing
+    prevented two sources from pairing to the SAME target. When two side
+    entities (a, b) with identical bodies are both gone from the resolution,
+    both pair to the single resolved entity c as renames, reporting 100%
+    preservation when one was genuinely dropped. Add a consumed_target guard
+    (mirroring detect_renames_2way's consumed_base_ids)."""
+    from capybase.adapters.structural import preservation_coverage
+    base = "def shared():\n    return 0\n"
+    side = "def shared():\n    return 0\ndef a():\n    return 1\ndef b():\n    return 1\n"
+    resolved = "def shared():\n    return 0\ndef c():\n    return 1\n"
+    cov = preservation_coverage(base, side, resolved, "python")
+    # c can be a rename of a OR b, not both. One of them is genuinely dropped.
+    assert cov.preserved == 1, (
+        f"two identical-body sources can't both rename to one target; "
+        f"expected preserved=1, got {cov.preserved}"
+    )
+    assert len(cov.dropped) == 1, (
+        f"expected exactly one dropped entity; got {[d.name for d in cov.dropped]}"
+    )
