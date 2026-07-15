@@ -301,3 +301,43 @@ def test_h3_find_definition_span_java_multi_modifier():
     assert _find_definition_span(src_simple, "bar", "java") is not None
     # Regression: non-matching name must NOT falsely match.
     assert _find_definition_span(src, "nonexistent", "java") is None
+
+
+# --- H3 hardening: fallback must not false-positive on types/calls/Python ---
+
+
+def test_h3_fallback_no_false_positive_on_param_type():
+    """The stacked-modifier fallback must match the DEFINITION IDENTIFIER, not
+    just any word on the line. A parameter type, return type, or throws-clause
+    name must NOT be found as a definition."""
+    from capybase.adapters.structural import _find_definition_span
+    # StaticType is a parameter TYPE, not the def name (process is).
+    src = "class C {\n    public void process(StaticType x) { }\n}\n"
+    assert _find_definition_span(src, "StaticType", "java") is None, (
+        "parameter type must not be matched as a definition"
+    )
+    # Logger is a RETURN TYPE, not the def name (getLogger is).
+    src2 = "class C { public static Logger getLogger() { return null; } }\n"
+    assert _find_definition_span(src2, "Logger", "java") is None, (
+        "return type must not be matched as a definition"
+    )
+    # The actual def name still works.
+    assert _find_definition_span(src, "process", "java") is not None
+
+
+def test_h3_fallback_not_for_python():
+    """The stacked-modifier fallback is for brace languages (Java/C#/C++).
+    Python has no stacked modifiers, so it must NOT fire — ``async def foo()``
+    is handled by the exact-prefix ``def {name}`` match (async is stripped by
+    the parser, and the pattern matches ``def foo``)."""
+    from capybase.adapters.structural import _find_definition_span
+    # A call named 'foo' after a 'static' token — must NOT match for Python.
+    src = "def bar():\n    static = foo()\n"
+    assert _find_definition_span(src, "foo", "python") is None, (
+        "fallback must not fire for Python (no stacked modifiers)"
+    )
+    # async def still works via the exact-prefix path.
+    src2 = "async def greet():\n    pass\n"
+    assert _find_definition_span(src2, "greet", "python") is not None, (
+        "async def must be found via the prefix match"
+    )

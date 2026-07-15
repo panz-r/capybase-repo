@@ -1608,38 +1608,59 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
     adapter = adapter_for(language)
     pats = tuple(pat.replace("{name}", name) for pat in adapter.definition_patterns())
     lines = source.split("\n")
-    # The keyword set for the modifier-stack fallback: the first token of each
-    # pattern (everything before the space + name), PLUS common declaration
-    # modifiers that stack before the type keyword in brace languages
-    # (``public static void``, ``virtual inline int``, ``abstract final`` ...).
-    # The patterns enumerate type keywords but not these modifiers, so a
-    # stacked-modifier signature would otherwise defeat the match.
-    _STACK_MODIFIERS = frozenset({
-        # visibility / access
-        "public", "private", "protected", "internal",
-        # storage / inheritance
-        "static", "final", "abstract", "virtual", "override", "inline",
-        "extern", "constexpr", "const", "synchronized", "async", "unsafe",
-    })
-    decl_keywords = frozenset(p.split(" ", 1)[0] for p in pats if " " in p) | _STACK_MODIFIERS
-    name_word_re = re.compile(rf"\b{re.escape(name)}\b")
+    # The stacked-modifier fallback applies ONLY to brace languages (Java/C#/
+    # C++), whose patterns enumerate single-keyword prefixes that a modifier
+    # stack (``public static void``) defeats. Python/Rust/Go/JS use a single
+    # leading keyword matched by the exact-prefix path above.
+    use_fallback = adapter.container_has_braces
+    if use_fallback:
+        # Common declaration modifiers that stack before the type keyword.
+        _STACK_MODIFIERS = frozenset({
+            "public", "private", "protected", "internal",
+            "static", "final", "abstract", "virtual", "override", "inline",
+            "extern", "constexpr", "const", "synchronized", "async", "unsafe",
+            "explicit", "friend", "mutable", "thread_local", "sealed", "partial",
+            "readonly", "volatile", "native", "transient", "strictfp", "default",
+            "open", "data", "suspend", "tailrec", "lateinit",
+            "mutating", "lazy", "convenience", "fileprivate",
+            "implicit", "given", "opaque", "transparent",
+        })
+        decl_keywords = frozenset(p.split(" ", 1)[0] for p in pats if " " in p) | _STACK_MODIFIERS
     for i, line in enumerate(lines):
         stripped = line.lstrip()
-        # Exact prefix match (the common case for Python/Rust/Go/JS).
-        for pat in pats:
-            if stripped.startswith(pat):
-                return (i, min(i + 1, len(lines) - 1))
+        # Exact prefix match (the common case for Python/Rust/Go/JS), including
+        # an optional leading ``async``/``await`` modifier (Python ``async def``,
+        # JS ``async function``) which the patterns don't enumerate.
+        for raw in (stripped, re.sub(r"^(async|await)\s+", "", stripped, count=1)):
+            for pat in pats:
+                if raw.startswith(pat):
+                    return (i, min(i + 1, len(lines) - 1))
         # Fallback: stacked-modifier signature (Java/C#/C++). The line must
-        # start with a declaration/modifier keyword and contain ``name`` as a
-        # word-bounded token. Reject calls (``obj.name(``) and qualified refs.
-        if decl_keywords and stripped:
-            first_tok = stripped.split("(", 1)[0].split(None, 1)[0] if "(" in stripped else stripped.split(None, 1)[0] if stripped.split() else ""
-            if first_tok in decl_keywords:
-                m = name_word_re.search(stripped)
-                if m is not None:
-                    # Not a call/qualified ref: name not preceded by '.'.
-                    before = stripped[: m.start()]
-                    if not before.endswith("."):
+        # start with a declaration/modifier keyword, AND ``name`` must be the
+        # DEFINITION IDENTIFIER — for a method, the token immediately before
+        # the opening ``(`` of its parameter list; for a type/field, the first
+        # identifier after the modifier/type-keyword run. This rejects
+        # parameter types, return types, throws-clauses, calls, and string
+        # literals containing the name.
+        if use_fallback and stripped:
+            toks = stripped.split()
+            if toks and toks[0] in decl_keywords:
+                # Method shape: name is the token immediately before '('.
+                paren_idx = next((k for k, t in enumerate(toks) if "(" in t), -1)
+                if paren_idx > 0:
+                    cand = re.split(r"[(<]", toks[paren_idx], maxsplit=1)[0]
+                    cand = cand.split("::")[-1].split(".")[-1].strip()
+                    if cand == name:
+                        return (i, min(i + 1, len(lines) - 1))
+                # Type/field shape (no paren): strip the modifier run, take the
+                # next identifier token before '=' / ';' / '{'.
+                j = 0
+                while j < len(toks) and toks[j] in decl_keywords:
+                    j += 1
+                if j < len(toks):
+                    cand = re.split(r"[<(=;{:]", toks[j], maxsplit=1)[0]
+                    cand = cand.split("::")[-1].split(".")[-1].strip()
+                    if cand == name:
                         return (i, min(i + 1, len(lines) - 1))
     return None
 
