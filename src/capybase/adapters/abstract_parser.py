@@ -1006,6 +1006,121 @@ def _match_string_prefix(src: str, quote_idx: int) -> int | None:
     return 0
 
 
+@dataclass
+class _AStrState:
+    """The mutable string/comment state for the Family-A char scan.
+
+    Extracted from the ``parse_family_a`` loop so the string/comment state
+    machine is testable in isolation. ``in_str`` is one of ``'"'``, ``"'"``,
+    ``"`"```, ``"char"``, or ``None``. When ``in_str == '"'`` and
+    ``hash_count > 0`` we're inside a Rust raw string (``r#"..."#``).
+    """
+    in_str: str | None = None
+    hash_count: int = 0
+    in_line_comment: bool = False
+    in_block_comment: bool = False
+
+
+def _advance_string_comment(
+    src: str, i: int, n: int, ch: str, nxt: str, st: _AStrState,
+) -> tuple[int, bool]:
+    """Process one char's string/comment state transition.
+
+    Returns ``(new_i, handled)``: when ``handled`` is True the char was consumed
+    by the string/comment machine (the caller continues the loop at ``new_i``);
+    when False the char is ordinary code (the caller processes it).
+    """
+    # --- newline: advance row handled by caller; here only close line comment ---
+    if ch == "\n":
+        if st.in_line_comment:
+            st.in_line_comment = False
+        # The newline-as-token-separator buffer logic stays in the caller.
+        return i + 1, True
+
+    if st.in_line_comment:
+        return i + 1, True
+    if st.in_block_comment:
+        if ch == "*" and nxt == "/":
+            st.in_block_comment = False
+            return i + 2, True
+        return i + 1, True
+    if st.in_str is not None:
+        if ch == "\\":
+            # Escapes only apply to NON-raw strings. A raw string (hash
+            # count > 0) treats backslash literally — skip the escape skip.
+            if st.in_str == '"' and st.hash_count > 0:
+                return i + 1, True
+            return i + 2, True  # skip escaped char
+        if st.in_str == "char" and ch == "'":
+            st.in_str = None
+            return i + 1, True
+        if st.in_str == "'" and ch == "'":
+            st.in_str = None
+            return i + 1, True
+        if st.in_str == '"' and ch == '"':
+            # Raw string closer: ``"`` must be followed by exactly
+            # ``hash_count`` ``#`` chars. An embedded ``"`` in the content
+            # (with no matching ``#`` run) does NOT close it.
+            if st.hash_count > 0:
+                tail = src[i + 1 : i + 1 + st.hash_count]
+                if len(tail) == st.hash_count and tail == "#" * st.hash_count:
+                    st.in_str = None
+                    st.hash_count = 0
+                    return i + 1 + st.hash_count, True
+                # Not the closer — content quote. Fall through to advance.
+                return i + 1, True
+            st.in_str = None
+            return i + 1, True
+        if st.in_str == "`" and ch == "`":
+            st.in_str = None
+            return i + 1, True
+        return i + 1, True
+
+    # Not in string/comment. Detect transitions into one.
+    if ch == "/" and nxt == "/":
+        st.in_line_comment = True
+        return i + 2, True
+    if ch == "/" and nxt == "*":
+        st.in_block_comment = True
+        return i + 2, True
+    if ch == '"':
+        # Detect raw/byte raw strings (Rust) and other prefixed strings so
+        # the closer matches the opener. A Rust raw string ``r#"..."#`` closes
+        # on ``"`` + N ``#``; without this, an embedded ``"`` in the content
+        # closes early and corrupts brace counting.
+        prefix = _match_string_prefix(src, i)
+        if prefix is not None:
+            # prefix is the hash_count (0 = ordinary, >0 = raw with N #).
+            st.in_str = '"'
+            st.hash_count = prefix
+        else:
+            st.in_str = '"'
+            st.hash_count = 0
+        return i + 1, True
+    if ch == "`":
+        st.in_str = "`"
+        return i + 1, True
+    if ch == "'":
+        # Rust char-literal vs lifetime (and JS/Python quoted strings which
+        # never reach here as a bare ``'`` outside a string). A char literal
+        # is ``'X'`` (single content char + closing ``'``); a lifetime is
+        # ``'ident`` with NO closing ``'`` (e.g. ``'a``, ``'static``).
+        nxt1 = src[i + 1] if i + 1 < n else ""
+        nxt2 = src[i + 2] if i + 2 < n else ""
+        prev = src[i - 1] if i > 0 else ""
+        # Lifetime: ' + identifier-start char, NOT immediately closed by '.
+        if (
+            (nxt1.isalpha() or nxt1 == "_")
+            and nxt2 != "'"
+            and not (prev.isalnum() or prev == "_")
+        ):
+            # Rust lifetime ('a / 'static) — don't enter string state.
+            return i + 1, True
+        st.in_str = "char"
+        return i + 1, True
+    return i, False
+
+
 def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
     r"""Parse a brace-delimited (Family A) source into a :class:`FileIR`.
 
@@ -1035,14 +1150,8 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
 
     brace_depth = 0
     paren_depth = 0  # track () so we don't misread a ``{`` inside a call
-    # String/comment state machine.
-    in_str: str | None = None  # one of "'", '"', "`", "char", or None
-    # When in_str == '"' and str_hash_count > 0, we're inside a Rust raw string
-    # (``r#"..."#``) that closes on ``"`` followed by exactly this many ``#``.
-    # A bare ``"`` in the content does NOT close it. 0 = ordinary quote.
-    str_hash_count = 0
-    in_line_comment = False
-    in_block_comment = False
+    # String/comment state machine (extracted to _AStrState + _advance_string_comment).
+    strst = _AStrState()
     # Statement-start byte for the in-pass field emitter. Tracks the start
     # of the current top-level statement: advances past ``;`` and past a ``}``
     # that closes back to depth 0, but NOT past ``{``/``}`` inside a statement
@@ -1071,12 +1180,15 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
         ch = src[i]
         nxt = src[i + 1] if i + 1 < n else ""
 
-        # --- newline: advance row, close line comment ---
+        # --- newline: advance row + line_start; the string/comment machine
+        # (called below) closes any line comment. The token-buffer boundary
+        # logic stays here because it depends on row/line_start. ---
         if ch == "\n":
+            was_line_comment = strst.in_line_comment
+            new_i, _ = _advance_string_comment(src, i, n, ch, nxt, strst)
             row += 1
-            line_start = i + 1
-            if in_line_comment:
-                in_line_comment = False
+            line_start = new_i
+            if was_line_comment:
                 # A line comment ends a statement run (token buffer boundary).
                 buf = ""
             else:
@@ -1086,120 +1198,13 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 # func main()``). Mirrors the ``isspace()`` accumulation below.
                 if buf and not buf.endswith(" "):
                     buf += " "
-            i += 1
+            i = new_i
             continue
 
-        # --- comment / string handling takes precedence ---
-        if in_line_comment:
-            i += 1
-            continue
-        if in_block_comment:
-            if ch == "*" and nxt == "/":
-                in_block_comment = False
-                i += 2
-                continue
-            i += 1
-            continue
-        if in_str is not None:
-            if ch == "\\":
-                # Escapes only apply to NON-raw strings. A raw string (hash
-                # count > 0) treats backslash literally — skip the escape skip.
-                if in_str == '"' and str_hash_count > 0:
-                    i += 1
-                    continue
-                i += 2  # skip escaped char
-                continue
-            if in_str == "char" and ch == "'":
-                in_str = None
-                i += 1
-                continue
-            if in_str == "'" and ch == "'":
-                in_str = None
-                i += 1
-                continue
-            if in_str == '"' and ch == '"':
-                # Raw string closer: ``"`` must be followed by exactly
-                # ``str_hash_count`` ``#`` chars. An embedded ``"`` in
-                # the content (with no matching ``#`` run) does NOT close it.
-                if str_hash_count > 0:
-                    tail = src[i + 1 : i + 1 + str_hash_count]
-                    if len(tail) == str_hash_count and tail == "#" * str_hash_count:
-                        in_str = None
-                        str_hash_count = 0
-                        i += 1 + str_hash_count
-                        continue
-                    # Not the closer — content quote. Fall through to advance.
-                    i += 1
-                    continue
-                in_str = None
-                i += 1
-                continue
-            if in_str == "`" and ch == "`":
-                in_str = None
-                i += 1
-                continue
-            i += 1
-            continue
-
-        # Not in string/comment. Detect transitions.
-        if ch == "/" and nxt == "/":
-            in_line_comment = True
-            i += 2
-            continue
-        if ch == "/" and nxt == "*":
-            in_block_comment = True
-            i += 2
-            continue
-        if ch == '"':
-            # Detect raw/byte raw strings (Rust) and other prefixed strings so
-            # the closer matches the opener. A Rust raw string
-            # ``r#"..."#`` closes on ``"`` + N ``#``; without this, an embedded
-            # ``"`` in the content closes early and corrupts brace counting.
-            # Look back at the run of identifier chars / ``#`` preceding ``"``.
-            prefix = _match_string_prefix(src, i)
-            if prefix is not None:
-                # prefix is (kind, hash_count). kind "raw" → hash_count ``#``;
-                # we model all as ordinary ``"`` strings with an optional hash.
-                in_str = '"'
-                str_hash_count = prefix
-            else:
-                in_str = '"'
-                str_hash_count = 0
-            i += 1
-            continue
-        if ch == "`":
-            in_str = "`"
-            i += 1
-            continue
-        if ch == "'":
-            # Rust char-literal vs lifetime (and JS/Python quoted strings which
-            # never reach here as a bare ``'`` outside a string). A char literal
-            # is ``'X'`` (single content char + closing ``'``); a lifetime is
-            # ``'ident`` with NO closing ``'`` (e.g. ``'a``, ``'static``).
-            # Discriminator: a ``'`` followed by an identifier char where
-            # the char AFTER the identifier run is NOT a closing ``'`` is a
-            # lifetime — skip it entirely. This is robust across all the
-            # contexts lifetimes appear (``&'a``, ``x: &'static``, ``<'a>``,
-            # ``('a)``) because none of them are preceded by alnum/_ (the old
-            # rule), and they're all followed by an identifier longer than one
-            # char OR a single identifier char followed by a non-``'`` token.
-            nxt1 = src[i + 1] if i + 1 < n else ""
-            nxt2 = src[i + 2] if i + 2 < n else ""
-            prev = src[i - 1] if i > 0 else ""
-            # Lifetime: ' + identifier-start char, NOT immediately closed by '.
-            # ``'a'`` (char lit) → nxt1='a', nxt2='\'' → NOT a lifetime.
-            # ``'a`` / ``'static`` (lifetime) → nxt1 ident, nxt2 != '\'' → lifetime.
-            # ``'\n'`` (char lit) → nxt1='\\' → not ident → falls to char path.
-            if (
-                (nxt1.isalpha() or nxt1 == "_")
-                and nxt2 != "'"
-                and not (prev.isalnum() or prev == "_")
-            ):
-                # Rust lifetime ('a / 'static) — don't enter string state.
-                i += 1
-                continue
-            in_str = "char"
-            i += 1
+        # --- string/comment state machine (takes precedence over brace logic) ---
+        new_i, handled = _advance_string_comment(src, i, n, ch, nxt, strst)
+        if handled:
+            i = new_i
             continue
 
         # Conflict markers (only at line start, depth 0).

@@ -2776,3 +2776,55 @@ def test_cov_minified_side_declines_diff():
     right = "def f(): return 1; def g(): return 2; " * 20
     diff = sd.compute_structural_diff_3way(base, left, right, language="python")
     assert diff is None, "minified side must decline the diff"
+
+
+# --- Coverage: parse_family_a string-state edge cases (safety net for extraction) ---
+
+
+def test_cov_raw_string_backslash_is_literal():
+    """Inside a Rust raw string (``r#"..."#``) a backslash is LITERAL, not an
+    escape — the scanner must not skip the next char. Pins the raw-string escape
+    branch where ``str_hash_count > 0`` short-circuits the ``i += 2`` escape skip."""
+    # r#"...\"..."# — the \" must not be treated as an escape (raw string).
+    # A brace inside the raw string must not open/close a scope.
+    src = 'fn f() {\n    let s = r#"{ not a brace } \\not escaped"#;\n}\n'
+    ir = ap.parse_family_a(src, language="rust")
+    assert _unit_named(ir, "f"), (
+        f"raw-string backslash must be literal; got {_kinds_of(ir)}"
+    )
+
+
+def test_cov_rust_char_literal_closes_string_state():
+    """A Rust char literal ``'a'`` must close the char-string state cleanly so a
+    following brace isn't miscounted. Pins the ``in_str == 'char'`` close branch
+    and the ordinary single-quote close (lines 1116-1119)."""
+    src = "fn f() {\n    let c = 'a';\n    let d = '\\\\n';\n    if c == d { return; }\n}\n"
+    ir = ap.parse_family_a(src, language="rust")
+    assert _unit_named(ir, "f"), (
+        f"char literal must not corrupt brace scan; got {_kinds_of(ir)}"
+    )
+
+
+def test_cov_ordinary_double_quote_string_entry():
+    """A plain ``\"...\"`` string (no prefix) must enter string state via the
+    ordinary-quote branch. Pins the ``else`` branch that sets ``str_hash_count=0``
+    (lines 1165-1167), complementing the raw/prefixed branches already covered."""
+    src = 'fn f() {\n    let s = "hello { world";\n}\n'
+    ir = ap.parse_family_a(src, language="rust")
+    assert _unit_named(ir, "f"), (
+        f"ordinary quote string must not corrupt; got {_kinds_of(ir)}"
+    )
+
+
+def test_cov_hash_line_non_preprocessor_consumed():
+    """A ``#`` line that isn't a preprocessor directive or pragma (e.g. a lone
+    shebang mid-file, or malformed) is consumed as a complete statement with no
+    unit emitted. Pins the fall-through ``_consume_line_as_statement`` branch
+    (lines 1348-1352)."""
+    # A stray '#!' not at line 0, between two functions — must not crash or emit.
+    src = "fn a() {\n    return 1;\n}\n#!stray\nfn b() {\n    return 2;\n}\n"
+    ir = ap.parse_family_a(src, language="rust")
+    names = [u.name for u in ap.all_units_flat(ir)]
+    assert "a" in names and "b" in names, (
+        f"stray # line must not block surrounding parse; got {names}"
+    )
