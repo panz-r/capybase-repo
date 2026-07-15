@@ -2951,3 +2951,23 @@ def test_a1_family_a_inline_comment_stripped_from_fingerprint():
     assert unit_body_fingerprint(py_div) != unit_body_fingerprint(py_no), (
         "default (no lang) is Python-correct"
     )
+
+
+# --- B1 regression: C++ digit separator must not trap char-literal state ---
+
+
+def test_b1_cpp_digit_separator_not_char_literal():
+    r"""C++14 digit separators (``1'000'000``) use ``'`` between digits. The
+    scanner must NOT enter char-literal state on them — it would swallow the
+    digits until the next ``'`` and corrupt the brace scan, silently dropping
+    subsequent declarations.
+
+    A digit separator is ``digit ' digit``; a char literal is ``'X'``; a Rust
+    lifetime is ``'ident``. The discriminator already handles lifetimes; this
+    adds the digit-separator exception."""
+    src = "int compute() {\n    return 1'000;\n}\nvoid next_decl() {\n}\n"
+    ir = ap.parse_family_a(src, language="cpp")
+    names = [u.name for u in ap.all_units_flat(ir)]
+    assert "compute" in names and "next_decl" in names, (
+        f"C++ digit separator must not drop subsequent decls; got {names}"
+    )
