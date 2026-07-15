@@ -1652,6 +1652,24 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
         # literals containing the name.
         if use_fallback and stripped:
             toks = stripped.split()
+            # Reject comment lines and statement-keyword-led lines outright.
+            # The ``Type name`` shape check below would otherwise match
+            # ``// note about bar``, ``return result;``, ``throw new X();``,
+            # ``new Foo();`` — all have >= 2 identifier tokens but are not
+            # definitions.
+            first_raw = toks[0] if toks else ""
+            if first_raw.startswith(("//", "/*", "*/", "*", "#")):
+                continue
+            # Statement / control-flow keywords that can lead a 2+-identifier
+            # line but never introduce a definition.
+            _STATEMENT_KEYWORDS = frozenset({
+                "return", "throw", "throws", "new", "assert", "yield", "await",
+                "if", "else", "for", "while", "do", "switch", "case", "break",
+                "continue", "goto", "try", "catch", "finally", "using",
+                "synchronized", "delete", "sizeof", "typeid", "decltype",
+            })
+            if first_raw in _STATEMENT_KEYWORDS:
+                continue
             # The line qualifies for the fallback if it begins with a known
             # declaration/modifier keyword OR has the ``Type name`` field shape
             # (>= 2 identifier tokens before the terminator: a type + a name).
@@ -1663,12 +1681,15 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
                 re.split(r"[<(]", t, maxsplit=1)[0].split("::")[-1].split(".")[-1].strip()
                 for t in decl_toks
             ]
+            # Strip trailing comma so multi-var decls (int x, y, z;) don't
+            # break the identifier regex.
+            ident_toks = [h.rstrip(",") for h in ident_toks]
             ident_count = sum(
                 1 for h in ident_toks
                 if h and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", h)
             )
             qualifies = bool(toks) and (
-                toks[0] in decl_keywords
+                first_raw in decl_keywords
                 or ident_count >= 2
             )
             if qualifies:

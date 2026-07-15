@@ -391,3 +391,32 @@ def test_r8_h3_lowercase_primitive_field():
     # False positives still rejected.
     assert _find_definition_span("class C {\n    public void process(StaticType x) { }\n}\n", "StaticType", "java") is None
     assert _find_definition_span("def bar():\n    static = foo()\n", "foo", "python") is None
+
+
+# --- B-5 hardening (round 9): reject comments + statements ---
+
+
+def test_r9_h3_no_false_positive_on_comment_or_statement():
+    r"""The H3 fallback gate (broadened in round 8 to ``ident_count >= 2``)
+    over-matched: a comment line, a ``return X;``, a ``throw new X();``, a
+    ``new X();`` all have >= 2 identifier tokens and falsely matched as
+    definitions. The gate must reject comment markers and statement keywords."""
+    from capybase.adapters.structural import _find_definition_span
+    # Comment line mentioning the name BEFORE the real def.
+    src = "class C {\n    // remember to update the bar\n    void bar() {}\n}\n"
+    span = st = _find_definition_span(src, "bar", "java")
+    assert span is None or span[0] == 2, (
+        f"comment line must not match before the real def; got {span}"
+    )
+    # Statement-keyword lines.
+    for label, src, name in [
+        ("return", "    return result;", "result"),
+        ("throw new", "    throw new Exception();", "Exception"),
+        ("new call", "    new Foo();", "Foo"),
+        ("assert", "    assert condition;", "condition"),
+    ]:
+        span = _find_definition_span(src, name, "java")
+        assert span is None, f"{label} statement must not match as a definition; got {span}"
+    # True positives still work (the gate's purpose).
+    assert _find_definition_span("class C {\n    int count = 0;\n}\n", "count", "java") is not None
+    assert _find_definition_span("class C {\n    public static void foo() {}\n}\n", "foo", "java") is not None
