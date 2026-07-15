@@ -442,7 +442,7 @@ def match_entities(
             # rename; mid cosine (0.70–0.85) needs a corroborating Jaccard/name
             # signal. Never raises — a failed embed leaves the source unmatched.
             emb_match = _embedding_rename_match(
-                src, targets, target_names_by_kind, bf, embedder
+                src, targets, target_names_by_kind, bf, embedder, lang
             )
             if emb_match is not None:
                 out.append(emb_match)
@@ -469,6 +469,7 @@ def _embedding_rename_match(
     target_names_by_kind: dict[str, set[str]],
     src_body_fp: str,
     embedder: "object",
+    lang: str | None = None,
 ) -> EntityMatch | None:
     """Find a rename for ``src`` via body-embedding cosine.
 
@@ -476,6 +477,7 @@ def _embedding_rename_match(
     Pure helper for :func:`match_entities`'s embedding tier. Never raises.
     """
     from capybase.memory.embeddings import normalize_body_for_embedding
+    from capybase.adapters.abstract_parser import entity_body_content as _ebc
 
     # A copy is not a rename: skip if the source name still exists in targets.
     if src.name in target_names_by_kind.get(src.kind, set()):
@@ -489,7 +491,7 @@ def _embedding_rename_match(
     src_norm = normalize_body_for_embedding(src_body_fp)
     if not src_norm:
         return None
-    cand_norms = [normalize_body_for_embedding(entity_body_fingerprint(t, "") or "") for t in cand_targets]
+    cand_norms = [normalize_body_for_embedding(_ebc(t.body or "", lang=lang) or "") for t in cand_targets]
     # Embed source + candidates in one batch; cosine-rank.
     try:
         texts = [src_norm] + [c for c in cand_norms if c]
@@ -512,7 +514,7 @@ def _embedding_rename_match(
             if sim < _EMB_POSSIBLY_RENAMED_THRESHOLD:
                 continue
             # Conjunction rule (§2): mid-band needs a corroborating signal.
-            t_body_fp = entity_body_fingerprint(t, "") or ""
+            t_body_fp = _ebc(t.body or "", lang=lang) or ""
             j = _jaccard(src_body_fp, t_body_fp)
             name_sim = _name_similarity(src.name, t.name)
             if sim >= _EMB_RENAME_THRESHOLD:
