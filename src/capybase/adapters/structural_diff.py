@@ -134,18 +134,23 @@ class StructuralDiff3Way:
 
     @property
     def required_units(self) -> list[str]:
-        """Names of units that must appear in the merged output.
+        """Names of units that must appear in the merged output (deduplicated).
 
         Includes ``deleted_left`` / ``deleted_right``: those mean one side
         deleted the unit but the OTHER side kept (and possibly modified) it —
         so the unit SURVIVES in the merge as the keeping side's version.
         Excluding them risked the LLM dropping a surviving unit. Only
         ``deleted_both`` (both sides removed it) is truly absent from the merge.
+
+        Deduplicated: a divergent-name rename conflict can produce both a
+        ``renamed`` entry and an ``added_both_conflict`` entry for the same
+        name, which would otherwise list it twice in the prompt.
         """
-        return [
+        names = [
             a.name for a in self.aligned
             if a.change_kind in _SURVIVING_CHANGE_KINDS and a.name != "<anon>"
         ]
+        return list(dict.fromkeys(names))
 
 
 # ---------------------------------------------------------------------------
