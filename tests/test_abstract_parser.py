@@ -2987,3 +2987,37 @@ def test_b1_cpp_hex_digit_separator():
     assert "bar" in names and "baz" in names, (
         f"hex digit separator must not drop subsequent decls; got {names}"
     )
+
+
+# --- A-1 regression: b'X' byte char literal broken by B1 hex fix ---
+
+
+def test_a1_rust_byte_char_literal_not_digit_separator():
+    r"""A Rust byte char literal ``b'0'`` / ``b'a'`` / ``b'F'`` must NOT be
+    treated as a digit separator. The B1 hex-digit broadening (prev in
+    _HEXDIGITS and nxt1 in _HEXDIGITS) matched these because both the prefix
+    char (e.g. ``b``) and the content (e.g. ``a``) are hex — but the closing
+    ``'`` at nxt2 distinguishes a char literal from a digit separator.
+
+    Without the nxt2 guard, b'a' skips char-literal state, the closing ' opens
+    one that swallows the rest of the file, and every subsequent declaration
+    is silently dropped. Idiomatic in Rust lexers/parsers (b'0'..=b'9')."""
+    src = (
+        "fn parse_hex(c: u8) -> u8 {\n"
+        "    match c {\n"
+        "        b'0'..=b'9' => c - b'0',\n"
+        "        b'a'..=b'f' => c - b'a' + 10,\n"
+        "        b'A'..=b'F' => c - b'A' + 10,\n"
+        "    }\n"
+        "}\n"
+        "fn next_fn() -> u8 { 0 }\n"
+    )
+    ir = ap.parse_family_a(src, language="rust")
+    names = [u.name for u in ap.all_units_flat(ir)]
+    assert "parse_hex" in names and "next_fn" in names, (
+        f"byte char literal b'X' must not drop subsequent decls; got {names}"
+    )
+    # Hex digit separators still work (the B1-hole fix's intent).
+    src2 = "int bar() {\n    long x = 0x1F'0000;\n    return x;\n}\nint baz() { return 1; }\n"
+    ir2 = ap.parse_family_a(src2, language="cpp")
+    assert "bar" in [u.name for u in ap.all_units_flat(ir2)] and "baz" in [u.name for u in ap.all_units_flat(ir2)]

@@ -1174,7 +1174,12 @@ def _advance_string_comment(
         # ' hex-digit run. Don't enter char-literal state — it would swallow the
         # digits until the next ' and corrupt the brace scan, silently dropping
         # subsequent declarations. Covers decimal AND hex letters (A-F).
-        if prev in _HEXDIGITS and nxt1 in _HEXDIGITS:
+        # The nxt2 != "'" guard distinguishes a digit separator from a char
+        # literal: b'a' / b'0' have prev/nxt1 both hex (b, a) BUT a closing '
+        # at nxt2 — without this guard, the byte-char-literal b'X' (idiomatic
+        # in Rust match arms) would skip char state and the closing ' would
+        # swallow the rest of the file.
+        if prev in _HEXDIGITS and nxt1 in _HEXDIGITS and nxt2 != "'":
             return i + 1, True
         st.in_str = "char"
         return i + 1, True
