@@ -877,77 +877,19 @@ def _body_is_substantial(body_fp: str) -> bool:
 
 
 def _split_header_body(entity: Entity) -> tuple[str, str]:
-    """Split an entity's body into (header, rest), whitespace-normalized.
+    """Split an entity's body into (header, rest), comment-preserving.
 
-    A rename changes the def/fn header (``def foo`` → ``def bar``) but leaves the
-    body content identical, so rename detection must compare the header-STRIPPED
-    body. Mirrors ``structural_resolver._body_content`` but returns both parts so
-    the signature fingerprint can use the header.
-
-    For a MULTI-LINE body the header is ``lines[0]`` (the def/fn/class line) and
-    the rest is the body lines below it — the common case. For a SINGLE-LINE body
-    (``fn foo() { 1 }``, ``def foo(): return 1``, ``function foo() { return 1; }``)
-    ``lines[0]`` is the WHOLE body, so the naive split leaves ``rest=""`` — which
-    makes every one-liner body edit register as ``signature_changed`` (the body
-    content gets folded into the "header") and breaks rename pairing (empty body
-    fingerprint never matches). We instead split a one-liner at its scope opener:
-    the first ``{`` (Family A) or the first ``:`` at bracket-depth 0 (Family B),
-    so the signature lands in the header and the inline body lands in ``rest``.
-    Detected from the text itself (no language param) so it's robust to mismatched
-    metadata; falls back to the whole-line-as-header when no opener is found.
+    Delegates the structural skeleton (multi-line vs one-liner, scope-opener
+    split) to the canonical :func:`abstract_parser._raw_header_body_split`, then
+    applies a comment-PRESERVING whitespace collapse (``_norm``). This is the
+    intentional divergence from rename detection's
+    :func:`abstract_parser.split_header_body` (which strips comments): body-CHANGE
+    detection must be comment-sensitive (an added ``# note`` is a real change),
+    while rename detection is comment-stable (a rename doesn't touch the body).
     """
-    body = entity.body or ""
-    if not body:
-        return "", ""
-    lines = body.split("\n")
-    if len(lines) > 1:
-        # Multi-line: header is the declaration line, rest is the body below it.
-        header = lines[0]
-        rest = "\n".join(lines[1:])
-        return _norm(header), _norm(rest)
-    # Single-line body: split at the scope opener so the body content isn't
-    # folded into the header. Family A opens with ``{``; Family B with ``:``.
-    line = lines[0]
-    brace = _scope_opener_brace(line)
-    if brace >= 0:
-        header = line[: brace + 1]
-        rest = line[brace + 1 :]
-        # Drop the single matching closing ``}`` (the function's own brace) so the
-        # rest is the body content, not ``... }``. Best-effort; nested braces in
-        # the body are left as-is (both sides compare identically regardless).
-        r = rest.rstrip()
-        if r.endswith("}"):
-            rest = r[:-1]
-        return _norm(header), _norm(rest)
-    colon = _scope_opener_colon(line)
-    if colon >= 0:
-        header = line[: colon + 1]
-        rest = line[colon + 1 :]
-        return _norm(header), _norm(rest)
-    # No opener found (e.g. a field ``const N = 5;``): keep prior behavior.
-    return _norm(line), ""
-
-
-def _scope_opener_brace(line: str) -> int:
-    """Index of the first ``{`` opening a body, or -1.
-
-    Delegate to the canonical :func:`abstract_parser._scope_opener_brace`
-    (consolidation #2) — one scope-opener implementation, shared with the
-    canonical ``split_header_body``.
-    """
-    from capybase.adapters.abstract_parser import _scope_opener_brace as _impl
-    return _impl(line)
-
-
-def _scope_opener_colon(line: str) -> int:
-    """Index of the first ``:`` at bracket-depth 0, or -1.
-
-    Delegate to the canonical :func:`abstract_parser._scope_opener_colon`
-    (consolidation #2) — one scope-opener implementation, shared with the
-    canonical ``split_header_body``.
-    """
-    from capybase.adapters.abstract_parser import _scope_opener_colon as _impl
-    return _impl(line)
+    from capybase.adapters.abstract_parser import _raw_header_body_split
+    header, rest = _raw_header_body_split(entity.body or "")
+    return _norm(header), _norm(rest)
 
 
 def _norm(text: str) -> str:

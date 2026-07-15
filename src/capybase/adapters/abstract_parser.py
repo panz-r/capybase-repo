@@ -2395,37 +2395,21 @@ def _scope_opener_colon(line: str) -> int:
     return -1
 
 
-def split_header_body(body: str) -> tuple[str, str]:
-    """Split a unit's body text into (header, rest), whitespace-normalized.
+def _raw_header_body_split(body: str) -> tuple[str, str]:
+    """Split body text into raw (header, rest) — no normalization applied.
 
-    The CANONICAL header/body split for rename detection (consolidation #2). A
-    rename changes the def/fn header (``def foo`` → ``def bar``) but leaves the
-    body content identical, so rename detection compares the header-STRIPPED
-    body. (Note: ``structural._split_header_body`` intentionally diverges — it
-    preserves comments because body-CHANGE detection must be comment-sensitive,
-    while rename detection is comment-stable.)
-
-    For a MULTI-LINE body the header is ``lines[0]`` (the def/fn/class line) and
-    the rest is the body lines below it — the common case. For a SINGLE-LINE body
-    (``fn foo() { 1 }``, ``def foo(): return 1``) ``lines[0]`` is the WHOLE body,
-    so the naive split leaves ``rest=""`` — which makes every one-liner body edit
-    register as a signature change and breaks rename pairing. We instead split a
-    one-liner at its scope opener: the first ``{`` (Family A) or the first ``:``
-    at bracket-depth 0 (Family B), so the signature lands in the header and the
-    inline body lands in ``rest``. Detected from the text itself (no language
-    param); falls back to the whole-line-as-header when no opener is found.
+    The structural skeleton shared by every header/body split: multi-line
+    bodies split at the first line; one-liner bodies split at the scope opener
+    (``{`` for Family A, ``:`` at depth 0 for Family B) so an inline body isn't
+    folded into the header. Callers normalize the two halves their own way
+    (rename detection strips comments; change detection preserves them).
     """
     body = body or ""
     if not body:
         return "", ""
     lines = body.split("\n")
     if len(lines) > 1:
-        # Multi-line: header is the declaration line, rest is the body below it.
-        header = lines[0]
-        rest = "\n".join(lines[1:])
-        return _normalize_header(header), normalize_body(rest)
-    # Single-line body: split at the scope opener so the body content isn't
-    # folded into the header. Family A opens with ``{``; Family B with ``:``.
+        return lines[0], "\n".join(lines[1:])
     line = lines[0]
     brace = _scope_opener_brace(line)
     if brace >= 0:
@@ -2437,14 +2421,27 @@ def split_header_body(body: str) -> tuple[str, str]:
         r = rest.rstrip()
         if r.endswith("}"):
             rest = r[:-1]
-        return _normalize_header(header), normalize_body(rest)
+        return header, rest
     colon = _scope_opener_colon(line)
     if colon >= 0:
-        header = line[: colon + 1]
-        rest = line[colon + 1 :]
-        return _normalize_header(header), normalize_body(rest)
-    # No opener found (e.g. a field ``const N = 5;``): keep prior behavior.
-    return _normalize_header(line), ""
+        return line[: colon + 1], line[colon + 1 :]
+    # No opener found (e.g. a field ``const N = 5;``): whole line is the header.
+    return line, ""
+
+
+def split_header_body(body: str) -> tuple[str, str]:
+    """Split a unit's body text into (header, rest), comment-stripped.
+
+    The CANONICAL header/body split for rename detection: a rename changes the
+    def/fn header (``def foo`` → ``def bar``) but leaves the body content
+    identical, so rename detection compares the header-STRIPPED body. Comments
+    and string-literal values are stripped/blanked so two bodies differing only
+    in those normalize equal — rename detection is comment-stable. (Change
+    detection in ``structural._split_header_body`` intentionally diverges: it
+    preserves comments via a whitespace-only collapse.)
+    """
+    header, rest = _raw_header_body_split(body)
+    return _normalize_header(header), normalize_body(rest)
 
 
 def entity_body_content(body: str) -> str:
