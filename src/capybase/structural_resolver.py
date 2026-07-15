@@ -949,7 +949,7 @@ def _body_content(body: str, lang: str | None = None) -> str:
 
 
 def _detect_renames(
-    side_ents: list, base_ents: list
+    side_ents: list, base_ents: list, lang: str | None = None,
 ) -> tuple[dict, dict]:
     """Detect renames of base entities on one side (rename handler, §2.2).
 
@@ -959,9 +959,13 @@ def _detect_renames(
     name-similarity/substantial-body guard — now lives in ONE place
     (``abstract_parser``), shared by this resolver, the 3-way diff, and
     ``semantic_diff``. Returns ``(renames, base_ids_removed)`` unchanged.
+
+    ``lang`` is forwarded so the body-content match strips the RIGHT comment
+    marker per language — otherwise a Rust rename that also edits a ``//``
+    comment won't pair, disagreeing with the lang-aware parse-time fingerprint.
     """
     from capybase.adapters.abstract_parser import detect_renames_2way
-    return detect_renames_2way(base_ents, side_ents)
+    return detect_renames_2way(base_ents, side_ents, lang=lang)
 
 
 @dataclass
@@ -1054,8 +1058,8 @@ def _prepare_entity_merge(unit: ConflictUnit) -> _EntityMergeCtx | None:
     # Rename detection per side (s3m rename handler, a base entity
     # whose body reappears under a NEW similar name on a side, with the old name
     # gone, is a RENAME — not a base-kept + side-added pair.
-    cur_renames, cur_removed = _detect_renames(cur_ents, base_ents)
-    rep_renames, rep_removed = _detect_renames(rep_ents, base_ents)
+    cur_renames, cur_removed = _detect_renames(cur_ents, base_ents, lang)
+    rep_renames, rep_removed = _detect_renames(rep_ents, base_ents, lang)
 
     return _EntityMergeCtx(
         enc_text=enc_text,

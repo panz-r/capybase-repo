@@ -1029,6 +1029,7 @@ def semantic_diff(
     from capybase.adapters.abstract_parser import detect_renames_2way
     renames, removed_old_ids = detect_renames_2way(
         old_ents, new_ents, fuzzy_body_threshold=_RENAME_BODY_JACCARD_THRESHOLD,
+        lang=language,
     )
 
     changes: list[EntityChange] = []

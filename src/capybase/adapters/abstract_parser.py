@@ -2564,6 +2564,7 @@ def detect_renames_2way(
     side_units: list,
     *,
     fuzzy_body_threshold: float | None = None,
+    lang: str | None = None,
 ) -> tuple[dict, set]:
     """Detect renames of base entities appearing on ONE side (canonical core).
 
@@ -2587,6 +2588,13 @@ def detect_renames_2way(
     edits the body still pair — used by ``semantic_diff`` (threshold 0.80). The
     resolver and 3-way diff leave it ``None`` (exact-only, conservative).
 
+    ``lang`` selects the comment marker for body-content normalization
+    (``//`` for Family-A brace languages, ``#`` for Python/Ruby). Defaults to
+    Python. Pass the entity's language so a Rust ``// note`` is stripped
+    (comment-stable pairing) — otherwise a rename that also edits a comment
+    won't pair, disagreeing with the parse-time fingerprint which IS
+    lang-aware.
+
     Works on ANY objects carrying ``.identity``, ``.kind``, ``.name``, and
     ``.body`` (both :class:`StructuralUnit` and the public ``Entity``), so the
     3-way diff, the structural resolver, and ``semantic_diff`` all share this
@@ -2604,7 +2612,7 @@ def detect_renames_2way(
     # token-set similarity. Only built when fuzzy matching is requested.
     base_body_tokens: dict = {}
     for e in base_units:
-        content = entity_body_content(e.body)
+        content = entity_body_content(e.body, lang=lang)
         key = (e.kind, content)
         # If two base entities share body content, keep the first; renames are
         # ambiguous in that case and we decline to guess.
@@ -2631,7 +2639,7 @@ def detect_renames_2way(
     removed: set = set()
     consumed_base_ids: set = set()
     for e in side_units:
-        content = entity_body_content(e.body)
+        content = entity_body_content(e.body, lang=lang)
         # 1) Exact body-content match (the primary, high-precision signal).
         key = (e.kind, content)
         base_match = base_by_content.get(key)

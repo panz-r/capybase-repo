@@ -789,3 +789,29 @@ def test_f1_refactoring_aware_merge_rename_plus_add_no_duplicate():
     assert result.count("def bar") <= 1, (
         f"refactoring_aware merge produced a doubled 'def bar';\n{result!r}"
     )
+
+
+# --- Finding 1 (round 7): detect_renames_2way must take lang ---
+
+
+def test_r7_detect_renames_2way_lang_rust_comment():
+    """detect_renames_2way must accept ``lang`` so Family-A ``//`` comments are
+    stripped from the body-content used for pairing — otherwise a Rust rename
+    where the side dropped/added a ``//`` comment silently fails to pair (the
+    comment-stability invariant A1 was meant to restore, but the canonical
+    2-way core was never updated)."""
+    from capybase.adapters.abstract_parser import (
+        StructuralUnit, detect_renames_2way,
+    )
+    base = [StructuralUnit(kind="function", name="loadData", span=(0, 3),
+                           body="fn loadData() {\n    let x = 1; // note\n    return x;\n}")]
+    side = [StructuralUnit(kind="function", name="fetchData", span=(0, 3),
+                           body="fn fetchData() {\n    let x = 1;\n    return x;\n}")]
+    # Without lang: the // comment is kept as code, bodies differ, no rename.
+    ren_nolang, _ = detect_renames_2way(base, side)
+    assert ren_nolang == {}, "without lang, the // comment prevents pairing (pre-fix)"
+    # With lang=rust: // comment stripped, bodies match, rename pairs.
+    ren_rust, _ = detect_renames_2way(base, side, lang="rust")
+    assert ("function", "fetchData") in ren_rust, (
+        f"with lang=rust the rename must pair despite the // comment; got {ren_rust}"
+    )
