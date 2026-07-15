@@ -1325,7 +1325,7 @@ def _compose_entity(renamer, modifier) -> "Entity":
     indent = ""
     for ln in mod_lines:
         if not replaced and ln.strip():
-            indent = ln[: len(ln) - len(ln.lstrip(" "))]
+            indent = ln[: len(ln) - len(ln.lstrip(" \t"))]
             composed.append(indent + ren_header if ren_header else ln)
             replaced = True
         else:
@@ -1538,7 +1538,7 @@ def _rebuild_container(enclosing_text: str, entity_bodies: list[str], language: 
     body_indent = ""
     for line in enc_lines[1:]:
         if line.strip():
-            body_indent = line[: len(line) - len(line.lstrip(" "))]
+            body_indent = line[: len(line) - len(line.lstrip(" \t"))]
             break
     # The header is line 0; the trailer is the container's OWN closing brace (for
     # brace languages) — exactly one line. We can't take more, because the method

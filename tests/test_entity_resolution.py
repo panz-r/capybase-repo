@@ -910,3 +910,27 @@ def test_r10_zealous_merge_span_intersection_declines():
     assert "LINE3" in result.text, (
         f"zealous_merge silently dropped replayed's edit (span intersection missed);\n{result.text!r}"
     )
+
+
+# --- B.2 (round 10): tab-indented containers must preserve indentation ---
+
+
+def test_r10_rebuild_container_tab_indented():
+    r"""_rebuild_container and _compose_entity computed indentation with
+    lstrip(' ') (spaces only), so a tab-indented container body yielded
+    body_indent='' and every spliced entity header lost its leading tab —
+    producing IndentationError in Python (methods emitted at module level).
+    Use lstrip(' \\t') so tabs count as indentation."""
+    base = "class C:\n\tdef shared(self):\n\t\treturn 1\n"
+    cur = "class C:\n\tdef shared(self):\n\t\treturn 1\n\tdef a(self):\n\t\treturn 2\n"
+    rep = "class C:\n\tdef shared(self):\n\t\treturn 1\n\tdef b(self):\n\t\treturn 3\n"
+    result = resolve_structurally(_unit(base, cur, rep))
+    assert result is not None and result.text is not None, (
+        "tab-indented disjoint-add merge must resolve"
+    )
+    # Every def line must be indented (inside the class), not at column 0.
+    for ln in result.text.split("\n"):
+        if ln.lstrip().startswith("def "):
+            assert ln.startswith("\t") or ln.startswith(" "), (
+                f"method header lost its tab indent (emitted at column 0);\n{result.text!r}"
+            )
