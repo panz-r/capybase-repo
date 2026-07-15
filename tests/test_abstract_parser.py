@@ -2971,3 +2971,19 @@ def test_b1_cpp_digit_separator_not_char_literal():
     assert "compute" in names and "next_decl" in names, (
         f"C++ digit separator must not drop subsequent decls; got {names}"
     )
+
+
+# --- B1-hole regression: C++ hex digit separator ---
+
+
+def test_b1_cpp_hex_digit_separator():
+    r"""C++14 digit separators also apply to hex/binary literals: ``0x1F'0000``,
+    ``0b1010'1010``. A hex letter (A-F) before the ``'`` must not trap char-
+    literal state. The B1 fix only handled decimal digits; hex letters fell
+    through to ``in_str='char'`` and swallowed the rest of the file."""
+    src = "int bar() {\n    long x = 0x1F'0000;\n    return x;\n}\nint baz() {\n    return 1;\n}\n"
+    ir = ap.parse_family_a(src, language="cpp")
+    names = [u.name for u in ap.all_units_flat(ir)]
+    assert "bar" in names and "baz" in names, (
+        f"hex digit separator must not drop subsequent decls; got {names}"
+    )

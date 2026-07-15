@@ -1049,6 +1049,12 @@ def _match_string_prefix(src: str, quote_idx: int) -> int | None:
     return 0
 
 
+#: Hex-digit characters (0-9, a-f, A-F). Used to detect C++14 digit separators
+#: in numeric literals (1'000, 0x1F'0000, 0b1010'1010) — a hex-digit ' hex-digit
+#: run is a separator, not a char literal.
+_HEXDIGITS = frozenset("0123456789abcdefABCDEF")
+
+
 @dataclass
 class _AStrState:
     """The mutable string/comment state for the Family-A char scan.
@@ -1164,10 +1170,11 @@ def _advance_string_comment(
         ):
             # Rust lifetime ('a / 'static) — don't enter string state.
             return i + 1, True
-        # C++14 digit separator (1'000'000): digit ' digit. Don't enter char-
-        # literal state — it would swallow the digits until the next ' and
-        # corrupt the brace scan, silently dropping subsequent declarations.
-        if prev.isdigit() and nxt1.isdigit():
+        # C++14 digit separator (1'000'000, 0x1F'0000, 0b1010'1010): a hex-digit
+        # ' hex-digit run. Don't enter char-literal state — it would swallow the
+        # digits until the next ' and corrupt the brace scan, silently dropping
+        # subsequent declarations. Covers decimal AND hex letters (A-F).
+        if prev in _HEXDIGITS and nxt1 in _HEXDIGITS:
             return i + 1, True
         st.in_str = "char"
         return i + 1, True
