@@ -341,3 +341,28 @@ def test_h3_fallback_not_for_python():
     assert _find_definition_span(src2, "greet", "python") is not None, (
         "async def must be found via the prefix match"
     )
+
+
+# --- Finding 3 (round 7): H3 hardening regressed typed-field detection ---
+
+
+def test_r7_h3_typed_field_detection_java_csharp():
+    """The H3 hardening's type/field branch stopped AT the type keyword
+    (Java patterns only enumerate ``void`` as a type, so ``int`` ended the
+    modifier-strip loop) — typed fields/properties like ``private final int
+    count`` regressed to false negatives. The old word-search found them.
+
+    A field's name is the LAST identifier before ``=`` / ``;`` / ``{``, not the
+    first after the modifier run (which is the type)."""
+    from capybase.adapters.structural import _find_definition_span
+    cases = [
+        ("class C {\n    private final int count = 0;\n}\n", "count", "java"),
+        ("class C {\n    public int Count { get; set; }\n}\n", "Count", "csharp"),
+        ("class C {\n    String name;\n}\n", "name", "java"),
+        ("class C {\n    protected List<Item> items;\n}\n", "items", "csharp"),
+    ]
+    for src, name, lang in cases:
+        span = _find_definition_span(src, name, lang)
+        assert span is not None, f"{lang} field/property {name!r} must be found"
+    # Negative: a parameter TYPE must still NOT match (the hardening's purpose).
+    assert _find_definition_span("class C {\n    public void process(StaticType x) { }\n}\n", "StaticType", "java") is None

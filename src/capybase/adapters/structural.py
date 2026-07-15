@@ -1645,7 +1645,15 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
         # literals containing the name.
         if use_fallback and stripped:
             toks = stripped.split()
-            if toks and toks[0] in decl_keywords:
+            # The line qualifies for the fallback if it begins with a known
+            # declaration/modifier keyword OR a likely type name (a Capitalized
+            # identifier — Java/C# convention for class types like String, List,
+            # Map). A bare field ``String name;`` has no modifier prefix.
+            qualifies = bool(toks) and (
+                toks[0] in decl_keywords
+                or re.fullmatch(r"[A-Z][A-Za-z0-9_]*", toks[0]) is not None
+            )
+            if qualifies:
                 # Method shape: name is the token immediately before '('.
                 paren_idx = next((k for k, t in enumerate(toks) if "(" in t), -1)
                 if paren_idx > 0:
@@ -1653,16 +1661,21 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
                     cand = cand.split("::")[-1].split(".")[-1].strip()
                     if cand == name:
                         return (i, min(i + 1, len(lines) - 1))
-                # Type/field shape (no paren): strip the modifier run, take the
-                # next identifier token before '=' / ';' / '{'.
-                j = 0
-                while j < len(toks) and toks[j] in decl_keywords:
-                    j += 1
-                if j < len(toks):
-                    cand = re.split(r"[<(=;{:]", toks[j], maxsplit=1)[0]
-                    cand = cand.split("::")[-1].split(".")[-1].strip()
-                    if cand == name:
-                        return (i, min(i + 1, len(lines) - 1))
+                # Type/field shape (no paren): the field NAME is the LAST
+                # identifier token before the terminator (= / ; / {), not the
+                # first token after the modifier run (which is the TYPE —
+                # int/String/List<...>). e.g. ``private final int count = 0``
+                # → name is ``count``, not ``int``.
+                decl_part = re.split(r"[=;{]", stripped, maxsplit=1)[0]
+                decl_toks = decl_part.split()
+                cand = ""
+                for t in decl_toks:
+                    head = re.split(r"[<(]", t, maxsplit=1)[0]
+                    head = head.split("::")[-1].split(".")[-1].strip()
+                    if head and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", head):
+                        cand = head  # keep the last identifier seen
+                if cand == name:
+                    return (i, min(i + 1, len(lines) - 1))
     return None
 
 
