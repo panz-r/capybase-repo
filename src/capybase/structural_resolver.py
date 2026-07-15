@@ -762,16 +762,53 @@ def _try_zealous_merge(base: str, current: str, replayed: str) -> str | None:
             i = cur_end
         elif in_cur:
             end, rep = cur_regions[i]
+            # Span-overlap guard: if a replayed region starts WITHIN (i, end)
+            # (this cur region spans past it), the jump to `end` would skip it.
+            # That's only safe if the skipped region's replacement is already
+            # covered by `rep` (the content we're emitting). Otherwise the
+            # replayed edit is silently dropped — decline.
+            for rs in range(i + 1, end):
+                if rs in rep_regions:
+                    re_, rrep = rep_regions[rs]
+                    if not _region_covered(rep, rs, re_, rrep, base_lines):
+                        return None
             out.extend(rep)
             i = end
         elif in_rep:
             end, rep = rep_regions[i]
+            # Symmetric guard: a current region starting within (i, end).
+            for cs in range(i + 1, end):
+                if cs in cur_regions:
+                    ce, crep = cur_regions[cs]
+                    if not _region_covered(rep, cs, ce, crep, base_lines):
+                        return None
             out.extend(rep)
             i = end
         else:
             out.append(base_lines[i])
             i += 1
     return "\n".join(out)
+
+
+def _region_covered(
+    emitted: list[str], r_start: int, r_end: int, r_replacement: list[str],
+    base_lines: list[str],
+) -> bool:
+    """True if the other side's region replacement is already covered by ``emitted``.
+
+    When one side's region spans past the other's start, the walk emits the
+    spanning side and jumps past the other. This is only safe if the jumped-past
+    region's edit is redundant — its replacement lines already appear in the
+    emitted content (e.g. both sides agreed on part of the change). If the
+    jumped-past edit differs, it would be silently dropped.
+    """
+    # The region replaces base[r_start:r_end] with r_replacement. The spanning
+    # side's `emitted` lines cover the whole span. If r_replacement is a suffix
+    # of `emitted` (the agreed tail), it's covered; otherwise it's a distinct
+    # edit that would be dropped.
+    if len(r_replacement) > len(emitted):
+        return False
+    return emitted[-len(r_replacement):] == r_replacement if r_replacement else True
 
 
 def _change_regions(

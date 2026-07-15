@@ -885,3 +885,28 @@ def test_r9_agreed_rename_comment_only_not_declined():
     assert result2 is None or result2.text is None, (
         "string-value divergent agreed rename must still decline"
     )
+
+
+# --- D.1 (round 10): zealous_merge must not silently drop a side's edit ---
+
+
+def test_r10_zealous_merge_span_intersection_declines():
+    r"""zealous_merge's walk only detected overlap when two regions START at the
+    same base line. When one side's region SPANS past the other's start (a
+    replace+delete coalesced into one region covering base lines 1-2, while the
+    other side's region starts at line 2), zealous emitted the first side's
+    region and jumped past the other's — silently dropping the second side's edit.
+
+    Add a span-intersection check before the walk: if any cur region's base-span
+    intersects any rep region's, decline (the conflict escalates to the LLM)."""
+    base = "line1\nline2\nline3"
+    cur = "line1\nLINE2"            # current: replace line2, DELETE line3 (one region spanning 1-3)
+    rep = "line1\nline2\nLINE3"    # replayed: replace line3 (region at line 2)
+    result = resolve_structurally(_unit(base, cur, rep))
+    # zealous must NOT silently drop replayed's LINE3 edit. Either decline, or
+    # produce output containing BOTH sides' edits.
+    if result is None or result.text is None:
+        return  # declined — correct
+    assert "LINE3" in result.text, (
+        f"zealous_merge silently dropped replayed's edit (span intersection missed);\n{result.text!r}"
+    )
