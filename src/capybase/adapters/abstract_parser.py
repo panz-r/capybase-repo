@@ -549,16 +549,25 @@ _B_EXPORT_RE = re.compile(r"^(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)")
 _B_PUBLIC_NAME = re.compile(r"^([A-Za-z][A-Za-z0-9_]*)\s*=")  # module-level const
 
 
+def _collect_imports(units: list[StructuralUnit]) -> list[str]:
+    """Names of the MODULE_STMT import units (``<import>`` sentinel skipped).
+
+    Shared by Family A and B: both detect imports as MODULE_STMT units during
+    the scan; only the export logic differs.
+    """
+    return [
+        u.name for u in units
+        if u.kind == KIND_MODULE_STMT and u.name and u.name != "<import>"
+    ]
+
+
 def _extract_imports_exports_b(source: str, units: list[StructuralUnit]) -> tuple[list[str], list[str]]:
     """Collect the import and export surfaces for a Family-B file.
 
     Imports: the names from ``import``/``from...import`` lines (already detected
     as MODULE_STMT units — extract their names). Exports: top-level public
     function/class/constant names (not ``_``-prefixed)."""
-    imports: list[str] = []
-    for u in units:
-        if u.kind == KIND_MODULE_STMT and u.name and u.name != "<import>":
-            imports.append(u.name)
+    imports = _collect_imports(units)
     exports: list[str] = []
     for u in units:
         if u.kind in (KIND_FUNCTION, KIND_CLASS) and u.name and not u.name.startswith("_"):
@@ -573,10 +582,7 @@ def _extract_imports_exports_a(source: str, units: list[StructuralUnit]) -> tupl
     units. Exports: top-level public names — ``pub``/``export``/``public``
     functions/classes/fields (Rust/JS/Java), or any non-private top-level name.
     """
-    imports: list[str] = []
-    for u in units:
-        if u.kind == KIND_MODULE_STMT and u.name and u.name != "<import>":
-            imports.append(u.name)
+    imports = _collect_imports(units)
     exports: list[str] = []
     for u in units:
         if u.kind in (KIND_FUNCTION, KIND_CLASS, KIND_FIELD) and u.name:
@@ -1467,6 +1473,27 @@ def _close_a_unit(
         units.append(su)
 
 
+def _last_balanced_paren_open(joined: str) -> int:
+    """Index of the ``(`` opening the last balanced ``(...)`` group, or -1.
+
+    Walks backwards from the end: the final param-list ``(...)`` of a signature
+    is the last group whose parens balance. Returns -1 when there is no balanced
+    paren group. Shared by the Go receiver/type and the keywordless-method name
+    recovery (both need "the param list at the end of the declaration").
+    """
+    depth_p = 0
+    for idx in range(len(joined) - 1, -1, -1):
+        c = joined[idx]
+        if c == ")":
+            depth_p += 1
+        elif c == "(":
+            if depth_p > 0:
+                depth_p -= 1
+                if depth_p == 0:
+                    return idx
+    return -1
+
+
 def _go_declaration_name(
     toks: list[str], last_kw_idx: int, last_kw: str,
 ) -> tuple[str | None, bool]:
@@ -1493,18 +1520,7 @@ def _go_declaration_name(
     if last_kw in ("func",):
         joined = " ".join(toks)
         # Find the last balanced ``(...)`` run ending the buffer.
-        paren_open = -1
-        depth_p = 0
-        for idx in range(len(joined) - 1, -1, -1):
-            c = joined[idx]
-            if c == ")":
-                depth_p += 1
-            elif c == "(":
-                if depth_p > 0:
-                    depth_p -= 1
-                    if depth_p == 0:
-                        paren_open = idx
-                        break
+        paren_open = _last_balanced_paren_open(joined)
         # Receiver shape: ``func ( recv ) Name (params)`` — TWO paren groups.
         # The non-receiver ``func Name(params)`` has ONE. Detect the receiver by
         # checking whether the token right after ``func`` is ``(``.
@@ -1783,23 +1799,11 @@ def _classify_keywordless_method(
     # + ``()`` depending on spacing. Find the last ``(`` to locate the param list.
     # Re-join to scan the raw shape (tokens were split on whitespace).
     joined = " ".join(toks)
+    # Must end in ``)`` for a signature (params before ``{``).
+    if not joined.endswith(")"):
+        return None
     # Find the parameter list: the last ``(`` ... ``)`` run ending the buffer.
-    paren_open = -1
-    depth_p = 0
-    for idx in range(len(joined) - 1, -1, -1):
-        c = joined[idx]
-        if c == ")":
-            depth_p += 1
-            if paren_open < 0:
-                # Must end in ``)`` for a signature (params before ``{``).
-                if idx != len(joined) - 1:
-                    return None
-        elif c == "(":
-            if depth_p > 0:
-                depth_p -= 1
-                if depth_p == 0:
-                    paren_open = idx
-                    break
+    paren_open = _last_balanced_paren_open(joined)
     if paren_open < 0:
         return None  # no balanced param list → not a signature
     # The name is the identifier immediately before ``(``.
