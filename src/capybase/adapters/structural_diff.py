@@ -153,30 +153,34 @@ class StructuralDiff3Way:
 # ---------------------------------------------------------------------------
 
 
-def _normalize_body_ws_only(text: str) -> str:
+def _normalize_body_ws_only(text: str, *, lang: str | None = None) -> str:
     """Whitespace-collapse WITHOUT blanking string literals or stripping comments.
 
     Used by :func:`_bodies_differ` for change detection: a string-value change
     (``return 'hi'`` vs ``return 'bye'``) IS a real body change for merge
     purposes, so we preserve string content. Only whitespace is normalized so
     reformatting doesn't register as a change.
+
+    ``lang`` selects which comment-only lines are stripped (``//`` for Family-A,
+    ``#`` for Python/Ruby) — otherwise a Rust ``#[cfg(test)]`` or C ``#define``
+    line is wrongly dropped as a Python comment, masking a real change.
     """
     if not text:
         return ""
     # Strip comment-only lines (they don't carry merge-relevant content), then
     # collapse whitespace — but keep string literals intact.
-    kept = [ln for ln in text.split("\n") if _has_code_content(ln)]
+    kept = [ln for ln in text.split("\n") if _has_code_content(ln, lang=lang)]
     return " ".join(" ".join(kept).split())
 
 
-def _bodies_differ(a: StructuralUnit, b: StructuralUnit) -> bool:
+def _bodies_differ(a: StructuralUnit, b: StructuralUnit, *, lang: str | None = None) -> bool:
     """True if two units' bodies differ.
 
     Uses a whitespace-normalized comparison that preserves string-literal
     content (unlike the body fingerprint, which blanks strings for rename
     matching). This ensures a string-value edit registers as a real change.
     """
-    return _normalize_body_ws_only(a.body) != _normalize_body_ws_only(b.body)
+    return _normalize_body_ws_only(a.body, lang=lang) != _normalize_body_ws_only(b.body, lang=lang)
 
 
 # ---------------------------------------------------------------------------
@@ -253,13 +257,13 @@ def compute_structural_diff_3way(
         b = base_by_id.get(ident)
         l = left_by_id.get(ident)
         r = right_by_id.get(ident)
-        kind = _classify_alignment(b, l, r)
+        kind = _classify_alignment(b, l, r, lang=language)
         aligned.append(AlignedUnit(base=b, left=l, right=r, change_kind=kind))
 
     # Rename detection: left or right units not matched by identity but with a
     # matching body fingerprint to a base unit. This is a secondary pass — the
     # identity-matched alignments are already done; here we pair unmatched units.
-    _detect_renames(base_units, left_units, right_units, aligned)
+    _detect_renames(base_units, left_units, right_units, aligned, lang=language)
 
     return StructuralDiff3Way(
         base_units=base_units,
@@ -275,6 +279,8 @@ def _classify_alignment(
     base: StructuralUnit | None,
     left: StructuralUnit | None,
     right: StructuralUnit | None,
+    *,
+    lang: str | None = None,
 ) -> str:
     """Classify a 3-way alignment into a change-kind label."""
     has_b = base is not None
@@ -282,8 +288,8 @@ def _classify_alignment(
     has_r = right is not None
 
     if has_b and has_l and has_r:
-        l_changed = _bodies_differ(base, left)
-        r_changed = _bodies_differ(base, right)
+        l_changed = _bodies_differ(base, left, lang=lang)
+        r_changed = _bodies_differ(base, right, lang=lang)
         if l_changed and r_changed:
             return _CHANGE_KIND_MODIFIED_BOTH
         if l_changed:
@@ -294,9 +300,9 @@ def _classify_alignment(
     if not has_b and has_l and has_r:
         # Both sides added a unit of this name. Sub-classify: identical bodies
         # = an agreed addition (not a conflict); differing bodies = a genuine
-        # conflict ( previously both were ``added_both`` and neither was
-        # flagged as a structural conflict, silently missing the clash).
-        if _bodies_differ(left, right):
+        # conflict (previously both were ``added_both`` and neither was flagged
+        # as a structural conflict, silently missing the clash).
+        if _bodies_differ(left, right, lang=lang):
             return _CHANGE_KIND_ADDED_BOTH_CONFLICT
         return _CHANGE_KIND_ADDED_BOTH
     if not has_b and has_l and not has_r:
@@ -307,10 +313,10 @@ def _classify_alignment(
         return _CHANGE_KIND_DELETED_BOTH
     if has_b and not has_l and has_r:
         # Deleted by left, present in right (and base) — right kept it.
-        return _CHANGE_KIND_DELETED_LEFT if _bodies_differ(base, right) else _CHANGE_KIND_UNCHANGED
+        return _CHANGE_KIND_DELETED_LEFT if _bodies_differ(base, right, lang=lang) else _CHANGE_KIND_UNCHANGED
     if has_b and has_l and not has_r:
         # Deleted by right, present in left (and base) — left kept it.
-        return _CHANGE_KIND_DELETED_RIGHT if _bodies_differ(base, left) else _CHANGE_KIND_UNCHANGED
+        return _CHANGE_KIND_DELETED_RIGHT if _bodies_differ(base, left, lang=lang) else _CHANGE_KIND_UNCHANGED
     return _CHANGE_KIND_UNCHANGED
 
 
@@ -324,6 +330,8 @@ def _detect_renames(
     left_units: list[StructuralUnit],
     right_units: list[StructuralUnit],
     aligned: list[AlignedUnit],
+    *,
+    lang: str | None = None,
 ) -> None:
     """Detect renamed units via body-fingerprint matching and re-pair them.
 
@@ -392,7 +400,7 @@ def _detect_renames(
         # not in _CONFLICT_CHANGE_KINDS), telling the LLM there's nothing to
         # resolve. In that case, skip the pairing and leave the
         # added_both_conflict classification the identity pass already produced.
-        if other_match is not None and _bodies_differ(side_unit, other_match):
+        if other_match is not None and _bodies_differ(side_unit, other_match, lang=lang):
             return
         # Build the RENAMED entry.
         if side == "left":

@@ -815,3 +815,23 @@ def test_r7_detect_renames_2way_lang_rust_comment():
     assert ("function", "fetchData") in ren_rust, (
         f"with lang=rust the rename must pair despite the // comment; got {ren_rust}"
     )
+
+
+# --- A-2 (round 7): _normalize_body_ws_only must be language-aware ---
+
+
+def test_r7_bodies_differ_rust_attribute_not_dropped():
+    """_bodies_differ (used by the 3-way diff's change detection) normalizes
+    bodies via _normalize_body_ws_only, which called _has_code_content with no
+    lang — defaulting to Python. A Rust ``#[cfg(test)]`` / ``#[derive(...)]``
+    line (or a C ``#define``) was dropped as a Python comment, so adding/
+    removing it was reported as UNCHANGED (a real change masked)."""
+    from capybase.adapters.abstract_parser import StructuralUnit
+    from capybase.adapters.structural_diff import _bodies_differ
+    a = StructuralUnit(kind="function", name="f", span=(0, 3),
+                       body="fn f() {\n    #[cfg(test)]\n    let x = 1;\n}")
+    b = StructuralUnit(kind="function", name="f", span=(0, 2),
+                       body="fn f() {\n    let x = 1;\n}")
+    assert _bodies_differ(a, b, lang="rust") is True, (
+        "adding/removing a Rust #[cfg(test)] attribute is a real body change"
+    )
