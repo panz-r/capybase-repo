@@ -270,3 +270,34 @@ def test_alias_adapter_matches_canonical_behavior():
         assert a.definition_patterns == c.definition_patterns, (
             f"{alias} definition_patterns != {canon}"
         )
+
+
+# --- H3 regression: multi-modifier method signatures ---
+
+
+def test_h3_find_definition_span_java_multi_modifier():
+    """Java/C#/C++ method signatures often stack modifiers before the name:
+    ``public static void foo()``, ``protected abstract int compute()``. The
+    definition patterns enumerate single-keyword prefixes (``void {name}``),
+    so a modifier stack defeats the ``startswith`` match and the symbol is not
+    found — silently breaking cross-file symbol resolution for the most common
+    Java/C#/C++ signatures."""
+    from capybase.adapters.structural import _find_definition_span
+    # Java: public static void foo() — must find foo.
+    src = "class C {\n    public static void foo() {\n        return;\n    }\n}\n"
+    span = _find_definition_span(src, "foo", "java")
+    assert span is not None, "Java 'public static void foo()' must be found"
+    assert span[0] == 1, f"foo is on line 1; got span={span}"
+    # C#: public static int Compute() — must find Compute.
+    src_cs = "class C {\n    public static int Compute() { return 0; }\n}\n"
+    span_cs = _find_definition_span(src_cs, "Compute", "csharp")
+    assert span_cs is not None, "C# 'public static int Compute()' must be found"
+    # C++: virtual void execute() — must find execute.
+    src_cpp = "class C {\n    virtual void execute() { }\n}\n"
+    span_cpp = _find_definition_span(src_cpp, "execute", "cpp")
+    assert span_cpp is not None, "C++ 'virtual void execute()' must be found"
+    # Regression: single-modifier signatures still work.
+    src_simple = "class C {\n    void bar() { }\n}\n"
+    assert _find_definition_span(src_simple, "bar", "java") is not None
+    # Regression: non-matching name must NOT falsely match.
+    assert _find_definition_span(src, "nonexistent", "java") is None

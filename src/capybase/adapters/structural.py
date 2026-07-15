@@ -15,6 +15,7 @@ structural signal available" and fall back to the line-window behavior.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -1594,16 +1595,52 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
     Returns the (start, end) row of the first line that looks like a definition
     of ``name``. The keyword patterns (``def name``/``class name`` for Python,
     ``fn name``/``struct name``/... for Rust) come from the language adapter
-    (#5) so adding a language is a new adapter, not an edit here.
+    so adding a language is a new adapter, not an edit here.
+
+    For brace languages whose patterns enumerate single-keyword prefixes
+    (Java/C#/C++: ``void {name}``, ``public {name}``, ...), a stacked-modifier
+    signature (``public static void foo()``) defeats the ``startswith`` match.
+    A fallback recognizes such lines: when the line starts with a known
+    declaration/modifier keyword AND ``name`` appears as a word-bounded token
+    (and isn't a call — no ``.`` before it), it counts as a definition.
     """
     from capybase.adapters.language import adapter_for
-    pats = tuple(pat.replace("{name}", name) for pat in adapter_for(language).definition_patterns())
+    adapter = adapter_for(language)
+    pats = tuple(pat.replace("{name}", name) for pat in adapter.definition_patterns())
     lines = source.split("\n")
+    # The keyword set for the modifier-stack fallback: the first token of each
+    # pattern (everything before the space + name), PLUS common declaration
+    # modifiers that stack before the type keyword in brace languages
+    # (``public static void``, ``virtual inline int``, ``abstract final`` ...).
+    # The patterns enumerate type keywords but not these modifiers, so a
+    # stacked-modifier signature would otherwise defeat the match.
+    _STACK_MODIFIERS = frozenset({
+        # visibility / access
+        "public", "private", "protected", "internal",
+        # storage / inheritance
+        "static", "final", "abstract", "virtual", "override", "inline",
+        "extern", "constexpr", "const", "synchronized", "async", "unsafe",
+    })
+    decl_keywords = frozenset(p.split(" ", 1)[0] for p in pats if " " in p) | _STACK_MODIFIERS
+    name_word_re = re.compile(rf"\b{re.escape(name)}\b")
     for i, line in enumerate(lines):
         stripped = line.lstrip()
+        # Exact prefix match (the common case for Python/Rust/Go/JS).
         for pat in pats:
             if stripped.startswith(pat):
                 return (i, min(i + 1, len(lines) - 1))
+        # Fallback: stacked-modifier signature (Java/C#/C++). The line must
+        # start with a declaration/modifier keyword and contain ``name`` as a
+        # word-bounded token. Reject calls (``obj.name(``) and qualified refs.
+        if decl_keywords and stripped:
+            first_tok = stripped.split("(", 1)[0].split(None, 1)[0] if "(" in stripped else stripped.split(None, 1)[0] if stripped.split() else ""
+            if first_tok in decl_keywords:
+                m = name_word_re.search(stripped)
+                if m is not None:
+                    # Not a call/qualified ref: name not preceded by '.'.
+                    before = stripped[: m.start()]
+                    if not before.endswith("."):
+                        return (i, min(i + 1, len(lines) - 1))
     return None
 
 
