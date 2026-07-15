@@ -3124,3 +3124,27 @@ def test_r12_filter_code_lines_string_before_comment():
     assert unit_body_fingerprint(b1, lang="rust") == unit_body_fingerprint(b2, lang="rust"), (
         "string-value diff must not break fingerprint stability when a comment follows"
     )
+
+
+# --- D1 (round 13): _strip_inline_comment index-shift (same bug class) ---
+
+
+def test_r13_strip_inline_comment_string_length_preserving():
+    r"""_strip_inline_comment blanks strings before finding the comment marker,
+    then slices the ORIGINAL line at the blanked-line index. A fixed-length
+    replacement ('_') shifts the index when the string length differs, truncating
+    the line mid-string and corrupting the fingerprint. This is the same bug
+    class round-12 fixed in _filter_code_lines. Use a length-preserving blank."""
+    from capybase.adapters.abstract_parser import _strip_inline_comment, unit_body_fingerprint
+    # A long string before an inline // comment.
+    out = _strip_inline_comment('let x = "LONGSTRING"; // comment', lang="rust")
+    assert out.startswith('let x = "LONGSTRING"'), (
+        f"string must be preserved (not truncated mid-string); got {out!r}"
+    )
+    assert "//" not in out, f"inline comment must be stripped; got {out!r}"
+    # End-to-end: fingerprint rename-stable when base has a long string + comment.
+    body_foo = 'fn foo() {\n    let msg = "Hello welcome to the system"; // greet\n    println!(msg);\n}\n'
+    body_bar = 'fn bar() {\n    let msg = "Hello welcome to the system";\n    println!(msg);\n}\n'
+    assert unit_body_fingerprint(body_foo, lang="rust") == unit_body_fingerprint(body_bar, lang="rust"), (
+        "rename with a long-string + inline-comment base must be fingerprint-stable"
+    )

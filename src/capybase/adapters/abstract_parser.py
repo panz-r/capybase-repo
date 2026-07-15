@@ -378,8 +378,11 @@ def _strip_inline_comment(line: str, *, lang: str | None = None) -> str:
 
     A marker inside a string literal is never treated as a comment start: string
     literals are blanked first, then the marker is searched in the blanked text.
+    The blanking is LENGTH-PRESERVING so the marker index in the blanked line
+    aligns with the original — a fixed-length replacement would shift the index
+    past any variable-length string and slice the original at the wrong spot.
     """
-    blanked = _STRING_LIT_RE.sub("'_'", line)
+    blanked = _STRING_LIT_RE.sub(lambda m: "_" * len(m.group(0)), line)
     marker = "//" if _lang_is_family_a(lang) else "#"
     idx = blanked.find(marker)
     if idx >= 0:
@@ -792,7 +795,6 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
             open_triple = None
             continue
         if _is_blank_or_comment(raw, language):
-            continue
             continue
 
         indent = _indent_width(raw)

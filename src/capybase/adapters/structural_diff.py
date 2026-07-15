@@ -417,9 +417,6 @@ def _detect_renames(
         # The base unit must be deleted (not present under its original name).
         if base_match.identity not in deleted_base_ids:
             return
-        # The base unit must be deleted (not present under its original name).
-        if base_match.identity not in deleted_base_ids:
-            return
         # Find the other side's entry for this new name (agreed rename?).
         other = left_units if side == "right" else right_units
         other_match = next((u for u in other if u.identity == side_unit.identity), None)
