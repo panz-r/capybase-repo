@@ -262,7 +262,7 @@ def unit_body_fingerprint(body: str, *, lang: str | None = None) -> str:
     # Count MEANINGFUL lines (non-blank, non-comment) so adding a comment line
     # doesn't perturb the digest — the fingerprint is stable under comment
     # additions (the AstPreservationValidator relies on this).
-    meaningful = sum(1 for ln in lines[1:] if _has_code_content(ln, lang=lang))
+    meaningful = len(_filter_code_lines(lines[1:], lang=lang))
     if not norm:
         return f"l{meaningful}"
     digest = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
@@ -293,6 +293,10 @@ def _has_code_content(line: str, *, lang: str | None = None) -> bool:
     ``lang`` selects the comment marker: ``//`` for Family-A brace languages,
     ``#`` for Python/Ruby. A Python ``// count`` (floor division) is NOT a
     comment; a Rust ``#[attr]`` is NOT a comment. Defaults to Python.
+
+    NOTE: this is line-local (no block-comment state). Callers that need to
+    recognize multi-line ``/* ... */`` interior lines as comments must use
+    :func:`_filter_code_lines` instead.
     """
     if not line.strip():
         return False
@@ -303,6 +307,38 @@ def _has_code_content(line: str, *, lang: str | None = None) -> bool:
         if _B_COMMENT_LINE_RE.match(line):
             return False
     return True
+
+
+def _filter_code_lines(lines: list[str], *, lang: str | None = None) -> list[str]:
+    """Return the lines that carry actual code, with multi-line block-comment state.
+
+    A line-local ``_has_code_content`` can't recognize interior lines of a
+    multi-line ``/* ... */`` block comment (the `` * continuation`` Javadoc/
+    Rustdoc style) — they don't start with ``/*`` or ``*/``. This helper tracks
+    ``in_block`` across lines so the whole comment region is stripped. Used by
+    the body-normalization paths (normalize_body, unit_body_fingerprint) so a
+    rename editing the block-comment interior stays comment-stable.
+
+    Python/Ruby (Family-B) have no block comments; this falls back to the
+    line-local check for them.
+    """
+    if not _lang_is_family_a(lang):
+        return [ln for ln in lines if _has_code_content(ln, lang=lang)]
+    out: list[str] = []
+    in_block = False
+    for ln in lines:
+        stripped = ln.strip()
+        if in_block:
+            if "*/" in stripped:
+                in_block = False
+            continue  # interior or closing line — not code
+        if stripped.startswith("/*"):
+            if "*/" not in stripped[2:]:
+                in_block = True
+            continue  # opening (or single-line /* */) — not code
+        if _has_code_content(ln, lang=lang):
+            out.append(ln)
+    return out
 
 
 def _strip_inline_comment(line: str, *, lang: str | None = None) -> str:
@@ -356,12 +392,12 @@ def normalize_body(text: str, *, lang: str | None = None) -> str:
     """
     if not text:
         return ""
-    # Drop pure-comment lines and strip inline comments, then blank string lits.
-    kept = []
-    for ln in text.split("\n"):
-        if not _has_code_content(ln, lang=lang):
-            continue
-        kept.append(_strip_inline_comment(ln, lang=lang))
+    # Drop pure-comment lines (with multi-line block-comment state) and strip
+    # inline comments, then blank string lits.
+    kept = [
+        _strip_inline_comment(ln, lang=lang)
+        for ln in _filter_code_lines(text.split("\n"), lang=lang)
+    ]
     joined = "\n".join(kept)
     blanked = _STRING_LIT_RE.sub("'_'", joined)
     return " ".join(blanked.split())

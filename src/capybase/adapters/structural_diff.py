@@ -167,9 +167,10 @@ def _normalize_body_ws_only(text: str, *, lang: str | None = None) -> str:
     """
     if not text:
         return ""
-    # Strip comment-only lines (they don't carry merge-relevant content), then
+    # Strip comment-only lines (with multi-line block-comment state), then
     # collapse whitespace — but keep string literals intact.
-    kept = [ln for ln in text.split("\n") if _has_code_content(ln, lang=lang)]
+    from capybase.adapters.abstract_parser import _filter_code_lines
+    kept = _filter_code_lines(text.split("\n"), lang=lang)
     return " ".join(" ".join(kept).split())
 
 

@@ -3021,3 +3021,40 @@ def test_a1_rust_byte_char_literal_not_digit_separator():
     src2 = "int bar() {\n    long x = 0x1F'0000;\n    return x;\n}\nint baz() { return 1; }\n"
     ir2 = ap.parse_family_a(src2, language="cpp")
     assert "bar" in [u.name for u in ap.all_units_flat(ir2)] and "baz" in [u.name for u in ap.all_units_flat(ir2)]
+
+
+# --- B.1 (round 10): multi-line block-comment interior must be stripped ---
+
+
+def test_b1_multiline_block_comment_interior_stripped():
+    r"""Interior lines of a multi-line ``/* ... */`` block comment (the Javadoc/
+    Rustdoc `` * continuation`` style) must be recognized as comment content and
+    stripped from fingerprints, so a rename that edits the comment interior still
+    pairs (comment-stability). Previously _has_code_content was line-based with
+    no block-comment state, so `` * Version A.`` leaked into the fingerprint as
+    code — breaking rename pairing and the AstPreservationValidator invariant."""
+    from capybase.adapters.abstract_parser import unit_body_fingerprint
+    base = (
+        "fn fetch() {\n"
+        "    let x = 1;\n"
+        "    /*\n"
+        "     * Current version.\n"
+        "     */\n"
+        "    return x;\n"
+        "}\n"
+    )
+    side = (
+        "fn fetch_data() {\n"
+        "    let x = 1;\n"
+        "    /*\n"
+        "     * Replayed version.\n"
+        "     */\n"
+        "    return x;\n"
+        "}\n"
+    )
+    fp_b = unit_body_fingerprint(base, lang="rust")
+    fp_s = unit_body_fingerprint(side, lang="rust")
+    assert fp_b == fp_s, (
+        f"a rename editing only the block-comment interior must be comment-stable; "
+        f"base={fp_b!r} side={fp_s!r}"
+    )
