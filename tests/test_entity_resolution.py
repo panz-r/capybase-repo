@@ -967,3 +967,24 @@ def test_r11_zealous_span_intersection_coincidental_tail():
     assert result is None or result.text is None, (
         f"coincidental-tail span intersection must decline;\n{result.text!r}"
     )
+
+
+# --- Finding 2-diff (round 12): both-sides rename to DIFFERENT names ---
+
+
+def test_r12_both_sides_rename_different_names_is_conflict():
+    r"""When base has ``foo`` and both sides rename it but to DIFFERENT names
+    (left: foo->bar, right: foo->baz), that's a genuine rename conflict — but
+    the 3-way diff paired left's bar with foo (consuming it), leaving right's
+    baz as a plain added_right with no conflict flag. The resolver correctly
+    declines this; the diff should surface it as a conflict too."""
+    from capybase.adapters.structural_diff import compute_structural_diff_3way
+    base = "def foo():\n    return 1\n"
+    left = "def bar():\n    return 1\n"    # rename foo->bar
+    right = "def baz():\n    return 1\n"   # rename foo->baz (DIFFERENT name)
+    diff = compute_structural_diff_3way(base, left, right, language="python")
+    assert diff is not None
+    assert len(diff.structural_conflicts) >= 1, (
+        f"both-sides rename to different names must be a conflict; "
+        f"kinds={[a.change_kind for a in diff.aligned]}, conflicts={len(diff.structural_conflicts)}"
+    )

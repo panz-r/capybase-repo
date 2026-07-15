@@ -379,6 +379,11 @@ def _detect_renames(
     consumed_side_ids: set = set()
     new_entries: list[AlignedUnit] = []
     indices_to_drop: set[int] = set()
+    # Track which base each side renamed, and to what new identity — so a
+    # both-sides rename to DIFFERENT names (left foo->bar, right foo->baz) can
+    # be surfaced as a conflict rather than silently leaving the second as a
+    # plain addition.
+    rename_by_base: dict = {}  # base_id -> (new_identity, side_unit, side)
 
     def _try_pair_side(side_unit: StructuralUnit, side: str) -> None:
         if side_unit.identity in consumed_side_ids:
@@ -386,7 +391,31 @@ def _detect_renames(
         if not _fingerprint_has_content(side_unit.fingerprint):
             return
         base_match = base_by_fp.get(side_unit.fingerprint)
-        if base_match is None or base_match.identity in consumed_base_ids:
+        if base_match is None:
+            return
+        # If this base was already consumed by the OTHER side's rename, check
+        # whether it's a conflict (same base, different new name) before bailing.
+        if base_match.identity in consumed_base_ids:
+            prior = rename_by_base.get(base_match.identity)
+            if prior is not None and prior[0] != side_unit.identity:
+                # Both sides renamed the same base to DIFFERENT names — a
+                # genuine rename conflict. Record it so structural_conflicts
+                # surfaces it. Don't consume the side unit (leave it as an
+                # added entry too, so both new names survive in required_units).
+                if side == "left":
+                    conflict = AlignedUnit(
+                        base=base_match, left=side_unit, right=prior[1],
+                        change_kind=_CHANGE_KIND_ADDED_BOTH_CONFLICT,
+                    )
+                else:
+                    conflict = AlignedUnit(
+                        base=base_match, left=prior[1], right=side_unit,
+                        change_kind=_CHANGE_KIND_ADDED_BOTH_CONFLICT,
+                    )
+                new_entries.append(conflict)
+            return
+        # The base unit must be deleted (not present under its original name).
+        if base_match.identity not in deleted_base_ids:
             return
         # The base unit must be deleted (not present under its original name).
         if base_match.identity not in deleted_base_ids:
@@ -418,6 +447,7 @@ def _detect_renames(
             ))
         consumed_base_ids.add(base_match.identity)
         consumed_side_ids.add(side_unit.identity)
+        rename_by_base[base_match.identity] = (side_unit.identity, side_unit, side)
 
     # Mark the stale added/deleted alignment indices for removal as we pair.
     # First, index alignments by their side identities for quick lookup.
