@@ -1577,6 +1577,66 @@ def _go_declaration_name(
     return None, False
 
 
+def _is_initializer_literal(toks: list[str]) -> bool:
+    """True when the buffer is a braced object/struct-literal initializer.
+
+    ``const P = Point { ... }``, ``let m = Map { ... }``, ``const cfg = { ... }``
+    — a field keyword + ``=`` whose token after ``=`` is an object/struct-literal
+    start (a bare ``{`` or a capitalized type name). Such a ``{`` is depth-only
+    (NOT a scope-opening declaration); the field is emitted later at the ``;``.
+
+    Function/class/arrow expressions assigned to a binding
+    (``const f = function() {`` / ``= class {`` / ``= () => {``) are NOT
+    initializers — the ``{`` IS a real declaration brace for the inner
+    function/class, so those fall through to normal classification.
+    """
+    if "=" not in toks or not any(t in _A_FIELD_KEYWORDS for t in toks):
+        return False
+    eq_idx = toks.index("=")
+    after_eq = toks[eq_idx + 1 :] if eq_idx + 1 < len(toks) else []
+    first_after = after_eq[0] if after_eq else ""
+    # ``= function`` / ``= class`` / ``= ( ... ) =>`` → a function/class/arrow
+    # expression; let it classify. Anything else is an object/struct literal.
+    return not (
+        first_after.startswith("function")
+        or first_after.startswith("class")
+        or first_after.startswith("(")
+    )
+
+
+def _recover_arrow_binding(toks: list[str], stack: list[_OpenAUnit]) -> tuple[str, str] | None:
+    """Recover the binding name for a JS/TS arrow function with a block body.
+
+    ``const f = (...) => {`` / ``const f = () => {`` — the buffer ends in ``=>``
+    with a binding name before ``=``, no declaration keyword present. Returns
+    ``(kind, name)`` where kind is METHOD when nested in a class/container,
+    else FUNCTION; or ``None`` when the shape isn't an arrow binding.
+
+    ``=>`` is treated as the pseudo-keyword position; the name is recovered via
+    the field-keyword-before-name rule (so a reassignment ``x = (...) => {``
+    without a field keyword is rejected).
+    """
+    if not toks or toks[-1] != "=>" or "=" not in toks:
+        return None
+    eq_idx = toks.index("=")
+    if eq_idx < 1:
+        return None
+    cand = toks[eq_idx - 1]
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
+        return None
+    # Require a field keyword (or export modifier) before the name so it's a
+    # binding declaration, not a reassignment.
+    for j in range(eq_idx - 2, -1, -1):
+        if toks[j] in _A_FIELD_KEYWORDS or toks[j] in ("export", "pub", "public"):
+            kind = KIND_METHOD if any(
+                (u.kind == KIND_CLASS or u.container_only) for u in reversed(stack)
+            ) else KIND_FUNCTION
+            return (kind, cand)
+        if toks[j] in (";", "}", "{"):
+            break
+    return None
+
+
 def _classify_a_brace(
     buf: str, stack: list[_OpenAUnit], language: str | None,
     brace_depth: int = 0,
@@ -1610,62 +1670,15 @@ def _classify_a_brace(
     toks = b.split()
     if not toks:
         return None
-    # an initializer brace — ``const P = Point { ... }``, ``let m = Map { ... }``,
-    # ``const cfg = { ... }`` — is an object/struct literal inside a field declaration,
-    # NOT a scope-opening declaration. A buffer containing a field keyword + ``=`` whose
-    # token after ``=`` is an object/struct literal start (a bare ``{`` or a capitalized
-    # type name) is a braced initializer; return None so it's treated as depth-only
-    # (the field is emitted at the terminating ``;``).
-    #
-    # this is NARROWER than the original  (which fired for any
-    # ``field-kw + =``). The old guard also rejected function/class/arrow
-    # expressions assigned to a binding — ``const f = function() { ... }``,
-    # ``const C = class { ... }``, ``const h = () => { ... }`` — silently dropping
-    # the whole declaration. Those must fall through to normal classification (the
-    # ``{`` IS a real declaration brace for the inner function/class). So the guard
-    # only fires when the token after ``=`` is NOT a function/class keyword and NOT
-    # a ``(`` (arrow function), i.e. it's genuinely an object/struct literal.
-    #
-    # Note: tokens are whitespace-split, so ``function()`` may be a single token
-    # (no space) — match by prefix, not equality.
-    if "=" in toks and any(t in _A_FIELD_KEYWORDS for t in toks):
-        eq_idx = toks.index("=")
-        after_eq = toks[eq_idx + 1 :] if eq_idx + 1 < len(toks) else []
-        first_after = after_eq[0] if after_eq else ""
-        # ``= function`` / ``= function()`` / ``= class`` → a function/class
-        # EXPRESSION; let it classify. ``= ( ... ) =>`` → arrow function; let it
-        # classify (``= (`` is the tell — the ``=>`` isn't in the buffer at ``{``).
-        if (
-            first_after.startswith("function")
-            or first_after.startswith("class")
-            or first_after.startswith("(")
-        ):
-            pass  # function/class/arrow expression — NOT an initializer literal
-        else:
-            return None  # genuine object/struct-literal initializer
-    # JS/TS arrow function with a block body — ``const f = (...) => {`` or
-    # ``const f = () => {``. The buffer ends in ``=>`` (the arrow), with a
-    # binding name before ``=``. No declaration keyword is present, so the
-    # keyword path and the keywordless heuristic (which requires ``)`` at the
-    # end) both miss it. Recognize the arrow shape explicitly and recover the
-    # binding name via ``_binding_name_before`` (treating ``=>`` as the
-    # pseudo-keyword position).
-    if toks and toks[-1] == "=>" and "=" in toks:
-        eq_idx = toks.index("=")
-        # The name is the token before ``=`` (recovered only if it's a binding).
-        if eq_idx >= 1:
-            cand = toks[eq_idx - 1]
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
-                # Require a field keyword before the name (so it's a binding,
-                # not a reassignment ``x = (...) => {``).
-                for j in range(eq_idx - 2, -1, -1):
-                    if toks[j] in _A_FIELD_KEYWORDS or toks[j] in ("export", "pub", "public"):
-                        kind = KIND_METHOD if stack and any(
-                            (u.kind == KIND_CLASS or u.container_only) for u in reversed(stack)
-                        ) else KIND_FUNCTION
-                        return (kind, cand, False)
-                    if toks[j] in (";", "}", "{"):
-                        break
+    # Object/struct-literal initializer: the ``{`` is depth-only, not a scope.
+    if _is_initializer_literal(toks):
+        return None
+    # JS/TS arrow function with a block body — ``const f = (...) => {``.
+    # No declaration keyword is present, so recover the binding name explicitly.
+    arrow = _recover_arrow_binding(toks, stack)
+    if arrow is not None:
+        kind, name = arrow
+        return (kind, name, False)
     # Find the LAST declaration keyword in the buffer. A keyword may be glued
     # to the following ``(`` / ``<`` / ``:`` in the whitespace-normalized
     # tokens (``function()`` / ``fn<T>``), so match by prefix: a token whose
