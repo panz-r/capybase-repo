@@ -2890,3 +2890,31 @@ def test_c2_conflict_marker_inside_triple_string():
     assert "=======" in f_unit.body, (
         f"the ======= inside the string must be part of f's body, not a scope break"
     )
+
+
+# --- M1 regression: raw-string closer must not leak #s into the token buffer ---
+
+
+def test_m1_raw_string_closer_advances_past_hashes():
+    r"""A Rust raw string ``r#"..."#`` closes on ``"`` followed by exactly N
+    ``#`` chars. The scanner must advance past BOTH the ``"`` and the ``#``-run
+    — previously it zeroed ``hash_count`` before reading it in the return, so
+    the closing ``#``s leaked into the token buffer and could corrupt the next
+    declaration's classification.
+
+    Pins the fix: a real function declared on the same line after a raw string
+    must still be detected."""
+    # r#"..."# immediately followed by `fn real` — the leaked #'s would glue to
+    # the buffer and misclassify the brace.
+    src = 'fn outer() {\n    let s = r#"x"#;\n}\nfn real() {\n    return 1;\n}\n'
+    ir = ap.parse_family_a(src, language="rust")
+    names = [u.name for u in ap.all_units_flat(ir)]
+    assert "outer" in names and "real" in names, (
+        f"raw-string closer must not corrupt surrounding parse; got {names}"
+    )
+    # Multi-hash raw string: r##"..."##  — must advance past BOTH #'s.
+    src2 = 'fn f() {\n    let s = r##"x"##;\n}\n'
+    ir2 = ap.parse_family_a(src2, language="rust")
+    assert _unit_named(ir2, "f"), (
+        f"multi-hash raw-string closer must not corrupt; got {_kinds_of(ir2)}"
+    )

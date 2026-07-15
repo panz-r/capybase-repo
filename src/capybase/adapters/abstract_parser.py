@@ -1085,11 +1085,16 @@ def _advance_string_comment(
             # ``hash_count`` ``#`` chars. An embedded ``"`` in the content
             # (with no matching ``#`` run) does NOT close it.
             if st.hash_count > 0:
-                tail = src[i + 1 : i + 1 + st.hash_count]
-                if len(tail) == st.hash_count and tail == "#" * st.hash_count:
+                hc = st.hash_count
+                tail = src[i + 1 : i + 1 + hc]
+                if len(tail) == hc and tail == "#" * hc:
                     st.in_str = None
                     st.hash_count = 0
-                    return i + 1 + st.hash_count, True
+                    # Advance past the ``"`` AND the matching ``#``-run. (Capture
+                    # hc before clearing — reading st.hash_count after the zero
+                    # above would return i+1, leaking the closing #'s into the
+                    # token buffer.)
+                    return i + 1 + hc, True
                 # Not the closer — content quote. Fall through to advance.
                 return i + 1, True
             st.in_str = None
