@@ -291,19 +291,39 @@ def _has_code_content(line: str) -> bool:
     return True
 
 
-def _strip_inline_comment(line: str) -> str:
-    """Strip an inline ``// ...`` or ``# ...`` comment (string-aware, best-effort).
+def _strip_inline_comment(line: str, *, lang: str | None = None) -> str:
+    r"""Strip an inline comment (string-aware, best-effort).
 
-    A ``//`` or ``#`` inside a string literal must NOT be treated as a comment
-    start. We blank string literals first, then look for the comment marker.
+    Which marker counts as a comment depends on the language:
+    - Python/Ruby (Family B, the default): only ``#``. ``//`` is floor division
+      (Python) or operator (Ruby) and must NOT be stripped — stripping it would
+      corrupt body fingerprints (``x = total // count`` would normalize to
+      ``x = total``) and cause false rename pairings.
+    - Family-A brace languages (Rust/JS/TS/Go/Java/C/C++/C#/...): only ``//``.
+      ``#`` is a preprocessor/attribute marker (Rust ``#[attr]``, C ``#include``),
+      not a comment.
+
+    A marker inside a string literal is never treated as a comment start: string
+    literals are blanked first, then the marker is searched in the blanked text.
     """
     blanked = _STRING_LIT_RE.sub("'_'", line)
-    for marker in ("//", "#"):
-        idx = blanked.find(marker)
-        if idx >= 0:
-            line = line[:idx]
-            blanked = blanked[:idx]
+    marker = "//" if _lang_is_family_a(lang) else "#"
+    idx = blanked.find(marker)
+    if idx >= 0:
+        line = line[:idx]
     return line
+
+
+def _lang_is_family_a(lang: str | None) -> bool:
+    """True when ``lang`` uses ``//`` line comments (the Family-A brace family).
+
+    ``None`` defaults to Family B (Python/Ruby): every current caller of
+    :func:`_strip_inline_comment` is a Family-B path (body normalization,
+    bracket-delta, backslash-continuation), so the default must be Python-correct.
+    """
+    if lang is None:
+        return False
+    return _LANG_FAMILY.get(lang.strip().lower()) == FAMILY_A
 
 
 def normalize_body(text: str) -> str:
@@ -671,6 +691,17 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
             last_line_row = i
             continue
 
+        # Triple-quote continuation: if a multi-line string is open from a prior
+        # line, this line is string content (even if it looks like ``class X:``).
+        # This check MUST precede the conflict-marker check below — a ``=======``
+        # or ``<<<<<<<`` line inside an open triple-quoted string is string
+        # content, not a real conflict marker. Closing it here would truncate the
+        # enclosing unit's span/body (a docstring containing a diff example or a
+        # markdown table is the plausible trigger).
+        if open_triple is not None:
+            open_triple = _update_triple_quote_state(raw, open_triple)
+            continue
+
         if _is_conflict_marker_line(raw):
             # Close against the last meaningful row (before this marker).
             close_units_at_or_below(0, last_line_row)
@@ -684,14 +715,6 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
             continue
         if _is_blank_or_comment(raw, language):
             continue
-
-        # Triple-quote continuation: if a multi-line string is open from a prior
-        # line, this line is string content (even if it looks like ``class X:``).
-        # Advance the state and absorb the line; do NOT close units or detect
-        # declarations. The closing line of the string is absorbed too (it's
-        # still part of the string literal until the closer is consumed).
-        if open_triple is not None:
-            open_triple = _update_triple_quote_state(raw, open_triple)
             continue
 
         indent = _indent_width(raw)

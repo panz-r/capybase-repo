@@ -2828,3 +2828,65 @@ def test_cov_hash_line_non_preprocessor_consumed():
     assert "a" in names and "b" in names, (
         f"stray # line must not block surrounding parse; got {names}"
     )
+
+
+# --- C1 regression: _strip_inline_comment must not mangle Python // ---
+
+
+def test_c1_strip_inline_comment_python_floor_division():
+    """Python ``//`` is floor division, NOT a comment marker. Stripping it
+    corrupts body fingerprints and rename detection: ``x = total // count``
+    would normalize identically to ``x = total``, causing a false rename pair.
+
+    Only ``#`` is a comment in Python/Ruby; ``//`` is a comment only in the
+    Family-A brace languages (Rust/JS/Go/C/...). The default (no lang given)
+    must be Python-correct since all current callers are Family-B paths."""
+    from capybase.adapters.abstract_parser import _strip_inline_comment, normalize_body
+    # Python: // is code, # is comment. (Trailing whitespace after the strip is
+    # left for the caller's whitespace-collapse step to handle.)
+    assert _strip_inline_comment("x = total // count") == "x = total // count"
+    assert _strip_inline_comment("x = 1  # note") == "x = 1  "
+    # Family-A: // is comment, # is not (Rust attribute / preprocessor).
+    assert _strip_inline_comment("let x = 1; // note", lang="rust") == "let x = 1; "
+    assert _strip_inline_comment("let x = 1; #[attr]", lang="rust") == "let x = 1; #[attr]"
+    # The end-to-end fingerprint impact: floor-division is preserved.
+    from capybase.adapters.abstract_parser import unit_body_fingerprint
+    fp_div = unit_body_fingerprint("def f():\n    x = total // count\n")
+    fp_nodiv = unit_body_fingerprint("def f():\n    x = total\n")
+    assert fp_div != fp_nodiv, (
+        "floor-division // must not be stripped from Python body fingerprints"
+    )
+
+
+# --- C2 regression: conflict marker inside a triple-quoted string ---
+
+
+def test_c2_conflict_marker_inside_triple_string():
+    r"""A ``=======`` (or other conflict marker) appearing inside an open
+    triple-quoted Python string is string CONTENT, not a real conflict marker.
+    It must NOT close open units or reset the parser state.
+
+    Previously the conflict-marker check ran before the triple-quote-absorption
+    check, so a marker inside a docstring/multi-line string truncated the
+    enclosing unit's span and body. Plausible in real code — a docstring
+    containing a diff example or markdown table."""
+    src = (
+        'def f():\n'
+        '    s = """\n'
+        '=======\n'
+        '"""\n'
+        '    return 1\n'
+    )
+    ir = ap.parse_file(src, language="python")
+    flat = ap.all_units_flat(ir)
+    # The function f must span the WHOLE snippet (its body includes the string
+    # and the return), not be truncated at the ======= line.
+    f_unit = next((u for u in flat if u.name == "f"), None)
+    assert f_unit is not None, f"function f must be detected; got {_kinds_of(ir)}"
+    # end_row should reach the last line (the 'return 1' line), not stop at the marker.
+    assert "return 1" in f_unit.body, (
+        f"f's body must include the full string + return; got:\n{f_unit.body!r}"
+    )
+    assert "=======" in f_unit.body, (
+        f"the ======= inside the string must be part of f's body, not a scope break"
+    )
