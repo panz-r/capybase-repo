@@ -857,3 +857,31 @@ def test_r8_agreed_rename_divergent_bodies_declines():
     assert '"v2"' in result.text and '"v3"' in result.text, (
         f"agreed-rename with divergent bodies must not silently drop one side;\n{result.text!r}"
     )
+
+
+# --- F1.1 (round 9): comment-only agreed rename must not be declined ---
+
+
+def test_r9_agreed_rename_comment_only_not_declined():
+    r"""The round-8 body-divergence guard used _ws_collapse (comment-PRESERVING),
+    so a comment-only difference between two same-name renames was flagged a
+    conflict and declined — even though the 3-way diff, detect_renames_2way,
+    and match_entities all consider a comment-only diff a non-divergence (an
+    agreed rename). The resolver must agree: use a comment-stripping comparison
+    so comment-only diffs don't decline, while genuine string-value diffs still do."""
+    # Python: both sides rename load_data->fetch_data; current adds a # comment.
+    base = "def load_data():\n    x = 1\n    return x\n"
+    cur = "def fetch_data():\n    # note\n    x = 1\n    return x\n"   # rename + comment
+    rep = "def fetch_data():\n    x = 1\n    return x\n"               # pure rename
+    result = resolve_structurally(_unit(base, cur, rep))
+    # Comment-only diff: should resolve (agreed rename), not decline.
+    assert result is not None and result.text is not None, (
+        "comment-only agreed rename must resolve (the 3-way diff reports no conflict)"
+    )
+    # But a genuine string-value divergence must still decline (round-8 intent).
+    cur2 = 'def fetch_data():\n    return "v2"\n'
+    rep2 = 'def fetch_data():\n    return "v3"\n'
+    result2 = resolve_structurally(_unit("def load_data():\n    return 1\n", cur2, rep2))
+    assert result2 is None or result2.text is None, (
+        "string-value divergent agreed rename must still decline"
+    )

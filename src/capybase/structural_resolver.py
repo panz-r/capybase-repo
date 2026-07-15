@@ -948,16 +948,25 @@ def _body_content(body: str, lang: str | None = None) -> str:
     return entity_body_content(body, lang=lang)
 
 
-def _ws_collapse(body: str) -> str:
-    """Whitespace-only collapse of a body (preserves strings/comments).
+def _ws_collapse(body: str, lang: str | None = None) -> str:
+    """Whitespace-collapse a body, stripping comment-only lines (string-preserving).
 
     Used for the agreed-rename body-divergence check: a string-VALUE edit
     (``return "v2"`` vs ``return "v3"``) must register as a divergence so a
     same-name-two-sided rename with different values is flagged a conflict,
-    not silently resolved by dropping one side. The comment/string-stripping
-    :func:`_body_content` would blank the difference away.
+    not silently resolved by dropping one side. But a COMMENT-only difference
+    must NOT register — the rest of the system (3-way diff, detect_renames_2way,
+    match_entities) treats a comment-only diff as a non-divergence (an agreed
+    rename), and the resolver must agree. The comment/string-stripping
+    :func:`_body_content` would blank string values away (too aggressive);
+    a naive whitespace collapse would flag comment diffs (too sensitive).
+
+    Delegates to the 3-way diff's :func:`_normalize_body_ws_only` (the single
+    lang-aware, string-preserving, comment-stripping normalizer) so all paths
+    agree on what counts as a body divergence.
     """
-    return " ".join((body or "").split())
+    from capybase.adapters.structural_diff import _normalize_body_ws_only
+    return _normalize_body_ws_only(body, lang=lang)
 
 
 def _detect_renames(
@@ -1145,7 +1154,7 @@ def _try_entity_disjoint(unit: ConflictUnit) -> str | None:
             if (
                 cur_e is not None
                 and rep_e is not None
-                and _ws_collapse(cur_e.body) != _ws_collapse(rep_e.body)
+                and _ws_collapse(cur_e.body, lang) != _ws_collapse(rep_e.body, lang)
             ):
                 return None  # same rename name, divergent bodies → conflict
             agreed_renames.add(base_id)  # both renamed it the same way → agreed
