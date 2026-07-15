@@ -334,7 +334,10 @@ def _filter_code_lines(lines: list[str], *, lang: str | None = None) -> list[str
         # as a comment boundary. We scan the BLANKED line for boundaries but
         # extract code from the ORIGINAL line so string values are preserved
         # (downstream callers may be string-preserving, e.g. _bodies_differ).
-        blanked = _STRING_LIT_RE.sub("'_", ln)
+        # Use a LENGTH-PRESERVING replacement so indices in the blanked line
+        # align with the original — a fixed-length replacement would shift
+        # every index after a variable-length string and corrupt the extraction.
+        blanked = _STRING_LIT_RE.sub(lambda m: "_" * len(m.group(0)), ln)
         segments: list[str] = []
         j = 0
         while j < len(blanked):
@@ -353,7 +356,10 @@ def _filter_code_lines(lines: list[str], *, lang: str | None = None) -> list[str
                 j = open_ + 2
                 in_block = True
         code = "".join(segments)
-        if code.strip():
+        # Keep the line only if its code portion (after stripping block-comment
+        # regions) has real code content — a residual pure line-comment
+        # (/* block */ // line) must be dropped. This also drops blank residues.
+        if code.strip() and _has_code_content(code, lang=lang):
             out.append(code)
     return out
 

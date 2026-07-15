@@ -3095,3 +3095,32 @@ def test_c2_code_after_closer_survives():
     out2 = _filter_code_lines(["/* comment */ let x = 1;"], lang="rust")
     joined2 = " ".join(out2)
     assert "let x = 1" in joined2, f"code after single-line /* */ must survive; got {out2}"
+
+
+# --- Finding 1 (round 12): _filter_code_lines string-blanking index shift ---
+
+
+def test_r12_filter_code_lines_string_before_comment():
+    r"""A string literal on the same line before a block comment must not corrupt
+    the extraction. The scan blanks strings (to avoid /* in a string opening
+    block state) then slices code from the ORIGINAL line using indices from the
+    blanked line. If the blanking changes the line LENGTH (fixed 2-char '_' for
+    a variable-length string), every index after the string shifts and the
+    extraction slices the wrong span — the string bleeds past its close quote
+    and swallows the comment opener.
+
+    Use a length-preserving blank so indices stay aligned."""
+    from capybase.adapters.abstract_parser import _filter_code_lines, unit_body_fingerprint
+    out = _filter_code_lines(['let s = "abc"; /* c */ let x = 1;'], lang="rust")
+    joined = " ".join(out)
+    # The comment must be stripped, the string and trailing code preserved.
+    assert "/* c */" not in joined, f"block comment must be stripped; got {out!r}"
+    assert "*/" not in joined, f"comment closer must not leak; got {out!r}"
+    assert "let x = 1" in joined, f"trailing code must survive; got {out!r}"
+    # End-to-end: fingerprints must be string-stable when only the string value
+    # differs and a block comment follows.
+    b1 = 'fn f() {\n    let s = "abc"; /* c */ let x = 1;\n}\n'
+    b2 = 'fn f() {\n    let s = "xyz"; /* c */ let x = 1;\n}\n'
+    assert unit_body_fingerprint(b1, lang="rust") == unit_body_fingerprint(b2, lang="rust"), (
+        "string-value diff must not break fingerprint stability when a comment follows"
+    )
