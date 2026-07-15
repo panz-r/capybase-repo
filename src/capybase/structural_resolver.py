@@ -808,11 +808,12 @@ def _region_covered(
     ``r_start - span_start``. The replacement must align exactly there.
     """
     if not r_replacement:
-        # A pure deletion is covered ONLY if the spanning side also deleted
-        # that base line (emitted nothing for it). Since the spanning side
-        # emitted content for the whole span, a deletion within it is NEVER
-        # covered — the base line survives in the spanning side's replacement.
-        return False
+        # A pure deletion is covered if the spanning side ALSO deleted that base
+        # line — i.e. it emitted no content at the deletion's positional offset.
+        # offset = r_start - span_start; if offset >= len(emitted), the spanning
+        # side's replacement didn't reach that base line (it was deleted too).
+        offset = r_start - span_start
+        return offset >= len(emitted)
     offset = r_start - span_start
     if offset < 0 or offset + len(r_replacement) > len(emitted):
         return False

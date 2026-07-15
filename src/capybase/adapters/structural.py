@@ -450,9 +450,10 @@ def match_entities(
             # rename; mid cosine (0.70–0.85) needs a corroborating Jaccard/name
             # signal. Never raises — a failed embed leaves the source unmatched.
             emb_match = _embedding_rename_match(
-                src, targets, target_names_by_kind, bf, embedder, lang
+                src, targets, target_names_by_kind, bf, embedder, lang, consumed_targets,
             )
             if emb_match is not None:
+                consumed_targets.add((emb_match.target.kind, emb_match.target.name))
                 out.append(emb_match)
             else:
                 out.append(EntityMatch(source=src, target=None, kind=MATCH_UNMATCHED))
@@ -478,6 +479,7 @@ def _embedding_rename_match(
     src_body_fp: str,
     embedder: "object",
     lang: str | None = None,
+    consumed_targets: "set[tuple[str, str]] | None" = None,
 ) -> EntityMatch | None:
     """Find a rename for ``src`` via body-embedding cosine.
 
@@ -492,8 +494,13 @@ def _embedding_rename_match(
         return None
     if not _body_is_substantial(src_body_fp):
         return None
-    # Collect same-kind target bodies to embed alongside the source.
-    cand_targets = [t for t in targets if t.kind == src.kind]
+    # Collect same-kind target bodies to embed alongside the source. Skip
+    # targets already claimed by an earlier source's rename (consumed_targets).
+    _consumed = consumed_targets or set()
+    cand_targets = [
+        t for t in targets
+        if t.kind == src.kind and (t.kind, t.name) not in _consumed
+    ]
     if not cand_targets:
         return None
     src_norm = normalize_body_for_embedding(src_body_fp)
