@@ -948,6 +948,18 @@ def _body_content(body: str, lang: str | None = None) -> str:
     return entity_body_content(body, lang=lang)
 
 
+def _ws_collapse(body: str) -> str:
+    """Whitespace-only collapse of a body (preserves strings/comments).
+
+    Used for the agreed-rename body-divergence check: a string-VALUE edit
+    (``return "v2"`` vs ``return "v3"``) must register as a divergence so a
+    same-name-two-sided rename with different values is flagged a conflict,
+    not silently resolved by dropping one side. The comment/string-stripping
+    :func:`_body_content` would blank the difference away.
+    """
+    return " ".join((body or "").split())
+
+
 def _detect_renames(
     side_ents: list, base_ents: list, lang: str | None = None,
 ) -> tuple[dict, dict]:
@@ -1120,6 +1132,22 @@ def _try_entity_disjoint(unit: ConflictUnit) -> str | None:
         if base_id in rep_new_by_base:
             if rep_new_by_base[base_id] != cur_new:
                 return None  # both renamed the same entity differently → conflict
+            # Both renamed to the same NEW NAME — but if their BODIES diverge
+            # (e.g. a different string value), it's still a conflict. The name
+            # check alone would let both sides' renames pass and the merge-walk
+            # would emit only current's body, silently dropping replayed's
+            # divergent value. Mirror the 3-way diff's cross-side body guard.
+            # Use a string-PRESERVING whitespace collapse so a string-value
+            # edit (return "v2" vs "v3") registers as a divergence — the
+            # comment/string-stripping _body_content would blank it away.
+            cur_e = next((e for e in cur_ents if e.identity == cur_new), None)
+            rep_e = next((e for e in rep_ents if e.identity == cur_new), None)
+            if (
+                cur_e is not None
+                and rep_e is not None
+                and _ws_collapse(cur_e.body) != _ws_collapse(rep_e.body)
+            ):
+                return None  # same rename name, divergent bodies → conflict
             agreed_renames.add(base_id)  # both renamed it the same way → agreed
     # Union of base identities renamed away by EITHER side — these must NOT be
     # re-emitted under their old names during the merge walk.

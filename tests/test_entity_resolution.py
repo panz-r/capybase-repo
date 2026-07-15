@@ -835,3 +835,25 @@ def test_r7_bodies_differ_rust_attribute_not_dropped():
     assert _bodies_differ(a, b, lang="rust") is True, (
         "adding/removing a Rust #[cfg(test)] attribute is a real body change"
     )
+
+
+# --- Resolver Finding 1 (round 8): agreed-rename divergent bodies ---
+
+
+def test_r8_agreed_rename_divergent_bodies_declines():
+    r"""When both sides rename a base entity to the SAME new name but with
+    DIVERGENT bodies (e.g. a different string value), the resolver must DECLINE
+    — it's a genuine conflict. The agreed-rename check compared only the new
+    NAMES, so both sides' renames passed, and the merge-walk emitted only
+    current's body, silently dropping replayed's divergent value. The 3-way
+    diff has the cross-side body-divergence guard; the resolver lacked it."""
+    base = 'class S:\n    def loadData(self):\n        return "v1"\n'
+    cur = 'class S:\n    def fetchData(self):\n        return "v2"\n'   # rename + "v2"
+    rep = 'class S:\n    def fetchData(self):\n        return "v3"\n'   # rename + "v3" (diverges)
+    result = resolve_structurally(_unit(base, cur, rep))
+    if result is None or result.text is None:
+        return  # declined — correct
+    # If it resolved, both values must be present (no silent drop).
+    assert '"v2"' in result.text and '"v3"' in result.text, (
+        f"agreed-rename with divergent bodies must not silently drop one side;\n{result.text!r}"
+    )
