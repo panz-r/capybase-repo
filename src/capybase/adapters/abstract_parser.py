@@ -310,34 +310,51 @@ def _has_code_content(line: str, *, lang: str | None = None) -> bool:
 
 
 def _filter_code_lines(lines: list[str], *, lang: str | None = None) -> list[str]:
-    """Return the lines that carry actual code, with multi-line block-comment state.
+    """Return the code portions of each line, with multi-line block-comment state.
 
-    A line-local ``_has_code_content`` can't recognize interior lines of a
-    multi-line ``/* ... */`` block comment (the `` * continuation`` Javadoc/
-    Rustdoc style) — they don't start with ``/*`` or ``*/``. This helper tracks
-    ``in_block`` across lines so the whole comment region is stripped. Used by
-    the body-normalization paths (normalize_body, unit_body_fingerprint) so a
-    rename editing the block-comment interior stays comment-stable.
+    Tracks ``in_block`` across lines and scans mid-line for ``/*`` and ``*/``
+    so that:
+    - code BEFORE a mid-line opener (``let x = 1; /* note``) survives;
+    - code AFTER a closer (``*/ let y = 2;``) survives;
+    - single-line ``/* ... */`` comments are stripped, leaving any trailing code;
+    - interior lines of a multi-line block comment are stripped.
 
-    Python/Ruby (Family-B) have no block comments; this falls back to the
-    line-local check for them.
+    String literals are blanked first so a ``/*`` inside a string doesn't open
+    block-comment state. Used by the body-normalization paths
+    (normalize_body, unit_body_fingerprint) so a rename editing a block comment
+    stays comment-stable. Python/Ruby (no block comments) fall back to the
+    line-local check.
     """
     if not _lang_is_family_a(lang):
         return [ln for ln in lines if _has_code_content(ln, lang=lang)]
     out: list[str] = []
     in_block = False
     for ln in lines:
-        stripped = ln.strip()
-        if in_block:
-            if "*/" in stripped:
+        # Blank string literals first so /* or */ inside a string doesn't count
+        # as a comment boundary. We scan the BLANKED line for boundaries but
+        # extract code from the ORIGINAL line so string values are preserved
+        # (downstream callers may be string-preserving, e.g. _bodies_differ).
+        blanked = _STRING_LIT_RE.sub("'_", ln)
+        segments: list[str] = []
+        j = 0
+        while j < len(blanked):
+            if in_block:
+                close = blanked.find("*/", j)
+                if close < 0:
+                    break  # rest of line is comment interior
+                j = close + 2
                 in_block = False
-            continue  # interior or closing line — not code
-        if stripped.startswith("/*"):
-            if "*/" not in stripped[2:]:
+            else:
+                open_ = blanked.find("/*", j)
+                if open_ < 0:
+                    segments.append(ln[j:])  # code from the ORIGINAL line
+                    break
+                segments.append(ln[j:open_])  # code before the opener (original)
+                j = open_ + 2
                 in_block = True
-            continue  # opening (or single-line /* */) — not code
-        if _has_code_content(ln, lang=lang):
-            out.append(ln)
+        code = "".join(segments)
+        if code.strip():
+            out.append(code)
     return out
 
 

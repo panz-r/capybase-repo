@@ -3058,3 +3058,40 @@ def test_b1_multiline_block_comment_interior_stripped():
         f"a rename editing only the block-comment interior must be comment-stable; "
         f"base={fp_b!r} side={fp_s!r}"
     )
+
+
+# --- C1/C2 (round 11): _filter_code_lines must handle mid-line block comments ---
+
+
+def test_c1_midline_block_comment_opener():
+    r"""A ``/*`` mid-line (after code) must open block-comment state, and the
+    code before it must survive. Previously _filter_code_lines only recognized
+    line-START ``/*``, so the whole comment region leaked as code and broke
+    fingerprint comment-stability for inline-opened comments."""
+    from capybase.adapters.abstract_parser import _filter_code_lines, unit_body_fingerprint
+    out = _filter_code_lines(["let x = 1; /* note", " rest of comment", "*/ let y = 2;"], lang="rust")
+    # Code before the opener and after the closer must survive; interior stripped.
+    joined = " ".join(out)
+    assert "let x = 1" in joined, f"code before mid-line /* must survive; got {out}"
+    assert "let y = 2" in joined, f"code after */ closer must survive; got {out}"
+    assert "rest of comment" not in joined, f"comment interior must be stripped; got {out}"
+    # End-to-end: fingerprint comment-stable for inline-opened comment.
+    base = "fn f() {\n    let x = 1; /* v1\n    interior\n    */\n}\n"
+    side = "fn fetch_data() {\n    let x = 1; /* v2\n    different\n    */\n}\n"
+    assert unit_body_fingerprint(base, lang="rust") == unit_body_fingerprint(side, lang="rust"), (
+        "inline-opened block comment must be comment-stable"
+    )
+
+
+def test_c2_code_after_closer_survives():
+    r"""Code on the same line after a ``*/`` closer must survive. Previously
+    the closer line was unconditionally dropped (``continue``), losing any
+    trailing code."""
+    from capybase.adapters.abstract_parser import _filter_code_lines
+    out = _filter_code_lines(["/* open", "*/ let y = 2;"], lang="rust")
+    joined = " ".join(out)
+    assert "let y = 2" in joined, f"code after */ must survive; got {out}"
+    # Single-line block comment followed by code.
+    out2 = _filter_code_lines(["/* comment */ let x = 1;"], lang="rust")
+    joined2 = " ".join(out2)
+    assert "let x = 1" in joined2, f"code after single-line /* */ must survive; got {out2}"
