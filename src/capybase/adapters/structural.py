@@ -1646,12 +1646,23 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
         if use_fallback and stripped:
             toks = stripped.split()
             # The line qualifies for the fallback if it begins with a known
-            # declaration/modifier keyword OR a likely type name (a Capitalized
-            # identifier — Java/C# convention for class types like String, List,
-            # Map). A bare field ``String name;`` has no modifier prefix.
+            # declaration/modifier keyword OR has the ``Type name`` field shape
+            # (>= 2 identifier tokens before the terminator: a type + a name).
+            # The shape check covers bare primitive-type fields (``int count;``,
+            # ``long total;``) whose type is neither a modifier nor Capitalized.
+            decl_part = re.split(r"[=;{]", stripped, maxsplit=1)[0]
+            decl_toks = decl_part.split()
+            ident_toks = [
+                re.split(r"[<(]", t, maxsplit=1)[0].split("::")[-1].split(".")[-1].strip()
+                for t in decl_toks
+            ]
+            ident_count = sum(
+                1 for h in ident_toks
+                if h and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", h)
+            )
             qualifies = bool(toks) and (
                 toks[0] in decl_keywords
-                or re.fullmatch(r"[A-Z][A-Za-z0-9_]*", toks[0]) is not None
+                or ident_count >= 2
             )
             if qualifies:
                 # Method shape: name is the token immediately before '('.
@@ -1665,15 +1676,12 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
                 # identifier token before the terminator (= / ; / {), not the
                 # first token after the modifier run (which is the TYPE —
                 # int/String/List<...>). e.g. ``private final int count = 0``
-                # → name is ``count``, not ``int``.
-                decl_part = re.split(r"[=;{]", stripped, maxsplit=1)[0]
-                decl_toks = decl_part.split()
+                # → name is ``count``, not ``int``. decl_part/decl_toks/ident_toks
+                # were computed at the gate above.
                 cand = ""
-                for t in decl_toks:
-                    head = re.split(r"[<(]", t, maxsplit=1)[0]
-                    head = head.split("::")[-1].split(".")[-1].strip()
-                    if head and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", head):
-                        cand = head  # keep the last identifier seen
+                for h in ident_toks:
+                    if h and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", h):
+                        cand = h  # keep the last identifier seen
                 if cand == name:
                     return (i, min(i + 1, len(lines) - 1))
     return None

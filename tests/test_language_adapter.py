@@ -366,3 +366,28 @@ def test_r7_h3_typed_field_detection_java_csharp():
         assert span is not None, f"{lang} field/property {name!r} must be found"
     # Negative: a parameter TYPE must still NOT match (the hardening's purpose).
     assert _find_definition_span("class C {\n    public void process(StaticType x) { }\n}\n", "StaticType", "java") is None
+
+
+# --- B-5 (round 8): H3 gate misses lowercase-primitive fields ---
+
+
+def test_r8_h3_lowercase_primitive_field():
+    r"""A bare primitive-type field (``int count;``, ``long total;``, ``double
+    pi;``) has no modifier prefix and a lowercase type — neither in
+    decl_keywords nor Capitalized — so the H3 fallback gate rejected it. This
+    is the single most common Java/C# field shape. Broaden the gate so the
+    type/field branch fires when the line has the ``Type name`` shape (>=2
+    identifier tokens before the terminator)."""
+    from capybase.adapters.structural import _find_definition_span
+    cases = [
+        ("class C {\n    int count = 0;\n}\n", "count", "java"),
+        ("class C {\n    long total;\n}\n", "total", "java"),
+        ("class C {\n    double pi = 3.14;\n}\n", "pi", "csharp"),
+        ("class C {\n    boolean flag;\n}\n", "flag", "java"),
+    ]
+    for src, name, lang in cases:
+        span = _find_definition_span(src, name, lang)
+        assert span is not None, f"{lang} primitive field {name!r} must be found"
+    # False positives still rejected.
+    assert _find_definition_span("class C {\n    public void process(StaticType x) { }\n}\n", "StaticType", "java") is None
+    assert _find_definition_span("def bar():\n    static = foo()\n", "foo", "python") is None
