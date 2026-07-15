@@ -610,3 +610,70 @@ def test_canonical_core_works_on_structural_units():
     assert renames == {("function", "new"): ("function", "old")}, renames
     assert removed == {("function", "old")}
 
+
+def test_fingerprint_and_body_content_invariant():
+    """The two rename-pairing signals must agree on content presence AND on
+    rename-pairability.
+
+    The 3-way diff (``structural_diff._detect_renames``) keys rename pairing on
+    ``unit.fingerprint`` (baked at parse time via ``unit_body_fingerprint``),
+    while the 2-way core (``detect_renames_2way``) and ``semantic_diff`` key on
+    ``entity_body_content``. The 3-way path has no dedicated rename test, so its
+    correctness rests on the invariant the docstring asserts:
+
+      1. content-presence agreement: a body has a content digest in its
+         fingerprint (``_fingerprint_has_content``) iff ``entity_body_content``
+         is non-empty.
+      2. rename agreement: for any two bodies that differ only in the name token
+         in the header, the fingerprints are equal iff the body-contents are
+         equal.
+
+    If these ever diverge (different normalization, one stops blanking strings),
+    the 3-way and 2-way rename detectors would silently disagree.
+    """
+    from capybase.adapters.abstract_parser import (
+        _fingerprint_has_content, unit_body_fingerprint,
+    )
+
+    # A varied corpus spanning both families, one-liners, multi-line, empty,
+    # content-less, comment-bearing, and field shapes.
+    corpus = [
+        "def foo():\n    return 1\n",              # multi-line Python
+        "def foo(): return 1\n",                    # one-liner (colon)
+        "fn foo() { 1 }\n",                         # one-liner (brace)
+        "fn foo() {\n    1\n}\n",                   # multi-line brace
+        "def foo():\n    pass\n",                   # content-less multi
+        "def foo(): pass\n",                        # content-less one-liner
+        "function foo() { return 1; }\n",           # JS one-liner
+        "function foo() {\n    return 1;\n}\n",     # JS multi
+        "def foo():\n    x = 1  # note\n",          # comment-bearing
+        "pub fn foo() -> u32 {\n    42\n}\n",       # Rust with signature
+        "const N: u32 = 5;\n",                      # field
+        "",                                         # empty
+        "def foo():\n",                             # header only
+    ]
+
+    # Invariant 1: content-presence agreement for every body.
+    for body in corpus:
+        fp = unit_body_fingerprint(body)
+        content = entity_body_content(body)
+        assert _fingerprint_has_content(fp) == (content != ""), (
+            f"presence disagreement for {body!r}: "
+            f"fp={fp!r} has_content={_fingerprint_has_content(fp)}, "
+            f"entity_body_content={content!r}"
+        )
+
+    # Invariant 2: for a rename pair (same body, name changed), both signals
+    # agree on equality. Rename foo→bar in each body that names foo.
+    for body in corpus:
+        if "foo" not in body:
+            continue
+        a, b = body.replace("foo", "alpha"), body.replace("foo", "beta")
+        fp_eq = unit_body_fingerprint(a) == unit_body_fingerprint(b)
+        content_eq = entity_body_content(a) == entity_body_content(b)
+        assert fp_eq == content_eq, (
+            f"rename-agreement broken for {body!r}: "
+            f"fingerprint_equal={fp_eq}, content_equal={content_eq}"
+        )
+
+
