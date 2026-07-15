@@ -355,11 +355,9 @@ def _detect_renames(
         if _fingerprint_has_content(u.fingerprint):
             base_by_fp[u.fingerprint] = u
 
-    # Base identities still present under their original name on each side —
-    # these are NOT rename sources (they weren't deleted).
-    left_present_ids = {a.left.identity for a in aligned if a.left is not None and a.base is not None}
-    right_present_ids = {a.right.identity for a in aligned if a.right is not None and a.base is not None}
     # Base identities deleted by each side (no side entry under the original name).
+    # A base unit is a rename candidate only when it's gone from the side in
+    # question (classified as a deletion), NOT when it's identity-matched.
     deleted_base_ids = {
         a.base.identity for a in aligned
         if a.base is not None and a.left is None and a.right is None

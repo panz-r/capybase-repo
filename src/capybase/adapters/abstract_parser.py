@@ -467,16 +467,6 @@ def _update_triple_quote_state(raw: str, open_triple: str | None) -> str | None:
     return state
 
 
-def _line_opens_or_continues_triple(raw: str, open_triple: str | None) -> bool:
-    """True if, after this line, a triple-quote string is still open.
-
-    Captures both "was already open and stays open" and "opens fresh and
-    doesn't close on this line". A line for which this is True is a
-    continuation — its content is string literal, not declarations.
-    """
-    return _update_triple_quote_state(raw, open_triple) is not None
-
-
 def _indent_width(line: str) -> int:
     """Leading-whitespace column count (tabs = 8, per Python convention)."""
     n = 0
@@ -1368,13 +1358,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
 
         # Field-like declarations at depth 0 without an opening brace: detect on
         # the ``;`` terminator. We accumulate into buf and check at ``;`` above —
-        # but we only emit a FIELD unit if no brace opened. Handle here:
-        if ch == "=" and brace_depth == 0 and paren_depth == 0:
-            # Possible field decl: ``pub const NAME = ...`` / ``let x = ...``.
-            # Peek back at buf for a field keyword.
-            if _buf_has_field_keyword(buf):
-                # Don't emit yet — wait for the terminating ``;`` or newline.
-                pass
+        # but we only emit a FIELD unit if no brace opened.
 
         # Accumulate into the token buffer (whitespace-normalized).
         if ch.isspace():
@@ -1857,10 +1841,6 @@ def _find_decl_start(src: str, brace_idx: int, line_start: int) -> int:
     while cut < brace_idx and src[cut] in " \t\r\n":
         cut += 1
     return cut
-
-
-def _buf_has_field_keyword(buf: str) -> bool:
-    return any(kw in buf.split() for kw in _A_FIELD_KEYWORDS)
 
 
 def _binding_name_before(toks: list[str], kw_idx: int) -> str | None:

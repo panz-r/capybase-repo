@@ -87,24 +87,6 @@ def _normalize(text: str) -> str:
     return " ".join((text or "").split())
 
 
-def _changed_line_indices(base: str, other: str) -> set[int]:
-    """Line indices (0-based, into ``other``) where ``other`` differs from ``base``.
-
-    Uses histogram-diff opcodes to find replace/insert/delete blocks relative
-    to the other side, mapping them onto the other side's line numbers.
-    """
-    base_lines = base.splitlines()
-    other_lines = other.splitlines()
-    changed: set[int] = set()
-    matcher = line_matcher(base_lines, other_lines)
-    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            continue
-        # j-indices are into other_lines; mark the changed range there.
-        changed.update(range(j1, j2))
-    return changed
-
-
 def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
     """Attempt the three deterministic rules in priority order.
 

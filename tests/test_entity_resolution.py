@@ -461,22 +461,6 @@ def test_cov_agreed_rename_resolves_entity_disjoint():
     assert "def bar(self)" in result and "def foo(self)" not in result
 
 
-def test_cov_changed_line_indices():
-    """``_changed_line_indices`` returns the 0-based line indices (into
-    ``other``) where ``other`` differs from ``base``. Pins the fully-untested
-    helper (lines 96-105) used by the zealous-merge context rule."""
-    from capybase.structural_resolver import _changed_line_indices
-
-    # Single modified line.
-    base = "line1\nline2\nline3\n"
-    other = "line1\nCHANGED\nline3\n"
-    assert _changed_line_indices(base, other) == {1}
-    # Two modified lines.
-    assert _changed_line_indices("a\nb\nc\nd\n", "a\nB\nc\nD\n") == {1, 3}
-    # Identical → empty.
-    assert _changed_line_indices(base, base) == set()
-
-
 def test_cov_entity_disjoint_renamed_away_emission():
     """When a base entity is renamed away by one side, entity_disjoint emits
     the renamed version (not the old name). Pins the renamed-away branch

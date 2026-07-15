@@ -128,15 +128,6 @@ def _unit_to_entity(unit) -> Entity:
     )
 
 
-def _all_flat_entities(ir) -> list[Entity]:
-    """Flatten a FileIR's units (top-level + nested) to ``Entity`` objects."""
-    try:
-        from capybase.adapters import abstract_parser
-    except Exception:  # noqa: BLE001
-        return []
-    return [_unit_to_entity(u) for u in abstract_parser.all_units_flat(ir)]
-
-
 # ---------------------------------------------------------------------------
 # Span → enclosing node
 # ---------------------------------------------------------------------------
@@ -216,9 +207,9 @@ def enumerate_entities(
         # that set) must not see them. Imports surface via referenced_symbols/
         # find_symbol_definitions, not entity enumeration.
         # Also skip container-scope units (impl/mod/namespace) in the whole-
-        # module path (Consumer fix): they're distinct scopes, not entities,
-        # and emitting them diverged from _all_flat_entities + duplicate_definitions
-        # (which both skip them). Their children are still walked separately.
+        # module path: they're distinct scopes, not entities, and emitting them
+        # diverged from enumerate_entities + duplicate_definitions (which both
+        # skip them). Their children are still walked separately.
         return [
             _unit_to_entity(u)
             for u in units
