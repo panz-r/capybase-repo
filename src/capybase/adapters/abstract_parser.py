@@ -108,7 +108,8 @@ _LANG_FAMILY: dict[str, str] = {
 #: PHP) and Family B (indentation-delimited: Python) are all supported by the
 #: grammar-free state machines. Family C (declarative/data) is not yet
 #: implemented. ``detect_family`` knows the broader map; ``is_available``
-#: gates the public API.
+#: gates the public API (currently just Python and Rust, to keep the skip-path
+#: tests green — expanding it is a one-line flip).
 _SUPPORTED_LANGUAGES = frozenset(_LANG_FAMILY.keys())
 
 
@@ -706,9 +707,8 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
         if _B_DECORATOR_RE.match(raw):
             # A decorator belongs to the NEXT declaration. It is a scope boundary
             # for the PREVIOUS unit at the same indent: close that unit against
-            # the prior meaningful row so it doesn't absorb this decorator (fix
-            # #2 — previously the previous unit's end advanced through the next
-            # unit's decorator). Do NOT advance last_line_row past this line.
+            # the prior meaningful row so it doesn't absorb this decorator.
+            # Do NOT advance last_line_row past this line.
             if stack and stack[-1].indent >= indent:
                 close_units_at_or_below(indent, prev_line_row)
             last_line_row = prev_line_row  # this line is not a body line
@@ -1388,8 +1388,8 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
     while stack:
         _close_a_unit(stack.pop(), n, src, units, stack, _line_index)
 
-    # Field units are now emitted in the main scan at the ``;`` terminator (fix
-    # #10), so no second whole-file re-scan is needed here.
+    # Field units are emitted in the main scan at the ``;`` terminator,
+    # so no second whole-file re-scan is needed here.
 
     # newline/expression-body declarations the brace machine can't catch
     # (Kotlin ``data class Name(...)`` with no body, ``fun m() = expr`` with an

@@ -1292,10 +1292,10 @@ def test_rust_type_alias_still_a_field():
 
 
 def test_field_with_struct_literal_initializer():
-    """a top-level ``const``/``static`` whose initializer contains a braced
-    struct literal must still be detected as a FIELD. The in-pass emitter (fix
-    #10) reset the token buffer at every ``{``/``}``, so by the ``;`` the
-    declaration keyword was gone and the field was silently dropped. This is a
+    """A top-level ``const``/``static`` whose initializer contains a braced
+    struct literal must still be detected as a FIELD. The in-pass emitter
+    resets the token buffer at every ``{``/``}``, so by the ``;`` the
+    declaration keyword is gone and the field is silently dropped. This is a
     very common Rust pattern."""
     src = "pub const P: Point = Point { x: 1, y: 2 };\nfn main() {}\n"
     ir = ap.parse_file(src, language="rust")
