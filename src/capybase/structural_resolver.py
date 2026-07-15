@@ -765,12 +765,12 @@ def _try_zealous_merge(base: str, current: str, replayed: str) -> str | None:
             # Span-overlap guard: if a replayed region starts WITHIN (i, end)
             # (this cur region spans past it), the jump to `end` would skip it.
             # That's only safe if the skipped region's replacement is already
-            # covered by `rep` (the content we're emitting). Otherwise the
+            # covered by `rep` at the CORRECT positional offset. Otherwise the
             # replayed edit is silently dropped — decline.
             for rs in range(i + 1, end):
                 if rs in rep_regions:
                     re_, rrep = rep_regions[rs]
-                    if not _region_covered(rep, rs, re_, rrep, base_lines):
+                    if not _region_covered(rep, i, rs, re_, rrep):
                         return None
             out.extend(rep)
             i = end
@@ -780,7 +780,7 @@ def _try_zealous_merge(base: str, current: str, replayed: str) -> str | None:
             for cs in range(i + 1, end):
                 if cs in cur_regions:
                     ce, crep = cur_regions[cs]
-                    if not _region_covered(rep, cs, ce, crep, base_lines):
+                    if not _region_covered(rep, i, cs, ce, crep):
                         return None
             out.extend(rep)
             i = end
@@ -791,24 +791,32 @@ def _try_zealous_merge(base: str, current: str, replayed: str) -> str | None:
 
 
 def _region_covered(
-    emitted: list[str], r_start: int, r_end: int, r_replacement: list[str],
-    base_lines: list[str],
+    emitted: list[str], span_start: int, r_start: int, r_end: int,
+    r_replacement: list[str],
 ) -> bool:
     """True if the other side's region replacement is already covered by ``emitted``.
 
-    When one side's region spans past the other's start, the walk emits the
-    spanning side and jumps past the other. This is only safe if the jumped-past
-    region's edit is redundant — its replacement lines already appear in the
-    emitted content (e.g. both sides agreed on part of the change). If the
-    jumped-past edit differs, it would be silently dropped.
+    When one side's region (starting at ``span_start``) spans past the other's
+    region (starting at ``r_start``), the walk emits the spanning side and jumps
+    past the other. This is only safe if the jumped-past region's edit is
+    redundant — its replacement already appears at the CORRECT POSITIONAL offset
+    within ``emitted`` (not just as a coincidental suffix). If the jumped-past
+    edit differs or is a pure deletion, it would be silently dropped.
+
+    ``span_start`` is the spanning region's base-line start; ``r_start`` is the
+    jumped-past region's base-line start. The positional offset is
+    ``r_start - span_start``. The replacement must align exactly there.
     """
-    # The region replaces base[r_start:r_end] with r_replacement. The spanning
-    # side's `emitted` lines cover the whole span. If r_replacement is a suffix
-    # of `emitted` (the agreed tail), it's covered; otherwise it's a distinct
-    # edit that would be dropped.
-    if len(r_replacement) > len(emitted):
+    if not r_replacement:
+        # A pure deletion is covered ONLY if the spanning side also deleted
+        # that base line (emitted nothing for it). Since the spanning side
+        # emitted content for the whole span, a deletion within it is NEVER
+        # covered — the base line survives in the spanning side's replacement.
         return False
-    return emitted[-len(r_replacement):] == r_replacement if r_replacement else True
+    offset = r_start - span_start
+    if offset < 0 or offset + len(r_replacement) > len(emitted):
+        return False
+    return emitted[offset : offset + len(r_replacement)] == r_replacement
 
 
 def _change_regions(

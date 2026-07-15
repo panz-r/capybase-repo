@@ -934,3 +934,36 @@ def test_r10_rebuild_container_tab_indented():
             assert ln.startswith("\t") or ln.startswith(" "), (
                 f"method header lost its tab indent (emitted at column 0);\n{result.text!r}"
             )
+
+
+# --- D.1 hardening (round 11): zealous must decline on ANY span intersection ---
+
+
+def test_r11_zealous_span_intersection_pure_delete():
+    r"""The round-10 _region_covered guard used a suffix heuristic that returned
+    True unconditionally for pure-DELETE (empty replacement), so a modify/delete
+    conflict where one side's region spanned past the other's deletion was
+    silently accepted. Replace with decline-on-any-span-intersection: if a
+    region spans past the other side's region start (and they don't share a
+    start), the overlap is ambiguous — decline."""
+    base = "a=1\nb=2\nc=3\nd=4\ne=5"
+    cur = "a=1\nx=9\ny=9\nz=9\ne=5"   # cur: replace [1,4) -> [x,y,z]
+    rep = "a=1\nb=2\nd=4\ne=5"         # rep: DELETE c (line 2, pure delete)
+    result = resolve_structurally(_unit(base, cur, rep))
+    assert result is None or result.text is None, (
+        f"modify/delete span intersection must decline (not silently drop the deletion);\n"
+        f"got {result.text!r}"
+    )
+
+
+def test_r11_zealous_span_intersection_coincidental_tail():
+    r"""The suffix heuristic also passed when the jumped-past replacement
+    coincidentally matched the spanning region's tail — but that's positional
+    coincidence, not coverage. Decline."""
+    base = "line1\nline2\nline3"
+    cur = "line1\nLINE2"            # cur: replace+delete spanning [1,3)
+    rep = "line1\nline2\nLINE2"    # rep: replace line3 -> LINE2 (== cur's tail)
+    result = resolve_structurally(_unit(base, cur, rep))
+    assert result is None or result.text is None, (
+        f"coincidental-tail span intersection must decline;\n{result.text!r}"
+    )
