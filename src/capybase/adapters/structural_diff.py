@@ -385,6 +385,15 @@ def _detect_renames(
         # Find the other side's entry for this new name (agreed rename?).
         other = left_units if side == "right" else right_units
         other_match = next((u for u in other if u.identity == side_unit.identity), None)
+        # When BOTH sides have the new name, sub-classify: an AGREED rename
+        # (both sides renamed identically) is non-conflicting, but if the two
+        # sides' bodies DIVERGE, it's a rename-conflict. Collapsing a divergent
+        # pair into a single RENAMED entry would drop the conflict (RENAMED is
+        # not in _CONFLICT_CHANGE_KINDS), telling the LLM there's nothing to
+        # resolve. In that case, skip the pairing and leave the
+        # added_both_conflict classification the identity pass already produced.
+        if other_match is not None and _bodies_differ(side_unit, other_match):
+            return
         # Build the RENAMED entry.
         if side == "left":
             new_entries.append(AlignedUnit(

@@ -709,3 +709,36 @@ def test_fingerprint_and_body_content_invariant():
         )
 
 
+
+
+# --- H1 regression: 3-way rename must not drop added_both_conflict ---
+
+
+def test_h1_both_sides_rename_same_name_different_bodies_stays_conflict():
+    """When base has ``foo`` and BOTH sides rename it to ``bar``, but with
+    DIFFERENT bodies, the 3-way diff must report a structural conflict — not
+    collapse it into a non-conflicting RENAMED entry.
+
+    The rename pass pairs ``bar`` with ``foo`` via fingerprint match (one side's
+    body matches foo's), but when the OTHER side also has ``bar`` with a
+    divergent body, that's a genuine rename-conflict. Previously the rename pass
+    unconditionally emitted RENAMED (not in _CONFLICT_CHANGE_KINDS), dropping the
+    conflict to zero and telling the LLM there's nothing to resolve."""
+    from capybase.adapters.structural_diff import compute_structural_diff_3way
+    base = "def foo():\n    return 1\n"
+    left = "def bar():\n    return 1\n"    # rename foo->bar, body identical to foo
+    right = "def bar():\n    return 2\n"   # rename foo->bar, DIFFERENT body
+    diff = compute_structural_diff_3way(base, left, right, language="python")
+    assert diff is not None, "diff must not decline on this input"
+    conflicts = diff.structural_conflicts
+    assert len(conflicts) >= 1, (
+        f"both-sides-rename-same-name with divergent bodies must be a conflict; "
+        f"got kinds={[a.change_kind for a in diff.aligned]}, conflicts={len(conflicts)}"
+    )
+    # Sanity: the agreed-same-body rename is still non-conflicting.
+    right_same = "def bar():\n    return 1\n"
+    diff_ok = compute_structural_diff_3way(base, left, right_same, language="python")
+    assert diff_ok is not None
+    assert len(diff_ok.structural_conflicts) == 0, (
+        "both-sides-rename with identical bodies is an agreed rename, not a conflict"
+    )
