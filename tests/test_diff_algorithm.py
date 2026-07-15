@@ -1,4 +1,4 @@
-"""P1 (survey §1.3): histogram diff as the merge-file refinement default.
+"""P1: histogram diff as the merge-file refinement default.
 
 The merge-file adapter now selects the xdiff backend via ``-c
 diff.algorithm=<alg>``. These tests pin the contract:
@@ -31,7 +31,7 @@ pytestmark = pytest.mark.skipif(not is_available(), reason="git not available")
 
 
 def test_default_is_histogram():
-    """The survey's #1 recommendation is the default, not Myers."""
+    """The's #1 recommendation is the default, not Myers."""
     assert DEFAULT_DIFF_ALGORITHM == "histogram"
 
 

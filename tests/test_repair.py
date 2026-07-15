@@ -156,7 +156,7 @@ def test_repair_prompt_says_fix_not_rewrite():
 
 
 def test_repair_prompt_requires_plan_before_fix():
-    """Self-correction plan step (survey §3.3): the repair prompt forces the
+    """Self-correction plan step: the repair prompt forces the
     model to reason about WHY each failure happened + the fix BEFORE emitting
     resolved_text — internalizing the critic feedback so retries converge
     instead of reproducing the same mistake. The plan is a `plan` field the

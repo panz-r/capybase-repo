@@ -1,4 +1,4 @@
-"""Integration tests: SBCR in the orchestrator resolve path (survey §4.1).
+"""Integration tests: SBCR in the orchestrator resolve path.
 
 Proves the safety contract end-to-end:
 
@@ -176,9 +176,9 @@ def test_contradictory_conflict_declined_falls_to_model(repo: Path):
 
 
 # ---------------------------------------------------------------------------
-# Balance-aware routing (survey §4.2): SBCR wins balanced, LLM wins imbalanced
+# Balance-aware routing: SBCR wins balanced, LLM wins imbalanced
 #
-# Two mechanisms encode the survey's finding:
+# Two mechanisms encode prior work's finding:
 # 1. SBCR's similarity floor already self-declines on heavily-imbalanced conflicts
 #    (the union's mean-similarity-to-both-parents can't clear 0.6 when one side
 #    dwarfs the other). See test_sbcr.py for that floor behavior.

@@ -1,4 +1,4 @@
-"""Cross-commit dependency guardian (survey §3.1) — a deterministic window-level
+"""Cross-commit dependency guardian — a deterministic window-level
 check that closes the per-commit blind spot.
 
 Every per-commit validator operates on one replayed commit in isolation. A
@@ -21,7 +21,7 @@ final rebased tree — by name OR by a recognized rename (body-fingerprint match
 
 Pure and deterministic. The orchestrator supplies the per-commit file contents
 (via ``git.blob_at``) and the final tree's entities; this module reports
-``DependencyBreak`` violations. No LLM is involved — the survey's finding that
+``DependencyBreak`` violations. No LLM is involved — prior work's finding that
 this gap is "entirely deterministic, no LLM required".
 """
 
@@ -325,7 +325,7 @@ def audit_cross_commit_dependencies(
 
 
 # ---------------------------------------------------------------------------
-# Intent evolution trace (survey §3.2) — post-window assurance audit
+# Intent evolution trace — post-window assurance audit
 # ---------------------------------------------------------------------------
 
 
@@ -465,7 +465,7 @@ def audit_evolution(
     means the merge kept/reverted to an earlier version — a lost intermediate
     evolution step no per-commit validator sees.
 
-    This is the SOUND version of the survey's evolution check: rather than
+    This is the SOUND version of prior work's evolution check: rather than
     speculatively composing body deltas (which don't compose like arithmetic),
     it verifies the merge matches the LATEST known evolution of the entity. A
     merge that silently drops the last step (the practical bug) is caught; the

@@ -523,7 +523,7 @@ def probe_embeddings(model_cfg: ModelConfig, *, embeddings_model: str = "") -> P
     Uses a fresh ``OpenAIEmbeddingsClient`` (distinct from the completion client)
     and the existing capability helper. Supported iff a probe text embeds to a
     non-empty vector. When supported, the profile enables embedding RAG (semantic
-    retrieval over past resolutions, survey §4.2); when not (the common case for
+    retrieval over past resolutions, when not (the common case for
     a llama-server started without ``--embeddings``), RAG stays lexical (BM25).
 
     ``embeddings_model`` is the embedding model name to send. On a multi-model
@@ -1877,7 +1877,7 @@ def run_calibration(
     results.append(jm_result)
     lp_result = probe_logprobs(client, tuned_cfg)
     results.append(lp_result)
-    # Embeddings capability (survey §4.2): a quick one-call check, parallel to
+    # Embeddings capability: a quick one-call check, parallel to
     # the logprobs probe. When supported, the profile enables semantic RAG; the
     # BM25 retriever is the fallback otherwise. Cheap, so always run it.
     emb_result = probe_embeddings(tuned_cfg, embeddings_model=embeddings_model)

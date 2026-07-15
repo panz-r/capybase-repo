@@ -192,7 +192,7 @@ def test_resolved_text_is_plain_block_text_no_markers():
 
 
 # ---------------------------------------------------------------------------
-# Rule 4: zealous merge — per-base-line 3-way (survey §1.4)
+# Rule 4: zealous merge — per-base-line 3-way
 #
 # This is the rule disjoint_edits CAN'T handle: two edits that overlap in
 # base-line span, yet are still safe because the overlap is agreed (both made

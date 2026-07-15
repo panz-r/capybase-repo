@@ -1,4 +1,4 @@
-"""RAG into the repair/retry path (embeddings survey §2).
+"""RAG into the repair/retry path.
 
 The repair prompt is the A/B failure site where the model reproduces the same
 dropped-side merge across retries. Surfacing a SINGLE high-trust retrieved
@@ -75,7 +75,7 @@ def _ex(name: str, resolved: str = "RESOLVED") -> HistoricalExample:
 
 
 def test_quality_filter_drops_high_retry_examples(tmp_path):
-    """Examples that took too many retries are excluded (survey §1)."""
+    """Examples that took too many retries are excluded."""
     store = ExperienceStore(tmp_path / "e.jsonl")
     good = _exp(retry_count=1)  # low retries → trustworthy
     lucky = _exp(retry_count=5)  # many retries → may have converged by luck

@@ -1,5 +1,5 @@
 """Tests for the commit change-type classifier's effect on retry budgets
-(Phase 1c / survey §5.2).
+(Phase 1c /
 
 The change-type role scales the retry budget: bugfix → more retries (correctness-
 critical), refactor → fewer (behavior-preserving, should converge fast). These

@@ -1,5 +1,5 @@
 """Tests for the entity-level semantic-change block injected into the resolve
-prompt (Phase 2c / survey Tier 5).
+prompt (Phase 2c / Tier 5).
 
 The block summarizes what each side changed at the entity level (added/removed/
 renamed/signature_changed/body_changed) via ``semantic_diff``, giving the model

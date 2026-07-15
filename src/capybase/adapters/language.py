@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 
-#: The single source of truth for file-extension → language-name mapping (fix #11).
+#: The single source of truth for file-extension → language-name mapping.
 #: The union of the two previously-divergent maps (conflict_extractor._EXT_LANG
 #: and abstract_parser._EXT_LANG). Both ``conflict_extractor.detect_language``
 #: and the abstract parser's family dispatch read from this so a newly-added
@@ -194,7 +194,7 @@ class RustAdapter(_BaseAdapter):
         )
 
 
-#: Per-language configuration for the brace-family adapters (fix #12). Each
+#: Per-language configuration for the brace-family adapters. Each
 #: entry is the keyword set for ``definition_patterns``; the rest (``//``
 #: comment prefix, ``container_has_braces=True``) is shared. Languages not
 #: listed here but with a parser family still get a sensible default via
@@ -234,7 +234,7 @@ _BRACE_LANG_EXTENSIONS: dict[str, str] = {
 
 @dataclass(frozen=True)
 class _BraceLangAdapter(_BaseAdapter):
-    """A brace-delimited (Family A) language adapter (fix #12).
+    """A brace-delimited (Family A) language adapter.
 
     One class serves all the C-syntax-family languages the parser supports
     (JS/TS/Go/Java/C/C++/C#/Kotlin/Swift/Scala/Dart/PHP): they share ``//``

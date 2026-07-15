@@ -1,4 +1,4 @@
-"""Tests for the test-gated side picker (survey §4.2 / conftest port pattern).
+"""Tests for the test-gated side picker.
 
 When both pre-LLM resolvers (structural + SBCR) decline a same-line scalar
 conflict where taking either side verbatim is plausible, the side picker tries

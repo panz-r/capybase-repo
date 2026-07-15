@@ -1,5 +1,4 @@
-"""Structural context annotation for the LLM prompt (survey §"Structural
-context annotation for the LLM prompt").
+"""Structural context annotation for the LLM prompt.
 
 Separated from :mod:`capybase.adapters.abstract_parser` (consolidation #3) so
 the parser/diff computation and the prompt-rendering presentation have distinct
@@ -177,7 +176,7 @@ def render_structural_context(
     if base_summary:
         lines.append(f"Base structure: {base_summary}")
 
-    # Import-surface block (survey: "imports-only tool outperformed complex
+    # Import-surface block "imports-only tool outperformed complex
     # structured tools — import conflict handling is the single highest-value
     # structural operation"). Imports are the one unit kind where the correct
     # merge is almost always the UNION of both sides' adds minus genuine removes;

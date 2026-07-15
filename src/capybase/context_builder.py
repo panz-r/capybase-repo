@@ -40,7 +40,7 @@ class ContextBuilder:
         self.retriever = retriever
         self.retriever_k = retriever_k
         self.min_examples = min_examples
-        # Repair-path retrieval (embeddings survey §2): a strictly-filtered
+        # Repair-path retrieval : a strictly-filtered
         # retriever (QualityFilteredRetriever) used ONLY to populate
         # ContextBundle.repair_retrieved_examples for the CEGIS repair prompt.
         # None → the repair prompt gets no few-shot (the prior behavior). Top-1
@@ -50,7 +50,7 @@ class ContextBuilder:
         self.repair_retriever_k = repair_retriever_k
         self.use_enclosing_as_primary = use_enclosing_as_primary
         self.canonicalize_context = canonicalize_context
-        # Cross-file dependency slicing (survey §5.3 Rover / §1.2): resolve the
+        # Cross-file dependency slicing (Rover / §1.2): resolve the
         # definitions of symbols the conflict code references across the repo
         # and surface them as ``related_snippets`` in the context bundle — the
         # dependency neighborhood a small model needs to merge correctly, found
@@ -131,7 +131,7 @@ class ContextBuilder:
                 if self.use_enclosing_as_primary:
                     primary = meta["enclosing_node_text"]
             structural_view["unit_kind"] = unit.unit_kind
-        # Sibling entities (survey §4.1/§5.4): the signatures of the OTHER
+        # Sibling entities: the signatures of the OTHER
         # methods/fields in the same container, surfaced so the prompt can show
         # the model the entity neighborhood it must stay consistent with.
         # Populated by the structural enricher; advisory.
@@ -187,7 +187,7 @@ class ContextBuilder:
                 # Stash the error so the orchestrator can journal an advisory
                 # (#idea 4); the builder has no journal access itself.
                 self.last_retrieval_error = str(exc)
-        # Repair-path retrieval (embeddings survey §2): a strictly-filtered top-1
+        # Repair-path retrieval : a strictly-filtered top-1
         # example for the CEGIS repair prompt. Separate from the fresh-generation
         # retrieval above — higher score floor + retry-count quality filter (a
         # misleading example costs more when the model is already fixing a specific
@@ -205,7 +205,7 @@ class ContextBuilder:
                 repair_retrieved = [ex for _, ex in repair_scored][: self.repair_retriever_k]
             except Exception:  # noqa: BLE001 - repair retrieval is best-effort
                 repair_retrieved = []
-        # Cross-file dependency slicing (survey §5.3): resolve definitions of
+        # Cross-file dependency slicing: resolve definitions of
         # symbols referenced in the EDITED sides (current + replayed). These are
         # the dependencies the merged result must stay consistent with — helpers,
         # constants, methods on other types the model would otherwise guess. The

@@ -44,13 +44,13 @@ from capybase.stats import (
 # when calibration can't run, and as the baseline the report compares against.
 DEFAULT_MIN_SIMILARITY = 0.35
 
-# Multiplier for the MAD-based zone thresholds (survey 2 §4.1): a zone boundary
+# Multiplier for the MAD-based zone thresholds ( 2 §4.1): a zone boundary
 # sits k robust-σ from the class median. k=2.5 ≈ the ~99% band under mild
 # assumptions, balancing precision (green) against recall (red).
 _ZONE_K = 2.5
 
 # A fit residual exceeding this many robust-σ flags a (likely mislabeled) probe,
-# triggering the Huber-loss refit (survey 2 §3.1).
+# triggering the Huber-loss refit ( 2 §3.1).
 _NOISE_OUTLIER_C = 1.345
 
 
@@ -58,7 +58,7 @@ _NOISE_OUTLIER_C = 1.345
 class ScoreDistribution:
     """Summary statistics of one class's measured similarity scores.
 
-    The robust ``median``/``mad`` (survey 2 §4.1) are recorded alongside the
+    The robust ``median``/``mad`` ( 2 §4.1) are recorded alongside the
     classic min/max/mean so drift detection can compare distributions on
     robust statistics and the report can show dispersion that ignores outliers.
     """
@@ -90,10 +90,10 @@ class EmbeddingCalibration:
     unchanged in meaning). ``quantile_gap`` / ``related_p10`` / ``unrelated_p90``
     are the three estimates; the report shows all three for transparency.
 
-    ``isotonic_points`` is the fitted score-calibration transform (survey §2.1):
+    ``isotonic_points`` is the fitted score-calibration transform:
     a monotone stepwise map from raw cosine to a model-agnostic calibrated scale,
     stored as ``(raw, calibrated)`` breakpoints. The three-zone thresholds
-    (``green``/``amber``/``red``, survey §3.2) are derived on that calibrated
+    (``green``/``amber``/``red``, are derived on that calibrated
     scale — green/amber are advisory (journaled), red is the hard filter floor.
 
     ``related`` and ``unrelated`` are the measured score distributions. ``ok`` is
@@ -111,7 +111,7 @@ class EmbeddingCalibration:
     ok: bool
     probed_at: str
     notes: list[str] = field(default_factory=list)
-    # Score-calibration transform + three-zone thresholds (survey §2.1, §3.2).
+    # Score-calibration transform + three-zone thresholds.
     # Empty when calibration fell back to quantile-gap-only (older profiles load
     # with these defaults — backward-compatible).
     isotonic_points: list[tuple[float, float]] = field(default_factory=list)
@@ -121,7 +121,7 @@ class EmbeddingCalibration:
     # KS separation on the calibrated scale: 1.0 = classes fully separated, 0.0
     # = identical. A fit-quality signal for the report.
     ks_separation: float = 0.0
-    # Robust-estimator provenance (survey 2 §3.1, §4.1). ``fit_loss`` records
+    # Robust-estimator provenance ( 2 §3.1, §4.1). ``fit_loss`` records
     # whether the isotonic transform used L2 (default) or Huber (selected when
     # label noise was detected). ``zone_method`` records whether the zones used
     # MAD (default, robust) or fell back to percentile (MAD=0 degeneracy).
@@ -145,18 +145,18 @@ class EmbeddingCalibration:
             "ok": self.ok,
             "probed_at": self.probed_at,
             "notes": list(self.notes),
-            # The fitted score-calibration transform (survey §2.1).
+            # The fitted score-calibration transform.
             "isotonic_points": [
                 [round(r, 4), round(c, 4)] for r, c in self.isotonic_points
             ],
-            # Three-zone thresholds on the calibrated scale (survey §3.2).
+            # Three-zone thresholds on the calibrated scale.
             "zones": {
                 "green": round(self.green_threshold, 4),
                 "amber": round(self.amber_threshold, 4),
                 "red": round(self.red_threshold, 4),
             },
             "ks_separation": round(self.ks_separation, 4),
-            # Robust-estimator provenance (survey 2 §3.1, §4.1).
+            # Robust-estimator provenance ( 2 §3.1, §4.1).
             "fit_loss": self.fit_loss,
             "zone_method": self.zone_method,
             "related_mad": round(self.related_mad, 4),
@@ -386,9 +386,9 @@ def calibrate_thresholds(
             "conservative floor (this model may be too weak for reliable RAG)"
         )
 
-    # Score calibration (survey §2.1): fit an isotonic transform mapping raw
+    # Score calibration: fit an isotonic transform mapping raw
     # cosines onto a model-agnostic [0,1] scale, then derive three-zone
-    # thresholds on that calibrated scale (survey §3.2). This is ADDITIVE to the
+    # thresholds on that calibrated scale. This is ADDITIVE to the
     # raw-scale floor above — ``min_similarity`` keeps its old meaning, and the
     # zones/isotonic transform are the new, richer capability. The fit needs both
     # classes non-empty (guaranteed here: we returned _failed above otherwise).
@@ -402,7 +402,7 @@ def calibrate_thresholds(
         fit_ys = [1.0] * len(related_scores) + [0.0] * len(unrelated_scores)
         # First the L2 (squared-loss) isotonic fit.
         cal_f = isotonic_fit(fit_xs, fit_ys)
-        # Label-noise detection (survey 2 §3.1): if any probe's L2 residual is a
+        # Label-noise detection ( 2 §3.1): if any probe's L2 residual is a
         # robust outlier (> _NOISE_OUTLIER_C robust-σ), refit under Huber loss so
         # the mislabeled probe has bounded influence on the curve.
         l2_pts = list(getattr(cal_f, "isotonic_points", []))
@@ -419,14 +419,14 @@ def calibrate_thresholds(
                 fit_loss = "huber"
                 notes.append(
                     "label noise detected (large isotonic residual); refit under "
-                    "Huber loss for bounded-influence calibration (survey 2 §3.1)"
+                    "Huber loss for bounded-influence calibration ( 2 §3.1)"
                 )
         iso_points = list(getattr(cal_f, "isotonic_points", []))
         if iso_points:
             cal_related = [cal_f(s) for s in related_scores]
             cal_unrelated = [cal_f(s) for s in unrelated_scores]
             # Zone derivation on the calibrated scale (related -> ~1.0, unrelated
-            # -> ~0.0). MAD-based thresholds (survey 2 §4.1): a zone boundary
+            # -> ~0.0). MAD-based thresholds ( 2 §4.1): a zone boundary
             # sits k·MAD from the class median — robust (50% breakdown) so a few
             # outliers don't move it. Falls back to percentile zones when MAD=0
             # (degenerate, e.g. a constant-vector model).
@@ -440,7 +440,7 @@ def calibrate_thresholds(
                 amber_t = (green_t + red_t) / 2.0
                 zone_method = "mad"
             else:
-                # MAD=0 degeneracy: fall back to percentile zones (survey §3.2).
+                # MAD=0 degeneracy: fall back to percentile zones.
                 green_t = _percentile(sorted(cal_unrelated), 95)
                 red_t = _percentile(sorted(cal_related), 5)
                 amber_t = (green_t + red_t) / 2.0
@@ -498,7 +498,7 @@ def _failed(model: str, notes: list[str]) -> EmbeddingCalibration:
 
 
 # ---------------------------------------------------------------------------
-# Offline drift detection (survey 2 §7) — compare a new calibration against the
+# Offline drift detection ( 2 §7) — compare a new calibration against the
 # stored baseline. Pure summary-statistic comparison (no raw scores persisted).
 # ---------------------------------------------------------------------------
 
@@ -515,7 +515,7 @@ _KS_DELTA = 0.15
 class DriftReport:
     """The result of comparing a new calibration against the stored baseline.
 
-    Offline-only (survey 2 §7): computed at calibrate-embeddings time against the
+    Offline-only ( 2 §7): computed at calibrate-embeddings time against the
     previous run's envelope. ``drifted`` is advisory — it never blocks writing the
     new calibration; it surfaces that the model's score behavior changed enough
     to warrant attention (the floor/zones the retriever now uses may differ).
@@ -523,7 +523,7 @@ class DriftReport:
 
     drifted: bool
     reasons: list[str] = field(default_factory=list)
-    # Hodges-Lehmann-style location shift (survey 2 §4.3): how far the related
+    # Hodges-Lehmann-style location shift ( 2 §4.3): how far the related
     # distribution's median moved, in absolute calibrated-scale units.
     related_median_shift: float = 0.0
     unrelated_median_shift: float = 0.0
@@ -562,7 +562,7 @@ def _median_shift(current: ScoreDistribution, baseline: ScoreDistribution) -> fl
 def compare_calibration(
     current: "EmbeddingCalibration", baseline: "EmbeddingCalibration"
 ) -> DriftReport:
-    """Compare a new calibration against the stored baseline (survey 2 §7).
+    """Compare a new calibration against the stored baseline ( 2 §7).
 
     Uses summary statistics (median/MAD/KS-separation) — the envelope persists
     these, not raw score lists, to avoid bloat. A drift signal fires when the

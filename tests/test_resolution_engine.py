@@ -82,7 +82,7 @@ def test_resolve_prompt_contains_sides():
     assert "BASE" in prompt
 
 
-# --- modify/delete disambiguation in the prompt (survey "silent loss of intent") ---
+# --- modify/delete disambiguation in the prompt ( "silent loss of intent") ---
 
 
 def _modify_delete_unit():
@@ -138,7 +138,7 @@ def test_resolve_prompt_has_no_intent_block_when_unclassified():
     assert "Conflict shape" not in prompt
 
 
-# --- prompt-variant generation (survey §4 Code Roulette robustness) ---
+# --- prompt-variant generation (Code Roulette robustness) ---
 
 
 def test_variants_baseline_equals_resolve_prompt_byte_for_byte():
@@ -342,7 +342,7 @@ def test_well_formed_has_no_failure_kind():
 
 
 def test_candidate_carries_token_entropy_from_response():
-    """TECP (survey §4.1): the model-side uncertainty signal on the LLMResponse
+    """TECP: the model-side uncertainty signal on the LLMResponse
     is surfaced onto the candidate so the calibration seam can learn from it."""
     from capybase.adapters.llm_openai import LLMResponse
 

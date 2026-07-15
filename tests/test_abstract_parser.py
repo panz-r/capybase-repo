@@ -1,4 +1,4 @@
-"""Spec for the grammar-free abstract structural parser (Round 1).
+"""Spec for the grammar-free abstract structural parser.
 
 Replaces tree-sitter grammars with two state machines: Family B (indentation-
 delimited, Python) and Family A (brace-delimited, Rust et al.). These tests pin
@@ -391,8 +391,7 @@ def test_low_confidence_parse_degrades_to_none_in_consumers():
     """A confidence-0.0 parse (minified) surfaces as None through the consumer
     wrapper and the 3-way diff, NOT as an empty FileIR. This lets callers
     distinguish "no trustworthy structure" from "genuinely empty file" — the
-    contract parse_confidence was always meant to send but never did (Round 4
-    wired the gate)."""
+    contract parse_confidence was always meant to send but never did."""
     from capybase.adapters import structural
     # Minified JS: median line length > 200 → confidence 0.0.
     minified = "var a=1;" + "x" * 300 + ";"
@@ -514,8 +513,8 @@ def test_go_parsing():
 def test_java_parsing():
     """Java class + method detection. The keyword-less ``main`` method (whose
     signature leads with return type ``void``, no ``fn``/``function`` keyword)
-    is now extracted as a METHOD child of the class (Round 4 keyword-less
-    method heuristic)."""
+    is now extracted as a METHOD child of the class via the keyword-less
+    method heuristic."""
     src = (
         "import java.util.List;\n\n"
         "public class Main {\n"
@@ -537,7 +536,7 @@ def test_java_parsing():
 def test_java_keywordless_methods_extracted():
     """Java methods (no declaration keyword — return type leads) are extracted as
     METHOD children of their class. Multiple sibling methods, constructors, and
-    methods with complex signatures all recover. Before Round 4, every Java
+    methods with complex signatures all recover. Before, every Java
     method was absorbed into the class body (invisible to the merge engine)."""
     src = (
         "class Service {\n"
@@ -872,7 +871,7 @@ def test_render_context_distinct_additions_says_no_conflict():
 
 
 # ---------------------------------------------------------------------------
-# Import-surface annotation (survey: import handling is the highest-value
+# Import-surface annotation import handling is the highest-value
 # structural operation). The block surfaces an explicit "union the imports"
 # instruction instead of leaving the model to infer it from generic lines.
 # ---------------------------------------------------------------------------
@@ -1287,13 +1286,13 @@ def test_rust_type_alias_still_a_field():
 
 
 # ---------------------------------------------------------------------------
-# Second-pass review fixes — R1 (field-drop regression) + G1–G6 (edge cases in
+# Second-pass review fixes — (field-drop regression) – (edge cases in
 # the bracket/string/continuation machinery introduced by the first round).
 # ---------------------------------------------------------------------------
 
 
 def test_field_with_struct_literal_initializer():
-    """R1: a top-level ``const``/``static`` whose initializer contains a braced
+    """a top-level ``const``/``static`` whose initializer contains a braced
     struct literal must still be detected as a FIELD. The in-pass emitter (fix
     #10) reset the token buffer at every ``{``/``}``, so by the ``;`` the
     declaration keyword was gone and the field was silently dropped. This is a
@@ -1306,7 +1305,7 @@ def test_field_with_struct_literal_initializer():
 
 
 def test_field_with_macro_brace_initializer():
-    """R1 (macro form): ``vec!{...}`` / ``format!{...}`` braced macros in a
+    """ (macro form): ``vec!{...}`` / ``format!{...}`` braced macros in a
     top-level const initializer must not lose the field."""
     src = "const V: Vec<u8> = vec!{1, 2, 3};\nfn main() {}\n"
     ir = ap.parse_file(src, language="rust")
@@ -1316,7 +1315,7 @@ def test_field_with_macro_brace_initializer():
 
 
 def test_field_with_brace_no_regression_on_plain_const():
-    """R1 regression guard: a plain const (no braces) is still detected."""
+    """a plain const (no braces) is still detected."""
     src = "pub const N: u32 = 5;\nfn main() {}\n"
     ir = ap.parse_file(src, language="rust")
     flat = ap.all_units_flat(ir)
@@ -1324,7 +1323,7 @@ def test_field_with_brace_no_regression_on_plain_const():
 
 
 def test_inline_comment_unbalanced_bracket_no_continuation():
-    """G1: an inline comment containing an unbalanced bracket must NOT corrupt
+    """an inline comment containing an unbalanced bracket must NOT corrupt
     the continuation depth. ``_line_bracket_delta`` must strip comments before
     counting brackets."""
     src = (
@@ -1338,7 +1337,7 @@ def test_inline_comment_unbalanced_bracket_no_continuation():
 
 
 def test_dangling_open_brace_does_not_swallow_next_def():
-    """G2: a malformed dangling ``{`` (a merge artifact) must not absorb the
+    """a malformed dangling ``{`` (a merge artifact) must not absorb the
     next declaration as a continuation. Only ``(`` opens a signature
     continuation; ``{``/``[`` (collection literals) at depth 0 are not
     declaration-relevant."""
@@ -1355,7 +1354,7 @@ def test_dangling_open_brace_does_not_swallow_next_def():
 
 
 def test_multiline_signature_still_uses_paren_continuation():
-    """G2 regression guard: the multi-line signature fix (#1) must still work —
+    """the multi-line signature fix (#1) must still work —
     ``(`` IS a continuation trigger, so the closing ``) -> bool:`` is absorbed."""
     src = (
         "def long(\n"
@@ -1369,7 +1368,7 @@ def test_multiline_signature_still_uses_paren_continuation():
 
 
 def test_identifier_ending_in_r_before_string_not_raw():
-    """G3: an identifier ending in ``r``/``b`` immediately before a string
+    """an identifier ending in ``r``/``b`` immediately before a string
     literal must NOT be misread as a raw-string prefix. ``myr#\"...\"#`` — the
     ``r`` is part of ``myr``, not a prefix. The fix is a word-boundary check in
     ``_match_string_prefix``: the rune run must be preceded by a non-identifier
@@ -1399,7 +1398,7 @@ def test_identifier_ending_in_r_before_string_not_raw():
 
 
 def test_real_raw_string_prefix_still_works():
-    """G3 regression guard: a genuine ``r#\"...\"#`` (with a word boundary
+    """a genuine ``r#\"...\"#`` (with a word boundary
     before ``r``) is still recognized as a raw string and closes on ``\"#``."""
     src = (
         "fn f() {\n"
@@ -1416,7 +1415,7 @@ def test_real_raw_string_prefix_still_works():
 
 
 def test_backslash_line_continuation_def():
-    """G4: an explicit backslash line-continuation in a signature is handled —
+    """an explicit backslash line-continuation in a signature is handled —
     ``def \\<newline>foo():`` still detects ``foo``. Rare but PEP 8-legal."""
     src = "def \\\nfoo():\n    pass\n"
     ir = ap.parse_family_b(src)
@@ -1425,7 +1424,7 @@ def test_backslash_line_continuation_def():
 
 
 def test_unterminated_string_does_not_corrupt_continuation():
-    """G5: an unterminated single-line ``\"`` on one line must not leave the
+    """an unterminated single-line ``\"`` on one line must not leave the
     bracket counter seeing raw brackets on subsequent lines. The string state
     should reset at the newline (Family B is line-oriented)."""
     # A signature line with an unterminated string then a real def after.
@@ -1441,7 +1440,7 @@ def test_unterminated_string_does_not_corrupt_continuation():
 
 
 def test_csharp_verbatim_string_doubled_quotes():
-    """G6: C# verbatim strings ``@\"...\"`` escape a literal quote by doubling
+    """C# verbatim strings ``@\"...\"`` escape a literal quote by doubling
     it (``\"\"``). The scanner must not close the string at the first ``\"\"``."""
     src = (
         "class C {\n"
@@ -1821,8 +1820,8 @@ def test_family_mismatch_does_not_crash():
 
 
 # ---------------------------------------------------------------------------
-# Third-pass review fixes: R2 (stmt_start_byte), R3 (Rust lifetimes),
-# G7 (initializer-brace guard), G8 (Kotlin fun + return-type heuristic).
+# Third-pass review fixes: (stmt_start_byte), (Rust lifetimes),
+# (initializer-brace guard), (Kotlin fun + return-type heuristic).
 # ---------------------------------------------------------------------------
 
 
@@ -1836,18 +1835,18 @@ def _unit_named(ir, name):
     return any(u.name == name for u in ap.all_units_flat(ir))
 
 
-# --- R2: stmt_start_byte must only advance at top-level ; ---
+# ---: stmt_start_byte must only advance at top-level ; ---
 
 
 def test_r2_field_with_function_expression_initializer():
-    """R2: ``const f = function() { ... };`` — the in-brace ``;`` (after
+    """``const f = function { ... };`` — the in-brace ``;`` (after
     ``return 1``) must NOT advance ``stmt_start_byte``; the outer ``;`` must
     slice the full statement. Previously the inner ``;`` reset the tracker,
     so the outer ``;`` sliced just ``} ;`` and the whole declaration was
     silently dropped.
 
-    Post-G7 the function expression is classified as a FUNCTION ``f`` (the
-    binding name is recovered); the original R2 concern — silent drop — is
+    the function expression is classified as a FUNCTION ``f`` (the
+    binding name is recovered); the original concern — silent drop — is
     what this guards against. Either a FUNCTION or FIELD ``f`` is acceptable."""
     src = "const f = function() {\n    return 1;\n};\n"
     ir = ap.parse_family_a(src, language="javascript")
@@ -1858,9 +1857,9 @@ def test_r2_field_with_function_expression_initializer():
 
 
 def test_r2_field_with_arrow_function_initializer():
-    """R2 regression: same bug for arrow-function bindings (very common in
+    """Regression: same bug for arrow-function bindings (very common in
     TS/JS). ``const h = () => { ... };`` — the inner ``;`` must not corrupt
-    ``stmt_start_byte``. Post-G7 an arrow expression falls through to the
+    ``stmt_start_byte``. an arrow expression falls through to the
     keywordless path (the ``=>`` isn't captured at the ``{``); either way the
     binding must not be silently dropped."""
     src = "const h = () => {\n    return 2;\n};\n"
@@ -1875,7 +1874,7 @@ def test_r2_field_with_arrow_function_initializer():
 
 
 def test_r2_field_with_struct_literal_still_works():
-    """R2 regression guard: the original R1 case (Rust struct literal) must
+    """the original case (Rust struct literal) must
     still emit a field. The fix must not regress the case it was added for."""
     src = "pub const P: Point = Point {\n    x: 0,\n    y: 0,\n};\n"
     ir = ap.parse_family_a(src, language="rust")
@@ -1885,11 +1884,11 @@ def test_r2_field_with_struct_literal_still_works():
     )
 
 
-# --- R3: Rust lifetimes preceded by & / , / ( corrupt the parse ---
+# ---: Rust lifetimes preceded by & /, / ( corrupt the parse ---
 
 
 def test_r3_rust_static_lifetime_in_return_type():
-    """R3: ``pub fn f() -> &'static str`` — the ``'`` of ``'static`` is
+    """``pub fn f -> &'static str`` — the ``'`` of ``'static`` is
     preceded by ``&`` (not alnum/_), so the parser misread it as a char-literal
     opener and never closed it, corrupting the rest of the file → 0 units.
     A lifetime is ``'`` followed by an identifier; recognize it and skip."""
@@ -1902,7 +1901,7 @@ def test_r3_rust_static_lifetime_in_return_type():
 
 
 def test_r3_rust_generic_lifetime_param():
-    """R3: ``fn f<'a>(x: &'a str)`` — lifetime in generic params and a ref
+    """``fn f<'a>(x: &'a str)`` — lifetime in generic params and a ref
     type. Both ``'a`` occurrences are preceded by ``<`` / ``&``."""
     src = "pub fn f<'a>(x: &'a str) {\n    todo!()\n}\n"
     ir = ap.parse_family_a(src, language="rust")
@@ -1913,7 +1912,7 @@ def test_r3_rust_generic_lifetime_param():
 
 
 def test_r3_rust_lifetime_in_body_not_corrupted():
-    """R3: a lifetime appearing in the function body (``let y: &'static str``)
+    """a lifetime appearing in the function body (``let y: &'static str``)
     must not corrupt the parse either — the function still parses, and a
     following sibling is still detected."""
     src = (
@@ -1928,7 +1927,7 @@ def test_r3_rust_lifetime_in_body_not_corrupted():
 
 
 def test_r3_rust_char_literal_still_works():
-    """R3 regression guard: genuine Rust char literals (``'a'``, ``'\\n'``)
+    """genuine Rust char literals (``'a'``, ``'\\n'``)
     must still be handled — they are NOT lifetimes. A char literal has the
     ``'`` followed by content then a closing ``'``; a lifetime is ``'`` + an
     identifier with no closing ``'``. The string with an embedded char literal
@@ -1941,20 +1940,20 @@ def test_r3_rust_char_literal_still_works():
     )
 
 
-# --- G7: initializer-brace guard too broad (const=function/class/arrow) ---
+# ---: initializer-brace guard too broad (const=function/class/arrow) ---
 
 
 def test_g7_const_function_expression_emits_function():
-    """G7: ``const f = function() { ... }`` (no semicolon, JS style) — the
-    R1 initializer guard rejected every ``const X = {`` shape, including
-    function/class expressions. With G7 tightening + R2 fix, the function
+    """``const f = function { ... }`` (no semicolon, JS style) — the
+     initializer guard rejected every ``const X = {`` shape, including
+    function/class expressions. tightening fix, the function
     body brace must be classified as a FUNCTION (the guard lets ``= function``
     through to normal classification)."""
     src = "const named = function() {\n    return 42;\n}\n"
     ir = ap.parse_family_a(src, language="javascript")
     kinds = _kinds_of(ir)
     # Either a FUNCTION 'named' or a FIELD 'named' is acceptable; the silent
-    # DROP (empty) is the bug. Post-G7 with the keyword path it should be a
+    # DROP (empty) is the bug. With the keyword path it should be a
     # function unit.
     assert kinds, (
         f"const=function(){{...}} must not be silently dropped; got {kinds}"
@@ -1963,7 +1962,7 @@ def test_g7_const_function_expression_emits_function():
 
 
 def test_g7_const_class_expression_detected():
-    """G7: ``const C = class { ... }`` — a class expression assigned to a
+    """``const C = class { ... }`` — a class expression assigned to a
     const. Must not be silently dropped."""
     src = "const Foo = class {\n    bar() {\n        return 1;\n    }\n};\n"
     ir = ap.parse_family_a(src, language="javascript")
@@ -1972,7 +1971,7 @@ def test_g7_const_class_expression_detected():
 
 
 def test_g7_rust_struct_literal_still_field():
-    """G7 regression guard: the genuine initializer-literal case the guard was
+    """the genuine initializer-literal case the guard was
     added for (Rust ``const P = Point { ... };``) must STILL return None from
     classification (so the field is emitted at the ``;``), not be
     misclassified as a function."""
@@ -1988,7 +1987,7 @@ def test_g7_rust_struct_literal_still_field():
 
 
 def test_g7_object_literal_initializer_still_field():
-    """G7 regression guard: a plain object-literal initializer
+    """a plain object-literal initializer
     (``const cfg = { ... };``) must remain a FIELD — the guard still applies
     when the token after ``=`` is ``{`` (an object literal), just not when
     it's ``function``/``class``/``(`` (an expression)."""
@@ -2000,11 +1999,11 @@ def test_g7_object_literal_initializer_still_field():
     )
 
 
-# --- G8: Kotlin 'fun' missing + return-type-after-params breaks heuristic ---
+# ---: Kotlin 'fun' missing + return-type-after-params breaks heuristic ---
 
 
 def test_g8_kotlin_top_level_fun():
-    """G8: Kotlin's ``fun`` keyword is missing from ``_A_FUNC_KEYWORDS``, so
+    """Kotlin's ``fun`` keyword is missing from ``_A_FUNC_KEYWORDS``, so
     every top-level Kotlin function was dropped (the keywordless heuristic
     only accepts C free functions at file scope). Adding ``fun`` fixes this."""
     src = "fun topLevel(x: Int): Int {\n    return x + 1\n}\n"
@@ -2016,7 +2015,7 @@ def test_g8_kotlin_top_level_fun():
 
 
 def test_g8_kotlin_method_with_return_type():
-    """G8: a Kotlin method ``fun m(): Int { ... }`` inside a class. Even with
+    """a Kotlin method ``fun m: Int { ... }`` inside a class. Even with
     ``fun`` added, the return type ``: Int`` after the params would break the
     keywordless-method heuristic (it requires the buffer to end in ``)``).
     But the keyword path (``fun`` recognized) handles this — the name comes
@@ -2031,7 +2030,7 @@ def test_g8_kotlin_method_with_return_type():
 
 
 def test_g8_kotlin_top_level_fun_no_return_type():
-    """G8: a Kotlin ``fun`` with no return type (``fun f() { }``) — the simple
+    """a Kotlin ``fun`` with no return type (``fun f { }``) — the simple
     case. Must also be detected once ``fun`` is in the keyword set."""
     src = "fun simple() {\n    println()\n}\n"
     ir = ap.parse_family_a(src, language="kotlin")
@@ -2042,15 +2041,15 @@ def test_g8_kotlin_top_level_fun_no_return_type():
 
 
 # ---------------------------------------------------------------------------
-# Fourth-pass review fixes: G9 (Kotlin coverage), G10 (Go generics),
-# G11 (JS/TS arrow functions), Consumer (container-scope leak).
+# Fourth-pass review fixes: (Kotlin coverage), (Go generics),
+# (JS/TS arrow functions), Consumer (container-scope leak).
 # ---------------------------------------------------------------------------
 
-# --- G9: Kotlin object / data class / init blocks / extension functions ---
+# ---: Kotlin object / data class / init blocks / extension functions ---
 
 
 def test_g9_kotlin_object_singleton():
-    """G9: ``object Config { ... }`` — Kotlin's singleton declaration. ``object``
+    """``object Config { ... }`` — Kotlin's singleton declaration. ``object``
     was missing from ``_A_CLASS_KEYWORDS``; the block was dropped entirely.
     The singleton's ``fun``/``val`` members should be detected."""
     src = (
@@ -2069,7 +2068,7 @@ def test_g9_kotlin_object_singleton():
 
 
 def test_g9_kotlin_data_class():
-    """G9: ``data class Point(val x: Int, val y: Int)`` — a bodyless data class.
+    """``data class Point(val x: Int, val y: Int)`` — a bodyless data class.
     ``data`` was not recognized; the class (a primary Kotlin construct) was
     dropped. At minimum the CLASS ``Point`` must be detected."""
     src = "data class Point(val x: Int, val y: Int)\n"
@@ -2086,7 +2085,7 @@ def test_g9_kotlin_data_class():
 
 
 def test_g9_kotlin_init_block_not_swallowed_silently():
-    """G9: a Kotlin ``init { ... }`` block inside a class. ``init`` isn't a
+    """a Kotlin ``init { ... }`` block inside a class. ``init`` isn't a
     declaration keyword, so the block was absorbed into the enclosing class
     with no separate unit. This test documents the expectation: the class is
     still detected, and sibling ``fun`` declarations are not lost."""
@@ -2108,7 +2107,7 @@ def test_g9_kotlin_init_block_not_swallowed_silently():
 
 
 def test_g9_kotlin_companion_object():
-    """G9: ``companion object { ... }`` inside a class — Kotlin's static-like
+    """``companion object { ... }`` inside a class — Kotlin's static-like
     block. Its members (``fun factory``) must be reachable."""
     src = (
         "class C {\n"
@@ -2127,11 +2126,11 @@ def test_g9_kotlin_companion_object():
     )
 
 
-# --- G10: Go generic function name mis-extraction ---
+# ---: Go generic function name mis-extraction ---
 
 
 def test_g10_go_generic_function_name():
-    """G10: ``func Map[T, U any](in []T, f func(T) U) []U { ... }`` — a Go 1.18+
+    """``func Map[T, U any](in []T, f func(T) U) []U { ... }`` — a Go 1.18+
     generic function. The type-param list ``[T, U any]`` between ``func`` and
     the params confused ``_go_declaration_name``'s receiver detection: it found
     the last balanced ``(...)`` (the params), then took the token before it
@@ -2149,7 +2148,7 @@ def test_g10_go_generic_function_name():
 
 
 def test_g10_go_generic_function_two_params():
-    """G10 regression breadth: a generic function with a simpler signature."""
+    """ regression breadth: a generic function with a simpler signature."""
     src = "func First[T any](xs []T) T {\n    return xs[0]\n}\n"
     ir = ap.parse_family_a(src, language="go")
     flat = ap.all_units_flat(ir)
@@ -2160,7 +2159,7 @@ def test_g10_go_generic_function_two_params():
 
 
 def test_g10_go_non_generic_function_still_works():
-    """G10 regression guard: a plain (non-generic) Go function name must still
+    """a plain (non-generic) Go function name must still
     be recovered correctly after the generic-aware fix."""
     src = "func process(items []int) int {\n    return len(items)\n}\n"
     ir = ap.parse_family_a(src, language="go")
@@ -2172,7 +2171,7 @@ def test_g10_go_non_generic_function_still_works():
 
 
 def test_g10_go_generic_receiver_method():
-    """G10 regression: a generic receiver method (``func (s Stack[T]) ...``).
+    """ regression: a generic receiver method (``func (s Stack[T]) ...``).
     Both the receiver-with-generics AND the method name must be handled."""
     src = (
         "type Stack[T any] struct {\n"
@@ -2188,15 +2187,15 @@ def test_g10_go_generic_receiver_method():
     assert _unit_named(ir, "Push"), f"generic receiver method Push must be detected; got {kinds}"
 
 
-# --- G11: JS/TS arrow functions with block body and no semicolon ---
+# ---: JS/TS arrow functions with block body and no semicolon ---
 
 
 def test_g11_js_arrow_function_block_no_semicolon():
-    """G11: ``const f = () => { ... }`` (no trailing ``;``) — the dominant
+    """``const f = () => { ... }`` (no trailing ``;``) — the dominant
     modern JS/TS function form under no-semicolon style (Standard, Airbnb).
-    The G7 fix let ``= (`` through the initializer guard, but the keywordless
+    The let ``= (`` through the initializer guard, but the keywordless
     heuristic then failed (buffer ends in ``=>``, not ``)``) → the whole
-    declaration was dropped. G11 recognizes ``=>`` before ``{`` as a
+    declaration was dropped. recognizes ``=>`` before ``{`` as a
     function-body opener and recovers the binding name."""
     src = "const handler = () => {\n    return 1\n}\n"
     ir = ap.parse_family_a(src, language="javascript")
@@ -2208,7 +2207,7 @@ def test_g11_js_arrow_function_block_no_semicolon():
 
 
 def test_g11_js_arrow_function_with_params():
-    """G11: an arrow function with params and a block body, no semicolon."""
+    """an arrow function with params and a block body, no semicolon."""
     src = "const add = (a, b) => {\n    return a + b\n}\n"
     ir = ap.parse_family_a(src, language="javascript")
     flat = ap.all_units_flat(ir)
@@ -2219,7 +2218,7 @@ def test_g11_js_arrow_function_with_params():
 
 
 def test_g11_ts_arrow_function_with_return_type():
-    """G11: a TypeScript arrow with an explicit return type before ``=>``."""
+    """a TypeScript arrow with an explicit return type before ``=>``."""
     src = "const get = (x: number): number => {\n    return x + 1\n}\n"
     ir = ap.parse_family_a(src, language="typescript")
     flat = ap.all_units_flat(ir)
@@ -2230,7 +2229,7 @@ def test_g11_ts_arrow_function_with_return_type():
 
 
 def test_g11_js_arrow_function_with_semicolon_still_works():
-    """G11 regression guard: the previously-working case (arrow + block + ``;``)
+    """the previously-working case (arrow + block + ``;``)
     must still produce a unit for the binding."""
     src = "const handler = () => {\n    return 1\n};\n"
     ir = ap.parse_family_a(src, language="javascript")
@@ -2242,21 +2241,21 @@ def test_g11_js_arrow_function_with_semicolon_still_works():
 
 
 # ---------------------------------------------------------------------------
-# Fifth-pass: G12 (require() expression import) + coverage-hardening tests
+# Fifth-pass: (require expression import) + coverage-hardening tests
 # for untested-but-working paths (block comments, char literals, byte strings,
 # backtick templates, C preprocessor, import-name variants, parse_file
 # robustness, deleted-by-one-side alignment).
 # ---------------------------------------------------------------------------
 
 
-# --- G12: CommonJS require() as an expression is an import ---
+# ---: CommonJS require as an expression is an import ---
 
 
 def test_g12_require_expression_is_module_stmt():
-    """G12: ``const fs = require('fs')`` — Node.js/CommonJS require as an
+    """``const fs = require('fs')`` — Node.js/CommonJS require as an
     expression (not leading the line) was not detected: the import regex
     required ``require`` to lead the line. The require-as-expression form is
-    ubiquitous in Node code. After G12 it produces a MODULE_STMT named ``fs``."""
+    ubiquitous in Node code. After it produces a MODULE_STMT named ``fs``."""
     src = "const fs = require('fs');\nfunction f() {\n    return 1\n}\n"
     ir = ap.parse_family_a(src, language="javascript")
     flat = ap.all_units_flat(ir)
@@ -2268,7 +2267,7 @@ def test_g12_require_expression_is_module_stmt():
 
 
 def test_g12_require_not_at_line_start():
-    """G12 regression: a ``require()`` nested inside a function body (not at
+    """ regression: a ``require`` nested inside a function body (not at
     top-level / brace_depth 0) must NOT be detected as an import — it's a
     runtime call, not a module dependency."""
     src = "function f() {\n    const x = require('dyn');\n    return x\n}\n"
@@ -2282,7 +2281,7 @@ def test_g12_require_not_at_line_start():
 
 
 def test_g12_leading_require_still_works():
-    """G12 regression guard: the original form (``require('fs')`` leading the
+    """the original form (``require('fs')`` leading the
     line, e.g. ``require('fs')`` alone) must still be detected."""
     src = "require('fs');\nfunction f() {}\n"
     ir = ap.parse_family_a(src, language="javascript")
@@ -2486,20 +2485,20 @@ def test_cov_alignment_deleted_left_when_right_modifies():
 
 
 # ---------------------------------------------------------------------------
-# Sixth-pass: R7 (required_units drops surviving units) + coverage hardening
+# Sixth-pass: (required_units drops surviving units) + coverage hardening
 # for untested-but-working paths (import-surface deletes, conflict-span in
 # nested units, Rust attributes, parse_file exception/unknown-lang, binding
 # reassignment guard, agreed rename).
 # ---------------------------------------------------------------------------
 
-# --- R7: required_units must include deleted-by-one-side (surviving units) ---
+# ---: required_units must include deleted-by-one-side (surviving units) ---
 
 
 def test_r7_required_units_includes_deleted_right_surviving():
-    """R7: when left deletes a unit and right MODIFIES it (deleted_right), the
+    """when left deletes a unit and right MODIFIES it (deleted_right), the
     unit survives in the merge as right's version. ``required_units`` used to
     exclude deleted_left/deleted_right, risking the LLM dropping a unit that
-    should survive. After R7, deleted-by-one-side units ARE required; only
+    should survive. After deleted-by-one-side units ARE required; only
     deleted_both (truly gone) is excluded."""
     base = "def bar():\n    return 2\n"
     left = "pass\n"                                      # deleted bar
@@ -2512,7 +2511,7 @@ def test_r7_required_units_includes_deleted_right_surviving():
 
 
 def test_r7_required_units_includes_deleted_left_surviving():
-    """R7 mirror: right deletes, left modifies-and-keeps → deleted_left, and
+    """right deletes, left modifies-and-keeps → deleted_left, and
     the unit survives as left's version → must be required."""
     base = "def bar():\n    return 2\n"
     left = "def bar():\n    return 99\n"                 # modified bar
@@ -2525,7 +2524,7 @@ def test_r7_required_units_includes_deleted_left_surviving():
 
 
 def test_r7_required_units_excludes_deleted_both():
-    """R7 regression guard: a unit deleted by BOTH sides (deleted_both) is
+    """a unit deleted by BOTH sides (deleted_both) is
     truly gone from the merge → must NOT be in required_units."""
     base = "def bar():\n    return 2\n"
     left = "pass\n"                                      # deleted bar
@@ -2538,7 +2537,7 @@ def test_r7_required_units_excludes_deleted_both():
 
 
 def test_r7_required_units_annotation_renders_surviving():
-    """R7 end-to-end: the 'Required: preserve these units' annotation in
+    """the 'Required: preserve these units' annotation in
     render_structural_context must include a deleted-by-one-side unit."""
     base = "def foo():\n    return 1\n\ndef bar():\n    return 2\n"
     left = "def foo():\n    return 10\n\ndef baz():\n    return 3\n"  # modify foo, delete bar, add baz

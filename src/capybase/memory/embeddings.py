@@ -139,7 +139,7 @@ def probe_embeddings_support(client: EmbeddingsClient) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Body normalization for semantic entity matching (embeddings survey §2)
+# Body normalization for semantic entity matching 
 # ---------------------------------------------------------------------------
 
 import re as _re  # noqa: E402 - stdlib, kept local to avoid top-import noise
@@ -179,7 +179,7 @@ def normalize_body_for_embedding(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Batch chunking wrapper (embeddings survey §1 — corpus re-embed can be large)
+# Batch chunking wrapper 
 # ---------------------------------------------------------------------------
 
 
@@ -188,7 +188,7 @@ class BatchEmbeddingClient:
 
     llama-server /v1/embeddings accepts a list input but has a practical per-
     request cap (context length of the embedding model). The vector-cache build
-    (embeddings survey §1) re-embeds the whole corpus on a cache miss, which can
+     re-embeds the whole corpus on a cache miss, which can
     be thousands of texts. This wrapper splits the input into bounded batches,
     calls the underlying client per batch, and concatenates — preserving input
     alignment. Failed batches raise (the caller decides whether to skip the

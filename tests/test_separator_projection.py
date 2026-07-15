@@ -1,4 +1,4 @@
-"""Tests for Sesame-style separator projection (survey §1.2).
+"""Tests for Sesame-style separator projection.
 
 P1: on brace/semicolon languages, splitting each ``{}();`` onto its own line
 before re-running diff3 lets the line-merger anchor on real statement/block

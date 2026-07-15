@@ -1,4 +1,4 @@
-"""3-way structural diff (survey Phase 3).
+"""3-way structural diff (phase 3).
 
 Separated from :mod:`capybase.adapters.abstract_parser` (consolidation #3) so
 the parser/IR and the 3-way diff computation have distinct homes. This module
@@ -136,7 +136,7 @@ class StructuralDiff3Way:
     def required_units(self) -> list[str]:
         """Names of units that must appear in the merged output.
 
-        Includes ``deleted_left`` / ``deleted_right`` (R7): those mean one side
+        Includes ``deleted_left`` / ``deleted_right``: those mean one side
         deleted the unit but the OTHER side kept (and possibly modified) it —
         so the unit SURVIVES in the merge as the keeping side's version.
         Excluding them risked the LLM dropping a surviving unit. Only
@@ -215,7 +215,7 @@ def compute_structural_diff_3way(
     left_units = all_units_flat(ir_left)
     right_units = all_units_flat(ir_right)
 
-    # Decline on duplicate identities (fix #3): two units sharing an identity
+    # Decline on duplicate identities: two units sharing an identity
     # (e.g. Java/C++/Python method overloads, re-definitions) would collide
     # silently in the identity-keyed dicts below, dropping all but one — a
     # missed-conflict data-loss bug. Decline so the caller escalates to the LLM.
@@ -294,7 +294,7 @@ def _classify_alignment(
     if not has_b and has_l and has_r:
         # Both sides added a unit of this name. Sub-classify: identical bodies
         # = an agreed addition (not a conflict); differing bodies = a genuine
-        # conflict (fix #7 — previously both were ``added_both`` and neither was
+        # conflict ( previously both were ``added_both`` and neither was
         # flagged as a structural conflict, silently missing the clash).
         if _bodies_differ(left, right):
             return _CHANGE_KIND_ADDED_BOTH_CONFLICT
@@ -349,7 +349,7 @@ def _detect_renames(
     # Index DELETED base units by body fingerprint. A base unit is a rename
     # candidate only when it's gone from the side in question (classified as a
     # deletion), NOT when it's identity-matched (present under its original name).
-    # Skip content-less bodies (fix #13): distinct empty bodies share ``l0``.
+    # Skip content-less bodies: distinct empty bodies share ``l0``.
     base_by_fp: dict[str, StructuralUnit] = {}
     for u in base_units:
         if _fingerprint_has_content(u.fingerprint):

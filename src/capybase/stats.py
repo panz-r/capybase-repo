@@ -71,7 +71,7 @@ def sigmoid(z: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Isotonic regression (Pool-Adjacent-Violators) — survey §2.1
+# Isotonic regression (Pool-Adjacent-Violators) —
 # ---------------------------------------------------------------------------
 
 
@@ -184,7 +184,7 @@ def isotonic_points(xs: list[float], ys: list[float]) -> list[tuple[float, float
 
 
 # ---------------------------------------------------------------------------
-# Kolmogorov–Smirnov two-sample statistic — survey §6.1 (drift), also used as a
+# Kolmogorov–Smirnov two-sample statistic — (drift), also used as a
 # fit-quality check: how well do two distributions separate after calibration?
 # ---------------------------------------------------------------------------
 
@@ -222,7 +222,7 @@ def ks_stat(a: list[float], b: list[float]) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Robust L-estimators — survey §4.1 (MAD thresholds), §4.3 (Hodges-Lehmann),
+# Robust L-estimators — (MAD thresholds), §4.3 (Hodges-Lehmann),
 # §7.1 (trimmed KS). Order-statistic based, 50% breakdown point.
 # ---------------------------------------------------------------------------
 
@@ -241,7 +241,7 @@ def median(xs: list[float]) -> float:
 def mad(xs: list[float]) -> float:
     """Median Absolute Deviation: ``median(|x - median(xs)|)``.
 
-    The robust scale estimator (survey §4.1, §5.1). 50% breakdown point — a
+    The robust scale estimator. 50% breakdown point — a
     handful of extreme scores barely move it, unlike standard deviation. Returns
     0.0 on empty input, or when all values are identical (zero spread).
     """
@@ -263,7 +263,7 @@ def mad_scaled(xs: list[float]) -> float:
 
 
 def trimmed(xs: list[float], pct: float = 5.0) -> list[float]:
-    """Drop ``pct``% from each tail, returning the central sample (survey §7.1).
+    """Drop ``pct``% from each tail, returning the central sample.
 
     ``pct`` is a percentage in [0, 50). At 0 the sample is unchanged. The trimmed
     sample underlies trimmed-KS and trimmed-mean estimators — focusing the
@@ -280,7 +280,7 @@ def trimmed(xs: list[float], pct: float = 5.0) -> list[float]:
 
 
 def hodges_lehmann(a: list[float], b: list[float]) -> float:
-    """Hodges–Lehmann location-shift estimator (survey §4.3).
+    """Hodges–Lehmann location-shift estimator.
 
     Returns ``median([ai - bj for ai in a for bj in b])`` — a robust estimate of
     how much one sample is shifted relative to another. High efficiency and
@@ -295,7 +295,7 @@ def hodges_lehmann(a: list[float], b: list[float]) -> float:
 
 
 def trimmed_ks(a: list[float], b: list[float], pct: float = 5.0) -> float:
-    """Two-sample KS on the trimmed samples (survey §7.1).
+    """Two-sample KS on the trimmed samples.
 
     Drops ``pct``% from each tail before computing :func:`ks_stat`, so the drift
     signal reflects the central 90% of scores — where thresholds live — rather
@@ -309,7 +309,7 @@ def trimmed_ks(a: list[float], b: list[float], pct: float = 5.0) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Huber-loss isotonic regression (M-estimation flavor) — survey §3.1
+# Huber-loss isotonic regression (M-estimation flavor) —
 # ---------------------------------------------------------------------------
 
 
@@ -329,7 +329,7 @@ def huber_loss(r: float, c: float) -> float:
 def huber_isotonic_fit(
     xs: list[float], ys: list[float], *, c: float | None = None, iters: int = 10
 ) -> Callable[[float], float]:
-    """Monotone isotonic fit under Huber loss (survey §3.1).
+    """Monotone isotonic fit under Huber loss.
 
     Robust alternative to :func:`isotonic_fit` (which uses L2 / squared loss): a
     handful of mislabeled calibration pairs have bounded influence on the fit.

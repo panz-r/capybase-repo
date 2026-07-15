@@ -152,7 +152,7 @@ class LLMResponse:
     """Normalized model response.
 
     ``mean_token_entropy`` is the logit-free, black-box uncertainty signal
-    (survey §4.1 TECP): the mean negative log-probability over the generated
+    (TECP): the mean negative log-probability over the generated
     content tokens, reduced from per-token logprobs the API emits in each SSE
     delta. It is ``None`` when the API returned no logprobs (the default when
     ``capture_token_entropy`` is off, or the server doesn't support them).

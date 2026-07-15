@@ -1,4 +1,4 @@
-"""Semantic entity matching — embedding rename tier (embeddings survey §2).
+"""Semantic entity matching — embedding rename tier.
 
 The 4th tier of ``match_entities``: when name + body-fingerprint + Jaccard all
 fail to pair a renamed entity (because the body was edited beyond the 0.80
@@ -96,7 +96,7 @@ def test_embedding_tier_matches_renamed_heavily_edited_body():
 def test_embedding_tier_possibly_renamed_in_mid_band():
     """Cosine 0.70–0.85 with a corroborating signal → possibly_renamed.
 
-    The conjunction rule (survey §2): a mid-band embedding match is accepted
+    The conjunction rule: a mid-band embedding match is accepted
     only with a corroborating Jaccard ≥ 0.80 OR name-similarity ≥ 0.6. Here the
     bodies share enough tokens for Jaccard ≥ 0.80 but a single token differs
     (so they don't pair by exact body-fp), and the embedding cosine is mid-band.

@@ -290,7 +290,7 @@ def _tool_of(command: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Per-test node-ID extraction (test-continuity invariant, survey §2.1a)
+# Per-test node-ID extraction (test-continuity invariant,
 # ---------------------------------------------------------------------------
 
 # pytest -v line: ``tests/test_x.py::test_name PASSED`` / ``... FAILED``.
@@ -302,7 +302,7 @@ _CARGO_TEST_RE = re.compile(r"^\s*test\s+(?P<name>\S+)\s+\.\.\.\s+(?P<outcome>ok
 def parse_passing_node_ids(stdout: str, tool: str) -> set[str]:
     """The set of PASSING test node-IDs from a test command's ``stdout``.
 
-    Powers the test-continuity invariant (survey §2.1a): the set captured
+    Powers the test-continuity invariant: the set captured
     pre-rebase (the baseline) is diffed against the post-merge set — any
     baseline-passing test absent from the post-merge set is a behavioral
     regression the merge introduced (a counterexample for the CEGIS loop).

@@ -535,7 +535,7 @@ class GitBackend:
 
     def last_touch(self, path: str, *, ref: str = "HEAD") -> tuple[str, str]:
         """Return ``(commit_sha, commit_subject)`` of the commit at ``ref`` that
-        last touched ``path``. Used for conflict provenance (survey §3.3):
+        last touched ``path``. Used for conflict provenance:
         attributing each side of a conflict to the commit that introduced it.
 
         Returns ``("", "")`` when git has no history for the path (e.g. a
@@ -744,7 +744,7 @@ class GitBackend:
                 meta_check = status_tok.rstrip("\n").split("\t")
                 if len(meta_check) >= 4 and _is_oid(meta_check[0]):
                     break  # next commit
-                # This is a status code (M, A, D, R100, C75, ...). The path(s)
+                # This is a status code (M, A, D, C75, ...). The path(s)
                 # follow in the next NUL-delimited token(s).
                 status = status_tok
                 i += 1

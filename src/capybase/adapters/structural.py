@@ -47,14 +47,14 @@ class NodeInfo:
 class Entity:
     """A coarse, identity-stable top-level definition inside a container.
 
-    The unit of entity-level merge (survey §3.2 Weave/Aura): a function, method,
+    The unit of entity-level merge (Weave/Aura): a function, method,
     class, or field matched by ``(kind, name)`` so two sides that each add a
     DISTINCT entity at the same insertion point can be recognized as
     non-conflicting. ``kind`` is a coarse, language-neutral label
     (``"function"``/``"class"``/``"method"``/``"field"``) so matching doesn't
     depend on grammar-specific node type strings; ``name`` is the bare
     identifier; ``body`` is the exact source text (the text-carrying leaf the
-    survey prescribes). ``span`` is the 0-based ``(start_row, end_row)`` range.
+     prescribes). ``span`` is the 0-based ``(start_row, end_row)`` range.
     """
 
     kind: str
@@ -74,7 +74,7 @@ class Entity:
 
 
 # Module-level embedder singleton for the semantic entity-matching tier
-# (embeddings survey §2). Set once by the orchestrator (which builds the shared
+#. Set once by the orchestrator (which builds the shared
 # OpenAIEmbeddingsClient) so the entity-matching call sites (validators,
 # conflict extractor, repair-prompt renderer) pick it up without threading the
 # param through every call. ``None`` (default) keeps matching pure-deterministic
@@ -88,7 +88,7 @@ def set_entity_embedder(embedder: object | None) -> None:
     When set, :func:`match_entities`'s embedding tier runs on otherwise-
     unmatched entities (after the name + body-fp + Jaccard tiers all fail),
     pairing renames whose bodies are semantically similar even when a heavy edit
-    dropped them below the Jaccard floor (embeddings survey §2). ``None``
+    dropped them below the Jaccard floor. ``None``
     restores pure-deterministic matching. Best-effort: the embedding tier never
     raises — a failed embed leaves the entity unmatched.
     """
@@ -180,19 +180,19 @@ def enclosing_node(
 
 
 # ---------------------------------------------------------------------------
-# Entity-level structure (survey §3.2 coarse AST / entity merge)
+# Entity-level structure (AST / entity merge)
 # ---------------------------------------------------------------------------
 
 def enumerate_entities(
     source: str, language: str, container_span: tuple[int, int] | None = None
 ) -> list[Entity] | None:
-    """List the coarse top-level entities in ``source`` (survey §3.2/§5.3).
+    """List the coarse top-level entities in ``source``.
 
     Parses ``source`` via the abstract parser and returns one :class:`Entity`
     per structural unit that is a *direct child of a container* (module, class,
     impl, mod body). Each carries a coarse ``kind`` (function/method/class/
     field), its ``name``, and exact source ``body`` text — the text-carrying
-    leaves the survey prescribes. Identity is ``(kind, name)``.
+    leaves prior findings. Identity is ``(kind, name)``.
 
     ``container_span`` restricts the enumeration to the children of the container
     enclosing that span (the typical case: "what entities live in the same
@@ -307,7 +307,7 @@ def duplicate_definitions(
 #: - ``renamed``: paired across DIFFERENT names by body-fingerprint equality or
 #:   near-equality (Jaccard ≥ threshold) — the source's old name is gone in target.
 #: - ``possibly_renamed``: a WEAKER rename signal from semantic embeddings
-#:   (embeddings survey §2) — cosine 0.70–0.85 with a corroborating signal
+#:    — cosine 0.70–0.85 with a corroborating signal
 #:   (Jaccard/name-similarity above their floors). Like ``renamed`` it is NOT
 #:   counted as dropped/unattributed (the false positive is suppressed), but it
 #:   is distinguishable so validators can downgrade severity to advisory.
@@ -357,7 +357,7 @@ def match_entities(
     a rename-with-edit), AND name-similarity ≥ 0.6 or a substantial body — so two
     distinct entities sharing a trivial body don't false-pair.
 
-    Semantic embedding tier (embeddings survey §2): when an embedder is available
+    Semantic embedding tier : when an embedder is available
     (the module-level singleton set by :func:`set_entity_embedder`, or an explicit
     ``embedder`` arg), a 4th pass runs on otherwise-unmatched entities (after name
     + body-fp + Jaccard all fail). It embeds the source body and each same-kind
@@ -436,7 +436,7 @@ def match_entities(
         if target is not None:
             out.append(EntityMatch(source=src, target=target, kind=MATCH_RENAMED))
         elif embedder is not None:
-            # 3. Semantic embedding tier (embeddings survey §2): for an otherwise-
+            # 3. Semantic embedding tier : for an otherwise-
             # unmatched source, embed its body and each same-kind target body
             # (different name required — a copy is not a rename). Pairs by cosine
             # with the conjunction rule: high cosine alone (≥0.85) confirms a
@@ -454,8 +454,8 @@ def match_entities(
     return out
 
 
-# Cosine floors for the embedding rename tier (embeddings survey §2). 0.85 is
-# the survey's "renamed" threshold (suppress the false positive); 0.70–0.85 is
+# Cosine floors for the embedding rename tier. 0.85 is
+# prior work's "renamed" threshold (suppress the false positive); 0.70–0.85 is
 # the "possibly_renamed" band (downgrade to advisory). The conjunction rule
 # (§2): a mid-band match is accepted only with a corroborating signal — Jaccard
 # ≥ 0.80 OR name-similarity ≥ 0.6 — so two semantically-similar-but-distinct
@@ -471,7 +471,7 @@ def _embedding_rename_match(
     src_body_fp: str,
     embedder: "object",
 ) -> EntityMatch | None:
-    """Find a rename for ``src`` via body-embedding cosine (embeddings survey §2).
+    """Find a rename for ``src`` via body-embedding cosine.
 
     Returns an ``EntityMatch`` (``renamed`` or ``possibly_renamed``) or None.
     Pure helper for :func:`match_entities`'s embedding tier. Never raises.
@@ -579,7 +579,7 @@ def dropped_entities(
     is a legitimate merge, not a drop): rename-aware matching (``match_entities``)
     recognizes a side entity whose body content reappears in the resolution under
     a different name, so a legitimate rename does NOT surface as a false drop.
-    With ``embedder`` (embeddings survey §2), a semantic-body rename also counts
+    With ``embedder``, a semantic-body rename also counts
     as preserved, closing the false-positive gap where a renamed+heavily-edited
     function fires as dropped. Module-level bare assignments (``X = ...``) are
     NOT enumerated, so this catches structural defs only; the token-set
@@ -610,7 +610,7 @@ def dropped_entities(
 
 @dataclass(frozen=True)
 class CoverageReport:
-    """Quantitative per-side preservation coverage (survey §5.1 intent signatures).
+    """Quantitative per-side preservation coverage.
 
     Of the ``added`` entities a side introduced beyond ``base``, ``preserved``
     survive in the resolution and ``dropped`` are absent. The ratio
@@ -639,7 +639,7 @@ def preservation_coverage(
     method/class/field) the side ADDED beyond ``base``, how many are present in
     the resolution. A rename counts as preserved (a renamed-but-present entity
     survives under a different name), so it does not lower coverage. With
-    ``embedder`` (embeddings survey §2), a semantic-body rename also counts as
+    ``embedder``, a semantic-body rename also counts as
     preserved. Returns a :class:`CoverageReport` with the ratio; ``None`` when
     the structural parser is unavailable or any text fails to parse (coverage undefined,
     not a failure). An ``added == 0`` report means the side added no structural
@@ -704,7 +704,7 @@ def unattributed_entities(
         return None
     # Match each resolved entity against the union of all side entities. A
     # same-name OR rename match (body-fingerprint equal/near, or a semantic
-    # rename via embedder — embeddings survey §2) counts as attributed; only an
+    # rename via embedder — embeddings counts as attributed; only an
     # unmatched resolved entity is unattributed.
     sides = list(base_ents) + list(cur_ents) + list(rep_ents)
     matches = match_entities(res_ents, sides, embedder=embedder)
@@ -721,7 +721,7 @@ def sibling_signatures(
     class/impl it's merging inside. This returns just their SIGNATURE lines (the
     def/fn/struct header), capped by ``limit`` and excluding the enclosing entity
     itself (``exclude`` = its name) so the model isn't shown the very block it's
-    resolving. Bodies are omitted to keep the prompt cheap — the survey's finding
+    resolving. Bodies are omitted to keep the prompt cheap — prior work's finding
     that *some* structured context helps, distinct from the cross-file callee
     definitions surfaced elsewhere.
 
@@ -835,7 +835,7 @@ def fingerprint_region(
 
 
 # ---------------------------------------------------------------------------
-# Per-entity semantic diff (survey §5 foundational layer)
+# Per-entity semantic diff
 # ---------------------------------------------------------------------------
 #
 # The analyzers above (dropped_entities / preservation_coverage /
@@ -1053,7 +1053,7 @@ class EntityChange:
 def semantic_diff(
     old_text: str, new_text: str, language: str
 ) -> list[EntityChange] | None:
-    """Classify the entity-level changes between two snapshots (survey §5.1).
+    """Classify the entity-level changes between two snapshots.
 
     Enumerates entities in ``old_text`` and ``new_text``, then classifies each by
     name-match + body/signature fingerprint:
@@ -1155,7 +1155,7 @@ def semantic_diff(
 
 
 # ---------------------------------------------------------------------------
-# Commit change-type classifier (survey Tier 5 §5.2)
+# Commit change-type classifier (tier 5 §5.2)
 # ---------------------------------------------------------------------------
 
 #: The commit-role labels produced by :func:`classify_commit_change`. Grounds
@@ -1206,7 +1206,7 @@ def classify_commit_change(
     base_text: str, replayed_text: str, path: str, language: str,
     *, changes: list[EntityChange] | None = None,
 ) -> str:
-    """Classify the SEMANTIC ROLE of a replayed commit (survey §5.2).
+    """Classify the SEMANTIC ROLE of a replayed commit.
 
     Determines whether the commit being replayed is a ``test_only`` /
     ``config_update`` / ``feature`` / ``bugfix`` / ``refactor`` change, using
@@ -1678,8 +1678,8 @@ def is_available(language: str) -> bool:
     """True if a structural parser is available for ``language``.
 
     The abstract parser is available when ``language`` maps to a known language
-    family (``detect_family`` is non-None). In Round 1 that is ``python`` and
-    ``rust``; broader coverage is Round 3.
+    family (``detect_family`` is non-None). In that is ``python`` and
+    ``rust``; broader coverage is.
     """
     try:
         from capybase.adapters import abstract_parser

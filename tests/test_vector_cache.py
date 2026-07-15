@@ -1,4 +1,4 @@
-"""Persisted vector cache for the embedding retriever (embeddings survey §1).
+"""Persisted vector cache for the embedding retriever.
 
 Two durable backends (sqlite-vec primary, numpy fallback) + an in-memory tier
 for when neither dep is available. The cache is content-keyed so a re-embed is

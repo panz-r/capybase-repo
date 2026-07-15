@@ -1,4 +1,4 @@
-"""Tests for token-level disjoint resolution (survey §4.2 Summer, layer 3).
+"""Tests for token-level disjoint resolution (Summer, layer 3).
 
 The line-granular rules (disjoint_edits, zealous_merge) decline whenever two
 sides touch the SAME line — even if they changed DIFFERENT TOKENS on it. Token

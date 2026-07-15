@@ -1,4 +1,4 @@
-"""Tests for the conflict feature spine (survey §6.7 routing, §4.2 balance).
+"""Tests for the conflict feature spine.
 
 P2: ``conflict_features`` flattens a conflict's characteristics into one stable
 dict that is recorded at extraction and surfaced into every

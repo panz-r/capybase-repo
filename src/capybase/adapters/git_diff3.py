@@ -13,11 +13,11 @@ files, runs ``git merge-file --diff3 -p``, and parses the result into
 Falls back to ``None`` on any error so the extractor keeps using the worktree
 markers.
 
-Diff algorithm (survey §1.3): ``git merge-file`` honors the ``diff.algorithm``
+Diff algorithm: ``git merge-file`` honors the ``diff.algorithm``
 config, which selects the xdiff backend used to align base↔ours and base↔theirs
 before the 3-way merge. **Histogram** is the default here — it anchors on rare
 (low-frequency) lines, producing more stable, tighter conflict regions than
-Myers on noisy code (the survey cites a conflict-size reduction in ~10% of
+Myers on noisy code (prior findings a conflict-size reduction in ~10% of
 merges that had conflicts). Patience/minimal/myers are selectable fallbacks.
 """
 
@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # The four xdiff backends git accepts for ``diff.algorithm``. Histogram is the
-# recommended default (survey §1.3); the others are selectable fallbacks for
+# recommended default; the others are selectable fallbacks for
 # pathological cases or minimal-edit-script diagnostics. Validated before use so
 # an unknown value from config never reaches the subprocess.
 DIFF_ALGORITHMS = ("myers", "patience", "histogram", "minimal")
@@ -75,7 +75,7 @@ def merge_file_diff3(
     merged the blobs with no conflicts (the sides are compatible) — in that
     case the caller should use the merged result directly.
 
-    ``diff_algorithm`` selects the xdiff backend (survey §1.3): one of
+    ``diff_algorithm`` selects the xdiff backend: one of
     ``DIFF_ALGORITHMS`` (default histogram). It is passed via ``-c
     diff.algorithm=<alg>`` rather than a positional flag because
     ``merge-file`` predates the ``--diff-algorithm`` plumbing option on older

@@ -1,11 +1,11 @@
 """Tests for the cargo-driven Rust compile check (the default for cargo projects).
 
-Round 1 used standalone ``rustc --emit=metadata`` on the resolved file in
-isolation, which FALSE-POSITIVES on any leaf file using ``crate::`` / ``super::``
-(standalone rustc can't resolve crate-relative paths → E0432). These tests
-verify the fix: in a cargo project, ``cargo check`` (crate-aware) is the default
-syntax check, so a valid ``crate::``-using leaf file passes, while standalone
-rustc is reserved for loose ``.rs`` files with no Cargo.toml.
+A standalone ``rustc --emit=metadata`` check on the resolved file in isolation
+FALSE-POSITIVES on any leaf file using ``crate::`` / ``super::`` (standalone
+rustc can't resolve crate-relative paths → E0432). These tests verify the fix:
+in a cargo project, ``cargo check`` (crate-aware) is the default syntax check,
+so a valid ``crate::``-using leaf file passes, while standalone rustc is
+reserved for loose ``.rs`` files with no Cargo.toml.
 
 The cargo-backed tests skip when cargo is absent (CI without a toolchain).
 """

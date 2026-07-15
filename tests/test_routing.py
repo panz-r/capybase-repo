@@ -1,4 +1,4 @@
-"""Tests for difficulty-aware routing (survey §6.1).
+"""Tests for difficulty-aware routing.
 
 The legacy ``classify_difficulty`` now delegates to the first-class
 :class:`capybase.classifier.ConflictClassification` (band + reasons); this file
@@ -181,7 +181,7 @@ def test_orchestrator_routing_disabled_unchanged(conflicted_repo):
 
 
 # ---------------------------------------------------------------------------
-# Difficulty-aware sample allocation (survey §4 UAB-lite): samples_complex
+# Difficulty-aware sample allocation (UAB-lite): samples_complex
 # makes complex units draw more samples than the base count.
 # ---------------------------------------------------------------------------
 

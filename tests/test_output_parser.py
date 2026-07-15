@@ -179,7 +179,7 @@ def test_unknown_command_fail():
 
 
 # ---------------------------------------------------------------------------
-# parse_passing_node_ids: the test-continuity baseline substrate (survey §2.1a).
+# parse_passing_node_ids: the test-continuity baseline substrate.
 # ---------------------------------------------------------------------------
 
 from capybase.test_output import parse_passing_node_ids  # noqa: E402

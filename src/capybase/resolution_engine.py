@@ -71,7 +71,7 @@ PROMPT_RETRY = "cegis_retry.v6"
 # Two-pass prompting (Step 2): intent extraction then code generation.
 PROMPT_INTENT = "intent.v1"
 PROMPT_CODE = "code_from_intent.v1"
-# PlanSearch (survey §1): multi-plan sampling. Each candidate is tagged
+# PlanSearch: multi-plan sampling. Each candidate is tagged
 # code_from_intent.v1#plan{i} so offline eval can attribute outcomes per plan.
 PROMPT_PLAN = "plan_search.v1"
 # Targeted repair (Step 4): send back the broken candidate for surgical fixing.
@@ -102,7 +102,7 @@ def _side_intent_block(unit: ConflictUnit) -> str:
 
     Two parts, both pure and folded into the budget-protected ``sides_text``:
 
-    1. The conflict-shape label (survey "silent loss of intent"): without it, a
+    1. The conflict-shape label ( "silent loss of intent"): without it, a
        side that's empty because it DELETED base content reads as merely
        'absent', and the model can't tell a deliberate deletion from a missing
        side. Surfaces :func:`merge_intent.direction`'s summary right above the
@@ -250,7 +250,7 @@ def _semantic_change_block(unit: ConflictUnit) -> str:
     / body_changed, and renders a one-line-per-change summary. This gives the
     model PRECISE change intent — e.g. "CURRENT side renamed `validate_token`→
     `check_token`" — that the raw side text + obligation lines convey only
-    implicitly. The survey's Tier 5 finding: surfacing structured change types
+    implicitly. The's Tier 5 finding: surfacing structured change types
     lifts a small LLM's merge quality by removing guesswork about what each side
     is doing.
 
@@ -286,7 +286,7 @@ def _semantic_change_block(unit: ConflictUnit) -> str:
         else:
             cur_changes = structural.semantic_diff(base, cur, lang)
             rep_changes = structural.semantic_diff(base, rep, lang)
-        # The replayed commit's semantic role (survey §5.2): tells the model what
+        # The replayed commit's semantic role: tells the model what
         # "correct" means for this commit (bugfix = preserve behavior; feature =
         # new behavior acceptable; refactor = behavior-preserving). Read off the
         # feature spine when present; compute live as a pure fallback.
@@ -722,10 +722,10 @@ def _resolve_prompt_parts(
 {enc_text}
 
 """
-    # Sibling entities (survey §4.1/§5.4 Rover): the OTHER methods/fields in the
+    # Sibling entities (Rover): the OTHER methods/fields in the
     # same container — the entity neighborhood the merged result must stay
     # consistent with (shared conventions, in-file callers/callees). Signatures
-    # only, to stay cheap; the survey's finding that *some* structured context
+    # only, to stay cheap; prior work's finding that *some* structured context
     # lifts a small LLM's output. Empty when no siblings were resolved.
     siblings_block = ""
     if sv and sv.get("sibling_entities"):
@@ -746,7 +746,7 @@ def _resolve_prompt_parts(
                 f"  RESOLVED: {_truncate_lines(ex.resolved)}"
             )
         few_shot = "Similar past merges (for reference — match this style):\n" + "\n".join(blocks) + "\n\n"
-    # Cross-file dependency neighborhood (survey §5.3 Rover): definitions of
+    # Cross-file dependency neighborhood (Rover): definitions of
     # symbols the conflict code references that live OUTSIDE the enclosing
     # block. The merged result must stay consistent with these; showing them
     # prevents the model from guessing at a helper's signature/behavior. Empty
@@ -1061,7 +1061,7 @@ def parse_block_capture_decision(raw: str) -> tuple[str, str]:
 
 # Variant tags are appended to the base prompt_version (e.g. "resolve_text_block.v5#v1")
 # so offline eval can attribute outcomes to the phrasing — the seed data for any
-# future prompt-optimization (survey §2 AOZPT) work. "" = baseline (no suffix).
+# future prompt-optimization (AOZPT) work. "" = baseline (no suffix).
 PROMPT_VARIANT_TAGS: tuple[str, ...] = ("", "#v1", "#v2")
 
 
@@ -1071,7 +1071,7 @@ def build_resolve_prompt_variants(
     k: int = 3,
     budget: TokenBudget | None = None,
 ) -> list[tuple[str, str]]:
-    """Return up to ``k`` semantically-equivalent resolve prompts (survey §4).
+    """Return up to ``k`` semantically-equivalent resolve prompts.
 
     Each entry is ``(prompt_text, variant_suffix)`` where ``variant_suffix`` is
     one of ``PROMPT_VARIANT_TAGS`` (``""`` for the baseline). The variants are
@@ -1399,7 +1399,7 @@ def build_repair_prompt(
     that don't preserve every unit verbatim. On a second repair the validator
     feedback + concrete code are the authoritative signal for what must change.
 
-    Repair-path few-shot (embeddings survey §2): a SINGLE high-trust retrieved
+    Repair-path few-shot : a SINGLE high-trust retrieved
     example (``context.repair_retrieved_examples``, top-1, quality-filtered) is
     surfaced as a one-shot anchor after the validator feedback. This is the A/B
     failure site where the model reproduces the same dropped-side merge across
@@ -1419,7 +1419,7 @@ def build_repair_prompt(
     # model gets orientation on every attempt but isn't over-constrained by the
     # preserve directive on a second repair where the correct fix may restructure.
     struct_ctx = _structural_context_block(unit, attempt=attempt)
-    # Repair few-shot anchor (embeddings survey §2): top-1 quality-filtered
+    # Repair few-shot anchor : top-1 quality-filtered
     # example. Rendered as a compact one-shot AFTER the feedback and BEFORE the
     # plan-first step so the model has a concrete resolution pattern in mind.
     repair_anchor = ""
@@ -1431,7 +1431,7 @@ def build_repair_prompt(
             f"  REPLAYED: {_truncate_lines(ex.replayed)}\n"
             f"  RESOLVED: {_truncate_lines(ex.resolved)}\n\n"
         )
-    # Self-correction plan step (survey §3.3): force the model to reason about
+    # Self-correction plan step: force the model to reason about
     # WHY each failure happened and WHAT it will change BEFORE emitting the fix,
     # in the same response (no extra round-trip). The A/B showed the model
     # reproducing the same dropped-side merge across retries — it wasn't
@@ -1728,7 +1728,7 @@ def build_code_prompt(
     the same output schema as the single-pass resolve prompt, but the intent
     context primes the model toward a correct synthesis.
 
-    ``plan`` (PlanSearch, survey §1): when given, a hard-constraint block is
+    ``plan`` (PlanSearch, when given, a hard-constraint block is
     prepended telling the model to implement THAT plan exactly — turning Pass 2
     into "one code candidate per plan" instead of "N candidates from one plan".
     With no plan, the prompt is byte-identical to the original.
@@ -1779,9 +1779,9 @@ Output a ```json fenced object:
 
 
 def build_plan_search_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
-    """Pass 1 for PlanSearch (survey §1): ask for MULTIPLE distinct plans.
+    """Pass 1 for PlanSearch: ask for MULTIPLE distinct plans.
 
-    Combines the survey's "observation" and "plan generation" steps: the model
+    Combines prior work's "observation" and "plan generation" steps: the model
     lists the key constraints a correct merge must respect, then proposes K
     distinct resolution strategies as a JSON list. Pass 2 then generates one
     code candidate per plan (``build_code_prompt(plan=...)``), so solution
@@ -1848,7 +1848,7 @@ def build_verifier_prompt(
     *,
     assertion_enabled: bool = True,
 ) -> str:
-    """Build the critic prompt for the verifier-model validator (surveys §1/§5).
+    """Build the critic prompt for the verifier-model validator.
 
     Asks the LLM to judge whether ``candidate.resolved_text`` preserves BOTH
     sides' intent — the semantic check no syntactic validator can make. The
@@ -1878,7 +1878,7 @@ def build_verifier_prompt(
     if assertion_enabled:
         dp = _deterministic_preservation(unit, candidate, cur_lines, rep_lines, base_lines)
         assertion = _deterministic_assertion_block(dp)
-    # Deterministic per-side preservation evidence (survey §5.1 quantitative):
+    # Deterministic per-side preservation evidence:
     # the specific logical units each side ADDED that are ABSENT from the
     # resolution. Gives the judge concrete evidence to weigh, beyond eyeballing
     # the three sides — a unit listed here is very likely a dropped intent.
@@ -1959,7 +1959,7 @@ def _dropped_units_evidence(
 class DeterministicPreservation:
     """The deterministic structural-preservation verdict for a candidate.
 
-    Two independent signals (embeddings survey → critic guardrail):
+    Two independent signals → critic guardrail:
     - ``cur_ratio``/``rep_ratio``: entity-level coverage (abstract parser
       ``preservation_coverage``) — of the structural units each side ADDED beyond
       base, the fraction present in the resolution. 1.0 = all preserved.
@@ -2328,7 +2328,7 @@ class ResolutionEngine:
         by raising ``samples``.
 
         ``n_samples`` overrides the config sample count when given (used by the
-        orchestrator to allocate more samples to "complex" units, survey §4
+        orchestrator to allocate more samples to "complex" units,
         UAB-lite). ``None`` (default) uses ``self.config.samples`` unchanged.
         """
         prompt_trims: list[dict] = []
@@ -2378,7 +2378,7 @@ class ResolutionEngine:
             prompt = outline_prompt
         candidates: list[CandidateResolution] = []
         n = max(1, self.config.samples if n_samples is None else n_samples)
-        # Prompt-variant sampling (survey §4): on a FRESH resolve only (retries/
+        # Prompt-variant sampling: on a FRESH resolve only (retries/
         # repair must stay single-template for reproducible counterexample
         # feedback), spread samples across semantically-equivalent phrasings.
         # The temperature portfolio still applies across the variants. Off by
@@ -2431,7 +2431,7 @@ class ResolutionEngine:
         base_version: str,
         variants: list[tuple[str, str]],
     ) -> list[CandidateResolution]:
-        """Draw one sample per prompt variant in a thread pool (survey §4).
+        """Draw one sample per prompt variant in a thread pool.
 
         ``variants`` is a list of ``(prompt_text, variant_suffix)`` pairs from
         ``build_resolve_prompt_variants``. Each suffix is appended to
@@ -2477,7 +2477,7 @@ class ResolutionEngine:
 
         When ``diverse_sampling`` is enabled we bypass the batched path: the
         server draws all N choices at ONE temperature, so per-sample
-        temperature diversity (survey §4.1) requires N separate requests.
+        temperature diversity requires N separate requests.
         Diversity beats batching efficiency for correctness, so the thread
         pool is used with a per-sample temperature portfolio.
         """
@@ -2501,7 +2501,7 @@ class ResolutionEngine:
     def _sample_temperatures(
         self, n: int, temperature_override: float | None = None
     ) -> list[float]:
-        """Build the per-sample temperature portfolio (survey §4.1).
+        """Build the per-sample temperature portfolio.
 
         When ``diverse_sampling`` is off (default), every sample uses the same
         temperature (the override, or the base) — returned as a list so callers
@@ -2660,7 +2660,7 @@ class ResolutionEngine:
             return self.propose(unit, context)
         n = max(1, n_samples)
         temp = temperature if temperature is not None else self.config.sampling_temperature
-        # --- PlanSearch (survey §1): sample N distinct plans → one code per plan.
+        # --- PlanSearch: sample N distinct plans → one code per plan.
         # Falls back to the standard one-plan→N-code path if disabled, if the
         # plan-search call fails, or if it yields <2 plans (parse_plans guards).
         if (

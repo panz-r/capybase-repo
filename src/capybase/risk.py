@@ -146,7 +146,7 @@ class RiskEngine:
         passed validators. Both must clear for accept.
         """
         feats = result.features
-        # Change-type-aware budget (survey §5.2): scale the retry ceiling by the
+        # Change-type-aware budget: scale the retry ceiling by the
         # replayed commit's semantic role (bugfix → more, refactor → fewer).
         # Used for every retryable branch below; the critic budget applies the
         # same role factor on top of its coverage scaling (see _critic_budget).
@@ -255,7 +255,7 @@ class RiskEngine:
                 reasons=soft or ["copied one side verbatim"],
                 required_followups=soft,
             )
-        # Dropping a side's additions (survey §5.1 violation) is the same class
+        # Dropping a side's additions is the same class
         # of "didn't actually merge" signal as copying one side — the candidate
         # silently lost a branch's change. Retry so the model gets another chance
         # to represent both sides; escalate if it keeps happening.
@@ -265,7 +265,7 @@ class RiskEngine:
                 reasons=soft or ["dropped a side's additions"],
                 required_followups=soft,
             )
-        # Intent-coverage floor (survey §5.1 signatures): the deterministic
+        # Intent-coverage floor: the deterministic
         # coverage check found a side's added structural units were dropped
         # below the configured fraction — a hard, quantitative backstop that
         # fires even when the LLM critic is uncertain or skipped. Same retry
@@ -276,7 +276,7 @@ class RiskEngine:
                 reasons=soft or ["intent coverage below floor"],
                 required_followups=soft,
             )
-        # Unattributed code (survey §2.1 spurious-addition guard): the merge
+        # Unattributed code: the merge
         # contains a unit present in NONE of the three sides — a hallucinated
         # helper/branch the model invented. The inverse failure mode of the
         # coverage drops above. Retry so the model removes or justifies it.
@@ -286,7 +286,7 @@ class RiskEngine:
                 reasons=soft or ["unattributed code (unit in neither side)"],
                 required_followups=soft,
             )
-        # Dropping a base-referenced dependency (survey §2.2 SafeMerge necessary
+        # Dropping a base-referenced dependency (SafeMerge necessary
         # condition): the merge silently removed a symbol base + both sides kept
         # — a semantic regression the syntactic checks miss. Retry so the model
         # re-includes it; escalate if it persists.
@@ -307,7 +307,7 @@ class RiskEngine:
                 reasons=soft or ["dropped a symbol a later commit needs"],
                 required_followups=soft,
             )
-        # Verifier-model critic disagreement (surveys §1/§5 Proposer-Critic): the
+        # Verifier-model critic disagreement (Proposer-Critic): the
         # LLM judge flagged the resolution as dropping a side's INTENT — the one
         # semantic signal no syntactic validator can make. The critic gets its
         # OWN retry budget (max_critic_retries_per_unit, default = mirror the
@@ -416,7 +416,7 @@ def _risk_score(feats: dict) -> float:
         score += 0.3
     if not feats.get("syntax_passed", True):
         score += 0.3
-    # Pre-resolution conflict severity (survey §3.3): high-severity conflicts
+    # Pre-resolution conflict severity: high-severity conflicts
     # (large + definition-touching) get a small risk bump. Encoded low=0/med=1/high=2.
     severity = feats.get("conflict_severity", 1.0)
     if isinstance(severity, (int, float)):

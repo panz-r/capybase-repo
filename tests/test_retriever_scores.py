@@ -164,7 +164,7 @@ def test_context_bundle_retrieval_scores_default_empty():
 
 
 # ---------------------------------------------------------------------------
-# EmbeddingRetriever consumes the calibration transform (A4, survey §2.1)
+# EmbeddingRetriever consumes the calibration transform (A4,
 # ---------------------------------------------------------------------------
 
 

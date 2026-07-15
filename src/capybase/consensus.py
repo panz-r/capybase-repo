@@ -115,7 +115,7 @@ class ConsensusReport:
     agreement_score: float  # winner cluster's agreement fraction
     cluster_count: int
     entropy: float = 0.0  # normalized Shannon entropy (0=unanimous, 1=max split)
-    # FactSelfCheck rationale-consistency (survey §2): agreement over the
+    # FactSelfCheck rationale-consistency: agreement over the
     # candidates' OWN intent claims (preserved_* booleans + intent-list items),
     # NOT over their code text. 1.0 = every candidate made the same claims; low
     # = candidates disagree about what they did — a hallucination/unstable-claim
@@ -167,8 +167,8 @@ def select(
 
     The largest cluster wins. Ties (equal cluster sizes) are broken by:
 
-    1. highest **fact-consistency** of the cluster's representative (survey §2
-       FactSelfCheck): prefer the candidate whose rationale claims are most
+    1. highest **fact-consistency** of the cluster's representative
+       (FactSelfCheck): prefer the candidate whose rationale claims are most
        shared across all samples — down-weights a candidate that relies on a
        low-consistency/minority claim),
     2. then highest ``self_reported_confidence``,
@@ -242,7 +242,7 @@ def _entropy(sizes: list[int], n: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# FactSelfCheck rationale-consistency (survey §2)
+# FactSelfCheck rationale-consistency
 #
 # The resolve prompt already asks the model for structured rationale fields
 # (current_side_intent, replayed_commit_intent, preserved_*_side booleans) and

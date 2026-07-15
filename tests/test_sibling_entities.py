@@ -1,8 +1,8 @@
-"""Tests for entity-neighborhood context (survey §4.1/§5.4 Rover).
+"""Tests for entity-neighborhood context (Rover).
 
 P3: the model sees the OTHER methods/fields co-located in the same container as
 the conflict — the entity neighborhood it must stay consistent with. This is
-the survey's finding that *some* structured organization of context lifts a
+prior work's finding that *some* structured organization of context lifts a
 small LLM's output, at near-zero cost (signatures only, no bodies). Distinct
 from the cross-file callee definitions surfaced elsewhere.
 

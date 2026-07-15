@@ -275,7 +275,7 @@ def test_consensus_clusters_candidates_across_prompt_variants():
 
 
 # ---------------------------------------------------------------------------
-# FactSelfCheck rationale-consistency (survey §2): agreement over the
+# FactSelfCheck rationale-consistency: agreement over the
 # candidates' OWN intent claims — orthogonal to text-consensus.
 # ---------------------------------------------------------------------------
 
@@ -414,7 +414,7 @@ def test_report_intent_agreement_one_when_unanimous():
 
 def test_tie_break_prefers_higher_consistency_candidate():
     """Among equal-size clusters, the candidate whose rationale is more
-    consistent with the cohort wins the tie-break (survey §2: down-weight
+    consistent with the cohort wins the tie-break ( down-weight
     candidates that depend on low-consistency facts)."""
     # Three singleton clusters (distinct code) → all tied on size.
     # a and b share the claim "add guard"; c asserts a unique minority claim.

@@ -11,10 +11,10 @@ Two retrievers implement the same Protocol:
 - ``LexicalRetriever`` (default): dependency-free BM25 over tokenized code. Splits
   identifiers (camelCase, snake_case), drops stopwords/punctuation, ranks by BM25.
 - ``EmbeddingRetriever``: semantic retrieval via the llama-server ``/v1/embeddings``
-  endpoint (survey §4.2, LLMinus pattern). Catches "same intent, different
+  endpoint (LLMinus pattern). Catches "same intent, different
   identifiers" that lexical matching misses. Used only when the endpoint supports
   embeddings (``capybase calibrate`` detects this); otherwise falls back to BM25.
-- ``HybridRetriever``: fuses the two (survey §4) via RRF (default) or DBSF so BM25's
+- ``HybridRetriever``: fuses the two via RRF (default) or DBSF so BM25's
   exact-identifier strength and embeddings' semantic strength combine — degrading
   to lexical ranking when the embedding endpoint is unavailable.
 """
@@ -315,7 +315,7 @@ class LexicalRetriever:
 
 
 # ---------------------------------------------------------------------------
-# EmbeddingRetriever (survey §4.2, LLMinus-style semantic RAG)
+# EmbeddingRetriever (LLMinus-style semantic RAG)
 # ---------------------------------------------------------------------------
 
 
@@ -390,7 +390,7 @@ class EmbeddingRetriever:
         # scale and the journaled scores reflect it. None → byte-identical to the
         # pre-calibration behavior.
         self.calibration = calibration
-        # An optional persisted VectorCache (embeddings survey §1). When set,
+        # An optional persisted VectorCache. When set,
         # ``_build`` consults the cache and embeds only NEW entries (content_keys
         # not yet cached), persisting them for the next process. When None, every
         # accepted example is re-embedded each run (the prior behavior). Typed
@@ -406,7 +406,7 @@ class EmbeddingRetriever:
     def _build(self) -> None:
         """Embed every accepted example. Cached until ``refresh``.
 
-        With a persisted VectorCache (embeddings survey §1): consults the cache
+        With a persisted VectorCache : consults the cache
         and embeds only NEW entries (content_keys not yet seen), persisting them
         for the next process. Without a cache: re-embeds every accepted example
         each run (the prior behavior — fine for small corpora).
@@ -451,7 +451,7 @@ class EmbeddingRetriever:
         CALIBRATED value (the raw cosine passed through the fitted transform) and
         the floor filter uses the calibration's ``red_threshold`` — so few-shot
         admission and the journaled scores both reflect the model-agnostic
-        calibrated scale (survey §2.1). Without a fit, the score is the raw
+        calibrated scale. Without a fit, the score is the raw
         cosine and the filter uses ``min_similarity`` exactly as before.
         """
         if self._accepted is None:
@@ -545,7 +545,7 @@ class EmbeddingRetriever:
 
 
 # ---------------------------------------------------------------------------
-# HybridRetriever (survey §4: BM25 + dense fusion)
+# HybridRetriever (BM25 + dense fusion)
 # ---------------------------------------------------------------------------
 
 # RRF constant. The literature default (k=60) smooths the rank contribution so a
@@ -595,7 +595,7 @@ def _rrf_scores(ranked: list[tuple[float, HistoricalExample]]) -> dict[tuple[str
 def _dbsf_scores(
     ranked: list[tuple[float, HistoricalExample]],
 ) -> dict[tuple[str, ...], float]:
-    """Distribution-Based Score Fusion with ROBUST normalization (survey 2 §5.1).
+    """Distribution-Based Score Fusion with ROBUST normalization ( 2 §5.1).
 
     Normalizes one retriever's raw scores to [0,1] via a median+MAD robust
     z-score rather than min-max: ``z = (s - median) / MAD``, clipped to [-3, 3],
@@ -625,7 +625,7 @@ def _dbsf_scores(
 
 
 class HybridRetriever:
-    """Fuses lexical (BM25) and semantic (embedding) retrieval (survey §4).
+    """Fuses lexical (BM25) and semantic (embedding) retrieval.
 
     BM25 and embeddings catch complementary failures: BM25 nails exact-identifier
     matches (``getUserName`` vs ``get_user_name``) that a semantic model may rank
@@ -638,9 +638,9 @@ class HybridRetriever:
 
     - ``"rrf"`` (default): Reciprocal Rank Fusion. Uses only rank position
       (``score = Σ 1/(k+rank)``), so it needs no labeled data and is robust to the
-      incompatible score scales. The survey's "no-tuning baseline" (§4.2).
+      incompatible score scales. The's "no-tuning baseline" (§4.2).
     - ``"dbsf"``: Distribution-Based Score Fusion. Normalizes each retriever's
-      raw scores to [0,1] via a median+MAD robust z-score (survey 2 §5.1), then
+      raw scores to [0,1] via a median+MAD robust z-score ( 2 §5.1), then
       sums them. 50% breakdown — a single extreme score no longer dominates.
       Better when the score magnitudes carry signal beyond rank (§4.1); pairs
       with the calibrated score scale from the isotonic transform when available.
@@ -764,16 +764,16 @@ class HybridRetriever:
 
 
 # ---------------------------------------------------------------------------
-# QualityFilteredRetriever (embeddings survey §1 index-quality rule, §2 repair)
+# QualityFilteredRetriever 
 # ---------------------------------------------------------------------------
 
 
 class QualityFilteredRetriever:
     """Wrap a retriever to apply a retry-count + score-floor quality filter.
 
-    The repair/retry path (embeddings survey §2) is the A/B failure site where
+    The repair/retry path is the A/B failure site where
     the model reproduces the same dropped-side merge. Injecting a retrieved
-    example helps ONLY if the example is trustworthy: the survey's §1 index-
+    example helps ONLY if the example is trustworthy: prior work's §1 index-
     quality rule excludes merges that took many retries to converge (they may
     have converged by luck, not a generalizable strategy). This wrapper looks up
     each retrieved example's ``retry_count`` in the store and drops any above

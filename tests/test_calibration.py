@@ -413,7 +413,7 @@ def test_merge_resolution_features_captures_all_signals():
 
 
 def test_merge_resolution_features_surfaces_token_entropy():
-    """TECP (survey §4.1): the accepted candidate's mean_token_entropy reaches
+    """TECP: the accepted candidate's mean_token_entropy reaches
     the recorded features — proving the model-side uncertainty signal threads
     from the adapter, through the candidate, into the calibration corpus."""
     from capybase.consensus import ConsensusReport
@@ -451,7 +451,7 @@ def test_merge_resolution_features_surfaces_token_entropy():
 
 
 def test_merge_resolution_features_surfaces_intent_agreement():
-    """FactSelfCheck (survey §2): the consensus report's intent_agreement and
+    """FactSelfCheck: the consensus report's intent_agreement and
     low_consistency_fact_count reach the recorded feature vector — proving the
     rationale-consistency signal threads into the calibration corpus."""
     from capybase.consensus import ConsensusReport

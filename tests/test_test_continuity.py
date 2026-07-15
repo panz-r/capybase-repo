@@ -1,4 +1,4 @@
-"""Tests for the test-continuity invariant (survey §2.1a).
+"""Tests for the test-continuity invariant.
 
 A pre-rebase passing-test baseline is captured, then diffed against the
 post-merge passing set: a baseline-passing test that now fails is a behavioral

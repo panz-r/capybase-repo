@@ -228,7 +228,7 @@ def test_calibration_envelope_empty_without_profile(repo: Path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# B2: hybrid retriever wiring (survey §4)
+# B2: hybrid retriever wiring
 # ---------------------------------------------------------------------------
 
 

@@ -323,7 +323,7 @@ def test_calibrate_embeddings_json_payload_carries_zones(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Offline drift detection (survey 2 §7) — drift block vs a prior run
+# Offline drift detection ( 2 §7) — drift block vs a prior run
 # ---------------------------------------------------------------------------
 
 

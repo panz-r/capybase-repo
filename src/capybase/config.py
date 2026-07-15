@@ -70,7 +70,7 @@ class ModelConfig(BaseModel):
     # consensus voting just picks the most-common wrong answer. Best-of-N helps
     # when a model has a higher per-draw success rate; default to 1 here.
     samples: int = 1
-    # Difficulty-aware sample allocation (survey §4 UAB-lite): when routing is
+    # Difficulty-aware sample allocation (UAB-lite): when routing is
     # enabled and a unit classifies as "complex", draw this many samples instead
     # of the base ``samples``. Concentrates test-time compute where a 3B model
     # genuinely struggles (multi-hunk files, large enclosing AST nodes) without a
@@ -89,7 +89,7 @@ class ModelConfig(BaseModel):
     # intents. Only activates when samples > 1 (the multi-candidate path) to
     # avoid doubling requests for the single-sample case.
     two_pass: bool = False
-    # PlanSearch (survey §1): in the two-pass path, sample MULTIPLE distinct
+    # PlanSearch: in the two-pass path, sample MULTIPLE distinct
     # NL resolution plans (Pass 1) and generate one code candidate per plan
     # (Pass 2), instead of one plan → N code samples. Adds diversity on the
     # planning axis — orthogonal to temperature and prompt-variant sampling.
@@ -103,14 +103,14 @@ class ModelConfig(BaseModel):
     # Draw samples concurrently in a thread pool (each is a blocking HTTP call).
     # Safe because the LLM adapter is stateless per-call.
     parallel_samples: bool = True
-    # Parameter-diversity portfolio (survey §4.1): when sampling N>1, split the
+    # Parameter-diversity portfolio: when sampling N>1, split the
     # samples across the high sampling_temperature (exploratory) and the low
     # base temperature (conservative). Raises the odds that at least one sample
     # is both valid and distinct on a 3B model. Bypasses the server-side batched
     # n path (which forces one temperature) to use N separate requests. Off by
     # default; for N=1 it is a no-op.
     diverse_sampling: bool = False
-    # Prompt-variant sampling (survey §4 Code Roulette): when on AND samples > 1
+    # Prompt-variant sampling (Code Roulette): when on AND samples > 1
     # AND this is a fresh resolve (no CEGIS retry/repair), draw the samples across
     # semantically-equivalent resolve-prompt phrasings instead of identical prompts
     # at varied temperatures. A candidate stable across prompt variants is a
@@ -145,7 +145,7 @@ class ModelConfig(BaseModel):
     # and become a retryable failure. Real completions on a 3B reasoning model
     # take ~30-90s; this gives headroom without hanging for minutes on a stall.
     generation_timeout_seconds: int = 180
-    # TECP token-entropy capture (survey §4.1): when on, requests per-token
+    # TECP token-entropy capture: when on, requests per-token
     # logprobs from the API and reduces them to a scalar mean token-entropy
     # (mean negative log-probability) carried on each candidate. This is the
     # logit-free, black-box uncertainty signal the conformal "flywheel" learns
@@ -259,7 +259,7 @@ class TestsConfig(BaseModel):
     final: str | None = "pytest"
     timeout_seconds: int = 300
     required: bool = True
-    # Test-continuity invariant (survey §2.1a): capture which tests PASS on the
+    # Test-continuity invariant: capture which tests PASS on the
     # pre-rebase tree, then treat a baseline-passing test that FAILS post-merge
     # as a behavioral regression the merge introduced — a high-signal
     # counterexample the syntactic/intent validators can't catch (a merge can
@@ -280,7 +280,7 @@ class PolicyRule(BaseModel):
     importing ``subprocess`` is the precondition); ``forbid_call`` matches when
     ``pattern`` is a prefix of any call target (so ``"eval"`` catches the
     builtin and ``"os.system"`` catches the dotted call). All deterministic at
-    runtime — no LLM, no execution (survey §4 VeriGuard).
+    runtime — no LLM, no execution (VeriGuard).
     """
 
     name: str
@@ -295,7 +295,7 @@ class ValidationConfig(BaseModel):
     require_exact_splice_scope: bool = True
     require_syntax_if_supported: bool = True
     reject_if_copies_one_side: bool = True
-    # Both-sides-represented (survey §5.1 cheap necessary condition): flag a
+    # Both-sides-represented: flag a
     # candidate that drops a side's additions entirely — a tweaked-but-still-
     # one-sided merge the copy heuristic misses. Advisory warning.
     reject_if_drops_a_side: bool = True
@@ -305,7 +305,7 @@ class ValidationConfig(BaseModel):
     # distinctive token), or drops a side's added line entirely. Derived from a
     # line-level diff of each side vs base. Advisory warning (feeds retry).
     reject_if_drops_obligation: bool = True
-    # Dependency preservation (survey §2.2 SafeMerge necessary condition): warn
+    # Dependency preservation (necessary condition): warn
     # when a merge drops a base-referenced symbol that has an in-repo definition
     # and neither side removed. Companion to both-sides-represented — that
     # guards a side's additions; this guards a shared base dependency (e.g. a
@@ -345,7 +345,7 @@ class ValidationConfig(BaseModel):
     rust_analyzer_path: str = "rust-analyzer"
     cargo_path: str = "cargo"
     lsp_baseline_strict: bool = True
-    # Rust compile floor (survey: parity with Python's py_compile). Rust files
+    # Rust compile floor parity with Python's py_compile). Rust files
     # are compiled with ``rustc --emit=metadata`` in Phase B — the exact analog
     # of ``py_compile``: a dependency-free syntax/parse check that rejects a
     # non-compiling merge (dropped ``;``, unbalanced braces, duplicate field)
@@ -371,7 +371,7 @@ class ValidationConfig(BaseModel):
     # Shadow tests: if a tests/test_<module>.py exists for the modified file,
     # run it before declaring success (best-effort, Phase B).
     enable_shadow_tests: bool = False
-    # Verifier-model critic (surveys §1/§5 Proposer-Critic; the reserved
+    # Verifier-model critic (Proposer-Critic; the reserved
     # `enable_verifier_model` seam): an LLM judge that checks the resolved text
     # preserves BOTH sides' semantic intent — the one failure mode the syntactic
     # validators (markers, splice scope, AST, LSP) are structurally blind to:
@@ -415,7 +415,7 @@ class ValidationConfig(BaseModel):
     # this is the PER-UNIT early-feedback check. Default-on; the hermetic suite
     # opts out (fake clients produce partial snippets that don't compile standalone).
     enable_per_unit_syntax_check: bool = True
-    # VeriGuard-style deterministic policy gate (survey §4): statically extract
+    # VeriGuard-style deterministic policy gate: statically extract
     # import/call facts from each candidate's resolved text and evaluate them
     # against ``policy_rules``. The ONLY check that inspects WHAT a patch
     # introduces (every other validator is syntactic/structural) — catches a
@@ -424,7 +424,7 @@ class ValidationConfig(BaseModel):
     # for other languages. When off OR no rules configured, the gate is inert.
     enable_policy_gate: bool = False
     policy_rules: list[PolicyRule] = Field(default_factory=list)
-    # LLM code-smell checks (survey §7): statically detect smells common in
+    # LLM code-smell checks: statically detect smells common in
     # LLM-generated code via stdlib ast — NaN comparison (x == np.nan, always
     # False), pandas chain indexing (df[a][b], ambiguous), uncontrolled
     # randomness (random.* with no seed). A cheap pre-test quality filter,
@@ -434,7 +434,7 @@ class ValidationConfig(BaseModel):
     # analysis and are deferred. When off (default) the checker is inert.
     enable_code_smell_checks: bool = False
     code_smell_severity: str = "warning"
-    # Silent-resurrection detection (survey "silent loss of intent"): git's
+    # Silent-resurrection detection ( "silent loss of intent"): git's
     # 3-way merge can resolve CLEANLY (no conflict markers) while resurrecting
     # dead code the ``onto`` branch deliberately deleted — because the replayed
     # branch predates the cleanup. Git sees no conflict; without this scan,
@@ -460,7 +460,7 @@ class ValidationConfig(BaseModel):
     # (1.0 = whole block returned; 0.85 default tolerates minor edits). Higher =
     # fewer false positives but may miss a partially-resurrected block.
     resurrection_min_similarity: float = 0.85
-    # Cross-commit dependency guardian (survey §3.1): a deterministic post-rebase
+    # Cross-commit dependency guardian: a deterministic post-rebase
     # audit that catches cross-window dependency breaks the per-commit validators
     # miss (e.g. commit A renames ``foo``→``bar``, a later commit B still calls
     # ``foo`` — locally valid per commit, broken across the window). When enabled
@@ -471,31 +471,31 @@ class ValidationConfig(BaseModel):
     # no-op for unsupported languages / when the structural parser is unavailable.
     enable_cross_commit_guardian: bool = True
     cross_commit_policy: Literal["warn", "stop"] = "warn"
-    # Structural parser backend (Round 1 of the abstract-parser migration).
+    # Structural parser backend.
     # Deprecated: the grammar-free abstract parser
     # (capybase.adapters.abstract_parser) is the sole structural backend. This
     # field is retained for config-file backward compatibility (it parsed from
     # capybase.toml) but has no effect — the tree-sitter backend was removed.
     parser_backend: Literal["abstract", "tree_sitter"] = "abstract"
-    # Intent evolution trace (survey §3.2): a deterministic post-rebase audit
+    # Intent evolution trace: a deterministic post-rebase audit
     # that, for an entity touched across ≥2 commits, checks the final merge
     # matches the entity's LAST source-branch evolution (its most recent body).
     # A divergence flags an ``intent_evolution_gap`` — the merge likely reverted
     # to or kept an earlier version, silently losing an intermediate step no
     # per-commit validator sees. Purely advisory (observability/assurance, never
-    # blocks): the survey notes the retry would be too expensive for multi-commit
+    # blocks): prior findings the retry would be too expensive for multi-commit
     # chains, so this produces a report rather than a gate. Degrades to a no-op
     # when the structural parser is unavailable. ``evolution_policy`` is reserved for a
     # future "stop" mode; currently always advisory.
     enable_evolution_audit: bool = True
-    # Session-level coverage SLO (survey §3.3): aggregate the per-unit intent
+    # Session-level coverage SLO: aggregate the per-unit intent
     # preservation coverage across the whole rebase window into one ratio
     # (preserved units / total units) and surface it in the completion report —
     # an observability metric for detecting regressions across orchestrator
     # changes (e.g. "session coverage dropped from 97% to 91%"). Purely advisory
     # (never blocks the rebase). ``session_coverage_slo`` is the floor; when > 0
     # and the session ratio falls below it, an advisory is emitted (still not a
-    # hard gate — observability, not enforcement, per the survey). 0 disables.
+    # hard gate — observability, not enforcement, per the). 0 disables.
     session_coverage_slo: float = 0.0
 
 
@@ -533,7 +533,7 @@ class FutureConfig(BaseModel):
     # [future] seam documentation. See ValidationConfig.enable_verifier_model.
     enable_verifier_model: bool = True
     enable_mutation_testing: bool = False
-    # Deterministic structural pre-resolution (survey §6.4 layer 1): BEFORE the
+    # Deterministic structural pre-resolution: BEFORE the
     # LLM, attempt a model-free resolution from base+sides via provably-safe
     # rules (identical sides, one-sided change, disjoint line edits). Every
     # resolution still runs the full validation pipeline; a guess that fails
@@ -541,7 +541,7 @@ class FutureConfig(BaseModel):
     # trivial conflicts, never produces a worse merge. Default ON (safe-by-
     # construction); flip off to force the model to handle every conflict.
     enable_structural_resolver: bool = True
-    # Search-based combination resolution (survey §4.1 SBCR): AFTER the
+    # Search-based combination resolution (SBCR): AFTER the
     # structural resolver declines and BEFORE the LLM, search order-preserving
     # interleavings of the two sides for the best combination (mean similarity
     # to both parents). Covers the ~98.6% of combination resolutions that use no
@@ -554,7 +554,7 @@ class FutureConfig(BaseModel):
     # SBCR (combination-search) tuning. The fitness is character-level Gestalt
     # similarity, mean-aggregated over both parents (arXiv:2605.16646 §4.1).
     # These knobs make the research-tuned parameters configurable without code
-    # changes; the defaults are the survey's recommended values.
+    # changes; the defaults are prior work's recommended values.
     # Minimum fitness for SBCR to accept a candidate. Below this the candidate
     # is essentially one-sided and is left to the LLM.
     sbcr_floor: float = 0.6
@@ -617,13 +617,13 @@ class StructuralConfig(BaseModel):
     # Refine conflict boundaries with `git merge-file --diff3` to get the
     # tightest possible marker span (git may auto-resolve adjacent lines).
     refine_with_diff3: bool = True
-    # xdiff backend for ``git merge-file`` alignment (survey §1.3). Histogram
+    # xdiff backend for ``git merge-file`` alignment. Histogram
     # anchors on rare lines → tighter, more stable conflict regions than Myers
     # on noisy code (conflict-size reduction in ~10% of conflicting merges).
     # One of "histogram" (default), "patience", "minimal", "myers". Unknown
     # values fall back to histogram silently; refinement is advisory only.
     diff_algorithm: Literal["histogram", "patience", "minimal", "myers"] = "histogram"
-    # Sesame-style separator projection (survey §1.2): for brace/semicolon
+    # Sesame-style separator projection: for brace/semicolon
     # languages (Rust/C/Java/JS/...), split each ``{`` ``}`` ``(`` ``)`` ``;`` onto
     # its own line BEFORE re-running diff3, so the line-merger anchors on real
     # statement/block boundaries instead of entangling trailing punctuation.
@@ -648,7 +648,7 @@ class MemoryConfig(BaseModel):
     enabled: bool = False
     store_path: str = ".rebase-agent/memory/experiences.jsonl"
     # "lexical" (dependency-free BM25, the default) or "embedding" (semantic
-    # retrieval via the /v1/embeddings endpoint, survey §4.2). The embedding
+    # retrieval via the /v1/embeddings endpoint, The embedding
     # retriever is used only when the endpoint actually supports embeddings
     # (capybase calibrate detects this); otherwise it falls back to BM25.
     retriever: str = "lexical"
@@ -674,14 +674,14 @@ class MemoryConfig(BaseModel):
     embedding_min_similarity: float = 0.35
     # The full embeddings-calibration envelope (EmbeddingCalibration.to_dict()),
     # carried from the profile so the retriever can apply the isotonic score
-    # transform and use the calibrated red_threshold floor (survey §2.1). Empty
+    # transform and use the calibrated red_threshold floor. Empty
     # until ``calibrate-embeddings`` runs; the profile overrides this at runtime.
     embedding_calibration: dict[str, Any] = Field(default_factory=dict)
     # Hybrid-retrieval fusion method, read only when ``retriever == "hybrid"``
-    # (survey §4). "rrf" (default, rank-only, scale-agnostic) or "dbsf"
+    #. "rrf" (default, rank-only, scale-agnostic) or "dbsf"
     # (min-max normalized score sum). The profile may override this.
     fusion_method: str = "rrf"
-    # Persisted vector cache for the embedding retriever (embeddings survey §1).
+    # Persisted vector cache for the embedding retriever.
     # Without this, EmbeddingRetriever._build re-embeds every accepted experience
     # on every process start — a re-embed cliff as the corpus grows past hundreds.
     # "auto" (default) selects sqlite-vec when importable, else numpy, else
@@ -692,12 +692,12 @@ class MemoryConfig(BaseModel):
     # extension (".vec.sqlite" / ".npy" + ".npy.manifest.jsonl"). Relative paths
     # resolve against the repo root, like store_path.
     vector_cache_path: str = ".rebase-agent/memory/vectors"
-    # RAG into the repair/retry path (embeddings survey §2). The repair prompt
+    # RAG into the repair/retry path. The repair prompt
     # previously carried NO few-shot — the A/B failure site where the model
     # reproduces the same dropped-side merge across retries. Quality filter:
-    # only surface examples that converged within this many retries (survey §1's
+    # only surface examples that converged within this many retries:
     # index-quality rule — merges that took many retries may have converged by
-    # luck, not a generalizable strategy). -1 disables the filter.
+    # luck, not a generalizable strategy. -1 disables the filter.
     repair_retrieval_max_retries: int = 2
     # Higher floor than fresh-generation for the repair path (the cost of a
     # misleading example is higher when the model is already fixing a specific
@@ -749,7 +749,7 @@ class CalibrationConfig(BaseModel):
 
 
 class RoutingConfig(BaseModel):
-    """Difficulty-aware routing (survey §6.1, ICoT/RoutingGen pattern).
+    """Difficulty-aware routing (ICoT/RoutingGen pattern).
 
     Classifies a conflict as ``simple`` or ``complex`` *before* any LLM call
     using structural signals already on the ConflictUnit. Simple conflicts (a
@@ -766,7 +766,7 @@ class RoutingConfig(BaseModel):
     max_simple_node_lines: int = 40
     # Combined base+current+replayed side text longer than this (chars) → complex.
     max_simple_side_chars: int = 1200
-    # Minimum conflict balance for SBCR to ACCEPT outright (survey §4.2). Balance
+    # Minimum conflict balance for SBCR to ACCEPT outright. Balance
     # = min/max of the two sides' non-blank line counts (1.0 = equal, →0 =
     # heavily imbalanced). SBCR wins on balanced conflicts and loses to the LLM
     # on imbalanced ones (arXiv:2605.16646 §4.2), so below this threshold an SBCR

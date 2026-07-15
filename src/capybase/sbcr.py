@@ -1,9 +1,9 @@
-"""SBCR: Search-Based Combination Resolution (survey §4.1).
+"""SBCR: Search-Based Combination Resolution.
 
 A deterministic, language-agnostic resolver that searches for the best
 *combination* resolution of a conflict: a merge made entirely of lines taken
 from the two sides, each side's lines kept in their original relative order (an
-order-preserving interleaving). The survey found ~98.6% of real-world
+order-preserving interleaving). The found ~98.6% of real-world
 combination resolutions contain no newly-invented lines, so this search space
 covers the overwhelming majority of "both sides added / both sides restructured"
 conflicts that have no single correct side.
@@ -18,7 +18,7 @@ Search strategy:
 - **Exhaustive** enumeration of all order-preserving interleavings when the
   block is small (product of side line counts ≤ ``EXHAUSTIVE_THRESHOLD``).
   This is optimal over the space and fast (≤ ~1k candidates).
-- **Random-restart hill climbing** for larger blocks, with the survey's three
+- **Random-restart hill climbing** for larger blocks, with prior work's three
   operators (add a line, remove a line, exchange positions). Bounded by
   ``max_iterations`` so cost is predictable.
 
@@ -32,7 +32,7 @@ first; SBCR only fires on conflicts the structural resolver declined.
 
 Scope guard: SBCR fires ONLY when the diff3-refined base is empty — i.e. a true
 *addition* conflict where both sides added content with no shared base line. The
-survey's search space is combination resolutions, which presuppose additions;
+'s search space is combination resolutions, which presuppose additions;
 applying it to *modifications* of a shared line (e.g. both sides changed
 ``x = 1`` differently) would let the fitness rank the two contradictory lines'
 concatenation above either side alone — a semantically-wrong last-wins merge
@@ -130,7 +130,7 @@ def balance(unit: ConflictUnit) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Fitness: mean textual similarity to both parents (survey §4.1)
+# Fitness: mean textual similarity to both parents
 # ---------------------------------------------------------------------------
 
 
@@ -155,7 +155,7 @@ def _ratio(a: list[str], b: list[str]) -> float:
 def fitness(candidate: list[str], ours: list[str], theirs: list[str]) -> float:
     """Mean character-level similarity of the candidate to each parent.
 
-    This is the survey's evaluation function: a good combination is close in
+    This is prior work's evaluation function: a good combination is close in
     text to BOTH sides (it contains lines from both, in a sensible order).
     Character-level Gestalt + mean aggregation reaches median Spearman ≈0.79
     with developer-chosen resolutions (arXiv:2605.16646 §4.1).
@@ -173,7 +173,7 @@ def _interleavings(ours: list[str], theirs: list[str]) -> Iterator[list[str]]:
 
     A candidate is a sequence where each side's lines appear in their original
     relative order, but the two sides may be merged in any way. This is exactly
-    the survey's search space (line-wise combinations, no new lines). The count
+    prior work's search space (line-wise combinations, no new lines). The count
     is C(m+n, m); the caller bounds this before calling.
     """
     if not ours:
@@ -249,7 +249,7 @@ def _hill_climb_best(
     interleaving space that ``_interleavings`` enumerates exhaustively. Random
     restarts sample fresh orderings when a local optimum is reached.
 
-    Three termination criteria (survey §2.2 / arXiv:2605.16646 §4.1):
+    Three termination criteria:
     - ``max_iterations``: hard budget on fitness evaluations.
     - ``stagnation_limit``: stop after this many consecutive non-improving evals.
     - ``max_time``: wall-clock budget in seconds.
@@ -365,16 +365,16 @@ def resolve_by_combination_search(
     Parameters
     ----------
     floor : float
-        Minimum fitness to accept a candidate. The survey's fitness tops out at
+        Minimum fitness to accept a candidate. The's fitness tops out at
         ~0.83 for a clean both-sides combination; below ~0.6 the candidate is
         essentially one-sided (it drops most of a side), which is not a genuine
         combination and is better left to the LLM.
     max_iterations : int
         Hard budget on total fitness evaluations for hill climbing on large
-        blocks (survey §2.2 termination).
+        blocks.
     stagnation_limit : int
         Stop the hill-climb search after this many consecutive non-improving
-        evaluations (survey §2.2 stagnation; arXiv:2605.16646 §4.1 tunes to 10).
+        evaluations.
         Once fitness plateaus, further restarts re-find the same local optima,
         so continuing wastes budget.
     max_time : float

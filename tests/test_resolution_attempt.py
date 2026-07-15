@@ -148,7 +148,7 @@ def test_restamp_is_a_named_path_with_reason(repo: Path):
 
 
 # ---------------------------------------------------------------------------
-# Decline-reason journaling (survey §5.3): structural + SBCR declines were
+# Decline-reason journaling: structural + SBCR declines were
 # previously SILENT (no resolution_attempt event). exact-reuse was already
 # instrumented. These tests pin the new parity so a skip is never invisible.
 # ---------------------------------------------------------------------------

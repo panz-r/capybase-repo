@@ -192,7 +192,7 @@ def test_catalog_markers_round_trip(conflict: RustConflict):
 # in the file as shared context. Only the shadow-test oracle (cargo test via
 # ``_run_shadow_tests``, gated on ``enable_shadow_tests``) catches it — a
 # distinct failure path from the compile floor. This is the file-level analog
-# of the orchestrator-level test_rust_test_gate_* (round 1); previously the
+# of the orchestrator-level test_rust_test_gate_*; previously the
 # "intent preservation via the project's own test suite" axis had NO file-level
 # coverage. Requires cargo.
 # ---------------------------------------------------------------------------

@@ -268,7 +268,7 @@ def test_rust_duplicate_degrades_when_grammar_missing(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# dropped_entities: the quantitative per-side preservation signal (surveys §5.1).
+# dropped_entities: the quantitative per-side preservation signal.
 # Used by the verifier critic (as prompt evidence) and the CEGIS retry feedback
 # (as exact "reintroduce: function X" targets).
 # ---------------------------------------------------------------------------
@@ -391,14 +391,14 @@ def test_dropped_entities_degrades_when_grammar_missing(monkeypatch):
     None, not via is_available (which the caller checks before invoking)."""
     from capybase.adapters import structural
 
-    # The abstract parser is primary (Round 1); a failed parse surfaces as None.
+    # The abstract parser is primary; a failed parse surfaces as None.
     monkeypatch.setattr(structural, "_abstract_parse", lambda src, lang: None)
     out = structural.dropped_entities("def a():pass", "def a():pass\ndef b():pass", "def a():pass", "python")
     assert out is None
 
 
 # ---------------------------------------------------------------------------
-# preservation_coverage: the quantitative per-side coverage ratio (survey §5.1).
+# preservation_coverage: the quantitative per-side coverage ratio.
 # ---------------------------------------------------------------------------
 
 
@@ -504,7 +504,7 @@ def test_intent_coverage_disabled_when_floor_zero():
 
 
 # ---------------------------------------------------------------------------
-# Unattributed Code Sentinel (survey §2.1): the spurious-addition guard.
+# Unattributed Code Sentinel: the spurious-addition guard.
 # Inverse of dropped_entities — flags merge units present in NEITHER side.
 # ---------------------------------------------------------------------------
 
@@ -568,7 +568,7 @@ def test_unattributed_entities_flags_genuinely_novel_unit():
 def test_unattributed_entities_degrades_when_grammar_missing(monkeypatch):
     from capybase.adapters import structural
 
-    # The abstract parser is primary (Round 1); a failed parse surfaces as None.
+    # The abstract parser is primary; a failed parse surfaces as None.
     monkeypatch.setattr(structural, "_abstract_parse", lambda src, lang: None)
     out = structural.unattributed_entities(
         "def a():pass", "def a():pass", "def a():pass", "def a():pass\ndef b():pass", "python"

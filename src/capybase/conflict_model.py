@@ -97,7 +97,7 @@ class ConflictUnit(BaseModel):
     enclosing_symbol: str | None = None
     structural_metadata: dict[str, Any] = Field(default_factory=dict)
     risk_tags: list[str] = Field(default_factory=list)
-    # Graded severity computed at extraction (survey §3.3) from cheap pre-LLM
+    # Graded severity computed at extraction from cheap pre-LLM
     # signals (hunk size, definition-touching, both-sides-changed-same-lines).
     # Distinct from risk_tags (validator-added violation names): this is a
     # pre-resolution triage signal for routing/escalation/attribution. Computed
@@ -200,7 +200,7 @@ class ContextBundle(BaseModel):
     side_summaries: dict[str, str] = Field(default_factory=dict)
     related_snippets: list[RelatedSnippet] = Field(default_factory=list)
     retrieved_examples: list[HistoricalExample] = Field(default_factory=list)
-    # Repair-path few-shot (embeddings survey §2): a STRICTLY-filtered subset of
+    # Repair-path few-shot : a STRICTLY-filtered subset of
     # retrieved_examples for the CEGIS repair/retry prompt. The repair path is the
     # A/B failure site; a single high-trust anchor there closes the loop where the
     # model reproduces the same dropped-side merge. Populated by the context
@@ -263,7 +263,7 @@ class CandidateResolution(BaseModel):
     replayed_commit_intent: list[str] = Field(default_factory=list)
     resolved_text: str
     explanation: str = ""
-    # Self-correction plan (survey §3.3): on a repair retry, the model's stated
+    # Self-correction plan: on a repair retry, the model's stated
     # reasoning about WHY each failure happened + the fix it will make, emitted
     # BEFORE the resolved_text to force internalization of the critic feedback.
     # Empty on fresh resolves (no plan step there). Auditable but not acted on.
@@ -285,7 +285,7 @@ class CandidateResolution(BaseModel):
     suspected_validator_error: bool = False
     self_reported_confidence: float = 0.0
 
-    # TECP token-entropy (survey §4.1): the mean negative log-probability of the
+    # TECP token-entropy: the mean negative log-probability of the
     # generated content tokens, reduced from the API's per-token logprobs. This
     # is the logit-free, black-box uncertainty signal the conformal "flywheel"
     # consumes. ``None`` when logprobs weren't captured (default config) or the

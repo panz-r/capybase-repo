@@ -101,7 +101,7 @@ def test_flags_copying_one_side():
 
 
 # ---------------------------------------------------------------------------
-# Both-sides-represented (survey §5.1 cheap necessary condition)
+# Both-sides-represented
 # ---------------------------------------------------------------------------
 
 
@@ -307,7 +307,7 @@ def test_verify_file_catches_leaked_markers():
 
 
 # ---------------------------------------------------------------------------
-# Verifier-model critic (surveys §1/§5): the LLM judge that checks a
+# Verifier-model critic: the LLM judge that checks a
 # resolution preserves both sides' semantic intent.
 # ---------------------------------------------------------------------------
 
@@ -546,7 +546,7 @@ def test_verifier_jury_member_uses_custom_prompt_and_name(verifier_critic_enable
 
 
 # ---------------------------------------------------------------------------
-# VeriGuard-style deterministic policy gate (survey §4): the only check that
+# VeriGuard-style deterministic policy gate: the only check that
 # inspects WHAT a patch introduces (imports/calls), not just its structure.
 # ---------------------------------------------------------------------------
 
@@ -735,7 +735,7 @@ from capybase.verification import PolicyGateValidator  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# LLM code-smell detection (survey §7): a deterministic ast-based pre-test
+# LLM code-smell detection: a deterministic ast-based pre-test
 # quality filter for smells common in LLM-generated code.
 # ---------------------------------------------------------------------------
 

@@ -322,7 +322,7 @@ def test_profile_embedding_min_similarity_default():
 
 
 def test_profile_fusion_method_roundtrip():
-    """The hybrid fusion method (survey §4) round-trips through to_dict/from_dict."""
+    """The hybrid fusion method round-trips through to_dict/from_dict."""
     p = _profile(fusion_method="dbsf")
     d = p.to_dict()
     assert d["fusion_method"] == "dbsf"

@@ -1,4 +1,4 @@
-"""Tests for the session-level coverage SLO (Phase 4 / survey §3.3).
+"""Tests for the session-level coverage SLO (Phase 4 /
 
 Aggregates per-unit intent preservation coverage across the whole rebase window
 into one ratio, surfaced at completion as observability for detecting

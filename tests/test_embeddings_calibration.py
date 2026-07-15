@@ -407,7 +407,7 @@ def test_old_envelope_keys_still_present():
 
 
 # ---------------------------------------------------------------------------
-# Robust estimators (survey 2 §3.1 Huber, §4.1 MAD zones)
+# Robust estimators ( 2 §3.1 Huber, §4.1 MAD zones)
 # ---------------------------------------------------------------------------
 
 
@@ -518,7 +518,7 @@ def test_zones_remain_ordered_on_separated_model():
 
 
 # ---------------------------------------------------------------------------
-# Offline drift detection (survey 2 §7) — compare_calibration
+# Offline drift detection ( 2 §7) — compare_calibration
 # ---------------------------------------------------------------------------
 
 

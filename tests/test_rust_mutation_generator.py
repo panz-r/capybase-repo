@@ -1,8 +1,8 @@
 """Property tests for verifier robustness via the catalog-mutation generator.
 
-Round 3 (Method C, honest form). The generator (``tests/rust_mutation_generator``)
-applies structure-preserving mutations to the curated catalog cases and these
-tests assert verifier invariants the hand-authored rows cannot state:
+The generator (``tests/rust_mutation_generator``) applies structure-preserving
+mutations to the curated catalog cases, and these tests assert verifier
+invariants the hand-authored rows cannot state:
 
 1. **No-crash**: ``verify_file`` returns a result (never raises) on the mutated
    expected/broken splices.

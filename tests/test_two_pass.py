@@ -310,7 +310,7 @@ def test_server_side_n_client_without_complete_many():
 
 
 # ---------------------------------------------------------------------------
-# Diverse sampling (survey §4.1): per-sample temperature portfolio
+# Diverse sampling: per-sample temperature portfolio
 # ---------------------------------------------------------------------------
 
 
@@ -393,7 +393,7 @@ def test_diverse_sampling_uses_thread_pool_temperatures():
 
 
 # ---------------------------------------------------------------------------
-# Prompt-variant sampling (survey §4 Code Roulette robustness): when
+# Prompt-variant sampling (Code Roulette robustness): when
 # prompt_variants is on, samples are drawn across distinct resolve-prompt
 # phrasings, each tagged on prompt_version, instead of one prompt at varied
 # temperatures.
@@ -498,7 +498,7 @@ def test_prompt_variants_skipped_when_samples_one():
 
 
 # ---------------------------------------------------------------------------
-# Difficulty-aware sample allocation (survey §4 UAB-lite): the n_samples
+# Difficulty-aware sample allocation (UAB-lite): the n_samples
 # override lets a caller draw more samples than config.samples — used by the
 # orchestrator to concentrate compute on "complex" units.
 # ---------------------------------------------------------------------------
@@ -548,7 +548,7 @@ def test_propose_with_consensus_forwards_n_samples():
 
 
 # ---------------------------------------------------------------------------
-# PlanSearch-style multi-plan sampling (survey §1): sample N distinct plans →
+# PlanSearch-style multi-plan sampling: sample N distinct plans →
 # one code candidate per plan, tagged code_from_intent.v1#plan{i}.
 # ---------------------------------------------------------------------------
 

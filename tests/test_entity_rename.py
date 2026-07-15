@@ -1,6 +1,6 @@
-"""Tests for rename-aware entity matching in entity_disjoint (survey §2.2 s3m).
+"""Tests for rename-aware entity matching in entity_disjoint.
 
-The s3m lineage (this survey's §2.2) flags renames as the #1 false-negative
+The s3m lineage (this's §2.2) flags renames as the #1 false-negative
 source for entity-level merge: when one side renames an entity (same body,
 different name) while the other makes an unrelated change, naive entity_disjoint
 treats the rename as "base keeps old + side added new" → a DUPLICATE method.
@@ -214,7 +214,7 @@ def test_rename_resolution_is_valid_python():
 
 
 # ---------------------------------------------------------------------------
-# Refactoring-aware composition (survey §3.2 RefMerge): when entity_disjoint
+# Refactoring-aware composition (RefMerge): when entity_disjoint
 # DECLINES on overlap, but the overlap is a clean rename + body-modify, compose.
 # Tests the _try_refactoring_aware_merge rule directly (it runs only on the
 # overlap tail where the earlier line/entity rules declined).

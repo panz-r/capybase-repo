@@ -1,4 +1,4 @@
-"""Tests for cross-file dependency slicing (survey §5.3 Rover-style context).
+"""Tests for cross-file dependency slicing (Rover-style context).
 
 P1: the context builder resolves definitions of symbols the conflict code
 references across the repo and surfaces them as ``related_snippets`` in the

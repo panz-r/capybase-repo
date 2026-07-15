@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from capybase.config import StructuralConfig
 
 # Language inference from file extension. The single source of truth is
-# ``language.EXTENSION_TO_LANGUAGE`` (fix #11 — previously this module carried a
+# ``language.EXTENSION_TO_LANGUAGE`` ( previously this module carried a
 # divergent copy that disagreed with the abstract parser's map). Aliased here as
 # ``_EXT_LANG`` for backward compatibility with any internal/test references.
 from capybase.adapters.language import EXTENSION_TO_LANGUAGE as _EXT_LANG
@@ -142,7 +142,7 @@ class ConflictExtractor:
                     risk_tags=[],
                 )
             )
-        # Per-side provenance (survey §3.3): attribute each side's blob to the
+        # Per-side provenance: attribute each side's blob to the
         # commit that introduced it. Advisory — never blocks resolution. The blob
         # OIDs come from the unmerged index (set above); this just enriches them.
         for u in units:
@@ -181,7 +181,7 @@ class ConflictExtractor:
         # "text_marker_block" and downstream code falls back to line windows.
         if self.structural_config and self.structural_config.enabled:
             _enrich_structural(units, worktree_text, base_text, self.structural_config)
-        # Diff3 marker refinement (survey §1.3/§1.4): recompute the tightest
+        # Diff3 marker refinement: recompute the tightest
         # conflict boundaries via `git merge-file`. This is logically SEPARATE
         # from the structural enrichment above — it only rewrites the side/base
         # texts recorded for resolution (advisory; splicing still uses worktree
@@ -199,7 +199,7 @@ class ConflictExtractor:
                 project_separators=self.structural_config.project_separators,
                 language=detect_language(path),
             )
-        # Grade each unit's severity from pre-LLM signals (survey §3.3). Done
+        # Grade each unit's severity from pre-LLM signals. Done
         # AFTER structural enrichment so the definition-touching signal is known.
         # Pure function; never fails (defaults to "medium" on any error).
         for u in units:
@@ -207,7 +207,7 @@ class ConflictExtractor:
                 u.severity = compute_severity(u)
             except Exception:  # noqa: BLE001 - severity is advisory
                 u.severity = "medium"
-        # Conflict feature spine (survey §6.7/§4.2): flatten the conflict's
+        # Conflict feature spine: flatten the conflict's
         # characteristics (size, balance, imbalance, touches-def, overlap,
         # sibling count, severity) into one stable dict on each unit. This is
         # the unified input vector the calibration flywheel and any learned
@@ -407,7 +407,7 @@ def _blob_provenance(git: object, blob_oid: str | None) -> dict:
 
 
 def compute_severity(unit: "ConflictUnit") -> str:
-    """Grade a conflict's severity (survey §3.3) from cheap pre-LLM signals.
+    """Grade a conflict's severity from cheap pre-LLM signals.
 
     A pure function of data already on the unit — no model, no git. Returns
     ``"low"``/``"medium"``/``"high"`` for triage/routing/attribution. The signals:
@@ -523,7 +523,7 @@ def conflict_features(unit: ConflictUnit) -> dict[str, float | int | str | bool]
         # live computation so this stays a pure function of the unit.
         "merge_kind": _merge_kind_of(unit),
         "modify_delete": _merge_kind_of(unit) == "modify_delete",
-        # Commit change-type (survey §5.2): the semantic ROLE of the replayed
+        # Commit change-type: the semantic ROLE of the replayed
         # commit (test_only/config_update/feature/bugfix/refactor/unknown),
         # classified deterministically from path + the BASE→REPLAYED entity diff.
         # Grounds retry budgets (bugfix→more retries, refactor→fewer) and the LLM
@@ -604,7 +604,7 @@ def _merge_kind_of(unit: ConflictUnit) -> str:
 def _commit_change_type_of(
     unit: ConflictUnit, rep_changes: list | None = None,
 ) -> str:
-    """The semantic ROLE of ``unit``'s replayed commit (survey §5.2).
+    """The semantic ROLE of ``unit``'s replayed commit.
 
     Classifies the replayed commit (test_only/config_update/feature/bugfix/
     refactor/unknown) via :func:`structural.classify_commit_change` over the
@@ -811,10 +811,10 @@ def _refine_with_diff3(
     original_worktree_text are unchanged (splicing still uses the worktree
     coordinates). All failures are silent no-ops.
 
-    ``diff_algorithm`` selects the xdiff backend (survey §1.3, default
+    ``diff_algorithm`` selects the xdiff backend ( default
     histogram); passed through to :func:`merge_file_diff3`.
 
-    ``project_separators`` (survey §1.2 Sesame): for brace/semicolon languages,
+    ``project_separators`` (Sesame): for brace/semicolon languages,
     additionally run a projected diff3 — the three blobs with each ``{}();``
     split onto its own line — and prefer it when it produces fewer/smaller
     conflict blocks than the raw view. The recorded refined texts are the
@@ -828,7 +828,7 @@ def _refine_with_diff3(
     blocks = merge_file_diff3(
         base_text, current_text, replayed_text, diff_algorithm=diff_algorithm
     )
-    # Separator-projected pass (survey §1.2): re-run diff3 on projected blobs
+    # Separator-projected pass: re-run diff3 on projected blobs
     # for brace/semicolon languages and prefer it when tighter. The projection
     # lets line-diff anchor on real statement/block boundaries.
     if project_separators and language is not None:
@@ -864,7 +864,7 @@ def _maybe_use_projected(
     language: str,
     diff_algorithm: str,
 ) -> list | None:
-    """Run a separator-projected diff3; prefer it when it's tighter (survey §1.2).
+    """Run a separator-projected diff3; prefer it when it's tighter.
 
     Returns the projected blocks if they have fewer conflict regions or a smaller
     total side-line footprint than ``raw_blocks``; otherwise returns the raw
@@ -982,10 +982,10 @@ def _enrich_structural(
                     # AST signature is sharper than the indent heuristic.
                     unit.enclosing_symbol = node.signature
                 unit.unit_kind = "ast_region"
-                # Sibling entities (survey §4.1/§5.4 Rover): the OTHER methods/
+                # Sibling entities (Rover): the OTHER methods/
                 # fields co-located in the same container as this conflict. The
                 # model sees the entity neighborhood it must stay consistent with
-                # (shared conventions, callers/callees in-file) — the survey's
+                # (shared conventions, callers/callees in-file) — prior work's
                 # finding that *some* structured context lifts LLM output, at
                 # near-zero cost. Enumerated from BASE (the clean, parseable
                 # blob), excluding the enclosing entity itself. Advisory.

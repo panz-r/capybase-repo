@@ -175,7 +175,7 @@ def test_no_early_termination_without_complete_answer(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# TECP token-entropy capture (survey §4.1): the adapter reduces the API's
+# TECP token-entropy capture: the adapter reduces the API's
 # per-token logprobs to a scalar mean token-entropy (mean negative log-prob).
 # ---------------------------------------------------------------------------
 

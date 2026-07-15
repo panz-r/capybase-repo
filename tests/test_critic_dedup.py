@@ -1,4 +1,4 @@
-"""Critic-feedback deduplication (embeddings survey §5).
+"""Critic-feedback deduplication.
 
 The PoLL jury may emit multiple ``verifier_model*`` warnings for the SAME issue
 under different wording — feeding both to the plan-first step dilutes the model's

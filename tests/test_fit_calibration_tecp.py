@@ -2,7 +2,7 @@
 
 The full fitter needs scikit-learn/numpy (offline-only, not installed in this
 env), but ``_tecp_entropy_threshold`` is pure-Python and is the part the TECP
-(survey §4.1) work added — so it is unit-tested directly via importlib.
+ work added — so it is unit-tested directly via importlib.
 
 The helper computes the (1-alpha) quantile of ``mean_token_entropy`` over
 ACCEPTED (correct) calibration outcomes; failures (rejected/escalated) and rows

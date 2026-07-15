@@ -189,7 +189,7 @@ def test_jury_union_any_critic_member_routes_to_retry():
 
 
 def test_unattributed_code_warning_retries():
-    """The spurious-addition guard (survey §2.1): a merge containing a unit in
+    """The spurious-addition guard: a merge containing a unit in
     NEITHER side triggers a retry so the model removes or justifies it."""
     eng = RiskEngine(max_retries_per_unit=2)
     res = _result(

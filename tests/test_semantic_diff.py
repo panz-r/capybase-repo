@@ -1,4 +1,4 @@
-"""Tests for the per-entity semantic diff (survey §5 foundational layer).
+"""Tests for the per-entity semantic diff.
 
 ``semantic_diff`` classifies entity-level changes between two snapshots — the
 deterministic input the resolve prompt, the critic, and the cross-commit
@@ -269,7 +269,7 @@ def test_detect_no_move_to_same_file():
 
 
 # ---------------------------------------------------------------------------
-# Commit change-type classifier (Phase 1a / survey §5.2)
+# Commit change-type classifier (Phase 1a /
 # ---------------------------------------------------------------------------
 
 

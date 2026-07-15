@@ -4,7 +4,7 @@ Covers: percentile/sigmoid parity with their prior module-private behavior;
 isotonic regression (PAV) monotonicity, known-input fits, and graceful
 degradation; the two-sample KS statistic on separated vs identical distributions;
 robust L-estimators (median, MAD, trimmed, Hodges-Lehmann, trimmed-KS) and the
-Huber-loss isotonic variant (survey 2 §3.1, §4.1, §4.3, §7.1).
+Huber-loss isotonic variant ( 2 §3.1, §4.1, §4.3, §7.1).
 """
 
 from __future__ import annotations
@@ -88,7 +88,7 @@ def test_sigmoid_no_overflow_on_large_magnitude():
 
 
 # ---------------------------------------------------------------------------
-# isotonic regression (PAV) — survey §2.1
+# isotonic regression (PAV) —
 # ---------------------------------------------------------------------------
 
 
@@ -173,7 +173,7 @@ def test_isotonic_points_empty_on_degenerate():
 
 
 # ---------------------------------------------------------------------------
-# KS two-sample statistic — survey §6.1
+# KS two-sample statistic —
 # ---------------------------------------------------------------------------
 
 
@@ -203,7 +203,7 @@ def test_ks_empty_returns_zero():
 
 
 # ---------------------------------------------------------------------------
-# Robust L-estimators (survey 2 §4.1, §4.3, §7.1)
+# Robust L-estimators ( 2 §4.1, §4.3, §7.1)
 # ---------------------------------------------------------------------------
 
 
@@ -295,7 +295,7 @@ def test_trimmed_ks_empty_returns_zero():
 
 
 # ---------------------------------------------------------------------------
-# Huber-loss isotonic regression (survey 2 §3.1)
+# Huber-loss isotonic regression ( 2 §3.1)
 # ---------------------------------------------------------------------------
 
 

@@ -1,5 +1,5 @@
 """Integration tests for the orchestrator's cross-commit dependency guardian
-(Phase 3 / survey §3.1).
+(Phase 3 /
 
 Exercises the wired-in completion-path audit: build a source branch where an
 early commit defines a symbol and a later commit references it, point the final

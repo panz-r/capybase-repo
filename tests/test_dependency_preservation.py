@@ -1,4 +1,4 @@
-"""Tests for the dependency-preservation validator (survey §2.2 SafeMerge).
+"""Tests for the dependency-preservation validator (SafeMerge).
 
 P3: the verification-time complement to P1's prompt-time dependency context.
 Both-sides-represented guards a side's additions; this validator guards a

@@ -1,4 +1,4 @@
-"""Tests for entity-level disjoint resolution (survey §3.2/§5.2 Weave/Aura).
+"""Tests for entity-level disjoint resolution (Weave/Aura).
 
 P2: when both sides add DISTINCT entities (methods/classes) at the same
 insertion point, git's line-diff reports a conflict but the entities are
@@ -213,8 +213,8 @@ def test_no_entities_touched_declines():
 
 
 # ---------------------------------------------------------------------------
-# Fourth-pass: R4 (resolver rename detection vs parser fingerprint consistency)
-# and R5 (refactoring-aware merge duplicate-identity guard).
+# Fourth-pass: (resolver rename detection vs parser fingerprint consistency)
+# and (refactoring-aware merge duplicate-identity guard).
 # ---------------------------------------------------------------------------
 
 from capybase.structural_resolver import _detect_renames, _body_content  # noqa: E402
@@ -226,13 +226,13 @@ def _entity(kind, name, body, span=(0, 1)):
 
 
 def test_r4_rename_with_inline_comment_drift_is_detected():
-    """R4: a rename where the body picked up an inline comment (or a changed
+    """a rename where the body picked up an inline comment (or a changed
     string literal) MUST still be detected. The resolver's ``_body_content``
     used whitespace-collapse-only normalization (keeping comments/strings),
     while the parser's ``unit_body_fingerprint`` strips comments and blanks
     strings. The two algorithms disagreed: the parser paired the rename, the
     resolver missed it → the merge emitted the old name AND the new name as a
-    duplicate. After R4, ``_body_content`` strips inline comments so the
+    duplicate. After ``_body_content`` strips inline comments so the
     rename pairs. ``loadData``→``fetchData`` with ``# cached`` added."""
     base_body = "def loadData():\n    return fetch()"
     renamed_body = "def fetchData():\n    return fetch()  # cached"
@@ -247,7 +247,7 @@ def test_r4_rename_with_inline_comment_drift_is_detected():
 
 
 def test_r4_rename_with_string_literal_drift_is_detected():
-    """R4: a rename where a string literal value changed (but no real body
+    """a rename where a string literal value changed (but no real body
     change) must still pair. The parser's fingerprint blanks strings for
     exactly this reason; the resolver must match."""
     base_body = 'def loadData():\n    return fetch("v1")'
@@ -261,9 +261,9 @@ def test_r4_rename_with_string_literal_drift_is_detected():
 
 
 def test_r4_real_body_change_still_not_a_rename():
-    """R4 regression guard: a genuine body change (not just comment/string
+    """a genuine body change (not just comment/string
     drift) must NOT pair as a rename — that would conflate two distinct
-    functions. After R4 the line ``return fetch()`` vs ``return save()``
+    functions. After the line ``return fetch`` vs ``return save``
     still differs under the comment/string-stripping normalization."""
     base_body = "def loadData():\n    return fetch()"
     renamed_body = "def fetchData():\n    return save()"
@@ -276,11 +276,11 @@ def test_r4_real_body_change_still_not_a_rename():
 
 
 def test_r5_refactoring_merge_declines_on_duplicate_identities():
-    """R5: ``_try_refactoring_aware_merge`` builds ``base_by_id`` without the
-    duplicate-identity guard that ``_try_entity_disjoint`` has (fix #3). A
+    """``_try_refactoring_aware_merge`` builds ``base_by_id`` without the
+    duplicate-identity guard that ``_try_entity_disjoint`` has. A
     base with two entities sharing an identity (Python ``@property`` +
     ``@x.setter`` both named ``x``) would silently drop one in the dict. After
-    R5, the path declines (returns None) on duplicate identities, escalating
+    the path declines (returns None) on duplicate identities, escalating
     to the LLM path — mirroring entity_disjoint."""
     from capybase.structural_resolver import _try_refactoring_aware_merge
     base = (
@@ -303,7 +303,7 @@ def test_r5_refactoring_merge_declines_on_duplicate_identities():
 
 
 # ---------------------------------------------------------------------------
-# Fifth-pass: R6 — _rebuild_container double-wraps a bare-function conflict.
+# Fifth-pass: — _rebuild_container double-wraps a bare-function conflict.
 # When the enclosing node is a top-level FUNCTION (not a class/impl container),
 # both _try_entity_disjoint and _try_refactoring_aware_merge produced malformed
 # output: the function header was kept AND the entities spliced inside it,
@@ -332,11 +332,11 @@ def _assert_valid_python_unit(text, label):
 
 
 def test_r6_entity_disjoint_bare_function_not_double_wrapped():
-    """R6: ``_try_entity_disjoint`` on a bare top-level function conflict (both
-    sides add DISTINCT methods to a function, not a class) used to produce
-    ``def foo():\\n    def foo():\\n    ...`` — the function header kept AND the
-    entities nested inside. After R6, the enclosing function is recognized as
-    the entity itself (not a container), so the output is a flat list of defs."""
+    """``_try_entity_disjoint`` on a bare top-level function conflict (both
+    sides add DISTINCT methods to a function, not a class) must NOT double-wrap:
+    the enclosing function is recognized as the entity itself (not a container),
+    so the output is a flat list of defs, not ``def foo():\\n    def foo():\\n    ...``
+    with the function header kept and the entities nested inside."""
     base = "def foo():\n    return 1\n"
     cur = "def foo():\n    return 1\n\ndef bar():\n    return 2\n"
     rep = "def foo():\n    return 1\n\ndef baz():\n    return 3\n"
@@ -358,10 +358,10 @@ def test_r6_entity_disjoint_bare_function_not_double_wrapped():
 
 
 def test_r6_refactoring_aware_bare_function_not_double_wrapped():
-    """R6: ``_try_refactoring_aware_merge`` on a bare-function rename+modify
-    (one side renames foo→bar, other modifies foo's body) used to produce
-    ``def foo():\\n    def bar():\\n    ...``. After R6 the output is the single
-    composed function (bar's header + modified body), no wrapper."""
+    """``_try_refactoring_aware_merge`` on a bare-function rename+modify
+    (one side renames foo→bar, other modifies foo's body) produces the single
+    composed function (bar's header + modified body), no wrapper — never the
+    malformed ``def foo:\\n def bar:\\n    ...`` nesting."""
     base = "def foo():\n    return 1\n    return 2\n"
     cur = "def bar():\n    return 1\n    return 2\n"   # rename foo→bar
     rep = "def foo():\n    return 1\n    return 99\n"  # modify foo's body
@@ -377,7 +377,7 @@ def test_r6_refactoring_aware_bare_function_not_double_wrapped():
 
 
 def test_r6_class_container_still_wraps_correctly():
-    """R6 regression guard: the class-container case (where _rebuild_container's
+    """the class-container case (where _rebuild_container's
     framing logic IS correct) must still work. A rename+modify inside a class
     should produce ``class C:\\n    def bar(self):...``, with the class header
     kept and the method composed inside."""
@@ -527,7 +527,7 @@ def test_canonical_detect_renames_exact_body_match():
 
 def test_canonical_detect_renames_comment_drift_pairs():
     """A rename whose body picked up an incidental comment still pairs — the
-    canonical body signal strips comments (this is the R4 contract, now baked
+    canonical body signal strips comments (this is the, now baked
     into entity_body_content rather than maintained separately)."""
     base = [_entity("function", "loadData", "def loadData():\n    return fetch()")]
     side = [_entity("function", "fetchData", "def fetchData():\n    return fetch()  # cached")]

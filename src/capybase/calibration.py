@@ -73,20 +73,20 @@ _FEATURE_KEYS: tuple[str, ...] = (
     "conflict_side_chars",
     "enclosing_node_lines",
     "self_reported_confidence",
-    # Pre-resolution conflict severity (survey §3.3): low=0/medium=1/high=2,
+    # Pre-resolution conflict severity: low=0/medium=1/high=2,
     # computed at extraction from hunk size + definition-touching + same-line
     # overlap. Recorded onto the feature spine by the orchestrator; the rules
     # risk engine already consumes it, so it belongs in the calibrated model's
     # vector too. Old stored models carry their own (shorter) feature_keys, so
     # adding this key here never breaks a loaded model.
     "conflict_severity",
-    # TECP token-entropy (survey §4.1): the model-side uncertainty signal,
+    # TECP token-entropy: the model-side uncertainty signal,
     # reduced from the API's per-token logprobs at the adapter seam and carried
     # onto each candidate. Unlike the process-side signals above, this is a
     # direct read of how confident the LLM was token-by-token — the logit-free
     # input the conformal "flywheel" is designed around.
     "mean_token_entropy",
-    # FactSelfCheck rationale-consistency (survey §2): agreement over the
+    # FactSelfCheck rationale-consistency: agreement over the
     # candidates' OWN intent claims (not their code text). Low intent_agreement
     # = candidates disagree about what they did = a hallucination/unstable-claim
     # signal orthogonal to text-consensus and validators. The count of
@@ -236,7 +236,7 @@ class ConformalRiskModel:
     alpha: float  # escalation strictness (lower = escalate more); NOT a proven coverage bound
     calibration_scores: list[float] = field(default_factory=list)
     feature_keys: tuple[str, ...] = _FEATURE_KEYS
-    # TECP entropy threshold (survey §4.1): the (1-alpha) quantile of mean
+    # TECP entropy threshold: the (1-alpha) quantile of mean
     # token-entropy over accepted calibration outcomes. When set, a candidate
     # whose ``mean_token_entropy`` feature exceeds it is escalated regardless
     # of the logistic p-value (high token-level uncertainty = nonconforming).

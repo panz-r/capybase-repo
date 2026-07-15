@@ -181,7 +181,7 @@ def test_real_conflict_falls_through_to_model(repo: Path):
 
 
 # ---------------------------------------------------------------------------
-# overlapping-but-resolvable conflict → zealous rule, NO model call (survey §1.4)
+# overlapping-but-resolvable conflict → zealous rule, NO model call
 # ---------------------------------------------------------------------------
 
 

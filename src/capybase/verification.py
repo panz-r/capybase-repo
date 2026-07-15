@@ -75,7 +75,7 @@ class ValidationConfig:
     require_exact_splice_scope: bool = True
     require_syntax_if_supported: bool = True
     reject_if_copies_one_side: bool = True
-    # Both-sides-represented (survey §5.1 cheap necessary condition): flag a
+    # Both-sides-represented: flag a
     # candidate that drops a side's additions entirely. Companion to
     # reject_if_copies_one_side — that catches verbatim copies; this catches
     # tweaked-but-still-one-sided merges. Advisory warning (feeds risk/retry).
@@ -85,7 +85,7 @@ class ValidationConfig:
     # Advisory warning (feeds retry). Kept in sync with config.py's pydantic
     # ValidationConfig.reject_if_drops_obligation.
     reject_if_drops_obligation: bool = True
-    # Dependency preservation (survey §2.2 SafeMerge necessary condition): warn
+    # Dependency preservation (necessary condition): warn
     # when a merge drops a base-referenced symbol that has an in-repo definition
     # and neither side removed. Companion to both-sides-represented — that
     # guards a side's additions; this guards a shared base dependency. Advisory
@@ -311,7 +311,7 @@ class PreservationHeuristicValidator:
 
 
 class BothSidesRepresentedValidator:
-    """Cheap necessary condition for semantic conflict-freedom (survey §5.1).
+    """Cheap necessary condition for semantic conflict-freedom.
 
     The expensive formulation (SafeMerge) treats merge as a 4-program relation:
     a candidate M is semantically conflict-free only if, wherever a side diverged
@@ -410,7 +410,7 @@ class BothSidesRepresentedValidator:
 
 
 class IntentCoverageValidator:
-    """Deterministic per-side structural-intent coverage (survey §5.1 signatures).
+    """Deterministic per-side structural-intent coverage.
 
     The hard coverage guarantee: of the logical units (function/method/class/
     field) each side ADDED beyond base, the resolution must preserve at least a
@@ -503,7 +503,7 @@ class IntentCoverageValidator:
 
 
 class UnattributedCodeValidator:
-    """Deterministic spurious-addition guard (survey §2.1 unattributed code).
+    """Deterministic spurious-addition guard.
 
     The INVERSE of :class:`IntentCoverageValidator`: where coverage checks that
     no side's unit was DROPPED, this checks that the merge added no unit present
@@ -714,7 +714,7 @@ class FutureObligationValidator:
 
 
 class DependencyPreservationValidator:
-    """SafeMerge necessary-condition: don't drop a base dependency (survey §2.2).
+    """SafeMerge necessary-condition: don't drop a base dependency.
 
     The verification-time complement to the prompt-time dependency context (P1).
     Both-sides-represented ensures a side's *additions* survive, but neither it
@@ -868,7 +868,7 @@ class NeedsHumanValidator:
 class VerifierModelValidator:
     """LLM critic that checks a resolution preserves BOTH sides' intent.
 
-    This is the verifier-model seam (surveys §1/§5 Proposer-Critic): every
+    This is the verifier-model seam (Proposer-Critic): every
     other validator is syntactic/structural — conflict markers, splice scope,
     AST preservation, syntax, LSP diagnostics, one-side-copy heuristic. None can
     catch a merge that parses cleanly but *semantically drops a side's intent*
@@ -909,7 +909,7 @@ class VerifierModelValidator:
         self.model_name = model_name
         self.json_mode = json_mode
         # Generation budget for the verdict call. Reasoning models (e.g.
-        # VibeThinker/DeepSeek-R1 style) emit a long <think> chain BEFORE the
+        # VibeThinker/DeepSeek- style) emit a long <think> chain BEFORE the
         # JSON verdict; a fixed-small budget (the old 512) runs out mid-thought
         # (finish_reason=length) and the verdict is never produced → the critic
         # silently degrades to verifier_checked=False. Threaded from the model
@@ -1192,7 +1192,7 @@ def _default_model(ctx: VerificationContext) -> str:
 
 
 # ---------------------------------------------------------------------------
-# VeriGuard-style deterministic policy gate (survey §4)
+# VeriGuard-style deterministic policy gate
 #
 # The only validator that inspects WHAT a patch introduces (every other
 # validator is syntactic/structural). Statically extracts import/call facts
@@ -1292,7 +1292,7 @@ def _safe_parse_fragment(text: str):
 
 
 class PolicyGateValidator:
-    """Deterministic safety gate over candidate import/call facts (survey §4).
+    """Deterministic safety gate over candidate import/call facts.
 
     Evaluates a configured ruleset (``PolicyRule``) against statically-extracted
     facts. A ``forbid_import`` rule matches when its pattern is a prefix of any
@@ -1386,7 +1386,7 @@ class PolicyGateValidator:
 
 
 # ---------------------------------------------------------------------------
-# LLM code-smell detection (survey §7)
+# LLM code-smell detection
 #
 # A cheap pre-test quality filter for smells common in LLM-generated code,
 # detected statically via stdlib ast. A sibling of the policy gate: same
@@ -1503,7 +1503,7 @@ def _detect_code_smells(text: str, language: str | None) -> list[SmellFinding]:
 
 
 class CodeSmellValidator:
-    """Deterministic LLM code-smell checker (survey §7).
+    """Deterministic LLM code-smell checker.
 
     Statically detects smells common in LLM-generated code (NaN comparison,
     pandas chain indexing, uncontrolled randomness) via stdlib ast and returns a
@@ -2581,7 +2581,7 @@ class VerificationEngine:
         # gate is a no-op even when enabled, so registering it is harmless.
         if getattr(config, "enable_policy_gate", False) and getattr(config, "policy_rules", ()):
             validators.append(PolicyGateValidator())
-        # LLM code-smell checks (survey §7): same shape as the policy gate —
+        # LLM code-smell checks: same shape as the policy gate —
         # deterministic, dependency-free (stdlib ast), so the factory wires it
         # when enabled. A cheap pre-test quality filter.
         if getattr(config, "enable_code_smell_checks", False):
@@ -2597,7 +2597,7 @@ class VerificationEngine:
         hard: list[VerificationFailure] = []
         warnings: list[VerificationWarning] = []
         features: dict[str, float | int | str | bool] = {}
-        # Conflict feature spine (survey §6.7/§4.2): seed the aggregated features
+        # Conflict feature spine: seed the aggregated features
         # with the pre-resolution characteristics recorded at extraction. This is
         # the unified input vector for the calibration flywheel / any learned
         # router — stable across validators and present even when all validators

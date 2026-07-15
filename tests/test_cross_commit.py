@@ -1,4 +1,4 @@
-"""Tests for the cross-commit dependency guardian (survey §3.1 / Phase 3).
+"""Tests for the cross-commit dependency guardian (Phase 3).
 
 Closes the per-commit blind spot: commit A renames ``foo``→``bar``, commit B
 still calls ``foo``. No per-commit validator sees both, so the final rebased
@@ -138,14 +138,14 @@ def test_render_human_readable():
 def test_unsupported_language_files_are_skipped():
     """A commit whose touched files are all unrecognized extensions produces an
     empty symbol set (graceful degradation, no crash). Note: .js/.go/etc. ARE
-    supported by the abstract parser now (Round 3), so use a genuinely
+    supported by the abstract parser now, so use a genuinely
     unrecognized extension to exercise the degradation path."""
     syms = build_commit_symbols({"readme.md": "function foo() { return bar(); }"})
     assert syms.defines == frozenset()
 
 
 # ---------------------------------------------------------------------------
-# Intent evolution trace (survey §3.2 / Phase 2)
+# Intent evolution trace (Phase 2)
 # ---------------------------------------------------------------------------
 
 from capybase.cross_commit import (  # noqa: E402
@@ -253,7 +253,7 @@ def test_evolution_degrades_when_parser_unavailable(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Multi-language coverage (Round 3): the guardian now derives its language map
+# Multi-language coverage: the guardian now derives its language map
 # from the abstract parser, so it detects cross-commit breaks in every language
 # the parser supports — not just python/rust. Previously ``_LANG_BY_EXT`` mapped
 # only .py/.rs, silently no-op'ing the guardian for Go/JS/Java/etc.
@@ -276,7 +276,7 @@ def test_language_for_path_covers_all_parser_languages():
 
 
 def test_guardian_detects_cross_commit_break_in_javascript():
-    """Regression guard for the Round 3 language-map fix: commit A defines
+    """Regression guard for the language-map fix: commit A defines
     ``helper`` (js), commit B (later) depends on it, and the final rebased tree
     drops ``helper`` → the guardian flags a missing_definition break. Before the
     fix, both .js files were silently skipped (lang=None → empty symbols)."""

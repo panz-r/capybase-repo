@@ -1,4 +1,4 @@
-"""Grammar-free, language-agnostic structural parser (survey groundwork §3).
+"""Grammar-free, language-agnostic structural parser.
 
 Replaces tree-sitter grammars with two single-pass state machines:
 
@@ -9,8 +9,8 @@ Replaces tree-sitter grammars with two single-pass state machines:
 - **Family B** (indentation-delimited, off-side rule): Python, Ruby (top-level),
   ... A line-by-line scan tracking indent level.
 
-The parser answers the FIVE questions that drive merge correctness (survey
-§"What Structural Information Actually Drives Merge Correctness"):
+The parser answers the FIVE questions that drive merge correctness
+(scope, identity, kind, body, surfaces):
 
 1. Scope boundaries (each unit's start/end line).
 2. Unit identity (stable name; body fingerprint for rename detection).
@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 # the structural resolver, and ``semantic_diff`` — previously each had its own.
 from capybase.diff import char_ratio as _char_ratio
 
-# Single source of truth for extension → language (fix #11). Aliased locally so
+# Single source of truth for extension → language. Aliased locally so
 # the family dispatch reads naturally; the authoritative map lives in
 # ``language.EXTENSION_TO_LANGUAGE``.
 from capybase.adapters.language import EXTENSION_TO_LANGUAGE as _EXT_LANG
@@ -72,9 +72,9 @@ FAMILY_B = "B"
 FAMILY_C = "C"
 
 #: Language string → family. Only ``python`` and ``rust`` are exposed as
-#: ``is_available`` in Round 1 (to keep the existing skip-path tests green),
+#: ``is_available`` in (to keep the existing skip-path tests green),
 #: but the families for the other Family-A languages are declared here so the
-#: dispatch is correct and language expansion (Round 3) is a one-line flip.
+#: dispatch is correct and language expansion is a one-line flip.
 _LANG_FAMILY: dict[str, str] = {
     # Family B (indentation-delimited)
     "python": FAMILY_B,
@@ -101,7 +101,7 @@ _LANG_FAMILY: dict[str, str] = {
 }
 
 #: File extension → language: now the single source of truth in
-#: ``language.EXTENSION_TO_LANGUAGE`` (fix #11). Re-exported above as ``_EXT_LANG``.
+#: ``language.EXTENSION_TO_LANGUAGE``. Re-exported above as ``_EXT_LANG``.
 
 #: Languages capybase advertises structural support for. Family A (brace-
 #: delimited: Rust, JS, TS, Go, Java, C/C++, C#, Kotlin, Swift, Scala, Dart,
@@ -149,7 +149,7 @@ def language_for_family_member(language: str | None, path: str | None = None) ->
 
 
 # ---------------------------------------------------------------------------
-# Data model (survey groundwork §"Abstract Grammar Schema Design")
+# Data model
 # ---------------------------------------------------------------------------
 
 
@@ -199,12 +199,11 @@ class FileIR:
     parser never raises — a file it can't make sense of still produces a FileIR,
     just with low confidence / UNKNOWN_BLOCK units.
 
-    ``imports`` and ``exports`` are the file's dependency surfaces (survey §"What
-    Structural Information Actually Drives Merge Correctness"): imports are
+    ``imports`` and ``exports`` are the file's dependency surfaces: imports are
     external names brought in (``import``/``use``/``require``/``#include``);
-    exports are top-level public names defined here. The survey notes "a simple
-    imports-only tool outperformed complex structured tools" — this surface
-    enables cross-commit dependency checks without re-scanning the file.
+    exports are top-level public names defined here. As prior work notes, "a
+    simple imports-only tool outperformed complex structured tools" — this
+    surface enables cross-commit dependency checks without re-scanning the file.
     """
 
     family: str
@@ -355,7 +354,7 @@ _B_CONFLICT_MARKERS = ("<", "=", ">")
 def _is_conflict_marker_line(line: str) -> bool:
     """True for ``<<<<<<<``/``=======``/``>>>>>>>`` conflict marker lines.
 
-    These are scope-boundary signals (survey §"Conflict marker awareness"):
+    These are scope-boundary signals:
     close any open unit and treat the region as UNKNOWN_BLOCK. Never crash.
     """
     s = line.lstrip()
@@ -367,7 +366,7 @@ def _is_conflict_marker_line(line: str) -> bool:
 
 
 #: Brackets whose unclosed state makes a line a continuation of the previous
-#: logical line. Only ``()`` counts (G2): signatures wrap inside parens
+#: logical line. Only ``()`` counts: signatures wrap inside parens
 #: (``def f(\n  a,\n) -> bool:``), but ``{``/``[`` on their own lines are
 #: collection literals, not continuation triggers — a malformed dangling ``{``
 #: (a merge artifact) must not swallow the next declaration.
@@ -379,12 +378,12 @@ def _line_bracket_delta(raw: str) -> int:
     """Net parenthesis change on a line (string- and comment-aware).
 
     ``opens - closes`` for ``()`` only, ignoring parens inside string literals
-    (blanked first) and inside inline comments (stripped first, G1 — a comment
+    (blanked first) and inside inline comments (stripped first — a comment
     like ``# see func(`` would otherwise corrupt the continuation depth). Used by
     Family B to track whether a line continues a multi-line signature (``delta``
     doesn't return to zero until the final closing ``)``).
     """
-    # Strip inline comments first (G1): a ``# ...`` / ``// ...`` comment may
+    # Strip inline comments first: a ``# ...`` / ``// ...`` comment may
     # contain unbalanced brackets that must not count.
     stripped = _strip_inline_comment(raw)
     blanked = _STRING_LIT_RE.sub("'_'", stripped)
@@ -398,7 +397,7 @@ def _line_bracket_delta(raw: str) -> int:
 
 
 def _ends_with_backslash_continuation(raw: str) -> bool:
-    """True when a line ends with a backslash line-continuation (G4).
+    """True when a line ends with a backslash line-continuation.
 
     Python (and shell) treat a trailing ``\\`` (not escaped, not in a comment or
     string) as joining the next logical line. An odd run of trailing backslashes
@@ -550,8 +549,8 @@ def _row_at(line_index: list[int], byte_idx: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Import / export surface extraction (survey §"What Structural Information
-# Actually Drives Merge Correctness" — requirement 4 + 5)
+# Import / export surface extraction — the structural information that
+# actually drives merge correctness (requirement 4 + 5)
 # ---------------------------------------------------------------------------
 
 # Family B (Python) export: top-level names not starting with `_`.
@@ -632,7 +631,7 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
     last_line_row = -1
     pending_decorator_indent: int | None = None
     pending_decorator_start: int | None = None
-    # Continuation tracking (fix #1 + #6): a line is a continuation when unclosed
+    # Continuation tracking: a line is a continuation when unclosed
     # brackets (``def f(`` … ``) -> bool:``) or an open triple-quote string span
     # it across newlines. Such lines are absorbed into the enclosing unit's body
     # (computed by source slice) and never trigger a dedent/close — the
@@ -640,8 +639,8 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
     # signature, and a ``class Fake:`` inside a docstring is string content.
     cont_depth = 0  # net unclosed ``()`` carried from prior lines (signature wrap)
     open_triple: str | None = None  # open multi-line triple-quote marker, if any
-    pending_backslash = False  # prior line ended with a ``\`` continuation (G4)
-    join_buffer = ""  # accumulated text of a ``\``-continued line (G4)
+    pending_backslash = False  # prior line ended with a ``\`` continuation
+    join_buffer = ""  # accumulated text of a ``\``-continued line
 
     def close_units_at_or_below(indent: int, end_row: int) -> None:
         # Close any open unit whose opening indent is >= indent (scope ended).
@@ -654,7 +653,7 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
             _finalize_unit(u, u_end, lines, units, stack)
 
     for i, raw in enumerate(lines):
-        # G4: backslash line-continuation. A prior line ending in ``\`` is joined
+        # backslash line-continuation. A prior line ending in ``\`` is joined
         # to this one so the def/class regexes see the full logical line
         # (``def \\<newline>foo():`` → ``def foo():``). The joined text drives
         # detection; span/body use the real source (the ``\\`` line's index is
@@ -718,7 +717,7 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
                 pending_decorator_start = i
             continue
 
-        # Bracket continuation (fix #1): a line is a continuation when brackets
+        # Bracket continuation: a line is a continuation when brackets
         # were ALREADY open coming into it (``was_continuing``). The signature
         # opener ``def f(`` itself is processed normally (it opens the unit) and
         # leaves ``cont_depth > 0``; subsequent lines — including the closing
@@ -901,7 +900,7 @@ _A_CLASS_KEYWORDS = (
 # ``struct Config`` definition under the same (class, "Config") identity.
 _A_CONTAINER_KEYWORDS = ("impl", "mod", "namespace", "module")
 # ``def`` appears here for Python-in-JS-template edge cases and is harmless;
-# the canonical Family-A function keywords lead. ``fun`` (G8) covers Kotlin —
+# the canonical Family-A function keywords lead. ``fun`` covers Kotlin —
 # without it every top-level Kotlin function was dropped (the keywordless
 # heuristic only accepts C free functions at file scope).
 _A_FUNC_KEYWORDS = (
@@ -923,14 +922,14 @@ _A_CONTROL_FLOW_KEYWORDS = frozenset({
     "finally", "synchronized", "lock", "using", "with", "unsafe",
 })
 # Import-like top-level statements. The first pattern matches declaration-led
-# forms (``use``/``import``/``#include`` leading the line). The second (G12)
+# forms (``use``/``import``/``#include`` leading the line). The second
 # matches CommonJS ``require()`` as an EXPRESSION — ``const fs = require('fs')``
 # — where ``require`` doesn't lead the line. Both are gated by the depth-0 +
 # line-start check at the call site, so a ``require()`` inside a function body
 # (brace_depth > 0) is correctly NOT detected as an import.
 _A_IMPORT_PATTERNS = (
     re.compile(r"^\s*(?:use\s+\S|import\s+\S|export\s+\{[^}]*\}\s+from|require\s*\(|#include\s+)"),
-    # G12: ``<binding> = require('...')`` — require as a RHS expression. Allows
+    # ``<binding> = require('...')`` — require as a RHS expression. Allows
     # any prefix (const/let/var/export NAME =, or bare NAME =) before require.
     re.compile(r"^\s*(?:\w+\s+)*\w+\s*=\s*require\s*\(\s*['\"]"),
 )
@@ -961,7 +960,7 @@ class _OpenAUnit:
 #: String-prefix runes that introduce a non-plain string literal whose closing
 #: quote rule differs from a bare ``"``. Used by :func:`_match_string_prefix` to
 #: recover Rust raw strings (``r``/``b``/``rb``/``br`` + optional ``#`` run),
-#: where an embedded ``"`` in the content must NOT close the string (fix #9).
+#: where an embedded ``"`` in the content must NOT close the string.
 _RAW_PREFIX_RUNES = frozenset("rRbB")
 
 
@@ -993,7 +992,7 @@ def _match_string_prefix(src: str, quote_idx: int) -> int | None:
         # No prefix rune. ``#`` before a bare ``"`` (e.g. ``#"``) isn't a raw
         # string — treat as plain quote.
         return 0
-    # Word-boundary check (G3): the rune run must be preceded by a non-identifier
+    # Word-boundary check: the rune run must be preceded by a non-identifier
     # character (or start of input). Otherwise the runes are the tail of an
     # identifier (``myr#"..."#`` — the ``r`` is part of ``myr``), not a prefix.
     # Misreading it as a raw prefix corrupts the string state for the rest of
@@ -1044,11 +1043,11 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
     in_str: str | None = None  # one of "'", '"', "`", "char", or None
     # When in_str == '"' and str_hash_count > 0, we're inside a Rust raw string
     # (``r#"..."#``) that closes on ``"`` followed by exactly this many ``#``.
-    # A bare ``"`` in the content does NOT close it (fix #9). 0 = ordinary quote.
+    # A bare ``"`` in the content does NOT close it. 0 = ordinary quote.
     str_hash_count = 0
     in_line_comment = False
     in_block_comment = False
-    # Statement-start byte for the in-pass field emitter (R1). Tracks the start
+    # Statement-start byte for the in-pass field emitter. Tracks the start
     # of the current top-level statement: advances past ``;`` and past a ``}``
     # that closes back to depth 0, but NOT past ``{``/``}`` inside a statement
     # (so a braced initializer ``const P = Point { ... };`` keeps its start at
@@ -1124,7 +1123,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 continue
             if in_str == '"' and ch == '"':
                 # Raw string closer: ``"`` must be followed by exactly
-                # ``str_hash_count`` ``#`` chars (fix #9). An embedded ``"`` in
+                # ``str_hash_count`` ``#`` chars. An embedded ``"`` in
                 # the content (with no matching ``#`` run) does NOT close it.
                 if str_hash_count > 0:
                     tail = src[i + 1 : i + 1 + str_hash_count]
@@ -1157,7 +1156,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             continue
         if ch == '"':
             # Detect raw/byte raw strings (Rust) and other prefixed strings so
-            # the closer matches the opener (fix #9). A Rust raw string
+            # the closer matches the opener. A Rust raw string
             # ``r#"..."#`` closes on ``"`` + N ``#``; without this, an embedded
             # ``"`` in the content closes early and corrupts brace counting.
             # Look back at the run of identifier chars / ``#`` preceding ``"``.
@@ -1181,7 +1180,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # never reach here as a bare ``'`` outside a string). A char literal
             # is ``'X'`` (single content char + closing ``'``); a lifetime is
             # ``'ident`` with NO closing ``'`` (e.g. ``'a``, ``'static``).
-            # Discriminator (R3): a ``'`` followed by an identifier char where
+            # Discriminator: a ``'`` followed by an identifier char where
             # the char AFTER the identifier run is NOT a closing ``'`` is a
             # lifetime — skip it entirely. This is robust across all the
             # contexts lifetimes appear (``&'a``, ``x: &'static``, ``<'a>``,
@@ -1270,7 +1269,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # (a unit was popped), the next statement starts fresh. But a ``}``
             # closing an object-literal inside a still-open statement (e.g.
             # ``const P = Point { ... };``) must NOT advance the tracker — the
-            # statement continues to its ``;`` (R1).
+            # statement continues to its ``;``.
             if brace_depth == 0 and closed_unit:
                 stmt_start_byte = i + 1
             buf = ""
@@ -1290,11 +1289,11 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
 
         # Statement terminators reset the token buffer (a new statement begins).
         if ch == ";":
-            # In-main-pass field detection (fix #10 + R1): at top level, a
+            # In-main-pass field detection: at top level, a
             # statement ending in ``;`` that matches the field-declaration shape
             # emits a FIELD unit here — no second whole-file re-scan needed.
             #
-            # R1: extract the name from the SOURCE SLICE (stmt_start_byte → ``;``),
+            # extract the name from the SOURCE SLICE (stmt_start_byte → ``;``),
             # NOT the token buffer — the buffer is reset at every ``{``/``}``,
             # so a const with a braced initializer (``const P = Point { ... };``)
             # would lose its keyword by the ``;`` and be silently dropped.
@@ -1322,7 +1321,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                             )
                         )
             # A ``;`` ends the statement; the next one starts after it. Only
-            # advance at TOP LEVEL (R2): a ``;`` inside braces (e.g. the
+            # advance at TOP LEVEL: a ``;`` inside braces (e.g. the
             # ``return 1;`` inside ``const f = function() { ... };``) must NOT
             # move the tracker, or the outer ``;`` would slice from mid-statement
             # and the field name recovery would fail. The tracker is only
@@ -1392,7 +1391,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
     # Field units are now emitted in the main scan at the ``;`` terminator (fix
     # #10), so no second whole-file re-scan is needed here.
 
-    # G9: newline/expression-body declarations the brace machine can't catch
+    # newline/expression-body declarations the brace machine can't catch
     # (Kotlin ``data class Name(...)`` with no body, ``fun m() = expr`` with an
     # expression body instead of a block). These have no ``{`` so the brace scan
     # never fires. A guarded line-scan supplements them — deduped against the
@@ -1491,14 +1490,14 @@ def _go_declaration_name(
 
     Go diverges from the generic after-keyword name lookup in two common cases:
 
-    - **Receiver method** (fix #4): ``func (recv) Name(...)`` — the token after
+    - **Receiver method**: ``func (recv) Name(...)`` — the token after
       ``func`` is ``(`` (the receiver), not the name. The real name is the
       identifier just before the final parameter-list ``(...)``. A Go receiver
       method is syntactically top-level (not nested in the type body), but
       semantically a method of the receiver's type — so this returns
       ``is_receiver_method=True`` so the caller classifies it as METHOD.
 
-    - **Type declaration** (fix #5): ``type Name struct/interface{...}`` — Go
+    - **Type declaration**: ``type Name struct/interface{...}`` — Go
       puts the name BEFORE ``struct``/``interface`` (the class keyword), so the
       generic lookup finds nothing after the keyword. The name is the token
       between ``type`` and the keyword.
@@ -1539,13 +1538,13 @@ def _go_declaration_name(
             # Non-receiver: ``func Name(params)`` or generic ``func Name[T any](params)``.
             # The name is the identifier right after ``func``. For generics the
             # type-param list ``[T any]`` may be glued to the name
-            # (``Map[T``) — strip it. G10: the previous code used the
+            # (``Map[T``) — strip it. The previous code used the
             # "last balanced ()" + take-token-before approach, which misread
             # generic signatures (the inner ``func(T) U`` param type's parens
             # confused the scan → name=None). The name is always the token
             # directly after ``func``.
             #
-            # G10 subtlety: the reverse keyword scan in the caller may have
+            # subtlety: the reverse keyword scan in the caller may have
             # found an INNER ``func`` (from a param type like ``f func(T) U``)
             # rather than the declaration's ``func``. The declaration's ``func``
             # is the FIRST ``func`` token in the buffer (it leads the statement).
@@ -1611,14 +1610,14 @@ def _classify_a_brace(
     toks = b.split()
     if not toks:
         return None
-    # R1 + G7: an initializer brace — ``const P = Point { ... }``, ``let m = Map { ... }``,
+    # an initializer brace — ``const P = Point { ... }``, ``let m = Map { ... }``,
     # ``const cfg = { ... }`` — is an object/struct literal inside a field declaration,
     # NOT a scope-opening declaration. A buffer containing a field keyword + ``=`` whose
     # token after ``=`` is an object/struct literal start (a bare ``{`` or a capitalized
     # type name) is a braced initializer; return None so it's treated as depth-only
     # (the field is emitted at the terminating ``;``).
     #
-    # G7: this is NARROWER than the original R1 guard (which fired for any
+    # this is NARROWER than the original  (which fired for any
     # ``field-kw + =``). The old guard also rejected function/class/arrow
     # expressions assigned to a binding — ``const f = function() { ... }``,
     # ``const C = class { ... }``, ``const h = () => { ... }`` — silently dropping
@@ -1644,7 +1643,7 @@ def _classify_a_brace(
             pass  # function/class/arrow expression — NOT an initializer literal
         else:
             return None  # genuine object/struct-literal initializer
-    # G11: JS/TS arrow function with a block body — ``const f = (...) => {`` or
+    # JS/TS arrow function with a block body — ``const f = (...) => {`` or
     # ``const f = () => {``. The buffer ends in ``=>`` (the arrow), with a
     # binding name before ``=``. No declaration keyword is present, so the
     # keyword path and the keywordless heuristic (which requires ``)`` at the
@@ -1705,7 +1704,7 @@ def _classify_a_brace(
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
             name = cand
 
-    # G7: function/class EXPRESSION assigned to a binding —
+    # function/class EXPRESSION assigned to a binding —
     # ``const NAME = function() {`` / ``let NAME = class {``. The keyword is
     # ``function``/``class`` and the name after it is empty (anonymous) or the
     # expression's own name (e.g. ``class Inner``), but the entity the binding
@@ -1867,7 +1866,7 @@ def _buf_has_field_keyword(buf: str) -> bool:
 def _binding_name_before(toks: list[str], kw_idx: int) -> str | None:
     """Recover the binding name for a ``field-kw NAME = function/class {`` shape.
 
-    Used by :func:`_classify_a_brace` (G7) when a function/class EXPRESSION is
+    Used by :func:`_classify_a_brace` when a function/class EXPRESSION is
     assigned to a binding (``const Foo = class { ... }``, ``let h = function() {``).
     The keyword after ``=`` is ``function``/``class``; the entity the merge cares
     about is the binding NAME, not the (often anonymous) expression. Scans
@@ -1905,7 +1904,7 @@ def _binding_name_before(toks: list[str], kw_idx: int) -> str | None:
 
 #: Regex matching a top-level field declaration's accumulated token buffer, e.g.
 #: ``pub const N : u32 = 5`` or ``let x = 1`` or ``type Foo = Bar``. Captures the
-#: declared name. Used by the in-main-pass field emitter (fix #10) — mirrors the
+#: declared name. Used by the in-main-pass field emitter — mirrors the
 #: line-regex the old ``_emit_a_field_units`` re-scan used, but operates on the
 #: whitespace-normalized buffer at the ``;`` terminator.
 _A_FIELD_RE = re.compile(
@@ -1919,7 +1918,7 @@ def _field_name_from_buf(buf: str) -> str | None:
 
     Returns the name when the buffer matches a top-level field-declaration shape
     (optional modifiers + a field keyword + an identifier); ``None`` otherwise.
-    Used by the in-main-pass field emitter (fix #10) so fields are detected in
+    Used by the in-main-pass field emitter so fields are detected in
     the same scan that tracks brace depth, eliminating the second whole-file
     re-scan (``_emit_a_field_units``) and its divergent string-state tracker.
     """
@@ -1930,7 +1929,7 @@ def _field_name_from_buf(buf: str) -> str | None:
 
 
 #: Patterns for newline/expression-body declarations the brace machine misses
-#: (G9). These have no ``{`` (bodyless or expression-body), so the brace scan
+#:. These have no ``{`` (bodyless or expression-body), so the brace scan
 #: never fires. Matched at line start (after optional modifiers). Each pattern
 #: captures the declared name. Only applied for languages whose syntax uses
 #: these forms (Kotlin, Scala) — the brace machine handles the rest.
@@ -2046,7 +2045,7 @@ def _extract_a_import_name(line: str) -> str:
     m = re.match(r"require\s*\(\s*[\"']([^\"']+)", s)
     if m:
         return m.group(1)
-    # G12: CommonJS require-as-expression — ``const fs = require('fs')``.
+    # CommonJS require-as-expression — ``const fs = require('fs')``.
     # Extract the module path (the import surface tracks dependencies, so the
     # path is the useful name; the binding name ``fs`` is incidental).
     m = re.search(r"require\s*\(\s*[\"']([^\"']+)", s)
@@ -2120,7 +2119,7 @@ def _consume_line_as_statement(
     line). ``stmt_start_byte`` should be set to ``next_i`` by the caller (a
     complete statement ends at the newline). Used by the ``#``-preprocessor
     handler to advance past lines that are NOT MODULE_STMTs (Rust attributes)
-    but still consume the whole line + reset the statement tracker (R1).
+    but still consume the whole line + reset the statement tracker.
     """
     line_end = src.find("\n", i)
     if line_end < 0:
@@ -2145,13 +2144,13 @@ _FRAGMENTATION_RATIO = 5
 
 
 def _assess_confidence(source: str, units: list[StructuralUnit]) -> float:
-    """Heuristic confidence in the parse (survey §"Robustness over correctness").
+    """Heuristic confidence in the parse.
 
     - Minified/generated (median line length > 200) → 0.0 (fall back to LSP).
     - Pathological fragmentation (> lines/5 NON-test top-level units on a sizable
       file) → 0.3 (suspicious; likely mis-detection). ``is_test`` units are
       excluded: a large test module with many small ``test_*`` functions is
-      normal, not fragmentation (fix #8).
+      normal, not fragmentation.
     - Otherwise 1.0.
     """
     if not source:
@@ -2165,7 +2164,7 @@ def _assess_confidence(source: str, units: list[StructuralUnit]) -> float:
     # Only flag fragmentation on substantial files (small files legitimately have
     # many short units — a test file with 8 tiny functions at 40 lines is fine).
     # Exclude test units: a 60-test module is a legitimate test file, not
-    # pathological fragmentation (fix #8 — previously flagged at confidence 0.3).
+    # pathological fragmentation (previously flagged at confidence 0.3).
     non_test = [u for u in units if not u.is_test]
     if n_lines >= 100 and len(non_test) > max(1, n_lines // _FRAGMENTATION_RATIO):
         return 0.3
@@ -2237,7 +2236,7 @@ def has_duplicate_identities(units) -> bool:
     Duplicate identities (e.g. two ``(method, "f")`` from Java/C++/Python
     overloads or re-definitions) collide silently in the identity-keyed dicts
     of :func:`compute_structural_diff_3way` and the entity_disjoint rule,
-    dropping all but one unit — a silent missed-conflict data-loss bug (fix #3).
+    dropping all but one unit — a silent missed-conflict data-loss bug.
     Callers use this to detect the collision and decline (escalate to the LLM
     path) rather than silently truncating. Works on any objects with an
     ``.identity`` attribute (``StructuralUnit`` or the public ``Entity``).
@@ -2325,24 +2324,17 @@ def units_in_container(ir: FileIR, span: tuple[int, int]) -> list[StructuralUnit
 # Rename detection — the CANONICAL core (consolidation #2)
 # ---------------------------------------------------------------------------
 #
-# Rename detection previously existed in THREE independent implementations,
-# each re-deriving the same "header-stripped normalized body" signal and the
-# same "old name gone + body matches + name-similarity guard" rule:
+# Canonical rename detection. The rule: a base entity whose body reappears
+# under a NEW similar name on a side, with the old name gone, is a rename —
+# not a base-kept + side-added pair. The body signal is header-stripped and
+# normalized (``entity_body_content``); name similarity uses ``_char_ratio``.
 #
-#   - ``abstract_parser._detect_renames`` (3-way, fingerprint-keyed)
-#   - ``structural_resolver._detect_renames`` (2-way, body-content-keyed)
-#   - ``structural.semantic_diff``          (2-way, body-content + Jaccard)
-#
-# They agreed only by coincidence (R4 manually aligned the resolver's
-# normalization to the parser's). This block is the single canonical core the
-# three callers now share. One body signal (``entity_body_content``), one
-# name-similarity measure (``_char_ratio``), one threshold.
+# One body signal, one name-similarity measure, one threshold — shared by all
+# callers (the 3-way diff, the structural resolver, and ``semantic_diff``).
 
 #: Minimum name-similarity (char_ratio) to confirm a body-content rename pair,
 #: OR the body must be substantial (>= this many chars) so two distinct entities
-#: sharing a trivial body (``pass`` / ``return 1``) don't false-pair. This is
-#: the single threshold; it replaces ``RENAME_SIMILARITY_THRESHOLD`` (resolver)
-#: and ``_RENAME_NAME_SIMILARITY_THRESHOLD`` (structural) which were both 0.6.
+#: sharing a trivial body (``pass`` / ``return 1``) don't false-pair.
 RENAME_NAME_SIMILARITY_THRESHOLD = 0.6
 
 #: A body-content signal must be at least this long to count as "substantial"
@@ -2429,8 +2421,9 @@ def split_header_body(body: str) -> tuple[str, str]:
     The CANONICAL header/body split for rename detection (consolidation #2). A
     rename changes the def/fn header (``def foo`` → ``def bar``) but leaves the
     body content identical, so rename detection compares the header-STRIPPED
-    body. This replaces the two divergent splits that previously existed
-    (``structural_resolver._body_content`` and ``structural._split_header_body``).
+    body. (Note: ``structural._split_header_body`` intentionally diverges — it
+    preserves comments because body-CHANGE detection must be comment-sensitive,
+    while rename detection is comment-stable.)
 
     For a MULTI-LINE body the header is ``lines[0]`` (the def/fn/class line) and
     the rest is the body lines below it — the common case. For a SINGLE-LINE body
@@ -2519,7 +2512,7 @@ def detect_renames_2way(
 
     A rename is: a base entity whose OLD name is GONE from ``side_units``, but
     whose body content (header-stripped, normalized) reappears under a NEW name
-    on the side. This is the false-merge source the survey flags: without it, a
+    on the side. This is the false-merge source prior findings: without it, a
     rename is treated as "base keeps old name + side adds new name" → a
     duplicate entity.
 

@@ -538,7 +538,7 @@ def test_whole_file_repair_recovers_and_accepts(multi_unit_conflicted_repo):
     concrete SyntaxError back to unit 1, which re-resolves to the valid merge
     on the repair attempt. The file is then ACCEPTED (not escalated).
 
-    This is the survey §4 principle: ground the model's correction in concrete
+    This is the principle: ground the model's correction in concrete
     execution feedback instead of escalating the cross-unit error."""
     repo = multi_unit_conflicted_repo["repo"]
     services = multi_unit_conflicted_repo["services_merged"]   # unit 0, valid
@@ -569,7 +569,7 @@ def test_whole_file_repair_recovers_and_accepts(multi_unit_conflicted_repo):
 
 
 # ---------------------------------------------------------------------------
-# Verifier-model critic integration (surveys §1/§5): the LLM judge gates the
+# Verifier-model critic integration: the LLM judge gates the
 # orchestrator's accept path end-to-end when enable_verifier_model is on.
 # ---------------------------------------------------------------------------
 
@@ -977,7 +977,7 @@ def test_verifier_registered_when_flag_on(conflicted_repo):
 
 
 # ---------------------------------------------------------------------------
-# VeriGuard policy gate integration (survey §4): the deterministic safety gate
+# VeriGuard policy gate integration: the deterministic safety gate
 # blocks an unsafe patch end-to-end when enable_policy_gate + a rule are set.
 # ---------------------------------------------------------------------------
 
@@ -1056,7 +1056,7 @@ def test_policy_gate_allows_safe_patch(conflicted_repo):
 
 
 # ---------------------------------------------------------------------------
-# LLM code-smell detection integration (survey §7): the ast-based checker is
+# LLM code-smell detection integration: the ast-based checker is
 # auto-registered when enabled and flags smelly patches through the accept path.
 # ---------------------------------------------------------------------------
 

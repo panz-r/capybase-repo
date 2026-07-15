@@ -1,4 +1,4 @@
-"""Tests for SBCR: Search-Based Combination Resolution (survey §4.1).
+"""Tests for SBCR: Search-Based Combination Resolution.
 
 SBCR is a *candidate generator*, not a decider. It searches order-preserving
 interleavings of a conflict's two sides for the highest-fitness combination
@@ -178,7 +178,7 @@ def test_both_sides_empty_declines():
 # ---------------------------------------------------------------------------
 # Scope guard: SBCR fires ONLY on addition conflicts (empty base)
 #
-# SBCR's search space is *combination* resolutions (survey §4.1): both sides
+# SBCR's search space is *combination* resolutions: both sides
 # ADD content. On a *modification* conflict (both sides changed a shared base
 # line), the space includes semantically-wrong concatenations (two contradictory
 # lines, last-wins — which can even be syntactically valid, e.g. the second
@@ -266,7 +266,7 @@ def test_hill_climbing_is_reproducible_with_seed():
 
 
 # ---------------------------------------------------------------------------
-# Stagnation early-exit (survey §2.2 termination)
+# Stagnation early-exit
 # ---------------------------------------------------------------------------
 
 

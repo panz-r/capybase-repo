@@ -1,4 +1,4 @@
-"""Sesame-style structural separator projection (survey §1.2).
+"""Sesame-style structural separator projection.
 
 On brace/semicolon languages (Rust, C, C++, Java, JavaScript, Go, etc.) git's
 line-diff anchors poorly when the *only* difference between two versions is a
@@ -19,7 +19,7 @@ meaningless. The projection is a no-op for unsupported languages.
 
 from __future__ import annotations
 
-# Language families the projection applies to. The survey's separator set is
+# Language families the projection applies to. The's separator set is
 # for brace/semicolon languages; Python (indentation/colon) is deliberately
 # excluded — projecting ``:`` would shred Python structure. ``rust``/``c``/
 # ``cpp``/``java``/``javascript``/``typescript``/``go``/``csharp``/``php`` all
@@ -58,7 +58,7 @@ def supports(language: str | None) -> bool:
 
 
 def project_separators(text: str, language: str | None) -> str:
-    """Split each separator char onto its own line (survey §1.2).
+    """Split each separator char onto its own line.
 
     Transforms ``fn f() { x; }`` into ``fn f ( ) { x ; }`` (each separator on its
     own line). This makes a line-merger anchor on statement/block boundaries: a

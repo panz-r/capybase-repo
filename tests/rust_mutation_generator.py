@@ -1,10 +1,10 @@
 """Catalog-mutation generator for verifier-robustness property tests (Method C).
 
-Round 3's honest form of "fuzzing": rather than generate random valid Rust from
-scratch (poor ROI — no baseline-comparison oracle exists, and random ASTs mostly
-auto-merge or fail to compile), this takes the curated catalog bases and applies
-**structure-preserving mutations** to probe verifier invariants the hand-authored
-rows structurally cannot state:
+Structure-preserving mutation rather than random fuzzing: rather than generate
+random valid Rust from scratch (poor ROI — no baseline-comparison oracle exists,
+and random ASTs mostly auto-merge or fail to compile), this takes the curated
+catalog bases and applies **structure-preserving mutations** to probe verifier
+invariants the hand-authored rows structurally cannot state:
 
 1. **No-crash**: the verifier returns a result (never raises) on valid-but-odd
    splices derived from a mutation.

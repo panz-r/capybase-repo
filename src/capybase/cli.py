@@ -434,7 +434,7 @@ def _format_embeddings_report(
     lines.append(f"  related_p10            = {cal.related_p10:.3f}")
     lines.append(f"  unrelated_p90          = {cal.unrelated_p90:.3f}")
     if cal.has_isotonic_fit:
-        # Score-calibration (survey §2.1): the isotonic transform maps raw cosines
+        # Score-calibration: the isotonic transform maps raw cosines
         # onto a model-agnostic scale; the three zones (§3.2) are derived on it.
         lines.append("")
         lines.append(
@@ -514,7 +514,7 @@ def _run_calibrate_embeddings(
     resolved = resolve_profile_path(repo, profile_path)
     written = False
     prev_floor = 0.35
-    drift = None  # advisory drift-vs-baseline report (survey 2 §7)
+    drift = None  # advisory drift-vs-baseline report ( 2 §7)
     if cal.ok:
         # Load the existing profile (preserving LLM-calibration knobs); a missing
         # profile is created fresh via from_dict (safe defaults for required

@@ -1,4 +1,4 @@
-"""Persisted vector cache for the embedding retriever (embeddings survey §1).
+"""Persisted vector cache for the embedding retriever.
 
 Without this, ``EmbeddingRetriever._build`` re-embeds every accepted experience
 on every process start — fine at tens of entries, a re-embed cliff as the corpus
@@ -42,7 +42,7 @@ class Embedder(Protocol):
 
 
 def content_key(base: str, current: str, replayed: str, resolved: str) -> str:
-    """Stable string key for an experience's content (embeddings survey §1).
+    """Stable string key for an experience's content.
 
     Mirrors ``retriever._example_key`` (the tuple the HybridRetriever fuses on),
     rendered as compact JSON so it's hash-stable across processes and survives
@@ -202,7 +202,7 @@ class NumpyVectorCache(VectorCache):
 
 
 class SqliteVecCache(VectorCache):
-    """A ``vec0`` virtual table keyed by ``content_key`` (embeddings survey §1).
+    """A ``vec0`` virtual table keyed by ``content_key``.
 
     Schema: ``CREATE VIRTUAL TABLE vec_examples USING vec0(embedding float[<dim>],
     content_key text)``. The dimension is fixed at table-creation from the first

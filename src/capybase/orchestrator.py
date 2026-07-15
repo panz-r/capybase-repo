@@ -212,9 +212,9 @@ def _critic_failure(
     )
 
 
-# Cosine similarity floor (embeddings survey §5): above this, two critic flags
+# Cosine similarity floor : above this, two critic flags
 # are treated as semantically EQUIVALENT (one is dropped, the more specific
-# kept). 0.90 is the survey's "same issue, different wording" threshold.
+# kept). 0.90 is prior work's "same issue, different wording" threshold.
 _CRITIC_DEDUP_EQUIVALENT = 0.90
 # Below this, two flags address DIFFERENT failure modes (keep both). The band
 # 0.60–0.90 is "related but distinct" (keep both, specificity-ordered).
@@ -252,7 +252,7 @@ def _critic_warning_text(w: VerificationWarning) -> str:
 def _dedupe_critic_warnings(
     warnings: list[VerificationWarning], embedder: object | None,
 ) -> list[VerificationWarning]:
-    """Deduplicate PoLL-jury critic flags by embedding similarity (survey §5).
+    """Deduplicate PoLL-jury critic flags by embedding similarity.
 
     The dual-critic jury may emit two flags for the SAME issue with different
     wording — feeding both to the plan-first step dilutes the model's attention
@@ -812,8 +812,8 @@ def _apply_profile_capability_flags(config: Config, profile: "object") -> Config
     The calibrated ``embedding_min_similarity`` (from ``calibrate-embeddings``)
     overrides the config default so the EmbeddingRetriever uses a model-specific
     floor rather than the 0.35 guess. The full ``embedding_calibration`` envelope
-    rides along so the retriever can apply the isotonic score transform (survey
-    §2.1). ``fusion_method`` is threaded for the HybridRetriever (survey §4).
+    rides along so the retriever can apply the isotonic score transform.
+    ``fusion_method`` is threaded for the HybridRetriever.
     """
     if getattr(profile, "enable_embedding_rag", False):
         if config.memory.enabled and config.future.enable_rag:
@@ -934,7 +934,7 @@ class Orchestrator:
         # DECLINE so _resolve_unit can thread them into the LLM path as seed
         # failures (CEGIS loop hardening). None when no probe ran or it accepted.
         self._last_side_probe_failures: list[VerificationFailure] | None = None
-        # Test-continuity baseline (survey §2.1a): the set of test node-IDs that
+        # Test-continuity baseline: the set of test node-IDs that
         # PASSED pre-rebase, captured in rebase() before the rebase starts. Diffed
         # against the post-merge passing set in _run_tests — a baseline-passing
         # test that now fails is a behavioral regression the merge introduced (a
@@ -957,7 +957,7 @@ class Orchestrator:
         # of the source branch's net effect per file, computed once at rebase
         # start. None when no plan; rendered into the history prompt block.
         self._branch_intent = None
-        # Shared embeddings client (embeddings survey §2/§5/§6): one client
+        # Shared embeddings client : one client
         # reused across semantic entity matching, critic-feedback deduplication,
         # and drift detection. Constructed lazily (only when memory is enabled)
         # after the context builder — but its default must exist here so the
@@ -996,9 +996,9 @@ class Orchestrator:
                 str(self.git.repo), config.memory.store_path
             )
             retriever = self._build_retriever(config)
-        # Repair-path retrieval (embeddings survey §2): a strictly-filtered view
+        # Repair-path retrieval : a strictly-filtered view
         # of the same retriever for the CEGIS repair prompt — higher score floor
-        # + retry-count quality filter (survey §1 index-quality rule). Built
+        # + retry-count quality filter. Built
         # only when memory is enabled and a base retriever exists; None otherwise
         # (the repair prompt gets no few-shot, the prior behavior). The wrapper
         # over-fetches from the base retriever so the filter still yields k.
@@ -1024,14 +1024,14 @@ class Orchestrator:
             slice_repo_root=str(self.git.repo),
             repair_retriever=repair_retriever,
         )
-        # Semantic entity matching (embeddings survey §2): install a shared
+        # Semantic entity matching : install a shared
         # embeddings client on the structural adapter so match_entities can run
         # the embedding rename tier. Reuses the same embeddings endpoint/model
         # as the retriever; built only when memory is enabled. The adapter's
         # embedding tier is best-effort and degrades to pure-deterministic on any
         # failure, so a missing endpoint never breaks matching. The same client
-        # is reused for critic-feedback deduplication (survey §5) and drift
-        # detection (survey §6) — one connection, one model, consistent vectors.
+        # is reused for critic-feedback deduplication and drift
+        # detection — one connection, one model, consistent vectors.
         if config.memory.enabled:
             try:
                 from capybase.adapters import structural
@@ -1076,7 +1076,7 @@ class Orchestrator:
         self.verification = VerificationEngine.default(
             ValidationConfig.from_dict(config.validation.model_dump())
         )
-        # Verifier-model critic (surveys §1/§5): when enabled (the default —
+        # Verifier-model critic: when enabled (the default —
         # opt-out), register an LLM judge that checks the resolution preserves
         # both sides' semantic intent — the failure mode the syntactic
         # validators are blind to. It runs last in the validator chain (after
@@ -1123,7 +1123,7 @@ class Orchestrator:
                 )
             except Exception:  # noqa: BLE001 - jury is best-effort; never block on it
                 pass
-        # Dependency-preservation validator (survey §2.2 SafeMerge necessary
+        # Dependency-preservation validator (SafeMerge necessary
         # condition): warns when a merge drops a base-referenced symbol that has
         # an in-repo definition and neither side removed. Registered only when
         # BOTH [structural] cross_file_slice (the slicer it depends on) AND
@@ -1153,7 +1153,7 @@ class Orchestrator:
 
         self._future_obligation_validator = FutureObligationValidator()
         self.verification.register(self._future_obligation_validator)
-        # VeriGuard-style deterministic policy gate (survey §4): auto-registered
+        # VeriGuard-style deterministic policy gate: auto-registered
         # by VerificationEngine.default() when enable_policy_gate is on AND rules
         # are configured. It inspects WHAT a patch introduces (the only such
         # check — all others are syntactic/structural), deterministically via
@@ -1212,7 +1212,7 @@ class Orchestrator:
         # accumulated across steps so detect_conflict_chains() can find related
         # conflicts sharing a region coordinate. Reset per rebase()/run().
         self._conflict_observations: list = []
-        # Session-level coverage samples (survey §3.3 SLO): one (path, preserved,
+        # Session-level coverage samples (SLO): one (path, preserved,
         # total) per accepted unit across the WHOLE window, accumulated each step
         # so the post-rebase rollup can compute one aggregate preservation ratio.
         # Reset per rebase()/run().
@@ -2029,7 +2029,7 @@ class Orchestrator:
         Runs AFTER the structural resolver declines and BEFORE the LLM. SBCR is a
         *candidate generator*, not a decider: it searches order-preserving
         interleavings of the two sides for the one with maximal mean similarity
-        to both parents (the survey's fitness, correlation ~0.64 with developer
+        to both parents (prior work's fitness, correlation ~0.64 with developer
         resolution quality). Its search space includes invalid combinations
         (e.g. two contradictory lines concatenated), so — exactly like the
         structural resolver — every candidate is validated (syntax/AST/splice)
@@ -2064,7 +2064,7 @@ class Orchestrator:
                 step_index=self.step, path=unit.path, unit_id=unit.unit_id,
             )
             return None
-        # Balance-aware routing (survey §4.2): SBCR wins on BALANCED conflicts
+        # Balance-aware routing: SBCR wins on BALANCED conflicts
         # and loses to the LLM on imbalanced ones (one side changed far more).
         # When routing is on and the conflict is more imbalanced than the
         # configured threshold, do NOT short-circuit — decline so the LLM runs,
@@ -2415,15 +2415,15 @@ class Orchestrator:
         """Construct the configured RAG retriever over ``self.memory_store``.
 
         - ``"lexical"`` (default): dependency-free BM25.
-        - ``"embedding"``: an :class:`EmbeddingRetriever` (semantic, survey §4.2)
+        - ``"embedding"``: an :class:`EmbeddingRetriever` (semantic)
           from a fresh embeddings client. Any failure to construct it falls back to
           BM25 so RAG never hard-fails.
-        - ``"hybrid"``: a :class:`HybridRetriever` fusing BM25 + embeddings (survey
-          §4). Degrades to lexical-only when the embedding endpoint is unavailable.
+        - ``"hybrid"``: a :class:`HybridRetriever` fusing BM25 + embeddings.
+          Degrades to lexical-only when the embedding endpoint is unavailable.
 
         When an embeddings-calibration envelope is present it is reconstructed and
         passed to the EmbeddingRetriever so the isotonic score transform +
-        calibrated floor apply (survey §2.1).
+        calibrated floor apply.
         """
         from capybase.memory.retriever import EmbeddingRetriever, HybridRetriever, LexicalRetriever
 
@@ -2449,8 +2449,8 @@ class Orchestrator:
         Returns None (rather than raising) on any construction failure so callers
         can fall back to BM25 — RAG never hard-fails. The calibrated envelope is
         reconstructed and attached so the isotonic transform + calibrated floor
-        apply when present (survey §2.1). The persisted vector cache
-        (embeddings survey §1) is constructed from ``config.memory.vector_cache``
+        apply when present. The persisted vector cache
+         is constructed from ``config.memory.vector_cache``
         and resolves its path against the repo root like ``store_path``; a cache
         construction failure degrades to in-memory (re-embed each run) silently.
         """
@@ -2470,7 +2470,7 @@ class Orchestrator:
             if updates:
                 emb_cfg = emb_cfg.model_copy(update=updates)
             client = OpenAIEmbeddingsClient(emb_cfg)
-            # Persisted vector cache (embeddings survey §1): best-effort; any
+            # Persisted vector cache : best-effort; any
             # failure degrades to None (re-embed each run, the prior behavior).
             cache = None
             if config.memory.vector_cache != "off":
@@ -2699,7 +2699,7 @@ class Orchestrator:
             "rebase started: session=%s target=%s branch=%s start=%s backup=%s",
             self.session_id, target, backup_branch, start_oid[:8], backup_ref,
         )
-        # Test-continuity baseline (survey §2.1a): capture which tests PASS on
+        # Test-continuity baseline: capture which tests PASS on
         # the pre-rebase tree, BEFORE the rebase starts. Post-merge, a baseline-
         # passing test that now fails is a behavioral regression the merge
         # introduced. Best-effort: any failure leaves the baseline None and the
@@ -2929,7 +2929,7 @@ class Orchestrator:
 
     # ------------------------------------------------------------------ resurrection
     #
-    # Silent-resurrection detection (survey "silent loss of intent"). After a
+    # Silent-resurrection detection ( "silent loss of intent"). After a
     # clean rebase — and per replayed step — compare the result against content
     # the target branch deliberately deleted since the merge-base. If the result
     # brought any of it back, the replayed commits (which predate the cleanup)
@@ -3899,12 +3899,12 @@ class Orchestrator:
         return preserved / total, preserved, total
 
     def _report_session_coverage_slo(self) -> None:
-        """Surface the session-level coverage ratio (survey §3.3 SLO) at completion.
+        """Surface the session-level coverage ratio (SLO) at completion.
 
         Emits a journal event + a completion-report line with the aggregate
         preservation ratio across the window. When ``session_coverage_slo`` is
         set (> 0) and the ratio falls below it, also emits an advisory (still
-        advisory only — observability, not enforcement, per the survey). No-op
+        advisory only — observability, not enforcement, per the). No-op
         when no coverage was measured (clean rebase, unsupported languages).
         """
         try:
@@ -3980,7 +3980,7 @@ class Orchestrator:
         return out
 
     def _run_cross_commit_guardian_on_completion(self) -> StepResult | None:
-        """Cross-commit dependency guardian audit (survey §3.1); None if clean.
+        """Cross-commit dependency guardian audit; None if clean.
 
         Runs after the resurrection scan on clean completion. Closes the per-
         commit blind spot: builds a defines/uses map across the replayed source
@@ -4086,14 +4086,14 @@ class Orchestrator:
         return StepResult(step_index=self.step, escalated=False, continued=True)
 
     def _run_evolution_audit_on_completion(self) -> StepResult | None:
-        """Intent evolution trace (survey §3.2); None if clean.
+        """Intent evolution trace; None if clean.
 
         Runs after the cross-commit guardian. For an entity touched across ≥2
         source commits, checks the final merge matches the entity's LAST source-
         branch evolution (its most recent body) — a divergence flags an
         ``intent_evolution_gap`` (the merge likely reverted/kept an earlier
         version, silently losing an intermediate step). Purely advisory
-        (observability/assurance, never blocks): the survey notes the retry would
+        (observability/assurance, never blocks): prior findings the retry would
         be too expensive for multi-commit chains, so this produces a report. A
         no-op when disabled or no source commits / parser available.
         Returns None when there are no findings.
@@ -4182,7 +4182,7 @@ class Orchestrator:
                 + "\n".join(f"  - {r}" for r in rendered)
             ) + "\n"
         )
-        # Advisory only (the survey notes a retry is too expensive for multi-commit
+        # Advisory only (prior findings a retry is too expensive for multi-commit
         # chains); never escalates.
         return StepResult(step_index=self.step, escalated=False, continued=True)
 
@@ -4224,7 +4224,7 @@ class Orchestrator:
             # populates it (it's read by _observe_drift after the gate).
             self._last_continuity_regressions = []
             # Accumulate this step's accepted-unit coverage into the session
-            # SLO rollup (survey §3.3). Cheap (reads already-computed detail);
+            # SLO rollup. Cheap (reads already-computed detail);
             # the post-rebase report aggregates it into one ratio.
             self._accumulate_coverage_samples(result)
             if result.escalated:
@@ -4268,7 +4268,7 @@ class Orchestrator:
                 if _res is not None and _res.escalated:
                     last = _res
                     break
-                # Cross-commit dependency guardian (survey §3.1): deterministic
+                # Cross-commit dependency guardian: deterministic
                 # window-level audit for cross-commit rename/reference breaks the
                 # per-commit validators can't see. Runs after the resurrection
                 # scan; under "stop" it escalates like resurrection.
@@ -4276,7 +4276,7 @@ class Orchestrator:
                 if _ccb is not None and _ccb.escalated:
                     last = _ccb
                     break
-                # Intent evolution trace (survey §3.2): advisory post-window audit
+                # Intent evolution trace: advisory post-window audit
                 # for entities that evolved across ≥2 commits — flags a merge
                 # that reverted/lost the last evolution step. Runs after the
                 # guardian; advisory only (never escalates).
@@ -4287,7 +4287,7 @@ class Orchestrator:
                     {"head_after": head_after},
                     git_head_after=head_after,
                 )
-                # Session-level coverage SLO (survey §3.3): one aggregate
+                # Session-level coverage SLO: one aggregate
                 # preservation ratio across the window, surfaced as observability
                 # for regression detection. Advisory; never blocks.
                 self._report_session_coverage_slo()
@@ -4450,7 +4450,7 @@ class Orchestrator:
             # sibling markers). Per-unit Phase A validation already passed for
             # each candidate in isolation.
             #
-            # Execution-driven whole-file CEGIS (survey §4): when the
+            # Execution-driven whole-file CEGIS: when the
             # combination fails, we do NOT escalate immediately — we feed the
             # concrete file-level failures back to the unit most likely at
             # fault and re-resolve it via the repair prompt, then re-splice and
@@ -4569,7 +4569,7 @@ class Orchestrator:
     ) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
         """Re-resolve the unit most likely at fault for a whole-file failure.
 
-        Execution-driven whole-file CEGIS (survey §4): the file-level failures
+        Execution-driven whole-file CEGIS: the file-level failures
         (cross-unit syntax errors, etc.) are fed back to the unit whose
         resolution most plausibly caused them. Attribution is by error-line
         containment in the unit's marker_span (parsed from the failure message
@@ -4717,7 +4717,7 @@ class Orchestrator:
             if early is not None:
                 return early  # accepted via verbatim reuse; LLM loop skipped
 
-        # Deterministic structural pre-resolution (survey §6.4 layer 1): BEFORE
+        # Deterministic structural pre-resolution: BEFORE
         # the LLM loop, attempt a safe, model-free resolution from base+sides.
         # Only on a FRESH resolve (not CEGIS retries, where the model must see the
         # counterexample). Any resolution still runs the full validation pipeline;
@@ -4728,14 +4728,14 @@ class Orchestrator:
             if early is not None:
                 return early  # accepted deterministically; LLM loop skipped entirely
 
-        # Search-based combination resolution (survey §4.1 SBCR): AFTER the
+        # Search-based combination resolution (SBCR): AFTER the
         # structural resolver declines and BEFORE the LLM. Searches order-
         # preserving interleavings for the best combination; the candidate is
         # validated before acceptance, so an invalid combination falls through to
         # the model. Only on a FRESH resolve. Gated by [future]
         # enable_combination_search.
         if failures is None and self.config.future.enable_combination_search:
-            # Difficulty-aware SBCR skip (survey §5.2): SBCR is addition-only
+            # Difficulty-aware SBCR skip: SBCR is addition-only
             # (empty-base scope), and hard conflicts are overwhelmingly
             # modification conflicts where SBCR's search would decline on scope
             # anyway (the corpus measurement showed 0/209 hard cases fire). Skip
@@ -4786,7 +4786,7 @@ class Orchestrator:
             if early is not None:
                 return early  # accepted via block-capture; LLM loop skipped
 
-        # LLM size guard (survey §4.2/§7): if the essential conflict content
+        # LLM size guard: if the essential conflict content
         # alone exceeds the model's context window, the LLM call is doomed (the
         # server truncates, the model fails). Skip it and escalate rather than
         # wasting the call. Only on a FRESH resolve (failures is None) — a CEGIS
@@ -4896,7 +4896,7 @@ class Orchestrator:
             )
 
             consensus_report = None
-            # Difficulty-aware routing (survey §6.1): classify the conflict
+            # Difficulty-aware routing: classify the conflict
             # before any LLM call. The ConflictClassifier returns a richer band
             # + explainable reasons; the legacy ``simple``/``complex`` label
             # (band ∈ {medium, hard} ⇒ complex) drives the existing fast path
@@ -4924,7 +4924,7 @@ class Orchestrator:
             outcome.difficulty = difficulty
             outcome.classification = classification
 
-            # Difficulty-aware sample allocation (survey §4 UAB-lite): complex
+            # Difficulty-aware sample allocation (UAB-lite): complex
             # units draw samples_complex (falling back to the base samples when
             # unset/0). Difficulty is known before any LLM call, so this is the
             # viable pre-generation allocation lever. Only affects fresh
@@ -5184,7 +5184,7 @@ class Orchestrator:
             # old `hard_failures or None` seed), so the model kept reproducing
             # the same dropped-side merge — the A/B's 30-min convergence loop.
             #
-            # Critic-feedback deduplication (embeddings survey §5): the PoLL jury
+            # Critic-feedback deduplication : the PoLL jury
             # may emit multiple verifier_model* flags; dedupe by embedding
             # similarity so two equivalent flags (same issue, different wording)
             # don't dilute the plan-first step's attention. All surviving flags
@@ -5204,7 +5204,7 @@ class Orchestrator:
             failures = list(validation.hard_failures)
             if critic_warning is not None:
                 # Enrich each surviving critic flag with the deterministic
-                # dropped-units list (survey §5.1 quantitative): name the SPECIFIC
+                # dropped-units list: name the SPECIFIC
                 # functions/classes the side added that the resolution dropped, so
                 # the retry prompt gives the model exact targets ("reintroduce
                 # function `foo`") rather than a vague "you dropped a side".
@@ -5346,7 +5346,7 @@ class Orchestrator:
         out["consensus_entropy"] = float(getattr(rep, "entropy", 0.0) or 0.0)
         out["consensus_agreement"] = float(getattr(rep, "agreement_score", 0.0) or 0.0)
         out["consensus_cluster_count"] = float(getattr(rep, "cluster_count", 0) or 0)
-        # FactSelfCheck rationale-consistency (survey §2): agreement over the
+        # FactSelfCheck rationale-consistency: agreement over the
         # candidates' own intent claims, surfaced from the consensus report.
         # Defaults (1.0 / 0) when no multi-sample consensus ran.
         out["intent_agreement"] = float(getattr(rep, "intent_agreement", 1.0) or 1.0)
@@ -5359,7 +5359,7 @@ class Orchestrator:
         out["conflict_side_chars"] = float(
             len(unit.base.text) + len(unit.current.text) + len(unit.replayed.text)
         )
-        # Pre-resolution severity (survey §3.3): a triage signal computed at
+        # Pre-resolution severity: a triage signal computed at
         # extraction, before any model call. Encoded numerically so the risk
         # score / calibration model can consume it (low=0, medium=1, high=2).
         out["conflict_severity"] = {"low": 0.0, "medium": 1.0, "high": 2.0}.get(
@@ -5727,7 +5727,7 @@ class Orchestrator:
         # after this call returns, in run()'s loop, and needs the human-readable
         # verdict like "1 test failed" / "compile error").
         self._last_test_verdict = run.verdict.summary or None
-        # Test-continuity diff (survey §2.1a): tests that PASSED pre-rebase but
+        # Test-continuity diff: tests that PASSED pre-rebase but
         # no longer pass are regressions the merge introduced — high-signal
         # counterexamples. Sharpen the verdict so the human/model sees WHICH
         # baseline tests broke, not just "tests failed".

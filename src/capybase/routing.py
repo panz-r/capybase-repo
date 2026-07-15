@@ -1,4 +1,4 @@
-"""Difficulty-aware routing (survey §6.1, ICoT/RoutingGen pattern).
+"""Difficulty-aware routing (ICoT/RoutingGen pattern).
 
 A rebase conflict is classified as ``simple`` or ``complex`` *before* any LLM
 call, using signals already present on the :class:`ConflictUnit`. The class

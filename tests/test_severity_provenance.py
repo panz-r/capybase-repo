@@ -1,4 +1,4 @@
-"""Tests for conflict severity grading and per-side provenance (survey §3.3).
+"""Tests for conflict severity grading and per-side provenance.
 
 Severity is a pure function of a ConflictUnit (no I/O, no model); provenance is
 populated by the extractor via git_backend and verified against a real temp repo.

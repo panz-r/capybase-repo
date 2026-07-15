@@ -1,4 +1,4 @@
-"""Deterministic structural conflict resolution (survey §2.1/§6.4, layer 1).
+"""Deterministic structural conflict resolution.
 
 A safe, LLM-free pre-resolver that runs BEFORE the model. It attempts to produce
 a correct merged text from base + current + replayed using four provably-safe
@@ -9,9 +9,9 @@ rules — no heuristics that could introduce a wrong merge:
 2. **one_sided_change** — only one side diverged from base → take the changed
    side; the other conceded. Resolves a large fraction of real conflicts.
 3. **disjoint_edits** — both sides changed, but on NON-overlapping line ranges
-   within the hunk → merge both edits (survey §1.2 zealous/line-granular merge).
+   within the hunk → merge both edits.
    No overlap means no semantic conflict at this granularity.
-4. **zealous_merge** — per-base-line 3-way merge (survey §1.4 zealous
+4. **zealous_merge** — per-base-line 3-way merge ( zealous
    refinement). Where git's coarse hunk groups adjacent edits into one conflict,
    this aligns each side against base line-by-line and resolves every region
    that is agreed (both made the same change) or one-sided (one side conceded a
@@ -44,7 +44,7 @@ from capybase.merge_intent import classify_side, direction
 Rule = Literal[
     "identical_sides", "one_sided_change", "disjoint_edits", "zealous_merge",
     "entity_disjoint", "token_disjoint", "delete_side",
-    # Refactoring-aware composition (survey §3.2 RefMerge): when entity_disjoint
+    # Refactoring-aware composition (RefMerge): when entity_disjoint
     # DECLINED on overlap, but the overlap is entirely a clean rename-vs-body-
     # modify partition, compose the renamer's header with the modifier's body.
     "refactoring_aware_merge",
@@ -120,7 +120,7 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
     # Rule 1: modify/delete — one side deliberately deleted the block and the
     # other side did NOT add anything that the deletion would clobber. The safe
     # resolution is to ACCEPT THE DELETION (emit the deleting side's text, which
-    # is empty or near-empty). This is the disambiguation the survey's "silent
+    # is empty or near-empty). This is the disambiguation prior work's "silent
     # loss of intent" failure mode calls out: without it, a modify/delete can be
     # wrongly merged to keep dead code the deleting branch cleaned up. Guarded
     # by merge_intent.direction so it fires ONLY on a proven clean deletion
@@ -153,7 +153,7 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if merged is not None:
             return StructuralResolution(rule="disjoint_edits", text=merged)
 
-        # Rule 5: zealous per-base-line 3-way merge (survey §1.4). Stronger than
+        # Rule 5: zealous per-base-line 3-way merge. Stronger than
         # disjoint_edits — also resolves overlaps that are agreed (both made the
         # same change) or one-sided (one side conceded a sub-region the other
         # touched). Returns None on any genuine two-sided disagreement or
@@ -162,7 +162,7 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if merged is not None:
             return StructuralResolution(rule="zealous_merge", text=merged)
 
-        # Rule 6: entity-level disjoint resolution (survey §3.2/§5.2 Weave/Aura).
+        # Rule 6: entity-level disjoint resolution (Weave/Aura).
         # The line-granular rules above correctly DECLINE when both sides insert
         # DISTINCT entities at the same base line (git sees two insertions at one
         # point → conflict; zealous sees a two-sided insertion → ambiguous → give
@@ -176,7 +176,7 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if merged is not None:
             return StructuralResolution(rule="entity_disjoint", text=merged)
 
-        # Rule 6b: refactoring-aware composition (survey §3.2 RefMerge). Fires
+        # Rule 6b: refactoring-aware composition (RefMerge). Fires
         # when entity_disjoint DECLINED on overlap, but the overlap is entirely a
         # clean rename-vs-body-modify partition: one side renamed an entity (pure
         # header change, body content identical to base), the other modified its
@@ -188,7 +188,7 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if merged is not None:
             return StructuralResolution(rule="refactoring_aware_merge", text=merged)
 
-        # Rule 7: token-level disjoint resolution (survey §4.2 Summer, layer 3).
+        # Rule 7: token-level disjoint resolution (Summer, layer 3).
         # Runs AFTER entity resolution so multi-entity conflicts (renames, adds)
         # are handled at the coarser, identity-aware entity granularity first.
         # Token-disjoint then catches the intra-line case the line/entity rules
@@ -247,7 +247,7 @@ def _accept_deletion(base: str, current: str, replayed: str) -> str | None:
     modified-with-additions content: in that case accepting the deletion could
     drop a real change the other branch introduced, so the LLM must judge.
 
-    This is the survey's "silent loss of intent" guard: without it, a
+    This is prior work's "silent loss of intent" guard: without it, a
     modify/delete can be wrongly merged to keep dead code the deleting branch
     cleaned up. Like every structural rule the result still runs the full
     validation pipeline before acceptance, so a wrong guess is discarded.
@@ -310,7 +310,7 @@ def _base_changed_lines(base: list[str], other: list[str]) -> set[int]:
 
 
 # ---------------------------------------------------------------------------
-# Token-level disjoint resolution (survey §4.2 Summer, layer 3)
+# Token-level disjoint resolution (Summer, layer 3)
 # ---------------------------------------------------------------------------
 
 # Maximum total non-blank lines across the three sides for the token rule to
@@ -729,7 +729,7 @@ def _pure_insertion_runs(
 
 
 def _try_zealous_merge(base: str, current: str, replayed: str) -> str | None:
-    """Per-base-line 3-way merge (survey §1.4 zealous refinement).
+    """Per-base-line 3-way merge.
 
     Aligns each side against base line-by-line via histogram diff. For every base
     region, resolves it as:
@@ -882,11 +882,11 @@ def _regions_against_base(base: list[str], other: list[str]) -> dict[int, tuple[
 
 
 # ---------------------------------------------------------------------------
-# Entity-level disjoint resolution (survey §3.2/§5.2 Weave/Aura)
+# Entity-level disjoint resolution (Weave/Aura)
 # ---------------------------------------------------------------------------
 
 # Minimum name-similarity ratio for two entity names to be considered a rename
-# (s3m's Levenshtein rename handler, survey §2.2). 0.6 is conservative: it
+# (s3m's Levenshtein rename handler, 0.6 is conservative: it
 # catches loadData→fetchData, load→fetch, parse_thing→parse_item, but won't
 # conflate unrelated short names. A rename ALSO requires the body to match
 # (normalized), so a coincidentally-similar name with different content isn't
@@ -899,7 +899,7 @@ def _body_content(body: str) -> str:
 
     Thin delegate to the canonical :func:`abstract_parser.entity_body_content`
     (consolidation #2). Both strip the header line and normalize the rest via
-    the parser's comment/string-aware :func:`normalize_body` (R4), so the
+    the parser's comment/string-aware :func:`normalize_body`, so the
     resolver's rename signal AGREES with the parser's ``unit_body_fingerprint``
     by construction — no longer by manually-maintained coincidence.
     """
@@ -910,7 +910,7 @@ def _body_content(body: str) -> str:
 def _detect_renames(
     side_ents: list, base_ents: list
 ) -> tuple[dict, dict]:
-    """Detect renames of base entities on one side (s3m rename handler, §2.2).
+    """Detect renames of base entities on one side (rename handler, §2.2).
 
     Thin delegate to the canonical :func:`abstract_parser.detect_renames_2way`
     (consolidation #2). The 2-way rename algorithm — index base by body-content,
@@ -958,7 +958,7 @@ def _prepare_entity_merge(unit: ConflictUnit) -> _EntityMergeCtx | None:
       2. Enumerate entities (base/current/replayed), descending into the
          container body when the top-level enumeration returned only the
          container itself.
-      3. Decline on duplicate identities (fix #3 / R5).
+      3. Decline on duplicate identities.
       4. Build the base identity index and detect per-side renames.
 
     Returns the shared context, or ``None`` when any precondition fails (the
@@ -1010,7 +1010,7 @@ def _prepare_entity_merge(unit: ConflictUnit) -> _EntityMergeCtx | None:
         return None
 
     base_by_id = {e.identity: e for e in base_ents}
-    # Rename detection per side (s3m rename handler, survey §2.2): a base entity
+    # Rename detection per side (s3m rename handler, a base entity
     # whose body reappears under a NEW similar name on a side, with the old name
     # gone, is a RENAME — not a base-kept + side-added pair.
     cur_renames, cur_removed = _detect_renames(cur_ents, base_ents)
@@ -1388,7 +1388,7 @@ def _rebuild_container(enclosing_text: str, entity_bodies: list[str], language: 
     enc_lines = enclosing_text.split("\n")
     if not enc_lines:
         return None
-    # R6: when the enclosing node is itself a FUNCTION (``def``/``fn``/``func``/
+    # when the enclosing node is itself a FUNCTION (``def``/``fn``/``func``/
     # ``fun``/``function`` leading the header), the conflict is inside a bare
     # top-level function — NOT a class/impl container. The entity bodies ARE the
     # whole output (joined at module level), and the function's own header must

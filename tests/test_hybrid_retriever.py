@@ -1,4 +1,4 @@
-"""Tests for HybridRetriever (survey §4: BM25 + dense fusion).
+"""Tests for HybridRetriever (BM25 + dense fusion).
 
 Exercises the fusion semantics with controlled stores + fake embedding clients:
 - RRF combines a lexical-only hit with an embedding-only hit (both surface).

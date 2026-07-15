@@ -219,7 +219,7 @@ def test_conformal_model_load_returns_none_for_non_conformal(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# TECP token-entropy threshold (survey §4.1): the entropy-only conformal gate
+# TECP token-entropy threshold: the entropy-only conformal gate
 # that fires when a candidate's mean token-entropy exceeds the (1-alpha)
 # quantile fit on accepted calibration outcomes.
 # ---------------------------------------------------------------------------
