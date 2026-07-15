@@ -909,6 +909,29 @@ def _is_bare_function_header(header_line: str) -> bool:
     return i < len(toks) and toks[i] in _FN_DECL_KEYWORDS
 
 
+def _has_name_collision(merged_ids: list) -> bool:
+    """True when two merged entities share the same resulting ``(kind, name)``.
+
+    The merge-walk's ``seen`` set is keyed by canonical BASE identity, so a
+    rename (cur: foo->bar, recorded under canonical foo) and an independent
+    addition (rep: fresh bar, canonical bar) both emit a ``bar`` — a malformed
+    container with a doubled method. Callers use this to DECLINE (return None)
+    so the conflict escalates to the line/LLM path rather than producing a
+    silently-wrong doubled entity.
+
+    Overloads are already declined upstream by ``has_duplicate_identities``
+    (same identity in one version), so any collision here is always a
+    malformation, never a legitimate merge.
+    """
+    emitted: set = set()
+    for e in merged_ids:
+        key = (e.kind, e.name)
+        if key in emitted:
+            return True
+        emitted.add(key)
+    return False
+
+
 def _body_content(body: str, lang: str | None = None) -> str:
     """The body with its signature/header line removed, normalized.
 
@@ -1179,18 +1202,10 @@ def _try_entity_disjoint(unit: ConflictUnit) -> str | None:
             merged_ids.append(e)
             seen.add(canon)
 
-    # Name-collision guard: the ``seen`` set is keyed by canonical BASE identity,
-    # so a rename (cur: foo->bar, recorded under canonical foo) and an independent
-    # addition (rep: fresh bar, canonical bar) both emit a ``bar`` — producing a
-    # malformed container with a doubled method. Decline when two merged entities
-    # would share the same resulting (kind, name); the conflict escalates to the
-    # line/LLM path instead of a silently-wrong doubled entity.
-    emitted_names: set = set()
-    for e in merged_ids:
-        key = (e.kind, e.name)
-        if key in emitted_names:
-            return None
-        emitted_names.add(key)
+    # Name-collision guard (see _has_name_collision): decline if two merged
+    # entities would share the same resulting (kind, name).
+    if _has_name_collision(merged_ids):
+        return None
 
     # Reconstruct the container text. The enclosing node's text is the source of
     # truth for its non-entity framing (class header, impl braces, indentation).
@@ -1377,6 +1392,12 @@ def _try_refactoring_aware_merge(unit: ConflictUnit) -> str | None:
         if canon not in base_by_id and canon not in seen:
             merged_ids.append(e)
             seen.add(canon)
+
+    # Name-collision guard (see _has_name_collision): decline if two merged
+    # entities would share the same resulting (kind, name). The compose step
+    # can rename an entity to a name the other side independently added.
+    if _has_name_collision(merged_ids):
+        return None
 
     return _rebuild_container(enc_text, [e.body for e in merged_ids], lang)
 

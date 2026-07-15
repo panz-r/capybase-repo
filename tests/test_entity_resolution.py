@@ -767,3 +767,25 @@ def test_h2_entity_disjoint_rename_plus_independent_add_no_duplicate():
     assert result.count("def bar") <= 1, (
         f"merge produced a doubled 'def bar' (rename + independent-add collision);\n{result!r}"
     )
+
+
+# --- Finding 1 regression: refactoring_aware_merge doubled entity ---
+
+
+def test_f1_refactoring_aware_merge_rename_plus_add_no_duplicate():
+    """The H2 name-collision guard was added only to _try_entity_disjoint.
+    _try_refactoring_aware_merge (the sibling strategy) builds merged_ids the
+    same way and had the same doubled-entity bug: when one side renames foo->bar
+    and the other modifies foo's body AND adds a fresh bar, the composed entity
+    (bar's header) and the addition (fresh bar) collide, producing two def bar.
+    Unlike entity_disjoint, this output is syntactically valid Python (second
+    shadows first) so validation may NOT catch it — a silent wrong merge."""
+    base = "class C:\n    def foo(self):\n        return 1\n"
+    cur = "class C:\n    def bar(self):\n        return 1\n"      # rename foo->bar
+    rep = "class C:\n    def foo(self):\n        return 2\n    def bar(self):\n        return 99\n"  # modify foo + add bar
+    result = _try_refactoring_aware_merge(_unit(base, cur, rep))
+    if result is None:
+        return  # declined — correct
+    assert result.count("def bar") <= 1, (
+        f"refactoring_aware merge produced a doubled 'def bar';\n{result!r}"
+    )
