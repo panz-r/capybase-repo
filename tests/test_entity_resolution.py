@@ -357,6 +357,38 @@ def test_r6_entity_disjoint_bare_function_not_double_wrapped():
             )
 
 
+def test_rebuild_container_visibility_prefixed_fn_is_bare():
+    """A bare function with a visibility/async modifier (``pub fn``, ``export
+    function``, ``async def``) is still a bare function, not a container — the
+    merged entities must emit flat, not wrapped inside the function header.
+
+    Regression guard: the old hardcoded ``_ENTITY_HEADER_TOKENS`` tuple matched
+    only the keyword itself (``fn ``/``def ``/...), so ``pub fn foo() {`` missed
+    the bare-function check and got the container splice — wrapping the merged
+    entities inside ``pub fn foo() { ... }`` (a malformation)."""
+    from capybase.structural_resolver import _rebuild_container
+    ents = ["def a():\n    return 1", "def b():\n    return 2"]
+    # Each visibility-prefixed function header must emit flat (no wrapper).
+    for header in (
+        "pub fn compute() {", "pub async fn compute() {",
+        "export function compute() {", "unsafe fn compute() {",
+        "async def compute():",
+    ):
+        enc = header + "\n    x + 1\n}" if "{" in header else header + "\n    return 1"
+        result = _rebuild_container(enc, ents, "rust" if "{" in header else "python")
+        assert result is not None, f"{header}: rebuild returned None"
+        # Flat: both entities present, no enclosing function header wrapping them.
+        assert "def a()" in result and "def b()" in result, f"{header}: missing entities"
+        assert "compute" not in result, (
+            f"{header}: enclosing header kept (the malformation);\n{result!r}"
+        )
+    # A visibility-prefixed CONTAINER (pub struct) must still wrap correctly.
+    r = _rebuild_container("pub struct S {\n    x: u32\n}", ents, "rust")
+    assert r is not None and "pub struct S {" in r and "}" in r.split("\n")[-1], (
+        f"pub struct should keep its container framing;\n{r!r}"
+    )
+
+
 def test_r6_refactoring_aware_bare_function_not_double_wrapped():
     """``_try_refactoring_aware_merge`` on a bare-function rename+modify
     (one side renames foo→bar, other modifies foo's body) produces the single

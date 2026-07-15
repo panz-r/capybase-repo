@@ -868,12 +868,45 @@ def _regions_against_base(base: list[str], other: list[str]) -> dict[int, tuple[
 # ---------------------------------------------------------------------------
 
 # Minimum name-similarity ratio for two entity names to be considered a rename
-# (s3m's Levenshtein rename handler, 0.6 is conservative: it
-# catches loadData→fetchData, load→fetch, parse_thing→parse_item, but won't
-# conflate unrelated short names. A rename ALSO requires the body to match
-# (normalized), so a coincidentally-similar name with different content isn't
-# misread as a rename. The threshold and name-similarity now live canonically
-# in abstract_parser (RENAME_NAME_SIMILARITY_THRESHOLD / name_similarity).
+# (0.6 is conservative: it catches loadData→fetchData, load→fetch,
+# parse_thing→parse_item, but won't conflate unrelated short names. A rename
+# ALSO requires the body to match (normalized), so a coincidentally-similar
+# name with different content isn't misread as a rename. The threshold and
+# name-similarity now live canonically in abstract_parser
+# (RENAME_NAME_SIMILARITY_THRESHOLD / name_similarity).
+
+#: Function-declaration keywords that, when leading a header line, identify the
+#: enclosing node as a bare FUNCTION (not a class/impl container). Used by
+#: ``_rebuild_container`` to decide whether to emit merged entities flat (bare-
+#: function conflict — the entities ARE the output) or splice them inside the
+#: container's header+trailer. Covers both supported families (Python/Rust) plus
+#: the other Family-A languages the parser recognizes, with the leading
+#: visibility/async modifiers that may precede the keyword.
+_FN_DECL_KEYWORDS = (
+    "def", "fn", "func", "fun", "function",
+)
+_VISIBILITY_PREFIXES = (
+    "pub", "export", "public", "private", "protected",
+    "internal", "extern", "unsafe", "async",
+)
+
+
+def _is_bare_function_header(header_line: str) -> bool:
+    """True when ``header_line`` declares a bare function (not a container).
+
+    Handles visibility/async modifiers preceding the function keyword:
+    ``pub fn``, ``export function``, ``async def``, ``unsafe extern fn``, etc.
+    A class/struct/impl/enum header (``class C`` / ``struct S`` / ``impl T``)
+    returns False — those are containers warranting the header+trailer splice.
+    """
+    toks = header_line.lstrip().split()
+    if not toks:
+        return False
+    # Strip leading visibility/async modifiers, then check the first real token.
+    i = 0
+    while i < len(toks) and toks[i] in _VISIBILITY_PREFIXES:
+        i += 1
+    return i < len(toks) and toks[i] in _FN_DECL_KEYWORDS
 
 
 def _body_content(body: str) -> str:
@@ -1370,16 +1403,15 @@ def _rebuild_container(enclosing_text: str, entity_bodies: list[str], language: 
     enc_lines = enclosing_text.split("\n")
     if not enc_lines:
         return None
-    # when the enclosing node is itself a FUNCTION (``def``/``fn``/``func``/
-    # ``fun``/``function`` leading the header), the conflict is inside a bare
-    # top-level function — NOT a class/impl container. The entity bodies ARE the
-    # whole output (joined at module level), and the function's own header must
-    # NOT be re-emitted as a wrapper (that produced ``def foo():\\n    def
-    # foo():`` — a nested/recursive malformation). Only a real container
-    # (class/impl/struct) warrants the header+trailer splice below.
-    header_line = enc_lines[0].lstrip()
-    _ENTITY_HEADER_TOKENS = ("def ", "fn ", "func ", "fun ", "function ", "async def ", "async fn ")
-    if any(header_line.startswith(tok) for tok in _ENTITY_HEADER_TOKENS):
+    # When the enclosing node is itself a FUNCTION (``def``/``fn``/``func``/
+    # ``fun``/``function`` leading the header, possibly visibility/async-
+    # prefixed), the conflict is inside a bare top-level function — NOT a
+    # class/impl container. The entity bodies ARE the whole output (joined at
+    # module level), and the function's own header must NOT be re-emitted as a
+    # wrapper (that produced ``def foo():\\n    def foo():`` — a nested/
+    # recursive malformation). Only a real container (class/impl/struct)
+    # warrants the header+trailer splice below.
+    if _is_bare_function_header(enc_lines[0]):
         # Bare-function conflict: emit the entity bodies flat, separated by a
         # blank line (module-level convention), no wrapper.
         return "\n\n".join(entity_bodies) if entity_bodies else ""
