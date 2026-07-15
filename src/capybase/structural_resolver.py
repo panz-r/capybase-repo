@@ -1176,6 +1176,19 @@ def _try_entity_disjoint(unit: ConflictUnit) -> str | None:
             merged_ids.append(e)
             seen.add(canon)
 
+    # Name-collision guard: the ``seen`` set is keyed by canonical BASE identity,
+    # so a rename (cur: foo->bar, recorded under canonical foo) and an independent
+    # addition (rep: fresh bar, canonical bar) both emit a ``bar`` — producing a
+    # malformed container with a doubled method. Decline when two merged entities
+    # would share the same resulting (kind, name); the conflict escalates to the
+    # line/LLM path instead of a silently-wrong doubled entity.
+    emitted_names: set = set()
+    for e in merged_ids:
+        key = (e.kind, e.name)
+        if key in emitted_names:
+            return None
+        emitted_names.add(key)
+
     # Reconstruct the container text. The enclosing node's text is the source of
     # truth for its non-entity framing (class header, impl braces, indentation).
     # We splice the merged entity bodies back into that framing.

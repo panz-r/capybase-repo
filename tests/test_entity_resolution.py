@@ -742,3 +742,28 @@ def test_h1_both_sides_rename_same_name_different_bodies_stays_conflict():
     assert len(diff_ok.structural_conflicts) == 0, (
         "both-sides-rename with identical bodies is an agreed rename, not a conflict"
     )
+
+
+# --- H2 regression: rename + independent-add name collision must not double ---
+
+
+def test_h2_entity_disjoint_rename_plus_independent_add_no_duplicate():
+    """When one side renames ``foo``→``bar`` and the other side independently
+    adds a fresh ``bar`` (different body, not a rename of foo), the merged
+    container must NOT end up with two ``bar`` methods.
+
+    The merge-walk's ``seen`` set is keyed by canonical BASE identity: the
+    renamed bar is recorded under canonical ``foo``, while the independently-
+    added bar has canonical ``bar``, so the dedup misses and both emit.
+    The resolver should DECLINE (return None) when a name collision would
+    result, rather than produce a malformed class with a doubled method."""
+    base = "class C:\n    def foo(self):\n        return 1\n"
+    cur = "class C:\n    def bar(self):\n        return 1\n"      # rename foo->bar
+    rep = "class C:\n    def foo(self):\n        return 1\n    def bar(self):\n        return 99\n"  # keeps foo + adds bar
+    result = _try_entity_disjoint(_unit(base, cur, rep))
+    if result is None:
+        return  # declined — correct
+    # If it resolved, there must NOT be two def bar.
+    assert result.count("def bar") <= 1, (
+        f"merge produced a doubled 'def bar' (rename + independent-add collision);\n{result!r}"
+    )
