@@ -232,7 +232,7 @@ _STRING_LIT_RE = re.compile(
 )
 
 
-def unit_body_fingerprint(body: str) -> str:
+def unit_body_fingerprint(body: str, *, lang: str | None = None) -> str:
     """A normalized, rename-insensitive digest of a unit's body content.
 
     Stable under whitespace, comment, and formatting changes, and RENAME-
@@ -242,6 +242,11 @@ def unit_body_fingerprint(body: str) -> str:
     ``structural._split_header_body`` contract (header-stripped, whitespace-
     collapsed body) so the existing rename-detection thresholds (Jaccard 0.80)
     stay calibrated.
+
+    ``lang`` selects the comment marker: ``//`` for Family-A brace languages
+    (Rust/JS/Go/...), ``#`` for Python/Ruby. Defaults to Python (``None``).
+    Comment-stability requires the RIGHT marker — a Rust ``// note`` must be
+    stripped, a Python ``//`` (floor division) must not.
 
     The digest folds in the line count + a SHA1 of the normalized body content
     so it is short to store/compare yet discriminating.
@@ -253,11 +258,11 @@ def unit_body_fingerprint(body: str) -> str:
     # Strip the header (first line: the def/fn/class signature) so a rename
     # (which only changes the header's name token) leaves the digest unchanged.
     rest = "\n".join(lines[1:])
-    norm = normalize_body(rest)
+    norm = normalize_body(rest, lang=lang)
     # Count MEANINGFUL lines (non-blank, non-comment) so adding a comment line
     # doesn't perturb the digest — the fingerprint is stable under comment
     # additions (the AstPreservationValidator relies on this).
-    meaningful = sum(1 for ln in lines[1:] if _has_code_content(ln))
+    meaningful = sum(1 for ln in lines[1:] if _has_code_content(ln, lang=lang))
     if not norm:
         return f"l{meaningful}"
     digest = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
@@ -276,18 +281,27 @@ def _fingerprint_has_content(fingerprint: str) -> bool:
     return bool(fingerprint) and ":" in fingerprint
 
 
-#: Matches a comment-only line (Python ``#``, Rust/JS/Go/C ``//``, block ``/* */``).
-_COMMENT_LINE_RE = re.compile(
-    r"^\s*(?:#|//|/\*|\*/).*$"
-)
+#: Matches a comment-only line for Family-A (Rust/JS/Go/C ``//``, block ``/* */``).
+_A_COMMENT_LINE_RE = re.compile(r"^\s*(?://|/\*|\*/).*$")
+#: Matches a comment-only line for Family-B (Python/Ruby ``#``).
+_B_COMMENT_LINE_RE = re.compile(r"^\s*#.*$")
 
 
-def _has_code_content(line: str) -> bool:
-    """True if a line carries actual code (not blank or a pure comment)."""
+def _has_code_content(line: str, *, lang: str | None = None) -> bool:
+    """True if a line carries actual code (not blank or a pure comment).
+
+    ``lang`` selects the comment marker: ``//`` for Family-A brace languages,
+    ``#`` for Python/Ruby. A Python ``// count`` (floor division) is NOT a
+    comment; a Rust ``#[attr]`` is NOT a comment. Defaults to Python.
+    """
     if not line.strip():
         return False
-    if _COMMENT_LINE_RE.match(line):
-        return False
+    if _lang_is_family_a(lang):
+        if _A_COMMENT_LINE_RE.match(line):
+            return False
+    else:
+        if _B_COMMENT_LINE_RE.match(line):
+            return False
     return True
 
 
@@ -326,23 +340,28 @@ def _lang_is_family_a(lang: str | None) -> bool:
     return _LANG_FAMILY.get(lang.strip().lower()) == FAMILY_A
 
 
-def normalize_body(text: str) -> str:
+def normalize_body(text: str, *, lang: str | None = None) -> str:
     """Whitespace-collapse + string/comment-literal-neutralize a body region.
 
     ``" ".join(split())`` collapses all whitespace runs to single spaces (stable
     across indentation/reformatting). String literals are blanked and comments
     stripped first so two bodies differing only in string values or comments
     normalize equal — rename detection and AST preservation shouldn't be thrown
-    off by ``return 'hello'`` vs ``return 'hi'`` or an added ``# note``.
+    off by ``return 'hello'`` vs ``return 'hi'`` or an added comment.
+
+    ``lang`` selects the comment marker (``//`` for Family-A brace languages,
+    ``#`` for Python/Ruby); defaults to Python. Stripping the WRONG marker
+    corrupts the body: a Rust ``// note`` left in (or a Python ``//`` floor-
+    division stripped) breaks rename pairing.
     """
     if not text:
         return ""
     # Drop pure-comment lines and strip inline comments, then blank string lits.
     kept = []
     for ln in text.split("\n"):
-        if not _has_code_content(ln):
+        if not _has_code_content(ln, lang=lang):
             continue
-        kept.append(_strip_inline_comment(ln))
+        kept.append(_strip_inline_comment(ln, lang=lang))
     joined = "\n".join(kept)
     blanked = _STRING_LIT_RE.sub("'_'", joined)
     return " ".join(blanked.split())
@@ -667,7 +686,7 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
         while stack and stack[-1].indent >= indent:
             u = stack.pop()
             u_end = end_row if end_row >= u.start_row else u.start_row
-            _finalize_unit(u, u_end, lines, units, stack)
+            _finalize_unit(u, u_end, lines, units, stack, language)
 
     for i, raw in enumerate(lines):
         # backslash line-continuation. A prior line ending in ``\`` is joined
@@ -779,7 +798,7 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
                     name=name,
                     span=(start, i),
                     body=body,
-                    fingerprint=unit_body_fingerprint(body),
+                    fingerprint=unit_body_fingerprint(body, lang=language),
                 )
             )
             pending_decorator_indent = None
@@ -868,6 +887,7 @@ def _finalize_unit(
     lines: list[str],
     units: list[StructuralUnit],
     stack: list[_OpenUnit],
+    language: str | None,
 ) -> None:
     """Pop a finished open unit: compute span/body from source, attach to parent."""
     body = _slice_body("\n".join(lines), lines, u.start_row, end_row)
@@ -878,7 +898,7 @@ def _finalize_unit(
         span=(u.start_row, max(end_row, u.start_row)),
         body=body,
         children=list(u.children),
-        fingerprint=unit_body_fingerprint(body),
+        fingerprint=unit_body_fingerprint(body, lang=language),
         is_test=u.is_test,
     )
     if stack:
@@ -1245,7 +1265,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             ):
                 # Close all open units.
                 while stack:
-                    _close_a_unit(stack.pop(), brace_depth + 1, src, units, stack, _line_index)
+                    _close_a_unit(stack.pop(), brace_depth + 1, src, units, stack, language, _line_index)
                 # Reset statement state.
                 buf = ""
                 # Skip the rest of this line.
@@ -1292,7 +1312,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # index so the body slice can be computed precisely.
             closed_unit = False
             while stack and brace_depth < stack[-1].open_brace_depth:
-                _close_a_unit(stack.pop(), i, src, units, stack, _line_index)
+                _close_a_unit(stack.pop(), i, src, units, stack, language, _line_index)
                 closed_unit = True
             # When a ``}`` closes a top-level DECLARATION scope back to depth 0
             # (a unit was popped), the next statement starts fresh. But a ``}``
@@ -1346,7 +1366,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                                 name=fname,
                                 span=(start_row_f, end_row),
                                 body=body,
-                                fingerprint=unit_body_fingerprint(body),
+                                fingerprint=unit_body_fingerprint(body, lang=language),
                             )
                         )
             # A ``;`` ends the statement; the next one starts after it. Only
@@ -1409,7 +1429,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
 
     # EOF: close any still-open units (malformed/unclosed — never crash).
     while stack:
-        _close_a_unit(stack.pop(), n, src, units, stack, _line_index)
+        _close_a_unit(stack.pop(), n, src, units, stack, language, _line_index)
 
     # Field units are emitted in the main scan at the ``;`` terminator,
     # so no second whole-file re-scan is needed here.
@@ -1440,6 +1460,7 @@ def _close_a_unit(
     src: str,
     units: list[StructuralUnit],
     stack: list[_OpenAUnit],
+    language: str | None,
     line_index: list[int] | None = None,
 ) -> None:
     """Finalize a Family-A unit: slice body, compute span/fingerprint, attach.
@@ -1487,7 +1508,7 @@ def _close_a_unit(
         span=(start_row, end_row),
         body=body,
         children=children,
-        fingerprint=unit_body_fingerprint(body),
+        fingerprint=unit_body_fingerprint(body, lang=language),
         is_test=unit.is_test,
         is_container_scope=unit.container_only,
     )
@@ -2035,7 +2056,7 @@ def _emit_a_expression_body_units(
                     name=name,
                     span=(row, row),
                     body=body,
-                    fingerprint=unit_body_fingerprint(body),
+                    fingerprint=unit_body_fingerprint(body, lang=language),
                 )
             )
             existing.add(ident)
@@ -2479,7 +2500,7 @@ def _raw_header_body_split(body: str) -> tuple[str, str]:
     return line, ""
 
 
-def split_header_body(body: str) -> tuple[str, str]:
+def split_header_body(body: str, *, lang: str | None = None) -> tuple[str, str]:
     """Split a unit's body text into (header, rest), comment-stripped.
 
     The CANONICAL header/body split for rename detection: a rename changes the
@@ -2489,12 +2510,15 @@ def split_header_body(body: str) -> tuple[str, str]:
     in those normalize equal — rename detection is comment-stable. (Change
     detection in ``structural._split_header_body`` intentionally diverges: it
     preserves comments via a whitespace-only collapse.)
+
+    ``lang`` selects the comment marker (``//`` for Family-A, ``#`` for
+    Python/Ruby); defaults to Python.
     """
     header, rest = _raw_header_body_split(body)
-    return _normalize_header(header), normalize_body(rest)
+    return _normalize_header(header), normalize_body(rest, lang=lang)
 
 
-def entity_body_content(body: str) -> str:
+def entity_body_content(body: str, *, lang: str | None = None) -> str:
     """The header-stripped, comment/string-normalized body content.
 
     A rename changes the def/fn/class header (``def loadData`` → ``def
@@ -2509,11 +2533,12 @@ def entity_body_content(body: str) -> str:
     This is the CANONICAL body signal for rename detection (consolidation #2).
     It delegates the header/body split to :func:`split_header_body` (which is
     one-liner-aware), then normalizes the body part. Works on the raw ``.body``
-    string any unit/entity carries.
+    string any unit/entity carries. ``lang`` selects the comment marker;
+    defaults to Python.
     """
     if not body:
         return ""
-    _, rest = split_header_body(body)
+    _, rest = split_header_body(body, lang=lang)
     return rest
 
 

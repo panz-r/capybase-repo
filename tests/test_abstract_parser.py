@@ -2918,3 +2918,36 @@ def test_m1_raw_string_closer_advances_past_hashes():
     assert _unit_named(ir2, "f"), (
         f"multi-hash raw-string closer must not corrupt; got {_kinds_of(ir2)}"
     )
+
+
+# --- A1 regression: Family-A // comments must be stripped from fingerprints ---
+
+
+def test_a1_family_a_inline_comment_stripped_from_fingerprint():
+    """A Rust/JS/Go inline ``//`` comment must be stripped from the body
+    fingerprint so two bodies differing only by a comment normalize equal
+    (the AstPreservationValidator relies on comment-stability).
+
+    The C1 fix made _strip_inline_comment language-aware but didn't thread
+    ``lang`` through normalize_body → unit_body_fingerprint, so the default
+    (Python: strip #, keep //) applied to Family-A too — breaking comment-
+    stability for every Family-A language and silently breaking rename
+    detection when a side adds/removes an inline comment."""
+    from capybase.adapters.abstract_parser import (
+        unit_body_fingerprint, normalize_body, entity_body_content,
+    )
+    rust_with = "fn compute(x: i32) -> i32 {\n    let y = x * 2;\n    y + 1 // note\n}"
+    rust_without = "fn compute(x: i32) -> i32 {\n    let y = x * 2;\n    y + 1\n}"
+    # Family-A fingerprints must be comment-stable.
+    assert unit_body_fingerprint(rust_with, lang="rust") == unit_body_fingerprint(rust_without, lang="rust"), (
+        "Rust // comment must be stripped from the fingerprint (comment-stability)"
+    )
+    # And the Python direction still works (// is floor division, preserved).
+    py_div = "def f():\n    x = total // count\n"
+    py_no = "def f():\n    x = total\n"
+    assert unit_body_fingerprint(py_div, lang="python") != unit_body_fingerprint(py_no, lang="python"), (
+        "Python // is floor division and must be PRESERVED (C1 contract)"
+    )
+    assert unit_body_fingerprint(py_div) != unit_body_fingerprint(py_no), (
+        "default (no lang) is Python-correct"
+    )

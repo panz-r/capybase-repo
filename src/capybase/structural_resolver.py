@@ -909,7 +909,7 @@ def _is_bare_function_header(header_line: str) -> bool:
     return i < len(toks) and toks[i] in _FN_DECL_KEYWORDS
 
 
-def _body_content(body: str) -> str:
+def _body_content(body: str, lang: str | None = None) -> str:
     """The body with its signature/header line removed, normalized.
 
     Thin delegate to the canonical :func:`abstract_parser.entity_body_content`
@@ -917,9 +917,12 @@ def _body_content(body: str) -> str:
     the parser's comment/string-aware :func:`normalize_body`, so the
     resolver's rename signal AGREES with the parser's ``unit_body_fingerprint``
     by construction — no longer by manually-maintained coincidence.
+
+    ``lang`` selects the comment marker (``//`` for Family-A, ``#`` for
+    Python/Ruby) so the fingerprint and this signal stay consistent per language.
     """
     from capybase.adapters.abstract_parser import entity_body_content
-    return entity_body_content(body)
+    return entity_body_content(body, lang=lang)
 
 
 def _detect_renames(
@@ -1287,7 +1290,7 @@ def _try_refactoring_aware_merge(unit: ConflictUnit) -> str | None:
         base_e = base_by_id.get(base_id)
         if base_e is None:
             return False
-        return _body_content(ent.body) == _body_content(base_e.body)
+        return _body_content(ent.body, lang) == _body_content(base_e.body, lang)
 
     def _is_body_modify(ent):
         """True if ``ent`` has the same identity as a base entity, the same header
@@ -1298,7 +1301,7 @@ def _try_refactoring_aware_merge(unit: ConflictUnit) -> str | None:
             return False  # not a base entity → it's an addition, not a modify
         if _entity_header_line(ent.body) != _entity_header_line(base_e.body):
             return False  # header changed → signature change, not body-only
-        return _body_content(ent.body) != _body_content(base_e.body)
+        return _body_content(ent.body, lang) != _body_content(base_e.body, lang)
 
     def _touched(side_ents, renames):
         """Canonical base identities a side touched (rename-aware), as Entity objs
