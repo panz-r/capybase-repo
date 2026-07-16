@@ -1391,8 +1391,13 @@ def _container_sibling_names(stack: list["_OpenAUnit"]) -> set[str]:
             names.add(child.name)
     # An open frame is a sibling if it sits directly inside the same container
     # (open_brace_depth == top's). In practice this is the still-open braced
-    # method whose body we might be shadowing — reserve its name.
+    # method whose body we might be shadowing — reserve its name. Exclude the
+    # container frame itself (``top``): its own name is NOT a sibling item, and
+    # reserving it would silently drop an associated item named after its
+    # container (e.g. ``trait serialize { fn serialize(&self); }``).
     for frame in stack:
+        if frame is top:
+            continue
         if frame.open_brace_depth == top.open_brace_depth and frame.name:
             names.add(frame.name)
     return names
@@ -2343,7 +2348,10 @@ def _strip_trailing_signature_tokens(joined: str) -> str:
             tokens = tokens[:idx]
             break
     # (2) Trailing qualifier keywords. Drop them from the tail while they keep
-    # appearing (stackable: ``const noexcept override``).
+    # appearing (stackable: ``const noexcept override``). Handles BOTH the glued
+    # form (``noexcept(false)``) and the spaced form (``noexcept (false)`` — valid
+    # C++ with whitespace before the argument list), which tokenize as separate
+    # tokens ``noexcept ( false )``.
     # Special-case Java ``throws A, B``: once ``throws`` is seen, drop it AND
     # everything after (the exception list).
     out: list[str] = []
@@ -2355,9 +2363,52 @@ def _strip_trailing_signature_tokens(joined: str) -> str:
             throwing = True
             continue
         out.append(tok)
-    while out and _is_trailing_qualifier_token(out[-1]):
-        out.pop()
+    out = _strip_trailing_qualifier_run(out)
     return " ".join(out)
+
+
+def _strip_trailing_qualifier_run(toks: list[str]) -> list[str]:
+    """Strip a run of trailing method qualifiers from ``toks`` (in place safe).
+
+    Handles bare keywords (``const``/``noexcept``/...), the glued parenthesized
+    form (``noexcept(false)``), AND the spaced form (``noexcept ( false )``).
+    Loops so stacked qualifiers (``const noexcept (false) override``) are all
+    stripped. Stops at the first non-qualifier tail token.
+    """
+    while toks:
+        last = toks[-1]
+        # Glued or bare qualifier: single-token pop.
+        if _is_trailing_qualifier_token(last):
+            toks.pop()
+            continue
+        # Spaced parenthesized form: ``... noexcept ( ... )`` — the tail is ``)``.
+        # Scan back to the matching ``(`` and check the token before it is a
+        # qualifier keyword. If so, pop the whole ``keyword ( ... )`` group.
+        if last == ")" or last.endswith(")"):
+            open_idx = _match_paren_open(toks, len(toks) - 1)
+            if open_idx > 0 and toks[open_idx - 1] in _A_TRAILING_METHOD_QUALIFIERS:
+                del toks[open_idx - 1 :]
+                continue
+        break
+    return toks
+
+
+def _match_paren_open(toks: list[str], close_idx: int) -> int:
+    """Index in ``toks`` of the ``(`` matching the ``)`` at ``close_idx``, or -1.
+
+    Walks backwards matching paren depth across tokens (a token may be ``(``,
+    ``)``, or contain them glued like ``foo()``). Used by the spaced-qualifier
+    stripper to find the opener of a trailing ``keyword ( ... )`` group.
+    """
+    depth = 0
+    for idx in range(close_idx, -1, -1):
+        tok = toks[idx]
+        # Count net parens in this token.
+        depth += tok.count(")")
+        depth -= tok.count("(")
+        if depth == 0:
+            return idx
+    return -1
 
 
 def _is_trailing_qualifier_token(tok: str) -> bool:

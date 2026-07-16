@@ -3567,3 +3567,61 @@ def test_r25_java_static_final_field_name():
     ir = ap.parse_family_a(src, "java")
     fields = [u.name for u in ap.all_units_flat(ir) if u.kind == "field"]
     assert "final" not in fields, f"phantom field 'final'; got {fields}"
+
+
+# ---------------------------------------------------------------------------
+# Round 26 — residual bugs in the round-25 fixes, found by stress-testing.
+# ---------------------------------------------------------------------------
+
+
+def test_r26_assoc_item_named_same_as_container_survives():
+    """F1 (HIGH): an associated item whose name equals its container's name was
+    silently dropped — ``_container_sibling_names`` reserved the container's OWN
+    name (the ``top`` frame matched its own open_brace_depth). The realistic case
+    is ``trait serialize { fn serialize(&self); }``."""
+    src = "trait serialize {\n    fn serialize(&self);\n}\n"
+    ir = ap.parse_family_a(src, "rust")
+    methods = [u.name for u in ap.all_units_flat(ir) if u.kind == "method"]
+    assert "serialize" in methods, f"method named after trait dropped; got {methods}"
+
+
+def test_r26_assoc_const_named_same_as_impl_survives():
+    """F1 (const variant): ``impl C { const C: u32 = 1; }`` — the const named C
+    must survive (it's not a collision with the impl, which is container-only)."""
+    src = "impl C {\n    const C: u32 = 1;\n}\n"
+    ir = ap.parse_family_a(src, "rust")
+    names = [u.name for u in ap.all_units_flat(ir)]
+    assert "C" in names, f"const named after impl dropped; got {names}"
+
+
+def test_r26_go_interface_method_named_same_as_interface_survives():
+    """F1 (Go variant): ``type Reader interface { Reader(p []byte) error }``."""
+    src = "type Reader interface {\n    Reader(p []byte) error\n}\n"
+    ir = ap.parse_family_a(src, "go")
+    methods = [u.name for u in ap.all_units_flat(ir) if u.kind == "method"]
+    assert "Reader" in methods, f"method named after interface dropped; got {methods}"
+
+
+def test_r26_cpp_spaced_noexcept_expr_no_phantom():
+    """F2 (HIGH): ``void f() noexcept (false)`` (spaced form) produced a phantom
+    method named ``noexcept`` and dropped the real method ``f``. The round-25 H3
+    fix only handled the glued ``noexcept(false)`` form."""
+    src = (
+        "struct S {\n"
+        "    void f() noexcept (false) { }\n"
+        "    void g() { }\n"
+        "};\n"
+    )
+    kinds = _kinds(src, "cpp")
+    names = [n for _, n in kinds]
+    assert "noexcept" not in names, f"phantom noexcept emitted; got {kinds}"
+    assert ("method", "f") in kinds, f"method f dropped; got {kinds}"
+
+
+def test_r26_cpp_spaced_throw_no_phantom():
+    """F2 (throw variant): ``void f() throw ()`` (spaced dynamic-exception spec)."""
+    src = "struct S {\n    void f() throw () { }\n    void g() { }\n};\n"
+    kinds = _kinds(src, "cpp")
+    names = [n for _, n in kinds]
+    assert "throw" not in names, f"phantom throw emitted; got {kinds}"
+    assert ("method", "f") in kinds, f"method f dropped; got {kinds}"
