@@ -1403,6 +1403,81 @@ def _container_sibling_names(stack: list["_OpenAUnit"]) -> set[str]:
     return names
 
 
+def _go_method_start_row(src: str, newline_idx: int, body: str, close_row: int) -> int:
+    """Approximate the start row of a Go interface method signature.
+
+    For a multi-line signature, the method name is on an earlier line than the
+    closing ``)``. Walk backwards from the closing line, counting source lines
+    until we find the one containing the method name (the first identifier token
+    of ``body``). Returns ``close_row`` if the name isn't found (single-line case
+    or malformed input).
+    """
+    name = body.split("(")[0].split()[-1] if "(" in body else (body.split()[-1] if body.split() else "")
+    if not name:
+        return close_row
+    row = close_row
+    pos = newline_idx
+    while pos > 0:
+        nl = src.rfind("\n", 0, pos)
+        if nl < 0:
+            line = src[:pos]
+            pos = -1
+        else:
+            line = src[nl + 1 : pos]
+            pos = nl
+        if name in line:
+            return row
+        row -= 1
+        if row < 0:
+            break
+    return close_row
+
+
+def _go_buf_is_interface_body(stack: list["_OpenAUnit"], src: str) -> bool:
+    """True if the innermost open frame is a Go interface body."""
+    if not stack:
+        return False
+    top = stack[-1]
+    if top.kind != KIND_CLASS:
+        return False
+    return "interface" in src[top.start_byte : top.body_start_byte + 1]
+
+
+def _emit_go_interface_method_from_buf(
+    buf: str,
+    stack: list["_OpenAUnit"],
+    src: str,
+    semi_idx: int,
+    cur_row_at,
+) -> bool:
+    """Emit a Go interface method from a ``;``-terminated buffer (single-line).
+
+    Handles the single-line interface form
+    ``type R interface { Read(p []byte) error; Close() error }`` where methods
+    are ``;``-separated with no newlines between them. The newline-based emitter
+    can't catch these. Returns True if a method was emitted.
+    """
+    if not stack or not buf.strip():
+        return False
+    body = buf.strip().rstrip(";").strip()
+    if not body:
+        return False
+    name = _go_method_name_from_buf(body)
+    if not name or name in _container_sibling_names(stack):
+        return False
+    row = cur_row_at(semi_idx)
+    stack[-1].children.append(
+        StructuralUnit(
+            kind=KIND_METHOD,
+            name=name,
+            span=(row, row),
+            body=body,
+            fingerprint=unit_body_fingerprint(body, lang="go"),
+        )
+    )
+    return True
+
+
 def _go_method_name_from_buf(buf: str) -> str | None:
     """Recover a Go method/function name from a buffered signature line.
 
@@ -1482,18 +1557,25 @@ def _maybe_emit_go_interface_method(
         return False
     if name in _container_sibling_names(stack):
         return False
-    # The body is the source line ending at this newline.
-    nl = src.rfind("\n", 0, newline_idx)
-    line_begin = nl + 1 if nl >= 0 else 0
-    body = src[line_begin:newline_idx].rstrip()
+    # The body is the full signature from the token buffer. ``buf`` accumulates
+    # the complete signature across continuation lines (joined with spaces) and
+    # already excludes line-comment content (consumed by the state machine), so
+    # it captures multi-line signatures correctly and is comment-free. Slicing
+    # the raw source line instead would truncate multi-line signatures to just
+    # the closing line AND retain trailing comments.
+    body = buf.strip()
     if not body:
         return False
-    row = cur_row_at(line_begin)
+    # Span: the closing line of the signature (where parens balanced). The start
+    # row of a multi-line signature is approximated by walking back the number
+    # of newlines the buffer spans.
+    row = cur_row_at(src.rfind("\n", 0, newline_idx) + 1) if newline_idx > 0 else 0
+    start_row = _go_method_start_row(src, newline_idx, body, row)
     top.children.append(
         StructuralUnit(
             kind=KIND_METHOD,
             name=name,
-            span=(row, row),
+            span=(start_row, row),
             body=body,
             fingerprint=unit_body_fingerprint(body, lang=language),
         )
@@ -1707,6 +1789,17 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             brace_depth -= 1
             if brace_depth < 0:
                 brace_depth = 0  # unbalanced (malformed) — clamp, never crash.
+            # Before closing a Go interface frame, emit any pending method in the
+            # buffer — a single-line interface's LAST method is terminated by ``}``
+            # not ``;`` or ``\n``: ``interface { Read(); Close() }``.
+            if (
+                language == "go"
+                and stack
+                and brace_depth < stack[-1].open_brace_depth
+                and buf.strip()
+                and _go_buf_is_interface_body(stack, src)
+            ):
+                _emit_go_interface_method_from_buf(buf, stack, src, i, cur_row_at)
             # Close any unit whose scope this brace ends. Pass the closing brace
             # index so the body slice can be computed precisely.
             closed_unit = False
@@ -1814,9 +1907,23 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 and _in_assoc_item_container(stack)
                 and language not in (None, "c", "h")
             ):
-                _emit_assoc_item_at_semicolon(
-                    src, inner_stmt_start, i, units, language, stack, cur_row_at
-                )
+                # Go interface methods are keywordless and ``;``-separated on a
+                # single line: ``type R interface { Read(); Close() }``. The
+                # generic associated-item emitter (which looks for fn/const
+                # keywords) can't recover them; try the Go method-name extractor
+                # first, then fall through to the generic path.
+                if language == "go" and _go_buf_is_interface_body(stack, src):
+                    emitted = _emit_go_interface_method_from_buf(
+                        buf, stack, src, i, cur_row_at
+                    )
+                    if not emitted:
+                        _emit_assoc_item_at_semicolon(
+                            src, inner_stmt_start, i, units, language, stack, cur_row_at
+                        )
+                else:
+                    _emit_assoc_item_at_semicolon(
+                        src, inner_stmt_start, i, units, language, stack, cur_row_at
+                    )
                 inner_stmt_start = i + 1
             # Only reset buf and bracket_depth at a REAL statement boundary
             # (brace_depth == 0 AND bracket_depth == 0). A ``;`` inside [T; N]

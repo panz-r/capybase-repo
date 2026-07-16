@@ -3625,3 +3625,42 @@ def test_r26_cpp_spaced_throw_no_phantom():
     names = [n for _, n in kinds]
     assert "throw" not in names, f"phantom throw emitted; got {kinds}"
     assert ("method", "f") in kinds, f"method f dropped; got {kinds}"
+
+
+# ---------------------------------------------------------------------------
+# Round 26 — Go interface fidelity improvements (MEDIUM/LOW).
+# ---------------------------------------------------------------------------
+
+
+def test_r26_go_interface_multiline_method_full_body():
+    """F3: a multi-line Go interface method must capture the FULL signature in its
+    body, not just the continuation line where parens balanced. The M5 fix
+    correctly deferred emission but the body slice only reached back to the
+    closing line — truncating the first line(s) of the signature."""
+    src = "type R interface {\n    Read(p []byte,\n         q int) error\n}\n"
+    ir = ap.parse_family_a(src, "go")
+    read = next(u for u in ap.all_units_flat(ir) if u.name == "Read")
+    assert "Read" in read.body, f"body missing the method name; got {read.body!r}"
+    assert "p []byte" in read.body, f"body missing first-line params; got {read.body!r}"
+    assert read.fingerprint, f"fingerprint empty; got {read.fingerprint!r}"
+
+
+def test_r26_go_interface_singleline_methods_detected():
+    """F4: a single-line Go interface ``type R interface { Read(); Close() }`` must
+    emit both methods. The newline-based emitter can't catch them (no newline
+    between methods), so the ``;`` handler must recover them for Go interfaces."""
+    src = "type R interface { Read(p []byte) error; Close() error }\n"
+    ir = ap.parse_family_a(src, "go")
+    methods = [u.name for u in ap.all_units_flat(ir) if u.kind == "method"]
+    assert "Read" in methods, f"Read dropped from single-line interface; got {methods}"
+    assert "Close" in methods, f"Close dropped from single-line interface; got {methods}"
+
+
+def test_r26_go_interface_method_strips_trailing_comment():
+    """F6: a trailing ``// comment`` on a Go interface method line must be stripped
+    from the body (so it doesn't perturb the fingerprint)."""
+    src = "type R interface {\n    Read(p []byte) error // read bytes\n}\n"
+    ir = ap.parse_family_a(src, "go")
+    read = next(u for u in ap.all_units_flat(ir) if u.name == "Read")
+    assert "//" not in read.body, f"comment retained in body; got {read.body!r}"
+    assert "Read" in read.body, f"body missing the signature; got {read.body!r}"
