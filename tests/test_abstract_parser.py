@@ -1590,18 +1590,23 @@ def test_rename_detected_both_sides_same_new_name():
 
 
 def test_rename_conflicting_left_bar_right_baz():
-    """Conflicting rename: left renames foo→bar, right renames foo→baz. The
-    left pass pairs foo→bar; right's baz has no unmatched base (foo consumed),
-    so baz is added_right. Both names appear — no silent drop."""
+    """Conflicting rename: left renames foo→bar, right renames foo→baz. This is
+    a divergent-name rename conflict — both names must survive in required_units
+    and the conflict must be flagged. Post round-12/14, the alignment has a
+    single added_both_conflict entry (base=foo, left=bar, right=baz) — no stale
+    entries, no contradictory renamed+conflict pair."""
     base = "def foo():\n    return 1\n    return 2\n"
     left = "def bar():\n    return 1\n    return 2\n"
     right = "def baz():\n    return 1\n    return 2\n"
     diff = sd.compute_structural_diff_3way(base, left, right, language="python")
-    names = {a.name for a in diff.aligned}
-    assert "bar" in names and "baz" in names
-    # bar is the rename (paired to base foo).
-    assert any(a.change_kind == sd._CHANGE_KIND_RENAMED and a.name == "bar"
-               for a in diff.aligned)
+    # Both new names survive in required_units.
+    assert "bar" in diff.required_units and "baz" in diff.required_units
+    # The conflict is flagged.
+    assert len(diff.structural_conflicts) >= 1
+    # No contradictory RENAMED entry for the same base.
+    assert not any(a.change_kind == sd._CHANGE_KIND_RENAMED for a in diff.aligned), (
+        "a divergent-name rename must not leave a non-conflicting RENAMED entry"
+    )
 
 
 def test_rename_one_sided_other_keeps_original():

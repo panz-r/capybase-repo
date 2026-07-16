@@ -255,14 +255,16 @@ def unit_body_fingerprint(body: str, *, lang: str | None = None) -> str:
     if not body:
         return ""
     lines = body.split("\n")
-    # Strip the header (first line: the def/fn/class signature) so a rename
-    # (which only changes the header's name token) leaves the digest unchanged.
-    rest = "\n".join(lines[1:])
+    # Strip the header via the scope-opener-aware split so a one-liner body
+    # (def foo(): return 1\n) correctly yields the inline body content as
+    # ``rest``, not an empty string. This keeps the fingerprint consistent with
+    # entity_body_content (which uses the same split).
+    _, rest = _raw_header_body_split(body)
     norm = normalize_body(rest, lang=lang)
     # Count MEANINGFUL lines (non-blank, non-comment) so adding a comment line
     # doesn't perturb the digest — the fingerprint is stable under comment
     # additions (the AstPreservationValidator relies on this).
-    meaningful = len(_filter_code_lines(lines[1:], lang=lang))
+    meaningful = len(_filter_code_lines(rest.split("\n"), lang=lang))
     if not norm:
         return f"l{meaningful}"
     digest = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
@@ -2557,7 +2559,11 @@ def _raw_header_body_split(body: str) -> tuple[str, str]:
     if not body:
         return "", ""
     lines = body.split("\n")
-    if len(lines) > 1:
+    # A one-liner body with a trailing newline splits into [line, ""] — treat
+    # it as a single-line body (split at the scope opener) so the inline body
+    # content isn't lost. Only genuinely multi-line bodies (>1 non-empty line)
+    # take the multi-line path.
+    if len(lines) > 1 and any(ln.strip() for ln in lines[1:]):
         return lines[0], "\n".join(lines[1:])
     line = lines[0]
     brace = _scope_opener_brace(line)
