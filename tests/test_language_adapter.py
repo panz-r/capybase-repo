@@ -420,3 +420,30 @@ def test_r9_h3_no_false_positive_on_comment_or_statement():
     # True positives still work (the gate's purpose).
     assert _find_definition_span("class C {\n    int count = 0;\n}\n", "count", "java") is not None
     assert _find_definition_span("class C {\n    public static void foo() {}\n}\n", "foo", "java") is not None
+
+
+# --- Finding 2 (round 14): exact-prefix false positives ---
+
+
+def test_r14_find_definition_span_no_false_positive_prefix():
+    r"""The exact-prefix path in _find_definition_span returns immediately on
+    startswith(pat) without validating that {name} is the actual definition
+    identifier. Two false-positive modes:
+    - a return type matching a modifier pattern (public Bar getBar() — Bar is
+      the return type, not the def name);
+    - a prefix of a longer name (fn compute_other matches search for compute).
+    Add a word-boundary check after the prefix match."""
+    from capybase.adapters.structural import _find_definition_span
+    # Return-type false positive (single-modifier pattern match).
+    src = "class C {\n    public Bar getBar() { return new Bar(); }\n}\n"
+    assert _find_definition_span(src, "Bar", "java") is None, (
+        "return type must not match as a definition (public Bar is a prefix pattern)"
+    )
+    # Prefix-of-longer-name false positive.
+    src2 = "fn compute_other() -> i32 { 2 }\n"
+    assert _find_definition_span(src2, "compute", "rust") is None, (
+        "prefix of a longer name must not match (fn compute_other != fn compute)"
+    )
+    # True positives still work.
+    assert _find_definition_span("fn compute() -> i32 { 2 }\n", "compute", "rust") is not None
+    assert _find_definition_span("class C {\n    public Bar getBar() { }\n}\n", "getBar", "java") is not None

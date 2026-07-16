@@ -1656,10 +1656,29 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
         # Exact prefix match (the common case for Python/Rust/Go/JS), including
         # an optional leading ``async``/``await`` modifier (Python ``async def``,
         # JS ``async function``) which the patterns don't enumerate.
+        # Word-boundary + identifier-position check: after the pattern, the name
+        # must be followed by ``(`` (method), ``<`` (generic), or be the LAST
+        # identifier before ``=``/``;``/``{``/end (field/type). This rejects:
+        # - prefix-of-longer-name (fn compute_other matches search for compute);
+        # - return-type lines (public Bar getBar() — Bar is a type, not the def).
         for raw in (stripped, re.sub(r"^(async|await)\s+", "", stripped, count=1)):
             for pat in pats:
                 if raw.startswith(pat):
-                    return (i, min(i + 1, len(lines) - 1))
+                    after = raw[len(pat):] if len(pat) < len(raw) else ""
+                    # Method/generic: name immediately followed by ( or <.
+                    if not after or after[0] in "(<":
+                        return (i, min(i + 1, len(lines) - 1))
+                    # Field/type: name must be the LAST identifier before a
+                    # terminator. If another identifier follows, this is a
+                    # type-then-name line and the pattern matched the TYPE.
+                    if after[0] in "=;{" or not after.strip():
+                        return (i, min(i + 1, len(lines) - 1))
+                    # Check: is there another identifier token before a terminator?
+                    tail = after.lstrip()
+                    if tail and not (tail[0].isalnum() or tail[0] == "_"):
+                        return (i, min(i + 1, len(lines) - 1))
+                    # Another identifier follows the name → the name is a type,
+                    # not the definition identifier. Fall through to the fallback.
         # Fallback: stacked-modifier signature (Java/C#/C++). The line must
         # start with a declaration/modifier keyword, AND ``name`` must be the
         # DEFINITION IDENTIFIER — for a method, the token immediately before
