@@ -481,21 +481,21 @@ def _try_list_union(base: str, current: str, replayed: str) -> str | None:
     if set(cur_appended) & set(rep_appended):
         return None
     merged_items = base_items + cur_appended + rep_appended
-    # Reconstruct BLOCK-SCOPED output (not whole-file): ``base`` is the unit's
-    # full base stage blob, so slicing ``base[:open]`` / ``base[close:]`` would
-    # drag the ENTIRE rest of the file into the resolution and, when spliced
-    # into the marker span, duplicate every definition after the list. The
-    # block-scoped sides (``current``/``replayed``) carry the exact same
-    # prefix/suffix around the list — use one of them as the template instead.
-    # Both sides share the base prefix/suffix by construction (the rule only
-    # fires when each preserves base items in place), so ``current`` is a safe
-    # template; mirror its surrounding text and swap in the merged list.
+    # Verify the surrounding text (prefix before ``[`` and suffix after ``]``)
+    # is invariant across all three sides. If a side changed the assignment
+    # target, a comment, or other non-item structure, the merge would silently
+    # drop that side's intent by inheriting the other side's surrounding text.
+    b_pre, b_suf = base[: b[2]], base[b[3]:]
+    if current[:cur[2]] != b_pre or current[cur[3]:] != b_suf:
+        return None
+    if replayed[:rep[2]] != b_pre or replayed[rep[3]:] != b_suf:
+        return None
     return (
-        current[: cur[2]]
+        b_pre
         + "["
         + ", ".join(merged_items)
         + "]"
-        + current[cur[3]:]
+        + b_suf
     )
 
 
@@ -542,12 +542,13 @@ def _try_dict_union(base: str, current: str, replayed: str) -> str | None:
     if cur_added_keys & base_keys or rep_added_keys & base_keys:
         return None
     merged = base_entries + cur_added + rep_added
-    # Reconstruct BLOCK-SCOPED output (see _try_list_union for the rationale):
-    # ``base`` is the unit's whole base blob, so rebuilding from it would drag
-    # the rest of the file into the resolution and duplicate surrounding defs.
-    # The block-scoped ``current`` carries the same dict-surrounding text, so
-    # use it as the rebuild template instead.
-    return _rebuild_dict(current, cur, merged)
+    # Verify surrounding text is invariant (same rationale as _try_list_union).
+    b_pre, b_suf = base[: b[2]], base[b[3]:]
+    if current[:cur[2]] != b_pre or current[cur[3]:] != b_suf:
+        return None
+    if replayed[:rep[2]] != b_pre or replayed[rep[3]:] != b_suf:
+        return None
+    return _rebuild_dict(base, b, merged)
 
 
 def _try_insertion_union(base: str, current: str, replayed: str) -> str | None:
@@ -649,10 +650,11 @@ def _split_list_items(inner: str) -> list[str]:
 
 
 def _find_single_dict(text: str):
-    """The (before, inner, after-unused) of the SOLE ``{...}`` dict in text.
+    """The (before, inner, open_off, close_off) of the SOLE ``{...}`` dict in text.
 
     Returns None if there's not exactly one brace-delimited dict. ``inner`` is
-    the text between the braces.
+    the text between the braces. ``open_off`` / ``close_off`` are the byte
+    offsets of the ``{`` and just after the ``}``.
     """
     import re
 
@@ -662,7 +664,7 @@ def _find_single_dict(text: str):
     inner = m.group(1)
     if "{" in inner or "}" in inner:
         return None
-    return (None, inner, None, None)
+    return (None, inner, m.start(), m.end())
 
 
 def _split_dict_entries(inner: str) -> list[str]:

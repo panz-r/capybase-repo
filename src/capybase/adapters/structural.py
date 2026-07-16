@@ -1765,9 +1765,14 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
                     if pre and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", pre):
                         cand = pre
                 if not cand:
+                    # Take the last identifier, but stop at ``->`` (return-type
+                    # arrow) — identifiers after it are return types (Result,
+                    # impl Trait), not definition names.
                     for h in ident_toks:
+                        if h == "->" or h.startswith("->"):
+                            break
                         if h and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", h):
-                            cand = h  # keep the last identifier seen
+                            cand = h
                 if cand == name:
                     return (i, min(i + 1, len(lines) - 1))
     return None
