@@ -1539,6 +1539,23 @@ def _rebuild_container(enclosing_text: str, entity_bodies: list[str], language: 
         # Bare-function conflict: emit the entity bodies flat, separated by a
         # blank line (module-level convention), no wrapper.
         return "\n\n".join(entity_bodies) if entity_bodies else ""
+    # A flat module of top-level fields (const/static/let/type/var) is NOT a
+    # container with framing — there's no class/impl header to splice around.
+    # Treating the first field as a "header" and re-emitting it would duplicate
+    # the field definition. Emit flat like the bare-function case.
+    _FIELD_KW = frozenset({"const", "static", "let", "type", "var"})
+    first_tok = enc_lines[0].lstrip().split(None, 1)[0] if enc_lines[0].lstrip() else ""
+    # Strip visibility prefixes (pub, pub(crate), etc.) to find the real keyword.
+    while first_tok in _VISIBILITY_PREFIXES and enc_lines[0].lstrip().split(None, 1):
+        rest = enc_lines[0].lstrip().split(None, 1)
+        first_tok = rest[1].split(None, 1)[0] if len(rest) > 1 and rest[1].split() else ""
+        break
+    # Also handle pub(crate)/pub(super) as a single token.
+    if first_tok.startswith("pub(") or first_tok.startswith("pub "):
+        toks = enc_lines[0].lstrip().split()
+        first_tok = toks[1] if len(toks) > 1 else ""
+    if first_tok in _FIELD_KW:
+        return "\n\n".join(entity_bodies) if entity_bodies else ""
     # The body indent is the leading whitespace of the first body line (the
     # convention under which the container's entities nest). tree-sitter's entity
     # body slice EXCLUDES this leading indent on the def/header line but KEEPS
