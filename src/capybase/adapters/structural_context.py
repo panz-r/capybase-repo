@@ -135,8 +135,13 @@ def _render_import_surface(diff: StructuralDiff3Way) -> str:
     if rep_drops:
         parts.append(f"REPLAYED removes {', '.join(rep_drops)}")
     head = "Import surface: " + "; ".join(parts)
-    # When both sides only ADD imports, the merge rule is unambiguous: union.
-    if not cur_drops and not rep_drops and (cur_adds or rep_adds):
+    # When both sides only ADD imports (no conflicts), the merge rule is
+    # unambiguous: union. But if any import is a divergent conflict, don't
+    # emit the "union them" suffix — it contradicts the conflict annotation.
+    has_conflict = any(
+        "(CONFLICT" in s for s in cur_adds + rep_adds
+    )
+    if not cur_drops and not rep_drops and (cur_adds or rep_adds) and not has_conflict:
         head += " — union them (imports are additive; keep every side's adds)"
     out = [head]
     if survivors:
@@ -198,12 +203,22 @@ def render_structural_context(
         if a.kind == KIND_MODULE_STMT:
             continue
         label = _CHANGE_LABELS.get(a.change_kind, a.change_kind)
-        lines.append(f"  {a.kind.upper()} {a.name}: {label}")
+        # For added_both_conflict, show both sides' names (a divergent rename
+        # conflict has two distinct names the LLM must reconcile).
+        if a.change_kind == _CHANGE_KIND_ADDED_BOTH_CONFLICT and a.left and a.right and a.left.name != a.right.name:
+            lines.append(f"  {a.kind.upper()} {a.left.name} / {a.right.name}: {label}")
+        else:
+            lines.append(f"  {a.kind.upper()} {a.name}: {label}")
 
     # Structural conflicts: units both sides modified.
     conflicts = diff.structural_conflicts
     if conflicts:
-        names = ", ".join(c.name for c in conflicts)
+        names = ", ".join(
+            f"{c.left.name}/{c.right.name}"
+            if c.change_kind == _CHANGE_KIND_ADDED_BOTH_CONFLICT and c.left and c.right and c.left.name != c.right.name
+            else c.name
+            for c in conflicts
+        )
         lines.append(
             f"Structural conflicts: {len(conflicts)} unit(s) modified by both sides ({names}) — "
             "synthesize both changes."
