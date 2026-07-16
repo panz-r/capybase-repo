@@ -3153,3 +3153,25 @@ def test_r13_strip_inline_comment_string_length_preserving():
     assert unit_body_fingerprint(body_foo, lang="rust") == unit_body_fingerprint(body_bar, lang="rust"), (
         "rename with a long-string + inline-comment base must be fingerprint-stable"
     )
+
+
+# --- Finding 1 (round 16): _A_FIELD_RE must skip Rust mut ---
+
+
+def test_r16_field_name_mut_not_captured():
+    r"""Rust ``let mut`` / ``static mut`` bindings: the ``mut`` keyword must be
+    treated as a modifier (like ``pub``/``static``), not captured as the field
+    name. Previously _A_FIELD_RE captured ``mut`` as the name, causing all
+    ``mut`` bindings to collide on identity ``(field, 'mut')`` and silently
+    dropping all but the first."""
+    from capybase.adapters.abstract_parser import _field_name_from_buf
+    assert _field_name_from_buf("let mut counter = 0;") == "counter"
+    assert _field_name_from_buf("static mut GLOBAL: i32 = 0;") == "GLOBAL"
+    assert _field_name_from_buf("pub static mut STATE: u64 = 0;") == "STATE"
+    # Non-mut still works.
+    assert _field_name_from_buf("let x = 1;") == "x"
+    assert _field_name_from_buf("const N: u32 = 5;") == "N"
+    # Two mut bindings don't collide.
+    ir = ap.parse_family_a("static mut A: u64 = 0;\nstatic mut B: u64 = 1;\n", "rust")
+    names = [u.name for u in ap.all_units_flat(ir) if u.kind == "field"]
+    assert "A" in names and "B" in names, f"two mut bindings must not collide; got {names}"

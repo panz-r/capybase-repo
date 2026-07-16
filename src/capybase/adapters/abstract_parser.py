@@ -2039,8 +2039,8 @@ def _binding_name_before(toks: list[str], kw_idx: int) -> str | None:
 #: line-regex the old ``_emit_a_field_units`` re-scan used, but operates on the
 #: whitespace-normalized buffer at the ``;`` terminator.
 _A_FIELD_RE = re.compile(
-    r"^(?:(?:pub|export|public|private|static|final|readonly|unsafe|inline)\s+)*"
-    r"(?:const|static|type|let|var)\s+([A-Za-z_][A-Za-z0-9_]*)\b"
+    r"^(?:(?:pub|export|public|private|static|final|readonly|unsafe|inline|mut)\s+)*"
+    r"(?:const|static|type|let|var)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\b"
 )
 
 
