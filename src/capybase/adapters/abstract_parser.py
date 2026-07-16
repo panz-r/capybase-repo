@@ -1482,13 +1482,18 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # meaningful for top-level statements.
             if brace_depth == 0 and bracket_depth == 0:
                 stmt_start_byte = i + 1
-            # Reset bracket_depth at every top-level ``;`` so an unmatched ``[``
-            # (malformed/partially-merged code) doesn't permanently disable field
-            # detection for the rest of the file. The parser's contract is
-            # "robustness over correctness" — it must recover from malformed input.
+            # Only reset buf and bracket_depth at a REAL statement boundary
+            # (brace_depth == 0 AND bracket_depth == 0). A ``;`` inside [T; N]
+            # array types (bracket_depth > 0) is a dimension separator, not a
+            # statement terminator — resetting buf there would wipe the function
+            # signature and drop the function. Also reset bracket_depth for
+            # malformed-input recovery, but only AFTER the buf gate so the gate
+            # sees the pre-reset value.
+            was_at_bracket_depth_zero = bracket_depth == 0
             if brace_depth == 0:
                 bracket_depth = 0
-            buf = ""
+            if was_at_bracket_depth_zero:
+                buf = ""
             i += 1
             continue
 
