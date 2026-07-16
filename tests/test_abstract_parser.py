@@ -1631,6 +1631,31 @@ def test_rename_plus_body_edit_does_not_pair():
     assert renamed == [], "rename + body edit must not pair"
 
 
+def test_r26_rename_found_when_base_has_duplicate_body():
+    """Diff-F2: when two base units share an identical substantial body, the 3-way
+    rename detector must still find a rename of the first. Previously the second
+    unit's identical fingerprint caused the first to be mis-attributed (the
+    identity-matched twin was treated as a rename candidate). The fix: a side
+    unit already identity-matched to a base (same name) is never a rename
+    candidate, even if its body matches another base unit."""
+    base = (
+        "def foo1():\n    a = 1\n    b = 2\n    return a + b\n\n"
+        "def foo2():\n    a = 1\n    b = 2\n    return a + b\n"
+    )
+    # left renames foo1 -> renamed (same body), keeps foo2; right deletes both.
+    left = (
+        "def renamed():\n    a = 1\n    b = 2\n    return a + b\n\n"
+        "def foo2():\n    a = 1\n    b = 2\n    return a + b\n"
+    )
+    right = ""
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    renamed = [a for a in diff.aligned if a.change_kind == sd._CHANGE_KIND_RENAMED]
+    renamed_names = [(a.base.name, a.left.name) for a in renamed]
+    assert ("foo1", "renamed") in renamed_names, (
+        f"foo1->renamed rename lost (duplicate-body mis-attribution); got {renamed_names}"
+    )
+
+
 # --- Region queries: enclosing_container, nested classes, boundaries ---
 
 def test_enclosing_container_direct():

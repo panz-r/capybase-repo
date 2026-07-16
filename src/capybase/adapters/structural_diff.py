@@ -378,7 +378,12 @@ def _detect_renames(
     base_by_fp: dict[str, StructuralUnit] = {}
     for u in base_units:
         if _fingerprint_has_content(u.fingerprint):
-            base_by_fp[u.fingerprint] = u
+            # First-wins: when two base units share an identical body (same
+            # fingerprint), keep the FIRST as the rename candidate. Last-wins
+            # overwrites the first's slot, so a rename of the first is
+            # mis-attributed to the second (which may not be deleted). Mirrors
+            # detect_renames_2way's base_by_content.setdefault.
+            base_by_fp.setdefault(u.fingerprint, u)
 
     # Base identities deleted by each side (no side entry under the original name).
     # A base unit is a rename candidate only when it's gone from the side in
@@ -404,6 +409,11 @@ def _detect_renames(
     def _try_pair_side(side_unit: StructuralUnit, side: str) -> None:
         nonlocal new_entries
         if side_unit.identity in consumed_side_ids:
+            return
+        # A side unit already identity-matched to a base (same name) is NOT a
+        # rename candidate — it's a genuine modify/unchanged, even if its body
+        # fingerprint coincidentally matches another base unit (duplicate bodies).
+        if side_unit.identity in identity_matched_side_ids:
             return
         if not _fingerprint_has_content(side_unit.fingerprint):
             return
@@ -470,6 +480,19 @@ def _detect_renames(
         consumed_base_ids.add(base_match.identity)
         consumed_side_ids.add(side_unit.identity)
         rename_by_base[base_match.identity] = (side_unit.identity, side_unit, side)
+
+    # Side identities already identity-matched to a base unit (same name) are
+    # NOT rename candidates — they're genuine modifications/unchanged, not
+    # renames. Without this guard, a side unit whose body happens to match a
+    # DIFFERENT base unit's fingerprint (two base fns with identical bodies)
+    # would be mis-paired as a rename of that other base.
+    identity_matched_side_ids = {
+        a.left.identity for a in aligned
+        if a.left is not None and a.base is not None
+    } | {
+        a.right.identity for a in aligned
+        if a.right is not None and a.base is not None
+    }
 
     # Mark the stale added/deleted alignment indices for removal as we pair.
     # First, index alignments by their side identities for quick lookup.
