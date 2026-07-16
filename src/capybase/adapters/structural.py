@@ -1719,7 +1719,9 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
             ]
             # Strip trailing comma so multi-var decls (int x, y, z;) don't
             # break the identifier regex.
-            ident_toks = [h.rstrip(",") for h in ident_toks]
+            # Strip trailing comma AND colon so multi-var decls and Rust type
+            # annotations (COUNTER: u32) don't break the identifier regex.
+            ident_toks = [h.rstrip(",:") for h in ident_toks]
             ident_count = sum(
                 1 for h in ident_toks
                 if h and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", h)
@@ -1730,22 +1732,42 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
             )
             if qualifies:
                 # Method shape: name is the token immediately before '('.
-                paren_idx = next((k for k, t in enumerate(toks) if "(" in t), -1)
+                # Skip pub(crate)/pub(super) tokens (they contain '(' but are
+                # visibility prefixes, not the param-list opener).
+                paren_idx = next(
+                    (k for k, t in enumerate(toks)
+                     if "(" in t and not t.startswith("pub(")),
+                    -1,
+                )
                 if paren_idx > 0:
                     cand = re.split(r"[(<]", toks[paren_idx], maxsplit=1)[0]
                     cand = cand.split("::")[-1].split(".")[-1].strip()
                     if cand == name:
                         return (i, min(i + 1, len(lines) - 1))
-                # Type/field shape (no paren): the field NAME is the LAST
-                # identifier token before the terminator (= / ; / {), not the
-                # first token after the modifier run (which is the TYPE —
-                # int/String/List<...>). e.g. ``private final int count = 0``
-                # → name is ``count``, not ``int``. decl_part/decl_toks/ident_toks
-                # were computed at the gate above.
+                # Type/field shape (no paren): find the field NAME. Two conventions:
+                # - Java/C#/C++: ``Type name`` → name is the LAST identifier before =/;/{.
+                # - Rust: ``name: Type`` → name is the identifier just BEFORE the ``:``.
+                # Detect a ``:`` type annotation in the original decl_toks; if found,
+                # the name is the identifier preceding it. Otherwise, take the last.
                 cand = ""
-                for h in ident_toks:
-                    if h and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", h):
-                        cand = h  # keep the last identifier seen
+                colon_idx = next((k for k, t in enumerate(decl_toks) if ":" in t), -1)
+                if colon_idx >= 0:
+                    # Rust-style type annotation. The colon may be in the NAME
+                    # token itself (``COUNTER: u32``) or as a separator after it.
+                    col_tok = decl_toks[colon_idx]
+                    if ":" in col_tok:
+                        # The name is the part before the colon in this token.
+                        pre = col_tok.split(":")[0].strip()
+                    elif colon_idx > 0:
+                        pre = decl_toks[colon_idx - 1].rstrip(",:")
+                    else:
+                        pre = ""
+                    if pre and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", pre):
+                        cand = pre
+                if not cand:
+                    for h in ident_toks:
+                        if h and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", h):
+                            cand = h  # keep the last identifier seen
                 if cand == name:
                     return (i, min(i + 1, len(lines) - 1))
     return None

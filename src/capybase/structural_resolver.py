@@ -616,10 +616,36 @@ def _find_single_list(text: str):
 
 
 def _split_list_items(inner: str) -> list[str]:
-    """Split a list literal's interior into stripped items (no surrounding [])."""
+    """Split a list literal's interior into stripped items (no surrounding []).
+
+    String-aware: a ``,`` inside a string literal (``"a,b"``) is NOT a
+    separator — splitting naively would corrupt the literal when it's
+    re-joined.
+    """
     if not inner.strip():
         return []
-    return [it.strip() for it in inner.split(",") if it.strip()]
+    items: list[str] = []
+    cur = ""
+    in_str: str | None = None
+    for ch in inner:
+        if in_str is not None:
+            cur += ch
+            if ch == in_str:
+                in_str = None
+            continue
+        if ch in ('"', "'"):
+            in_str = ch
+            cur += ch
+            continue
+        if ch == ",":
+            if cur.strip():
+                items.append(cur.strip())
+            cur = ""
+            continue
+        cur += ch
+    if cur.strip():
+        items.append(cur.strip())
+    return items
 
 
 def _find_single_dict(text: str):
@@ -939,17 +965,33 @@ _FIELD_DECL_KEYWORDS = frozenset({"const", "static", "let", "type", "var"})
 
 
 def _first_real_keyword(header_line: str) -> str:
-    """Strip leading visibility prefixes (including ``pub(crate)``/``pub(super)``)
-    and return the first real declaration keyword, or ``""`` if none.
+    r"""Strip leading visibility prefixes (including ``pub(crate)``/``pub(super)``
+    /``pub(in path)``) and return the first real declaration keyword, or ``""``.
 
     Handles stacked modifiers: ``pub unsafe static``, ``pub(crate) async fn``,
-    ``unsafe pub(in crate) extern fn``, etc.
+    ``unsafe pub(in crate::m) extern fn``, etc. Also handles ``extern "C"``
+    (the ABI string after ``extern`` is consumed as part of the modifier).
     """
     toks = header_line.lstrip().split()
     i = 0
     while i < len(toks):
         t = toks[i]
-        if t in _VISIBILITY_PREFIXES or t.startswith("pub("):
+        if t in _VISIBILITY_PREFIXES:
+            i += 1
+            # After ``extern``, skip an optional ABI string (``"C"``, ``"system"``).
+            if t == "extern" and i < len(toks) and toks[i].startswith('"'):
+                i += 1
+            continue
+        if t.startswith("pub(") and not t.endswith(")"):
+            # ``pub(in crate::m)`` split into multiple tokens — consume until ``)``.
+            i += 1
+            while i < len(toks) and not toks[i].endswith(")"):
+                i += 1
+            if i < len(toks):
+                i += 1  # consume the ``)`` token
+            continue
+        if t.startswith("pub("):
+            # Single-token ``pub(crate)`` — consumed.
             i += 1
             continue
         break
