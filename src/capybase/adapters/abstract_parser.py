@@ -1444,11 +1444,18 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # or when a ``}`` closes to depth 0), so it always points at the
             # declaration keyword.
             if brace_depth == 0 and bracket_depth == 0 and not stack and language not in (None, "c", "h"):
-                stmt_text = src[stmt_start_byte : i + 1]
+                stmt_start = stmt_start_byte
+                # Skip a leading newline so the body doesn't start with "\n"
+                # (which would make _raw_header_body_split treat the declaration
+                # as a multi-line body and fail to strip the header → name leaks
+                # into the fingerprint → rename detection breaks for 2nd+ fields).
+                while stmt_start < i and src[stmt_start] == "\n":
+                    stmt_start += 1
+                stmt_text = src[stmt_start : i + 1]
                 fname = _field_name_from_buf(stmt_text)
                 if fname is not None:
                     end_row = cur_row_at(i)
-                    start_row_f = cur_row_at(stmt_start_byte)
+                    start_row_f = cur_row_at(stmt_start)
                     body = stmt_text
                     # Dedup against already-emitted units (a brace-opened decl
                     # with the same name, e.g. a Go ``type X struct``).
@@ -1471,6 +1478,12 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # meaningful for top-level statements.
             if brace_depth == 0 and bracket_depth == 0:
                 stmt_start_byte = i + 1
+            # Reset bracket_depth at every top-level ``;`` so an unmatched ``[``
+            # (malformed/partially-merged code) doesn't permanently disable field
+            # detection for the rest of the file. The parser's contract is
+            # "robustness over correctness" — it must recover from malformed input.
+            if brace_depth == 0:
+                bracket_depth = 0
             buf = ""
             i += 1
             continue
