@@ -3689,3 +3689,61 @@ def test_r26_go_interface_method_strips_trailing_comment():
     read = next(u for u in ap.all_units_flat(ir) if u.name == "Read")
     assert "//" not in read.body, f"comment retained in body; got {read.body!r}"
     assert "Read" in read.body, f"body missing the signature; got {read.body!r}"
+
+
+# ---------------------------------------------------------------------------
+# Round 27 — regressions in the round-26 Go interface body + Diff-F2 paths.
+# ---------------------------------------------------------------------------
+
+
+def test_r27_go_interface_method_not_corrupted_by_embedded_interface():
+    """F1 (HIGH): an embedded interface line (``io.Reader``) preceding a method
+    corrupted the method's body — the non-method line's tokens bled into ``buf``
+    and the round-26 ``body = buf.strip()`` change baked the merge in. The
+    method's body and fingerprint must be clean."""
+    src = "type R interface {\n    io.Reader\n    Close() error\n}\n"
+    ir = ap.parse_family_a(src, "go")
+    close = next(u for u in ap.all_units_flat(ir) if u.name == "Close")
+    assert close.body == "Close() error", f"body corrupted by embedded iface; got {close.body!r}"
+    assert close.fingerprint, f"fingerprint empty/corrupt; got {close.fingerprint!r}"
+
+
+def test_r27_rename_of_second_dup_bodied_base_found():
+    """F2 (HIGH): when two base units share an identical body and the SECOND is
+    renamed (while the first is unchanged), the rename must still be detected.
+    Diff-F2's first-wins ``setdefault`` made base_by_fp point at the first
+    (unchanged) base, which isn't in deleted_base_ids, so the rename bailed."""
+    base = "def A():\n    a=1\n    b=2\n    return a+b\n\ndef B():\n    a=1\n    b=2\n    return a+b\n"
+    left = "def A():\n    a=1\n    b=2\n    return a+b\n\ndef C():\n    a=1\n    b=2\n    return a+b\n"
+    right = "def A():\n    a=1\n    b=2\n    return a+b\n"
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    renamed = [(a.base.name, a.left.name) for a in diff.aligned if a.change_kind == sd._CHANGE_KIND_RENAMED]
+    assert ("B", "C") in renamed, f"B->C rename lost (2nd dup-bodied base); got {renamed}"
+
+
+def test_r27_same_side_dup_renames_no_phantom_conflict():
+    """F3 (HIGH, pre-existing): two dup-bodied bases BOTH renamed on the SAME side
+    to different names must NOT fabricate an added_both_conflict naming a unit on
+    the opposite (empty) side. Each rename is one-sided; at most one RENAMED plus
+    a plain added_* for the other."""
+    base = "def foo1():\n    a=1\n    b=2\n    return a+b\n\ndef foo2():\n    a=1\n    b=2\n    return a+b\n"
+    left = "def renamed1():\n    a=1\n    b=2\n    return a+b\n\ndef renamed2():\n    a=1\n    b=2\n    return a+b\n"
+    right = ""
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    conflicts = [a for a in diff.aligned if a.change_kind == sd._CHANGE_KIND_ADDED_BOTH_CONFLICT]
+    assert conflicts == [], (
+        f"phantom added_both_conflict on empty side; got "
+        f"{[(a.base.name, a.left.name if a.left else None, a.right.name if a.right else None) for a in conflicts]}"
+    )
+
+
+def test_r27_go_interface_multiline_method_start_row_not_substring_matched():
+    """F4 (LOW): _go_method_start_row used a bare substring check (``name in line``)
+    which matched the method name inside a continuation-line identifier (e.g.
+    ``Read`` inside ``ReadBuf``), giving the wrong start row. Now uses a
+    word-boundary regex requiring the name followed by ``(``."""
+    src = "type R interface {\n    Read(\n         p ReadBuf) error\n}\n"
+    ir = ap.parse_family_a(src, "go")
+    read = next(u for u in ap.all_units_flat(ir) if u.name == "Read")
+    # Line 1 is 'Read(' (the real start); line 2 is 'p ReadBuf) error' (false match).
+    assert read.span[0] == 1, f"start row substring-matched ReadBuf; got span {read.span}"

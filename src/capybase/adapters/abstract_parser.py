@@ -1425,7 +1425,7 @@ def _go_method_start_row(src: str, newline_idx: int, body: str, close_row: int) 
         else:
             line = src[nl + 1 : pos]
             pos = nl
-        if name in line:
+        if re.search(r"\b" + re.escape(name) + r"\b\s*(?:\(|$)", line):
             return row
         row -= 1
         if row < 0:
@@ -1709,6 +1709,20 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 src, i, cur_row_at,
             ):
                 buf = ""  # consumed — start the next method's signature fresh
+            elif (
+                language == "go"
+                and stack
+                and brace_depth == stack[-1].open_brace_depth
+                and _go_buf_is_interface_body(stack, src)
+                and _go_buf_params_balanced(buf)
+            ):
+                # Inside a Go interface body, the line had balanced parens but
+                # wasn't a method signature (e.g. an embedded interface
+                # ``io.Reader``, a blank line). Reset buf so its tokens don't
+                # bleed into the NEXT method's body (which is sourced from buf).
+                # A line with UNBALANCED parens is a partial multi-line method —
+                # keep buf so the continuation completes the signature.
+                buf = ""
             i = new_i
             continue
 

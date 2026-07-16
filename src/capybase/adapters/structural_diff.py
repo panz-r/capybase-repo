@@ -375,15 +375,13 @@ def _detect_renames(
     # candidate only when it's gone from the side in question (classified as a
     # deletion), NOT when it's identity-matched (present under its original name).
     # Skip content-less bodies: distinct empty bodies share ``l0``.
-    base_by_fp: dict[str, StructuralUnit] = {}
+    base_by_fp: dict[str, list[StructuralUnit]] = {}
     for u in base_units:
         if _fingerprint_has_content(u.fingerprint):
-            # First-wins: when two base units share an identical body (same
-            # fingerprint), keep the FIRST as the rename candidate. Last-wins
-            # overwrites the first's slot, so a rename of the first is
-            # mis-attributed to the second (which may not be deleted). Mirrors
-            # detect_renames_2way's base_by_content.setdefault.
-            base_by_fp.setdefault(u.fingerprint, u)
+            # Collect ALL base units sharing a fingerprint (duplicate bodies).
+            # _try_pair_side iterates to find a deleted, unconsumed one, so a
+            # rename of ANY dup-bodied base is found — not just the first.
+            base_by_fp.setdefault(u.fingerprint, []).append(u)
 
     # Base identities deleted by each side (no side entry under the original name).
     # A base unit is a rename candidate only when it's gone from the side in
@@ -418,40 +416,56 @@ def _detect_renames(
         if not _fingerprint_has_content(side_unit.fingerprint):
             return
         base_match = base_by_fp.get(side_unit.fingerprint)
-        if base_match is None:
+        if not base_match:
             return
-        # If this base was already consumed by the OTHER side's rename, check
-        # whether it's a conflict (same base, different new name) before bailing.
-        if base_match.identity in consumed_base_ids:
-            prior = rename_by_base.get(base_match.identity)
-            if prior is not None and prior[0] != side_unit.identity:
-                # Both sides renamed the same base to DIFFERENT names — a
-                # genuine rename conflict. Replace the prior side's RENAMED
-                # entry (which says "clean rename, no conflict") with an
-                # added_both_conflict entry, and consume this side unit so its
-                # stale added_* entry is dropped during cleanup.
-                new_entries = [
-                    e for e in new_entries
-                    if not (e.change_kind == _CHANGE_KIND_RENAMED
-                            and e.base is not None
-                            and e.base.identity == base_match.identity)
-                ]
-                if side == "left":
-                    conflict = AlignedUnit(
-                        base=base_match, left=side_unit, right=prior[1],
-                        change_kind=_CHANGE_KIND_ADDED_BOTH_CONFLICT,
-                    )
-                else:
-                    conflict = AlignedUnit(
-                        base=base_match, left=prior[1], right=side_unit,
-                        change_kind=_CHANGE_KIND_ADDED_BOTH_CONFLICT,
-                    )
-                new_entries.append(conflict)
-                consumed_side_ids.add(side_unit.identity)
+        # Iterate the dup-bodied candidates to find a deleted, unconsumed one.
+        # This finds a rename of ANY base sharing the fingerprint — not just the
+        # first. When all candidates are consumed by the OTHER side, check for a
+        # cross-side conflict (same base, different new name on each side).
+        chosen: StructuralUnit | None = None
+        conflict_base: StructuralUnit | None = None
+        for cand in base_match:
+            if cand.identity in consumed_base_ids:
+                # Already consumed — remember it for the cross-side-conflict
+                # check (below) if no fresh candidate is found.
+                if conflict_base is None:
+                    prior = rename_by_base.get(cand.identity)
+                    if prior is not None and prior[0] != side_unit.identity:
+                        conflict_base = cand
+                continue
+            if cand.identity not in deleted_base_ids:
+                continue
+            chosen = cand
+            break
+        if chosen is None:
+            # No fresh deleted candidate. If a consumed base was renamed by the
+            # OTHER side to a different name, that's a cross-side conflict.
+            if conflict_base is not None:
+                prior = rename_by_base.get(conflict_base.identity)
+                # Only a CROSS-side prior (different side) is a real conflict —
+                # a same-side prior means two same-side units matched the same
+                # base, which is just a duplicate (leave the 2nd as added_*).
+                if prior is not None and prior[2] != side:
+                    new_entries = [
+                        e for e in new_entries
+                        if not (e.change_kind == _CHANGE_KIND_RENAMED
+                                and e.base is not None
+                                and e.base.identity == conflict_base.identity)
+                    ]
+                    if side == "left":
+                        conflict = AlignedUnit(
+                            base=conflict_base, left=side_unit, right=prior[1],
+                            change_kind=_CHANGE_KIND_ADDED_BOTH_CONFLICT,
+                        )
+                    else:
+                        conflict = AlignedUnit(
+                            base=conflict_base, left=prior[1], right=side_unit,
+                            change_kind=_CHANGE_KIND_ADDED_BOTH_CONFLICT,
+                        )
+                    new_entries.append(conflict)
+                    consumed_side_ids.add(side_unit.identity)
             return
-        # The base unit must be deleted (not present under its original name).
-        if base_match.identity not in deleted_base_ids:
-            return
+        base_match = chosen
         # Find the other side's entry for this new name (agreed rename?).
         other = left_units if side == "right" else right_units
         other_match = next((u for u in other if u.identity == side_unit.identity), None)
