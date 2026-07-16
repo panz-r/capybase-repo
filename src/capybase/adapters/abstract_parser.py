@@ -1323,7 +1323,19 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             line_start = new_i
             if was_line_comment:
                 # A line comment ends a statement run (token buffer boundary).
-                buf = ""
+                # Exception: if the buffer holds a *pending signature* — it
+                # contains a balanced ``(...)`` parameter list with no ``;`` yet
+                # seen — the brace that opens the body is on a LATER line
+                # (Allman style with a trailing inline comment:
+                # ``int getCount() const // c\n { ... }``). Wiping here would
+                # drop the whole unit when that ``{`` is classified with an
+                # empty buffer. Preserve the signature across the newline
+                # instead; the next ``{``/``;``/``}`` will still reset it.
+                if _buf_has_pending_signature(buf):
+                    if not buf.endswith(" "):
+                        buf += " "
+                else:
+                    buf = ""
             else:
                 # A newline acts as a token separator so declarations on
                 # consecutive lines don't concatenate in the buffer (e.g.
@@ -1865,6 +1877,18 @@ def _classify_a_brace(
             arrow_idx = ai
             break
     scan_end = arrow_idx if arrow_idx >= 0 else len(toks)
+    # A declaration keyword must come BEFORE the parameter list. Any keyword
+    # token that appears after the LAST ``)`` is a trailing modifier (Dart
+    # ``async``, C++ ``const``/``noexcept``), not an introducer — without this
+    # bound, Dart ``void main() async`` found ``async`` as the rightmost
+    # func-keyword, treated it as the leading introducer, and lost the name.
+    last_paren_close = -1
+    for pci in range(scan_end - 1, -1, -1):
+        if toks[pci] == ")" or toks[pci].endswith(")"):
+            last_paren_close = pci
+            break
+    if last_paren_close >= 0 and scan_end > last_paren_close + 1:
+        scan_end = last_paren_close + 1
     for idx in range(scan_end - 1, -1, -1):
         t = toks[idx]
         head = re.split(r"[<(:\[{]", t, maxsplit=1)[0]
@@ -1939,6 +1963,98 @@ def _classify_a_brace(
     return (KIND_FUNCTION, name, False)
 
 
+# Trailing tokens that may legitimately appear after a method's parameter list
+# and before the opening ``{``. Stripped by :func:`_strip_trailing_signature_tokens`
+# so the ``endswith(")")`` shape guard in :func:`_classify_keywordless_method`
+# recognizes the signature. C++ qualifiers (``const``/``noexcept``/``override``/
+# ``final``, stackable), C++ trailing-return arrow ``-> RetType``, and Dart async
+# markers (``async``/``async*``/``sync*``). ``noexcept(expr)`` and ``final`` are
+# included; ``override``/``final``/``consteval``/``constexpr`` are not declaration
+# keywords (they're specifiers), so they aren't in _A_FUNC_KEYWORDS.
+_A_TRAILING_METHOD_QUALIFIERS = frozenset({
+    # C++ cv/ref/exception/override specifiers (stackable: ``const noexcept``).
+    "const", "volatile", "noexcept", "override", "final", "constexpr",
+    "consteval", "mutable", "throw",
+    # Dart coroutine markers (``async``/``async*``/``sync*``/``yield``).
+    "async", "async*", "sync", "sync*", "yield",
+    # Java ``throws X`` is handled separately (multi-token); kept out here.
+})
+
+
+def _strip_trailing_signature_tokens(joined: str) -> str:
+    """Remove tokens that may trail a method's ``(...)`` parameter list.
+
+    Handles two shapes that would otherwise fail the ``endswith(")")`` shape
+    guard in :func:`_classify_keywordless_method`:
+
+    1. **C++ trailing return type** ``-> RetType`` — strip everything from the
+       first top-level ``->`` onward (the return type can be complex:
+       ``-> std::vector<int> const &``). Only a ``->`` that is a standalone
+       token (whitespace around it) counts, so ``a->b`` member access earlier
+       in the signature is left intact.
+    2. **C++ / Dart trailing qualifiers** — ``const``/``noexcept``/``override``/
+       ``final``/``async``/... stacked after the params. Also handles Java's
+       ``throws P, Q`` clause and Dart's ``async*`` token.
+
+    The result always ends at the closing ``)`` of the parameter list when the
+    buffer represents one of these shapes; otherwise it is returned unchanged.
+    """
+    tokens = joined.split()
+    # (1) Trailing return type: cut at the first standalone ``->`` token.
+    for idx, tok in enumerate(tokens):
+        if tok.startswith("->"):
+            tokens = tokens[:idx]
+            break
+    # (2) Trailing qualifier keywords. Drop them from the tail while they keep
+    # appearing (stackable: ``const noexcept override``).
+    # Special-case Java ``throws A, B``: once ``throws`` is seen, drop it AND
+    # everything after (the exception list).
+    out: list[str] = []
+    throwing = False
+    for tok in tokens:
+        if throwing:
+            continue
+        if tok == "throws":
+            throwing = True
+            continue
+        out.append(tok)
+    while out and out[-1] in _A_TRAILING_METHOD_QUALIFIERS:
+        out.pop()
+    return " ".join(out)
+
+
+def _buf_has_pending_signature(buf: str) -> bool:
+    """True if ``buf`` holds an unterminated method/function signature.
+
+    Used by the Family-A line-comment-newline handler to decide whether to
+    preserve the token buffer across the newline. A pending signature is one
+    that contains a balanced ``(...)`` parameter list (paren depth returned to
+    zero) but no statement terminator — the opening ``{`` of the body is
+    expected on a later line (Allman brace style).
+
+    The check is conservative: it requires at least one ``(`` AND net-zero paren
+    depth across the whole buffer (so an unbalanced ``(`` from an unfinished
+    expression is NOT treated as a signature). This correctly distinguishes:
+
+    - ``fn foo()`` / ``int getCount() const`` → pending signature (preserve)
+    - ``let x = 1;`` → terminated (``;`` already reset buf, so buf is empty)
+    - ``x = foo() + bar`` → no balanced trailing param list as a *signature*;
+      though this CAN contain ``()``, the call-site behavior is unchanged because
+      such a line almost never precedes an Allman ``{``.
+    """
+    if not buf:
+        return False
+    depth = 0
+    saw_open = False
+    for ch in buf:
+        if ch == "(":
+            depth += 1
+            saw_open = True
+        elif ch == ")":
+            depth -= 1
+    return saw_open and depth == 0
+
+
 def _classify_keywordless_method(
     toks: list[str], stack: list[_OpenAUnit], brace_depth: int,
 ) -> tuple[str, str | None, bool] | None:
@@ -1993,6 +2109,14 @@ def _classify_keywordless_method(
     # + ``()`` depending on spacing. Find the last ``(`` to locate the param list.
     # Re-join to scan the raw shape (tokens were split on whitespace).
     joined = " ".join(toks)
+    # Strip tokens that may legitimately trail the parameter list: C++ method
+    # qualifiers (``const``/``noexcept``/``override``/``final``, stacked), Dart
+    # async markers (``async``/``async*``/``sync*``/``yield``), and the C++
+    # trailing return type (``-> RetType``). Without this, a signature like
+    # ``int get() const`` or ``void f() async`` ends with a keyword rather than
+    # ``)``, so the ``endswith(")")`` guard below silently dropped the whole
+    # method — a very common C++/Dart shape.
+    joined = _strip_trailing_signature_tokens(joined)
     # Must end in ``)`` for a signature (params before ``{``).
     if not joined.endswith(")"):
         return None

@@ -3175,3 +3175,148 @@ def test_r16_field_name_mut_not_captured():
     ir = ap.parse_family_a("static mut A: u64 = 0;\nstatic mut B: u64 = 1;\n", "rust")
     names = [u.name for u in ap.all_units_flat(ir) if u.kind == "field"]
     assert "A" in names and "B" in names, f"two mut bindings must not collide; got {names}"
+
+
+# ---------------------------------------------------------------------------
+# Round 24 — C++/Dart methods with tokens trailing the parameter list.
+# A single over-strict guard (``joined.endswith(")"))`` in
+# _classify_keywordless_method) silently dropped any method whose signature
+# had tokens after the ``)``: C++ const/noexcept/override/final qualifiers,
+# C++ trailing return types (``auto f() -> T``), and Dart ``async``/``async*``.
+# These are idiomatic shapes — a large fraction of real C++/Dart methods were
+# silently lost. The fix strips known trailing qualifiers BEFORE the shape
+# guard, then accepts the trailing-return form explicitly.
+# ---------------------------------------------------------------------------
+
+
+def test_r24_cpp_const_method_detected():
+    """C++ ``int get() const { }`` — the ``const`` qualifier must not drop the
+    method. The most common C++ getter shape."""
+    src = (
+        "class C {\n"
+        "public:\n"
+        "    int get() const { return x; }\n"
+        "    int plain() { return 1; }\n"
+        "};\n"
+    )
+    kinds = _kinds(src, "cpp")
+    assert ("method", "get") in kinds, f"const method dropped; got {kinds}"
+    assert ("method", "plain") in kinds, f"plain method regressed; got {kinds}"
+
+
+def test_r24_cpp_noexcept_override_final_methods_detected():
+    """All four C++ trailing method qualifiers must be detected."""
+    src = (
+        "class C {\n"
+        "public:\n"
+        "    void a() noexcept { }\n"
+        "    bool b() override { return false; }\n"
+        "    void c() final { }\n"
+        "    bool d() const noexcept { return true; }\n"
+        "    int e() const override { return 0; }\n"
+        "};\n"
+    )
+    kinds = _kinds(src, "cpp")
+    for name in ("a", "b", "c", "d", "e"):
+        assert ("method", name) in kinds, f"{name!r} dropped; got {kinds}"
+
+
+def test_r24_cpp_trailing_return_type_detected():
+    """C++ trailing return type ``auto f() -> T { }`` — the modern return idiom.
+    Both the free function and class-method forms."""
+    src = (
+        "auto add(int a, int b) -> int { return a + b; }\n"
+        "class Calc {\n"
+        "public:\n"
+        "    auto sub(int a, int b) -> long { return a - b; }\n"
+        "};\n"
+    )
+    kinds = _kinds(src, "cpp")
+    assert ("function", "add") in kinds, f"free trailing-return fn dropped; got {kinds}"
+    assert ("method", "sub") in kinds, f"member trailing-return fn dropped; got {kinds}"
+
+
+def test_r24_dart_async_method_name_recovered():
+    """Dart ``Type name() async { }`` — the ``async`` keyword must be stripped so
+    the method name is recovered (not ``None``). A ``None`` name breaks identity
+    and rename tracking and collides all async methods on ``(method, None)``."""
+    src = (
+        "class C {\n"
+        "  Future<int> compute() async { return 1; }\n"
+        "  void main() async { print(1); }\n"
+        "}\n"
+    )
+    kinds = _kinds(src, "dart")
+    assert ("method", "compute") in kinds, f"async method name lost; got {kinds}"
+    assert ("method", "main") in kinds, f"async method name lost; got {kinds}"
+
+
+def test_r24_trailing_qualifier_does_not_swallow_control_flow():
+    """Regression guard: stripping trailing qualifiers must NOT cause a plain
+    ``if (x) { }`` / ``while (y) { }`` at method-depth to be misread as a
+    method named ``if``/``while``. The control-flow keyword guard still fires."""
+    src = (
+        "class C {\n"
+        "public:\n"
+        "    void loop() {\n"
+        "        if (x) { return; }\n"
+        "        while (y) { step(); }\n"
+        "    }\n"
+        "};\n"
+    )
+    kinds = _kinds(src, "cpp")
+    names = [n for _, n in kinds]
+    assert "if" not in names, f"control-flow swallowed as method; got {kinds}"
+    assert "while" not in names, f"control-flow swallowed as method; got {kinds}"
+    assert ("method", "loop") in kinds, f"real method regressed; got {kinds}"
+
+
+def test_r24_keywordless_method_plain_form_unchanged():
+    """Regression guard: the classic keyword-less method shape (``int get() { }``,
+    no trailing tokens) still classifies after the qualifier-stripping change."""
+    src = (
+        "class C {\n"
+        "public:\n"
+        "    int get() { return 1; }\n"
+        "    void set(int v) { x = v; }\n"
+        "};\n"
+    )
+    kinds = _kinds(src, "cpp")
+    assert ("method", "get") in kinds, f"plain get regressed; got {kinds}"
+    assert ("method", "set") in kinds, f"plain set regressed; got {kinds}"
+
+
+# ---------------------------------------------------------------------------
+# Round 24 — line comment between signature and ``{`` (Allman brace style).
+# A ``// comment`` ending the signature line triggered the line-comment buffer
+# reset, wiping the accumulated signature tokens before the ``{`` on the next
+# line was classified — silently dropping the whole unit. Affects every Family-A
+# language with Allman braces + a trailing inline comment.
+# ---------------------------------------------------------------------------
+
+
+def test_r24_rust_signature_line_comment_before_brace():
+    """``fn foo() // c\\n{ }`` — the inline comment must not wipe the signature
+    buffer; the function must still be detected when its brace is on the next line."""
+    src = "fn foo()  // this is foo\n{\n    return 1;\n}\nfn bar() { return 2; }\n"
+    kinds = _kinds(src, "rust")
+    assert ("function", "foo") in kinds, f"foo dropped by line-comment reset; got {kinds}"
+    assert ("function", "bar") in kinds, f"sibling bar regressed; got {kinds}"
+
+
+def test_r24_cpp_allman_brace_with_inline_comment():
+    """C++ Allman braces with an inline comment on the signature line — the
+    method must survive (comment must not reset the buffer across the newline)."""
+    src = (
+        "class C {\n"
+        "public:\n"
+        "    int getCount() const  // returns count\n"
+        "    {\n"
+        "        return count;\n"
+        "    }\n"
+        "    void other() {}\n"
+        "};\n"
+    )
+    kinds = _kinds(src, "cpp")
+    assert ("method", "getCount") in kinds, f"getCount dropped; got {kinds}"
+    assert ("method", "other") in kinds, f"sibling other regressed; got {kinds}"
