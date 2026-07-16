@@ -463,6 +463,10 @@ def _try_list_union(base: str, current: str, replayed: str) -> str | None:
     if b is None:
         return None
     _, base_inner, base_open_off, base_close_off = b
+    # Decline multi-line lists — the rebuild flattens to one line, destroying
+    # formatting. (_try_dict_union already has this guard.)
+    if "\n" in base_inner:
+        return None
     base_items = _split_list_items(base_inner)
     cur = _find_single_list(current)
     rep = _find_single_list(replayed)

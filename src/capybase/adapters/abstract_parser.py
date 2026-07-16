@@ -1869,6 +1869,7 @@ def _classify_a_brace(
             or t in _A_CONTAINER_KEYWORDS
             or (head != t and head in _A_FUNC_KEYWORDS)
             or (head != t and head in _A_CLASS_KEYWORDS)
+            or (head != t and head in _A_CONTAINER_KEYWORDS)
         ):
             last_kw_idx = idx
             last_kw = head if head != t else t

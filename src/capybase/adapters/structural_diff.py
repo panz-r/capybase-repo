@@ -150,6 +150,10 @@ class StructuralDiff3Way:
         for a in self.aligned:
             if a.change_kind not in _SURVIVING_CHANGE_KINDS:
                 continue
+            # Skip imports (MODULE_STMT) — they have their own Import-surface
+            # block in the rendered context, not the Required-units list.
+            if a.kind == "module_stmt":
+                continue
             if a.change_kind == _CHANGE_KIND_ADDED_BOTH_CONFLICT:
                 # Both sides' names survive (divergent rename targets).
                 for side in (a.left, a.right):
