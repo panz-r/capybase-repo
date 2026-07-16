@@ -1278,6 +1278,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
 
     brace_depth = 0
     paren_depth = 0  # track () so we don't misread a ``{`` inside a call
+    bracket_depth = 0  # track [] so a ``;`` inside [T; N] isn't a statement terminator
     # String/comment state machine (extracted to _AStrState + _advance_string_comment).
     strst = _AStrState()
     # Statement-start byte for the in-pass field emitter. Tracks the start
@@ -1415,6 +1416,16 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             buf += ch
             i += 1
             continue
+        if ch == "[":
+            bracket_depth += 1
+            buf += ch
+            i += 1
+            continue
+        if ch == "]":
+            bracket_depth = max(0, bracket_depth - 1)
+            buf += ch
+            i += 1
+            continue
 
         # Statement terminators reset the token buffer (a new statement begins).
         if ch == ";":
@@ -1429,7 +1440,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # ``stmt_start_byte`` survives internal braces (only advances at ``;``
             # or when a ``}`` closes to depth 0), so it always points at the
             # declaration keyword.
-            if brace_depth == 0 and not stack and language not in (None, "c", "h"):
+            if brace_depth == 0 and bracket_depth == 0 and not stack and language not in (None, "c", "h"):
                 stmt_text = src[stmt_start_byte : i + 1]
                 fname = _field_name_from_buf(stmt_text)
                 if fname is not None:
@@ -1455,7 +1466,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # move the tracker, or the outer ``;`` would slice from mid-statement
             # and the field name recovery would fail. The tracker is only
             # meaningful for top-level statements.
-            if brace_depth == 0:
+            if brace_depth == 0 and bracket_depth == 0:
                 stmt_start_byte = i + 1
             buf = ""
             i += 1
