@@ -142,14 +142,21 @@ class StructuralDiff3Way:
         Excluding them risked the LLM dropping a surviving unit. Only
         ``deleted_both`` (both sides removed it) is truly absent from the merge.
 
-        Deduplicated: a divergent-name rename conflict can produce both a
-        ``renamed`` entry and an ``added_both_conflict`` entry for the same
-        name, which would otherwise list it twice in the prompt.
+        For ``added_both_conflict``, BOTH the left and right names are emitted
+        (a divergent-name rename conflict has two distinct surviving names).
+        Deduplicated to avoid listing the same name twice.
         """
-        names = [
-            a.name for a in self.aligned
-            if a.change_kind in _SURVIVING_CHANGE_KINDS and a.name != "<anon>"
-        ]
+        names: list[str] = []
+        for a in self.aligned:
+            if a.change_kind not in _SURVIVING_CHANGE_KINDS:
+                continue
+            if a.change_kind == _CHANGE_KIND_ADDED_BOTH_CONFLICT:
+                # Both sides' names survive (divergent rename targets).
+                for side in (a.left, a.right):
+                    if side is not None and side.name and side.name != "<anon>":
+                        names.append(side.name)
+            elif a.name and a.name != "<anon>":
+                names.append(a.name)
         return list(dict.fromkeys(names))
 
 
@@ -391,6 +398,7 @@ def _detect_renames(
     rename_by_base: dict = {}  # base_id -> (new_identity, side_unit, side)
 
     def _try_pair_side(side_unit: StructuralUnit, side: str) -> None:
+        nonlocal new_entries
         if side_unit.identity in consumed_side_ids:
             return
         if not _fingerprint_has_content(side_unit.fingerprint):
@@ -404,9 +412,16 @@ def _detect_renames(
             prior = rename_by_base.get(base_match.identity)
             if prior is not None and prior[0] != side_unit.identity:
                 # Both sides renamed the same base to DIFFERENT names — a
-                # genuine rename conflict. Record it so structural_conflicts
-                # surfaces it. Don't consume the side unit (leave it as an
-                # added entry too, so both new names survive in required_units).
+                # genuine rename conflict. Replace the prior side's RENAMED
+                # entry (which says "clean rename, no conflict") with an
+                # added_both_conflict entry, and consume this side unit so its
+                # stale added_* entry is dropped during cleanup.
+                new_entries = [
+                    e for e in new_entries
+                    if not (e.change_kind == _CHANGE_KIND_RENAMED
+                            and e.base is not None
+                            and e.base.identity == base_match.identity)
+                ]
                 if side == "left":
                     conflict = AlignedUnit(
                         base=base_match, left=side_unit, right=prior[1],
@@ -418,6 +433,7 @@ def _detect_renames(
                         change_kind=_CHANGE_KIND_ADDED_BOTH_CONFLICT,
                     )
                 new_entries.append(conflict)
+                consumed_side_ids.add(side_unit.identity)
             return
         # The base unit must be deleted (not present under its original name).
         if base_match.identity not in deleted_base_ids:
