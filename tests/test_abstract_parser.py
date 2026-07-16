@@ -3835,3 +3835,47 @@ def test_r28_rust_extern_static_detected():
     ir = ap.parse_family_a(src, "rust")
     names = [u.name for u in ap.all_units_flat(ir)]
     assert "GLOBAL" in names, f"extern static dropped; got {names}"
+
+
+# ---------------------------------------------------------------------------
+# Round 29 — incomplete generic strip + C++ requires/operator gaps.
+# ---------------------------------------------------------------------------
+
+
+def test_r29_cpp_generic_nested_angle_brackets():
+    """F1 (HIGH): ``f<vector<int>>(...)`` — nested generics were dropped because
+    the name-token strip used rfind('<') (finds the innermost), not angle-depth
+    matching. This is the most common real-world C++ generic shape."""
+    src = "class C { void f<vector<int>>(int x) { } };"
+    kinds = _kinds(src, "cpp")
+    assert ("method", "f") in kinds, f"nested-generic method dropped; got {kinds}"
+
+
+def test_r29_cpp_generic_space_separated_args():
+    """F1 (HIGH): ``f<T, U>(...)`` — space-separated generic args split across
+    tokens, so the name token was ``U>`` (failed the identifier regex)."""
+    src = "class C { void f<T, U>(T x) { } };"
+    kinds = _kinds(src, "cpp")
+    assert ("method", "f") in kinds, f"space-separated generic method dropped; got {kinds}"
+
+
+def test_r29_cpp_operator_shift_dropped():
+    """F4 (MEDIUM): ``operator<<`` / ``operator>>`` — the ``<<`` was stripped by
+    the incomplete generic logic (rfind found the second ``<``). Now handled by
+    the angle-depth-aware strip."""
+    src = "struct S { void operator<<(int x) {} };"
+    kinds = _kinds(src, "cpp")
+    names = [n for _, n in kinds]
+    assert "operator<<" in names or "operator" in names, f"operator<< dropped; got {kinds}"
+
+
+def test_r29_cpp_requires_clause_no_phantom():
+    """F2 (HIGH): ``void f() requires (x > 0) { }`` — the C++20 requires clause
+    was not stripped, so the last ``(...)`` (the requires predicate) was misread
+    as the param list, producing a phantom method named ``requires`` and dropping
+    the real method ``f``."""
+    src = "struct S { void f() requires (x > 0) {} void g() {} };"
+    kinds = _kinds(src, "cpp")
+    names = [n for _, n in kinds]
+    assert "requires" not in names, f"phantom 'requires' method; got {kinds}"
+    assert ("method", "f") in kinds, f"method f dropped; got {kinds}"

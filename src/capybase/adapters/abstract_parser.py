@@ -2506,15 +2506,16 @@ def _strip_trailing_signature_tokens(joined: str) -> str:
     # form (``noexcept(false)``) and the spaced form (``noexcept (false)`` — valid
     # C++ with whitespace before the argument list), which tokenize as separate
     # tokens ``noexcept ( false )``.
-    # Special-case Java ``throws A, B``: once ``throws`` is seen, drop it AND
-    # everything after (the exception list).
+    # Special-case Java ``throws A, B`` and C++20 ``requires (expr)`` /
+    # ``requires Concept``: once seen, drop the keyword AND everything after
+    # (the clause spans to the ``{`` and can contain nested parens/concepts).
     out: list[str] = []
-    throwing = False
+    clipping = False
     for tok in tokens:
-        if throwing:
+        if clipping:
             continue
-        if tok == "throws":
-            throwing = True
+        if tok in ("throws", "requires"):
+            clipping = True
             continue
         out.append(tok)
     out = _strip_trailing_qualifier_run(out)
@@ -2563,6 +2564,35 @@ def _match_paren_open(toks: list[str], close_idx: int) -> int:
         if depth == 0:
             return idx
     return -1
+
+
+def _strip_trailing_generics(name_part: str) -> str:
+    """Strip a trailing balanced ``<...>`` generic-parameter list from name_part.
+
+    Walks backwards from the end matching angle-bracket depth. When the depth
+    returns to zero at a ``<``, the identifier before it is the method name.
+    Handles nested generics (``f<vector<int>>``) and space-separated args
+    (``f<T, U>``) that split across whitespace tokens. Does NOT strip
+    ``operator<<`` / ``operator>>`` (those are NOT a balanced ``<...>`` pair —
+    the depth never returns to zero because there's no matching ``>`` before the
+    ``<<``; the name stays ``operator<<`` and the caller's identifier regex
+    handles the ``operator`` prefix).
+    """
+    if not name_part.endswith(">"):
+        return name_part
+    depth = 0
+    for idx in range(len(name_part) - 1, -1, -1):
+        ch = name_part[idx]
+        if ch == ">":
+            depth += 1
+        elif ch == "<":
+            depth -= 1
+            if depth == 0:
+                # Found the matching ``<``. The name is everything before it.
+                return name_part[:idx].rstrip()
+    # Unbalanced ``<`` (depth never returned to zero) — leave unchanged so the
+    # caller's identifier regex can reject it (e.g. ``operator<<``).
+    return name_part
 
 
 def _is_trailing_qualifier_token(tok: str) -> bool:
@@ -2712,19 +2742,28 @@ def _classify_keywordless_method(
     name_part = joined[:paren_open].rstrip()
     if not name_part:
         return None
+    # Strip a trailing generic-parameter list ``<...>`` from the name_part.
+    # Must use angle-bracket DEPTH matching across the whole name_part (which
+    # may span multiple whitespace-separated tokens), not a single-token rfind.
+    # Without depth matching, ``f<vector<int>>`` (nested) and ``f<T, U>`` (space-
+    # separated args split across tokens) were silently dropped. Also recovers
+    # ``operator<<`` / ``operator>>`` (the ``<<`` is not a generic list).
+    name_part = _strip_trailing_generics(name_part)
     # The name is the last whitespace-separated token of the pre-param run.
     name_tok = name_part.split()[-1] if name_part.split() else ""
-    # Strip a trailing generic-parameter list ``<...>`` (C++ ``f<T>``, Java
-    # ``f<T extends X>``) and a leading ``~`` (C++ destructor ``~Foo``) so the
-    # identifier regex matches. Without this, ``auto f<T>(T x) -> T`` dropped the
-    # method and ``~Foo()`` was silently lost.
-    if name_tok.endswith(">"):
-        lt = name_tok.rfind("<")
-        if lt > 0:
-            name_tok = name_tok[:lt]
+    # Strip a leading ``~`` (C++ destructor ``~Foo``) so the identifier regex
+    # matches. Without this, ``~Foo()`` was silently lost.
     if name_tok.startswith("~"):
         name_tok = name_tok[1:]
-    # Guard 3: valid identifier.
+    # Guard 3: valid identifier. Accept C++ operator-overload names
+    # (``operator<<``, ``operator>>``, ``operator+``, ``operator()``, ...) which
+    # are valid method names but contain non-identifier symbols. Normalize them
+    # to ``operator`` so they don't collide with real methods under the identity
+    # (kind, name) — the operator symbols are not distinguishable enough for
+    # rename tracking, and multiple operators collapsing to ``operator`` is
+    # acceptable (they're rare in conflict zones).
+    if name_tok.startswith("operator") and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
+        name_tok = "operator"
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
         return None
     # Guard 4: not a control-flow keyword.
