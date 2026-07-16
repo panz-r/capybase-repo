@@ -1850,7 +1850,17 @@ def _classify_a_brace(
     # head (before the first ``(``/``<``/``:``) is a declaration keyword counts.
     last_kw_idx = -1
     last_kw = ""
-    for idx in range(len(toks) - 1, -1, -1):
+    # Find the position of ``->`` (return-type arrow) if present. Anything
+    # AFTER ``->`` is a type expression (impl Trait, dyn Error, Box<T>), NOT a
+    # declaration context. Without this guard, ``fn foo() -> impl Iterator<...>``
+    # misclassifies the brace as an ``impl`` container scope.
+    arrow_idx = -1
+    for ai, at in enumerate(toks):
+        if at == "->" or at.startswith("->"):
+            arrow_idx = ai
+            break
+    scan_end = arrow_idx if arrow_idx >= 0 else len(toks)
+    for idx in range(scan_end - 1, -1, -1):
         t = toks[idx]
         head = re.split(r"[<(:\[{]", t, maxsplit=1)[0]
         if (
