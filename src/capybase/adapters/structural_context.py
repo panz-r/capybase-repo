@@ -165,7 +165,10 @@ def render_structural_context(
 
     This directly addresses the "dropped replayed side" failure mode: the model
     sees unit boundaries and required outputs explicitly before generating.
+    Returns ``""`` on a ``None`` diff (the structural analysis declined).
     """
+    if diff is None:
+        return ""
     lines: list[str] = []
     # Only show units that changed (not unchanged) — the model doesn't need to
     # see a list of everything that stayed the same.

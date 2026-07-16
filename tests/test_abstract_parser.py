@@ -12,6 +12,7 @@ from __future__ import annotations
 from capybase.adapters import abstract_parser as ap
 from capybase.adapters import structural_context as sc
 from capybase.adapters import structural_diff as sd
+from capybase.structural_resolver import resolve_structurally
 
 
 # ---------------------------------------------------------------------------
@@ -3945,3 +3946,49 @@ def test_r30_python_relative_imports_detected():
     src = "from . import utils\nfrom ..models import User\nfrom .models import User\nimport os"
     ir = ap.parse_family_b(src)
     assert len(ir.imports) == 4, f"relative imports dropped; got {ir.imports}"
+
+
+def test_r31_relative_imports_no_duplicate_identity_decline():
+    """A.3 (HIGH, round-30 regression): multiple ``from . import X`` statements
+    collapsed to the same identity ``('module_stmt', '.')``, triggering a blanket
+    duplicate-identity decline for the most common Python __init__.py shape. The
+    import name must be distinguishable (include the imported names or the dots)."""
+    base = "from . import a\nfrom . import b\nfrom . import c\n"
+    left = base + "from . import d\n"
+    right = base + "from . import e\n"
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    assert diff is not None, "relative imports blanket-declined (duplicate identity)"
+
+
+# ---------------------------------------------------------------------------
+# Round 31 — resolver + context-rendering gaps.
+# ---------------------------------------------------------------------------
+
+
+def test_r31_refactoring_aware_rename_with_string_edit_preserves_value():
+    """B.7 (HIGH): a rename that ALSO edits a string value must NOT silently drop
+    the value change. ``_is_pure_rename`` used string-blanking ``_body_content``
+    (which normalizes both ``\"hello\"`` and ``\"world\"`` to ``'_'``), so the
+    rename+value-edit was misclassified as a pure rename and the value change was
+    lost. Now uses string-preserving ``_ws_collapse``, so the edit survives —
+    whether via decline (refactoring_aware_merge) or a correct disjoint merge."""
+    from capybase.conflict_extractor import ConflictUnit, ConflictSide
+    base = 'class C:\n    def foo():\n        return "hello"'
+    cur = 'class C:\n    def bar():\n        return "world"'
+    rep = 'class C:\n    def foo():\n        x = 2\n        return "hello"'
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=cur),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=rep),
+        original_worktree_text="", marker_span=None,
+    )
+    unit.structural_metadata["enclosing_node_text"] = base
+    result = resolve_structurally(unit)
+    # The string-value edit ("world") must survive — either the merge preserves
+    # it, or the resolver declines (escalates to LLM). It must NOT silently use
+    # "hello" (the dropped-edit symptom).
+    assert result.text is None or "world" in result.text, (
+        f"rename+string-edit silently dropped the value change; got {result.text!r}"
+    )

@@ -633,31 +633,45 @@ def _find_single_list(text: str):
 def _split_list_items(inner: str) -> list[str]:
     """Split a list literal's interior into stripped items (no surrounding []).
 
-    String-aware: a ``,`` inside a string literal (``"a,b"``) is NOT a
-    separator — splitting naively would corrupt the literal when it's
-    re-joined.
+    String-aware AND escape-aware: a ``,`` inside a string literal (``"a,b"``)
+    is NOT a separator, and an escaped quote (``\\"``) does NOT close the string.
+    Without escape-awareness, ``"c\\"d"`` closes the string at the escaped quote,
+    corrupting the split and causing a false decline of a valid list-union merge.
     """
     if not inner.strip():
         return []
     items: list[str] = []
     cur = ""
     in_str: str | None = None
-    for ch in inner:
+    chars = list(inner)
+    i = 0
+    n = len(chars)
+    while i < n:
+        ch = chars[i]
         if in_str is not None:
             cur += ch
+            if ch == "\\" and i + 1 < n:
+                # Escape: skip the next char (it can't close the string).
+                cur += chars[i + 1]
+                i += 2
+                continue
             if ch == in_str:
                 in_str = None
+            i += 1
             continue
         if ch in ('"', "'"):
             in_str = ch
             cur += ch
+            i += 1
             continue
         if ch == ",":
             if cur.strip():
                 items.append(cur.strip())
             cur = ""
+            i += 1
             continue
         cur += ch
+        i += 1
     if cur.strip():
         items.append(cur.strip())
     return items
@@ -1079,6 +1093,18 @@ def _body_content(body: str, lang: str | None = None) -> str:
     return entity_body_content(body, lang=lang)
 
 
+def _body_below_header(body: str, lang: str | None = None) -> str:
+    """Strip the first (header) line and whitespace-collapse the rest.
+
+    Used by ``_is_pure_rename`` to compare a renamed entity's body against the
+    base WITHOUT the header (a rename changes the header by definition) while
+    preserving string values (so a string-value edit registers as a divergence).
+    """
+    lines = body.split("\n", 1)
+    rest = lines[1] if len(lines) > 1 else ""
+    return _ws_collapse(rest, lang=lang)
+
+
 def _ws_collapse(body: str, lang: str | None = None) -> str:
     """Whitespace-collapse a body, stripping comment-only lines (string-preserving).
 
@@ -1470,14 +1496,23 @@ def _try_refactoring_aware_merge(unit: ConflictUnit) -> str | None:
     cur_renames, rep_renames = ctx.cur_renames, ctx.rep_renames
 
     def _is_pure_rename(side_ents, renames, ent):
-        """True if ``ent`` is a rename whose body content == the base entity's."""
+        """True if ``ent`` is a rename whose body content == the base entity's.
+
+        Compares the bodies EXCLUDING the header line (a rename changes the
+        header by definition) using the string-PRESERVING
+        :func:`_ws_collapse` — not the string-blanking :func:`_body_content`.
+        Without string preservation, a rename that ALSO edits a string value
+        (``return "hello"`` → ``return "world"``) is misclassified as a pure
+        rename and the value change is silently dropped. Mirrors the same
+        string-preservation fix already applied in :func:`_try_entity_disjoint`.
+        """
         if ent.identity not in renames:
             return False
         base_id = renames[ent.identity]
         base_e = base_by_id.get(base_id)
         if base_e is None:
             return False
-        return _body_content(ent.body, lang) == _body_content(base_e.body, lang)
+        return _body_below_header(ent.body) == _body_below_header(base_e.body)
 
     def _is_body_modify(ent):
         """True if ``ent`` has the same identity as a base entity, the same header

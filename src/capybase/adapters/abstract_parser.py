@@ -975,10 +975,21 @@ def _finalize_unit(
 
 
 def _extract_import_name(line: str) -> str:
-    """A best-effort label for an import statement (for identity/diff)."""
+    """A best-effort label for an import statement (for identity/diff).
+
+    For absolute imports (``from sys import path``) the label is the module
+    (``sys``). For RELATIVE imports (``from . import a``, ``from .m import b``)
+    the label includes the imported names (``.a``, ``.m.b``) so two ``from .
+    import`` lines with different names don't collide on the same identity
+    — which would force a blanket duplicate-identity decline for common
+    ``__init__.py`` patterns.
+    """
     s = line.strip()
-    # ``from X import a, b`` → ``X``; ``import X as y`` → ``X``; ``import X`` → ``X``.
-    # Relative imports (``from . import x``, ``from ..m import y``) start with ``.``.
+    # Relative imports: include names to distinguish multiple ``from . import``.
+    m = re.match(r"from\s+(\.[\w.]*)\s+import\s+(.+)", s)
+    if m:
+        return f"{m.group(1)}.{m.group(2).strip()}"
+    # Absolute ``from X import ...`` → just the module name.
     m = re.match(r"from\s+(\.[\w.]*|[A-Za-z_][\w.]*)", s)
     if m:
         return m.group(1)
