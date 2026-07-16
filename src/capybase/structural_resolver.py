@@ -272,6 +272,16 @@ def _try_disjoint_merge(base: str, current: str, replayed: str) -> str | None:
     if cur_base_changed & rep_base_changed:
         return None  # overlapping edits → real conflict, defer to LLM
 
+    # Decline if either side has a pure insertion (a new line with no base
+    # anchor). _merge_disjoint_regions silently drops pure insertions, which
+    # means a side's addition would be lost. The entity-level rules
+    # (entity_disjoint, insertion_union) handle insertions correctly, so
+    # defer to them.
+    cur_has_insert = _has_pure_insertion(base_lines, cur_lines)
+    rep_has_insert = _has_pure_insertion(base_lines, rep_lines)
+    if cur_has_insert or rep_has_insert:
+        return None
+
     # Non-overlapping: apply both edits to base. Build a merged line list by
     # walking base and substituting each side's replacement regions.
     return _merge_disjoint_regions(base_lines, cur_lines, rep_lines,
@@ -918,6 +928,22 @@ def _merge_disjoint_regions(
     # pure insertion (j2>j1 with i1==i2==len(base)) is ambiguous about ordering
     # relative to the other side, so we deliberately drop/ignore it (None-safe).
     return "\n".join(out)
+
+
+def _has_pure_insertion(base: list[str], other: list[str]) -> bool:
+    """True if ``other`` has a pure insertion (new lines with no base anchor).
+
+    Used by _try_disjoint_merge to decline when a side's insertion would be
+    silently dropped by _merge_disjoint_regions (which only handles
+    replace/delete regions anchored on base lines).
+    """
+    matcher = line_matcher(base, other)
+    for tag, i1, i2, _j1, _j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if i1 == i2:
+            return True  # pure insertion: no base anchor
+    return False
 
 
 def _regions_against_base(base: list[str], other: list[str]) -> dict[int, tuple[int, list[str]]]:
