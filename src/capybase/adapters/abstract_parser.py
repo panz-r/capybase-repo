@@ -697,7 +697,11 @@ def _extract_imports_exports_a(source: str, units: list[StructuralUnit]) -> tupl
             # language; removed.)
             first_line = u.body.split("\n", 1)[0] if u.body else ""
             toks = first_line.split()
-            is_public = any(kw in toks for kw in ("pub", "export", "public"))
+            # Recognize pub, pub(crate), pub(super), pub(in path), export, public.
+            is_public = any(
+                kw == "pub" or kw.startswith("pub(") or kw in ("export", "public")
+                for kw in toks
+            )
             if not is_public and "module.exports" in first_line:
                 is_public = True
             if is_public or u.kind == KIND_CLASS:
@@ -1030,7 +1034,7 @@ _A_CONTROL_FLOW_KEYWORDS = frozenset({
 # line-start check at the call site, so a ``require()`` inside a function body
 # (brace_depth > 0) is correctly NOT detected as an import.
 _A_IMPORT_PATTERNS = (
-    re.compile(r"^\s*(?:use\s+\S|import\s+\S|export\s+\{[^}]*\}\s+from|require\s*\(|#include\s+)"),
+    re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:use\s+\S|import\s+\S|export\s+\{[^}]*\}\s+from|require\s*\(|#include\s+)"),
     # ``<binding> = require('...')`` — require as a RHS expression. Allows
     # any prefix (const/let/var/export NAME =, or bare NAME =) before require.
     re.compile(r"^\s*(?:\w+\s+)*\w+\s*=\s*require\s*\(\s*['\"]"),
@@ -2066,7 +2070,7 @@ def _binding_name_before(toks: list[str], kw_idx: int) -> str | None:
 #: line-regex the old ``_emit_a_field_units`` re-scan used, but operates on the
 #: whitespace-normalized buffer at the ``;`` terminator.
 _A_FIELD_RE = re.compile(
-    r"^(?:(?:pub|export|public|private|static|final|readonly|unsafe|inline|mut)\s+)*"
+    r"^(?:(?:pub(?:\([^)]*\))?|export|public|private|static|final|readonly|unsafe|inline|mut)\s+)*"
     r"(?:const|static|type|let|var)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\b"
 )
 
@@ -2173,6 +2177,8 @@ def _emit_a_expression_body_units(
 def _extract_a_import_name(line: str) -> str:
     """Best-effort label for a Family-A import/use/include statement."""
     s = line.strip()
+    # Strip an optional ``pub`` / ``pub(crate)`` / ``pub(super)`` re-export prefix.
+    s = re.sub(r"^pub(?:\([^)]*\))?\s+", "", s)
     m = re.match(r"use\s+([A-Za-z_][\w:]*)", s)
     if m:
         return m.group(1)

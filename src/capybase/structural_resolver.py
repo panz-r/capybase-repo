@@ -935,24 +935,35 @@ _VISIBILITY_PREFIXES = (
     "pub", "export", "public", "private", "protected",
     "internal", "extern", "unsafe", "async",
 )
+_FIELD_DECL_KEYWORDS = frozenset({"const", "static", "let", "type", "var"})
+
+
+def _first_real_keyword(header_line: str) -> str:
+    """Strip leading visibility prefixes (including ``pub(crate)``/``pub(super)``)
+    and return the first real declaration keyword, or ``""`` if none.
+
+    Handles stacked modifiers: ``pub unsafe static``, ``pub(crate) async fn``,
+    ``unsafe pub(in crate) extern fn``, etc.
+    """
+    toks = header_line.lstrip().split()
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t in _VISIBILITY_PREFIXES or t.startswith("pub("):
+            i += 1
+            continue
+        break
+    return toks[i] if i < len(toks) else ""
 
 
 def _is_bare_function_header(header_line: str) -> bool:
     """True when ``header_line`` declares a bare function (not a container).
 
     Handles visibility/async modifiers preceding the function keyword:
-    ``pub fn``, ``export function``, ``async def``, ``unsafe extern fn``, etc.
-    A class/struct/impl/enum header (``class C`` / ``struct S`` / ``impl T``)
-    returns False — those are containers warranting the header+trailer splice.
+    ``pub fn``, ``pub(crate) fn``, ``export function``, ``async def``,
+    ``unsafe extern fn``, etc. A class/struct/impl/enum header returns False.
     """
-    toks = header_line.lstrip().split()
-    if not toks:
-        return False
-    # Strip leading visibility/async modifiers, then check the first real token.
-    i = 0
-    while i < len(toks) and toks[i] in _VISIBILITY_PREFIXES:
-        i += 1
-    return i < len(toks) and toks[i] in _FN_DECL_KEYWORDS
+    return _first_real_keyword(header_line) in _FN_DECL_KEYWORDS
 
 
 def _has_name_collision(merged_ids: list) -> bool:
@@ -1543,18 +1554,7 @@ def _rebuild_container(enclosing_text: str, entity_bodies: list[str], language: 
     # container with framing — there's no class/impl header to splice around.
     # Treating the first field as a "header" and re-emitting it would duplicate
     # the field definition. Emit flat like the bare-function case.
-    _FIELD_KW = frozenset({"const", "static", "let", "type", "var"})
-    first_tok = enc_lines[0].lstrip().split(None, 1)[0] if enc_lines[0].lstrip() else ""
-    # Strip visibility prefixes (pub, pub(crate), etc.) to find the real keyword.
-    while first_tok in _VISIBILITY_PREFIXES and enc_lines[0].lstrip().split(None, 1):
-        rest = enc_lines[0].lstrip().split(None, 1)
-        first_tok = rest[1].split(None, 1)[0] if len(rest) > 1 and rest[1].split() else ""
-        break
-    # Also handle pub(crate)/pub(super) as a single token.
-    if first_tok.startswith("pub(") or first_tok.startswith("pub "):
-        toks = enc_lines[0].lstrip().split()
-        first_tok = toks[1] if len(toks) > 1 else ""
-    if first_tok in _FIELD_KW:
+    if _first_real_keyword(enc_lines[0]) in _FIELD_DECL_KEYWORDS:
         return "\n\n".join(entity_bodies) if entity_bodies else ""
     # The body indent is the leading whitespace of the first body line (the
     # convention under which the container's entities nest). tree-sitter's entity
@@ -1574,7 +1574,7 @@ def _rebuild_container(enclosing_text: str, entity_bodies: list[str], language: 
     trailer_lines: list[str] = []
     if language != "python" and enc_lines:
         last = enc_lines[-1]
-        if last.strip() == "}":
+        if last.strip() in ("}", "};"):
             trailer_lines = [last]
     out = [header]
     for body in entity_bodies:
