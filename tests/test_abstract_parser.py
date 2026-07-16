@@ -3747,3 +3747,18 @@ def test_r27_go_interface_multiline_method_start_row_not_substring_matched():
     read = next(u for u in ap.all_units_flat(ir) if u.name == "Read")
     # Line 1 is 'Read(' (the real start); line 2 is 'p ReadBuf) error' (false match).
     assert read.span[0] == 1, f"start row substring-matched ReadBuf; got span {read.span}"
+
+
+def test_r28_no_duplicate_conflict_when_one_side_collides_with_two():
+    """When one side unit (X) collides with TWO units on the other side (Y and Z)
+    via the same deleted base, only ONE added_both_conflict should be emitted for
+    that base — not a duplicate. The non-colliding unit (Z) stays a plain add."""
+    base = "def foo():\n    return 1\n"
+    left = "def X():\n    return 1\n"
+    right = "def Y():\n    return 1\n\ndef Z():\n    return 1\n"
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    conflicts = [a for a in diff.aligned if a.change_kind == sd._CHANGE_KIND_ADDED_BOTH_CONFLICT]
+    assert len(conflicts) == 1, f"expected one conflict, got {len(conflicts)}: {[(a.left.name, a.right.name) for a in conflicts]}"
+    # Z must survive as a plain add (not swallowed or doubled).
+    names = [u.name for u in diff.aligned if u.left is not None or u.right is not None]
+    assert "Z" in diff.required_units, f"Z lost from required_units; got {diff.required_units}"

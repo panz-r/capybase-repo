@@ -446,11 +446,27 @@ def _detect_renames(
                 # a same-side prior means two same-side units matched the same
                 # base, which is just a duplicate (leave the 2nd as added_*).
                 if prior is not None and prior[2] != side:
+                    # Replace the prior RENAMED (or an existing conflict) entry
+                    # for this base with a conflict. Also avoid emitting a SECOND
+                    # conflict for the same base when multiple side units collide
+                    # with the same prior (X collides with both Y and Z on the
+                    # other side — only one conflict entry, not two).
+                    already_conflict = any(
+                        e.change_kind == _CHANGE_KIND_ADDED_BOTH_CONFLICT
+                        and e.base is not None
+                        and e.base.identity == conflict_base.identity
+                        for e in new_entries
+                    )
+                    if already_conflict:
+                        # The base is already in a conflict; this side unit just
+                        # stays as a plain added_* (the conflict already captures
+                        # the divergence).
+                        return
                     new_entries = [
                         e for e in new_entries
-                        if not (e.change_kind == _CHANGE_KIND_RENAMED
-                                and e.base is not None
-                                and e.base.identity == conflict_base.identity)
+                        if not (e.base is not None
+                                and e.base.identity == conflict_base.identity
+                                and e.change_kind in (_CHANGE_KIND_RENAMED, _CHANGE_KIND_ADDED_BOTH_CONFLICT))
                     ]
                     if side == "left":
                         conflict = AlignedUnit(
