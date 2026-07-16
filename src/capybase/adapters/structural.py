@@ -1529,8 +1529,16 @@ def referenced_symbols(text: str, language: str) -> list[str]:
     order. Excludes language-specific reserved keywords so they don't pollute
     the cross-commit ``uses`` set or the dependency-drop check (a Go ``func`` or
     Rust ``crate`` is not a symbol reference).
+
+    String literals are blanked before tokenizing so identifiers inside strings
+    (docstrings, error messages, format strings) don't pollute the reference set
+    — a symbol mentioned only in prose is not a code dependency.
     """
     reserved = _reserved_keywords(language)
+    # Blank string-literal contents so identifiers inside strings (docstrings,
+    # error messages) don't enter the reference set. Reuses the parser's regex
+    # (handles escapes, triple-quotes). Length-preserving to keep positions.
+    text = _blank_text_strings(text)
 
     out: list[str] = []
     seen: set[str] = set()
@@ -1620,28 +1628,27 @@ def find_symbol_definitions(
     return snippets
 
 
-def _line_content_is_string(line: str) -> bool:
-    """True if ``line``'s code content is dominated by a string literal.
+def _blank_line_strings(line: str) -> str:
+    """Replace string-literal contents with spaces (length-preserving).
 
-    A heuristic guard for :func:`_find_definition_span`: a line like
-    ``let s = "fn foo() { not real }";`` contains a definition-looking pattern
-    INSIDE a string. Tracking exact string boundaries across lines is complex;
-    this checks whether the line has a ``"`` or ``'`` quote BEFORE the first
-    declaration keyword — if so, the keyword is likely inside a string literal
-    and the line should be skipped. Conservative: only rejects when a quote
-    precedes ALL declaration-like content.
+    Used by :func:`_find_definition_span` to prevent definition-pattern matches
+    INSIDE string literals (e.g. ``let s = "fn foo() { not real }";``). Blanking
+    (not removing) preserves character positions so column-relative logic in the
+    caller is unaffected. Handles ``"..."``, ``'...'``, and triple-quoted forms.
     """
-    # Find the first quote char position.
-    dq = line.find('"')
-    sq = line.find("'")
-    first_quote = min(x for x in (dq, sq) if x >= 0) if (dq >= 0 or sq >= 0) else -1
-    if first_quote < 0:
-        return False
-    # Check if any declaration keyword appears AFTER the first quote (inside the
-    # string). Common declaration keywords that would trigger a false match.
-    after_quote = line[first_quote:]
-    decl_indicators = ("fn ", "def ", "func ", "fun ", "function ", "void ", "class ", "struct ")
-    return any(ind in after_quote for ind in decl_indicators)
+    from capybase.adapters.abstract_parser import _STRING_LIT_RE
+    return _STRING_LIT_RE.sub(lambda m: " " * len(m.group(0)), line)
+
+
+def _blank_text_strings(text: str) -> str:
+    """Replace string-literal contents with spaces across multi-line text.
+
+    Same as :func:`_blank_line_strings` but for full text blocks (used by
+    :func:`referenced_symbols` to exclude identifiers inside strings/comments
+    from the symbol reference set).
+    """
+    from capybase.adapters.abstract_parser import _STRING_LIT_RE
+    return _STRING_LIT_RE.sub(lambda m: " " * len(m.group(0)), text)
 
 
 
@@ -1684,11 +1691,10 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
         decl_keywords = frozenset(p.split(" ", 1)[0] for p in pats if " " in p) | _STACK_MODIFIERS
     for i, line in enumerate(lines):
         stripped = line.lstrip()
-        # String-literal guard: a line whose content is dominated by a string
-        # (e.g. ``let s = "fn foo() { not real }";``) contains definition-looking
-        # patterns INSIDE the string. Skip such lines to avoid phantom definitions.
-        if _line_content_is_string(stripped):
-            continue
+        # Blank string-literal contents so definition-pattern matching can't fire
+        # on text inside strings (e.g. ``let s = "fn foo() { not real }";``).
+        # Length-preserving blanking keeps character positions intact.
+        stripped = _blank_line_strings(stripped)
         # Exact prefix match (the common case for Python/Rust/Go/JS), including
         # an optional leading ``async``/``await`` modifier (Python ``async def``,
         # JS ``async function``) which the patterns don't enumerate.

@@ -3992,3 +3992,17 @@ def test_r31_refactoring_aware_rename_with_string_edit_preserves_value():
     assert result.text is None or "world" in result.text, (
         f"rename+string-edit silently dropped the value change; got {result.text!r}"
     )
+
+
+def test_r33_strip_decl_header_colon_in_string_default():
+    """F2 (MEDIUM): _strip_decl_header found the header boundary at the first ':',
+    which could be inside a string default arg (``def f(x="a:b"): ...``). Two
+    one-liners with different string defaults produced the same body residue,
+    misclassifying a rename+value-edit as a pure rename. Now finds ':' on a
+    string-blanked copy."""
+    from capybase.structural_resolver import _strip_decl_header
+    r1 = _strip_decl_header('def foo(x="a:b"): return 1', "python")
+    r2 = _strip_decl_header('def bar(x="z:b"): return 1', "python")
+    # Both must extract 'return 1' (the real body), NOT 'b"): return 1'.
+    assert r1 == "return 1", f"header split hit ':' inside string; got {r1!r}"
+    assert r2 == "return 1", f"header split hit ':' inside string; got {r2!r}"

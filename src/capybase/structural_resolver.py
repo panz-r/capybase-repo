@@ -1114,20 +1114,26 @@ def _strip_decl_header(body: str, lang: str | None = None) -> str:
     header boundary: Python ``def f(): BODY`` → ``BODY`` (after the first ``:)``);
     Family-A ``fn f() { BODY }`` → the content after the first line or within the
     braces. Does NOT blank string values (unlike ``split_header_body``).
+
+    The header boundary is found on a STRING-BLANKED copy so a ``:`` or ``{``
+    inside a string literal in the header (e.g. a default arg ``x="a:b"``) is
+    not mistaken for the boundary. The slice is then applied to the ORIGINAL
+    body so string values in the body portion are preserved.
     """
     if "\n" in body:
         return body.split("\n", 1)[1]
-    # One-liner: split at the header end. Python: after ``):`` or ``:``.
-    # Family-A: after ``{``.  Conservative: take everything after the first
-    # ``:`` (Python) or first ``{`` (brace langs) on the line.
+    # Find the header boundary on a string-blanked copy (so ':'/'{' inside a
+    # string in the header doesn't trigger a false split).
+    from capybase.adapters.abstract_parser import _STRING_LIT_RE
+    blanked = _STRING_LIT_RE.sub(lambda m: " " * len(m.group(0)), body)
     if lang in (None, "python", "ruby"):
         # Python one-liner: ``def f(): return 1`` → header is ``def f():``
-        idx = body.find(":")
+        idx = blanked.find(":")
         if 0 <= idx < len(body) - 1:
             return body[idx + 1:].strip()
     else:
         # Brace-lang one-liner: ``fn f() { x }`` → body is ``x``
-        idx = body.find("{")
+        idx = blanked.find("{")
         if 0 <= idx < len(body) - 1:
             return body[idx + 1:].strip()
     return body

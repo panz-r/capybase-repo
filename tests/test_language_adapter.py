@@ -468,3 +468,28 @@ def test_r32_find_definition_span_ignores_string_literals():
     assert _find_definition_span(src3, "foo", "python") is None, (
         "definition inside a Python string literal must be ignored"
     )
+
+
+def test_r33_find_definition_span_not_over_rejected_by_body_strings():
+    """F1 (HIGH, round-32 regression): the _line_content_is_string guard was too
+    broad — it rejected ANY line with a quote before a decl keyword, silently
+    missing real one-liner definitions whose body string contains common words
+    like 'function', 'void', 'class'. Now uses string-blanking (not a heuristic)."""
+    from capybase.adapters.structural import _find_definition_span
+    # Real definitions whose body contains strings with decl-like words.
+    assert _find_definition_span('def msg(): return "Error in function bar"', "msg", "python") is not None
+    assert _find_definition_span('fn foo() -> &str { "hello fn bar()" }', "foo", "rust") is not None
+    assert _find_definition_span('public String foo() { return "void bar"; }', "foo", "java") is not None
+
+
+def test_r33_referenced_symbols_ignores_string_literals():
+    """F4 (MEDIUM): referenced_symbols extracted identifiers from inside string
+    literals, polluting the dependency-drop check. Now blanks strings first."""
+    from capybase.adapters.structural import referenced_symbols
+    refs = referenced_symbols('msg = "def foo(): return bar"', "python")
+    assert "foo" not in refs, f"identifier inside string extracted; got {refs}"
+    assert "bar" not in refs, f"identifier inside string extracted; got {refs}"
+    # Real code references must survive.
+    refs2 = referenced_symbols("x = compute(real_thing)", "python")
+    assert "compute" in refs2
+    assert "real_thing" in refs2
