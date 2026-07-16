@@ -986,9 +986,14 @@ def _extract_import_name(line: str) -> str:
     """
     s = line.strip()
     # Relative imports: include names to distinguish multiple ``from . import``.
-    m = re.match(r"from\s+(\.[\w.]*)\s+import\s+(.+)", s)
+    # Strip a trailing ``(`` (parenthesized multi-line import: the names are on
+    # later lines, not captured here — fall back to module-only for the label).
+    m = re.match(r"from\s+(\.[\w.]*)\s+import\s+([^\s(][^\n]*)", s)
     if m:
-        return f"{m.group(1)}.{m.group(2).strip()}"
+        names = m.group(2).strip().rstrip(",").strip()
+        if names:
+            return f"{m.group(1)}.{names}"
+        return m.group(1)
     # Absolute ``from X import ...`` → just the module name.
     m = re.match(r"from\s+(\.[\w.]*|[A-Za-z_][\w.]*)", s)
     if m:

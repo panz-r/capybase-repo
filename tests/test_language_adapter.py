@@ -447,3 +447,24 @@ def test_r14_find_definition_span_no_false_positive_prefix():
     # True positives still work.
     assert _find_definition_span("fn compute() -> i32 { 2 }\n", "compute", "rust") is not None
     assert _find_definition_span("class C {\n    public Bar getBar() { }\n}\n", "getBar", "java") is not None
+
+
+def test_r32_find_definition_span_ignores_string_literals():
+    """B-1 (HIGH): a name appearing ONLY inside a string literal was reported as
+    a definition (the scan has no string-awareness), producing phantom definitions
+    that corrupt cross-file symbol resolution."""
+    from capybase.adapters.structural import _find_definition_span
+    src = 'fn main() {\n    let s = "fn foo() { not real }";\n    println!("{}", s);\n}\n'
+    assert _find_definition_span(src, "foo", "rust") is None, (
+        "definition inside a string literal must be ignored"
+    )
+    # Java/C++ string form.
+    src2 = 'class C {\n    String s = "void foo() {}";\n}\n'
+    assert _find_definition_span(src2, "foo", "java") is None, (
+        "definition inside a Java string literal must be ignored"
+    )
+    # Python string form.
+    src3 = 'x = "def foo(): return 1"\n'
+    assert _find_definition_span(src3, "foo", "python") is None, (
+        "definition inside a Python string literal must be ignored"
+    )

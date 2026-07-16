@@ -1094,15 +1094,43 @@ def _body_content(body: str, lang: str | None = None) -> str:
 
 
 def _body_below_header(body: str, lang: str | None = None) -> str:
-    """Strip the first (header) line and whitespace-collapse the rest.
+    """Strip the declaration header and whitespace-collapse the body content.
 
     Used by ``_is_pure_rename`` to compare a renamed entity's body against the
     base WITHOUT the header (a rename changes the header by definition) while
     preserving string values (so a string-value edit registers as a divergence).
+    Handles one-liners (``def f(): x``) — a naive ``split("\\n", 1)`` strips their
+    entire content. Uses a STRING-PRESERVING header split (not the parser's
+    ``split_header_body``, which blanks string values via ``normalize_body``).
     """
-    lines = body.split("\n", 1)
-    rest = lines[1] if len(lines) > 1 else ""
+    rest = _strip_decl_header(body, lang)
     return _ws_collapse(rest, lang=lang)
+
+
+def _strip_decl_header(body: str, lang: str | None = None) -> str:
+    """Strip the declaration header line from ``body``, preserving strings.
+
+    For multi-line bodies, drops the first line. For one-liners, splits at the
+    header boundary: Python ``def f(): BODY`` → ``BODY`` (after the first ``:)``);
+    Family-A ``fn f() { BODY }`` → the content after the first line or within the
+    braces. Does NOT blank string values (unlike ``split_header_body``).
+    """
+    if "\n" in body:
+        return body.split("\n", 1)[1]
+    # One-liner: split at the header end. Python: after ``):`` or ``:``.
+    # Family-A: after ``{``.  Conservative: take everything after the first
+    # ``:`` (Python) or first ``{`` (brace langs) on the line.
+    if lang in (None, "python", "ruby"):
+        # Python one-liner: ``def f(): return 1`` → header is ``def f():``
+        idx = body.find(":")
+        if 0 <= idx < len(body) - 1:
+            return body[idx + 1:].strip()
+    else:
+        # Brace-lang one-liner: ``fn f() { x }`` → body is ``x``
+        idx = body.find("{")
+        if 0 <= idx < len(body) - 1:
+            return body[idx + 1:].strip()
+    return body
 
 
 def _ws_collapse(body: str, lang: str | None = None) -> str:

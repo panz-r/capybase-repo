@@ -1234,7 +1234,13 @@ def classify_commit_change(
     )
     if has_body_or_sig:
         return COMMIT_BUGFIX
-    # Only renames / removals / moves on existing entities → restructuring.
+    # Pure removals (deleting entities) change behavior — not a behavior-
+    # preserving refactor. Only renames/moves (entities present under a new name
+    # or location, no net loss) qualify as restructuring.
+    has_removals = any(c.change_type == "removed" for c in changes)
+    if has_removals:
+        return COMMIT_BUGFIX
+    # Only renames / moves on existing entities → restructuring.
     return COMMIT_REFACTOR
 
 
@@ -1614,6 +1620,31 @@ def find_symbol_definitions(
     return snippets
 
 
+def _line_content_is_string(line: str) -> bool:
+    """True if ``line``'s code content is dominated by a string literal.
+
+    A heuristic guard for :func:`_find_definition_span`: a line like
+    ``let s = "fn foo() { not real }";`` contains a definition-looking pattern
+    INSIDE a string. Tracking exact string boundaries across lines is complex;
+    this checks whether the line has a ``"`` or ``'`` quote BEFORE the first
+    declaration keyword — if so, the keyword is likely inside a string literal
+    and the line should be skipped. Conservative: only rejects when a quote
+    precedes ALL declaration-like content.
+    """
+    # Find the first quote char position.
+    dq = line.find('"')
+    sq = line.find("'")
+    first_quote = min(x for x in (dq, sq) if x >= 0) if (dq >= 0 or sq >= 0) else -1
+    if first_quote < 0:
+        return False
+    # Check if any declaration keyword appears AFTER the first quote (inside the
+    # string). Common declaration keywords that would trigger a false match.
+    after_quote = line[first_quote:]
+    decl_indicators = ("fn ", "def ", "func ", "fun ", "function ", "void ", "class ", "struct ")
+    return any(ind in after_quote for ind in decl_indicators)
+
+
+
 def _find_definition_span(source: str, name: str, language: str) -> tuple[int, int] | None:
     """Find the line span of a definition of ``name`` in ``source``.
 
@@ -1653,6 +1684,11 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
         decl_keywords = frozenset(p.split(" ", 1)[0] for p in pats if " " in p) | _STACK_MODIFIERS
     for i, line in enumerate(lines):
         stripped = line.lstrip()
+        # String-literal guard: a line whose content is dominated by a string
+        # (e.g. ``let s = "fn foo() { not real }";``) contains definition-looking
+        # patterns INSIDE the string. Skip such lines to avoid phantom definitions.
+        if _line_content_is_string(stripped):
+            continue
         # Exact prefix match (the common case for Python/Rust/Go/JS), including
         # an optional leading ``async``/``await`` modifier (Python ``async def``,
         # JS ``async function``) which the patterns don't enumerate.
