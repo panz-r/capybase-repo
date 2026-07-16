@@ -1380,7 +1380,7 @@ def _build_reserved_keywords() -> None:
     """Populate ``_RESERVED_KEYWORDS`` for each supported language."""
     import keyword as _kw
     # Python — the stdlib list is authoritative (includes softkwlist like 'match').
-    _RESERVED_KEYWORDS["python"] = frozenset(_kw.kwlist) | frozenset(_kw.softkwlist)
+    _RESERVED_KEYWORDS["python"] = frozenset(_kw.kwlist) | frozenset(_kw.softkwlist) | frozenset({"self", "cls"})
 
     # Rust.
     _RESERVED_KEYWORDS["rust"] = _C_FAMILY_KEYWORDS | frozenset({

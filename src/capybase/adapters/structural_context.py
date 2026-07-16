@@ -103,6 +103,11 @@ def _render_import_surface(diff: StructuralDiff3Way) -> str:
         elif ck == _CHANGE_KIND_ADDED_BOTH:
             cur_adds.append(a.name)
             rep_adds.append(a.name)
+        elif ck == _CHANGE_KIND_ADDED_BOTH_CONFLICT:
+            # Both sides added this import with divergent bodies — a conflict,
+            # NOT a simple union. Surface it in both lists with a conflict note.
+            cur_adds.append(f"{a.name} (CONFLICT — divergent)")
+            rep_adds.append(f"{a.name} (CONFLICT — divergent)")
         elif ck == _CHANGE_KIND_DELETED_LEFT:
             rep_drops.append(a.name)
         elif ck == _CHANGE_KIND_DELETED_RIGHT:
