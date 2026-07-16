@@ -3879,3 +3879,69 @@ def test_r29_cpp_requires_clause_no_phantom():
     names = [n for _, n in kinds]
     assert "requires" not in names, f"phantom 'requires' method; got {kinds}"
     assert ("method", "f") in kinds, f"method f dropped; got {kinds}"
+
+
+# ---------------------------------------------------------------------------
+# Round 30 — C++ operator/destructor identity + Python relative imports.
+# ---------------------------------------------------------------------------
+
+
+def test_r30_cpp_ctor_destructor_no_collision():
+    """F4 (HIGH): ``Widget()`` ctor + ``~Widget()`` dtor collapsed to the same
+    identity (the ``~`` was stripped), forcing a blanket structural-diff decline
+    for EVERY C++ class with both (the standard RAII idiom). The destructor must
+    keep a distinguishing name (``~Widget``)."""
+    src = "class Widget {\npublic:\n    Widget() { init(); }\n    ~Widget() { cleanup(); }\n    void show() { }\n};"
+    ir = ap.parse_family_a(src, "cpp")
+    names = [u.name for u in ap.all_units_flat(ir) if u.kind == "method"]
+    # Both ctor and dtor must survive with DISTINCT names.
+    assert len(names) == 3, f"expected ctor+dtor+show, got {names}"
+    assert "Widget" in names, f"ctor Widget missing; got {names}"
+    dtor_names = [n for n in names if "Widget" in n and n != "Widget"]
+    assert dtor_names, f"destructor not distinguished from ctor; got {names}"
+
+
+def test_r30_cpp_ctor_destructor_diff_not_declined():
+    """F4 (HIGH): a class with ctor+dtor must NOT be declined by the 3-way diff
+    (no duplicate identities)."""
+    src = "class W {\npublic:\n    W() {}\n    ~W() {}\n    void f() {}\n};"
+    ir = ap.parse_family_a(src, "cpp")
+    assert not ap.has_duplicate_identities(ap.all_units_flat(ir)), "ctor+dtor collision"
+
+
+def test_r30_cpp_conversion_operator_scalar_detected():
+    """F2 (HIGH): ``operator int()`` must be detected as an operator, not misnamed
+    ``int`` (which corrupts identity/rename tracking and collides with real methods)."""
+    src = "class Money {\npublic:\n    operator int() { return cents; }\n    operator double() { return cents / 100.0; }\n};"
+    ir = ap.parse_family_a(src, "cpp")
+    names = [u.name for u in ap.all_units_flat(ir) if u.kind == "method"]
+    assert "int" not in names, f"conversion operator misnamed 'int'; got {names}"
+    assert "double" not in names, f"conversion operator misnamed 'double'; got {names}"
+    assert len(names) == 2, f"both conversion operators must survive; got {names}"
+
+
+def test_r30_cpp_conversion_operator_pointer_detected():
+    """F1 (HIGH): ``operator void*()`` / ``operator char*()`` were silently dropped
+    (the target type's last token ``*`` failed the identifier regex)."""
+    src = "class C {\npublic:\n    operator void*() { return nullptr; }\n    operator char*() { return 0; }\n};"
+    ir = ap.parse_family_a(src, "cpp")
+    names = [u.name for u in ap.all_units_flat(ir) if u.kind == "method"]
+    assert len(names) == 2, f"pointer-target conversion operators dropped; got {names}"
+
+
+def test_r30_cpp_distinct_operators_no_collision():
+    """F3 (MEDIUM): ``operator+`` and ``operator-`` collapsing to a single
+    ``operator`` identity forced a blanket diff decline for operator-rich classes.
+    Operators must be distinguishable."""
+    src = "class Vec {\npublic:\n    Vec operator+(const Vec& o) { return *this; }\n    Vec operator-(const Vec& o) { return *this; }\n};"
+    ir = ap.parse_family_a(src, "cpp")
+    assert not ap.has_duplicate_identities(ap.all_units_flat(ir)), "operator+ / operator- collision"
+
+
+def test_r30_python_relative_imports_detected():
+    """F5 (MEDIUM): Python relative imports ``from . import x`` / ``from ..m import y``
+    / ``from .m import z`` were silently dropped from the import surface (the regex
+    required the first char after ``from`` to be [A-Za-z_], not ``.``)."""
+    src = "from . import utils\nfrom ..models import User\nfrom .models import User\nimport os"
+    ir = ap.parse_family_b(src)
+    assert len(ir.imports) == 4, f"relative imports dropped; got {ir.imports}"

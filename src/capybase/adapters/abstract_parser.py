@@ -446,7 +446,7 @@ def _normalize_header(text: str) -> str:
 _B_DEF_RE = re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 _B_CLASS_RE = re.compile(r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)\s*[\(:]")
 _B_IMPORT_RE = re.compile(
-    r"^\s*(?:import\s+\S|from\s+[A-Za-z_][\w.]*\s+import\s)"
+    r"^\s*(?:import\s+\S|from\s+(?:\.[\w.]*|[A-Za-z_][\w.]*)\s+import\s)"
 )
 # Decorator line (Python). Attribution to the following decl is done in the scan
 # by remembering the leading decorator indent.
@@ -978,7 +978,8 @@ def _extract_import_name(line: str) -> str:
     """A best-effort label for an import statement (for identity/diff)."""
     s = line.strip()
     # ``from X import a, b`` → ``X``; ``import X as y`` → ``X``; ``import X`` → ``X``.
-    m = re.match(r"from\s+([A-Za-z_][\w.]*)", s)
+    # Relative imports (``from . import x``, ``from ..m import y``) start with ``.``.
+    m = re.match(r"from\s+(\.[\w.]*|[A-Za-z_][\w.]*)", s)
     if m:
         return m.group(1)
     m = re.match(r"import\s+([A-Za-z_][\w.]*)", s)
@@ -2566,6 +2567,45 @@ def _match_paren_open(toks: list[str], close_idx: int) -> int:
     return -1
 
 
+def _cpp_operator_name(name_part: str) -> str | None:
+    """Build a distinguishable C++ operator-overload method name.
+
+    Returns a name like ``operator+``, ``operator<<``, ``operator int``,
+    ``operator void*``, or ``None`` if ``name_part`` doesn't contain an operator
+    declaration. Handles two shapes:
+
+    - **Symbol operators**: ``operator+``, ``operator<<``, ``operator()``, where
+      ``operator`` is glued to the operator symbols in the last token.
+    - **Conversion operators**: ``operator int``, ``operator void*``, where
+      ``operator`` is followed by a target TYPE (possibly multiple tokens).
+
+    The returned name is distinguishable across different operators so they don't
+    collide under the identity ``(kind, name)`` (which would force a blanket
+    structural-diff decline for operator-rich classes).
+    """
+    toks = name_part.split()
+    if not toks:
+        return None
+    # Find the ``operator`` token (may be glued: ``operator+``, or standalone).
+    op_idx = -1
+    for idx, tok in enumerate(toks):
+        if tok == "operator" or tok.startswith("operator"):
+            # Must be the operator keyword, not a method named ``operatorX``.
+            # ``operator`` followed by non-identifier chars, or ``operator`` as a
+            # standalone token followed by more tokens (conversion operator).
+            rest = tok[len("operator"):]
+            if tok == "operator" or (rest and not rest[0].isalnum() and rest[0] != "_"):
+                op_idx = idx
+                break
+    if op_idx < 0:
+        return None
+    # Everything from ``operator`` onward is the operator name.
+    op_tail = " ".join(toks[op_idx:])
+    # Normalize whitespace: ``operator  int`` -> ``operator int``.
+    op_tail = re.sub(r"\s+", " ", op_tail).strip()
+    return op_tail
+
+
 def _strip_trailing_generics(name_part: str) -> str:
     """Strip a trailing balanced ``<...>`` generic-parameter list from name_part.
 
@@ -2751,21 +2791,26 @@ def _classify_keywordless_method(
     name_part = _strip_trailing_generics(name_part)
     # The name is the last whitespace-separated token of the pre-param run.
     name_tok = name_part.split()[-1] if name_part.split() else ""
-    # Strip a leading ``~`` (C++ destructor ``~Foo``) so the identifier regex
-    # matches. Without this, ``~Foo()`` was silently lost.
-    if name_tok.startswith("~"):
-        name_tok = name_tok[1:]
-    # Guard 3: valid identifier. Accept C++ operator-overload names
-    # (``operator<<``, ``operator>>``, ``operator+``, ``operator()``, ...) which
-    # are valid method names but contain non-identifier symbols. Normalize them
-    # to ``operator`` so they don't collide with real methods under the identity
-    # (kind, name) — the operator symbols are not distinguishable enough for
-    # rename tracking, and multiple operators collapsing to ``operator`` is
-    # acceptable (they're rare in conflict zones).
-    if name_tok.startswith("operator") and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
-        name_tok = "operator"
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
-        return None
+    # C++ destructor: keep the ``~`` prefix so ``~Widget`` is distinguished from
+    # the constructor ``Widget`` (otherwise every RAII class has a duplicate
+    # identity and the 3-way diff blanket-declines).
+    is_dtor = name_tok.startswith("~")
+    # C++ operator overloads, including conversion operators. The ``operator``
+    # keyword may be the last token (``operator+``, ``operator<<``) OR followed
+    # by the target type (``operator int``, ``operator void*``). Build a
+    # distinguishable name: ``operator+`` / ``operator int`` / ``operator<<``.
+    # Without this, conversion operators were misnamed (``int``) or dropped
+    # (``*``), and distinct operators (``+`` vs ``-``) collided.
+    op_name = _cpp_operator_name(name_part)
+    if op_name is not None:
+        name_tok = op_name
+    elif is_dtor:
+        # Keep the ``~`` — it's a valid distinguishing prefix.
+        pass
+    # Guard 3: valid identifier (or a recognized special name above).
+    if op_name is None and not is_dtor:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
+            return None
     # Guard 4: not a control-flow keyword.
     if name_tok in _A_CONTROL_FLOW_KEYWORDS:
         return None
