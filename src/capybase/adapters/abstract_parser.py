@@ -2408,9 +2408,27 @@ def _classify_a_brace(
 
     # Container-only keywords (impl/mod/namespace): open a scope but emit nothing.
     if last_kw in _A_CONTAINER_KEYWORDS:
-        # Mark as class-kind for span/body purposes; container_only suppresses
-        # the entity emission and passes children through.
-        return (KIND_CLASS, name, True)
+        # ``extern`` is special: it's a container ONLY in the block form
+        # ``extern "C" { ... }`` (where the ABI string was consumed, leaving
+        # ``extern`` as the sole token). The C++ function form
+        # ``extern int foo() { }`` has a full signature after ``extern`` — it's
+        # a function, not a container. If tokens follow ``extern`` that include
+        # a ``(`` (a param list), fall through to normal classification instead
+        # of swallowing the function into a phantom container scope.
+        if last_kw == "extern":
+            after_extern = toks[last_kw_idx + 1 :]
+            if any("(" in t for t in after_extern):
+                # C++ extern *function* form: ``extern int foo() { }`` — treat
+                # ``extern`` as a visibility prefix and classify the remaining
+                # signature via the keywordless-method path (which recovers
+                # the real name ``foo`` from the param list).
+                return _classify_keywordless_method(after_extern, stack, brace_depth)
+            else:
+                return (KIND_CLASS, name, True)
+        else:
+            # Mark as class-kind for span/body purposes; container_only suppresses
+            # the entity emission and passes children through.
+            return (KIND_CLASS, name, True)
 
     # Class vs function vs method.
     if last_kw in _A_CLASS_KEYWORDS:
@@ -2463,9 +2481,24 @@ def _strip_trailing_signature_tokens(joined: str) -> str:
     buffer represents one of these shapes; otherwise it is returned unchanged.
     """
     tokens = joined.split()
-    # (1) Trailing return type: cut at the first standalone ``->`` token.
+    # (0) C++ member-init list: ``Foo() : base(), member(42) { }`` — the init
+    # list trails the param list after a ``:``. Cut everything from the first
+    # ``:`` that follows a ``)`` (the param-list close). Without this, the last
+    # ``(...)`` in the init list (e.g. ``base()``) is misread as the param list
+    # and the method is named after the init member. A ``:`` before any ``)``
+    # is a base-class clause (``class C : B``) or a type annotation, not an init
+    # list — leave it intact.
+    paren_seen = False
     for idx, tok in enumerate(tokens):
-        if tok.startswith("->"):
+        if ")" in tok:
+            paren_seen = True
+        if paren_seen and tok == ":":
+            tokens = tokens[:idx]
+            break
+    # (1) Trailing return type: cut at the first standalone ``->`` token (C++)
+    # or ``=>`` (C# expression-bodied members: ``string Get() => expr;``).
+    for idx, tok in enumerate(tokens):
+        if tok.startswith("->") or tok == "=>":
             tokens = tokens[:idx]
             break
     # (2) Trailing qualifier keywords. Drop them from the tail while they keep
@@ -2681,6 +2714,16 @@ def _classify_keywordless_method(
         return None
     # The name is the last whitespace-separated token of the pre-param run.
     name_tok = name_part.split()[-1] if name_part.split() else ""
+    # Strip a trailing generic-parameter list ``<...>`` (C++ ``f<T>``, Java
+    # ``f<T extends X>``) and a leading ``~`` (C++ destructor ``~Foo``) so the
+    # identifier regex matches. Without this, ``auto f<T>(T x) -> T`` dropped the
+    # method and ``~Foo()`` was silently lost.
+    if name_tok.endswith(">"):
+        lt = name_tok.rfind("<")
+        if lt > 0:
+            name_tok = name_tok[:lt]
+    if name_tok.startswith("~"):
+        name_tok = name_tok[1:]
     # Guard 3: valid identifier.
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
         return None
@@ -2761,7 +2804,7 @@ def _binding_name_before(toks: list[str], kw_idx: int) -> str | None:
 #: line-regex the old ``_emit_a_field_units`` re-scan used, but operates on the
 #: whitespace-normalized buffer at the ``;`` terminator.
 _A_FIELD_RE = re.compile(
-    r"^(?:(?:pub(?:\([^)]*\))?|export|public|private|static|final|readonly|unsafe|inline|mut)\s+)*"
+    r"^(?:(?:pub(?:\([^)]*\))?|export|public|private|static|final|readonly|unsafe|inline|mut|extern)\s+)*"
     r"(?:const|static|type|let|var)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\b"
     # Anchor: the name must be followed by a type annotation (``:``) or an
     # assignment (``=``) or end-of-statement. This rejects Java/C++ typed fields

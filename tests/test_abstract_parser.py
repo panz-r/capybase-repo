@@ -3762,3 +3762,76 @@ def test_r28_no_duplicate_conflict_when_one_side_collides_with_two():
     # Z must survive as a plain add (not swallowed or doubled).
     names = [u.name for u in diff.aligned if u.left is not None or u.right is not None]
     assert "Z" in diff.required_units, f"Z lost from required_units; got {diff.required_units}"
+
+
+# ---------------------------------------------------------------------------
+# Round 28 — C++/C#/Rust keywordless-method + extern gaps (Auditor B).
+# ---------------------------------------------------------------------------
+
+
+def test_r28_cpp_generic_trailing_return_method_detected():
+    """1.1 (HIGH): ``auto f<T>(T x) -> T { }`` — the generic parameter list
+    ``<T>`` on the method name broke the identifier regex (``f<T>`` isn't a valid
+    identifier). The name token must be stripped of trailing ``<...>``."""
+    src = "class C { auto f<T>(T x) -> T { return x; } };"
+    kinds = _kinds(src, "cpp")
+    assert ("method", "f") in kinds, f"generic trailing-return method dropped; got {kinds}"
+
+
+def test_r28_cpp_ctor_init_list_correct_name():
+    """1.2 (HIGH): ``Foo() : base() { }`` — the member-init list's ``base()``
+    was misread as the param list, naming the method ``base`` and colliding with a
+    real ``base()`` method. The constructor's OWN param list ``Foo()`` is the name."""
+    src = "class C { Foo() : base() { } };"
+    kinds = _kinds(src, "cpp")
+    assert ("method", "Foo") in kinds, f"ctor named after init-list member; got {kinds}"
+    assert ("method", "base") not in kinds, f"ctor misnamed 'base'; got {kinds}"
+
+
+def test_r28_cpp_ctor_init_list_no_collision():
+    """1.2 (HIGH, collision): a ctor with an init list + a real method of the
+    init-member's name must NOT produce two units with the same identity."""
+    src = "class C { Foo() : base() { } void base() { } };"
+    ir = ap.parse_family_a(src, "cpp")
+    bases = [u for u in ap.all_units_flat(ir) if u.name == "base"]
+    assert len(bases) == 1, f"ctor collided with real base() method; got {len(bases)} 'base' units"
+    foos = [u for u in ap.all_units_flat(ir) if u.name == "Foo"]
+    assert len(foos) == 1, f"ctor Foo missing; got {[u.name for u in ap.all_units_flat(ir)]}"
+
+
+def test_r28_cpp_destructor_detected():
+    """1.3 (MEDIUM): ``~Foo() { }`` — the leading ``~`` broke the identifier
+    regex. Destructors are common C++ entities."""
+    src = "class C { ~Foo() { } };"
+    kinds = _kinds(src, "cpp")
+    names = [n for _, n in kinds]
+    assert "Foo" in names or "~Foo" in names, f"destructor dropped; got {kinds}"
+
+
+def test_r28_csharp_expression_bodied_arrow_stripped():
+    """1.4 (MEDIUM): C# ``=>`` (expression-bodied) is now stripped by the trailing-
+    token stripper, matching ``->``. This test verifies the stripper handles ``=>``;
+    full detection of ``;``-terminated keywordless methods inside classes is a
+    separate enhancement (the in-container ``;`` handler only recognizes
+    fn/func/field keywords, not keywordless C# signatures)."""
+    from capybase.adapters.abstract_parser import _strip_trailing_signature_tokens
+    result = _strip_trailing_signature_tokens("string Get ( ) => expr")
+    assert result == "string Get ( )", f"=> not stripped; got {result!r}"
+
+
+def test_r28_cpp_extern_function_not_dropped():
+    """5.1 (HIGH): ``extern int foo() { }`` — the C++ extern *function* form was
+    silently dropped because ``extern`` was treated as a container keyword. Only
+    the Rust ``extern "C" { }`` block form should be a container."""
+    src = "extern int foo() { return 1; }"
+    kinds = _kinds(src, "cpp")
+    assert ("function", "foo") in kinds, f"extern function dropped; got {kinds}"
+
+
+def test_r28_rust_extern_static_detected():
+    """5.2 (MEDIUM): top-level ``extern static GLOBAL: u32 = 0;`` was dropped
+    because ``extern`` isn't in the field-keyword modifier prefix."""
+    src = "extern static GLOBAL: u32 = 0;"
+    ir = ap.parse_family_a(src, "rust")
+    names = [u.name for u in ap.all_units_flat(ir)]
+    assert "GLOBAL" in names, f"extern static dropped; got {names}"
