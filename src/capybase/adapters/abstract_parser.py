@@ -1336,8 +1336,11 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             i = new_i
             continue
 
-        # Conflict markers (only at line start, depth 0).
-        if i == line_start or (i > line_start and src[line_start:i].strip() == ""):
+        # Conflict markers (only at line start, brace depth 0). A marker inside
+        # a function body (depth > 0) is content, not a real conflict boundary —
+        # firing at depth > 0 would close the enclosing unit mid-body, truncating
+        # its span/body to a fragment.
+        if brace_depth == 0 and (i == line_start or (i > line_start and src[line_start:i].strip() == "")):
             line_head = src[line_start : line_start + 7]
             if (
                 line_head.startswith("<<<<<<<")
