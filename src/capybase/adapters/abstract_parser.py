@@ -1061,6 +1061,10 @@ class _OpenAUnit:
     container_only: bool = False
     # Attribute/decorator lines consumed immediately before this decl.
     attr_start_row: int | None = None
+    # True for a ``macro_rules!`` body: its contents are expansion *templates*,
+    # not real entities, so neither the brace machine nor the associated-item
+    # emitter should classify declarations inside it.
+    is_macro_body: bool = False
 
 
 #: String-prefix runes that introduce a non-plain string literal whose closing
@@ -1274,6 +1278,11 @@ def _in_assoc_item_container(stack: list["_OpenAUnit"]) -> bool:
     if not stack:
         return False
     top = stack[-1]
+    # A ``macro_rules!`` body contains expansion templates, not real entities —
+    # a ``;`` inside it (e.g. a template arm terminator) must not be read as a
+    # bodyless declaration.
+    if top.is_macro_body:
+        return False
     if top.container_only:
         return True
     return top.kind == KIND_CLASS
@@ -1317,10 +1326,14 @@ def _emit_assoc_item_at_semicolon(
     Called from the in-container ``;`` handler. Slices ``src[stmt_start:semi+1]``
     and tries, in order: (1) a field declaration (``const``/``static``/``let``) →
     FIELD; (2) a bodyless function signature (``fn foo(...)``) → METHOD. Emits at
-    most one unit, deduped against already-emitted unit names (so a real method
-    with a ``{`` body — already emitted by the brace machine — isn't doubled).
-    Attached as a child of the innermost open container frame.
+    most one unit. The unit is attached as a CHILD of the innermost open
+    container frame (``stack[-1].children``), mirroring the brace-machine path,
+    so dedup is per-container — two ``const ID`` in sibling impls both survive.
+    Dedup also checks open sibling frames (a method with a ``{`` body already
+    opened) so a bodyless signature isn't doubled against its braced twin.
     """
+    if not stack:
+        return
     start = stmt_start
     while start < semi_idx and src[start] == "\n":
         start += 1
@@ -1329,32 +1342,60 @@ def _emit_assoc_item_at_semicolon(
         return
     end_row = cur_row_at(semi_idx)
     start_row = cur_row_at(start)
-    existing = {u.name for u in units if u.name}
+    # Dedup against THIS container's scope: its already-emitted children plus any
+    # sibling declarations still open on the stack (a braced method sharing the
+    # name). NOT the global units list — that would drop same-name items across
+    # sibling containers (the very thing container scopes exist to allow).
+    existing = _container_sibling_names(stack)
+    su: StructuralUnit | None = None
     # (1) Field-shaped: ``const``/``static``/``let`` binding.
     fname = _field_name_from_buf(stmt_text)
     if fname is not None and fname not in existing:
-        units.append(
-            StructuralUnit(
-                kind=KIND_FIELD,
-                name=fname,
-                span=(start_row, end_row),
-                body=stmt_text,
-                fingerprint=unit_body_fingerprint(stmt_text, lang=language),
-            )
+        su = StructuralUnit(
+            kind=KIND_FIELD,
+            name=fname,
+            span=(start_row, end_row),
+            body=stmt_text,
+            fingerprint=unit_body_fingerprint(stmt_text, lang=language),
         )
-        return
-    # (2) Bodyless function/method signature: ``fn foo(&self);`` etc.
-    mname = _assoc_item_func_name(stmt_text)
-    if mname is not None and mname not in existing:
-        units.append(
-            StructuralUnit(
+    else:
+        # (2) Bodyless function/method signature: ``fn foo(&self);`` etc.
+        mname = _assoc_item_func_name(stmt_text)
+        if mname is not None and mname not in existing:
+            su = StructuralUnit(
                 kind=KIND_METHOD,
                 name=mname,
                 span=(start_row, end_row),
                 body=stmt_text,
                 fingerprint=unit_body_fingerprint(stmt_text, lang=language),
             )
-        )
+    if su is not None:
+        stack[-1].children.append(su)
+
+
+def _container_sibling_names(stack: list["_OpenAUnit"]) -> set[str]:
+    """Names already declared in the innermost container's scope.
+
+    Combines (a) the already-emitted children of the innermost open frame and
+    (b) the names of any sibling frames still open directly inside the same
+    container. Used by the in-container associated-item emitter for per-scope
+    dedup (so two ``const ID`` in sibling impls both survive, but a bodyless
+    signature isn't doubled against its braced twin).
+    """
+    names: set[str] = set()
+    if not stack:
+        return names
+    top = stack[-1]
+    for child in top.children:
+        if child.name:
+            names.add(child.name)
+    # An open frame is a sibling if it sits directly inside the same container
+    # (open_brace_depth == top's). In practice this is the still-open braced
+    # method whose body we might be shadowing — reserve its name.
+    for frame in stack:
+        if frame.open_brace_depth == top.open_brace_depth and frame.name:
+            names.add(frame.name)
+    return names
 
 
 def _go_method_name_from_buf(buf: str) -> str | None:
@@ -1362,8 +1403,9 @@ def _go_method_name_from_buf(buf: str) -> str | None:
 
     Go method specs may have two paren groups — params and named results:
     ``Read(p []byte) (n int, err error)`` — so the name is the first identifier
-    before the FIRST ``(`` (the parameter list), not before the last. Returns the
-    name or ``None`` if no valid identifier precedes the param list.
+    before the FIRST ``(`` (the parameter list), not before the last. Generic
+    methods put a type-parameter list before the params: ``Map[T any](s []T)`` —
+    the name is before the ``[``. Returns the name or ``None``.
     """
     t = buf.strip()
     # Find the first top-level ``(`` (the param list opener).
@@ -1373,6 +1415,12 @@ def _go_method_name_from_buf(buf: str) -> str | None:
     name_part = t[:paren].strip()
     if not name_part:
         return None
+    # Strip a trailing generic type-parameter list ``[T any]``: the name is the
+    # identifier before it (``Map`` in ``Map[T any]``).
+    if name_part.endswith("]"):
+        br = name_part.rfind("[")
+        if br > 0:
+            name_part = name_part[:br].strip()
     # The name is the last whitespace-separated token of the pre-param run (a
     # return type may precede it: ``error DoThing(...)`` — name is DoThing).
     cand = name_part.split()[-1] if name_part.split() else ""
@@ -1392,7 +1440,7 @@ def _maybe_emit_go_interface_method(
     brace_depth: int,
     units: list[StructuralUnit],
     src: str,
-    line_start: int,
+    newline_idx: int,
     cur_row_at,
 ) -> bool:
     """Emit a Go interface method spec at a newline. Returns True if emitted.
@@ -1401,45 +1449,44 @@ def _maybe_emit_go_interface_method(
     no ``;``: ``Read(p []byte) (n int, err error)``. Only fires when the scanner
     is DIRECTLY inside a Go interface body (the innermost open frame is a CLASS
     whose declaration keyword was ``interface``, and the brace depth is exactly
-    one past the interface's open depth — i.e. not inside a nested method body,
-    which can't happen in a pure interface but guards against malformed input).
+    the interface's open depth). ``newline_idx`` is the byte index of the newline
+    that ended the method's line; the body is sliced back to the line's start.
 
-    The signature is classified via the keywordless-method heuristic (reused for
-    C++/Java methods). Deduped against already-emitted units.
+    Multi-line signatures (params spanning lines) are handled by declining when
+    the paren depth in ``buf`` is unbalanced — the method is incomplete and will
+    be emitted at its closing line. The emitted unit is attached to the
+    interface frame's children (per-scope dedup via _container_sibling_names).
     """
     if language != "go" or not stack or not buf.strip():
         return False
     top = stack[-1]
     # Directly inside the interface body: brace_depth == top.open_brace_depth.
-    # A depth greater than that means we're inside a nested block (not a method
-    # spec) — skip.
     if brace_depth != top.open_brace_depth or top.kind != KIND_CLASS:
         return False
     # Confirm the container is an interface (not a struct) by checking the
     # source at the frame's start for the ``interface`` keyword.
     if "interface" not in src[top.start_byte : top.body_start_byte + 1]:
         return False
-    # Recover the method name. Go signatures may have TWO paren groups — params
-    # ``(p []byte)`` and named results ``(n int, err error)`` — so the generic
-    # keywordless classifier (which takes the name before the LAST paren group)
-    # misreads them. The method name is the first identifier before the FIRST
-    # ``(`` (the param list). Strip any leading receiver, which Go interfaces
-    # don't have (those are on concrete receiver methods, not interface specs).
+    # Decline on an unbalanced param list: the signature spans multiple lines
+    # (``Read(p []byte,\n  q int) error``) and isn't complete yet. Emitting now
+    # would produce a truncated method now and a phantom from the continuation.
+    if not _go_buf_params_balanced(buf):
+        return False
     name = _go_method_name_from_buf(buf)
     if not name:
         return False
-    kind = KIND_METHOD
-    existing = {u.name for u in units if u.name}
-    if name in existing:
+    if name in _container_sibling_names(stack):
         return False
     # The body is the source line ending at this newline.
-    nl = src.rfind("\n", 0, line_start)
+    nl = src.rfind("\n", 0, newline_idx)
     line_begin = nl + 1 if nl >= 0 else 0
-    body = src[line_begin:line_start].rstrip()
+    body = src[line_begin:newline_idx].rstrip()
+    if not body:
+        return False
     row = cur_row_at(line_begin)
-    units.append(
+    top.children.append(
         StructuralUnit(
-            kind=kind,
+            kind=KIND_METHOD,
             name=name,
             span=(row, row),
             body=body,
@@ -1447,6 +1494,22 @@ def _maybe_emit_go_interface_method(
         )
     )
     return True
+
+
+def _go_buf_params_balanced(buf: str) -> bool:
+    """True if the paren depth in ``buf`` is net-zero (a complete signature).
+
+    A Go interface method whose params span multiple lines has an unbalanced
+    ``(`` at the first line's newline (the closing ``)`` is on a later line).
+    Declining here defers emission to the line where the signature completes.
+    """
+    depth = 0
+    for ch in buf:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+    return depth == 0
 
 
 def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
@@ -1553,9 +1616,10 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # The ``;`` handler can't catch them (no ``;``) and the brace
             # machine can't either (no ``{``). At a newline directly inside a
             # Go interface body, classify the buffer as a bodyless method.
+            # ``i`` is the newline byte — the method's line ends at it.
             if _maybe_emit_go_interface_method(
                 buf, language, stack, brace_depth, units,
-                src, line_start, cur_row_at,
+                src, i, cur_row_at,
             ):
                 buf = ""  # consumed — start the next method's signature fresh
             i = new_i
@@ -1593,14 +1657,20 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
 
         # --- track braces / parens ---
         if ch == "{":
-            # Classify this brace.
-            classified = _classify_a_brace(buf, stack, language, brace_depth)
+            # Inside a ``macro_rules!`` body, braces are template syntax, not
+            # declarations — skip classification so ``fn``/``const`` fragments in
+            # the macro body don't leak as phantom entities.
+            in_macro = any(f.is_macro_body for f in stack)
+            classified = None if in_macro else _classify_a_brace(buf, stack, language, brace_depth)
             if classified is not None:
                 # Declaration-level brace. Push a new unit.
                 kind, name, container_only = classified
                 decl_start = _find_decl_start(src, i, line_start)
                 attr_row = pending_attr_row
                 pending_attr_row = None
+                # Detect a macro_rules! body: mark it so its template contents are
+                # not classified as real entities.
+                is_macro = _buf_is_macro_rules(buf, language)
                 unit = _OpenAUnit(
                     kind=kind,
                     name=name,
@@ -1611,14 +1681,20 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                     attr_start_row=attr_row,
                     is_test=bool(name and (name.startswith("test") or name.startswith("Test"))),
                     container_only=container_only,
+                    is_macro_body=is_macro,
                 )
                 stack.append(unit)
             # Either way, depth increases.
             brace_depth += 1
             buf = ""
             # A declaration brace opens a new body — the next associated-item
-            # statement (if any) starts right after this brace.
-            inner_stmt_start = i + 1
+            # statement (if any) starts right after this brace. An object/struct-
+            # literal brace (``classified is None``) does NOT reset the tracker:
+            # it's internal to the current statement (``const O: P = P { ... };``),
+            # and resetting would lose the declaration start before the ``;``.
+            # Mirrors stmt_start_byte's "survives internal braces" discipline.
+            if classified is not None:
+                inner_stmt_start = i + 1
             i += 1
             continue
 
@@ -2106,15 +2182,22 @@ def _classify_a_brace(
         return (kind, name, False)
     # Rust ``macro_rules! Name { ... }`` — a macro definition. The ``!`` glues to
     # ``macro_rules`` (no declaration keyword set matches it), so handle it here:
-    # the name is the identifier token after ``macro_rules!``. Tracked as a CLASS
-    # (it opens a braced body and is a named top-level entity).
-    if language == "rust" and toks and toks[0].startswith("macro_rules!"):
-        if len(toks) >= 2:
-            cand = toks[1]
-            cand = re.split(r"[<(:\[{]", cand, maxsplit=1)[0].strip(" \t")
-            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
-                return (KIND_CLASS, cand, False)
-        return (KIND_CLASS, None, False)
+    # the name is the identifier token after ``macro_rules!``. An optional leading
+    # visibility prefix (``pub``/``pub(crate)``) is skipped. Tracked as a CLASS
+    # (it opens a braced body and is a named top-level entity). The body is marked
+    # is_macro_body by the caller so its template fragments don't leak as entities.
+    if language == "rust":
+        mtoks = toks
+        # Strip a leading visibility prefix (pub / pub(crate)) if present.
+        if mtoks and (mtoks[0] == "pub" or mtoks[0].startswith("pub(")):
+            mtoks = mtoks[1:]
+        if mtoks and mtoks[0].startswith("macro_rules!"):
+            if len(mtoks) >= 2:
+                cand = mtoks[1]
+                cand = re.split(r"[<(:\[{]", cand, maxsplit=1)[0].strip(" \t")
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
+                    return (KIND_CLASS, cand, False)
+            return (KIND_CLASS, None, False)
     # Find the LAST declaration keyword in the buffer. A keyword may be glued
     # to the following ``(`` / ``<`` / ``:`` in the whitespace-normalized
     # tokens (``function()`` / ``fn<T>``), so match by prefix: a token whose
@@ -2272,9 +2355,43 @@ def _strip_trailing_signature_tokens(joined: str) -> str:
             throwing = True
             continue
         out.append(tok)
-    while out and out[-1] in _A_TRAILING_METHOD_QUALIFIERS:
+    while out and _is_trailing_qualifier_token(out[-1]):
         out.pop()
     return " ".join(out)
+
+
+def _is_trailing_qualifier_token(tok: str) -> bool:
+    """True if ``tok`` is a trailing method qualifier (bare or parenthesized).
+
+    Handles the bare form (``const``/``noexcept``/``override``/...) AND the
+    parenthesized C++ form ``noexcept(expr)`` / ``throw(...)`` — where the
+    qualifier keyword is glued to its argument list. Without this, ``void f()
+    noexcept(false)`` left the parenthesized qualifier in place, so the
+    ``endswith(")")`` guard misread ``(false)`` as the param list and produced a
+    phantom method named ``noexcept``.
+    """
+    if tok in _A_TRAILING_METHOD_QUALIFIERS:
+        return True
+    # Parenthesized form: ``noexcept(...)`` / ``throw(...)``. The keyword is the
+    # head before the first ``(``.
+    head = tok.split("(", 1)[0]
+    return head in _A_TRAILING_METHOD_QUALIFIERS and tok.endswith(")")
+
+
+def _buf_is_macro_rules(buf: str, language: str | None) -> bool:
+    """True if ``buf`` is a ``macro_rules! Name`` declaration (Rust).
+
+    Detects both ``macro_rules! name`` and ``pub macro_rules! name`` / ``pub(crate)
+    macro_rules! name``. Used by the ``{`` handler to mark the opened body as a
+    macro body so its template fragments (``fn``/``const`` inside the macro) are
+    not classified as real entities.
+    """
+    if language != "rust" or not buf:
+        return False
+    toks = buf.split()
+    if toks and (toks[0] == "pub" or toks[0].startswith("pub(")):
+        toks = toks[1:]
+    return bool(toks) and toks[0].startswith("macro_rules!")
 
 
 def _buf_has_pending_signature(buf: str) -> bool:
@@ -2297,6 +2414,14 @@ def _buf_has_pending_signature(buf: str) -> bool:
       such a line almost never precedes an Allman ``{``.
     """
     if not buf:
+        return False
+    # An assignment (``=``) before the param list means this is an expression
+    # statement (``x = foo()``), not a declaration — reject so the buffer is
+    # wiped at the comment newline instead of over-preserved. A real signature
+    # never has a top-level ``=`` before its ``()``.
+    # Find the first ``(`` (the param list); an ``=`` before it is an assignment.
+    paren = buf.find("(")
+    if paren > 0 and "=" in buf[:paren]:
         return False
     depth = 0
     saw_open = False
@@ -2466,6 +2591,12 @@ def _binding_name_before(toks: list[str], kw_idx: int) -> str | None:
 _A_FIELD_RE = re.compile(
     r"^(?:(?:pub(?:\([^)]*\))?|export|public|private|static|final|readonly|unsafe|inline|mut)\s+)*"
     r"(?:const|static|type|let|var)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\b"
+    # Anchor: the name must be followed by a type annotation (``:``) or an
+    # assignment (``=``) or end-of-statement. This rejects Java/C++ typed fields
+    # (``static final int N``) where backtracking would match ``static`` as the
+    # field keyword and capture the following TYPE token as the name. In valid
+    # Rust/JS field declarations the name is always followed by ``:``/``=``.
+    r"\s*(?:[:=]|$)"
 )
 
 

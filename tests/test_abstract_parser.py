@@ -3418,3 +3418,152 @@ def test_r24_rust_macro_rules_detected():
     fn_names = [n for _, n in kinds]
     assert "vec" in fn_names, f"macro_rules! vec dropped; got {kinds}"
     assert ("function", "bar") in kinds, f"sibling bar regressed; got {kinds}"
+
+
+# ---------------------------------------------------------------------------
+# Round 25 — regressions in the round-24 in-container associated-item path.
+# The new emitter (a) deduped against the GLOBAL unit name set instead of the
+# per-container scope, and (b) the inner_stmt_start tracker reset on every
+# ``{`` (including object-literal braces), contradicting its own docstring.
+# ---------------------------------------------------------------------------
+
+
+def test_r25_sibling_impl_same_name_const_both_survive():
+    """H1: ``const ID`` in two sibling impl blocks must BOTH survive. The
+    associated-item emitter deduped against the global unit list, dropping the
+    2nd — exactly the scenario container-scopes exist for."""
+    src = "impl A { const ID: u32 = 1; }\nimpl B { const ID: u32 = 2; }\n"
+    ir = ap.parse_family_a(src, "rust")
+    ids = [u.name for u in ap.all_units_flat(ir) if u.kind == "field"]
+    assert ids.count("ID") == 2, f"both ID consts must survive; got {ids}"
+
+
+def test_r25_sibling_trait_same_name_method_both_survive():
+    """H1 (bodyless): same-name bodyless method in two sibling traits."""
+    src = "trait T1 { fn m(&self); }\ntrait T2 { fn m(&self); }\n"
+    ir = ap.parse_family_a(src, "rust")
+    ms = [u.name for u in ap.all_units_flat(ir) if u.kind == "method"]
+    assert ms.count("m") == 2, f"both m methods must survive; got {ms}"
+
+
+def test_r25_assoc_const_with_braced_initializer_survives():
+    """H2: ``const O: P = P { x: 0 };`` inside an impl. The inner_stmt_start
+    tracker reset on the object-literal ``{``, so the slice at the ``;`` no
+    longer started at ``const`` and the field was dropped."""
+    src = "impl C {\n    const O: P = P { x: 0 };\n    fn f(&self){}\n}\n"
+    ir = ap.parse_family_a(src, "rust")
+    names = [u.name for u in ap.all_units_flat(ir)]
+    assert "O" in names, f"associated const with initializer dropped; got {names}"
+    assert "f" in names, f"sibling fn regressed; got {names}"
+
+
+def test_r25_assoc_const_with_empty_struct_init_survives():
+    """H2 minimal: ``const X: S = S {};`` — the empty struct literal brace."""
+    src = "impl C {\n    const X: S = S {};\n}\n"
+    ir = ap.parse_family_a(src, "rust")
+    names = [u.name for u in ap.all_units_flat(ir)]
+    assert "X" in names, f"const with empty struct init dropped; got {names}"
+
+
+# ---------------------------------------------------------------------------
+# Round 25 — Go interface method fidelity (round-24 path).
+# ---------------------------------------------------------------------------
+
+
+def test_r25_go_interface_method_has_body_and_fingerprint():
+    """M4: a Go interface method must have a non-empty body and fingerprint.
+    Round 24 emitted the method with empty body (sliced the wrong range),
+    breaking rename detection for the entire Go interface surface."""
+    src = "type R interface {\n    Read(p []byte) error\n}\n"
+    ir = ap.parse_family_a(src, "go")
+    read = next(u for u in ap.all_units_flat(ir) if u.name == "Read")
+    assert read.body, f"interface method body empty; got body={read.body!r}"
+    assert read.fingerprint, f"interface method fingerprint empty; got {read.fingerprint!r}"
+    assert "Read" in read.body, f"body should contain the signature; got {read.body!r}"
+
+
+def test_r25_go_interface_generic_method_detected():
+    """M3: a generic Go interface method ``Map[T any](s []T) []T`` must be
+    detected. The type-parameter list ``[T any]`` before ``(`` broke name
+    extraction (it took the token after ``[``)."""
+    src = "type R interface {\n    Map[T any](s []T) []T\n}\n"
+    kinds = _kinds(src, "go")
+    assert ("method", "Map") in kinds, f"generic interface method dropped; got {kinds}"
+
+
+def test_r25_go_interface_multiline_method_no_phantom():
+    """M5: a Go interface method whose params span multiple lines must emit ONE
+    method, not a phantom from a continuation line that happens to contain ``(``."""
+    src = (
+        "type R interface {\n"
+        "    Read(p []byte,\n"
+        "         foo(x) int) error\n"
+        "}\n"
+    )
+    ir = ap.parse_family_a(src, "go")
+    methods = [u.name for u in ap.all_units_flat(ir) if u.kind == "method"]
+    assert methods == ["Read"], f"expected one Read, got phantoms {methods}"
+
+
+# ---------------------------------------------------------------------------
+# Round 25 — macro_rules body must not leak template fragments (round-24 path).
+# ---------------------------------------------------------------------------
+
+
+def test_r25_macro_rules_body_no_phantom_leak():
+    """M2: a macro_rules! body contains expansion *templates*, not real
+    entities. The fn/const inside must NOT leak as phantom entities."""
+    src = (
+        "macro_rules! m {\n"
+        "    () => {\n"
+        "        fn leak() -> u32 { 0 }\n"
+        "        const C: u32 = 1;\n"
+        "    };\n"
+        "}\n"
+    )
+    ir = ap.parse_family_a(src, "rust")
+    names = [u.name for u in ap.all_units_flat(ir)]
+    assert "leak" not in names, f"macro body leaked phantom fn; got {names}"
+    assert "C" not in names, f"macro body leaked phantom const; got {names}"
+    assert "m" in names, f"the macro itself must survive; got {names}"
+
+
+def test_r25_pub_macro_rules_detected():
+    """L1: ``pub macro_rules! name`` (with a visibility prefix) must be detected
+    as the named macro, not an anonymous function."""
+    src = "pub macro_rules! publ {\n    () => { }\n}\n"
+    kinds = _kinds(src, "rust")
+    assert ("class", "publ") in kinds, f"pub macro_rules! misclassified; got {kinds}"
+
+
+# ---------------------------------------------------------------------------
+# Round 25 — trailing-token classifier edge cases (round-24 path).
+# ---------------------------------------------------------------------------
+
+
+def test_r25_cpp_noexcept_with_expr_no_phantom():
+    """H3: ``void f() noexcept(false) { }`` must classify as method ``f``, not a
+    phantom ``noexcept``. The parenthesized ``noexcept(expr)`` form broke the
+    trailing-qualifier strip (it only matched the bare token)."""
+    src = (
+        "struct S {\n"
+        "    void f() noexcept(false) { }\n"
+        "    void g() { }\n"
+        "};\n"
+    )
+    kinds = _kinds(src, "cpp")
+    names = [n for _, n in kinds]
+    assert "noexcept" not in names, f"phantom noexcept emitted; got {kinds}"
+    assert ("method", "f") in kinds, f"method f dropped; got {kinds}"
+
+
+def test_r25_java_static_final_field_name():
+    """M1: ``public static final int N = 5;`` inside a Java class must NOT emit a
+    phantom field named ``final`` (backtracking in _A_FIELD_RE matched ``static``
+    as the field keyword and captured the following TYPE token as the name).
+    Detection of Java typed fields (``N``) is out of scope for the Rust-oriented
+    field emitter; the bug was the phantom, not the miss."""
+    src = "class C {\n    public static final int N = 5;\n    void m(){}\n}\n"
+    ir = ap.parse_family_a(src, "java")
+    fields = [u.name for u in ap.all_units_flat(ir) if u.kind == "field"]
+    assert "final" not in fields, f"phantom field 'final'; got {fields}"
