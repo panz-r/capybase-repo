@@ -3320,3 +3320,101 @@ def test_r24_cpp_allman_brace_with_inline_comment():
     kinds = _kinds(src, "cpp")
     assert ("method", "getCount") in kinds, f"getCount dropped; got {kinds}"
     assert ("method", "other") in kinds, f"sibling other regressed; got {kinds}"
+
+
+# ---------------------------------------------------------------------------
+# Round 24 — associated items & bodyless signatures inside containers.
+# The in-pass field/method emitters only fired at brace_depth == 0, so several
+# idiomatic constructs nested inside impl/trait/mod/extern/interface were
+# silently dropped: Rust associated consts, Rust trait method signatures (no
+# body), Rust extern "C" FFI declarations, and Go interface method specs.
+# ---------------------------------------------------------------------------
+
+
+def test_r24_rust_associated_const_in_impl():
+    """Rust ``impl C { const N: u32 = 1; }`` — the associated const must emit a
+    FIELD unit. Previously dropped (field emitter gated on brace_depth == 0)."""
+    src = (
+        "struct Config;\n"
+        "impl Config {\n"
+        "    const VERSION: u32 = 1;\n"
+        "    fn name() -> &'static str { \"x\" }\n"
+        "}\n"
+    )
+    kinds = _kinds(src, "rust")
+    assert ("field", "VERSION") in kinds, f"associated const dropped; got {kinds}"
+    assert ("method", "name") in kinds, f"sibling fn regressed; got {kinds}"
+
+
+def test_r24_rust_associated_const_in_trait():
+    """Rust ``trait T { const N: u32; }`` — trait associated const (no value)."""
+    src = (
+        "trait T {\n"
+        "    const N: u32;\n"
+        "    fn foo(&self);\n"
+        "}\n"
+    )
+    kinds = _kinds(src, "rust")
+    assert ("field", "N") in kinds, f"trait associated const dropped; got {kinds}"
+
+
+def test_r24_rust_trait_bodyless_method():
+    """Rust ``trait T { fn foo(&self); }`` — a trait method with no body (just a
+    signature terminated by ``;``). Previously dropped (no ``{`` to classify)."""
+    src = (
+        "trait T {\n"
+        "    fn foo(&self);\n"
+    "    fn bar(&self) -> bool;\n"
+        "}\n"
+    )
+    kinds = _kinds(src, "rust")
+    assert ("method", "foo") in kinds, f"trait bodyless method dropped; got {kinds}"
+    assert ("method", "bar") in kinds, f"trait bodyless method dropped; got {kinds}"
+
+
+def test_r24_rust_extern_c_ffi_declarations():
+    """Rust ``extern \"C\" { fn foo(); fn bar(x: i32) -> i32; }`` — FFI surface.
+    Each declaration inside the extern block must be tracked (the linkage surface)."""
+    src = (
+        "extern \"C\" {\n"
+        "    fn foo();\n"
+        "    fn bar(x: i32) -> i32;\n"
+        "}\n"
+        "pub fn real_func() -> i32 { 42 }\n"
+    )
+    kinds = _kinds(src, "rust")
+    fn_names = [n for k, n in kinds if k in ("function", "method")]
+    assert "foo" in fn_names, f"extern fn foo dropped; got {kinds}"
+    assert "bar" in fn_names, f"extern fn bar dropped; got {kinds}"
+    assert ("function", "real_func") in kinds, f"real_func regressed; got {kinds}"
+
+
+def test_r24_go_interface_method_specs():
+    """Go ``type R interface { Read(p []byte) error; Close() error }`` — each
+    interface method spec (signature, no body) must be tracked as a method."""
+    src = (
+        "type Reader interface {\n"
+        "    Read(p []byte) (n int, err error)\n"
+        "    Close() error\n"
+        "}\n"
+        "func main() {}\n"
+    )
+    kinds = _kinds(src, "go")
+    assert ("method", "Read") in kinds, f"interface method Read dropped; got {kinds}"
+    assert ("method", "Close") in kinds, f"interface method Close dropped; got {kinds}"
+
+
+def test_r24_rust_macro_rules_detected():
+    """Rust ``macro_rules! name { ... }`` — a macro definition must be tracked as
+    an entity (its name is the macro name). Previously dropped (``macro_rules``
+    is not a recognized keyword, and the body brace opened a depth-only scope)."""
+    src = (
+        "macro_rules! vec {\n"
+        "    ($e:expr) => { vec![$e] }\n"
+        "}\n"
+        "fn bar() {}\n"
+    )
+    kinds = _kinds(src, "rust")
+    fn_names = [n for _, n in kinds]
+    assert "vec" in fn_names, f"macro_rules! vec dropped; got {kinds}"
+    assert ("function", "bar") in kinds, f"sibling bar regressed; got {kinds}"

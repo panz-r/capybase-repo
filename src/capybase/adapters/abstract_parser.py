@@ -1004,7 +1004,7 @@ _A_CLASS_KEYWORDS = (
 # entry (only its ``implementation_list`` body is enumerated). This matters for
 # identity stability: an ``impl Config`` block must not collide with the
 # ``struct Config`` definition under the same (class, "Config") identity.
-_A_CONTAINER_KEYWORDS = ("impl", "mod", "namespace", "module")
+_A_CONTAINER_KEYWORDS = ("impl", "mod", "namespace", "module", "extern")
 # ``def`` appears here for Python-in-JS-template edge cases and is harmless;
 # the canonical Family-A function keywords lead. ``fun`` covers Kotlin —
 # without it every top-level Kotlin function was dropped (the keywordless
@@ -1253,6 +1253,202 @@ def _advance_string_comment(
     return i, False
 
 
+# Keyword sets for in-container associated-item detection (bodyless decls).
+# A ``;`` inside a container may terminate an associated const (keyword-led) or
+# a bodyless method signature (keyword-led ``fn``/``func`` with ``(...)``). The
+# container itself must be one that holds associated items, not a method body.
+_ASSOC_FIELD_KEYWORDS = ("const", "static", "let")
+_ASSOC_FUNC_KEYWORDS = ("fn", "func", "fun", "def")
+
+
+def _in_assoc_item_container(stack: list["_OpenAUnit"]) -> bool:
+    """True if the innermost open frame is a container that holds associated items.
+
+    Associated-item containers are: class/struct/interface/trait/enum (CLASS
+    kind) and the container-only scopes impl/mod/namespace/module. A METHOD or
+    FUNCTION frame is NOT an associated-item container — a ``;`` inside a method
+    body (e.g. ``return 1;``) must not be read as a bodyless declaration. This
+    guards the in-container ``;`` emitter so it only fires in trait/impl/mod/
+    class/interface bodies, never inside a method body.
+    """
+    if not stack:
+        return False
+    top = stack[-1]
+    if top.container_only:
+        return True
+    return top.kind == KIND_CLASS
+
+
+def _assoc_item_func_name(stmt_text: str) -> str | None:
+    """Recover the name from a bodyless function/method signature.
+
+    Handles ``fn foo(...)`` / ``func foo(...)`` / ``fun foo(...)`` terminated by
+    ``;`` (Rust trait methods, extern FFI declarations, bodyless specs). Returns
+    the name or ``None`` if the text isn't a function-keyword-led signature.
+    """
+    # Normalize whitespace and strip the trailing ``;``.
+    t = stmt_text.strip().rstrip(";").strip()
+    toks = t.split()
+    if len(toks) < 2:
+        return None
+    # Find a function keyword; the name is the next identifier token.
+    for idx, tok in enumerate(toks):
+        kw = re.split(r"[<(:\[{]", tok, maxsplit=1)[0]
+        if kw in _ASSOC_FUNC_KEYWORDS and idx + 1 < len(toks):
+            cand = toks[idx + 1]
+            cand = re.split(r"[<(:\[{]", cand, maxsplit=1)[0]
+            cand = cand.strip(" \t")
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
+                return cand
+    return None
+
+
+def _emit_assoc_item_at_semicolon(
+    src: str,
+    stmt_start: int,
+    semi_idx: int,
+    units: list[StructuralUnit],
+    language: str | None,
+    stack: list["_OpenAUnit"],
+    cur_row_at,
+) -> None:
+    """Emit a bodyless associated-item declaration terminated at ``semi_idx``.
+
+    Called from the in-container ``;`` handler. Slices ``src[stmt_start:semi+1]``
+    and tries, in order: (1) a field declaration (``const``/``static``/``let``) →
+    FIELD; (2) a bodyless function signature (``fn foo(...)``) → METHOD. Emits at
+    most one unit, deduped against already-emitted unit names (so a real method
+    with a ``{`` body — already emitted by the brace machine — isn't doubled).
+    Attached as a child of the innermost open container frame.
+    """
+    start = stmt_start
+    while start < semi_idx and src[start] == "\n":
+        start += 1
+    stmt_text = src[start : semi_idx + 1]
+    if not stmt_text.strip():
+        return
+    end_row = cur_row_at(semi_idx)
+    start_row = cur_row_at(start)
+    existing = {u.name for u in units if u.name}
+    # (1) Field-shaped: ``const``/``static``/``let`` binding.
+    fname = _field_name_from_buf(stmt_text)
+    if fname is not None and fname not in existing:
+        units.append(
+            StructuralUnit(
+                kind=KIND_FIELD,
+                name=fname,
+                span=(start_row, end_row),
+                body=stmt_text,
+                fingerprint=unit_body_fingerprint(stmt_text, lang=language),
+            )
+        )
+        return
+    # (2) Bodyless function/method signature: ``fn foo(&self);`` etc.
+    mname = _assoc_item_func_name(stmt_text)
+    if mname is not None and mname not in existing:
+        units.append(
+            StructuralUnit(
+                kind=KIND_METHOD,
+                name=mname,
+                span=(start_row, end_row),
+                body=stmt_text,
+                fingerprint=unit_body_fingerprint(stmt_text, lang=language),
+            )
+        )
+
+
+def _go_method_name_from_buf(buf: str) -> str | None:
+    """Recover a Go method/function name from a buffered signature line.
+
+    Go method specs may have two paren groups — params and named results:
+    ``Read(p []byte) (n int, err error)`` — so the name is the first identifier
+    before the FIRST ``(`` (the parameter list), not before the last. Returns the
+    name or ``None`` if no valid identifier precedes the param list.
+    """
+    t = buf.strip()
+    # Find the first top-level ``(`` (the param list opener).
+    paren = t.find("(")
+    if paren <= 0:
+        return None
+    name_part = t[:paren].strip()
+    if not name_part:
+        return None
+    # The name is the last whitespace-separated token of the pre-param run (a
+    # return type may precede it: ``error DoThing(...)`` — name is DoThing).
+    cand = name_part.split()[-1] if name_part.split() else ""
+    cand = cand.strip(" \t")
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
+        # Reject control-flow keywords masquerading as a name.
+        if cand in _A_CONTROL_FLOW_KEYWORDS:
+            return None
+        return cand
+    return None
+
+
+def _maybe_emit_go_interface_method(
+    buf: str,
+    language: str | None,
+    stack: list["_OpenAUnit"],
+    brace_depth: int,
+    units: list[StructuralUnit],
+    src: str,
+    line_start: int,
+    cur_row_at,
+) -> bool:
+    """Emit a Go interface method spec at a newline. Returns True if emitted.
+
+    Go interface methods are newline-terminated signatures with no body brace and
+    no ``;``: ``Read(p []byte) (n int, err error)``. Only fires when the scanner
+    is DIRECTLY inside a Go interface body (the innermost open frame is a CLASS
+    whose declaration keyword was ``interface``, and the brace depth is exactly
+    one past the interface's open depth — i.e. not inside a nested method body,
+    which can't happen in a pure interface but guards against malformed input).
+
+    The signature is classified via the keywordless-method heuristic (reused for
+    C++/Java methods). Deduped against already-emitted units.
+    """
+    if language != "go" or not stack or not buf.strip():
+        return False
+    top = stack[-1]
+    # Directly inside the interface body: brace_depth == top.open_brace_depth.
+    # A depth greater than that means we're inside a nested block (not a method
+    # spec) — skip.
+    if brace_depth != top.open_brace_depth or top.kind != KIND_CLASS:
+        return False
+    # Confirm the container is an interface (not a struct) by checking the
+    # source at the frame's start for the ``interface`` keyword.
+    if "interface" not in src[top.start_byte : top.body_start_byte + 1]:
+        return False
+    # Recover the method name. Go signatures may have TWO paren groups — params
+    # ``(p []byte)`` and named results ``(n int, err error)`` — so the generic
+    # keywordless classifier (which takes the name before the LAST paren group)
+    # misreads them. The method name is the first identifier before the FIRST
+    # ``(`` (the param list). Strip any leading receiver, which Go interfaces
+    # don't have (those are on concrete receiver methods, not interface specs).
+    name = _go_method_name_from_buf(buf)
+    if not name:
+        return False
+    kind = KIND_METHOD
+    existing = {u.name for u in units if u.name}
+    if name in existing:
+        return False
+    # The body is the source line ending at this newline.
+    nl = src.rfind("\n", 0, line_start)
+    line_begin = nl + 1 if nl >= 0 else 0
+    body = src[line_begin:line_start].rstrip()
+    row = cur_row_at(line_begin)
+    units.append(
+        StructuralUnit(
+            kind=kind,
+            name=name,
+            span=(row, row),
+            body=body,
+            fingerprint=unit_body_fingerprint(body, lang=language),
+        )
+    )
+    return True
+
+
 def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
     r"""Parse a brace-delimited (Family A) source into a :class:`FileIR`.
 
@@ -1292,6 +1488,14 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
     # ``const``). Unlike the token buffer (reset at every brace), this survives
     # internal braces so the field name can be recovered at the terminating ``;``.
     stmt_start_byte = 0
+    # In-container statement-start byte: like stmt_start_byte but scoped to the
+    # body of an open container (impl/trait/mod/extern/interface). Tracks where
+    # the current associated-item statement began so bodyless declarations
+    # (Rust ``const N: u32;``, ``fn foo(&self);``, extern ``fn bar();``) can be
+    # recovered at their ``;`` terminator. Reset at ``;`` and at the ``{``/``}``
+    # that opens/closes a container body — NOT at internal braces inside a single
+    # statement (so a braced initializer inside a container keeps its start).
+    inner_stmt_start = 0
     # Pending attribute/macro line (#[...] / @decorator) preceding a decl.
     pending_attr_row: int | None = None
     pending_attr_buf = ""
@@ -1343,6 +1547,17 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 # func main()``). Mirrors the ``isspace()`` accumulation below.
                 if buf and not buf.endswith(" "):
                     buf += " "
+            # Go interface method specs: Go interfaces declare methods as
+            # signatures with NO body and NO ``;`` terminator (newline-ended):
+            #   type R interface { Read(p []byte) error\n Close() error }
+            # The ``;`` handler can't catch them (no ``;``) and the brace
+            # machine can't either (no ``{``). At a newline directly inside a
+            # Go interface body, classify the buffer as a bodyless method.
+            if _maybe_emit_go_interface_method(
+                buf, language, stack, brace_depth, units,
+                src, line_start, cur_row_at,
+            ):
+                buf = ""  # consumed — start the next method's signature fresh
             i = new_i
             continue
 
@@ -1401,6 +1616,9 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # Either way, depth increases.
             brace_depth += 1
             buf = ""
+            # A declaration brace opens a new body — the next associated-item
+            # statement (if any) starts right after this brace.
+            inner_stmt_start = i + 1
             i += 1
             continue
 
@@ -1421,6 +1639,12 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # statement continues to its ``;``.
             if brace_depth == 0 and closed_unit:
                 stmt_start_byte = i + 1
+            # A ``}`` that closed a container body: the next associated-item
+            # statement in the enclosing container (if any) starts after this
+            # brace. Only advance when a unit was actually popped (a real scope
+            # close), not for an object-literal brace inside a statement.
+            if closed_unit and brace_depth > 0:
+                inner_stmt_start = i + 1
             buf = ""
             i += 1
             continue
@@ -1494,6 +1718,25 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # meaningful for top-level statements.
             if brace_depth == 0 and bracket_depth == 0:
                 stmt_start_byte = i + 1
+            # In-container associated-item detection: a ``;`` inside an open
+            # container (impl/trait/mod/extern/interface) may terminate a
+            # bodyless declaration — a Rust associated const (``const N: u32;``),
+            # a Rust trait method signature (``fn foo(&self);``), or an extern
+            # FFI declaration (``fn bar();``). These have no ``{`` body, so the
+            # brace machine never classifies them; recover them from the source
+            # slice here. Mirrors the top-level path: slice from the statement
+            # start (survives internal braces) to the ``;``.
+            elif (
+                brace_depth > 0
+                and bracket_depth == 0
+                and stack
+                and _in_assoc_item_container(stack)
+                and language not in (None, "c", "h")
+            ):
+                _emit_assoc_item_at_semicolon(
+                    src, inner_stmt_start, i, units, language, stack, cur_row_at
+                )
+                inner_stmt_start = i + 1
             # Only reset buf and bracket_depth at a REAL statement boundary
             # (brace_depth == 0 AND bracket_depth == 0). A ``;`` inside [T; N]
             # array types (bracket_depth > 0) is a dimension separator, not a
@@ -1861,6 +2104,17 @@ def _classify_a_brace(
     if arrow is not None:
         kind, name = arrow
         return (kind, name, False)
+    # Rust ``macro_rules! Name { ... }`` — a macro definition. The ``!`` glues to
+    # ``macro_rules`` (no declaration keyword set matches it), so handle it here:
+    # the name is the identifier token after ``macro_rules!``. Tracked as a CLASS
+    # (it opens a braced body and is a named top-level entity).
+    if language == "rust" and toks and toks[0].startswith("macro_rules!"):
+        if len(toks) >= 2:
+            cand = toks[1]
+            cand = re.split(r"[<(:\[{]", cand, maxsplit=1)[0].strip(" \t")
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
+                return (KIND_CLASS, cand, False)
+        return (KIND_CLASS, None, False)
     # Find the LAST declaration keyword in the buffer. A keyword may be glued
     # to the following ``(`` / ``<`` / ``:`` in the whitespace-normalized
     # tokens (``function()`` / ``fn<T>``), so match by prefix: a token whose
