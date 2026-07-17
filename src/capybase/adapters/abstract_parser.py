@@ -810,7 +810,24 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
         # enclosing unit's span/body (a docstring containing a diff example or a
         # markdown table is the plausible trigger).
         if open_triple is not None:
+            closed = open_triple
             open_triple = _update_triple_quote_state(raw, open_triple)
+            # Advance last_line_row so the absorbed string-content line extends
+            # the enclosing unit's reach. Without this, a multi-line docstring's
+            # content (and especially its closing line) was dropped from the
+            # unit's span/body → corrupted fingerprint → missed renames.
+            last_line_row = i
+            # If the triple-quote CLOSES on this line, the text AFTER the closer
+            # is real code again — e.g. the ``)`` that closes a decorator's
+            # parenthesized arg list (``string""")``). Apply this line's bracket
+            # delta so cont_depth returns to 0 and the following ``def`` isn't
+            # absorbed as a continuation. (Only the post-closer tail carries
+            # code, but applying the whole-line delta is safe: the string
+            # interior has no unbalanced brackets that matter — they're inside
+            # the now-closed string.)
+            if open_triple is None and closed is not None:
+                delta = _line_bracket_delta(raw)
+                cont_depth = max(0, cont_depth + delta)
             continue
 
         if _is_conflict_marker_line(raw):
@@ -844,6 +861,21 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
             if pending_decorator_indent is None:
                 pending_decorator_indent = indent
                 pending_decorator_start = i
+            # A multi-line decorator (``@route(\n    "/api",\n)``) opens brackets
+            # and/or a multi-line triple-quote string that continue onto the
+            # following lines. Compute the continuation state HERE (the generic
+            # computation below is past this branch's ``continue``) so the
+            # continuation lines are absorbed on subsequent iterations instead
+            # of falling through — without this, the orphan-decorator reset
+            # cleared ``pending_decorator_start`` and the decorator lines were
+            # lost from the following decl's span/body. Also record a triple-
+            # quote opener so a decorator with a multi-line string arg doesn't
+            # swallow the ``def`` line as string content.
+            delta = _line_bracket_delta(raw)
+            cont_depth = max(0, cont_depth + delta)
+            new_open_triple = _update_triple_quote_state(raw, None)
+            if new_open_triple is not None:
+                open_triple = new_open_triple
             continue
 
         # Bracket continuation: a line is a continuation when brackets

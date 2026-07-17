@@ -4526,3 +4526,110 @@ def test_r40_generic_type_alias_surfaces():
     assert ("field", "Centimeters") in _kinds_of_flat(
         _flat("type Centimeters = f64;\n", "rust")
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 41 — Family B scan-loop: triple-quote body, multi-line decorator
+# ---------------------------------------------------------------------------
+
+
+def test_r41_multiline_docstring_body_not_truncated():
+    """r41 (HIGH): a multi-line triple-quoted string (a docstring) DROPPED its
+    content lines from the enclosing unit's span/body. The triple-quote
+    continuation branch ``continue``d without advancing ``last_line_row``, so
+    every absorbed string-content line failed to extend the parent unit's reach.
+    The canonical "function with only a docstring" idiom had a truncated body
+    (the closing ``\"\"\"`` line was lost) → corrupted fingerprint → missed
+    renames and "no change" false negatives."""
+    src = 'def foo():\n    """Multi-line\n    docstring."""\n'
+    flat = _flat(src, "python")
+    f = _by_name(flat, "foo")
+    assert f is not None, "foo must surface"
+    # Span must cover the closing triple-quote line (row 2), not truncate at the
+    # opener (row 1).
+    assert f.span == (0, 2), f"docstring closing line dropped from span: {f.span}"
+    assert "docstring." in f.body, f"docstring content dropped from body: {f.body!r}"
+
+
+def test_r41_function_body_ending_with_docstring():
+    """r41 (HIGH): a function whose body ENDS with a multi-line docstring (or
+    any multi-line string as the last meaningful body line) must include the
+    closing line in its span/body. Before the fix the body was truncated at the
+    string's opener line."""
+    src = "def foo():\n    x = 1\n    \"\"\"\n    trailing docstring\n    \"\"\"\n"
+    flat = _flat(src, "python")
+    f = _by_name(flat, "foo")
+    assert f is not None
+    assert f.span == (0, 4), f"trailing docstring dropped from span: {f.span}"
+    assert "trailing docstring" in f.body
+
+
+def test_r41_multiline_decorator_lines_in_span():
+    """r41 (HIGH): a multi-line decorator (parenthesized args spanning lines)
+    lost its decorator lines from the following declaration's span/body. The
+    decorator branch fired before bracket-continuation state was computed, so
+    ``@route(`` never set ``cont_depth``; the continuation lines fell through
+    and the orphan-decorator reset cleared the pending start, leaving the def's
+    span starting at itself rather than the decorator."""
+    src = (
+        '@route(\n'
+        '    "/api",\n'
+        '    methods=["GET"],\n'
+        ')\n'
+        "def view():\n"
+        "    return 1\n"
+    )
+    flat = _flat(src, "python")
+    v = _by_name(flat, "view")
+    assert v is not None, "view must surface"
+    # The decorator lines (rows 0-3) must be in the span/body.
+    assert v.span[0] == 0, f"multi-line decorator dropped from span: {v.span}"
+    assert "@route(" in v.body, f"decorator dropped from body: {v.body!r}"
+
+
+def test_r41_multiline_decorator_on_class():
+    """r41 (HIGH): multi-line decorator on a CLASS must also fold into the
+    class's span/body."""
+    src = (
+        "@dataclass(\n"
+        "    frozen=True,\n"
+        ")\n"
+        "class Point:\n"
+        "    x: int\n"
+    )
+    flat = _flat(src, "python")
+    p = _by_name(flat, "Point")
+    assert p is not None
+    assert p.span[0] == 0, f"multi-line decorator dropped from class span: {p.span}"
+    assert "@dataclass(" in p.body
+
+
+def test_r41_decorator_with_multiline_triple_quote_arg():
+    """r41 (HIGH): a decorator whose argument is a multi-line triple-quoted
+    string made the following declaration VANISH entirely — the decorator branch
+    returned before recording the triple-quote opener, then the closer line was
+    misclassified as an opener, absorbing the ``def`` line as string content.
+    Zero units were produced."""
+    src = (
+        '@my_decorator("""\n'
+        "multi-line\n"
+        'string""")\n'
+        "def foo():\n"
+        "    pass\n"
+    )
+    flat = _flat(src, "python")
+    f = _by_name(flat, "foo")
+    assert f is not None, "def vanished due to decorator+triple-quote interaction"
+    assert f.span[0] == 0, f"decorator not folded into span: {f.span}"
+
+
+def test_r41_single_line_decorator_still_works():
+    """r41 REGRESSION: a single-line decorator ``@route("/api")`` directly above
+    a def must STILL fold into the def's span/body (the legitimate case the
+    multi-line fix must not break)."""
+    src = '@route("/api")\ndef view():\n    return 1\n'
+    flat = _flat(src, "python")
+    v = _by_name(flat, "view")
+    assert v is not None
+    assert v.span[0] == 0, f"single-line decorator dropped: {v.span}"
+    assert "@route" in v.body
