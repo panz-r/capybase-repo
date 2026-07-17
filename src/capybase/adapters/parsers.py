@@ -108,6 +108,15 @@ def parse_marker_blocks(text: str) -> list[MarkerBlock]:
         base_marker_line: int | None = None
         while j < n:
             m = _is_marker(lines[j])
+            if m == _MARK_CURRENT:
+                # A nested opener inside the current side is malformed nesting
+                # (git never emits nested markers; this is a hand/LLM edit). The
+                # docstring promises a ValueError rather than silently appending
+                # the nested block's content as this side's text.
+                raise ValueError(
+                    f"malformed conflict markers: nested '<<<<<<<' at line {j} "
+                    f"inside block starting at line {start}"
+                )
             if m == _MARK_BASE:
                 base_marker_line = j
                 break
@@ -131,6 +140,17 @@ def parse_marker_blocks(text: str) -> list[MarkerBlock]:
         replayed_lines: list[str] = []
         k = j + 1
         while k < n and _is_marker(lines[k]) != _MARK_REPLAYED:
+            if _is_marker(lines[k]) == _MARK_CURRENT:
+                # A nested opener while collecting the replayed side means this
+                # block's ``>>>>>>>`` is missing — the next block's ``<<<<<<<``
+                # was reached. Without this guard, everything between (including
+                # entire subsequent well-formed blocks) was silently absorbed as
+                # this block's replayed text, and those blocks were lost. Raise
+                # so the caller escalates instead of silently mis-splicing.
+                raise ValueError(
+                    f"malformed conflict markers: nested '<<<<<<<' at line {k} "
+                    f"(missing '>>>>>>>') inside block starting at line {start}"
+                )
             replayed_lines.append(lines[k])
             k += 1
         if k >= n:

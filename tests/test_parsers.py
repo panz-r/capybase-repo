@@ -434,3 +434,83 @@ def test_coerce_candidate_dict_normalizes_aliases():
     data, _ = coerce_candidate_dict('{"resolved": "r", "confidence": 0.5}')
     assert data["resolved_text"] == "r"
     assert data["self_reported_confidence"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Round 41 — malformed conflict markers must raise, not silently absorb
+# ---------------------------------------------------------------------------
+
+
+def test_r41_nested_opener_in_current_side_raises():
+    """r41 (MED): a nested ``<<<<<<<`` inside the current side is malformed
+    nesting. The docstring promises ``ValueError`` for malformed nesting, but
+    the code silently appended it as content. Now raises."""
+    text = (
+        "<<<<<<< HEAD\n"
+        "outer\n"
+        "<<<<<<< HEAD\n"  # nested opener — malformed
+        "inner\n"
+        "=======\n"
+        "inner rep\n"
+        ">>>>>>> branch\n"
+        "=======\n"
+        "outer rep\n"
+        ">>>>>>> branch"
+    )
+    import pytest
+    with pytest.raises(ValueError, match="nested|malformed|unexpected"):
+        parse_marker_blocks(text)
+
+
+def test_r41_missing_replayed_terminator_in_middle_block_raises():
+    """r41 (HIGH): a MIDDLE conflict block missing its ``>>>>>>>`` silently
+    absorbed all following content (including subsequent well-formed blocks)
+    as its replayed side — the next block's ``>>>>>>>`` was consumed as this
+    block's end, and the swallowed block was lost. Now raises on the nested
+    opener encountered while collecting the replayed side."""
+    text = (
+        "<<<<<<< HEAD\n"
+        "A1 cur\n"
+        "=======\n"
+        "A1 rep\n"
+        ">>>>>>> end-A\n"
+        "between\n"
+        "<<<<<<< HEAD\n"
+        "B1 cur\n"
+        "=======\n"
+        "B1 rep\n"  # B's >>>>>>> missing
+        "<<<<<<< HEAD\n"  # next block's opener — should trigger raise
+        "C1 cur\n"
+        "=======\n"
+        "C1 rep\n"
+        ">>>>>>> end-C\n"
+        "trailing"
+    )
+    import pytest
+    with pytest.raises(ValueError):
+        parse_marker_blocks(text)
+
+
+def test_r41_well_formed_multi_block_still_parses():
+    """r41 REGRESSION: well-formed multiple sibling blocks must still parse
+    correctly (the nested-opener detection must not over-fire on the legitimate
+    back-to-back block sequence)."""
+    text = (
+        "<<<<<<< HEAD\n"
+        "A cur\n"
+        "=======\n"
+        "A rep\n"
+        ">>>>>>> end-A\n"
+        "between\n"
+        "<<<<<<< HEAD\n"
+        "B cur\n"
+        "=======\n"
+        "B rep\n"
+        ">>>>>>> end-B"
+    )
+    blocks = parse_marker_blocks(text)
+    assert len(blocks) == 2
+    assert blocks[0].current_text == "A cur"
+    assert blocks[0].replayed_text == "A rep"
+    assert blocks[1].current_text == "B cur"
+    assert blocks[1].replayed_text == "B rep"
