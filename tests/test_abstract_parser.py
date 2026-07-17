@@ -4019,3 +4019,19 @@ def test_r36_empty_body_functions_not_falsely_renamed():
     types = {c.change_type for c in changes}
     assert "renamed" not in types, f"empty-body stubs falsely paired as rename; got {types}"
     assert "added" in types and "removed" in types
+
+
+def test_r37_trivial_body_renames_require_substantial_content():
+    """F3 (MEDIUM): a body-content match on a TRIVIAL body (``}`` from a
+    comment-only stub, 1 char) must not confirm a rename — two unrelated stubs
+    would false-pair. Bodies at or above _RENAME_SUBSTANTIAL_BODY_MIN (8 chars)
+    DO confirm (the established contract: identical substantial body = rename)."""
+    from capybase.adapters.abstract_parser import StructuralUnit, detect_renames_2way
+    def mk(name, body):
+        return StructuralUnit(kind="function", name=name, body=body, span=(0, 1),
+                              fingerprint=ap.unit_body_fingerprint(body, lang="rust"))
+    # Trivial body (}): must NOT pair.
+    old = [mk("alpha", "fn alpha() {\n    /* TODO */\n}\n")]
+    new = [mk("omega", "fn omega() {\n    /* other */\n}\n")]
+    renames, removed = detect_renames_2way(old, new, lang="rust")
+    assert not renames, f"trivial-body stubs falsely paired; got {renames}"

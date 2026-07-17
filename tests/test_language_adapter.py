@@ -556,3 +556,29 @@ def test_r36_rust_raw_string_not_truncated_in_consensus():
     from capybase.consensus import normalize
     result = normalize('let s = r#"contains " quote and // mark"#;', "rust")
     assert "// mark" in result, f"raw string truncated at inner //; got {result!r}"
+
+
+def test_r37_multiline_raw_string_symbols_not_extracted():
+    """F1 (HIGH): _RAW_STRING_RE was compiled without re.DOTALL, so multi-line
+    raw strings leaked their content (identifiers extracted, // lines dropped
+    as comments, false renames). Now handles multi-line raw strings."""
+    from capybase.adapters.structural import referenced_symbols
+    src = 'let s = r#"x " y\n// not a comment\nmore"#;'
+    refs = referenced_symbols(src, "rust")
+    assert "not" not in refs and "comment" not in refs and "more" not in refs, (
+        f"multi-line raw string content leaked; got {refs}"
+    )
+
+
+def test_r37_fstring_prefix_word_boundary():
+    """F2 (HIGH): _blank_text_strings detected f-string prefixes by checking
+    only the char before the quote, with no word-boundary guard. Any identifier
+    ending in 'f' (self, dict_of) triggered f-string interpolation preservation,
+    leaking brace content as phantom symbols."""
+    from capybase.adapters.structural import referenced_symbols
+    # self"..." should NOT be treated as an f-string.
+    refs = referenced_symbols('return self"{user}"', "python")
+    assert "user" not in refs, f"identifier-ending-in-f leaked brace content; got {refs}"
+    # A real f-string still works.
+    refs2 = referenced_symbols('x = f"{real_call()}"', "python")
+    assert "real_call" in refs2, f"real f-string interpolation lost; got {refs2}"

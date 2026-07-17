@@ -236,7 +236,8 @@ _STRING_LIT_RE = re.compile(
 # raw strings with embedded quotes split the _STRING_LIT_RE match, exposing their
 # content to comment/identifier extraction (false renames, phantom symbols).
 _RAW_STRING_RE = re.compile(
-    r'(?<![A-Za-z0-9_])(?:br|rb|r)(#*)"((?:(?!"\1).)*?)"\1'
+    r'(?<![A-Za-z0-9_])(?:br|rb|r)(#*)"((?:(?!"\1).)*?)"\1',
+    re.DOTALL,  # raw strings can span multiple lines; '.' must match '\n'
 )
 
 
@@ -3609,17 +3610,16 @@ def detect_renames_2way(
         """The name/substantial-body guard: is this a real rename, not a
         coincidental body-content collision between two distinct entities?
 
-        For substantial bodies (>=8 chars of content), either a name similarity
-        above the threshold OR the body length suffices. But for trivial/empty
-        bodies (comment-only, stub ``{}``, ``pass``), name similarity alone is
-        insufficient — two unrelated stubs with similar names would falsely
-        pair. Require a substantial body to confirm.
+        For substantial bodies (>= ``_RENAME_SUBSTANTIAL_BODY_MIN``): a body-
+        content match is a strong signal — accept even with dissimilar names.
+        For trivial bodies (``}``, ``pass``, < substantial min): reject — two
+        unrelated stubs with similar names shouldn't false-pair on a trivially
+        short body. The name-similarity branch alone is insufficient for trivial
+        bodies because stub functions often have similar names by convention.
         """
         if not content:
             return False
-        if len(content) >= _RENAME_SUBSTANTIAL_BODY_MIN:
-            return True  # body content match is a strong signal on its own
-        return name_similarity(base_match.name, side_entity.name) >= RENAME_NAME_SIMILARITY_THRESHOLD and len(content) >= _RENAME_SUBSTANTIAL_BODY_MIN
+        return len(content) >= _RENAME_SUBSTANTIAL_BODY_MIN
 
     renames: dict = {}
     removed: set = set()

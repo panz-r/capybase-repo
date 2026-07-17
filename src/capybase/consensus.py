@@ -47,10 +47,13 @@ def _strip_trailing_comment(line: str, *, language: str | None = None) -> str:
     # Pre-blank Rust raw strings (r#"..."#) which _STRING_LIT_RE can't handle.
     blanked = _RAW_STRING_RE.sub(lambda mm: " " * len(mm.group(0)), line)
     blanked = _STRING_LIT_RE.sub(lambda mm: " " * len(mm.group(0)), blanked)
-    # ``//`` is a line comment only in brace languages.
-    slash_is_comment = language not in (None, "python", "ruby")
-    # ``#`` is a line comment in Python/Ruby (and shell).
-    hash_is_comment = language in (None, "python", "ruby", "php")
+    # Delegate to the canonical family classification so consensus agrees with
+    # the parser/fingerprint layer on which marker is a comment per language.
+    # Family-A (brace langs): ``//`` is a comment. Family-B (Python/Ruby): ``#``.
+    from capybase.adapters.abstract_parser import _lang_is_family_a
+    is_family_a = _lang_is_family_a(language)
+    slash_is_comment = is_family_a
+    hash_is_comment = not is_family_a
     # Find the FIRST comment marker in the blanked line that is preceded by
     # whitespace (a trailing comment) — not inside a string (which is now blanked).
     for i, ch in enumerate(blanked):

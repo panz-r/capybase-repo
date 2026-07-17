@@ -1672,12 +1672,20 @@ def _blank_text_strings(text: str) -> str:
     def _blank_match(m: re.Match) -> str:
         raw = m.group(0)
         start = m.start()
-        # Detect f-string prefix (check chars before the quote in the ORIGINAL
-        # pre-raw-blanked text — but raw strings are already blanked, so check
-        # the current text which has spaces where raw strings were).
+        # Detect f-string prefix: the char(s) before the quote must be a
+        # standalone ``f`` (or ``rf``/``fr``) token — NOT part of a longer
+        # identifier (``self"..."``, ``dict_of"..."``). The char before the
+        # prefix must be a non-identifier (space, ``=``, ``(``, etc.) or start
+        # of text. Without this guard, any identifier ending in ``f`` would
+        # trigger f-string interpolation preservation, leaking brace content.
         prefix_char = text[start - 1] if start > 0 else ""
         prefix2 = text[start - 2 : start] if start >= 2 else ""
-        is_fstring = (
+        # The char BEFORE the prefix (must be non-identifier for a real prefix).
+        before_prefix = text[start - 2] if prefix_char == "f" and start >= 2 else (
+            text[start - 3] if start >= 3 and prefix2 in ("rf", "fr") else ""
+        )
+        prefix_ok = before_prefix == "" or not (before_prefix.isalnum() or before_prefix == "_")
+        is_fstring = prefix_ok and (
             prefix_char == "f"
             or prefix2 in ("rf", "fr")
         )
