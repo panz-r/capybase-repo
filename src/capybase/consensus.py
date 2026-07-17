@@ -30,21 +30,31 @@ _BLANK_LINE = re.compile(r"\n\s*\n+")
 _TRAILING_COMMENT = re.compile(r"[ \t]+(#|//).*$")
 
 
-def _strip_trailing_comment(line: str) -> str:
+def _strip_trailing_comment(line: str, *, language: str | None = None) -> str:
     """Remove a trailing ``#``/``//`` comment, respecting string literals.
 
     Finds the comment on a string-blanked copy (so a ``#`` inside a string
     literal is not mistaken for a comment), then strips from that position on
     the ORIGINAL line. Blanking is length-preserving so positions map 1:1.
+
+    ``language`` selects the comment marker: ``//`` is a comment only in brace
+    languages (Rust/JS/Go/Java/C++/...), NOT in Python/Ruby where ``//`` is floor
+    division. ``#`` is a comment in Python/Ruby (and Rust attributes at line
+    start, but trailing ``#`` is not a comment in Rust — only Python/Ruby use
+    trailing ``#`` comments in practice).
     """
     from capybase.adapters.abstract_parser import _STRING_LIT_RE
     blanked = _STRING_LIT_RE.sub(lambda mm: " " * len(mm.group(0)), line)
-    # Find the FIRST ``#`` or ``//`` in the blanked line that is preceded by
+    # ``//`` is a line comment only in brace languages.
+    slash_is_comment = language not in (None, "python", "ruby")
+    # ``#`` is a line comment in Python/Ruby (and shell).
+    hash_is_comment = language in (None, "python", "ruby", "php")
+    # Find the FIRST comment marker in the blanked line that is preceded by
     # whitespace (a trailing comment) — not inside a string (which is now blanked).
     for i, ch in enumerate(blanked):
-        if ch == "#" and i > 0 and blanked[i - 1] in " \t":
+        if hash_is_comment and ch == "#" and i > 0 and blanked[i - 1] in " \t":
             return line[:i].rstrip()
-        if ch == "/" and i + 1 < len(blanked) and blanked[i + 1] == "/" and i > 0 and blanked[i - 1] in " \t":
+        if slash_is_comment and ch == "/" and i + 1 < len(blanked) and blanked[i + 1] == "/" and i > 0 and blanked[i - 1] in " \t":
             return line[:i].rstrip()
     return line
 
@@ -52,11 +62,11 @@ def _strip_trailing_comment(line: str) -> str:
 def normalize(text: str, language: str | None = None) -> str:
     """Canonicalize a resolution for clustering.
 
-    Strips trailing whitespace, trailing inline comments (string-aware), and
-    full comment lines, then collapses blank-line runs, so that semantically-
-    identical resolutions that differ only in formatting cluster together.
-    Indentation is PRESERVED (it is structurally significant in Python and
-    meaningful in Rust).
+    Strips trailing whitespace, trailing inline comments (string-aware,
+    language-aware), and full comment lines, then collapses blank-line runs, so
+    that semantically-identical resolutions that differ only in formatting
+    cluster together. Indentation is PRESERVED (it is structurally significant
+    in Python and meaningful in Rust).
     """
     if not text:
         return ""
@@ -67,7 +77,7 @@ def normalize(text: str, language: str | None = None) -> str:
             continue
         # Remove trailing inline comments (e.g. "x = 1  # foo" -> "x = 1"),
         # respecting string boundaries so a # inside a string isn't stripped.
-        line = _strip_trailing_comment(line)
+        line = _strip_trailing_comment(line, language=language)
         lines.append(_TRAILING_WS.sub("", line))
     out = "\n".join(lines)
     out = _BLANK_LINE.sub("\n", out)

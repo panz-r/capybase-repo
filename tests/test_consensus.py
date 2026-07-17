@@ -510,3 +510,24 @@ def test_r34_normalize_does_not_truncate_string_with_hash():
     # Rust // inside a string.
     result2 = normalize('let s = "a // b";  // real', "rust")
     assert '"a // b"' in result2, f"string truncated at inner //; got {result2!r}"
+
+
+def test_r35_python_floor_division_not_stripped():
+    """F3 (MEDIUM, pre-existing): ``//`` is floor division in Python, not a
+    comment. normalize stripped it, making ``n // 2`` and ``n // 3`` cluster
+    together under the same key."""
+    r1 = normalize("total = n // 2", "python")
+    r2 = normalize("total = n // 3", "python")
+    assert r1 != r2, f"floor-division operand stripped; both normalize to {r1!r}"
+    assert "2" in r1, f"floor-div operand lost; got {r1!r}"
+
+
+def test_r35_canonicalize_preserves_hash_lines_in_strings():
+    """F5 (MEDIUM): canonicalize_context dropped #-led lines inside multi-line
+    strings (docstrings), corrupting the context window shown to the model."""
+    from capybase.context_builder import canonicalize_context
+    text = 'def foo():\n    """\n    Intro.\n    # heading in docstring\n    """\n    return 1\n'
+    result = canonicalize_context(text, "python")
+    assert "# heading in docstring" in result, (
+        f"docstring #-line dropped; got {result!r}"
+    )

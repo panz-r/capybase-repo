@@ -1643,64 +1643,127 @@ def _blank_line_strings(line: str) -> str:
 def _blank_text_strings(text: str) -> str:
     """Replace string-literal contents with spaces across multi-line text.
 
-    Same as :func:`_blank_line_strings` but for full text blocks (used by
-    :func:`referenced_symbols` to exclude identifiers inside strings/comments
-    from the symbol reference set).
+    Uses the parser's :func:`_advance_string_comment` char-scan state machine
+    (which correctly handles Rust raw strings ``r#"..."#``, byte strings
+    ``b"..."``, C# verbatim ``@"..."``, triple-quotes, and all escape rules) to
+    find string-literal spans, then blanks them (length-preserving).
 
     F-string interpolation expressions (``f"{foo()}"``) are PRESERVED — the
-    ``{...}`` content is real runtime code, not prose. Only the literal text
-    portions of the f-string are blanked.
+    ``{...}`` content is real runtime code. Escaped braces ``{{``/``}}`` are
+    treated as literal text (blanked), matching Python f-string semantics.
     """
-    from capybase.adapters.abstract_parser import _STRING_LIT_RE
+    from capybase.adapters.abstract_parser import _advance_string_comment, _AStrState
 
-    def _blank_match(m: re.Match) -> str:
-        raw = m.group(0)
-        # Detect an f-string prefix: ``_STRING_LIT_RE`` matches the quoted part
-        # WITHOUT the prefix, so check the character before the match for ``f``
-        # (or ``rf``/``fr``).
-        start = m.start()
-        prefix_char = m.string[start - 1] if start > 0 else ""
-        prefix2 = m.string[start - 2 : start] if start >= 2 else ""
-        is_fstring = (
-            prefix_char == "f"
-            or prefix2 in ("rf", "fr")
-            or raw[0:2] in ('f"', "f'")
-            or raw[:3] in ('rf"', "rf'", 'fr"', "fr'")
-        )
-        # Preserve f-string interpolation expressions: replace the literal text
-        # with spaces but keep ``{...}`` regions intact so their identifiers are
-        # extracted by the caller's tokenizer.
-        if is_fstring:
-            # It's an f-string — preserve interpolation regions.
-            result = []
-            i = 0
-            n = len(raw)
-            while i < n:
-                # Find the next ``{`` (interpolation start).
-                brace = raw.find("{", i)
-                if brace < 0:
-                    # Rest is literal text — blank it.
-                    result.append(" " * (n - i))
-                    break
-                # Blank literal text up to the brace.
-                result.append(" " * (brace - i))
-                # Find the matching ``}`` (handle ``{{`` escaped braces).
-                j = brace + 1
-                depth = 1
-                while j < n and depth > 0:
-                    if raw[j] == "{":
-                        depth += 1
-                    elif raw[j] == "}":
-                        depth -= 1
-                    j += 1
-                # Preserve the interpolation expression (including braces).
-                result.append(raw[brace:j])
-                i = j
-            return "".join(result)
-        # Regular string — blank entirely.
-        return " " * len(raw)
+    chars = list(text)
+    n = len(chars)
+    st = _AStrState()
+    # Track string spans so we can restore f-string interpolations afterward.
+    # (start, end) byte indices of each string literal.
+    string_spans: list[tuple[int, int]] = []
+    str_start = -1
+    i = 0
+    while i < n:
+        ch = chars[i]
+        nxt = chars[i + 1] if i + 1 < n else ""
+        was_in_str = st.in_str
+        new_i, _handled = _advance_string_comment(text, i, n, ch, nxt, st)
+        # A string just STARTED if we weren't in one and now are.
+        if st.in_str is not None and was_in_str is None:
+            # The string opened somewhere at/before i. _advance_string_comment
+            # may have consumed the opening quote(s). Record the start as the
+            # position just before the consumed chars (the prefix + quote).
+            # Search back for the opening quote from the current position.
+            str_start = _find_string_open_start(text, i, new_i)
+        # A string just ENDED if we were in one and now aren't.
+        if was_in_str is not None and st.in_str is None and str_start >= 0:
+            string_spans.append((str_start, new_i))
+            str_start = -1
+        # Blank chars inside strings (but NOT comments — comments are handled
+        # separately by the caller for symbol extraction).
+        if st.in_str is not None:
+            for j in range(i, new_i):
+                if j < n:
+                    chars[j] = " "
+        i = max(new_i, i + 1)
+    # Restore f-string interpolation expressions within string spans.
+    result = "".join(chars)
+    for start, end in string_spans:
+        if _is_fstring_prefix_at(text, start):
+            result = _restore_fstring_interpolations(result, text, start, end)
+    return result
 
-    return _STRING_LIT_RE.sub(_blank_match, text)
+
+def _find_string_open_start(text: str, i: int, new_i: int) -> int:
+    """Find the byte index where the current string's opening began.
+
+    ``i`` is the position passed to ``_advance_string_comment`` and ``new_i`` is
+    where it landed. The opening quote (and any prefix) is at or before ``i``.
+    Search backward from ``i`` for the opening ``"`` or ``'``.
+    """
+    # The opening quote is the last quote char at or before i in the range
+    # that _advance_string_comment consumed. Simplest: search back from i.
+    for j in range(min(i, len(text) - 1), max(0, i - 6) - 1, -1):
+        if text[j] in ('"', "'"):
+            return j
+    return i
+
+
+def _is_fstring_prefix_at(text: str, quote_pos: int) -> bool:
+    """True if the char(s) before ``quote_pos`` form an f-string prefix."""
+    if quote_pos <= 0:
+        return False
+    p1 = text[quote_pos - 1] if quote_pos >= 1 else ""
+    p2 = text[quote_pos - 2 : quote_pos] if quote_pos >= 2 else ""
+    return p1 == "f" or p2 in ("rf", "fr")
+
+
+def _restore_fstring_interpolations(
+    blanked: str, original: str, start: int, end: int
+) -> str:
+    """Restore ``{...}`` interpolation regions in an f-string span.
+
+    Walks the ORIGINAL f-string content, finding ``{`` interpolation starts
+    (skipping ``{{`` escaped braces) and restoring the balanced ``{...}`` region
+    in the blanked output.
+    """
+    chars = list(blanked)
+    i = start
+    while i < end:
+        if i < len(original) and original[i] == "{":
+            # Check for escaped brace ``{{``.
+            if i + 1 < end and original[i + 1] == "{":
+                i += 2
+                continue
+            # Find the matching ``}``.
+            depth = 1
+            j = i + 1
+            while j < end and depth > 0:
+                if original[j] == "{":
+                    depth += 1
+                elif original[j] == "}":
+                    depth -= 1
+                j += 1
+            # Restore the interpolation region in the blanked output.
+            for k in range(i, min(j, len(chars))):
+                chars[k] = original[k]
+            i = j
+        else:
+            i += 1
+    return "".join(chars)
+
+
+def _is_fstring_prefix(text: str, pos: int) -> bool:
+    """True if position ``pos`` is at an f-string prefix (``f"``, ``rf"``, etc.).
+
+    Checks the characters before a ``"`` or ``'`` at or near ``pos`` for an ``f``
+    prefix (optionally preceded by ``r``).
+    """
+    # Look back up to 2 chars for an f/r prefix.
+    if pos <= 0:
+        return False
+    p1 = text[pos - 1] if pos >= 1 else ""
+    p2 = text[pos - 2] if pos >= 2 else ""
+    return p1 == "f" or p2 in ("rf", "fr")
 
 
 

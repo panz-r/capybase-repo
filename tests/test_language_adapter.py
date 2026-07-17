@@ -515,3 +515,23 @@ def test_r34_relative_import_label_no_double_dot():
     )
     assert _extract_import_name("from . import a, b") == ".a, b"
     assert _extract_import_name("from .models import User") == ".models.User"
+
+
+def test_r35_rust_raw_string_symbols_not_extracted():
+    """F4 (MEDIUM): Rust raw strings (r#\"...\"#) with embedded quotes bypassed
+    _STRING_LIT_RE blanking, leaking literal-text identifiers into the symbol
+    reference set. Now uses the parser's char-scan blanker."""
+    from capybase.adapters.structural import referenced_symbols
+    src = 'fn caller() { let m = r#""SpuriousSym outside""#; real_call(); }'
+    refs = referenced_symbols(src, "rust")
+    assert "SpuriousSym" not in refs, f"raw-string content leaked; got {refs}"
+    assert "outside" not in refs, f"raw-string content leaked; got {refs}"
+    assert "real_call" in refs, f"real call reference lost; got {refs}"
+
+
+def test_r35_fstring_escaped_braces_not_extracted():
+    """F1 (MEDIUM): f-string escaped braces ``{{not_token}}`` are LITERAL text
+    (Python emits one ``{``), not interpolation. The identifier must NOT leak."""
+    from capybase.adapters.structural import referenced_symbols
+    refs = referenced_symbols('x = f"literal {{not_interp_token}}"', "python")
+    assert "not_interp_token" not in refs, f"escaped-brace text leaked; got {refs}"

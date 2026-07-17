@@ -511,15 +511,24 @@ def canonicalize_context(text: str, language: str | None = None) -> str:
     """
     if not text:
         return text
+    # Blank string-literal contents (length-preserving) so a ``#``-led line that
+    # is actually inside a multi-line string (docstring) is NOT mistaken for a
+    # comment. The blanked version is used ONLY to decide keep/drop; the
+    # ORIGINAL line content is preserved in the output.
+    from capybase.adapters.structural import _blank_text_strings
+    blanked = _blank_text_strings(text)
+    blanked_lines = blanked.split("\n")
     lines: list[str] = []
-    for line in text.split("\n"):
+    for idx, line in enumerate(text.split("\n")):
         stripped = line.lstrip()
         # Never strip conflict-marker lines — the model needs exact boundaries.
         if stripped.startswith(("<<<<<<<", "=======", ">>>>>>>", "|||||||")):
             lines.append(line.rstrip())
             continue
-        # Drop full comment lines.
-        if _is_context_comment(stripped, language):
+        # Drop full comment lines — but check the BLANKED version so a ``#``-led
+        # line inside a multi-line string (now spaces) is NOT dropped.
+        blanked_stripped = blanked_lines[idx].lstrip() if idx < len(blanked_lines) else stripped
+        if _is_context_comment(blanked_stripped, language):
             continue
         lines.append(line.rstrip())
     out = "\n".join(lines)
