@@ -1037,3 +1037,74 @@ def test_r41_ast_preservation_no_stale_span_on_line_shift():
         f"stale marker_span → false FAIL on a correct line-shifting merge: "
         f"{result.message}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 42 — NonEmptyResolutionValidator accepts valid deletions
+# ---------------------------------------------------------------------------
+
+
+def test_r42_nonempty_accepts_structural_delete_side():
+    """r42 (HIGH): NonEmptyResolutionValidator rejected a valid empty deletion
+    from the structural resolver's ``delete_side`` rule (and from an LLM
+    confirming a deletion). The exemption only covered ``block_capture``, so a
+    structural ``delete_side`` result (correct empty text for a modify/delete)
+    was hard-failed, forcing an LLM retry that either keeps dead code or
+    exhausts the budget. Now accepts empty text from the structural resolver
+    and from a modify/delete conflict where one side is empty."""
+    # A modify/delete: current deleted the block (empty), replayed kept it.
+    worktree = "<<<<<<< H\n=======\n    fn kept() {}\n>>>>>>> b\n"
+    unit = _unit(
+        "    fn kept() {}",
+        "",  # current deleted
+        "    fn kept() {}",
+        worktree,
+        span=(0, 3),
+    )
+    # Structural resolver produced empty (correct deletion).
+    cand = CandidateResolution(
+        candidate_id="c", unit_id="u", model_name="m",
+        prompt_version="resolve_text_block.v2",
+        resolved_text="", needs_human=False,
+        provenance="deterministic_structural",
+    )
+    res = _engine().verify(unit, cand)
+    # The empty resolution is a VALID deletion — NonEmpty must NOT hard-fail it.
+    assert not any(
+        f.validator == "non_empty_resolution" for f in res.hard_failures
+    ), f"valid structural deletion hard-failed by non_empty_resolution: {res.hard_failures}"
+
+
+def test_r42_nonempty_accepts_modify_delete_empty_side():
+    """r42 (HIGH): for a modify/delete conflict (one side's text is empty), an
+    empty resolution that matches the deleting side is a correct deletion — the
+    validator must not reject it (whether from the structural resolver or the
+    LLM confirming the deletion)."""
+    worktree = "<<<<<<< H\n=======\n    fn kept() {}\n>>>>>>> b\n"
+    unit = _unit(
+        "    fn kept() {}",
+        "",  # current deleted
+        "    fn kept() {}",
+        worktree,
+        span=(0, 3),
+    )
+    # An LLM candidate confirming the deletion (empty text, normal prompt).
+    cand = _candidate("")
+    res = _engine().verify(unit, cand)
+    assert not any(
+        f.validator == "non_empty_resolution" for f in res.hard_failures
+    ), f"valid modify/delete deletion hard-failed: {res.hard_failures}"
+
+
+def test_r42_nonempty_still_rejects_empty_on_normal_conflict():
+    """r42 REGRESSION: an empty resolution on a NORMAL (non-modify/delete)
+    conflict — where neither side is empty — must STILL be hard-failed (it's a
+    model failure, not a deletion). The modify/delete carve-out must not
+    over-fire."""
+    worktree = "<<<<<<< H\n    return 1\n=======\n    return 2\n>>>>>>> b\n"
+    unit = _unit("def f():\n    pass", "    return 1", "    return 2", worktree)
+    cand = _candidate("")
+    res = _engine().verify(unit, cand)
+    assert any(
+        f.validator == "non_empty_resolution" for f in res.hard_failures
+    ), "empty resolution on a normal conflict must still be rejected"
