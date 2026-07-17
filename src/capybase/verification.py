@@ -201,22 +201,19 @@ class NonEmptyResolutionValidator:
         # or provenance ("block_capture").
         pv = getattr(ctx.candidate, "prompt_version", "") or ""
         prov = getattr(ctx.candidate, "provenance", "") or ""
-        # A structural-resolver ``delete_side`` result (or any modify/delete
-        # conflict where one side's text is empty) is ALSO a deliberate deletion
-        # — the empty resolution is correct. Without this, the structural
-        # resolver's empty ``delete_side`` was hard-failed (forcing an LLM retry
-        # that keeps dead code or exhausts the budget), and an LLM confirming a
-        # deletion was rejected too.
-        is_modify_delete = (
-            not (ctx.unit.current.text or "").strip()
-            or not (ctx.unit.replayed.text or "").strip()
-        )
+        # A deliberate deletion is identified by the MECHANISM that produced the
+        # candidate, NOT by the conflict shape. Keying on the conflict shape (a
+        # modify/delete where one side is empty) over-broadly accepted ANY empty
+        # candidate — including a ``plain_llm`` candidate that simply failed to
+        # produce text — as a "deliberate deletion" (silent wrong merge / data
+        # loss). Only block-capture and the structural resolver's ``delete_side``
+        # (which set explicit provenance) are deliberate deletions; an empty LLM
+        # candidate is a model failure and must retry.
         is_deliberate_deletion = (
             pv.startswith("block_capture")
             or prov == "block_capture"
             or prov == "deterministic_structural"
             or pv.startswith("structural.")
-            or is_modify_delete
         )
         if is_empty and is_deliberate_deletion:
             return VerificationCheckResult(

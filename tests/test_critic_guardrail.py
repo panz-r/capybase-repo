@@ -203,13 +203,16 @@ def test_phase2_revoke_on_null_evidence():
     """Critic flags + imperfect coverage + reassessment returns null evidence → squash."""
     # Construct a case where token-level coverage is imperfect (so Phase 3 doesn't fire)
     # but a side's distinctive token is absent — yet the reassessment can't ground it.
+    # Uses real code (not comments) so the token check detects the drop — a
+    # comment-only difference is no longer a drop after the r43 comment-blanking
+    # fix to _deterministic_preservation.
     unit = _unit(
-        base="def f():\n    return 1\n",
-        current="def f():\n    return 1\n    # cur comment\n",
-        replayed="def f():\n    return 1\n    # rep note\n",
-        resolved="def f():\n    return 1\n    # cur comment\n",  # rep note absent
+        base="def f():\n    x = 1\n",
+        current="def f():\n    x = 1\n    y = 2\n",
+        replayed="def f():\n    x = 1\n    z = 3\n",
+        resolved="def f():\n    x = 1\n    y = 2\n",  # z = 3 absent
     )
-    cand = _candidate(resolved="def f():\n    return 1\n    # cur comment\n")
+    cand = _candidate(resolved="def f():\n    x = 1\n    y = 2\n")
     client = _FakeClient([
         _VERDICT_DROPS_REPLAYED,
         '{"original_verdict_accurate": false, "reasoning": "cant find it", '
@@ -225,12 +228,12 @@ def test_phase2_revoke_on_null_evidence():
 def test_phase2_revoke_on_fabricated_evidence():
     """Evidence not a substring of any side/resolved → fabricated → squash."""
     unit = _unit(
-        base="def f():\n    return 1\n",
-        current="def f():\n    return 1\n    # cur\n",
-        replayed="def f():\n    return 1\n    # rep\n",
-        resolved="def f():\n    return 1\n    # cur\n",
+        base="def f():\n    x = 1\n",
+        current="def f():\n    x = 1\n    y = 2\n",
+        replayed="def f():\n    x = 1\n    z = 3\n",
+        resolved="def f():\n    x = 1\n    y = 2\n",  # z = 3 absent
     )
-    cand = _candidate(resolved="def f():\n    return 1\n    # cur\n")
+    cand = _candidate(resolved="def f():\n    x = 1\n    y = 2\n")
     client = _FakeClient([
         _VERDICT_DROPS_REPLAYED,
         '{"original_verdict_accurate": true, "reasoning": "missing", '
@@ -327,12 +330,12 @@ def test_guardrail_disabled_no_suppress():
 
 def test_reflection_disabled_no_reassessment():
     unit = _unit(
-        base="def f():\n    return 1\n",
-        current="def f():\n    return 1\n    # cur\n",
-        replayed="def f():\n    return 1\n    # rep\n",
-        resolved="def f():\n    return 1\n    # cur\n",
+        base="def f():\n    x = 1\n",
+        current="def f():\n    x = 1\n    y = 2\n",
+        replayed="def f():\n    x = 1\n    z = 3\n",
+        resolved="def f():\n    x = 1\n    y = 2\n",  # z = 3 absent
     )
-    cand = _candidate(resolved="def f():\n    return 1\n    # cur\n")
+    cand = _candidate(resolved="def f():\n    x = 1\n    y = 2\n")
     cfg = ValidationConfig()
     cfg.enable_verifier_reflection = False
     client = _FakeClient([_VERDICT_DROPS_REPLAYED])
@@ -380,3 +383,42 @@ def test_preserves_both_no_guardrail_fires():
     assert res.passed is True
     assert res.features["verifier_guardrail_suppressed"] is False
     assert len(client.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Round 43 — _deterministic_preservation comment-blanking
+# ---------------------------------------------------------------------------
+
+
+def test_r43_deterministic_preservation_blanks_comments():
+    """r43 (HIGH): ``_deterministic_preservation._toks`` used raw
+    ``re.findall(r'\\w+')`` with no comment/string blanking. A token that
+    survived only inside a comment (e.g. a side's added ``validate`` call that
+    the merge COMMENTED OUT: ``# validate(x)``) was found in the merged text →
+    ``dropped_replayed_additions=False`` → ``unanimous=True`` → the Phase 3
+    critic guardrail suppressed a CORRECT critic flag (silent wrong accept of a
+    dropped safety check). Now blanks comments/strings first."""
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="def f():\n    pass\n"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="def f():\n    pass\n"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="def f():\n    validate(x)\n"),
+        original_worktree_text="", marker_span=None,
+    )
+    cand = _candidate(resolved="def f():\n    # validate(x)\n")
+    dp = _deterministic_preservation(
+        unit, cand,
+        cur_lines="def f():\n    pass\n",
+        rep_lines="def f():\n    validate(x)\n",
+        base_lines="def f():\n    pass\n",
+    )
+    # ``validate`` was replayed's real addition; the merge commented it out (a
+    # genuine drop). The token check must detect the drop (not find ``validate``
+    # in the comment), so unanimous=False and the critic flag is NOT suppressed.
+    assert dp.dropped_replayed_additions is True, (
+        f"comment-leak → dropped_replayed_additions=False (critic false-suppressed): "
+        f"dp={dp}"
+    )
+    assert dp.unanimous is False

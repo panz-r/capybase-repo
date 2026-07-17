@@ -1075,11 +1075,14 @@ def test_r42_nonempty_accepts_structural_delete_side():
     ), f"valid structural deletion hard-failed by non_empty_resolution: {res.hard_failures}"
 
 
-def test_r42_nonempty_accepts_modify_delete_empty_side():
-    """r42 (HIGH): for a modify/delete conflict (one side's text is empty), an
-    empty resolution that matches the deleting side is a correct deletion — the
-    validator must not reject it (whether from the structural resolver or the
-    LLM confirming the deletion)."""
+def test_r43_nonempty_rejects_plain_llm_empty_on_modify_delete():
+    """r43 (HIGH, regression from r42): the r42 carve-out keyed the deletion
+    exemption on the conflict SHAPE (``is_modify_delete``), which over-broadly
+    accepted ANY empty candidate on a modify/delete — including a ``plain_llm``
+    candidate that simply failed to produce text (silent wrong merge / data
+    loss). A deliberate deletion is identified by MECHANISM (block-capture /
+    structural-resolver provenance), not conflict shape. A plain LLM candidate
+    that's empty is a model failure and must retry."""
     worktree = "<<<<<<< H\n=======\n    fn kept() {}\n>>>>>>> b\n"
     unit = _unit(
         "    fn kept() {}",
@@ -1088,12 +1091,16 @@ def test_r42_nonempty_accepts_modify_delete_empty_side():
         worktree,
         span=(0, 3),
     )
-    # An LLM candidate confirming the deletion (empty text, normal prompt).
-    cand = _candidate("")
+    # A plain LLM candidate (no deletion provenance) that's empty — model failure.
+    cand = CandidateResolution(
+        candidate_id="c", unit_id="u", model_name="m",
+        prompt_version="resolve_text_block.v6",
+        resolved_text="", needs_human=False, provenance="plain_llm",
+    )
     res = _engine().verify(unit, cand)
-    assert not any(
+    assert any(
         f.validator == "non_empty_resolution" for f in res.hard_failures
-    ), f"valid modify/delete deletion hard-failed: {res.hard_failures}"
+    ), f"plain_llm empty candidate on modify/delete must be rejected: {res.hard_failures}"
 
 
 def test_r42_nonempty_still_rejects_empty_on_normal_conflict():

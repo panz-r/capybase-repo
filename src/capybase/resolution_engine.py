@@ -2007,7 +2007,17 @@ def _deterministic_preservation(
     import re
 
     def _toks(text: str) -> set[str]:
-        return set(re.findall(r"\w+", text or ""))
+        # Blank comments and string literals before tokenizing, mirroring
+        # ``BothSidesRepresentedValidator._token_set``. Without this, a token
+        # that survives only inside a comment (e.g. a side's added ``validate``
+        # call that the merge commented out: ``# validate(x)``) is found in the
+        # merged text → ``dropped_*_additions=False`` → ``unanimous=True`` → the
+        # Phase 3 critic guardrail suppresses a CORRECT critic flag (silent wrong
+        # accept of a dropped safety check).
+        from capybase.adapters.structural import _blank_text_strings, _blank_comments
+        blanked = _blank_text_strings(text or "")
+        blanked = _blank_comments(blanked)
+        return set(re.findall(r"\w+", blanked))
 
     base_t = _toks(base_lines)
     cur_t = _toks(cur_lines)

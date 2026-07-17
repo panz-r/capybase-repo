@@ -150,3 +150,63 @@ def test_markdown_layout_tolerant_metadata_repair():
     data, warns = parse_resolution_json(raw, layout="markdown_code")
     assert data["resolved_text"] == "x = 1"
     assert data["explanation"] == "ok"
+
+
+def test_r43_nested_fence_does_not_truncate_resolved_text():
+    """r43 (HIGH): a fenced code block whose CONTENT contains a ````` ``` `````
+    line (a Markdown/docs/config file being merged, a code comment with
+    triple-backticks) was prematurely closed at the inner fence — the block was
+    truncated to the fragment after the inner fence (silent data loss). Per
+    CommonMark, a fence opened with N backticks closes only on a fence with N+
+    backticks; a shorter inner fence is literal content. A model that wraps
+    backtick-bearing content in a 4-backtick outer fence (the correct idiom)
+    now round-trips the full content."""
+    # 4-backtick outer fence wraps 3-backtick inner fences (the correct idiom).
+    raw = (
+        "````markdown\n"
+        "# Title\n"
+        "Here is code:\n"
+        "```python\n"
+        "x = 1\n"
+        "```\n"
+        "done.\n"
+        "````\n"
+        "\n"
+        '```json\n{"explanation": "merged readme", "needs_human": false}\n```\n'
+    )
+    data, warns = parse_resolution_json(raw, layout="markdown_code")
+    # The full markdown content must survive (the inner 3-backtick fences are
+    # literal content, not closers, because the outer fence is 4 backticks).
+    assert "# Title" in data["resolved_text"], (
+        f"inner fence truncated resolved_text: {data['resolved_text']!r}"
+    )
+    assert "x = 1" in data["resolved_text"]
+    assert "done." in data["resolved_text"]
+
+
+def test_r43_first_code_block_preferred_over_last_fragment():
+    """r43: when the model emits a 3-backtick outer fence around content that
+    contains a 3-backtick inner fence (ambiguous in strict CommonMark — both are
+    3 backticks), the iterator splits the block into fragments. Taking the FIRST
+    non-json block (the merged code's head) instead of the LAST (a trailing
+    fragment) recovers the real content's start rather than a misleading tail.
+    The full content requires a longer outer fence (see the companion test), but
+    first-not-last avoids the worst silent-truncation (returning only 'done.')."""
+    raw = (
+        "```markdown\n"
+        "# Title\n"
+        "Here is code:\n"
+        "```python\n"
+        "x = 1\n"
+        "```\n"
+        "done.\n"
+        "```\n"
+        "\n"
+        '```json\n{"explanation": "merged readme", "needs_human": false}\n```\n'
+    )
+    data, warns = parse_resolution_json(raw, layout="markdown_code")
+    # The FIRST fragment is the head (Title + the inner fence's lead-in), NOT
+    # the trailing 'done.' fragment that the prior LAST-block logic returned.
+    assert "# Title" in data["resolved_text"], (
+        f"returned the trailing fragment instead of the code head: {data['resolved_text']!r}"
+    )

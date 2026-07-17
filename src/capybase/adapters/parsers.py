@@ -489,15 +489,26 @@ def _iter_fenced_blocks(raw: str):
     while i < n:
         stripped = lines[i].strip()
         if stripped.startswith("```"):
+            # The opening fence's backtick run length. Per CommonMark, a fence
+            # opened with N backticks is closed ONLY by a line whose backtick
+            # run is N or longer — a shorter ```` ``` ```` inside the block is
+            # literal content. Without this, a merged-code block containing a
+            # ```` ``` ```` line (Markdown/docs/config files, a code-comment with
+            # triple-backticks) was prematurely closed and the block truncated to
+            # the fragment after the inner fence (silent data loss).
+            open_run = len(stripped) - len(stripped.lstrip("`"))
             # info string = everything after the opening fence
-            info = stripped[3:].strip()
+            info = stripped[open_run:].strip()
             buf: list[str] = []
             j = i + 1
             closed = False
             while j < n:
-                if lines[j].strip().startswith("```"):
-                    closed = True
-                    break
+                ln_stripped = lines[j].strip()
+                if ln_stripped.startswith("```"):
+                    close_run = len(ln_stripped) - len(ln_stripped.lstrip("`"))
+                    if close_run >= open_run:
+                        closed = True
+                        break
                 buf.append(lines[j])
                 j += 1
             if closed:
@@ -510,7 +521,7 @@ def _iter_fenced_blocks(raw: str):
 
 
 def _extract_markdown_code_block(raw: str) -> str | None:
-    """Return the body of the LAST non-JSON fenced code block, or None.
+    """Return the body of the FIRST non-JSON fenced code block, or None.
 
     Under the markdown-code output layout the model emits the merged code as a
     raw fenced block (e.g. `` ```python `` ... `` ``` ``) followed by a small
@@ -520,15 +531,22 @@ def _extract_markdown_code_block(raw: str) -> str | None:
     as the metadata block, not the code; a bare `` ``` `` fence counts as code
     (the model may not know the language). Returns ``None`` when no suitable
     block exists so the caller can fall back to the legacy JSON parse.
+
+    Takes the FIRST non-json block (not the last): the merged code leads, the
+    metadata follows. When the code itself contains a ```` ``` ```` line (a
+    Markdown/docs/config file being merged) and the model didn't use a longer
+    outer fence, the CommonMark fence matcher splits the block into fragments —
+    the FIRST fragment is the real merged code's head, while the LAST is just
+    the trailing fragment after an inner fence (which silently truncated the
+    resolved text).
     """
-    code_blocks: list[str] = []
     for info, body in _iter_fenced_blocks(raw):
         # A ```json fence (or one whose info string starts with json) is the
         # metadata block; everything else is the merged code.
         if info.lower().startswith("json"):
             continue
-        code_blocks.append(body)
-    return code_blocks[-1] if code_blocks else None
+        return body
+    return None
 
 
 def _parse_markdown_metadata(raw: str) -> dict | None:
