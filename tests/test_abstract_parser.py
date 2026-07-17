@@ -61,6 +61,14 @@ def _names_by_kind(flat: list, kind: str) -> list[str]:
     return [u.name for u in flat if u.kind == kind]
 
 
+def _by_name(flat: list, name: str):
+    """First unit named ``name`` in a flattened list, or None.
+
+    Convenience over ``next((u for u in flat if u.name == name), None)`` for
+    span/body assertions on a specific unit."""
+    return next((u for u in flat if u.name == name), None)
+
+
 # ---------------------------------------------------------------------------
 # Family dispatch
 # ---------------------------------------------------------------------------
@@ -4008,6 +4016,37 @@ def test_r33_strip_decl_header_colon_in_string_default():
     assert r2 == "return 1", f"header split hit ':' inside string; got {r2!r}"
 
 
+def test_r38_body_below_header_rust_oneliner_needs_lang():
+    """r38 (MEDIUM): ``_is_pure_rename`` called ``_body_below_header(body)``
+    WITHOUT forwarding ``lang`` even though ``lang`` was in scope (its sibling
+    ``_is_body_modify`` correctly forwarded it on the next line). For a Rust
+    ONE-LINER ``fn foo() -> i32 { BODY }``, ``_strip_decl_header`` with the
+    default ``lang=None`` takes the Python colon-branch, finds no ``:``, and
+    returns the body UNCHANGED (header included). The rename comparison then
+    saw ``fn bar()...`` vs ``fn foo()...`` and always returned False — so a
+    Rust one-liner rename was never recognized as a pure rename, forcing an
+    unnecessary escalation to the LLM resolver.
+
+    With ``lang='rust'`` the brace-branch strips the header correctly and the
+    identical bodies compare equal. Multi-line Rust was unaffected (it takes
+    the lang-independent ``"\\n" in body`` first-line-drop path)."""
+    from capybase.structural_resolver import _body_below_header
+    base = "fn foo() -> i32 { let x = 1; x }"
+    renamed = "fn bar() -> i32 { let x = 1; x }"
+    # With lang forwarded (the fix's contract): headers stripped, bodies equal.
+    assert _body_below_header(renamed, lang="rust") == _body_below_header(base, lang="rust"), (
+        "rust one-liner bodies should compare equal once the header is stripped"
+    )
+    # The bodies themselves are the post-header content (not the whole line).
+    assert _body_below_header(renamed, lang="rust") == "let x = 1; x }"
+    # Demonstrate WHY lang forwarding matters: with the default ``lang=None`` a
+    # Rust one-liner's header is NOT stripped (no ':' → falls through, returns
+    # the full body unchanged). This is the exact gap _is_pure_rename fell into.
+    assert _body_below_header(renamed).startswith("fn "), (
+        "without lang, the rust one-liner header should NOT be stripped"
+    )
+
+
 def test_r36_empty_body_functions_not_falsely_renamed():
     """B-2 (MEDIUM): two stub/comment-only functions with similar names falsely
     paired as a rename (the body-content guard wasn't applied in the exact-match
@@ -4035,3 +4074,97 @@ def test_r37_trivial_body_renames_require_substantial_content():
     new = [mk("omega", "fn omega() {\n    /* other */\n}\n")]
     renames, removed = detect_renames_2way(old, new, lang="rust")
     assert not renames, f"trivial-body stubs falsely paired; got {renames}"
+
+
+# ---------------------------------------------------------------------------
+# Round 38 — orphan decorator over-attribution (Family B)
+# ---------------------------------------------------------------------------
+
+
+def test_r38_orphan_decorator_does_not_swallow_intervening_statement():
+    """r38 (HIGH): a standalone ``@decorator`` followed by an ordinary
+    statement (NOT a def/class/import) must NOT leapfrog that statement and
+    attach to the next real declaration.
+
+    Before the fix, a pending decorator was only invalidated on a strict
+    *dedent* (``indent < decorator_indent``). A same-indent ordinary line
+    (``URL = "/api"``, ``x = 1``, even a blank line) left it pending, so the
+    NEXT ``def`` consumed ``start = decorator_row`` and sliced its body from
+    there — swallowing the decorator AND the intervening lines. The decorator
+    must attach only to a declaration on the IMMEDIATELY following line."""
+    src = (
+        "@d\n"           # row 0 — orphan decorator
+        "URL = '/api'\n" # row 1 — ordinary module-level statement (same indent)
+        "def handler():\n"  # row 2
+        "    return 1\n"     # row 3
+    )
+    flat = _flat(src, "python")
+    f = _by_name(flat, "handler")
+    assert f is not None, f"handler not found; got {_kinds(src, 'python')}"
+    # The unit must start at the def line (row 2), NOT at the decorator (row 0).
+    assert f.span[0] == 2, f"orphan decorator leaked into span {f.span}"
+    assert "@d" not in f.body, f"orphan decorator leaked into body: {f.body!r}"
+    assert "URL" not in f.body, f"intervening statement leaked into body: {f.body!r}"
+    assert f.span[1] == 3, f"span end wrong: {f.span}"
+
+
+def test_r38_orphan_decorator_statement_then_def_with_blanks():
+    """r38: an ordinary statement between an orphan decorator and the next def
+    orphans the decorator EVEN WHEN blanks/comments surround the statement.
+
+    ``@d`` … ordinary statement … ``def`` means the decorator is stranded; the
+    def must NOT absorb it. (A decorator with ONLY blank/comment lines between
+    it and the next def still attaches — that's the legitimate idiom; see the
+    ``test_r38_directly_attached_decorator_still_works`` companion.)"""
+    src = (
+        "@d\n"           # row 0 — orphan decorator
+        "\n"             # row 1 — blank (does not orphan by itself)
+        "x = 1\n"        # row 2 — ordinary statement → orphans the decorator
+        "\n"             # row 3 — blank
+        "def real():\n"  # row 4
+        "    pass\n"     # row 5
+    )
+    flat = _flat(src, "python")
+    r = _by_name(flat, "real")
+    assert r is not None
+    assert r.span[0] == 4, f"orphan decorator leaked into span {r.span}"
+    assert "@d" not in r.body
+    assert "x = 1" not in r.body
+
+
+def test_r38_orphan_decorator_only_blanks_still_attaches():
+    """r38 REGRESSION: a decorator followed by ONLY blank/comment lines and then
+    a def is the legitimate ``@deco`` … ``def`` idiom (blank separation) — the
+    decorator attaches. Only an ordinary STATEMENT orphans it. This pins the
+    boundary so the orphan fix doesn't over-fire and drop real decorators."""
+    src = (
+        "@deco\n"        # row 0
+        "\n"             # row 1 — blank
+        "# comment\n"    # row 2 — comment
+        "def f():\n"     # row 3
+        "    return 1\n"  # row 4
+    )
+    flat = _flat(src, "python")
+    f = _by_name(flat, "f")
+    assert f is not None
+    # Only blanks/comments between → decorator still attaches (start at row 0).
+    assert f.span[0] == 0, f"legitimate blank-separated decorator dropped: {f.span}"
+    assert "@deco" in f.body
+
+
+def test_r38_directly_attached_decorator_still_works():
+    """r38 REGRESSION: a decorator IMMEDIATELY above a def (the normal,
+    non-orphan case) must STILL fold into the def's span/body. The orphan fix
+    must not break the legitimate decorator-attachment behavior pinned by
+    ``test_family_b_decorators_attach_to_following_decl``."""
+    src = (
+        "@deco\n"        # row 0 — directly attached
+        "def f():\n"     # row 1
+        "    return 1\n"  # row 2
+    )
+    flat = _flat(src, "python")
+    f = _by_name(flat, "f")
+    assert f is not None
+    # The directly-attached decorator DOES fold in (start at row 0).
+    assert f.span[0] == 0, f"directly-attached decorator dropped from span {f.span}"
+    assert "@deco" in f.body

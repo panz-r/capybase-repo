@@ -936,6 +936,18 @@ def parse_family_b(source: str, language: str | None = "python") -> FileIR:
             pending_decorator_start = None
             continue
 
+        # A decorator attaches ONLY to the next declaration. If we reach here,
+        # the current line is an ordinary statement (not def/class/import) — a
+        # pending decorator is orphaned. Without this, ``@d\nx = 1\ndef f()``
+        # leaves ``@d`` pending across ``x = 1`` and the NEXT ``def`` swallows
+        # both the decorator and the intervening statement into its body/span
+        # (a silent-wrong-output bug: the body/fingerprint are corrupted and a
+        # real module-level statement is mis-attributed). Blank/comment lines
+        # between a decorator and a real declaration are fine (they ``continue``
+        # early above and never reach here); only an ordinary statement orphans.
+        pending_decorator_indent = None
+        pending_decorator_start = None
+
     # EOF: close everything still open. end_row = last meaningful line (trailing
     # blanks/comments don't extend a unit's body).
     close_units_at_or_below(0, last_line_row)
