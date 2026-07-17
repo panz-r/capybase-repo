@@ -4441,3 +4441,88 @@ def test_r39_inline_comment_in_multiline_params_keeps_method():
     assert ("method", "foo") in kinds, (
         f"method with // in multi-line params dropped; got {kinds}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 40 — Family A field detection
+# ---------------------------------------------------------------------------
+
+
+def test_r40_leading_comment_does_not_drop_next_field():
+    """r40 (HIGH): a ``//`` line comment, ``/* */`` block comment, or Rust
+    ``#[...]`` attribute directly preceding a top-level field silently dropped
+    the field. The statement-start tracker (``stmt_start_byte``) was advanced
+    only at ``;`` and at a ``}`` closing to depth 0 — never past comments or
+    attributes — so the field's source slice reached BACKWARD into the comment
+    text and the field-name regex failed to match. Doc comments and derive
+    attributes are standard idiomatic Rust/TS, so this was a common silent loss."""
+    # Line comment.
+    assert ("field", "X") in _kinds_of_flat(_flat("// doc\nconst X: u32 = 5;\n", "rust")), (
+        f"// comment dropped the field; got {_kinds('// doc\\nconst X: u32 = 5;\\n', 'rust')}"
+    )
+    # Block comment.
+    assert ("field", "X") in _kinds_of_flat(_flat("/* c */ const X: u32 = 5;\n", "rust"))
+    # Doc comment (///).
+    assert ("field", "X") in _kinds_of_flat(_flat("/// doc\nconst X: u32 = 5;\n", "rust"))
+    # Rust attribute.
+    assert ("field", "X") in _kinds_of_flat(_flat("#[derive(Debug)]\nconst X: u32 = 5;\n", "rust"))
+    # Multi-line attribute.
+    assert ("field", "X") in _kinds_of_flat(
+        _flat('#[cfg(any(\n    feature = "a",\n))]\nconst X: u32 = 5;\n', "rust")
+    )
+
+
+def test_r40_leading_comment_does_not_drop_in_container_field():
+    """r40 (HIGH): the in-container path (``inner_stmt_start``) had the same
+    bug — an associated const or bodyless trait method preceded by a comment or
+    attribute was silently dropped."""
+    flat = _flat("trait T {\n    // doc\n    const N: u32;\n}\n", "rust")
+    kinds = _kinds_of_flat(flat)
+    assert ("field", "N") in kinds or ("method", "N") in kinds, (
+        f"associated const after // comment dropped; got {kinds}"
+    )
+    flat = _flat("trait T {\n    /// doc\n    fn bar(&self);\n}\n", "rust")
+    assert ("method", "bar") in _kinds_of_flat(flat), (
+        f"trait method after /// doc dropped; got {_kinds_of_flat(flat)}"
+    )
+    flat = _flat("impl T {\n    #[foo]\n    const N: u32 = 5;\n}\n", "rust")
+    assert ("field", "N") in _kinds_of_flat(flat), (
+        f"associated const after #[attr] dropped; got {_kinds_of_flat(flat)}"
+    )
+
+
+def test_r40_realistic_rust_file_fields_all_surface():
+    """r40 (HIGH): a realistic Rust file mixing use, doc comments, derive
+    attributes, and plain consts must surface every field (previously only the
+    field after a blank line survived)."""
+    src = (
+        "// Header\n"
+        "use std::io;\n"
+        "\n"
+        "/// Doc\n"
+        "const X: u32 = 5;\n"
+        "\n"
+        "#[derive(Debug)]\n"
+        "const Y: u32 = 10;\n"
+        "\n"
+        "const Z: u32 = 15;\n"
+    )
+    names = {n for _, n in _kinds_of_flat(_flat(src, "rust")) if n}
+    assert {"X", "Y", "Z"} <= names, f"some fields lost; got {names}"
+
+
+def test_r40_generic_type_alias_surfaces():
+    """r40 (HIGH): a generic type alias ``type Map<K, V> = ...;`` was dropped —
+    the field regex required the name immediately followed by ``:=`` or end,
+    but a generic alias has ``<`` after the name. Now accepts a ``<`` (generic
+    parameter list) between the name and the ``=``/``:``."""
+    assert ("field", "Map") in _kinds_of_flat(
+        _flat("type Map<K, V> = HashMap<K, V>;\n", "rust")
+    ), "generic type alias dropped"
+    assert ("field", "Map") in _kinds_of_flat(
+        _flat("type Map<K, V> = Record<K, V>;\n", "typescript")
+    )
+    # Simple (non-generic) alias still works (regression).
+    assert ("field", "Centimeters") in _kinds_of_flat(
+        _flat("type Centimeters = f64;\n", "rust")
+    )

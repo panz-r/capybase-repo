@@ -1513,6 +1513,10 @@ def _emit_assoc_item_at_semicolon(
     start = stmt_start
     while start < semi_idx and src[start] == "\n":
         start += 1
+    # Skip leading comments / Rust attributes preceding the declaration (a
+    # doc comment or ``#[attr]`` directly above an associated const / bodyless
+    # trait method would otherwise reach into the noise and drop the item).
+    start = _skip_leading_noise(src, start, semi_idx + 1)
     stmt_text = src[start : semi_idx + 1]
     if not stmt_text.strip():
         return
@@ -1848,9 +1852,18 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
         # logic stays here because it depends on row/line_start. ---
         if ch == "\n":
             was_line_comment = strst.in_line_comment
+            was_in_block = strst.in_block_comment
             new_i, _ = _advance_string_comment(src, i, n, ch, nxt, strst)
             row += 1
             line_start = new_i
+            # A comment line (``// ...``) or a line INSIDE a ``/* ... */`` block
+            # is not part of any declaration. When the buffer is wiped at the end
+            # of a comment line (no pending signature to preserve), advance the
+            # statement-start trackers past it — otherwise the NEXT field's slice
+            # (taken at its ``;``) reaches backward into the comment text, the
+            # field-name regex fails to match, and the field is silently dropped
+            # (a leading doc comment / ``#[derive]`` was a common silent loss).
+            comment_advances_tracker = False
             if was_line_comment:
                 # A line comment ends a statement run (token buffer boundary).
                 # Exception: if the buffer holds a *pending signature* — it
@@ -1866,6 +1879,12 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                         buf += " "
                 else:
                     buf = ""
+                    comment_advances_tracker = True
+            elif was_in_block:
+                # A newline inside an open block comment: the line is comment
+                # interior, not a statement. Advance so a following field isn't
+                # sliced back into the block comment.
+                comment_advances_tracker = True
             else:
                 # A newline acts as a token separator so declarations on
                 # consecutive lines don't concatenate in the buffer (e.g.
@@ -1899,6 +1918,14 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 # A line with UNBALANCED parens is a partial multi-line method —
                 # keep buf so the continuation completes the signature.
                 buf = ""
+            # A comment line / block-comment-interior line is not a statement:
+            # advance the trackers to the start of the NEXT line so a following
+            # field's slice (taken at its ``;``) doesn't reach back into the
+            # comment. Only when the comment actually ended the statement run
+            # (buffer wiped, no pending signature preserved).
+            if comment_advances_tracker:
+                stmt_start_byte = new_i
+                inner_stmt_start = new_i
             i = new_i
             continue
 
@@ -2055,6 +2082,14 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 # into the fingerprint → rename detection breaks for 2nd+ fields).
                 while stmt_start < i and src[stmt_start] == "\n":
                     stmt_start += 1
+                # Skip leading comments (// ..., /* ... */, /// ...) and Rust
+                # attributes (#[...] possibly multi-line) that precede the
+                # declaration. The statement-start tracker isn't reliably
+                # advanced past these (a comment/attr directly abutting the field
+                # left the slice reaching backward into the comment text, failing
+                # the field-name regex and dropping the field). This scan-forward
+                # is the robust catch-all for every leading-noise shape.
+                stmt_start = _skip_leading_noise(src, stmt_start, i + 1)
                 stmt_text = src[stmt_start : i + 1]
                 fname = _field_name_from_buf(stmt_text)
                 if fname is not None:
@@ -2139,6 +2174,26 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             if stripped.startswith("#[") or stripped.startswith("#!"):
                 # Rust attribute → attach to the following decl (no unit emitted).
                 pending_attr_row = row
+                # A single-line attribute ``#[...]`` (balanced brackets on this
+                # line) is not part of any declaration — consume the rest of the
+                # line and advance the statement-start trackers past it, so the
+                # NEXT field's slice doesn't reach back into the attribute text
+                # (which would fail the field-name regex and drop the field).
+                # Multi-line attributes are handled incrementally: each newline
+                # inside the still-open ``[...]`` advances via the block-comment-
+                # style guard is not applicable, but the closing ``]`` line is a
+                # single-line attribute in its tail, consumed here.
+                if stripped.startswith("#[") and _brackets_balanced(stripped):
+                    nl = src.find("\n", i)
+                    after = (nl + 1) if nl >= 0 else n
+                    stmt_start_byte = after
+                    inner_stmt_start = after
+                    buf = ""
+                    i = after
+                    if nl >= 0:
+                        row += 1
+                        line_start = after
+                    continue
             elif stripped.startswith("#include") or stripped.startswith("#define"):
                 # MODULE_STMT for #include / #define (emits + advances).
                 i, row, line_start = _emit_module_stmt_line(src, i, units, row, n)
@@ -2789,6 +2844,74 @@ def _strip_trailing_qualifier_run(toks: list[str]) -> list[str]:
     return toks
 
 
+def _brackets_balanced(text: str) -> bool:
+    """True if ``[``/``]`` are balanced in ``text`` (depth returns to zero)."""
+    depth = 0
+    for ch in text:
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _skip_leading_noise(src: str, start: int, end: int) -> int:
+    """Advance ``start`` past leading comments and Rust attributes.
+
+    Skips (repeated, separated by whitespace/newlines):
+    - ``// ...`` and ``///``/``//!`` doc line comments (to end of line);
+    - ``/* ... */`` block comments (possibly multi-line);
+    - ``#[...]`` Rust attributes (possibly multi-line, bracket-balanced).
+
+    Returns the offset of the first non-noise character (or ``start`` if there
+    is none). Used by the field emitter so a declaration preceded by a doc
+    comment or ``#[derive]`` isn't dropped — the slice must begin at the
+    declaration keyword, not the preceding comment.
+    """
+    j = start
+    n = end
+    progressed = True
+    while progressed:
+        progressed = False
+        # Skip whitespace/newlines.
+        while j < n and src[j] in " \t\r\n":
+            j += 1
+            progressed = True
+        if j >= n:
+            break
+        # Line comment ``//`` (incl. ``///``/``//!``): skip to end of line.
+        if src[j] == "/" and j + 1 < n and src[j + 1] == "/":
+            nl = src.find("\n", j)
+            j = (nl + 1) if nl >= 0 else n
+            progressed = True
+            continue
+        # Block comment ``/* ... */`` (possibly multi-line).
+        if src[j] == "/" and j + 1 < n and src[j + 1] == "*":
+            close = src.find("*/", j + 2)
+            j = (close + 2) if close >= 0 else n
+            progressed = True
+            continue
+        # Rust attribute ``#[...]`` (possibly multi-line, bracket-balanced).
+        if src[j] == "#" and j + 1 < n and src[j + 1] == "[":
+            depth = 0
+            k = j
+            while k < n:
+                if src[k] == "[":
+                    depth += 1
+                elif src[k] == "]":
+                    depth -= 1
+                    if depth == 0:
+                        k += 1
+                        break
+                k += 1
+            j = k
+            progressed = True
+            continue
+    return j
+
+
 def _match_paren_open(toks: list[str], close_idx: int) -> int:
     """Index in ``toks`` of the ``(`` matching the ``)`` at ``close_idx``, or -1.
 
@@ -3182,11 +3305,16 @@ def _binding_name_before(toks: list[str], kw_idx: int) -> str | None:
 _A_FIELD_RE = re.compile(
     r"^(?:(?:pub(?:\([^)]*\))?|export|public|private|static|final|readonly|unsafe|inline|mut|extern)\s+)*"
     r"(?:const|static|type|let|var)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\b"
-    # Anchor: the name must be followed by a type annotation (``:``) or an
-    # assignment (``=``) or end-of-statement. This rejects Java/C++ typed fields
-    # (``static final int N``) where backtracking would match ``static`` as the
-    # field keyword and capture the following TYPE token as the name. In valid
-    # Rust/JS field declarations the name is always followed by ``:``/``=``.
+    # An optional generic parameter list may follow the name (Rust/TS type
+    # aliases: ``type Map<K, V> = ...``). The ``<...>`` is balanced so nested
+    # generics (``type M<K, V> = HashMap<K, V>``) don't stop the match early.
+    r"(?:\s*<[^=]*>)?"
+    # Anchor: the name (or its generic list) must be followed by a type
+    # annotation (``:``) or an assignment (``=``) or end-of-statement. This
+    # rejects Java/C++ typed fields (``static final int N``) where backtracking
+    # would match ``static`` as the field keyword and capture the following TYPE
+    # token as the name. In valid Rust/JS field declarations the name is always
+    # followed by ``:``/``=``.
     r"\s*(?:[:=]|$)"
 )
 
