@@ -1053,6 +1053,11 @@ def _extract_import_name(line: str) -> str:
 # (METHOD when nested inside a CLASS or container).
 _A_CLASS_KEYWORDS = (
     "class", "struct", "interface", "trait", "enum", "union", "object",
+    # Swift ``protocol`` is the language's interface equivalent; ``actor`` is a
+    # reference type with isolated state. Java/Dart ``record`` (Java 16+) is a
+    # class-like aggregate. Dart ``mixin`` is a standalone mixable type. Without
+    # these, whole declaration kinds were invisible to the parser.
+    "protocol", "actor", "record", "mixin",
 )
 # Container-only keywords: ``impl``/``mod`` open a scope whose children are the
 # real entities (methods/fields), but the container itself is NOT emitted as an
@@ -1060,7 +1065,13 @@ _A_CLASS_KEYWORDS = (
 # entry (only its ``implementation_list`` body is enumerated). This matters for
 # identity stability: an ``impl Config`` block must not collide with the
 # ``struct Config`` definition under the same (class, "Config") identity.
-_A_CONTAINER_KEYWORDS = ("impl", "mod", "namespace", "module", "extern")
+_A_CONTAINER_KEYWORDS = (
+    "impl", "mod", "namespace", "module", "extern",
+    # Swift/Dart ``extension`` adds methods to an EXISTING type — like ``impl``,
+    # it must not collide with the type's own (class, Name) identity, so it opens
+    # a suppressed scope whose members surface as top-level entities.
+    "extension",
+)
 # ``def`` appears here for Python-in-JS-template edge cases and is harmless;
 # the canonical Family-A function keywords lead. ``fun`` covers Kotlin —
 # without it every top-level Kotlin function was dropped (the keywordless
@@ -1347,16 +1358,27 @@ def _in_assoc_item_container(stack: list["_OpenAUnit"]) -> bool:
 def _assoc_item_func_name(stmt_text: str) -> str | None:
     """Recover the name from a bodyless function/method signature.
 
-    Handles ``fn foo(...)`` / ``func foo(...)`` / ``fun foo(...)`` terminated by
-    ``;`` (Rust trait methods, extern FFI declarations, bodyless specs). Returns
-    the name or ``None`` if the text isn't a function-keyword-led signature.
+    Handles two shapes, both ``;``-terminated:
+
+    1. **Keyworded**: ``fn foo(...)`` / ``func foo(...)`` / ``fun foo(...)``
+       (Rust trait methods, extern FFI declarations, bodyless specs). The name
+       is the identifier after the function keyword.
+    2. **Keywordless**: ``[modifiers] RetType name(params) [quals] [= 0]`` —
+       Java/TS interface methods (``void bar();``, ``bar(): void;``) and C++
+       pure-virtual declarations (``virtual double area() const = 0;``). These
+       have no function keyword, so the name is the identifier immediately
+       before the parameter list, with a return type preceding it. The
+       preceding-type requirement distinguishes a declaration (``void bar()``)
+       from a bare call statement (``bar();``).
+
+    Returns the name or ``None`` if the text isn't a recognizable signature.
     """
     # Normalize whitespace and strip the trailing ``;``.
     t = stmt_text.strip().rstrip(";").strip()
     toks = t.split()
     if len(toks) < 2:
         return None
-    # Find a function keyword; the name is the next identifier token.
+    # (1) Find a function keyword; the name is the next identifier token.
     for idx, tok in enumerate(toks):
         kw = re.split(r"[<(:\[{]", tok, maxsplit=1)[0]
         if kw in _ASSOC_FUNC_KEYWORDS and idx + 1 < len(toks):
@@ -1365,6 +1387,37 @@ def _assoc_item_func_name(stmt_text: str) -> str | None:
             cand = cand.strip(" \t")
             if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
                 return cand
+    # (2) Keywordless: a return type + name + param list. Reuse the brace-path
+    # signature-stripping (C++ trailing qualifiers, ``= 0`` pure-virtual) so the
+    # buffer ends in ``)`` with a balanced param list. A preceding return-type
+    # token (before the name) distinguishes a declaration from a call statement.
+    # TS interface methods put the return type AFTER the params (``bar(): void``)
+    # — those have no preceding token, so a trailing ``: <type>`` annotation is
+    # the discriminator instead (a bare call ``foo();`` has none).
+    joined = _strip_trailing_signature_tokens(t)
+    if joined.endswith(")"):
+        paren_open = _last_balanced_paren_open(joined)
+        if paren_open > 0:
+            name_part = joined[:paren_open].rstrip()
+            name_part = _strip_trailing_generics(name_part)
+            pre = name_part.split()
+            # A preceding return type (Java/C++: ``void bar()``) OR a trailing
+            # TS-style ``: type`` annotation on the original line. A lone
+            # ``foo()`` with neither is a call statement, not a declaration.
+            has_return_type = len(pre) >= 2
+            # TS annotation: ``name(): type`` — the raw text has ``):`` followed
+            # by a type token before the ``;``.
+            has_ts_annotation = bool(re.search(r"\)\s*:\s*\S", t))
+            min_pre = 2 if has_return_type else (1 if has_ts_annotation else 0)
+            if len(pre) >= min_pre >= 1:
+                name_tok = pre[-1]
+                op_name = _cpp_operator_name(name_part)
+                if op_name is not None:
+                    return op_name
+                is_dtor = name_tok.startswith("~")
+                if (is_dtor or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok)) \
+                        and name_tok not in _A_CONTROL_FLOW_KEYWORDS:
+                    return name_tok
     return None
 
 
@@ -2247,15 +2300,32 @@ def _go_declaration_name(
     # and the class keyword. For Go generics (``type Container[T any] struct``)
     # the type-param list splits into extra tokens, so scan backwards from the
     # class keyword for the ``type`` keyword; the name is the token right after it
-    # (with any ``[...]`` stripped).
+    # (with any ``[...]`` stripped). For a grouped ``type ( Name struct { ... } )``
+    # block, the token after ``type`` is ``(`` — skip it to reach the real name.
+    # Inside a grouped block the 2nd+ types have no ``type`` keyword in the
+    # buffer (each is its own statement); the name is then the token right
+    # before the class keyword.
     if last_kw in _A_CLASS_KEYWORDS:
         for back in range(last_kw_idx - 1, -1, -1):
             if toks[back] == "type" and back + 1 <= last_kw_idx:
-                cand = toks[back + 1]
+                name_idx = back + 1
+                # Skip a grouped-type-block opening paren: ``type ( Name ...``.
+                if name_idx < last_kw_idx and toks[name_idx] == "(":
+                    name_idx += 1
+                cand = toks[name_idx] if name_idx < len(toks) else ""
                 cand = re.split(r"\[", cand, maxsplit=1)[0]
                 if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
                     return cand, False
                 break
+        # Grouped-block continuation: no ``type`` keyword precedes the class
+        # keyword, so the name is the identifier immediately before it
+        # (``Bar struct`` → ``Bar``). Go has no access modifiers before type
+        # keywords, so this token is reliably the name.
+        if last_kw_idx > 0:
+            cand = toks[last_kw_idx - 1]
+            cand = re.split(r"\[", cand, maxsplit=1)[0]
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cand):
+                return cand, False
 
     return None, False
 
@@ -2278,12 +2348,16 @@ def _is_initializer_literal(toks: list[str]) -> bool:
     eq_idx = toks.index("=")
     after_eq = toks[eq_idx + 1 :] if eq_idx + 1 < len(toks) else []
     first_after = after_eq[0] if after_eq else ""
-    # ``= function`` / ``= class`` / ``= ( ... ) =>`` → a function/class/arrow
-    # expression; let it classify. Anything else is an object/struct literal.
+    # ``= function`` / ``= class`` / ``= ( ... ) =>`` / ``= async ...`` → a
+    # function/class/arrow expression; let it classify. Anything else is an
+    # object/struct literal. ``async`` must be excluded so
+    # ``const f = async () => { ... }`` and ``= async function() { ... }`` route
+    # to the arrow/function path instead of being treated as a field initializer.
     return not (
         first_after.startswith("function")
         or first_after.startswith("class")
         or first_after.startswith("(")
+        or first_after == "async"
     )
 
 
@@ -2411,6 +2485,12 @@ def _classify_a_brace(
     for idx in range(scan_end - 1, -1, -1):
         t = toks[idx]
         head = re.split(r"[<(:\[{]", t, maxsplit=1)[0]
+        # JS generator: ``function*`` (glued) — strip the trailing ``*`` so the
+        # ``function`` keyword is recognized. Without this, ``async function* g``
+        # selected ``async`` as the keyword (shadowing ``function*``) and lost
+        # the name. The spaced ``function * g`` form is handled in name extraction.
+        if head.endswith("*") and head.rstrip("*") in _A_FUNC_KEYWORDS:
+            head = head.rstrip("*")
         if (
             t in _A_CLASS_KEYWORDS
             or t in _A_FUNC_KEYWORDS
@@ -2432,6 +2512,10 @@ def _classify_a_brace(
     # Determine the name: the identifier right after the keyword.
     name: str | None = None
     after = toks[last_kw_idx + 1 :]
+    # JS spaced generator: ``function * name`` — skip a leading ``*`` after the
+    # ``function`` keyword to reach the name.
+    if last_kw == "function" and after and after[0] == "*":
+        after = after[1:]
     # For ``impl X for Y`` / ``trait X : Y`` the name is X (first after impl/trait).
     if after:
         cand = after[0]
@@ -2537,6 +2621,21 @@ def _strip_trailing_signature_tokens(joined: str) -> str:
     buffer represents one of these shapes; otherwise it is returned unchanged.
     """
     tokens = joined.split()
+    # Split a glued ``):`` (TS return-type annotation ``bar(): void``) into ``)``
+    # and ``:`` so the ``:``-after-``)`` cuts below (member-init list, and the
+    # keywordless ``;``-terminated name extractor) see the boundary. Whitespace
+    # tokenization leaves ``bar():`` as one token, hiding the annotation.
+    split_tokens: list[str] = []
+    for tok in tokens:
+        if "):" in tok:
+            pre, post = tok.split("):", 1)
+            split_tokens.append(pre + ")")
+            split_tokens.append(":")
+            if post:
+                split_tokens.append(post)
+        else:
+            split_tokens.append(tok)
+    tokens = split_tokens
     # (0) C++ member-init list: ``Foo() : base(), member(42) { }`` — the init
     # list trails the param list after a ``:``. Cut everything from the first
     # ``:`` that follows a ``)`` (the param-list close). Without this, the last
@@ -2574,6 +2673,13 @@ def _strip_trailing_signature_tokens(joined: str) -> str:
             clipping = True
             continue
         out.append(tok)
+    # (2b) C++ pure-virtual / explicit-default markers: ``= 0`` / ``= default`` /
+    # ``= delete`` trail a bodyless declaration's param list. Strip BEFORE the
+    # qualifier run — otherwise ``const = 0`` leaves ``const`` dangling past the
+    # ``= 0`` tail (the run stops at the non-qualifier ``0``). Without this the
+    # keywordless ``;``-terminated path drops every pure-virtual method.
+    if len(out) >= 2 and out[-2] == "=" and out[-1] in {"0", "default", "delete"}:
+        del out[-2:]
     out = _strip_trailing_qualifier_run(out)
     return " ".join(out)
 
@@ -2914,12 +3020,20 @@ def _binding_name_before(toks: list[str], kw_idx: int) -> str | None:
     # the expression's own name between, e.g. ``const Foo = class Inner {``).
     # Find the ``=`` that opens the expression.
     eq_idx = -1
+    # Modifiers that may legitimately appear between ``=`` and the keyword
+    # (``const g = async function()``) without being a declaration boundary.
+    # Without excluding ``async`` here, the walk-back stopped at it (it's in
+    # _A_FUNC_KEYWORDS for Rust's ``async fn``) and the binding name was lost.
+    modifiers = ("async", "pub", "export")
     for j in range(kw_idx - 1, -1, -1):
         if toks[j] == "=":
             eq_idx = j
             break
         # Stop at a statement boundary / another declaration — no binding here.
-        if toks[j] in (";", "}", "{") or toks[j] in _A_FUNC_KEYWORDS:
+        # ``async``/``pub``/``export`` are modifiers, not boundaries.
+        if toks[j] in (";", "}", "{") or (
+            toks[j] in _A_FUNC_KEYWORDS and toks[j] not in modifiers
+        ):
             return None
     if eq_idx < 1:
         return None  # nothing before the ``=``

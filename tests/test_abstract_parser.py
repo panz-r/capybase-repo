@@ -69,6 +69,14 @@ def _by_name(flat: list, name: str):
     return next((u for u in flat if u.name == name), None)
 
 
+def _kinds_of_flat(flat: list) -> list[tuple[str, str]]:
+    """``[(kind, name), ...]`` for an already-flattened unit list.
+
+    Companion to :func:`_flat`: ``_kinds_of_flat(_flat(src, lang))`` replaces
+    the ``[(u.kind, u.name) for u in _flat(...)]`` inline idiom in assertions."""
+    return [(u.kind, u.name) for u in flat]
+
+
 # ---------------------------------------------------------------------------
 # Family dispatch
 # ---------------------------------------------------------------------------
@@ -4168,3 +4176,139 @@ def test_r38_directly_attached_decorator_still_works():
     # The directly-attached decorator DOES fold in (start at row 0).
     assert f.span[0] == 0, f"directly-attached decorator dropped from span {f.span}"
     assert "@deco" in f.body
+
+
+# ---------------------------------------------------------------------------
+# Round 39 — Family A: missing declaration keywords + classification
+# ---------------------------------------------------------------------------
+
+
+def test_r39_swift_protocol_is_class():
+    """r39 (HIGH): Swift ``protocol`` is the language's interface equivalent and
+    was entirely absent from the keyword sets — a whole protocol was invisible
+    to the parser. Now recognized as CLASS so protocols surface for merge
+    identity. (Bodyless protocol methods without a ``;`` terminator — the Swift
+    idiom — are a separate, harder case; the win here is the protocol itself
+    no longer vanishing.)"""
+    flat = _flat("protocol Drawable {\n    func draw()\n}\n", "swift")
+    assert ("class", "Drawable") in _kinds_of_flat(flat), (
+        f"protocol must surface as a class; got {_kinds_of_flat(flat)}"
+    )
+
+
+def test_r39_swift_actor_is_class():
+    """r39 (HIGH): Swift ``actor`` (a reference type with isolated state) was
+    invisible. Now CLASS so it and its members surface."""
+    flat = _flat("actor Bank {\n    var balance: Double\n}\n", "swift")
+    assert ("class", "Bank") in _kinds_of_flat(flat), (
+        f"actor must surface as a class; got {_kinds_of_flat(flat)}"
+    )
+
+
+def test_r39_swift_extension_methods_surface():
+    """r39 (HIGH): Swift ``extension`` adds methods to an existing type and was
+    entirely invisible. It is a container (like ``impl``): the extension itself
+    is suppressed (no collision with the type's own (class, Name) identity) but
+    its methods surface as top-level entities."""
+    flat = _flat("extension MyType {\n    func helper() {}\n}\n", "swift")
+    kinds = _kinds_of_flat(flat)
+    # The method must surface (whether as function or method depends on nesting;
+    # the key contract is it is NOT dropped).
+    assert "helper" in [n for _, n in kinds], (
+        f"extension method must surface; got {kinds}"
+    )
+
+
+def test_r39_dart_mixin_is_class():
+    """r39 (HIGH): Dart ``mixin`` is a standalone type with its own identity and
+    was invisible. Now CLASS."""
+    flat = _flat("mixin MyMixin {\n    void hello() {}\n}\n", "dart")
+    assert ("class", "MyMixin") in _kinds_of_flat(flat), (
+        f"mixin must surface as a class; got {_kinds_of_flat(flat)}"
+    )
+
+
+def test_r39_dart_extension_methods_surface():
+    """r39 (HIGH): Dart ``extension Name on Type`` was invisible. Container-like:
+    suppressed itself, methods surface."""
+    flat = _flat("extension MyExt on String {\n    void greet() {}\n}\n", "dart")
+    kinds = _kinds_of_flat(flat)
+    assert "greet" in [n for _, n in kinds], f"extension method must surface; got {kinds}"
+
+
+def test_r39_java_record_is_class():
+    """r39 (HIGH): Java ``record`` is a class-like aggregate. It fell through to
+    the keywordless-method path and was misclassified as a FUNCTION. Now CLASS
+    so the record and its header surface correctly for identity."""
+    flat = _flat("public record Point(int x, int y) {\n}\n", "java")
+    assert ("class", "Point") in _kinds_of_flat(flat), (
+        f"record must surface as a class, not a function; got {_kinds_of_flat(flat)}"
+    )
+
+
+def test_r39_go_grouped_type_block_names_recovered():
+    """r39 (HIGH): Go's grouped ``type ( ... )`` block is the idiomatic way to
+    declare multiple types together. The name recovery walked back to ``type``
+    and took the token after it — which is ``(`` for a grouped block, failing
+    the identifier check and yielding name ``None`` for every type inside.
+    Now skips the ``(`` grouping paren to reach the real name."""
+    flat = _flat(
+        "type (\n  Foo struct { a int }\n  Bar struct { b int }\n)\n", "go"
+    )
+    kinds = _kinds_of_flat(flat)
+    assert ("class", "Foo") in kinds, f"Foo name lost in grouped type block; got {kinds}"
+    assert ("class", "Bar") in kinds, f"Bar name lost in grouped type block; got {kinds}"
+
+
+def test_r39_bodyless_interface_methods_surface():
+    """r39 (HIGH): bodyless (``;``-terminated) method declarations — Java/TS
+    interface methods ``void bar();`` / ``bar(): void;`` and C++ pure virtuals
+    ``virtual double area() const = 0;`` — were silently dropped. The
+    ``;``-terminated emission path only recovered keyworded methods
+    (``fn``/``func``), not keywordless signatures. Now recovered via the
+    keywordless-method name extractor."""
+    # Java interface.
+    flat = _flat("interface Foo {\n  void bar();\n  int baz();\n}\n", "java")
+    kinds = _kinds_of_flat(flat)
+    assert ("class", "Foo") in kinds, f"got {kinds}"
+    assert ("method", "bar") in kinds, f"Java bodyless method bar dropped; got {kinds}"
+    assert ("method", "baz") in kinds, f"Java bodyless method baz dropped; got {kinds}"
+    # TypeScript interface.
+    flat = _flat("interface Foo {\n  bar(): void;\n  baz(): number;\n}\n", "typescript")
+    kinds = _kinds_of_flat(flat)
+    assert ("method", "bar") in kinds, f"TS bodyless method bar dropped; got {kinds}"
+    assert ("method", "baz") in kinds, f"TS bodyless method baz dropped; got {kinds}"
+
+
+def test_r39_cpp_pure_virtual_methods_surface():
+    """r39 (HIGH): C++ pure virtual methods ``virtual double area() const = 0;``
+    were dropped (``= 0`` made the signature not look keywordless-method-
+    shaped). Now recovered."""
+    flat = _flat(
+        "class Shape {\npublic:\n  virtual double area() const = 0;\n"
+        "  virtual void draw() const = 0;\n  void helper() { }\n};\n",
+        "cpp",
+    )
+    kinds = _kinds_of_flat(flat)
+    assert ("method", "area") in kinds, f"pure virtual area dropped; got {kinds}"
+    assert ("method", "draw") in kinds, f"pure virtual draw dropped; got {kinds}"
+    assert ("method", "helper") in kinds, f"helper (control) dropped; got {kinds}"
+
+
+def test_r39_async_arrow_function_not_field():
+    """r39 (HIGH): ``const f = async () => { ... }`` and
+    ``const f = async function() { ... }`` were misclassified as FIELDs. The
+    initializer-literal check excluded ``function``/``class``/``(`` after ``=``
+    but not ``async``, so the arrow/function brace was treated as an object
+    literal and the binding emitted as a field. ``async`` (and ``async (``,
+    ``async function``) now route to the arrow/function path → FUNCTION."""
+    # async arrow
+    flat = _flat("const f = async () => {\n  return 1;\n};\n", "typescript")
+    assert ("function", "f") in _kinds_of_flat(flat), (
+        f"async arrow misclassified; got {_kinds_of_flat(flat)}"
+    )
+    # async function expression
+    flat = _flat("const g = async function() {\n  return 1;\n};\n", "javascript")
+    assert ("function", "g") in _kinds_of_flat(flat), (
+        f"async function expr misclassified; got {_kinds_of_flat(flat)}"
+    )
