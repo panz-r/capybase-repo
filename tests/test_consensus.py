@@ -497,3 +497,16 @@ def test_propose_with_consensus_forwards_prev_candidate_to_repair_prompt():
             "targeted repair prompt — prev_candidate was not forwarded"
         )
         assert "BROKEN_ATTEMPT" in p  # the broken candidate is shown to the model
+
+
+def test_r34_normalize_does_not_truncate_string_with_hash():
+    """F3 (HIGH): normalize's trailing-comment regex matched a ``#`` inside a
+    string literal (``x = \"a # b\"``), truncating the string and corrupting the
+    clustering key — two resolutions with different string values could merge."""
+    result = normalize('msg = "a # b"  # real comment', "python")
+    assert '"a # b"' in result, f"string truncated at inner #; got {result!r}"
+    # The real trailing comment must still be stripped.
+    assert "# real comment" not in result
+    # Rust // inside a string.
+    result2 = normalize('let s = "a // b";  // real', "rust")
+    assert '"a // b"' in result2, f"string truncated at inner //; got {result2!r}"

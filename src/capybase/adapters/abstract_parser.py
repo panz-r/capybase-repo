@@ -992,7 +992,10 @@ def _extract_import_name(line: str) -> str:
     if m:
         names = m.group(2).strip().rstrip(",").strip()
         if names:
-            return f"{m.group(1)}.{names}"
+            mod = m.group(1)
+            # Avoid a double-dot: ``from . import a`` → ``.a`` not ``..a``.
+            sep = "" if mod.endswith(".") else "."
+            return f"{mod}{sep}{names}"
         return m.group(1)
     # Absolute ``from X import ...`` → just the module name.
     m = re.match(r"from\s+(\.[\w.]*|[A-Za-z_][\w.]*)", s)

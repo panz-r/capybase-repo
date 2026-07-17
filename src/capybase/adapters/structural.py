@@ -1646,9 +1646,61 @@ def _blank_text_strings(text: str) -> str:
     Same as :func:`_blank_line_strings` but for full text blocks (used by
     :func:`referenced_symbols` to exclude identifiers inside strings/comments
     from the symbol reference set).
+
+    F-string interpolation expressions (``f"{foo()}"``) are PRESERVED — the
+    ``{...}`` content is real runtime code, not prose. Only the literal text
+    portions of the f-string are blanked.
     """
     from capybase.adapters.abstract_parser import _STRING_LIT_RE
-    return _STRING_LIT_RE.sub(lambda m: " " * len(m.group(0)), text)
+
+    def _blank_match(m: re.Match) -> str:
+        raw = m.group(0)
+        # Detect an f-string prefix: ``_STRING_LIT_RE`` matches the quoted part
+        # WITHOUT the prefix, so check the character before the match for ``f``
+        # (or ``rf``/``fr``).
+        start = m.start()
+        prefix_char = m.string[start - 1] if start > 0 else ""
+        prefix2 = m.string[start - 2 : start] if start >= 2 else ""
+        is_fstring = (
+            prefix_char == "f"
+            or prefix2 in ("rf", "fr")
+            or raw[0:2] in ('f"', "f'")
+            or raw[:3] in ('rf"', "rf'", 'fr"', "fr'")
+        )
+        # Preserve f-string interpolation expressions: replace the literal text
+        # with spaces but keep ``{...}`` regions intact so their identifiers are
+        # extracted by the caller's tokenizer.
+        if is_fstring:
+            # It's an f-string — preserve interpolation regions.
+            result = []
+            i = 0
+            n = len(raw)
+            while i < n:
+                # Find the next ``{`` (interpolation start).
+                brace = raw.find("{", i)
+                if brace < 0:
+                    # Rest is literal text — blank it.
+                    result.append(" " * (n - i))
+                    break
+                # Blank literal text up to the brace.
+                result.append(" " * (brace - i))
+                # Find the matching ``}`` (handle ``{{`` escaped braces).
+                j = brace + 1
+                depth = 1
+                while j < n and depth > 0:
+                    if raw[j] == "{":
+                        depth += 1
+                    elif raw[j] == "}":
+                        depth -= 1
+                    j += 1
+                # Preserve the interpolation expression (including braces).
+                result.append(raw[brace:j])
+                i = j
+            return "".join(result)
+        # Regular string — blank entirely.
+        return " " * len(raw)
+
+    return _STRING_LIT_RE.sub(_blank_match, text)
 
 
 

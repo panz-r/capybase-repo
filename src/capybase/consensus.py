@@ -27,20 +27,36 @@ from capybase.conflict_model import CandidateResolution
 _TRAILING_WS = re.compile(r"[ \t]+$")
 _BLANK_LINE = re.compile(r"\n\s*\n+")
 # A trailing inline comment: whitespace, then # or // (not inside a string).
-# Naive — does not track string state — but sufficient for clustering where a
-# false positive only merges two lines that differ solely by a trailing
-# comment, which is the desired behavior for self-consistency.
 _TRAILING_COMMENT = re.compile(r"[ \t]+(#|//).*$")
+
+
+def _strip_trailing_comment(line: str) -> str:
+    """Remove a trailing ``#``/``//`` comment, respecting string literals.
+
+    Finds the comment on a string-blanked copy (so a ``#`` inside a string
+    literal is not mistaken for a comment), then strips from that position on
+    the ORIGINAL line. Blanking is length-preserving so positions map 1:1.
+    """
+    from capybase.adapters.abstract_parser import _STRING_LIT_RE
+    blanked = _STRING_LIT_RE.sub(lambda mm: " " * len(mm.group(0)), line)
+    # Find the FIRST ``#`` or ``//`` in the blanked line that is preceded by
+    # whitespace (a trailing comment) — not inside a string (which is now blanked).
+    for i, ch in enumerate(blanked):
+        if ch == "#" and i > 0 and blanked[i - 1] in " \t":
+            return line[:i].rstrip()
+        if ch == "/" and i + 1 < len(blanked) and blanked[i + 1] == "/" and i > 0 and blanked[i - 1] in " \t":
+            return line[:i].rstrip()
+    return line
 
 
 def normalize(text: str, language: str | None = None) -> str:
     """Canonicalize a resolution for clustering.
 
-    Strips trailing whitespace, trailing inline comments, and full comment
-    lines, then collapses blank-line runs, so that semantically-identical
-    resolutions that differ only in formatting cluster together. Indentation
-    is PRESERVED (it is structurally significant in Python and meaningful in
-    Rust).
+    Strips trailing whitespace, trailing inline comments (string-aware), and
+    full comment lines, then collapses blank-line runs, so that semantically-
+    identical resolutions that differ only in formatting cluster together.
+    Indentation is PRESERVED (it is structurally significant in Python and
+    meaningful in Rust).
     """
     if not text:
         return ""
@@ -49,8 +65,9 @@ def normalize(text: str, language: str | None = None) -> str:
         stripped = line.lstrip()
         if _is_comment_line(stripped, language):
             continue
-        # Remove trailing inline comments (e.g. "x = 1  # foo" -> "x = 1").
-        line = _TRAILING_COMMENT.sub("", line)
+        # Remove trailing inline comments (e.g. "x = 1  # foo" -> "x = 1"),
+        # respecting string boundaries so a # inside a string isn't stripped.
+        line = _strip_trailing_comment(line)
         lines.append(_TRAILING_WS.sub("", line))
     out = "\n".join(lines)
     out = _BLANK_LINE.sub("\n", out)

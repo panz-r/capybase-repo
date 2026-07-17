@@ -493,3 +493,25 @@ def test_r33_referenced_symbols_ignores_string_literals():
     refs2 = referenced_symbols("x = compute(real_thing)", "python")
     assert "compute" in refs2
     assert "real_thing" in refs2
+
+
+def test_r34_referenced_symbols_preserves_fstring_interpolation():
+    """F2 (HIGH, round-33 regression): blanking string literals discarded f-string
+    interpolation expressions (``f\"{foo()}\"``), silently dropping real runtime
+    call references from the dependency set. Now preserves ``{...}`` regions."""
+    from capybase.adapters.structural import referenced_symbols
+    refs = referenced_symbols('def caller():\n    return f"result={foo()}"\n', "python")
+    assert "foo" in refs, f"f-string interpolation reference dropped; got {refs}"
+    # The literal text 'result' must NOT be extracted.
+    assert "result" not in refs, f"f-string literal text extracted; got {refs}"
+
+
+def test_r34_relative_import_label_no_double_dot():
+    """F4 (MEDIUM): ``from . import a`` produced a garbled label ``..a`` (the
+    module ``.`` already ends with a dot). Must be ``.a``."""
+    from capybase.adapters.abstract_parser import _extract_import_name
+    assert _extract_import_name("from . import a") == ".a", (
+        f"double-dot label; got {_extract_import_name('from . import a')!r}"
+    )
+    assert _extract_import_name("from . import a, b") == ".a, b"
+    assert _extract_import_name("from .models import User") == ".models.User"
