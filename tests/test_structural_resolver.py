@@ -412,6 +412,46 @@ def test_list_union_declines_when_a_side_edits_a_base_item():
     assert r.rule != "list_union"
 
 
+# ---------------------------------------------------------------------------
+# Round 38 — _find_single_list must reject subscript/index expressions
+# ---------------------------------------------------------------------------
+
+
+def test_r38_list_union_does_not_fire_on_subscript():
+    """r38 (HIGH): ``_find_single_list`` matched ANY ``[...]`` bracket pair,
+    not just list literals. A subscript ``a[0]`` was treated as a one-element
+    list ``[0]``; two sides that changed the index (``a[0, 1]``, ``a[0, 2]``)
+    were wrongly merged into ``a[0, 1, 2]`` — turning an integer subscript into
+    a tuple subscript. This is valid Python (numpy/pandas), so it could pass
+    downstream validation and be applied as a wrong merge. A subscript's ``[``
+    is preceded by an identifier char / ``]`` / ``)``; a list literal's ``[``
+    is preceded by ``=`` / whitespace / ``(`` / ``,``. The rule must decline
+    on the subscript shape so the LLM/line resolver handles it correctly."""
+    from capybase.structural_resolver import _find_single_list
+
+    # A subscript is NOT a list literal.
+    assert _find_single_list("x = a[0]") is None
+    assert _find_single_list("result = call()[1]") is None
+    assert _find_single_list("y = grid[r][c]") is None  # outer [ follows ]
+    # A genuine list literal still matches.
+    assert _find_single_list('S = ["a"]') is not None
+    assert _find_single_list("xs = [1, 2, 3]") is not None
+
+
+def test_r38_list_union_subscript_does_not_corrupt_merge():
+    """r38 (HIGH): end-to-end — two sides editing a subscript expression must
+    NOT be merged by ``list_union`` (it would corrupt ``a[0]`` into a tuple
+    subscript). The rule must decline (``rule != "list_union"``) so a safer
+    resolver handles it."""
+    base = "x = a[0]"
+    current = "x = a[0, 1]"  # both sides changed the subscript
+    replayed = "x = a[0, 2]"
+    r = resolve_structurally(_unit(base, current, replayed))
+    assert r.rule != "list_union", (
+        f"list_union fired on a subscript and likely corrupted it: {r.text!r}"
+    )
+
+
 def test_dict_union_merges_distinct_inline_keys():
     """Both sides add distinct keys to an inline dict → base + current + replayed."""
     base = 'CFG = {"a": 1}'
@@ -438,6 +478,54 @@ def test_dict_union_declines_on_shared_key():
     replayed = 'CFG = {"a": 1, "b": 9}'  # same key, different value
     r = resolve_structurally(_unit(base, current, replayed))
     assert r.rule != "dict_union"
+
+
+# ---------------------------------------------------------------------------
+# Round 38 — _split_dict_entries must be string-aware (comma-in-value)
+# ---------------------------------------------------------------------------
+
+
+def test_r38_split_dict_entries_string_aware_comma():
+    """r38 (LOW): ``_split_dict_entries`` split on EVERY comma via a naive
+    ``inner.split(",")``, so a string value containing a comma was torn apart
+    (``"hello, world"`` → ``"hello`` + ``world"``). The post-hoc ``all(':'
+    in p)`` guard happened to decline the corrupted halves, so this never
+    produced a WRONG merge — but it caused dict_union to wrongly DECLINE a
+    legitimate both-sides-add-keys merge whenever a value contained a comma
+    (common: error messages, paths, formatted strings). Now string-aware,
+    matching the escape-aware :func:`_split_list_items`."""
+    from capybase.structural_resolver import _split_dict_entries
+
+    # A comma INSIDE a string value must not split the entry.
+    parts = _split_dict_entries('"msg": "hello, world"')
+    assert parts == ['"msg": "hello, world"'], (
+        f"comma inside string value wrongly split the entry; got {parts}"
+    )
+    # Multiple entries with comma-bearing values all survive intact.
+    parts = _split_dict_entries(
+        '"a": "x, y", "b": "1:2", "c": 3'
+    )
+    assert parts == ['"a": "x, y"', '"b": "1:2"', '"c": 3'], (
+        f"entries with comma/colon values mis-split; got {parts}"
+    )
+
+
+def test_r38_dict_union_merges_with_comma_in_value():
+    """r38 (LOW) end-to-end: a base dict whose value contains a comma (e.g. an
+    error message / path) must still allow both sides to add distinct keys via
+    dict_union. Before the string-aware fix, the comma-in-value made
+    ``_split_dict_entries`` mis-split and the rule declined — forcing an
+    unnecessary LLM call for a clean both-sides-add-keys merge."""
+    base = 'CFG = {"msg": "hello, world"}'
+    current = 'CFG = {"msg": "hello, world", "a": 1}'
+    replayed = 'CFG = {"msg": "hello, world", "b": 2}'
+    r = resolve_structurally(_unit(base, current, replayed))
+    assert r.rule == "dict_union", (
+        f"dict_union should merge both-sides-add-keys despite comma-in-value; "
+        f"got rule={r.rule!r} text={r.text!r}"
+    )
+    assert '"a": 1' in r.text and '"b": 2' in r.text
+    assert "hello, world" in r.text  # the comma-bearing value preserved verbatim
 
 
 def test_insertion_union_merges_distinct_inserted_lines():

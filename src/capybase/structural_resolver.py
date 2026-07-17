@@ -616,6 +616,14 @@ def _find_single_list(text: str):
     ``inner`` is the text between the brackets; ``open_offset``/``close_offset``
     are the char offsets of the ``[`` and ``]`` (so the caller can splice).
     Rejects nested/extra brackets (a single list with no inner ``[``).
+
+    Also rejects SUBSCRIPT / index expressions: a ``[`` immediately preceded by
+    an identifier char, ``]``, or ``)`` is an indexing operation (``a[0]``,
+    ``call()[1]``, ``grid[r][c]``), NOT a list literal. Without this guard, two
+    sides editing a subscript (``a[0]`` → ``a[0, 1]`` / ``a[0, 2]``) would be
+    wrongly merged into ``a[0, 1, 2]`` (turning an integer subscript into a
+    tuple subscript) — a wrong merge that's valid Python and can slip through.
+    A list literal's ``[`` follows ``=`` / whitespace / ``(`` / ``,`` / start.
     """
     import re
 
@@ -627,6 +635,12 @@ def _find_single_list(text: str):
         return None
     open_off = m.start()  # offset of '['
     close_off = m.end()   # offset just after ']'
+    # Reject subscript: the char right before '[' is an identifier char / ']'
+    # / ')' → it's an indexing operation, not a list literal.
+    if open_off > 0:
+        prev = text[open_off - 1]
+        if prev.isalnum() or prev == "_" or prev in "])":
+            return None
     return (None, inner, open_off, close_off)
 
 
@@ -698,17 +712,26 @@ def _find_single_dict(text: str):
 def _split_dict_entries(inner: str) -> list[str]:
     """Split a dict interior into entries (``key: value``), preserving text.
 
-    Splits on top-level commas (the regex form ``key: value`` is assumed; nested
-    commas inside values — e.g. a function call — are NOT handled, which keeps
-    the rule conservative: a dict with complex values declines rather than
-    mis-splitting).
+    STRING-AWARE and escape-aware (delegates to :func:`_split_list_items`, the
+    same string/escape-aware top-level-comma splitter the list rule uses): a
+    comma INSIDE a string value (``"hello, world"``, ``"a:b,c"``) must NOT split
+    the entry. The naive ``inner.split(",")`` tore such values apart; the
+    post-hoc ``all(':')`` guard happened to decline the corrupted halves (so no
+    wrong merge ever resulted) but it caused dict_union to wrongly DECLINE a
+    legitimate both-sides-add-keys merge whenever a value contained a comma.
+
+    Remains conservative: a comma in a NON-string context whose segment lacks a
+    ``:`` (e.g. a function-call value ``f(a, b)``) still declines via the guard.
     """
     if not inner.strip():
         return []
-    # Conservative: split on commas only when every segment looks like `key: val`.
-    parts = [p.strip() for p in inner.split(",") if p.strip()]
+    # Reuse the string/escape-aware top-level-comma splitter. A comma inside a
+    # string literal is no longer a separator; a top-level comma still is.
+    parts = _split_list_items(inner)
+    # Conservative: keep only when every segment looks like `key: val`. A
+    # top-level comma whose segment lacks ':' (e.g. ``f(a, b)``) → decline.
     if not all(":" in p for p in parts):
-        return []  # ambiguous (nested commas) → decline via empty
+        return []
     return parts
 
 
@@ -1546,7 +1569,13 @@ def _try_refactoring_aware_merge(unit: ConflictUnit) -> str | None:
         base_e = base_by_id.get(base_id)
         if base_e is None:
             return False
-        return _body_below_header(ent.body) == _body_below_header(base_e.body)
+        # Forward ``lang`` so one-liner headers are stripped correctly: a Rust
+        # one-liner ``fn foo() -> i32 { BODY }`` has no ':', so the default
+        # ``lang=None`` (Python colon-branch) leaves the header intact and the
+        # renamed-vs-base comparison always differs — the rename is never
+        # recognized, forcing an unnecessary LLM escalation. Multi-line bodies
+        # are unaffected (they take the lang-independent first-line-drop path).
+        return _body_below_header(ent.body, lang) == _body_below_header(base_e.body, lang)
 
     def _is_body_modify(ent):
         """True if ``ent`` has the same identity as a base entity, the same header
