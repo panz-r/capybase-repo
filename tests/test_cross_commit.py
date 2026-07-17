@@ -317,3 +317,62 @@ def test_guardian_detects_cross_commit_break_in_go():
     breaks = audit_cross_commit_dependencies(edges, final)
     assert any(b.symbol == "helper" for b in breaks)
 
+
+# ---------------------------------------------------------------------------
+# Round 42 — consistent rename must not false-block
+# ---------------------------------------------------------------------------
+
+
+def test_r42_consistent_rename_no_false_break():
+    """r42 (HIGH): when the definer's symbol is CONSISTENTLY renamed across the
+    whole final tree — the definition renamed AND the user's call site updated
+    to the new name — the guardian must NOT report a break. The dead
+    ``final_by_body`` index was built for exactly this (recognize the symbol
+    survives under a renamed name) but never read; the audit did a pure name
+    match and false-blocked a legitimate, complete rename."""
+    # Commit A defines foo; commit B (later) uses foo in its added lines.
+    a = build_commit_symbols(_files(a="def foo():\n    return 1\n"))
+    b = build_commit_symbols(_files(b=""), added_text={"b.py": "y = foo()\n"})
+    edges = build_dependency_graph({"A": a, "B": b}, ["A", "B"])
+    assert any(e.symbol == "foo" for e in edges), "edge not built"
+    # Final tree: foo renamed to bar EVERYWHERE — def AND the user's call site.
+    final = {
+        "a.py": structural.enumerate_entities("def bar():\n    return 1\n", "python"),
+        "b.py": structural.enumerate_entities("y = bar()\n", "python"),
+    }
+    final_text = {
+        "a.py": "def bar():\n    return 1\n",
+        "b.py": "y = bar()\n",
+    }
+    breaks = audit_cross_commit_dependencies(edges, final, final_text)
+    foo_breaks = [b for b in breaks if b.symbol == "foo"]
+    assert foo_breaks == [], (
+        f"consistent rename (foo->bar, call updated) false-blocked: {foo_breaks}"
+    )
+
+
+def test_r42_inconsistent_rename_still_breaks():
+    """r42 REGRESSION: when the definer's symbol is renamed in the def but the
+    user's call site was NOT updated (still references the old name), that's a
+    GENUINE stale-reference break — the rename is incomplete. The consistent-
+    rename fix must not over-fire and mask this real break."""
+    a = build_commit_symbols(_files(a="def foo():\n    return 1\n"))
+    b = build_commit_symbols(_files(b="def main():\n    return foo()\n"))
+    edges = build_dependency_graph({"A": a, "B": b}, ["A", "B"])
+    # Final tree: def renamed foo->bar, but B's call still says foo() (stale).
+    final = {
+        "a.py": structural.enumerate_entities("def bar():\n    return 1\n", "python"),
+        "main.py": structural.enumerate_entities(
+            "def main():\n    return foo()\n", "python"),  # stale reference
+    }
+    final_text = {
+        "a.py": "def bar():\n    return 1\n",
+        "main.py": "def main():\n    return foo()\n",
+    }
+    breaks = audit_cross_commit_dependencies(edges, final, final_text)
+    foo_breaks = [b for b in breaks if b.symbol == "foo"]
+    assert len(foo_breaks) >= 1, (
+        f"inconsistent rename (def renamed, call stale) must still break; "
+        f"got {breaks}"
+    )
+

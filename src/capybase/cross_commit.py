@@ -28,7 +28,7 @@ this gap is "entirely deterministic, no LLM required".
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Mapping
 
 if TYPE_CHECKING:
     from capybase.adapters.structural import Entity
@@ -103,6 +103,11 @@ class CommitSymbols:
 
     defines: frozenset[tuple[str, str]] = field(default_factory=frozenset)
     uses: frozenset[str] = field(default_factory=frozenset)
+    # name → (kind, body_fingerprint) for each defined entity. Used by the audit
+    # to recognize a CONSISTENT rename: a symbol gone by name but whose body
+    # survives under a different name (and whose call sites were updated) is not
+    # a missing definition.
+    defines_body: Mapping[str, tuple[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -110,12 +115,16 @@ class DependencyEdge:
     """Commit B references a symbol commit A defines (B depends on A).
 
     ``symbol`` is the used name; ``definer`` is the commit OID that defines it;
-    ``user`` is the commit OID that references it.
+    ``user`` is the commit OID that references it. ``body_fingerprint`` is the
+    ``(kind, body_fp)`` of the definer's original definition, used by the audit
+    to recognize a consistent rename (the symbol survives under a new name with
+    the same body, and the user's call site was updated).
     """
 
     symbol: str
     definer: str
     user: str
+    body_fingerprint: tuple[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +185,7 @@ def build_commit_symbols(
     from capybase.adapters import structural
 
     defines: set[tuple[str, str]] = set()
+    defines_body: dict[str, tuple[str, str]] = {}
     for path, text in files.items():
         lang = _language_for_path(path)
         if lang is None or not structural.is_available(lang):
@@ -186,6 +196,9 @@ def build_commit_symbols(
         for e in ents:
             if e.kind in defined_kinds:
                 defines.add((e.kind, e.name))
+                bf = structural.entity_body_fingerprint(e, "") or ""
+                if bf:
+                    defines_body.setdefault(e.name, (e.kind, bf))
     # When added_text is provided, USES is computed from the commit's actual
     # contribution (its + lines), and "locally defined" for the subtraction is
     # the names the commit DEFINES in that added content — NOT the full post-image
@@ -216,7 +229,8 @@ def build_commit_symbols(
             if name not in locally_defined:
                 uses.add(name)
     return CommitSymbols(
-        defines=frozenset(defines), uses=frozenset(uses)
+        defines=frozenset(defines), uses=frozenset(uses),
+        defines_body=dict(defines_body),
     )
 
 
@@ -240,15 +254,19 @@ def build_dependency_graph(
     Returns the dependency edges. OIDs missing from ``commit_symbols`` are
     skipped (the guardian degrades to whatever symbols it could build).
     """
-    # Map each defined name → the EARLIEST commit that defines it.
+    # Map each defined name → the EARLIEST commit that defines it, plus that
+    # definer's (kind, body_fingerprint) for consistent-rename recognition.
     first_definer: dict[str, str] = {}
+    first_definer_body: dict[str, tuple[str, str] | None] = {}
     position: dict[str, int] = {oid: i for i, oid in enumerate(commit_order)}
     for oid in commit_order:
         syms = commit_symbols.get(oid)
         if syms is None:
             continue
         for _kind, name in syms.defines:
-            first_definer.setdefault(name, oid)
+            if name not in first_definer:
+                first_definer[name] = oid
+                first_definer_body[name] = syms.defines_body.get(name)
     edges: list[DependencyEdge] = []
     for user in commit_order:
         syms = commit_symbols.get(user)
@@ -267,6 +285,7 @@ def build_dependency_graph(
             if position.get(definer, -1) < position.get(user, -1):
                 edges.append(DependencyEdge(
                     symbol=name, definer=definer, user=user,
+                    body_fingerprint=first_definer_body.get(name),
                 ))
     return edges
 
@@ -274,6 +293,7 @@ def build_dependency_graph(
 def audit_cross_commit_dependencies(
     edges: "list[DependencyEdge]",
     final_tree_entities: "dict[str, list[Entity]]",
+    final_tree_text: "dict[str, str] | None" = None,
 ) -> list[DependencyBreak]:
     """Verify each dependency edge survives in the final rebased tree.
 
@@ -314,9 +334,30 @@ def audit_cross_commit_dependencies(
         if key in seen:
             continue
         seen.add(key)
-        # Not present by name → missing (we don't have the original definition's
-        # body here to confirm a rename, so this is the conservative report:
-        # the symbol the user-commit referenced is not findable by name).
+        # Not present by name. Check whether the original definition's BODY
+        # survives under a different name (a consistent rename). If it does,
+        # the symbol was renamed, not dropped. The rename is COMPLETE (not a
+        # break) only if the old name is no longer REFERENCED anywhere in the
+        # final tree — a stale reference (the user's call site still uses the
+        # old name) is a genuine ``stale_reference`` break. Requires the final
+        # tree text; without it, fall through to the conservative report.
+        if edge.body_fingerprint and edge.body_fingerprint in final_by_body:
+            if final_tree_text is not None:
+                old_name_still_referenced = any(
+                    edge.symbol in structural.referenced_symbols(text, _language_for_path(path) or "")
+                    for path, text in final_tree_text.items()
+                )
+                if not old_name_still_referenced:
+                    continue  # consistent rename: old name gone, body survives → resolved
+                # Stale reference — report as informational, not missing_definition.
+                breaks.append(DependencyBreak(
+                    symbol=edge.symbol, definer=edge.definer, user=edge.user,
+                    break_type="stale_reference",
+                ))
+                continue
+            # No text to check staleness — fall through to the conservative
+            # missing_definition report (preserves prior behavior for callers
+            # that don't supply final_tree_text).
         breaks.append(DependencyBreak(
             symbol=edge.symbol, definer=edge.definer, user=edge.user,
             break_type="missing_definition",

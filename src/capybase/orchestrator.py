@@ -4041,6 +4041,7 @@ class Orchestrator:
 
         # Enumerate the final rebased tree's entities for the touched files.
         final_tree: dict[str, list] = {}
+        final_tree_text: dict[str, str] = {}
         for path in all_paths:
             blob = self.git.blob_at(head_after, path)
             if blob is None:
@@ -4048,12 +4049,14 @@ class Orchestrator:
             lang = cross_commit._language_for_path(path)
             if lang is None or not structural.is_available(lang):
                 continue
-            ents = structural.enumerate_entities(
-                blob.decode("utf-8", errors="replace"), lang
-            )
+            text = blob.decode("utf-8", errors="replace")
+            ents = structural.enumerate_entities(text, lang)
             if ents is not None:
                 final_tree[path] = ents
-        breaks = cross_commit.audit_cross_commit_dependencies(edges, final_tree)
+                final_tree_text[path] = text
+        breaks = cross_commit.audit_cross_commit_dependencies(
+            edges, final_tree, final_tree_text
+        )
         if not breaks:
             return None
 
