@@ -1193,6 +1193,48 @@ def _match_string_prefix(src: str, quote_idx: int) -> int | None:
 _HEXDIGITS = frozenset("0123456789abcdefABCDEF")
 
 
+def _match_cpp_raw_prefix(src: str, quote_idx: int, n: int) -> str | None:
+    """Detect a C++ raw-string opener ending at ``src[quote_idx] == '"'``.
+
+    C++ raw strings have the form ``[u8|L|u|U]R"DELIM(...)DELIM"`` where DELIM
+    is an optional identifier (the raw-string delimiter). The closer is
+    ``)DELIM"``. Returns the delimiter string (possibly empty) when this is a
+    C++ raw string opener, or ``None`` otherwise.
+
+    The opener's ``R"`` is followed by DELIM then ``(``. We look back from the
+    quote for ``R`` preceded by an optional encoding prefix (``u8``/``L``/``u``
+    /``U``) and a word boundary, then look ahead for DELIM + ``(``.
+    """
+    j = quote_idx - 1
+    if j < 0 or src[j] != "R":
+        return None
+    k = j - 1
+    # Optional encoding prefix: u8, L, u, U (case-sensitive per the standard).
+    if k >= 0 and src[k] == "8" and k - 1 >= 0 and src[k - 1] in ("u", "U", "L"):
+        k -= 2
+    elif k >= 0 and src[k] in ("L", "u", "U"):
+        k -= 1
+    # Word boundary: the char before the (encoding-prefixed) R must be a
+    # non-identifier char (or start of input). Otherwise the R is the tail of
+    # an identifier (``myR"..."``), not a raw-string prefix.
+    if k >= 0 and (src[k].isalnum() or src[k] == "_"):
+        return None
+    # Look ahead from after the quote for DELIM + "(". DELIM is an optional run
+    # of d-chars (anything except whitespace, parens, backslash, control chars;
+    # up to 16 chars). We accept a run of identifier/operator chars up to "(".
+    a = quote_idx + 1
+    delim_start = a
+    while a < n and src[a] != "(" and src[a] != ")" and src[a] != " " and src[a] != "\t" and src[a] != "\n":
+        delim = src[delim_start:a]
+        if len(delim) > 16:
+            return None
+        a += 1
+    if a >= n or src[a] != "(":
+        return None
+    delim = src[delim_start:a]
+    return delim
+
+
 @dataclass
 class _AStrState:
     """The mutable string/comment state for the Family-A char scan.
@@ -1204,6 +1246,10 @@ class _AStrState:
     """
     in_str: str | None = None
     hash_count: int = 0
+    # C++ raw string ``R"DELIM(...)DELIM"``: when non-empty, we're inside one
+    # and the closer is ``)`` + this delimiter + ``"``. Empty = not in a C++
+    # raw string (Rust raw strings use ``hash_count`` above instead).
+    cpp_raw_delim: str = ""
     in_line_comment: bool = False
     in_block_comment: bool = False
 
@@ -1245,6 +1291,19 @@ def _advance_string_comment(
             st.in_str = None
             return i + 1, True
         if st.in_str == '"' and ch == '"':
+            # C++ raw string closer: the ``"`` must be preceded by ``)`` + the
+            # opener's delimiter. An embedded ``"`` in the content (without the
+            # ``)DELIM`` prefix) does NOT close it.
+            if st.cpp_raw_delim:
+                delim = st.cpp_raw_delim
+                need = ")" + delim
+                start = i - len(need)
+                if start >= 0 and src[start:i] == need:
+                    st.in_str = None
+                    st.cpp_raw_delim = ""
+                    return i + 1, True
+                # Embedded quote — not the closer.
+                return i + 1, True
             # Raw string closer: ``"`` must be followed by exactly
             # ``hash_count`` ``#`` chars. An embedded ``"`` in the content
             # (with no matching ``#`` run) does NOT close it.
@@ -1280,6 +1339,14 @@ def _advance_string_comment(
         # the closer matches the opener. A Rust raw string ``r#"..."#`` closes
         # on ``"`` + N ``#``; without this, an embedded ``"`` in the content
         # closes early and corrupts brace counting.
+        # C++ raw strings ``R"DELIM(...)DELIM"`` (also LR/u8R/uR/UR) close on
+        # ``)`` + DELIM + ``"``. Without this, an embedded ``"}`` in the content
+        # closed early and corrupted brace counting, truncating the function.
+        cpp_delim = _match_cpp_raw_prefix(src, i, n)
+        if cpp_delim is not None:
+            st.in_str = '"'
+            st.cpp_raw_delim = cpp_delim
+            return i + 1, True
         prefix = _match_string_prefix(src, i)
         if prefix is not None:
             # prefix is the hash_count (0 = ordinary, >0 = raw with N #).

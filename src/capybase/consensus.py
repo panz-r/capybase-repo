@@ -53,7 +53,10 @@ def _strip_trailing_comment(line: str, *, language: str | None = None) -> str:
     from capybase.adapters.abstract_parser import _lang_is_family_a
     is_family_a = _lang_is_family_a(language)
     slash_is_comment = is_family_a
-    hash_is_comment = not is_family_a
+    # PHP is a Family-A (brace) language but supports BOTH ``//`` and ``#`` line
+    # comments — without this, ``#`` comments survived normalization while
+    # ``//`` comments were stripped (inconsistent clustering).
+    hash_is_comment = (not is_family_a) or language == "php"
     # Find the FIRST comment marker in the blanked line that is preceded by
     # whitespace (a trailing comment) — not inside a string (which is now blanked).
     for i, ch in enumerate(blanked):
@@ -72,25 +75,142 @@ def normalize(text: str, language: str | None = None) -> str:
     that semantically-identical resolutions that differ only in formatting
     cluster together. Indentation is PRESERVED (it is structurally significant
     in Python and meaningful in Rust).
+
+    MULTI-LINE-STRING-AWARE: lines inside an open multi-line string (Python
+    triple-quote, Rust raw multi-line) are preserved VERBATIM — not comment-
+    stripped, not blank-collapsed — so a docstring's interior (which may contain
+    ``#``-led lines or blank runs) survives intact. Without this, two resolutions
+    differing only in docstring text falsely clustered together.
     """
     if not text:
         return ""
-    lines = []
+    from capybase.adapters.abstract_parser import _STRING_LIT_RE, _RAW_STRING_RE
+    # Partition lines into "string-interior" vs "code" by tracking open
+    # multi-line strings across the whole text. A line is string-interior if a
+    # multi-line string was open coming into it (and hasn't closed on it).
+    in_multi = False  # whether a multi-line string is currently open
+    out_lines: list[str] = []
     for line in text.split("\n"):
+        if in_multi:
+            out_lines.append(line)  # preserve verbatim
+            # Check whether this line CLOSES the open multi-line string. Blank
+            # on a copy; if the blanked line still has an odd number of raw/
+            # triple-quote openers, the string remains open into the next line.
+            if _multi_string_closes(line):
+                in_multi = False
+            continue
         stripped = line.lstrip()
         if _is_comment_line(stripped, language):
             continue
         # Remove trailing inline comments (e.g. "x = 1  # foo" -> "x = 1"),
         # respecting string boundaries so a # inside a string isn't stripped.
         line = _strip_trailing_comment(line, language=language)
-        lines.append(_TRAILING_WS.sub("", line))
-    out = "\n".join(lines)
-    out = _BLANK_LINE.sub("\n", out)
+        out_lines.append(_TRAILING_WS.sub("", line))
+        # Does this line OPEN a multi-line string that continues past its end?
+        if _multi_string_opens(line):
+            in_multi = True
+    out = "\n".join(out_lines)
+    # Collapse blank-line runs ONLY in code regions. To avoid touching blank
+    # runs inside multi-line strings, operate per-line and skip string-interior
+    # lines. Re-derive the interior mask on the joined output (a multi-line
+    # string's blank interior lines are the only blank lines that must survive).
+    out = _collapse_code_blank_runs(out)
     # Strip only trailing newlines/whitespace from the whole string — NOT
     # leading indentation, which is structurally significant (Python) and
     # distinguishes a top-level statement from a method body.
     out = out.rstrip()
     return out
+
+
+def _multi_string_open_count(line: str) -> int:
+    """Net number of UNCLOSED multi-line string openers on ``line``.
+
+    Counts triple-quote / raw-string openers that span past the line. Positive
+    ⇒ a multi-line string opens here and continues; the next lines are string
+    interior until a closer is seen.
+    """
+    from capybase.adapters.abstract_parser import _STRING_LIT_RE, _RAW_STRING_RE
+    # Blank regular strings first (single-line ones), but track raw/triple
+    # openers. Simplest: count triple-quote markers not consumed by a same-line
+    # close, plus Rust raw multi-line openers.
+    count = 0
+    # Python triple-quotes.
+    count += line.count('"""') % 2
+    count += line.count("'''") % 2
+    # Rust raw strings spanning multiple lines: r#"..."# where the content has
+    # a newline. Detect an unclosed raw string (opener with no matching closer
+    # on this line) via the blanker — if blanking consumed a different length
+    # than a fully-closed raw string would, it's multi-line. Simpler heuristic:
+    # an ``r#"`` (or br/rb) whose closer ``"#`` is absent on the line.
+    for m in _RAW_STRING_RE.finditer(line + "\n"):
+        # _RAW_STRING_RE matches CLOSED raw strings; a multi-line opener won't
+        # match (no closer on the line). Detect the opener directly.
+        pass
+    # Detect raw-string openers without a same-line closer.
+    for pref in (r"r#", r"br#", r"rb#"):
+        i = 0
+        while True:
+            idx = line.find(pref, i)
+            if idx < 0:
+                break
+            # Is there a matching closer ``"#`` (with the right hash count) on
+            # this same line? If not, the raw string spans multiple lines.
+            hashes = 0
+            j = idx + 1
+            while j < len(line) and line[j] == "#":
+                hashes += 1
+                j += 1
+            closer = '"' + "#" * hashes
+            if line.find(closer, j) < 0:
+                count += 1
+            i = idx + 1
+    return count
+
+
+def _multi_string_opens(line: str) -> bool:
+    return _multi_string_open_count(line) > 0
+
+
+def _multi_string_closes(line: str) -> bool:
+    """True if ``line`` contains a closer for the currently-open multi-line
+    string (reduces the open count back to zero from the interior)."""
+    # A triple-quote closer, or a raw-string closer (``"#`` / ``"##``).
+    if '"""' in line or "'''" in line:
+        return True
+    # Raw-string closer: ``"#`` run not preceded by an opener on this line.
+    return bool(re.search(r'"#+', line))
+
+
+def _collapse_code_blank_runs(text: str) -> str:
+    """Collapse blank-line runs in CODE to nothing (mirrors the original
+    ``\\n\\s*\\n+`` → ``\\n``), but NOT inside multi-line strings.
+
+    Re-derive the multi-line-string interior mask on the joined text so blank
+    runs that are string interior (between an opener and its closer) survive.
+    """
+    lines = text.split("\n")
+    in_multi = False
+    out: list[str] = []
+    prev_was_blank_code = False
+    for line in lines:
+        if in_multi:
+            # String interior — preserve verbatim (including blank lines).
+            out.append(line)
+            prev_was_blank_code = False
+            if _multi_string_closes(line):
+                in_multi = False
+            continue
+        is_blank = not line.strip()
+        if is_blank:
+            # Drop blank CODE lines entirely (collapse runs to nothing). The
+            # original ``_BLANK_LINE`` regex reduced ``\\n\\s*\\n+`` → ``\\n``.
+            prev_was_blank_code = True
+            continue
+        out.append(line)
+        prev_was_blank_code = False
+        if _multi_string_opens(line):
+            in_multi = True
+    return "\n".join(out)
 
 
 def _is_comment_line(stripped: str, language: str | None) -> bool:

@@ -4314,6 +4314,37 @@ def test_r39_async_arrow_function_not_field():
     )
 
 
+def test_r39_cpp_raw_string_does_not_corrupt_brace_depth():
+    """r39 (HIGH): C++ raw strings ``R"x(...)x"`` / ``R"DELIM(...)DELIM"`` (also
+    LR/u8R/uR/UR) corrupted brace depth — the closer is ``)DELIM"``, but the
+    scanner only knew Rust raw closers (``"#``). An embedded ``"}`` in the
+    content closed early, so a following ``}`` was treated as the function's
+    close and the function was truncated (losing everything after the raw
+    string). Now the scanner recognizes the C++ raw opener and matches the
+    ``)DELIM"`` closer."""
+    # Embedded quote + brace inside the raw string must not close the function.
+    flat = _flat(
+        'void f() {\n  const char* b = R"x("} )x";\n  g();\n}\n',
+        "cpp",
+    )
+    f = _by_name(flat, "f")
+    assert f is not None, f"raw string corrupted brace depth; got {_kinds_of_flat(flat)}"
+    # The function span must cover the body including g() (row 2), not truncate
+    # at the embedded brace inside the raw string.
+    assert f.span[1] >= 2, f"function truncated by raw-string brace; span={f.span}"
+    assert "g()" in f.body, f"body lost content after the raw string: {f.body!r}"
+
+    # A delimited raw string likewise.
+    flat = _flat(
+        'void h() {\n  auto s = R"DELIM(a}b"c)DELIM";\n  p();\n}\n',
+        "cpp",
+    )
+    h = _by_name(flat, "h")
+    assert h is not None and "p()" in h.body, (
+        f"delimited raw string corrupted depth; got {_kinds_of_flat(flat)}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Round 39 — Family A: signature/body correctness
 # ---------------------------------------------------------------------------

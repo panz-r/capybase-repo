@@ -531,3 +531,70 @@ def test_r35_canonicalize_preserves_hash_lines_in_strings():
     assert "# heading in docstring" in result, (
         f"docstring #-line dropped; got {result!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 39 — consensus / context: state-aware comment & string handling
+# ---------------------------------------------------------------------------
+
+
+def test_r39_star_prefix_does_not_drop_rust_deref():
+    """r39 (HIGH): the ``*`` entry in comment_line_prefixes (meant to catch
+    ``/* */`` block-comment continuation lines like `` * foo``) also matched
+    valid Rust pointer dereferences (``*p = 5;``) and JS multi-line
+    multiplications, silently dropping code from normalized output. A bare
+    ``*``-leading line is far more often code than a comment; only ``/*``/``*/``
+    unambiguously indicate a comment line."""
+    src = "fn foo(p: *mut i32) {\n    *p = 5;\n}\n"
+    out = normalize(src, language="rust")
+    assert "*p = 5;" in out, f"deref code line dropped by '*' prefix; got {out!r}"
+
+
+def test_r39_canonicalize_star_prefix_does_not_drop_deref():
+    """r39 (HIGH): same bug in canonicalize_context — the context window shown
+    to the model dropped ``*ptr;`` lines."""
+    from capybase.context_builder import canonicalize_context
+    src = "unsafe {\n    *ptr;\n}\n"
+    out = canonicalize_context(src, language="rust")
+    assert "*ptr;" in out, f"deref dropped from context; got {out!r}"
+
+
+def test_r39_normalize_preserves_docstring_interior_lines():
+    """r39 (HIGH): normalize dropped lines inside a multi-line string that
+    LOOKED like comments (``#``-led), because it made line-local comment
+    decisions with no multi-line-string state. A docstring's interior is string
+    CONTENT and must be preserved — otherwise two resolutions differing only in
+    docstring text falsely cluster together."""
+    src1 = 'def foo():\n    """\n    # alpha\n    """\n    return 1'
+    src2 = 'def foo():\n    """\n    # beta\n    """\n    return 1'
+    assert normalize(src1, "python") != normalize(src2, "python"), (
+        "docstring-interior comment lines dropped → false clustering"
+    )
+    # The interior line is preserved verbatim.
+    assert "# alpha" in normalize(src1, "python")
+
+
+def test_r39_normalize_preserves_blank_runs_in_strings():
+    """r39 (HIGH): normalize's blank-line collapse (``\\n\\s*\\n+``) ran over
+    the WHOLE joined output, collapsing blank-line runs INSIDE multi-line
+    strings — corrupting string contents and causing false clustering."""
+    src1 = 'msg = """\n\n\nhello"""'   # 3 internal blanks
+    src2 = 'msg = """\nhello"""'
+    assert normalize(src1, "python") != normalize(src2, "python"), (
+        "blank runs inside strings collapsed → false clustering"
+    )
+    # The internal blank lines survive (3 newlines = 2 blank lines preserved).
+    out = normalize(src1, "python")
+    assert "\n\n\n" in out, f"internal blank lines collapsed; got {out!r}"
+
+
+def test_r39_php_hash_comments_stripped():
+    """r39 (MEDIUM): PHP supports BOTH ``//`` and ``#`` line comments, but the
+    Family-A classification set ``hash_is_comment = False`` for PHP, so ``#``
+    comments survived normalization (while ``//`` comments were stripped) —
+    inconsistent clustering."""
+    with_hash = '<?php\n$x = 1; # php comment\n?>'
+    clean = '<?php\n$x = 1;\n?>'
+    assert normalize(with_hash, "php") == normalize(clean, "php"), (
+        "PHP # comment not stripped → inconsistent clustering"
+    )

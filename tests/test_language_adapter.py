@@ -57,7 +57,9 @@ def test_python_adapter_shape():
 def test_rust_adapter_shape():
     rust = adapter_for("rust")
     assert rust.comment_prefix == "//"
-    assert rust.comment_line_prefixes == ("//", "/*", "*", "*/")
+    # NOTE: ``*`` is intentionally excluded — it matched pointer dereferences
+    # (``*p = 5;``) as comment continuation lines. See test_r39_star_prefix_*.
+    assert rust.comment_line_prefixes == ("//", "/*", "*/")
     assert rust.source_extension == ".rs"
     assert rust.container_has_braces is True
     assert "fn {name}" in rust.definition_patterns()
@@ -129,7 +131,10 @@ def test_consensus_comment_line_uses_adapter():
     from capybase.consensus import _is_comment_line
     assert _is_comment_line("# a comment", "python") is True
     assert _is_comment_line("// a comment", "rust") is True
-    assert _is_comment_line("* cont", "rust") is True  # rust block-comment cont
+    assert _is_comment_line("*/ end", "rust") is True  # block-comment close
+    # A bare ``*``-led line is NOT a comment — it can be a pointer dereference
+    # (``*p = 5;``). See test_r39_star_prefix_does_not_drop_rust_deref.
+    assert _is_comment_line("* cont", "rust") is False
     assert _is_comment_line("x = 1", "python") is False
 
 

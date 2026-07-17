@@ -183,8 +183,11 @@ class RustAdapter(_BaseAdapter):
         super().__init__(
             name="rust",
             comment_prefix="//",
-            # Superset of the three prior implementations (includes `*/`).
-            comment_line_prefixes=("//", "/*", "*", "*/"),
+            # NOTE: ``*`` is intentionally NOT a comment-line prefix. It was
+            # meant to catch ``/* */`` block-comment continuation lines, but it
+            # also matched valid pointer dereferences (``*p = 5;``) — silently
+            # dropping code from normalized output / the model's context window.
+            comment_line_prefixes=("//", "/*", "*/"),
             source_extension=".rs",
             _definition_patterns=(
                 "fn {name}", "struct {name}", "enum {name}", "trait {name}",
@@ -251,7 +254,13 @@ class _BraceLangAdapter(_BaseAdapter):
         super().__init__(
             name=name,
             comment_prefix="//",
-            comment_line_prefixes=("//", "/*", "*", "*/"),
+            # NOTE: ``*`` is intentionally NOT a comment-line prefix. It was
+            # meant to catch ``/* */`` block-comment continuation lines
+            # (`` * foo``), but it also matched valid pointer dereferences
+            # (``*p = 5;``) and multi-line multiplications — silently dropping
+            # code from normalized output / the model's context window. A bare
+            # ``*``-leading line is far more often code than a comment.
+            comment_line_prefixes=("//", "/*", "*/"),
             source_extension=ext,
             _definition_patterns=patterns,
             container_has_braces=True,
