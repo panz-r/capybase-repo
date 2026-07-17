@@ -4633,3 +4633,59 @@ def test_r41_single_line_decorator_still_works():
     assert v is not None
     assert v.span[0] == 0, f"single-line decorator dropped: {v.span}"
     assert "@route" in v.body
+
+
+# ---------------------------------------------------------------------------
+# Round 42 — Family A: top-level bodyless decls + attribute retention
+# ---------------------------------------------------------------------------
+
+
+def test_r42_toplevel_bodyless_function_declarations_surface():
+    """r42 (HIGH): top-level bodyless function declarations (C/C++ header files)
+    were silently dropped — there was no emitter for file-scope ``;``-terminated
+    function signatures. The assoc-item emitter only fires inside containers,
+    and the top-level ``;`` handler only did FIELD detection. A C/C++ header
+    (the defining content of ``.h`` files) lost its entire API surface, so a
+    rename/diff across a header change had no entities to pair. Bodyless decls
+    INSIDE a class already worked; the gap was specifically file-scope."""
+    # C++ header: two bodyless decls + one definition.
+    flat = _flat("int foo();\nint bar();\nint baz() { return 1; }\n", "cpp")
+    kinds = _kinds_of_flat(flat)
+    assert ("function", "foo") in kinds, f"top-level bodyless foo dropped; got {kinds}"
+    assert ("function", "bar") in kinds, f"top-level bodyless bar dropped; got {kinds}"
+    assert ("function", "baz") in kinds, f"braced baz dropped (regression); got {kinds}"
+    # Pure C header (no definitions).
+    flat = _flat("int foo();\nint bar();\n", "c")
+    kinds = _kinds_of_flat(flat)
+    assert ("function", "foo") in kinds and ("function", "bar") in kinds, (
+        f"C header bodyless decls dropped; got {kinds}"
+    )
+
+
+def test_r42_attribute_retained_on_bodyless_item():
+    """r42 (MED): a ``#[...]`` attribute or ``///`` doc-comment preceding a
+    bodyless (``;``-terminated) associated item was stripped from its body/span
+    — asymmetric with braced items, which include the attribute. The
+    ``_skip_leading_noise`` scan was used for BOTH name recovery AND body/span
+    slicing, so the attribute was dropped from the slice. Now the body/span
+    start before the leading noise (matching the braced-item behavior)."""
+    src = (
+        "impl T {\n"
+        "    #[cfg(foo)]\n"
+        "    fn bodyless();\n"
+        "    #[cfg(foo)]\n"
+        "    fn braced() {}\n"
+        "}\n"
+    )
+    flat = _flat(src, "rust")
+    bodyless = _by_name(flat, "bodyless")
+    braced = _by_name(flat, "braced")
+    assert bodyless is not None and braced is not None
+    # The braced item includes its attribute — the bodyless one must too
+    # (consistency for fingerprinting/diff display).
+    assert "#[cfg(foo)]" in bodyless.body, (
+        f"attribute stripped from bodyless item body: {bodyless.body!r}"
+    )
+    assert bodyless.span[0] < bodyless.span[1] or "#[cfg" in bodyless.body, (
+        f"attribute stripped from bodyless span: {bodyless.span}"
+    )

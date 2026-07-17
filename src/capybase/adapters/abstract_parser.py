@@ -1545,15 +1545,16 @@ def _emit_assoc_item_at_semicolon(
     start = stmt_start
     while start < semi_idx and src[start] == "\n":
         start += 1
+    body_start = start  # the body/span include preceding attributes/doc-comments
     # Skip leading comments / Rust attributes preceding the declaration (a
     # doc comment or ``#[attr]`` directly above an associated const / bodyless
     # trait method would otherwise reach into the noise and drop the item).
-    start = _skip_leading_noise(src, start, semi_idx + 1)
-    stmt_text = src[start : semi_idx + 1]
+    name_start = _skip_leading_noise(src, start, semi_idx + 1)
+    stmt_text = src[name_start : semi_idx + 1]
     if not stmt_text.strip():
         return
     end_row = cur_row_at(semi_idx)
-    start_row = cur_row_at(start)
+    start_row = cur_row_at(body_start)
     # Dedup against THIS container's scope: its already-emitted children plus any
     # sibling declarations still open on the stack (a braced method sharing the
     # name). NOT the global units list — that would drop same-name items across
@@ -1562,13 +1563,16 @@ def _emit_assoc_item_at_semicolon(
     su: StructuralUnit | None = None
     # (1) Field-shaped: ``const``/``static``/``let`` binding.
     fname = _field_name_from_buf(stmt_text)
+    # The body/span include preceding attributes/doc-comments (matching braced
+    # items) — slice from the pre-noise ``body_start``, not ``name_start``.
+    body_text = src[body_start : semi_idx + 1]
     if fname is not None and fname not in existing:
         su = StructuralUnit(
             kind=KIND_FIELD,
             name=fname,
             span=(start_row, end_row),
-            body=stmt_text,
-            fingerprint=unit_body_fingerprint(stmt_text, lang=language),
+            body=body_text,
+            fingerprint=unit_body_fingerprint(body_text, lang=language),
         )
     else:
         # (2) Bodyless function/method signature: ``fn foo(&self);`` etc.
@@ -1578,8 +1582,8 @@ def _emit_assoc_item_at_semicolon(
                 kind=KIND_METHOD,
                 name=mname,
                 span=(start_row, end_row),
-                body=stmt_text,
-                fingerprint=unit_body_fingerprint(stmt_text, lang=language),
+                body=body_text,
+                fingerprint=unit_body_fingerprint(body_text, lang=language),
             )
     if su is not None:
         stack[-1].children.append(su)
@@ -2106,7 +2110,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # ``stmt_start_byte`` survives internal braces (only advances at ``;``
             # or when a ``}`` closes to depth 0), so it always points at the
             # declaration keyword.
-            if brace_depth == 0 and bracket_depth == 0 and not stack and language not in (None, "c", "h"):
+            if brace_depth == 0 and bracket_depth == 0 and not stack and language is not None:
                 stmt_start = stmt_start_byte
                 # Skip a leading newline so the body doesn't start with "\n"
                 # (which would make _raw_header_body_split treat the declaration
@@ -2121,13 +2125,17 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 # left the slice reaching backward into the comment text, failing
                 # the field-name regex and dropping the field). This scan-forward
                 # is the robust catch-all for every leading-noise shape.
-                stmt_start = _skip_leading_noise(src, stmt_start, i + 1)
-                stmt_text = src[stmt_start : i + 1]
+                name_start = _skip_leading_noise(src, stmt_start, i + 1)
+                stmt_text = src[name_start : i + 1]
                 fname = _field_name_from_buf(stmt_text)
                 if fname is not None:
                     end_row = cur_row_at(i)
-                    start_row_f = cur_row_at(stmt_start)
-                    body = stmt_text
+                    # The body/span include preceding attributes/doc-comments
+                    # (matching braced items) — use the pre-noise start for the
+                    # slice, the post-noise start only for name recovery.
+                    body_start = stmt_start
+                    body = src[body_start : i + 1]
+                    start_row_f = cur_row_at(body_start)
                     # Dedup against already-emitted units (a brace-opened decl
                     # with the same name, e.g. a Go ``type X struct``).
                     existing_f = {u.name for u in units if u.name}
@@ -2141,6 +2149,31 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                                 fingerprint=unit_body_fingerprint(body, lang=language),
                             )
                         )
+                else:
+                    # Top-level bodyless FUNCTION declaration (C/C++/Java header
+                    # files: ``int foo();``). Previously dropped — the assoc-item
+                    # emitter only fires inside containers, and the field regex
+                    # doesn't recognize function signatures. Without this, a
+                    # C/C++ header lost its entire API surface (no entities to
+                    # pair across a rename/diff). Reuse the keywordless signature
+                    # name extractor (handles return-type-then-name shapes).
+                    mname = _assoc_item_func_name(stmt_text)
+                    if mname is not None:
+                        end_row = cur_row_at(i)
+                        body_start = stmt_start
+                        body = src[body_start : i + 1]
+                        start_row_f = cur_row_at(body_start)
+                        existing_f = {u.name for u in units if u.name}
+                        if mname not in existing_f:
+                            units.append(
+                                StructuralUnit(
+                                    kind=KIND_FUNCTION,
+                                    name=mname,
+                                    span=(start_row_f, end_row),
+                                    body=body,
+                                    fingerprint=unit_body_fingerprint(body, lang=language),
+                                )
+                            )
             # A ``;`` ends the statement; the next one starts after it. Only
             # advance at TOP LEVEL: a ``;`` inside braces (e.g. the
             # ``return 1;`` inside ``const f = function() { ... };``) must NOT
