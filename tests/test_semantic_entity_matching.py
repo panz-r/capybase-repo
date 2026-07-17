@@ -132,6 +132,30 @@ def test_embedding_tier_orthogonal_bodies_stay_unmatched():
     assert matches[0].kind == MATCH_UNMATCHED
 
 
+def test_r39_embedding_tier_skips_empty_norm_target():
+    """r39 (MEDIUM): the embedding-tier candidate loop ``break``ed (instead of
+    ``continue``-ing) when a target's normalized body was empty (e.g. a
+    comment-only body). Such a target has no vector, so it was excluded from
+    the embed call — but the ``break`` aborted the whole loop, skipping every
+    SUBSEQUENT candidate. A legitimate rename was missed (order-dependently)
+    when an empty-norm target happened to precede the true match."""
+    from capybase.memory.embeddings import normalize_body_for_embedding
+
+    src = _fn("old_op", "    d=load_cache(); r=transform_data(d); log_event(r); persist(r); return r")
+    # An empty-norm target (comment-only body) that sorts FIRST, then the true match.
+    tgt_empty = _fn("aaa_co", "    # only comment")
+    tgt_good = _fn("zzz_op", "    d=load_cache(); r=transform_data(d); return r")
+    src_norm = normalize_body_for_embedding(structural.entity_body_fingerprint(src, "") or "")
+    good_norm = normalize_body_for_embedding(structural.entity_body_fingerprint(tgt_good, "") or "")
+    emb = _MapEmbedder({src_norm: _VEC_OLD, good_norm: _VEC_NEW})
+    # Empty-norm target FIRST — the loop must skip it and still reach the good one.
+    matches = match_entities([src], [tgt_empty, tgt_good], embedder=emb)
+    assert matches[0].kind in (MATCH_RENAMED, MATCH_POSSIBLY_RENAMED), (
+        f"empty-norm target broke the loop, missing the rename; got {matches[0].kind}"
+    )
+    assert matches[0].target.name == "zzz_op"
+
+
 def test_copy_is_not_a_rename():
     """If the source name still exists in targets, it's not a rename (a copy)."""
     from capybase.memory.embeddings import normalize_body_for_embedding

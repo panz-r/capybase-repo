@@ -587,3 +587,67 @@ def test_r37_fstring_prefix_word_boundary():
     # A real f-string still works.
     refs2 = referenced_symbols('x = f"{real_call()}"', "python")
     assert "real_call" in refs2, f"real f-string interpolation lost; got {refs2}"
+
+
+# ---------------------------------------------------------------------------
+# Round 39 — symbol resolution: comments, rf-strings, definition span
+# ---------------------------------------------------------------------------
+
+
+def test_r39_referenced_symbols_ignores_comment_identifiers():
+    """r39 (HIGH): referenced_symbols blanked string literals but NOT comments,
+    so identifiers inside ``#``/``//``/``/* */`` comments were extracted as real
+    references. A symbol dropped from code but mentioned only in a comment was
+    then falsely reported as 'preserved' by the dependency-drop check (a false
+    negative masking a real drop), and comment mentions inflated the per-commit
+    'uses' set with false dependency edges."""
+    from capybase.adapters.structural import referenced_symbols
+    # Python line comment.
+    assert referenced_symbols("# uses helper_function here", "python") == [], (
+        f"comment identifiers extracted (py); got {referenced_symbols('# uses helper_function here', 'python')}"
+    )
+    # Brace-language line comment.
+    refs = referenced_symbols("// uses helper_fn in body", "rust")
+    assert "helper_fn" not in refs, f"comment identifiers extracted (rust); got {refs}"
+    # Block comment.
+    refs = referenced_symbols("/* calls compute(x) */", "rust")
+    assert "compute" not in refs, f"block-comment identifiers extracted; got {refs}"
+    # Real code references still survive.
+    refs = referenced_symbols("x = compute(real_thing)  # note about helper", "python")
+    assert "compute" in refs and "real_thing" in refs, f"real refs lost; got {refs}"
+    assert "helper" not in refs and "note" not in refs, f"comment refs leaked; got {refs}"
+
+
+def test_r39_rf_fstring_interpolation_preserved():
+    """r39 (MEDIUM): ``rf"..."`` / ``Rf"..."`` / ``RF"..."`` (raw f-strings,
+    common for regexes with interpolations) lost their interpolation — the
+    f-string prefix detection checked the char before the quote, and for ``rf``
+    the immediate preceding char is ``f`` (taken as a lone ``f`` prefix whose
+    char-before is ``r``, an identifier → rejected). Now recognizes the 2-char
+    ``rf``/``fr`` prefix so interpolation symbols survive."""
+    from capybase.adapters.structural import referenced_symbols, _blank_text_strings
+    # rf"..." interpolation must survive.
+    refs = referenced_symbols('x = rf"val {important_sym}"', "python")
+    assert "important_sym" in refs, f"rf-string interpolation lost; got {refs}"
+    # The 'rf' prefix token must NOT leak as a bogus reference.
+    assert "rf" not in refs, f"rf prefix leaked as a reference; got {refs}"
+    # Capital variants too.
+    refs = referenced_symbols('x = Rf"val {cap_sym}"', "python")
+    assert "cap_sym" in refs, f"Rf interpolation lost; got {refs}"
+    # Plain f-string still works (regression).
+    assert "ok" in referenced_symbols('x = f"{ok}"', "python")
+
+
+def test_r39_find_definition_span_fallback_no_false_match_on_call():
+    """r39 (MEDIUM): the brace-language fallback in _find_definition_span matched
+    a later call on a single-line multi-statement (``let x = 1; random_call()``)
+    as a 'definition' of random_call — the paren scan covered the whole line,
+    not just the declaration part, and ``let`` wasn't a statement keyword. A
+    call is not a definition; must return None."""
+    from capybase.adapters.structural import _find_definition_span
+    assert _find_definition_span("let x = 1; random_call()", "random_call", "rust") is None, (
+        "fallback matched a call as a definition"
+    )
+    assert _find_definition_span("let a = 1; obj.method_nm()", "method_nm", "rust") is None
+    # A genuine definition still matches (regression).
+    assert _find_definition_span("fn real_fn() {", "real_fn", "rust") is not None

@@ -521,7 +521,14 @@ def _embedding_rename_match(
         best: tuple[float, str, Entity] | None = None
         vi = 0
         for t, cn in zip(cand_targets, cand_norms):
-            if not cn or vi >= len(cand_vecs):
+            # An empty-norm candidate (e.g. comment-only body) has no vector;
+            # SKIP it (``continue``) so later candidates are still evaluated.
+            # Breaking here would abort the whole loop whenever an empty-norm
+            # target preceded the true match in enumeration order — a legitimate
+            # rename was missed, order-dependently.
+            if not cn:
+                continue
+            if vi >= len(cand_vecs):
                 break
             cv = cand_vecs[vi]
             vi += 1
@@ -1535,10 +1542,22 @@ def referenced_symbols(text: str, language: str) -> list[str]:
     — a symbol mentioned only in prose is not a code dependency.
     """
     reserved = _reserved_keywords(language)
+    # String-prefix runes that ``_STRING_LIT_RE`` leaves as bare tokens (it
+    # matches from the quote, not the prefix): ``rf``/``fr``/``rb``/``br`` and
+    # case variants. A lone ``f``/``r``/``b`` is already filtered by the
+    # ``len > 1`` guard, but these 2-char prefixes would leak as bogus refs.
+    reserved = reserved | {
+        "rb", "br", "rf", "fr", "Rb", "bR", "Rf", "fR", "RB", "BR", "RF", "FR",
+    }
     # Blank string-literal contents so identifiers inside strings (docstrings,
     # error messages) don't enter the reference set. Reuses the parser's regex
     # (handles escapes, triple-quotes). Length-preserving to keep positions.
     text = _blank_text_strings(text)
+    # Blank comment regions so identifiers inside comments (# / // / /* */)
+    # don't enter the reference set either — a symbol mentioned only in prose
+    # or a ``# TODO re-add`` note is not a code dependency. Must run AFTER
+    # string-blanking so a comment marker inside a string isn't mistaken.
+    text = _blank_comments(text, language)
 
     out: list[str] = []
     seen: set[str] = set()
@@ -1672,23 +1691,22 @@ def _blank_text_strings(text: str) -> str:
     def _blank_match(m: re.Match) -> str:
         raw = m.group(0)
         start = m.start()
-        # Detect f-string prefix: the char(s) before the quote must be a
-        # standalone ``f`` (or ``rf``/``fr``) token — NOT part of a longer
-        # identifier (``self"..."``, ``dict_of"..."``). The char before the
-        # prefix must be a non-identifier (space, ``=``, ``(``, etc.) or start
-        # of text. Without this guard, any identifier ending in ``f`` would
-        # trigger f-string interpolation preservation, leaking brace content.
-        prefix_char = text[start - 1] if start > 0 else ""
+        # Detect an f-string prefix: the char(s) immediately before the quote
+        # must be a standalone ``f`` (or ``rf``/``fr``/``Rf``/``RF``) token —
+        # NOT part of a longer identifier (``self"..."``, ``dict_of"..."``).
+        # Check the 2-char prefix FIRST so ``rf"..."`` is recognized as a raw
+        # f-string (its char before the quote is ``f``, but the REAL prefix is
+        # the 2-char ``rf``). The char before the (1- or 2-char) prefix must be
+        # a non-identifier (space, ``=``, ``(``, ...) or start of text.
         prefix2 = text[start - 2 : start] if start >= 2 else ""
-        # The char BEFORE the prefix (must be non-identifier for a real prefix).
-        before_prefix = text[start - 2] if prefix_char == "f" and start >= 2 else (
-            text[start - 3] if start >= 3 and prefix2 in ("rf", "fr") else ""
-        )
-        prefix_ok = before_prefix == "" or not (before_prefix.isalnum() or before_prefix == "_")
-        is_fstring = prefix_ok and (
-            prefix_char == "f"
-            or prefix2 in ("rf", "fr")
-        )
+        prefix1 = text[start - 1] if start >= 1 else ""
+        is_fstring = False
+        if prefix2.lower() in ("rf", "fr"):
+            before = text[start - 3] if start >= 3 else ""
+            is_fstring = before == "" or not (before.isalnum() or before == "_")
+        elif prefix1.lower() == "f":
+            before = text[start - 2] if start >= 2 else ""
+            is_fstring = before == "" or not (before.isalnum() or before == "_")
         if is_fstring:
             # Preserve f-string interpolation expressions.
             return _blank_fstring_preserving_interpolation(raw)
@@ -1696,6 +1714,54 @@ def _blank_text_strings(text: str) -> str:
 
     result = _STRING_LIT_RE.sub(_blank_match, text)
     return result
+
+
+def _blank_comments(text: str, language: str | None = None) -> str:
+    """Blank comment regions (length-preserving) so identifiers inside comments
+    don't pollute the reference set.
+
+    Handles line comments (``#`` for Python/Ruby/PHP, ``//`` for brace langs)
+    and block comments (``/* ... */`` for brace langs). Language-aware via the
+    canonical family classification (PHP supports both ``//`` and ``#``). Must
+    run AFTER :func:`_blank_text_strings` so a comment marker inside a string
+    isn't mistaken for a real comment.
+    """
+    from capybase.adapters.abstract_parser import _lang_is_family_a
+    is_family_a = _lang_is_family_a(language)
+    slash_is_comment = is_family_a
+    hash_is_comment = (not is_family_a) or language == "php"
+    chars = list(text)
+    n = len(chars)
+    i = 0
+    while i < n:
+        # Line comment: ``//`` or ``#`` to end of line.
+        if slash_is_comment and i + 1 < n and chars[i] == "/" and chars[i + 1] == "/":
+            while i < n and chars[i] != "\n":
+                chars[i] = " "
+                i += 1
+            continue
+        if hash_is_comment and chars[i] == "#":
+            while i < n and chars[i] != "\n":
+                chars[i] = " "
+                i += 1
+            continue
+        # Block comment: ``/* ... */`` (brace langs).
+        if slash_is_comment and i + 1 < n and chars[i] == "/" and chars[i + 1] == "*":
+            chars[i] = " "
+            chars[i + 1] = " "
+            i += 2
+            while i < n and not (chars[i] == "*" and i + 1 < n and chars[i + 1] == "/"):
+                if chars[i] != "\n":
+                    chars[i] = " "
+                i += 1
+            if i < n:
+                chars[i] = " "      # '*'
+                if i + 1 < n:
+                    chars[i + 1] = " "  # '/'
+                i += 2
+            continue
+        i += 1
+    return "".join(chars)
 
 
 def _blank_fstring_preserving_interpolation(raw: str) -> str:
@@ -1873,14 +1939,17 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
             if qualifies:
                 # Method shape: name is the token immediately before '('.
                 # Skip pub(crate)/pub(super) tokens (they contain '(' but are
-                # visibility prefixes, not the param-list opener).
+                # visibility prefixes, not the param-list opener). Scan ONLY
+                # ``decl_toks`` (text before the first ``=``/``;``/``{``) so a
+                # call on a LATER statement on the same line
+                # (``let x = 1; random_call()``) isn't matched as a definition.
                 paren_idx = next(
-                    (k for k, t in enumerate(toks)
+                    (k for k, t in enumerate(decl_toks)
                      if "(" in t and not t.startswith("pub(")),
                     -1,
                 )
                 if paren_idx > 0:
-                    cand = re.split(r"[(<]", toks[paren_idx], maxsplit=1)[0]
+                    cand = re.split(r"[(<]", decl_toks[paren_idx], maxsplit=1)[0]
                     cand = cand.split("::")[-1].split(".")[-1].strip()
                     if cand == name:
                         return (i, min(i + 1, len(lines) - 1))

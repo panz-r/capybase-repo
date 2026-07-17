@@ -988,3 +988,28 @@ def test_r12_both_sides_rename_different_names_is_conflict():
         f"both-sides rename to different names must be a conflict; "
         f"kinds={[a.change_kind for a in diff.aligned]}, conflicts={len(diff.structural_conflicts)}"
     )
+
+
+def test_r39_one_way_rename_vs_edit_surfaces_conflict():
+    """r39 (MEDIUM): a 1-way rename-vs-edit — left renames foo->bar (body
+    unchanged), right keeps foo and edits its body — is a classic 3-way
+    conflict (one side moved the name, the other changed the body). But
+    ``_detect_renames`` required a base to be deleted by BOTH sides before
+    considering it a rename candidate, so a base renamed on only ONE side was
+    reported as a benign deleted_left + added_left with NO conflict — and
+    ``required_units`` would list both old and new names, risking a duplicate.
+
+    Now per-side: the base is a rename candidate for the side it's gone from,
+    so the rename is detected and the overlap with the other side's edit
+    surfaces as a structural conflict."""
+    from capybase.adapters.structural_diff import compute_structural_diff_3way
+    base = "def foo():\n    return 11111111\n"
+    left = "def bar():\n    return 11111111\n"   # left renames foo->bar
+    right = "def foo():\n    return 22222222\n"   # right edits foo's body
+    diff = compute_structural_diff_3way(base, left, right, "python")
+    kinds = [a.change_kind for a in diff.aligned]
+    # The rename must be detected (not a bare deleted_left + added_left).
+    assert any("renam" in k.lower() for k in kinds) or len(diff.structural_conflicts) >= 1, (
+        f"1-way rename-vs-edit missed; kinds={kinds}, "
+        f"conflicts={len(diff.structural_conflicts)}"
+    )

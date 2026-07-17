@@ -383,12 +383,30 @@ def _detect_renames(
             # rename of ANY dup-bodied base is found — not just the first.
             base_by_fp.setdefault(u.fingerprint, []).append(u)
 
-    # Base identities deleted by each side (no side entry under the original name).
-    # A base unit is a rename candidate only when it's gone from the side in
-    # question (classified as a deletion), NOT when it's identity-matched.
-    deleted_base_ids = {
+    # Base identities deleted by EACH side (no side entry under the original
+    # name on that side). A base unit is a rename candidate for a side when it's
+    # gone from THAT side — NOT necessarily from both. A 1-way rename (left
+    # renames foo->bar while right keeps+modifies foo) must pair on the left:
+    # requiring deletion-by-both missed the rename entirely, reporting it as a
+    # benign deleted_left + added_left with no conflict (and risking a duplicate
+    # emission of the old name alongside the new).
+    #
+    # REFINEMENT: a base deleted from side X is a rename candidate for side X
+    # only if the OTHER side did NOT keep it UNCHANGED. If the other side
+    # identity-matched it with the same body (unchanged), the "rename" is really
+    # an addition (a copy that happens to share the body) — pairing it would
+    # wrongly consume the kept-original and drop the real addition. If the other
+    # side MODIFIED or also deleted it, the rename-vs-edit / rename-vs-rename
+    # conflict is genuine and must surface.
+    deleted_left_ids = {
         a.base.identity for a in aligned
-        if a.base is not None and a.left is None and a.right is None
+        if a.base is not None and a.left is None
+        and a.change_kind != _CHANGE_KIND_UNCHANGED
+    }
+    deleted_right_ids = {
+        a.base.identity for a in aligned
+        if a.base is not None and a.right is None
+        and a.change_kind != _CHANGE_KIND_UNCHANGED
     }
 
     # Rename candidates on each side: units classified as added (no base) whose
@@ -433,8 +451,12 @@ def _detect_renames(
                     if prior is not None and prior[0] != side_unit.identity:
                         conflict_base = cand
                 continue
-            if cand.identity not in deleted_base_ids:
-                continue
+            if side == "left":
+                if cand.identity not in deleted_left_ids:
+                    continue
+            else:
+                if cand.identity not in deleted_right_ids:
+                    continue
             chosen = cand
             break
         if chosen is None:
