@@ -2698,6 +2698,18 @@ def _strip_trailing_qualifier_run(toks: list[str]) -> list[str]:
         if _is_trailing_qualifier_token(last):
             toks.pop()
             continue
+        # C++ ref-qualifier: bare ``&`` / ``&&`` trailing token (``foo() &``).
+        if last in ("&", "&&"):
+            toks.pop()
+            continue
+        # C++ ref-qualifier glued to the param-list close: ``foo()&`` /
+        # ``foo()&&``. Strip the trailing ampersand run, keeping the ``)`` so
+        # the loop can then strip a preceding ``const`` (``foo() const &``).
+        if last.endswith(")&") or last.endswith(")&"):
+            stripped = last.rstrip("&")
+            if stripped and stripped[-1] == ")":
+                toks[-1] = stripped
+                continue
         # Spaced parenthesized form: ``... noexcept ( ... )`` — the tail is ``)``.
         # Scan back to the matching ``(`` and check the token before it is a
         # qualifier keyword. If so, pop the whole ``keyword ( ... )`` group.
@@ -2839,11 +2851,15 @@ def _buf_has_pending_signature(buf: str) -> bool:
     zero) but no statement terminator — the opening ``{`` of the body is
     expected on a later line (Allman brace style).
 
-    The check is conservative: it requires at least one ``(`` AND net-zero paren
-    depth across the whole buffer (so an unbalanced ``(`` from an unfinished
-    expression is NOT treated as a signature). This correctly distinguishes:
+    The check is conservative: it requires at least one ``(`` AND non-negative
+    paren depth across the whole buffer. This preserves BOTH a balanced
+    signature (Allman style ``int foo() const // c\\n {``) AND an unbalanced
+    one — a multi-line parameter list still mid-declaration
+    (``void foo(int a, // first\\n int b) {``). Without the unbalanced case,
+    the inline-``//`` comment wiped the buffer and the method was dropped.
 
     - ``fn foo()`` / ``int getCount() const`` → pending signature (preserve)
+    - ``void foo(int a,`` (unbalanced, multi-line params) → preserve
     - ``let x = 1;`` → terminated (``;`` already reset buf, so buf is empty)
     - ``x = foo() + bar`` → no balanced trailing param list as a *signature*;
       though this CAN contain ``()``, the call-site behavior is unchanged because
@@ -2867,7 +2883,9 @@ def _buf_has_pending_signature(buf: str) -> bool:
             saw_open = True
         elif ch == ")":
             depth -= 1
-    return saw_open and depth == 0
+    # depth >= 0 covers both balanced (Allman) and unbalanced-open (multi-line
+    # params) signatures. A negative depth (more closes than opens) is malformed.
+    return saw_open and depth >= 0
 
 
 def _classify_keywordless_method(
@@ -2968,8 +2986,18 @@ def _classify_keywordless_method(
     elif is_dtor:
         # Keep the ``~`` — it's a valid distinguishing prefix.
         pass
-    # Guard 3: valid identifier (or a recognized special name above).
-    if op_name is None and not is_dtor:
+    # JS/TS accessors: ``get x()`` / ``set x(v)`` — without distinguishing, both
+    # recover the bare name ``x`` and collide on (method, "x"), forcing a
+    # blanket decline for rename detection. Build ``get x`` / ``set x`` so the
+    # two accessors have distinct identities. (Only the accessor keywords
+    # directly preceding the name; a return type like ``void`` is not one.)
+    pre_toks = name_part.split()
+    if len(pre_toks) >= 2 and pre_toks[-2] in ("get", "set"):
+        name_tok = f"{pre_toks[-2]} {name_tok}"
+    # Guard 3: valid identifier (or a recognized special name above). A JS
+    # accessor name (``get x``) contains a space and is validated separately.
+    is_accessor = " " in name_tok and name_tok.split()[0] in ("get", "set")
+    if op_name is None and not is_dtor and not is_accessor:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
             return None
     # Guard 4: not a control-flow keyword.
@@ -2988,6 +3016,12 @@ def _find_decl_start(src: str, brace_idx: int, line_start: int) -> int:
     matters for the first method inside an ``impl``: its ``fn`` keyword's buffer
     starts right after the impl's opening ``{``, so its decl start is the ``fn``
     line — NOT the impl line.
+
+    Also skips full ``//`` comment lines and C++ access-specifier labels
+    (``public:``/``private:``/``protected:``) that precede the declaration.
+    Without this, a trailing comment on the previous declaration's line or a
+    ``public:`` label leaked into this declaration's body, corrupting the
+    fingerprint used for rename detection.
     """
     cut = max(
         src.rfind(";", 0, brace_idx),
@@ -2998,9 +3032,31 @@ def _find_decl_start(src: str, brace_idx: int, line_start: int) -> int:
     # Skip the separator itself.
     if cut > 0:
         cut += 1
-    # Skip leading whitespace/newlines.
-    while cut < brace_idx and src[cut] in " \t\r\n":
-        cut += 1
+    # Skip leading whitespace/newlines, then any comment or access-label lines
+    # that directly precede the declaration. Repeat so consecutive comment
+    # lines (a doc block) are all skipped.
+    while cut < brace_idx:
+        # Skip whitespace/newlines.
+        while cut < brace_idx and src[cut] in " \t\r\n":
+            cut += 1
+        if cut >= brace_idx:
+            break
+        # Inspect the line starting at ``cut``. A ``//`` comment line, a
+        # ``/* ... */`` block-comment line, or a ``public:``/``private:``/
+        # ``protected:`` access-specifier label does not belong to this
+        # declaration — advance past it to the next newline.
+        nl = src.find("\n", cut, brace_idx)
+        if nl < 0:
+            nl = brace_idx
+        line = src[cut:nl].strip()
+        is_comment = line.startswith("//") or line.startswith("/*") or line.startswith("*")
+        is_access_label = bool(
+            re.fullmatch(r"(public|private|protected)\s*:", line)
+        )
+        if is_comment or is_access_label:
+            cut = nl + 1
+            continue
+        break
     return cut
 
 

@@ -4312,3 +4312,101 @@ def test_r39_async_arrow_function_not_field():
     assert ("function", "g") in _kinds_of_flat(flat), (
         f"async function expr misclassified; got {_kinds_of_flat(flat)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 39 — Family A: signature/body correctness
+# ---------------------------------------------------------------------------
+
+
+def test_r39_cpp_ref_qualified_methods_surface():
+    """r39 (MEDIUM): C++11 ref-qualified member functions (``void foo() &``,
+    ``void bar() &&``, ``void baz() const &``) were dropped. The trailing
+    qualifier set lacked ``&``/``&&``, so the signature didn't end in ``)``
+    after qualifier stripping and the method was dropped. Ref-qualifiers select
+    lvalue/rvalue overloads — increasingly common in modern C++."""
+    flat = _flat(
+        "class C {\n  void foo() & { }\n  void bar() && { }\n"
+        "  void baz() const & { }\n};\n",
+        "cpp",
+    )
+    kinds = _kinds_of_flat(flat)
+    assert ("method", "foo") in kinds, f"ref-qualified foo (&) dropped; got {kinds}"
+    assert ("method", "bar") in kinds, f"ref-qualified bar (&&) dropped; got {kinds}"
+    assert ("method", "baz") in kinds, f"ref-qualified baz (const &) dropped; got {kinds}"
+
+
+def test_r39_js_get_set_distinguishable_identity():
+    """r39 (MEDIUM): JS ``get x()`` / ``set x(v)`` both recovered name ``x``,
+    colliding on the (method, "x") identity — a downstream 3-way diff would
+    blanket-decline for rename detection. Accessors must be distinguishable:
+    ``get x`` / ``set x`` so they don't collide."""
+    flat = _flat(
+        "class C {\n  get x() { return this._x; }\n  set x(v) { this._x = v; }\n}\n",
+        "javascript",
+    )
+    names = [n for _, n in _kinds_of_flat(flat) if n]
+    # Both accessors surface, and they are distinguishable (not both bare "x").
+    assert len([n for n in names if n.endswith("x")]) == 2, (
+        f"both accessors must surface; got {names}"
+    )
+    assert names.count("x") <= 1, (
+        f"get/set collided on bare 'x' identity; got {names}"
+    )
+
+
+def test_r39_access_specifier_does_not_leak_into_body():
+    """r39 (MEDIUM): a C++ access-specifier label (``public:``, ``private:``)
+    or a leading comment leaked into the FOLLOWING declaration's body/span
+    because the decl-start walker skipped whitespace/newlines but not comments
+    or ``label:`` lines. The corrupted body pollutes the fingerprint used for
+    rename detection. ``public:`` must not prefix ``foo``'s body."""
+    flat = _flat(
+        "class C {\nprivate:\n  int x;\npublic:\n  void foo() { }\n};\n",
+        "cpp",
+    )
+    foo = _by_name(flat, "foo")
+    assert foo is not None, "foo must surface"
+    assert "public:" not in foo.body, (
+        f"access-specifier label leaked into body: {foo.body!r}"
+    )
+
+
+def test_r39_leading_comment_does_not_leak_into_next_body():
+    """r39 (MEDIUM): a ``//`` comment on the line before a declaration (or a
+    trailing comment on the PREVIOUS declaration's line) leaked into the next
+    declaration's body. The comment must not prefix the body."""
+    flat = _flat(
+        "void f() { } // trailing\nvoid h() { }\n",
+        "c",
+    )
+    h = _by_name(flat, "h")
+    assert h is not None
+    assert "// trailing" not in h.body, (
+        f"trailing comment leaked into next decl body: {h.body!r}"
+    )
+    # A comment immediately above a method likewise must not leak in.
+    flat2 = _flat(
+        "class C {\n  void a() { }\n\n  // about b\n  void b() { }\n};\n",
+        "cpp",
+    )
+    b = _by_name(flat2, "b")
+    assert b is not None
+    assert "// about b" not in b.body, f"leading comment leaked into body: {b.body!r}"
+
+
+def test_r39_inline_comment_in_multiline_params_keeps_method():
+    """r39 (MEDIUM): a ``//`` comment inside a multi-line parameter list
+    (``void foo(int a, // first\\n int b) { }``) dropped the method. The
+    line-comment-newline handler wiped the unbalanced-paren buffer, so the
+    continuation line had no signature to classify. A documented-parameter
+    comment must not cause the method to vanish."""
+    flat = _flat(
+        "class C {\n  void foo(int a, // first\n           int b) {\n"
+        "    bar();\n  }\n};\n",
+        "cpp",
+    )
+    kinds = _kinds_of_flat(flat)
+    assert ("method", "foo") in kinds, (
+        f"method with // in multi-line params dropped; got {kinds}"
+    )
