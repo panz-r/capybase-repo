@@ -204,10 +204,15 @@ def _unit(base, current, replayed, worktree, span, with_fingerprint=True):
         original_worktree_text=worktree,
         marker_span=span,
     )
-    # The extractor computes the base fingerprint on the clean BASE blob;
-    # mirror that here so the validator has a consistent baseline.
+    # Mirror the PRODUCTION extractor: compute the base-outside fingerprint on
+    # the marker-blanked WORKTREE (not the clean BASE blob). The worktree has
+    # the conflict markers; blanking them to comments gives the structural
+    # skeleton the spliced result must match. Using clean BASE diverges from
+    # production (BASE has no markers) and masked the stale-marker_span bug.
     if with_fingerprint and S.is_available("python"):
-        outside, _ = S.fingerprint_region(base, "python", span)
+        from capybase.verification import _blank_markers
+        blanked_worktree = _blank_markers(worktree)
+        outside, _ = S.fingerprint_region(blanked_worktree, "python", span)
         if outside is not None:
             u.structural_metadata["ast_fingerprint_base_outside"] = outside
     return u

@@ -353,8 +353,18 @@ class BothSidesRepresentedValidator:
         not incidental formatting. Splitting on whitespace alone would keep
         ``"scheduler"]`` as one token and miss the match against a merge that
         wrote ``"scheduler",``.
+
+        COMMENTS and STRING LITERALS are blanked first (language-agnostic — a
+        ``#``/``//``/``/* */`` region and a quoted string become spaces). Without
+        this, a side's distinctive addition that was DROPPED from the code but
+        survived in a comment or string satisfied the "represented" check → a
+        false PASS (silent data loss). Mirrors the comment/string blanking in
+        :func:`structural.referenced_symbols`.
         """
-        return set(re.findall(r"\w+", text or ""))
+        from capybase.adapters.structural import _blank_text_strings, _blank_comments
+        blanked = _blank_text_strings(text or "")
+        blanked = _blank_comments(blanked)
+        return set(re.findall(r"\w+", blanked))
 
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
         # Value-resolution fast path: when both sides preserve the same statement
@@ -2100,8 +2110,22 @@ class AstPreservationValidator:
             unit.original_worktree_text, unit.marker_span, ctx.candidate.resolved_text
         )
         spliced = _blank_markers(spliced, lang)
+        # Recompute the post-splice span: the resolved text occupies
+        # [start, start + n_resolved_lines - 1], NOT the original marker_span.
+        # The original span is offsets into the PRE-splice worktree; after
+        # splicing, the line count shifts (a 5-line marker block resolved to 1
+        # line shifts every subsequent line up by 4). Reusing the original span
+        # classified the wrong lines as inside/outside → a sibling node that was
+        # OUTSIDE the original span became INSIDE the shifted one and was dropped
+        # from the outside fingerprint, producing a spurious mismatch (false FAIL
+        # the model could never satisfy).
+        resolved_lines = ctx.candidate.resolved_text.split("\n")
+        spliced_span = (
+            unit.marker_span[0],
+            unit.marker_span[0] + max(0, len(resolved_lines) - 1),
+        )
         after_outside, _ = structural.fingerprint_region(
-            spliced, lang, unit.marker_span
+            spliced, lang, spliced_span
         )
         if after_outside is None:
             return VerificationCheckResult(
@@ -2111,6 +2135,20 @@ class AstPreservationValidator:
                 features={"ast_checked": False, "ast_preserved": True},
             )
         preserved = after_outside == base_outside
+        # Complementary injection guard: the outside fingerprint (line-range
+        # partitioned with the recomputed span) catches edits to sibling nodes,
+        # but a resolution that INJECTS a new top-level entity within its own
+        # line range lands "inside" the span and is excluded from the outside
+        # digest. Compare the full top-level identity sequence (kind:name) of
+        # the blanked worktree vs the spliced result so an injected top-level
+        # def/class/struct is caught regardless of where its lines fall.
+        if preserved:
+            base_ids = _top_level_identities(
+                _blank_markers(unit.original_worktree_text, lang), lang
+            )
+            after_ids = _top_level_identities(spliced, lang)
+            if base_ids is not None and after_ids is not None and base_ids != after_ids:
+                preserved = False
         return VerificationCheckResult(
             name=self.name,
             passed=preserved,
@@ -3589,6 +3627,22 @@ def _blank_markers(text: str, language: str | None = None) -> str:
             continue
         out.append(line)
     return "\n".join(out)
+
+
+def _top_level_identities(text: str, language: str | None) -> str | None:
+    """The top-level entity identity sequence (``kind:name``) of ``text``.
+
+    Used by the AST-preservation validator's injection guard: a resolution that
+    injects a NEW top-level def/class/struct (anywhere in the file) changes the
+    identity sequence, which a line-range-partitioned outside fingerprint can
+    miss (the injected node lands "inside" the recomputed span). Returns None
+    when the parse fails (the caller treats that as "no signal").
+    """
+    from capybase.adapters import structural
+    ir = structural._abstract_parse(text, language)
+    if ir is None:
+        return None
+    return " ".join(f"{u.kind}:{u.name or '<anon>'}" for u in ir.units)
 
 
 def _blank_markers_one_side(text: str, language: str | None = None) -> str:

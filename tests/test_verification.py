@@ -965,3 +965,75 @@ def test_introduced_diagnostics_zero_on_clean_merge():
     )
     assert fres.passed
     assert fres.features["introduced_diagnostics"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Round 41 — verification validators: comment/string leak, stale AST span
+# ---------------------------------------------------------------------------
+
+
+def test_r41_both_sides_represented_no_comment_leak():
+    """r41 (HIGH): ``BothSidesRepresentedValidator._token_set`` extracted
+    identifiers from comments and string literals (it did ``re.findall(r'\\w+')``
+    with no blanking). A side's distinctive addition that was DROPPED from the
+    code but survived in a comment satisfied the 'represented' check → a false
+    PASS (silent data loss). Now blanks comments/strings first, mirroring
+    ``referenced_symbols``.
+
+    Here current changes ``timeout = 0`` → ``timeout = 30``; the candidate
+    REVERTS that edit but leaves ``30`` only in a trailing comment. The validator
+    must flag it (the current side's value change is not represented in code)."""
+    worktree = "<<<<<<< H\ntimeout = 30\n=======\ntimeout = 0\n>>>>>>> b\n"
+    unit = _unit("timeout = 0", "timeout = 30", "timeout = 0", worktree, span=(0, 4))
+    # Candidate reverts current's edit; '30' survives only in a comment.
+    cand = _candidate("timeout = 0  # was 30")
+    res = _engine().verify(unit, cand)
+    # The current side's distinctive addition ('30') is NOT in the code — only
+    # in a comment. The validator must flag it (warning or failure).
+    assert res.features.get("dropped_a_side") is True or any(
+        w.validator == "both_sides_represented" for w in res.warnings
+    ), (
+        f"comment leak → false PASS on a reverted value change: {res.features}"
+    )
+
+
+def test_r41_ast_preservation_no_stale_span_on_line_shift():
+    """r41 (MED): ``AstPreservationValidator`` reused the original ``marker_span``
+    against the SPLICED text. When the resolution changed the line count (a
+    5-line marker block resolved to 1 line), every subsequent line shifted up,
+    so a sibling node that was OUTSIDE the original span became INSIDE the stale
+    span and was dropped from the outside fingerprint → a spurious mismatch
+    (false FAIL the model could never satisfy).
+
+    Here a CORRECT 1-line merge of a 5-line conflict block is followed by a
+    sibling function; the AST-preservation check must PASS (the sibling is
+    untouched outside the span)."""
+    from capybase.adapters import structural as S
+    worktree = (
+        "def greet():\n"
+        "<<<<<<< H\n    return 'hi'\n"
+        "=======\n    return 'howdy'\n"
+        ">>>>>>> b\n"
+        "\n"
+        "def farewell():\n    return 'bye'\n"
+    )
+    unit = _unit(
+        "def greet():\n    return 'hi'\n\ndef farewell():\n    return 'bye'\n",
+        "    return 'hi'",
+        "    return 'howdy'",
+        worktree,
+        span=(1, 5),
+    )
+    # A correct merge: both returns combined into one line (5-line block → 1 line).
+    cand = _candidate("    return ('hi', 'howdy')")
+    # Compute base_outside the way the production extractor does (worktree,
+    # markers blanked) and set it on the unit's structural metadata.
+    from capybase.verification import _blank_markers, VerificationContext, AstPreservationValidator
+    base_outside, _ = S.fingerprint_region(_blank_markers(worktree, "python"), "python", (1, 5))
+    unit.structural_metadata["ast_fingerprint_base_outside"] = base_outside
+    ctx = VerificationContext(unit=unit, candidate=cand, config=ValidationConfig())
+    result = AstPreservationValidator().verify(ctx)
+    assert result.passed, (
+        f"stale marker_span → false FAIL on a correct line-shifting merge: "
+        f"{result.message}"
+    )
