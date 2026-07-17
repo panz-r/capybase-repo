@@ -1521,11 +1521,29 @@ def _try_entity_disjoint(unit: ConflictUnit) -> str | None:
     # have handled it. Decline to avoid duplicate logic — but guard anyway.
     if not cur_touched or not rep_touched:
         return None
+    # Agreed ADDITIONS: an entity both sides ADDED with the same body is an
+    # agreed change, not a conflict (mirrors ``agreed_renames`` for renames).
+    # Without this, a shared addition landed in both touched sets, counted as
+    # overlap, and the merge wrongly declined even though the only real conflict
+    # was the distinct additions (which are disjoint by construction).
+    agreed_additions: set = set()
+    overlap_ids = set(cur_touched) & set(rep_touched)
+    for ident in overlap_ids:
+        if ident in base_by_id:
+            continue  # a base entity both touched — handled by agreed_renames
+        cur_e = next((e for e in cur_ents if e.identity == ident), None)
+        rep_e = next((e for e in rep_ents if e.identity == ident), None)
+        if (
+            cur_e is not None
+            and rep_e is not None
+            and _ws_collapse(cur_e.body, lang) == _ws_collapse(rep_e.body, lang)
+        ):
+            agreed_additions.add(ident)
     # Overlap → genuine intra-entity conflict — UNLESS both sides made the SAME
-    # rename (agreed change), which is not a conflict. Decline for the line/LLM
-    # path otherwise.
+    # rename (agreed change) or the SAME addition (agreed), which is not a
+    # conflict. Decline for the line/LLM path otherwise.
     overlap = set(cur_touched) & set(rep_touched)
-    if overlap - agreed_renames:
+    if overlap - agreed_renames - agreed_additions:
         return None
 
     # Disjoint: build the merged container. Start from base's entities, apply
@@ -1825,6 +1843,12 @@ def _rebuild_container(enclosing_text: str, entity_bodies: list[str], language: 
     entity block inside a container (the common case — a class/impl body or a
     module-level def run). If the framing can't be cleanly identified, it
     returns None so the resolver declines and the LLM handles it.
+
+    TRAILER PRESERVATION: content between the last entity and the container's
+    close brace (a trailing comment, attribute, blank-separated note) that was
+    present in the enclosing text is preserved — it sat in all three sides and
+    dropping it is silent data loss. The trailer is the run of lines after the
+    last entity's content up to and including the closing brace.
     """
     enc_lines = enclosing_text.split("\n")
     if not enc_lines:
@@ -1857,16 +1881,14 @@ def _rebuild_container(enclosing_text: str, entity_bodies: list[str], language: 
         if line.strip():
             body_indent = line[: len(line) - len(line.lstrip(" \t"))]
             break
-    # The header is line 0; the trailer is the container's OWN closing brace (for
-    # brace languages) — exactly one line. We can't take more, because the method
-    # bodies' own closing braces (``    }``) sit just above the container's close
-    # and would be stolen. Python class bodies have no trailer.
+    # The header is line 0. The trailer is the container's OWN closing brace (for
+    # brace languages) PLUS any non-entity content between the last entity and
+    # that brace (a trailing comment / attribute present in all sides). We can't
+    # take method bodies' own closing braces (``    }``) — only the trailing run
+    # after the last entity. Locate where the last entity ends in the enclosing
+    # text and take everything from there to the container's close.
     header = enc_lines[0]
-    trailer_lines: list[str] = []
-    if language != "python" and enc_lines:
-        last = enc_lines[-1]
-        if last.strip() in ("}", "};"):
-            trailer_lines = [last]
+    trailer_lines = _container_trailer(enc_lines, entity_bodies, language)
     out = [header]
     for body in entity_bodies:
         blines = body.split("\n")
@@ -1876,3 +1898,50 @@ def _rebuild_container(enclosing_text: str, entity_bodies: list[str], language: 
         out.append("\n".join(blines))
     out.extend(trailer_lines)
     return "\n".join(out)
+
+
+def _container_trailer(
+    enc_lines: list[str], entity_bodies: list[str], language: str | None
+) -> list[str]:
+    """The trailing lines of a container after its last entity, up to the close.
+
+    For brace languages this is the run of lines from just after the last
+    entity's content through the container's closing ``}``/``};`` — preserving
+    any trailing comment / attribute that sat between the last entity and the
+    close (present in all three sides; dropping it was silent data loss). For
+    Python (no closing brace) there is no trailer.
+
+    Falls back to the prior single-line behavior (just the ``}``/``};`` line)
+    when the last entity's end can't be located, so behavior is unchanged for
+    shapes the locator can't handle.
+    """
+    if language == "python" or not enc_lines:
+        return []
+    last = enc_lines[-1]
+    if last.strip() not in ("}", "};"):
+        return []  # not a brace-closed container
+    # Locate the last entity's LAST line within the enclosing text. Entity bodies
+    # are dedented; in the enclosing text they appear indented by body_indent.
+    # Match the last non-blank line of the last entity body (stripped) against
+    # the enclosing lines to find where the entity block ends.
+    if not entity_bodies:
+        return [last]
+    # The enclosing text is the BASE version; the merged entity_bodies include
+    # additions that aren't in it. Find the LAST entity whose last line IS
+    # present in the enclosing text (the last BASE entity) and take the trailer
+    # from just after it. Build a set of needles (last stripped line of each body)
+    # and scan the enclosing lines (excluding the closing brace) from the end.
+    needles = {
+        next((ln for ln in reversed(body.split("\n")) if ln.strip()), "").strip()
+        for body in entity_bodies
+    }
+    needles.discard("")
+    end_idx = -1
+    for idx in range(len(enc_lines) - 2, 0, -1):  # skip the closing brace line
+        if enc_lines[idx].strip() in needles:
+            end_idx = idx
+            break
+    if end_idx < 0:
+        return [last]  # couldn't locate → conservative single-brace trailer
+    # Trailer = everything after the last base entity's last line, through close.
+    return enc_lines[end_idx + 1:]

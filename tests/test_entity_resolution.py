@@ -1013,3 +1013,51 @@ def test_r39_one_way_rename_vs_edit_surfaces_conflict():
         f"1-way rename-vs-edit missed; kinds={kinds}, "
         f"conflicts={len(diff.structural_conflicts)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 40 — entity merge composition
+# ---------------------------------------------------------------------------
+
+
+def test_r40_entity_merge_preserves_trailing_container_content():
+    """r40 (HIGH): ``_rebuild_container`` dropped any non-entity content between
+    the last entity and the container's close brace — a trailing comment,
+    attribute, or blank-separated note present in all three sides was silently
+    lost. The trailer was extracted as only the single ``}``/``};`` line.
+    Now preserves the run of lines after the last entity through the close."""
+    base = 'impl S {\n    fn a() { 1 }\n    //[debug]\n}'
+    cur = 'impl S {\n    fn a() { 1 }\n    fn b() { 2 }\n    //[debug]\n}'
+    rep = 'impl S {\n    fn a() { 1 }\n    fn c() { 3 }\n    //[debug]\n}'
+    result = _try_entity_disjoint(_unit(base, cur, rep, lang="rust", path="f.rs"))
+    # The method additions survive...
+    assert result is not None and "fn b() { 2 }" in result and "fn c() { 3 }" in result
+    # ...AND the trailing comment that was in all three sides is preserved.
+    assert "//[debug]" in result, f"trailing container content dropped: {result!r}"
+
+
+def test_r40_entity_merge_agreed_shared_addition_resolves():
+    """r40 (MEDIUM): when both sides add the SAME new entity (identical body)
+    PLUS distinct additions, the merge wrongly declined — the shared addition
+    landed in both touched sets, counting as overlap. An agreed shared addition
+    is not a conflict (it's an agreed change); the merge should emit it once
+    alongside the distinct additions."""
+    base = 'class C:\n    def base():\n        return 0'
+    cur = (
+        'class C:\n    def base():\n        return 0\n'
+        '    def shared():\n        return 9\n'
+        '    def y():\n        return 100'
+    )
+    rep = (
+        'class C:\n    def base():\n        return 0\n'
+        '    def shared():\n        return 9\n'
+        '    def z():\n        return 200'
+    )
+    result = _try_entity_disjoint(_unit(base, cur, rep, lang="python", path="f.py"))
+    assert result is not None, "agreed shared addition wrongly declined"
+    # The distinct additions survive...
+    assert "def y():" in result and "def z():" in result
+    # ...and the agreed shared addition appears exactly once.
+    assert result.count("def shared():") == 1, (
+        f"shared addition not emitted once: {result!r}"
+    )
