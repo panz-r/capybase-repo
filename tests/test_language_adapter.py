@@ -535,3 +535,24 @@ def test_r35_fstring_escaped_braces_not_extracted():
     from capybase.adapters.structural import referenced_symbols
     refs = referenced_symbols('x = f"literal {{not_interp_token}}"', "python")
     assert "not_interp_token" not in refs, f"escaped-brace text leaked; got {refs}"
+
+
+def test_r36_triple_quoted_fstring_interpolation_preserved():
+    """A-1 (HIGH, round-35 regression): the char-scan blanker didn't handle
+    Python triple-quoted f-strings (\"\"\"...\"\"\"), dropping their interpolations.
+    The hybrid regex blanker now handles them."""
+    from capybase.adapters.structural import referenced_symbols
+    refs = referenced_symbols('x = f"""{foo()}"""', "python")
+    assert "foo" in refs, f"triple-quoted f-string interpolation dropped; got {refs}"
+    # Multi-line variant
+    refs2 = referenced_symbols('x = f"""\n    Hello {name}!\n    Count: {count}\n"""', "python")
+    assert "name" in refs2 and "count" in refs2, f"multi-line f-string refs dropped; got {refs2}"
+
+
+def test_r36_rust_raw_string_not_truncated_in_consensus():
+    """A-2 (HIGH): a Rust raw string containing both embedded quotes and // was
+    truncated by consensus.normalize's comment-stripping. The raw-string
+    pre-blanking now prevents this."""
+    from capybase.consensus import normalize
+    result = normalize('let s = r#"contains " quote and // mark"#;', "rust")
+    assert "// mark" in result, f"raw string truncated at inner //; got {result!r}"

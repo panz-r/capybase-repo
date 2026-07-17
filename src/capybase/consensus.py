@@ -43,8 +43,10 @@ def _strip_trailing_comment(line: str, *, language: str | None = None) -> str:
     start, but trailing ``#`` is not a comment in Rust — only Python/Ruby use
     trailing ``#`` comments in practice).
     """
-    from capybase.adapters.abstract_parser import _STRING_LIT_RE
-    blanked = _STRING_LIT_RE.sub(lambda mm: " " * len(mm.group(0)), line)
+    from capybase.adapters.abstract_parser import _STRING_LIT_RE, _RAW_STRING_RE
+    # Pre-blank Rust raw strings (r#"..."#) which _STRING_LIT_RE can't handle.
+    blanked = _RAW_STRING_RE.sub(lambda mm: " " * len(mm.group(0)), line)
+    blanked = _STRING_LIT_RE.sub(lambda mm: " " * len(mm.group(0)), blanked)
     # ``//`` is a line comment only in brace languages.
     slash_is_comment = language not in (None, "python", "ruby")
     # ``#`` is a line comment in Python/Ruby (and shell).

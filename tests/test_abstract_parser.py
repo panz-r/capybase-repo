@@ -4006,3 +4006,16 @@ def test_r33_strip_decl_header_colon_in_string_default():
     # Both must extract 'return 1' (the real body), NOT 'b"): return 1'.
     assert r1 == "return 1", f"header split hit ':' inside string; got {r1!r}"
     assert r2 == "return 1", f"header split hit ':' inside string; got {r2!r}"
+
+
+def test_r36_empty_body_functions_not_falsely_renamed():
+    """B-2 (MEDIUM): two stub/comment-only functions with similar names falsely
+    paired as a rename (the body-content guard wasn't applied in the exact-match
+    path). Their identical trivial bodies (just '}') are not enough to confirm."""
+    from capybase.adapters.structural import semantic_diff
+    old = "fn process_data() {\n    /* TODO */\n}\n"
+    new = "fn process_data_v2() {\n    /* Different TODO comment */\n}\n"
+    changes = semantic_diff(old, new, "rust")
+    types = {c.change_type for c in changes}
+    assert "renamed" not in types, f"empty-body stubs falsely paired as rename; got {types}"
+    assert "added" in types and "removed" in types

@@ -230,6 +230,26 @@ _STRING_LIT_RE = re.compile(
     r'"(?:\\.|[^"\\])*"|'  # double-quoted
     r"'(?:\\.|[^'\\])*'"  # single-quoted
 )
+# Rust raw strings: r"...", r#"..."#, r##"..."##, br#"..."#, rb#"..."#.
+# The closer is ``"`` + exactly N ``#`` matching the opener. Handles embedded
+# quotes (content stops only at ``"`` + the matching ``#`` run). Without this,
+# raw strings with embedded quotes split the _STRING_LIT_RE match, exposing their
+# content to comment/identifier extraction (false renames, phantom symbols).
+_RAW_STRING_RE = re.compile(
+    r'(?<![A-Za-z0-9_])(?:br|rb|r)(#*)"((?:(?!"\1).)*?)"\1'
+)
+
+
+def _blank_all_strings(text: str) -> str:
+    """Blank ALL string-literal contents (raw + regular), length-preserving.
+
+    Pre-blanks Rust raw strings (which ``_STRING_LIT_RE`` can't model), then
+    blanks the remaining regular/triple-quoted strings. Used by the
+    fingerprint/normalization layer so raw-string content doesn't leak into
+    fingerprints or comment detection.
+    """
+    text = _RAW_STRING_RE.sub(lambda m: "_" * len(m.group(0)), text)
+    return _STRING_LIT_RE.sub(lambda m: "_" * len(m.group(0)), text)
 
 
 def unit_body_fingerprint(body: str, *, lang: str | None = None) -> str:
@@ -339,7 +359,7 @@ def _filter_code_lines(lines: list[str], *, lang: str | None = None) -> list[str
         # Use a LENGTH-PRESERVING replacement so indices in the blanked line
         # align with the original — a fixed-length replacement would shift
         # every index after a variable-length string and corrupt the extraction.
-        blanked = _STRING_LIT_RE.sub(lambda m: "_" * len(m.group(0)), ln)
+        blanked = _blank_all_strings(ln)
         segments: list[str] = []
         j = 0
         while j < len(blanked):
@@ -384,7 +404,7 @@ def _strip_inline_comment(line: str, *, lang: str | None = None) -> str:
     aligns with the original — a fixed-length replacement would shift the index
     past any variable-length string and slice the original at the wrong spot.
     """
-    blanked = _STRING_LIT_RE.sub(lambda m: "_" * len(m.group(0)), line)
+    blanked = _blank_all_strings(line)
     marker = "//" if _lang_is_family_a(lang) else "#"
     idx = blanked.find(marker)
     if idx >= 0:
@@ -427,6 +447,7 @@ def normalize_body(text: str, *, lang: str | None = None) -> str:
         for ln in _filter_code_lines(text.split("\n"), lang=lang)
     ]
     joined = "\n".join(kept)
+    joined = _RAW_STRING_RE.sub("'_'", joined)
     blanked = _STRING_LIT_RE.sub("'_'", joined)
     return " ".join(blanked.split())
 
@@ -490,6 +511,7 @@ def _line_bracket_delta(raw: str) -> int:
     # Strip inline comments first: a ``# ...`` / ``// ...`` comment may
     # contain unbalanced brackets that must not count.
     stripped = _strip_inline_comment(raw)
+    stripped = _RAW_STRING_RE.sub("'_'", stripped)
     blanked = _STRING_LIT_RE.sub("'_'", stripped)
     delta = 0
     for ch in blanked:
@@ -510,6 +532,7 @@ def _ends_with_backslash_continuation(raw: str) -> bool:
     """
     # Blank strings/comments first so a trailing ``\\`` in those contexts is ignored.
     stripped = _strip_inline_comment(raw)
+    stripped = _RAW_STRING_RE.sub("'_'", stripped)
     blanked = _STRING_LIT_RE.sub("'_'", stripped).rstrip()
     if not blanked or not blanked.endswith("\\"):
         return False
@@ -3584,11 +3607,19 @@ def detect_renames_2way(
 
     def _confirms_rename(base_match, side_entity, content: str) -> bool:
         """The name/substantial-body guard: is this a real rename, not a
-        coincidental body-content collision between two distinct entities?"""
-        return bool(content) and (
-            name_similarity(base_match.name, side_entity.name) >= RENAME_NAME_SIMILARITY_THRESHOLD
-            or len(content) >= _RENAME_SUBSTANTIAL_BODY_MIN
-        )
+        coincidental body-content collision between two distinct entities?
+
+        For substantial bodies (>=8 chars of content), either a name similarity
+        above the threshold OR the body length suffices. But for trivial/empty
+        bodies (comment-only, stub ``{}``, ``pass``), name similarity alone is
+        insufficient — two unrelated stubs with similar names would falsely
+        pair. Require a substantial body to confirm.
+        """
+        if not content:
+            return False
+        if len(content) >= _RENAME_SUBSTANTIAL_BODY_MIN:
+            return True  # body content match is a strong signal on its own
+        return name_similarity(base_match.name, side_entity.name) >= RENAME_NAME_SIMILARITY_THRESHOLD and len(content) >= _RENAME_SUBSTANTIAL_BODY_MIN
 
     renames: dict = {}
     removed: set = set()
@@ -3602,6 +3633,12 @@ def detect_renames_2way(
             # The base entity's old name must be GONE from this side (renamed,
             # not duplicated). If the old name still exists, this is a copy.
             if base_match.name in side_names_by_kind.get(e.kind, set()):
+                base_match = None
+            # Substantial-body guard: empty/comment-only bodies normalize to
+            # trivially-short content (e.g. ``}``), so two unrelated stub
+            # functions would falsely pair. Require either a name similarity
+            # above the threshold or a body long enough to be meaningful.
+            if base_match is not None and not _confirms_rename(base_match, e, content):
                 base_match = None
         else:
             base_match = None
