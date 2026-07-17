@@ -591,3 +591,72 @@ def test_blessed_corpus_combine_shapes_resolve_deterministically():
         assert _is_correct(r.text, conflict.expected_text), (
             f"{title} resolved to wrong text: {r.text!r} vs {conflict.expected_text!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Round 40 — resolver region-matching correctness
+# ---------------------------------------------------------------------------
+
+
+def test_r40_disjoint_does_not_drop_line_kept_by_other_side():
+    """r40 (HIGH): ``_try_disjoint_merge`` silently applied a deletion of a line
+    the OTHER side kept (a modify/delete blind spot). The overlap test only
+    fired when both sides CHANGED the same base line; a line one side deleted
+    and the other KEPT (an ``equal`` opcode) was not in the changed set, so the
+    sets were disjoint and the deletion was applied — dropping the kept line.
+    A genuine modify/delete conflict must escalate, not silently drop."""
+    # current modifies sys/re but KEEPS import json; replayed deletes import json.
+    base = "import os\nimport sys\nimport json\nimport re\nimport time"
+    current = "import os\nimport sys2\nimport json\nimport re2\nimport time"
+    replayed = "import os\nimport sys\nimport re\nimport time"  # deletes import json
+    r = resolve_structurally(_unit(base, current, replayed))
+    # The kept line (import json) must survive, OR the resolver must decline.
+    text = r.text or ""
+    if r.rule == "disjoint_edits":
+        assert "import json" in text, (
+            f"disjoint_edits dropped the line current kept (modify/delete "
+            f"data loss): {text!r}"
+        )
+    # Most importantly: never silently drop. Either json survives or it declines.
+    assert ("import json" in text) or (r.text is None), (
+        f"modify/delete silently dropped the kept line: rule={r.rule} text={text!r}"
+    )
+
+
+def test_r40_zealous_region_covered_rejects_mismatched_span_length():
+    """r40 (HIGH): ``_region_covered`` assumed a 1:1 positional correspondence
+    between base lines in the span and the emitted replacement, computing
+    ``offset = r_start - span_start``. When the spanning side's replacement was
+    longer (grown) or shorter (shrunk) than the base span it covers, the offset
+    was an arbitrary position, and a coincidental textual match declared the
+    inner edit 'covered' — silently dropping the other side's change (lines the
+    other side kept were lost). Now requires the replacement length to match the
+    span length for a positional 'covered' verdict."""
+    # current replaces B,C,D (3 lines) with P,Q (2) — SHRINK. replayed edits C->Q
+    # and KEEPS B and D. The zealous merge must not drop B and D.
+    base = "A\nB\nC\nD\nE"
+    current = "A\nP\nQ\nE"
+    replayed = "A\nB\nQ\nD\nE"
+    r = resolve_structurally(_unit(base, current, replayed))
+    text = r.text or ""
+    # B and D were kept by replayed — they must not be silently lost.
+    if r.rule == "zealous_merge":
+        assert "B" in text.split() and "D" in text.split(), (
+            f"zealous_merge dropped lines replayed kept (mismatched-span "
+            f"offset unsoundness): {text!r}"
+        )
+
+
+def test_r40_disjoint_preserves_trailing_newline():
+    """r40 (LOW): ``_try_disjoint_merge`` used ``splitlines()`` (drops the
+    trailing empty) and ``"\\n".join``, losing a trailing newline present in all
+    three sides. The missing newline would join the last line to the following
+    conflict marker. Now preserves the trailing newline."""
+    base = "line1\nline2\nline3\n"
+    current = "line1\nMODIFIED\nline3\n"
+    replayed = "line1\nline2\nCHANGED\n"
+    r = resolve_structurally(_unit(base, current, replayed))
+    if r.rule == "disjoint_edits":
+        assert (r.text or "").endswith("\n"), (
+            f"trailing newline lost: {r.text!r}"
+        )

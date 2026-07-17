@@ -252,6 +252,24 @@ def _accept_deletion(base: str, current: str, replayed: str) -> str | None:
     return None
 
 
+def _restore_trailing_newline(merged: str | None, base: str, current: str, replayed: str) -> str | None:
+    """Re-append a trailing newline lost by ``splitlines`` + ``"\\n".join``.
+
+    The line-based rules (disjoint, zealous) use ``splitlines()`` which drops a
+    trailing empty element, so a result rebuilt with ``"\\n".join`` loses the
+    trailing newline present in all three sides. Restoring it (when base,
+    current, AND replayed all end with ``"\\n"`` and the merged result doesn't)
+    keeps the spliced output from joining its last line to the following
+    conflict marker. ``_try_insertion_union`` uses ``split("\\n")`` and is
+    unaffected, so it need not call this.
+    """
+    if not merged or merged.endswith("\n"):
+        return merged
+    if base.endswith("\n") and current.endswith("\n") and replayed.endswith("\n"):
+        return merged + "\n"
+    return merged
+
+
 def _try_disjoint_merge(base: str, current: str, replayed: str) -> str | None:
     """Merge two divergent sides when their edits touch disjoint base lines.
 
@@ -271,6 +289,20 @@ def _try_disjoint_merge(base: str, current: str, replayed: str) -> str | None:
         return None
     if cur_base_changed & rep_base_changed:
         return None  # overlapping edits → real conflict, defer to LLM
+    # Modify/delete blind spot: a line one side DELETES that the other side
+    # KEPT (unchanged) is a genuine modify/delete conflict, but the changed-set
+    # overlap test misses it (the kept line is an ``equal`` opcode, not in the
+    # other side's changed set, so the sets look disjoint). Without this guard
+    # the merge applies the deletion and silently drops the kept line. Decline
+    # so the conflict escalates (mirrors ``_accept_deletion``'s modify/delete
+    # guard, which ``disjoint_edits`` otherwise bypassed).
+    cur_deleted = _base_deleted_lines(base_lines, cur_lines)
+    rep_deleted = _base_deleted_lines(base_lines, rep_lines)
+    # A line current deleted that replayed did NOT touch (kept) → conflict.
+    if cur_deleted - rep_base_changed:
+        return None
+    if rep_deleted - cur_base_changed:
+        return None
 
     # Decline if either side has a pure insertion (a new line with no base
     # anchor). _merge_disjoint_regions silently drops pure insertions, which
@@ -284,8 +316,9 @@ def _try_disjoint_merge(base: str, current: str, replayed: str) -> str | None:
 
     # Non-overlapping: apply both edits to base. Build a merged line list by
     # walking base and substituting each side's replacement regions.
-    return _merge_disjoint_regions(base_lines, cur_lines, rep_lines,
-                                   cur_base_changed, rep_base_changed)
+    merged = _merge_disjoint_regions(base_lines, cur_lines, rep_lines,
+                                     cur_base_changed, rep_base_changed)
+    return _restore_trailing_newline(merged, base, current, replayed)
 
 
 def _base_changed_lines(base: list[str], other: list[str]) -> set[int]:
@@ -299,6 +332,57 @@ def _base_changed_lines(base: list[str], other: list[str]) -> set[int]:
         # i-indices are into base; mark the affected base range.
         changed.update(range(i1, i2))
     return changed
+
+
+def _base_deleted_lines(base: list[str], other: list[str]) -> set[int]:
+    """Base line indices (0-based) that ``other`` DELETES (a ``delete`` opcode —
+    lines present in base but absent from ``other``). Distinct from
+    :func:`_base_changed_lines` (which also counts replaces/inserts): a line one
+    side deletes that the other side KEEPS is a modify/delete conflict, not a
+    disjoint change, and must escalate rather than silently drop the kept line.
+    """
+    deleted: set[int] = set()
+    matcher = line_matcher(base, other)
+    for tag, i1, i2, _j1, _j2 in matcher.get_opcodes():
+        if tag == "delete":
+            deleted.update(range(i1, i2))
+    return deleted
+
+
+def _has_delete_adjacent_to_other_change(
+    base: list[str], current: list[str], replayed: list[str]
+) -> bool:
+    """True if one side DELETES a base line whose NEIGHBOR the other side changed.
+
+    A deletion adjacent to the other side's edit is a genuine conflict (git
+    flags it — the diffs overlap when aligned), but a line-by-line walk would
+    apply the deletion as a one-sided change and silently drop the line the
+    other side's edit abuts. ``adjacent`` = the deleted line's immediate
+    neighbor (line±1) is in the other side's changed set. A deletion far from
+    any of the other side's changes is safe to apply (a real one-sided delete).
+    """
+    cur_deleted = _base_deleted_lines(base, current)
+    rep_deleted = _base_deleted_lines(base, replayed)
+    cur_changed = _base_changed_lines(base, current)
+    rep_changed = _base_changed_lines(base, replayed)
+    n = len(base)
+
+    def _adjacent(deleted: set[int], other_deleted: set[int], other_changed: set[int]) -> bool:
+        for idx in deleted:
+            # Only a line the OTHER side did NOT also delete is a real
+            # modify/delete conflict. When both sides "delete" the same line
+            # (e.g. the conflict unit's base is the whole file but current/
+            # replayed are just the marker block — lines outside the block
+            # appear deleted by both), it's agreed context, not a conflict.
+            if idx in other_deleted:
+                continue
+            if idx - 1 >= 0 and (idx - 1) in other_changed:
+                return True
+            if idx + 1 < n and (idx + 1) in other_changed:
+                return True
+        return False
+
+    return _adjacent(cur_deleted, rep_deleted, rep_changed) or _adjacent(rep_deleted, cur_deleted, cur_changed)
 
 
 # ---------------------------------------------------------------------------
@@ -815,6 +899,23 @@ def _try_zealous_merge(base: str, current: str, replayed: str) -> str | None:
         # No replace/delete regions against base (only possible insertions,
         # already excluded above) → nothing for zealous to merge here.
         return None
+    # Modify/delete adjacency guard (mirrors the disjoint rule's guard). A
+    # deletion by one side of a base line ADJACENT to a line the other side
+    # changed is a genuine conflict (git flags it — the diffs overlap when
+    # aligned), but the line-by-line walk would apply the deletion as a one-
+    # sided change and silently drop the line the other side's edit abuts.
+    # Decline so the conflict escalates. Only applied when current and replayed
+    # have DIFFERENT line counts (an asymmetric add/remove — a real deletion):
+    # when they have the SAME (shorter-than-base) count, the "deletions" are
+    # typically shared context outside a conflict marker block (base is the
+    # whole file, current/replayed are the block), not a real modify/delete.
+    cur_split = current.splitlines()
+    rep_split = replayed.splitlines()
+    if (
+        len(cur_split) != len(rep_split)
+        and _has_delete_adjacent_to_other_change(base_lines, cur_split, rep_split)
+    ):
+        return None
 
     out: list[str] = []
     i = 0
@@ -849,7 +950,7 @@ def _try_zealous_merge(base: str, current: str, replayed: str) -> str | None:
             for rs in range(i + 1, end):
                 if rs in rep_regions:
                     re_, rrep = rep_regions[rs]
-                    if not _region_covered(rep, i, rs, re_, rrep):
+                    if not _region_covered(rep, i, end, rs, re_, rrep):
                         return None
             out.extend(rep)
             i = end
@@ -859,32 +960,48 @@ def _try_zealous_merge(base: str, current: str, replayed: str) -> str | None:
             for cs in range(i + 1, end):
                 if cs in cur_regions:
                     ce, crep = cur_regions[cs]
-                    if not _region_covered(rep, i, cs, ce, crep):
+                    if not _region_covered(rep, i, end, cs, ce, crep):
                         return None
             out.extend(rep)
             i = end
         else:
             out.append(base_lines[i])
             i += 1
-    return "\n".join(out)
+    return _restore_trailing_newline("\n".join(out), base, current, replayed)
 
 
 def _region_covered(
-    emitted: list[str], span_start: int, r_start: int, r_end: int,
+    emitted: list[str], span_start: int, span_end: int, r_start: int, r_end: int,
     r_replacement: list[str],
 ) -> bool:
     """True if the other side's region replacement is already covered by ``emitted``.
 
-    When one side's region (starting at ``span_start``) spans past the other's
-    region (starting at ``r_start``), the walk emits the spanning side and jumps
-    past the other. This is only safe if the jumped-past region's edit is
-    redundant — its replacement already appears at the CORRECT POSITIONAL offset
-    within ``emitted`` (not just as a coincidental suffix). If the jumped-past
-    edit differs or is a pure deletion, it would be silently dropped.
+    When one side's region (spanning base lines ``[span_start, span_end)``)
+    spans past the other's region (``[r_start, r_end)``), the walk emits the
+    spanning side and jumps past the other. This is only safe if the jumped-past
+    region's edit is redundant — its replacement already appears at the CORRECT
+    POSITIONAL offset within ``emitted`` (not just as a coincidental suffix). If
+    the jumped-past edit differs or is a pure deletion, it would be silently
+    dropped.
 
     ``span_start`` is the spanning region's base-line start; ``r_start`` is the
     jumped-past region's base-line start. The positional offset is
     ``r_start - span_start``. The replacement must align exactly there.
+
+    LENGTH INVARIANT: the 1:1 base-line→emitted-line correspondence only holds
+    when the spanning side's replacement is the SAME length as its base span
+    (``len(emitted) == span_end - span_start``). A grown or shrunk replacement
+    shifts every position after the change, so the naive offset is an arbitrary
+    position and a coincidental textual match could wrongly declare the inner
+    edit "covered" — silently dropping the other side's change. When the lengths
+    differ, decline (return False) so the conflict escalates.
+
+    Exception: a pure DELETION (``r_replacement == []``) is covered whenever the
+    spanning side emitted no content at the deletion's positional offset — its
+    own ``offset >= len(emitted)`` check is sound regardless of span length
+    (a deletion adds nothing, so a shorter emitted list still correctly
+    indicates the line is gone). Applying the length guard to deletions would
+    wrongly reject agreed deletions (both sides drop the same trailing line).
     """
     if not r_replacement:
         # A pure deletion is covered if the spanning side ALSO deleted that base
@@ -893,6 +1010,8 @@ def _region_covered(
         # side's replacement didn't reach that base line (it was deleted too).
         offset = r_start - span_start
         return offset >= len(emitted)
+    if len(emitted) != (span_end - span_start):
+        return False
     offset = r_start - span_start
     if offset < 0 or offset + len(r_replacement) > len(emitted):
         return False
