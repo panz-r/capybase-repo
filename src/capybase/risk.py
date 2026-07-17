@@ -307,6 +307,28 @@ class RiskEngine:
                 reasons=soft or ["dropped a symbol a later commit needs"],
                 required_followups=soft,
             )
+        # Content-loss warnings that persisted past the retry budget must
+        # ESCALATE, not silently accept. The retry branches above only fire
+        # while ``retry_count < budget``; once exhausted they fall through, and
+        # without this guard the merge was accepted-with-warning — a silent
+        # wrong accept (data loss: a dropped safety check, import, function, or
+        # later-commit dependency). The docstrings above promise "escalate if
+        # it persists"; this delivers that. The more-heuristic warnings
+        # (``preservation_heuristic`` copy-one-side, ``unattributed_code``) are
+        # NOT here — a verbatim copy of one side can be a valid merge for a
+        # trivial conflict, so they accept-with-warning when exhausted.
+        _content_loss = {
+            "both_sides_represented", "intent_coverage",
+            "referenced_symbol_dropped", "future_obligation",
+        }
+        if warning_names & _content_loss:
+            return _escalate(
+                result,
+                [
+                    "content-loss warning persisted past the retry budget",
+                    *soft,
+                ],
+            )
         # Verifier-model critic disagreement (Proposer-Critic): the
         # LLM judge flagged the resolution as dropping a side's INTENT — the one
         # semantic signal no syntactic validator can make. The critic gets its

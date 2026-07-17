@@ -52,6 +52,33 @@ def test_normalize_collapses_blank_lines():
     assert "\n\n" not in a
 
 
+def test_r43_normalize_crlf_to_lf():
+    """r43 (MEDIUM): normalize never converted CRLF → LF, so two byte-identical
+    resolutions differing only in line endings (a Windows worktree's CRLF blobs
+    echoed by the model) got different normalization keys → split clusters →
+    degraded agreement score (and in a tie, a flipped winner). Now normalizes
+    CRLF (and bare CR) to LF before everything else."""
+    lf = "def foo():\n    return 1"
+    crlf = "def foo():\r\n    return 1"
+    assert normalize(lf, "python") == normalize(crlf, "python"), (
+        f"CRLF vs LF split clusters: {normalize(lf, 'python')!r} != {normalize(crlf, 'python')!r}"
+    )
+    # No CR survives normalization.
+    assert "\r" not in normalize(crlf, "python")
+    # A cluster of mixed-line-ending samples is unanimous.
+    from capybase.conflict_model import CandidateResolution
+    cands = [
+        CandidateResolution(candidate_id="a", unit_id="u", model_name="m",
+                            prompt_version="v", resolved_text=lf),
+        CandidateResolution(candidate_id="b", unit_id="u", model_name="m",
+                            prompt_version="v", resolved_text=lf),
+        CandidateResolution(candidate_id="c", unit_id="u", model_name="m",
+                            prompt_version="v", resolved_text=crlf),
+    ]
+    clusters = cluster(cands, "python")
+    assert len(clusters) == 1, f"mixed line endings split into {len(clusters)} clusters"
+
+
 # ---------------------------------------------------------------------------
 # cluster + select
 # ---------------------------------------------------------------------------

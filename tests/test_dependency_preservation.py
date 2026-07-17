@@ -249,10 +249,13 @@ def test_risk_engine_retries_on_dropped_dependency():
     assert any("dropped" in r.lower() or "dependency" in r.lower() for r in decision.reasons)
 
 
-def test_risk_engine_accepts_with_warning_when_retries_exhausted():
-    """Once retries are exhausted, a passing candidate is accepted-with-warning
-    (matches both_sides_represented / copied_one_side semantics — soft signals
-    retry while budget remains, then accept rather than hard-block)."""
+def test_risk_engine_escalates_with_warning_when_retries_exhausted():
+    """A referenced-symbol-drop (a base-referenced dependency the merge removed)
+    is a content-loss warning: it retries while budget remains, then ESCALATES
+    when exhausted (r43 — the prior accept-with-warning silently lost a needed
+    dependency). This matches both_sides_represented / intent_coverage /
+    future_obligation; the heuristic copy-one-side warning is the one that
+    accepts-with-warning when exhausted."""
     from capybase.conflict_model import VerificationResult, VerificationWarning
     from capybase.risk import RiskEngine
 
@@ -269,8 +272,8 @@ def test_risk_engine_accepts_with_warning_when_retries_exhausted():
     # Below the limit → retry.
     assert engine.decide(result, retry_count=0).action == "retry"
     assert engine.decide(result, retry_count=1).action == "retry"
-    # At the limit → can't retry, no hard failure, no consensus signal → accept.
-    assert engine.decide(result, retry_count=2).action == "accept"
+    # At the limit → escalate (content loss that persisted).
+    assert engine.decide(result, retry_count=2).action == "escalate"
 
 
 # ---------------------------------------------------------------------------

@@ -84,6 +84,12 @@ def normalize(text: str, language: str | None = None) -> str:
     """
     if not text:
         return ""
+    # Normalize CRLF → LF before anything else. Two byte-identical resolutions
+    # that differ only in line endings (a Windows worktree's CRLF blobs echoed
+    # by the model) must cluster together; without this they got different
+    # normalization keys, splitting the cluster and degrading the agreement
+    # score (and in a tie, flipping the winner).
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     from capybase.adapters.abstract_parser import _STRING_LIT_RE, _RAW_STRING_RE
     # Partition lines into "string-interior" vs "code" by tracking open
     # multi-line strings across the whole text. A line is string-interior if a

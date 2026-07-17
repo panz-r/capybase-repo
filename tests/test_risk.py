@@ -325,3 +325,69 @@ def test_agreement_and_entropy_both_gate_accept():
         res, retry_count=0, consensus_agreement=0.4, consensus_entropy=0.5,
     ).action == "escalate"
 
+
+# ---------------------------------------------------------------------------
+# Round 43 — content-loss soft warnings escalate when budget exhausted
+# ---------------------------------------------------------------------------
+
+
+def test_r43_content_loss_warning_escalates_when_budget_exhausted():
+    """r43 (HIGH): a content-loss soft warning (dropped side, dropped dependency,
+    intent coverage) that persists past the retry budget must ESCALATE, not
+    silently accept. The surrounding docstrings promised 'escalate if it
+    persists' but the code fell through to accept when the budget ran out — a
+    silent wrong accept (data loss: a dropped safety check, import, or function).
+    Only the more-heuristic warnings (copy-one-side, unattributed) accept-with-
+    warning when exhausted; a definitive content drop escalates."""
+    eng = RiskEngine(max_retries_per_unit=2)
+    # referenced_symbol_dropped — a base-referenced dependency the merge removed.
+    res = _result(
+        True, {"dropped_referenced_symbol": True},
+        warnings=[VerificationWarning(
+            validator="referenced_symbol_dropped", message="dropped validate")],
+    )
+    # Budget exhausted (retry_count past the ceiling).
+    assert eng.decide(res, retry_count=99).action == "escalate", (
+        "content-loss warning silently accepted after budget exhausted"
+    )
+
+
+def test_r43_dropped_side_escalates_when_budget_exhausted():
+    """r43: same escalation contract for both_sides_represented (a side's
+    additions definitively dropped)."""
+    eng = RiskEngine(max_retries_per_unit=2)
+    res = _result(
+        True, {"dropped_a_side": True},
+        warnings=[VerificationWarning(
+            validator="both_sides_represented", message="dropped")],
+    )
+    assert eng.decide(res, retry_count=99).action == "escalate"
+
+
+def test_r43_intent_coverage_escalates_when_budget_exhausted():
+    """r43: same escalation contract for intent_coverage (structural coverage
+    below floor)."""
+    eng = RiskEngine(max_retries_per_unit=2)
+    res = _result(
+        True, {"intent_coverage_min": 0.3},
+        warnings=[VerificationWarning(
+            validator="intent_coverage", message="below floor")],
+    )
+    assert eng.decide(res, retry_count=99).action == "escalate"
+
+
+def test_r43_copy_one_side_still_accepts_when_exhausted():
+    """r43 REGRESSION: the copy-one-side heuristic warning (preservation_
+    heuristic) is a weaker, more-ambiguous signal than a definitive content
+    drop — it still accepts-with-warning when the budget is exhausted (a
+    verbatim copy of one side is a valid merge for a trivial/value-resolution
+    conflict, just suboptimal). The escalation applies only to content-loss
+    warnings, not this heuristic."""
+    eng = RiskEngine(max_retries_per_unit=2)
+    res = _result(
+        True, {"copied_one_side": True},
+        warnings=[VerificationWarning(
+            validator="preservation_heuristic", message="copied")],
+    )
+    assert eng.decide(res, retry_count=99).action == "accept"
+
