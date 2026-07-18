@@ -1954,6 +1954,88 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 # A line with UNBALANCED parens is a partial multi-line method —
                 # keep buf so the continuation completes the signature.
                 buf = ""
+            # Go top-level newline-terminated declarations: Go has no ``;``, so
+            # ``var X = ...``, ``const N = ...``, ``type Handler = ...`` at file
+            # scope are terminated by a newline, not a ``;``. The ``;`` handler
+            # never fires for them → they were silently dropped (and worse, a
+            # ``var``/``const`` line immediately before a ``func`` accumulated
+            # into the func's buffer and triggered ``_is_initializer_literal``,
+            # dropping the func too). Emit the field at the newline for Go when
+            # the buffer holds a complete field declaration and is NOT awaiting
+            # a ``{`` body (function/struct/interface bodies use ``{``; the brace
+            # machine handles those — don't emit them here).
+            if (
+                language == "go"
+                and brace_depth == 0
+                and not stack
+                and buf.strip()
+                # A statement awaiting a ``{`` body (a func/method signature)
+                # is handled by the brace machine, not here. But a Go ``type X
+                # func(...)`` / ``var X = f(...)`` has balanced parens as part
+                # of a type/initializer, NOT a pending body — only treat as
+                # pending when the statement LEADS with ``func`` (the one form
+                # that opens a ``{`` body at file scope).
+                and not (
+                    _buf_has_pending_signature(buf)
+                    and buf.split()[0:1] == ["func"]
+                )
+                # Skip statements that LEAD with a brace-body keyword (their
+                # ``{`` is handled by the brace machine): ``func``, ``struct``,
+                # ``interface``. A ``type Name func(...)`` type definition does
+                # NOT lead with ``func`` (it leads with ``type``) and has no
+                # ``{`` body, so it's correctly emitted here.
+                and not (
+                    buf.split()[0:1] and buf.split()[0] in
+                    ("func", "struct", "interface")
+                )
+            ):
+                stmt_start = stmt_start_byte
+                while stmt_start < i and src[stmt_start] == "\n":
+                    stmt_start += 1
+                name_start = _skip_leading_noise(src, stmt_start, i + 1)
+                stmt_text = src[name_start : i + 1]
+                fname = _field_name_from_buf(stmt_text)
+                # Go ``type Name <Spec>`` (no ``=``): ``type Handler func(...)``,
+                # ``type Celsius float64``. The field regex requires ``:=/``/end
+                # after the name; these forms have a type spec instead. Recover
+                # the name as the identifier after ``type``.
+                if fname is None:
+                    _toks = stmt_text.split()
+                    for _ti, _t in enumerate(_toks):
+                        if _t == "type" and _ti + 1 < len(_toks):
+                            _cand = re.split(r"[<(\[{]", _toks[_ti + 1], maxsplit=1)[0]
+                            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _cand):
+                                fname = _cand
+                            break
+                if fname is not None:
+                    end_row = cur_row_at(i)
+                    body_start = stmt_start
+                    body_text = src[body_start : i + 1]
+                    start_row_f = cur_row_at(body_start)
+                    existing_f = {u.name for u in units if u.name}
+                    if fname not in existing_f:
+                        units.append(
+                            StructuralUnit(
+                                kind=KIND_FIELD,
+                                name=fname,
+                                span=(start_row_f, end_row),
+                                body=body_text,
+                                fingerprint=unit_body_fingerprint(body_text, lang=language),
+                            )
+                        )
+                # The Go statement is complete at the newline — reset the buffer
+                # so the next declaration (a func, another var, etc.) doesn't
+                # accumulate onto it. Without this, ``package main`` + the next
+                # line concatenated, and ``var X`` + ``func F`` merged (dropping
+                # F via _is_initializer_literal). Function/struct/interface
+                # bodies (which use ``{``) are excluded above and handled by the
+                # brace machine.
+                buf = ""
+                # Advance the statement-start trackers past this complete Go
+                # statement so the next declaration's slice (and body) starts at
+                # the next line, not back at a prior ``package``/``var`` line.
+                stmt_start_byte = new_i
+                inner_stmt_start = new_i
             # A comment line / block-comment-interior line is not a statement:
             # advance the trackers to the start of the NEXT line so a following
             # field's slice (taken at its ``;``) doesn't reach back into the
@@ -2006,6 +2088,14 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 # Declaration-level brace. Push a new unit.
                 kind, name, container_only = classified
                 decl_start = _find_decl_start(src, i, line_start)
+                # For Go (no ``;``), ``stmt_start_byte`` is advanced past each
+                # newline-terminated statement, so it's a tighter floor than the
+                # ``;``/``}``-based ``_find_decl_start`` walk (which falls back
+                # to byte 0 when no separator precedes the decl — e.g. ``package
+                # main`` before ``func main()``). Use it as a floor so the body
+                # starts at the declaration, not a prior top-level statement.
+                if language == "go":
+                    decl_start = max(decl_start, stmt_start_byte)
                 attr_row = pending_attr_row
                 pending_attr_row = None
                 # Detect a macro_rules! body: mark it so its template contents are

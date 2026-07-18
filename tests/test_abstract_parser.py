@@ -4689,3 +4689,56 @@ def test_r42_attribute_retained_on_bodyless_item():
     assert bodyless.span[0] < bodyless.span[1] or "#[cfg" in bodyless.body, (
         f"attribute stripped from bodyless span: {bodyless.span}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 44 — Go newline-terminated statements
+# ---------------------------------------------------------------------------
+
+
+def test_r44_go_toplevel_var_const_surface():
+    """r44 (HIGH): Go has no ``;`` — statements are newline-terminated. The
+    top-level field emitter only fired at ``;``, so Go package-level ``var``/
+    ``const`` declarations were silently dropped (zero units). These are
+    extremely common public API exports (``var ErrNotFound = ...``, ``const
+    MaxRetries = ...``). Now emitted at the newline for Go."""
+    flat = _flat(
+        "package main\nvar ErrNotFound = errors.New(\"x\")\nconst MaxRetries = 3\nfunc main() {}\n",
+        "go",
+    )
+    names = {n for _, n in _kinds_of_flat(flat) if n}
+    assert "ErrNotFound" in names, f"Go var dropped; got {names}"
+    assert "MaxRetries" in names, f"Go const dropped; got {names}"
+    assert "main" in names  # function still works
+
+
+def test_r44_go_var_before_func_does_not_drop_func():
+    """r44 (HIGH): a ``var X = ...`` / ``const N = ...`` line immediately before
+    a ``func`` caused the func to be DROPPED — without a ``;``, the token buffer
+    accumulated across the two statements and hit ``_is_initializer_literal``,
+    classifying the func's ``{`` as an object literal. Now the var/const is
+    emitted at its newline, resetting the buffer before the func."""
+    flat = _flat("const N = 1\nfunc F() {}\nfunc G() {}\n", "go")
+    names = [n for _, n in _kinds_of_flat(flat) if n]
+    assert "F" in names, f"func after const dropped; got {names}"
+    assert "G" in names
+
+
+def test_r44_go_package_not_absorbed_into_first_decl_body():
+    """r44 (HIGH): the ``package main`` line was absorbed into the first
+    declaration's body/span because ``_find_decl_start`` walks back to the last
+    ``;``/``}``/``{`` (none in Go's package line) → byte 0. The body/span must
+    start at the declaration, not the package line."""
+    flat = _flat("package main\n\nfunc main() {\n    fmt.Println(\"hi\")\n}\n", "go")
+    m = _by_name(flat, "main")
+    assert m is not None
+    assert "package main" not in m.body, (
+        f"package line absorbed into main body: {m.body!r}"
+    )
+
+
+def test_r44_go_type_alias_at_toplevel():
+    """r44: a Go top-level type alias ``type Handler func(x int) error``
+    (newline-terminated, no ``{``) should surface as a field."""
+    flat = _flat("type Handler func(x int) error\n", "go")
+    assert "Handler" in [n for _, n in _kinds_of_flat(flat) if n]
