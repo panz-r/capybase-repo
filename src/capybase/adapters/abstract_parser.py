@@ -1114,7 +1114,7 @@ _A_FUNC_KEYWORDS = (
 # Field-like (top-level bindings): ``const``/``static``/``type``/``var``/``let``
 # declarations without a following ``{`` (so they don't open a scope) — detected
 # separately from the brace machine.
-_A_FIELD_KEYWORDS = ("const", "static", "type", "var", "let", "final")
+_A_FIELD_KEYWORDS = ("const", "static", "type", "var", "let", "final", "val")
 
 # Control-flow keywords whose ``(...)`` + ``{`` shape mimics a keyword-less method
 # signature (``if (x) {``, ``while (y) {``, ``switch (s) {``). Used by the
@@ -2116,7 +2116,15 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                 stack.append(unit)
             # Either way, depth increases.
             brace_depth += 1
-            buf = ""
+            # Wipe the token buffer ONLY for a declaration brace (a new scope
+            # begins). An object/struct-literal brace (``classified is None``) is
+            # internal to the current statement — wiping it would lose the
+            # signature accumulated so far. Critically for Go: ``interface{}``
+            # inside a method signature (``B(v interface{}) error``) is an inline
+            # type literal (classified None); wiping buf at its ``{`` lost ``B(v
+            # interface`` and left only ``) error`` → the method was dropped.
+            if classified is not None:
+                buf = ""
             # A declaration brace opens a new body — the next associated-item
             # statement (if any) starts right after this brace. An object/struct-
             # literal brace (``classified is None``) does NOT reset the tracker:
@@ -2162,7 +2170,13 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             # close), not for an object-literal brace inside a statement.
             if closed_unit and brace_depth > 0:
                 inner_stmt_start = i + 1
-            buf = ""
+            # Wipe the token buffer ONLY when a declaration scope was closed
+            # (``closed_unit``). An inline type literal's ``}`` (e.g. Go
+            # ``interface{}`` inside a method signature) does NOT close a scope —
+            # wiping buf here lost the method signature accumulated before the
+            # literal (``B(v interface`` → buf became ``) error`` → method dropped).
+            if closed_unit:
+                buf = ""
             i += 1
             continue
 
@@ -2630,11 +2644,20 @@ def _is_initializer_literal(toks: list[str]) -> bool:
     # object/struct literal. ``async`` must be excluded so
     # ``const f = async () => { ... }`` and ``= async function() { ... }`` route
     # to the arrow/function path instead of being treated as a field initializer.
+    # Also reject when a function keyword appears ANYWHERE after ``=``: in
+    # newline-terminated languages (Kotlin) without a ``;``, a ``val x = 1`` and
+    # the following ``fun foo()`` accumulate into one buffer. Treating that as an
+    # initializer would classify ``fun foo() {`` as an object literal and drop the
+    # function. The function keyword means a real declaration brace follows.
+    has_func_after_eq = any(
+        t in ("fun", "fn", "func", "function") for t in after_eq
+    )
     return not (
         first_after.startswith("function")
         or first_after.startswith("class")
         or first_after.startswith("(")
         or first_after == "async"
+        or has_func_after_eq
     )
 
 
@@ -2785,6 +2808,20 @@ def _classify_a_brace(
         # a return type, not a keyword). Returns None for control flow / object
         # literals / anything that isn't a method-shaped declaration.
         return _classify_keywordless_method(toks, stack, brace_depth)
+
+    # Go inline type literal: ``interface{}`` / ``struct{}`` appearing INSIDE a
+    # method signature or composite type (e.g. ``B(v interface{})``) is NOT a
+    # declaration — the ``{`` is an inline type literal's body, not a scope-
+    # opening brace. When the class keyword is the tail token AND parens are
+    # still unbalanced in the buffer (we're mid-signature), treat the brace as
+    # depth-only (return None). Without this, a phantom ``class None`` scope was
+    # pushed, the method was dropped, and the following method's body corrupted.
+    if (
+        language == "go"
+        and last_kw in _A_CLASS_KEYWORDS
+        and b.count("(") > b.count(")")
+    ):
+        return None
 
     # Determine the name: the identifier right after the keyword.
     name: str | None = None
@@ -3459,7 +3496,7 @@ def _binding_name_before(toks: list[str], kw_idx: int) -> str | None:
 #: whitespace-normalized buffer at the ``;`` terminator.
 _A_FIELD_RE = re.compile(
     r"^(?:(?:pub(?:\([^)]*\))?|export|public|private|static|final|readonly|unsafe|inline|mut|extern)\s+)*"
-    r"(?:const|static|type|let|var)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\b"
+    r"(?:const|static|type|let|var|val)\s+(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\b"
     # An optional generic parameter list may follow the name (Rust/TS type
     # aliases: ``type Map<K, V> = ...``). The ``<...>`` is balanced so nested
     # generics (``type M<K, V> = HashMap<K, V>``) don't stop the match early.

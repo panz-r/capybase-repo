@@ -103,6 +103,25 @@ def test_test_gated_side_picks_upstream_value(repo):
     assert "<<<<<<<" not in text
 
 
+def test_r45_test_gated_side_works_with_final_only_config(repo):
+    """r45 (HIGH): a config with only ``tests.final`` set (pre_continue empty)
+    made the picker silently inert — the guard used ``pre_continue or final``
+    (passing), but the probe hardcoded ``_run_tests("pre_continue", ...)`` which
+    read ``config.tests.pre_continue`` → None → returned True vacuously → both
+    sides "passed" → picker declined. Now resolves the label at the guard and
+    threads it to the probe, so final-only configs work."""
+    fixture = _make_value_conflict(repo)
+    cfg = _config(repo)
+    # Clear pre_continue — simulate a final-only config.
+    cfg.tests.pre_continue = None
+    cfg.tests.final = f"{sys.executable} -m pytest -v -c /dev/null tests/"
+    orch = Orchestrator(cfg, repo=str(repo), out=lambda *_a, **_k: None)
+    result = orch.run()
+    text = (repo / "app.py").read_text()
+    assert "9090" in text, f"final-only config: picker didn't resolve; got: {text}"
+    assert "7070" not in text
+
+
 def test_test_gated_side_declines_when_no_test_configured(repo):
     """When no real test command is configured (the `true` no-op shim), the side
     picker declines — there's no way to discriminate → falls through to the LLM."""

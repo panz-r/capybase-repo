@@ -2169,8 +2169,16 @@ class Orchestrator:
         """
         # Scope guard: only when the test gate is real (required + a non-trivial
         # command). The no-op ``true`` shim can't discriminate, so decline.
-        cmd = self.config.tests.pre_continue or self.config.tests.final
-        if not self.config.tests.required or not cmd or cmd.strip() in ("true", "pytest"):
+        # Resolve which test command to probe with: prefer ``pre_continue`` (the
+        # fast targeted gate), fall back to ``final``. A final-only config
+        # (pre_continue empty) must still work — the probe uses whichever is set.
+        if self.config.tests.pre_continue:
+            _probe_cmd = self.config.tests.pre_continue
+            _probe_label = "pre_continue"
+        else:
+            _probe_cmd = self.config.tests.final
+            _probe_label = "final"
+        if not self.config.tests.required or not _probe_cmd or _probe_cmd.strip() in ("true", "pytest"):
             # Note: "pytest" is left to the LLM because pytest runs the WHOLE
             # suite (slow, and may have pre-existing failures unrelated to this
             # unit); the side picker targets targeted test commands (cargo test,
@@ -2242,7 +2250,7 @@ class Orchestrator:
                 {"candidate_id": cand.candidate_id, "side": side_label},
                 step_index=self.step, path=unit.path, unit_id=unit.unit_id,
             )
-            test_ok = self._run_tests("pre_continue", probe)
+            test_ok = self._run_tests(_probe_label, probe)
             if test_ok:
                 passed_sides.append((side_label, side_text, cand, validation))
             else:

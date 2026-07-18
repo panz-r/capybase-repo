@@ -4742,3 +4742,59 @@ def test_r44_go_type_alias_at_toplevel():
     (newline-terminated, no ``{``) should surface as a field."""
     flat = _flat("type Handler func(x int) error\n", "go")
     assert "Handler" in [n for _, n in _kinds_of_flat(flat) if n]
+
+
+# ---------------------------------------------------------------------------
+# Round 45 — Go interface{} in method signatures + side picker + Kotlin val
+# ---------------------------------------------------------------------------
+
+
+def test_r45_go_interface_method_with_interface_arg():
+    """r45 (HIGH): a Go interface method whose signature contains an inline
+    ``interface{}`` (or ``struct{}``) type literal caused cascade corruption —
+    the ``{`` of ``interface{}`` was classified as a phantom ``class None``
+    scope, the method was dropped, and the FOLLOWING method's body was
+    corrupted. The ``{`` of an inline type literal inside a method signature
+    (parens still open) is NOT a declaration scope."""
+    flat = _flat(
+        "type I interface {\n"
+        "    A() error\n"
+        "    B(v interface{}) error\n"
+        "    C() error\n"
+        "}\n",
+        "go",
+    )
+    kinds = _kinds_of_flat(flat)
+    # All three methods must surface; no phantom class None.
+    assert ("method", "A") in kinds, f"A dropped; got {kinds}"
+    assert ("method", "B") in kinds, f"B (interface{{}} arg) dropped; got {kinds}"
+    assert ("method", "C") in kinds, f"C dropped/corrupted; got {kinds}"
+    # No phantom anonymous class.
+    assert ("class", None) not in kinds, f"phantom class None; got {kinds}"
+
+
+def test_r45_go_interface_method_with_slice_of_interface():
+    """r45: ``Do(args []interface{}) error`` — the ``interface{}`` is inside a
+    slice type in the parameter list. Must not corrupt."""
+    flat = _flat(
+        "type I interface {\n"
+        "    Do(args []interface{}) error\n"
+        "    Close() error\n"
+        "}\n",
+        "go",
+    )
+    kinds = _kinds_of_flat(flat)
+    assert ("method", "Do") in kinds, f"Do dropped; got {kinds}"
+    assert ("method", "Close") in kinds, f"Close dropped; got {kinds}"
+
+
+def test_r45_kotlin_val_keyword_field():
+    """r45: Kotlin ``val`` was missing from ``_A_FIELD_KEYWORDS`` (only
+    ``var``/``let``), so even the keyworded form ``val x = 1`` produced no
+    unit. Now recognized."""
+    # Kotlin uses no semicolons — but the ; handler is the canonical path.
+    # Test with a semicolon (valid Kotlin).
+    flat = _flat("val name = \"x\";\n", "kotlin")
+    assert ("field", "name") in _kinds_of_flat(flat), (
+        f"Kotlin val field dropped; got {_kinds_of_flat(flat)}"
+    )
