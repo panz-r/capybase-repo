@@ -1661,7 +1661,49 @@ def _is_rust_resolution_error(msg: str) -> bool:
     return bool(msg and _RUST_SEMANTIC_ERROR.search(msg))
 
 
-def _braces_balanced(text: str) -> bool:
+def _comment_markers_for(language: str | None) -> tuple[str, ...]:
+    """The line-comment marker(s) for ``language``.
+
+    Defaults to ``("#",)`` (Python/shell) for unknown languages. Brace languages
+    use ``("//",)``; PHP uses both ``//`` and ``#``. Rust ``#`` is an attribute
+    (NOT a comment), Python ``//`` is floor division — using the wrong marker
+    caused phantom brace imbalance (a ``//``/``#`` inside a string cut the
+    string open, exposing a ``{`` that counted as code).
+    """
+    if language == "php":
+        return ("//", "#")
+    from capybase.adapters.abstract_parser import _lang_is_family_a
+    return ("//",) if _lang_is_family_a(language) else ("#",)
+
+
+def _mask_strings_and_comments(text: str, language: str | None) -> str:
+    """Mask string/char literals and strip line comments, language-aware.
+
+    Masks strings/chars FIRST (so a comment marker or ``{``/``}`` inside a
+    string is hidden), then strips the language-correct line-comment marker.
+    Without string-first ordering, a ``//`` or ``#`` inside a string cut it
+    open and a brace before it counted as code → phantom imbalance.
+    """
+    import re
+    # Mask strings/chars first (length-preserving-ish; content → spaces).
+    masked = re.sub(r'"(?:\\.|[^"\\])*"', lambda m: " " * len(m.group(0)), text)
+    masked = re.sub(r"'(?:\\.|[^'\\])*'", lambda m: " " * len(m.group(0)), masked)
+    # Now strip the language-correct line comment to end-of-line.
+    markers = _comment_markers_for(language)
+    if not markers:
+        return masked
+    out_lines = []
+    for line in masked.split("\n"):
+        cut = len(line)
+        for marker in markers:
+            idx = line.find(marker)
+            if 0 <= idx < cut:
+                cut = idx
+        out_lines.append(line[:cut])
+    return "\n".join(out_lines)
+
+
+def _braces_balanced(text: str, language: str | None = None) -> bool:
     """Cheap structural sanity check: are ``{}`` braces balanced?
 
     A per-unit splice that fills a marker span inside a larger construct (e.g.
@@ -1675,10 +1717,10 @@ def _braces_balanced(text: str) -> bool:
     inside a string that throws off the count is rare and the guard only SKIPS,
     never false-fails). Comments (``//`` to EOL, ``#`` to EOL) are stripped first.
     """
-    return _brace_imbalance_line(text) is None
+    return _brace_imbalance_line(text, language) is None
 
 
-def _brace_imbalance_line(text: str) -> int | None:
+def _brace_imbalance_line(text: str, language: str | None = None) -> int | None:
     """The 0-based line where ``{}`` braces first diverge, or None if balanced.
 
     Tracks running brace depth line-by-line; returns the line of the FIRST
@@ -1690,19 +1732,7 @@ def _brace_imbalance_line(text: str) -> int | None:
     """
     if not text:
         return None
-    import re
-
-    cleaned_lines = []
-    for line in text.split("\n"):
-        for marker in ("//", "#"):
-            idx = line.find(marker)
-            if idx >= 0:
-                line = line[:idx]
-        cleaned_lines.append(line)
-    cleaned = "\n.join"  # placeholder, replaced below
-    cleaned = "\n".join(cleaned_lines)
-    cleaned = re.sub(r'"(?:\\.|[^"\\])*"', '""', cleaned)
-    cleaned = re.sub(r"'(?:\\.|[^'\\])*'", "''", cleaned)
+    cleaned = _mask_strings_and_comments(text, language)
     depth = 0
     last_line = 0
     for line_no, line in enumerate(cleaned.split("\n")):
@@ -1719,29 +1749,20 @@ def _brace_imbalance_line(text: str) -> int | None:
     return None
 
 
-def _strip_strings_comments(text: str) -> list[str]:
-    """Strip // and # comments (per-line) then mask string/char literals.
+def _strip_strings_comments(text: str, language: str | None = None) -> list[str]:
+    """Mask string/char literals then strip line comments (language-aware).
 
     Returns the cleaned lines (without the trailing-join). Shared by the brace
     gate (:func:`_brace_imbalance_line`) and the deterministic repair
     (:func:`_try_balance_braces`) so the two agree on what counts as a brace.
+    Masks strings FIRST so a comment marker or brace inside a string is hidden;
+    strips only the language-correct comment marker (``//`` for brace langs,
+    ``#`` for Python/Ruby, both for PHP).
     """
-    import re
-
-    cleaned_lines = []
-    for line in text.split("\n"):
-        for marker in ("//", "#"):
-            idx = line.find(marker)
-            if idx >= 0:
-                line = line[:idx]
-        cleaned_lines.append(line)
-    cleaned = "\n".join(cleaned_lines)
-    cleaned = re.sub(r'"(?:\\.|[^"\\])*"', '""', cleaned)
-    cleaned = re.sub(r"'(?:\\.|[^'\\])*'", "''", cleaned)
-    return cleaned.split("\n")
+    return _mask_strings_and_comments(text, language).split("\n")
 
 
-def _try_balance_braces(text: str) -> str | None:
+def _try_balance_braces(text: str, language: str | None = None) -> str | None:
     """Deterministically repair a single brace imbalance, or return None.
 
     The live eval exposed a recurring failure: the model merges each hunk of a
@@ -1772,7 +1793,7 @@ def _try_balance_braces(text: str) -> str | None:
     if not text:
         return None
     lines = text.split("\n")
-    cleaned = _strip_strings_comments(text)
+    cleaned = _strip_strings_comments(text, language)
 
     # Walk depth to classify the imbalance (extra-close vs unclosed-open).
     # Walk the WHOLE text (don't break at the first negative) so the final
@@ -1807,7 +1828,7 @@ def _try_balance_braces(text: str) -> str | None:
             if deficit <= 0:
                 break
             raw = lines[i]
-            c = _strip_strings_comments(raw)[0] if i < len(cleaned) else raw
+            c = _strip_strings_comments(raw, language)[0] if i < len(cleaned) else raw
             if c.strip() == "}":
                 to_remove.append(i)
                 deficit -= 1
@@ -1819,7 +1840,7 @@ def _try_balance_braces(text: str) -> str | None:
             return None  # couldn't collect enough stray brace-only lines
         candidate = [l for i, l in enumerate(lines) if i not in set(to_remove)]
         result = "\n".join(candidate)
-        if _brace_imbalance_line(result) is None:
+        if _brace_imbalance_line(result, language) is None:
             return result
         return None
 
@@ -1837,7 +1858,7 @@ def _try_balance_braces(text: str) -> str | None:
         # Append the closing braces on their own line at the insertion point.
         candidate = lines[:insert_at] + [suffix] + lines[insert_at:]
         result = "\n".join(candidate)
-        if _brace_imbalance_line(result) is None:
+        if _brace_imbalance_line(result, language) is None:
             return result
         return None
 
@@ -1904,7 +1925,7 @@ class RustSyntaxValidator:
         # surrounding impl/fn) produces structurally-incomplete code that rustc
         # rejects with a spurious parse error. Skip the compile (defer to Phase B
         # whole-file cargo) when the spliced text has unbalanced braces.
-        if not _braces_balanced(spliced):
+        if not _braces_balanced(spliced, ctx.unit.language):
             return VerificationCheckResult(
                 name=self.name, passed=True,
                 message="spliced text has unbalanced braces; deferring to whole-file check",
@@ -2773,14 +2794,14 @@ class VerificationEngine:
         # Reported under the "syntax" validator name (it IS a syntax error) so
         # the existing test assertions and the risk/retry path treat it uniformly.
         if language in ("rust", "python") and self.config.require_syntax_if_supported:
-            imbalance_line = _brace_imbalance_line(whole)
+            imbalance_line = _brace_imbalance_line(whole, language)
             if imbalance_line is not None:
                 # Fix #1 — enrich the message with the brace delta so the model
                 # knows WHICH kind of imbalance it is (extra `}` vs unclosed `{`),
                 # not just "unbalanced". The classification matches
                 # _try_balance_braces: walk the cleaned depth to see whether it
                 # goes negative (extra close) or ends positive (unclosed open).
-                cleaned_for_msg = _strip_strings_comments(whole)
+                cleaned_for_msg = _strip_strings_comments(whole, language)
                 _d = 0
                 _went_neg = False
                 for _cl in cleaned_for_msg:

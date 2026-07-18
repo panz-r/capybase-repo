@@ -64,9 +64,11 @@ def test_braces_balanced_unbalanced():
 
 
 def test_braces_balanced_ignores_strings_and_comments():
-    # Brace inside a string literal and a comment should not count.
+    # Brace inside a string literal and a comment should not count. The language
+    # arg selects the comment marker (Rust '//'); without it, the default '#'
+    # marker is used and the '// } extra' comment wouldn't be stripped.
     text = 'let s = "{ unbalanced }"; // } extra\nfn f() {}\n'
-    assert _braces_balanced(text) is True
+    assert _braces_balanced(text, "rust") is True
 
 
 def test_braces_balanced_empty():

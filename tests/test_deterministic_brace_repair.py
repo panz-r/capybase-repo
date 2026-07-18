@@ -232,3 +232,46 @@ def test_splice_snippet_no_error_line_returns_empty():
     )]
     snippet = _splice_context_snippet(failures, worktree, accepted)
     assert snippet == ""
+
+
+# ---------------------------------------------------------------------------
+# Round 44 — brace-balance: string-aware + language-aware comment stripping
+# ---------------------------------------------------------------------------
+
+
+def test_r44_brace_imbalance_ignores_floor_division_in_string():
+    """r44 (HIGH): the brace-balance check stripped ``//`` and ``#`` comments
+    BEFORE masking string literals, using BOTH markers for every language. A
+    ``//`` or ``#`` inside a string literal was mistaken for a comment, the
+    string was cut open, and a ``{`` before it counted as code → phantom brace
+    imbalance → a correct merge was escalated. Python floor division ``x = {a // 2}``
+    and Rust strings ``"open { // close"`` both triggered it."""
+    from capybase.verification import _brace_imbalance_line
+    # Python: floor division inside a set literal — balanced, valid code.
+    assert _brace_imbalance_line("x = {a // 2}\ny = 1\n", "python") is None, (
+        "floor-division // inside a { } flagged as phantom brace imbalance"
+    )
+    # Rust: a string containing { and // — balanced.
+    assert _brace_imbalance_line('let s = "open { // close";\nlet t = 1;\n', "rust") is None
+
+
+def test_r44_brace_imbalance_language_aware_comment_markers():
+    """r44: the wrong language's comment marker must not be stripped. Python's
+    ``//`` is floor division (not a comment); Rust's ``#`` is an attribute (not
+    a comment). Only the language-correct marker is stripped now."""
+    from capybase.verification import _brace_imbalance_line
+    # Python: ``//`` is floor division — must NOT be stripped, so a `{` before
+    # it (inside a set literal) counts and the line is correctly balanced.
+    assert _brace_imbalance_line("x = {a // b}\n", "python") is None
+    # Rust: ``#`` is an attribute prefix — must NOT be stripped as a comment.
+    # A balanced Rust file with an attribute.
+    assert _brace_imbalance_line("#[cfg(test)]\nfn f() {}\n", "rust") is None
+
+
+def test_r44_try_balance_braces_no_false_repair_on_valid_code():
+    """r44: _try_balance_braces must NOT repair (append a ``}``) code that's
+    actually balanced — the phantom imbalance from comment-in-string must not
+    trigger a corrupting repair."""
+    from capybase.verification import _try_balance_braces
+    # Python floor division — balanced, no repair needed.
+    assert _try_balance_braces("x = {a // 2}\ny = 1\n", "python") is None

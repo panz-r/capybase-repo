@@ -631,12 +631,14 @@ def _try_deterministic_brace_repair(
         spliced = _resolved_buffer(original, accepted)
     except Exception:  # noqa: BLE001 - splice may fail on bad spans
         return None
-    if _brace_imbalance_line(spliced) is None:
+    # Language for comment-marker awareness (Python '#' vs Rust '//').
+    _lang = accepted[fault_idx][0].language if 0 <= fault_idx < len(accepted) else None
+    if _brace_imbalance_line(spliced, _lang) is None:
         return None  # not actually a brace imbalance; nothing to fix
-    repaired = _try_balance_braces(spliced)
+    repaired = _try_balance_braces(spliced, _lang)
     if repaired is None:
         return None  # couldn't balance in one edit → defer to LLM
-    if _brace_imbalance_line(repaired) is not None:
+    if _brace_imbalance_line(repaired, _lang) is not None:
         return None  # safety re-check (shouldn't happen, but never trust)
     # Build a synthetic whole-file unit carrying the repaired buffer. This is
     # the correct representation: the deterministic fix produced a complete file.
