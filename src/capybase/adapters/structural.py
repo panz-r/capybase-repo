@@ -379,14 +379,17 @@ def match_entities(
     # pairs in the resolver/3-way-diff but NOT here, causing a false 'dropped'
     # flag while the merge correctly recognized the rename.
     from capybase.adapters.abstract_parser import entity_body_content as _body_content
-    target_by_body: dict[tuple[str, str], Entity] = {}
-    target_body_tokens: dict[tuple[str, str], frozenset[str]] = {}
+    # List-of-candidates: when two targets share identical body content (common
+    # for stubs/wrappers), BOTH must be reachable — otherwise the second source
+    # finds the already-consumed first target and silently loses the pairing.
+    target_by_body: dict[tuple[str, str], list[Entity]] = {}
+    target_body_tokens: dict[tuple[str, str], list[frozenset[str]]] = {}
     for e in targets:
         bf = _body_content(e.body or "", lang=lang) or ""
         if bf:
             key = (e.kind, bf)
-            target_by_body.setdefault(key, e)
-            target_body_tokens[key] = frozenset(_token_set(bf))
+            target_by_body.setdefault(key, []).append(e)
+            target_body_tokens.setdefault(key, []).append(frozenset(_token_set(bf)))
 
     out: list[EntityMatch] = []
     # Targets already claimed by an earlier source's rename pairing. Prevents
@@ -403,40 +406,42 @@ def match_entities(
         bf = _body_content(src.body or "", lang=lang) or ""
         target: Entity | None = None
         if bf:
-            direct = target_by_body.get((src.kind, bf))
-            if (
-                direct is not None
-                and (direct.kind, direct.name) not in consumed_targets
-                and src.name not in target_names_by_kind.get(src.kind, set())
-                and (
+            # Exact body match: iterate candidates to find an unconsumed one.
+            for direct in target_by_body.get((src.kind, bf), []):
+                if (direct.kind, direct.name) in consumed_targets:
+                    continue
+                if src.name in target_names_by_kind.get(src.kind, set()):
+                    break  # source name still present → not a rename
+                if (
                     _name_similarity(direct.name, src.name) >= _RENAME_NAME_SIMILARITY_THRESHOLD
                     or _body_is_substantial(bf)
-                )
-            ):
-                target = direct
-            else:
+                ):
+                    target = direct
+                    break
+            if target is None:
                 # Jaccard fallback for a rename that also edited the body.
                 tk = frozenset(_token_set(bf))
                 best: tuple[float, Entity] | None = None
-                for key, oks in target_body_tokens.items():
+                for key, oks_list in target_body_tokens.items():
                     if key[0] != src.kind:
                         continue
-                    cand = target_by_body[key]
-                    if (cand.kind, cand.name) in consumed_targets:
-                        continue  # already claimed by an earlier source
-                    if src.name in target_names_by_kind.get(src.kind, set()):
-                        break  # source name still present → not a rename
-                    inter = len(tk & oks)
-                    union = len(tk | oks)
-                    if union == 0:
-                        continue
-                    j = inter / union
-                    if (
-                        j >= _RENAME_BODY_JACCARD_THRESHOLD
-                        and _body_is_substantial(bf)
-                        and (best is None or j > best[0])
-                    ):
-                        best = (j, cand)
+                    cands = target_by_body.get(key, [])
+                    for oks, cand in zip(oks_list, cands):
+                        if (cand.kind, cand.name) in consumed_targets:
+                            continue
+                        if src.name in target_names_by_kind.get(src.kind, set()):
+                            break  # source name still present → not a rename
+                        inter = len(tk & oks)
+                        union = len(tk | oks)
+                        if union == 0:
+                            continue
+                        j = inter / union
+                        if (
+                            j >= _RENAME_BODY_JACCARD_THRESHOLD
+                            and _body_is_substantial(bf)
+                            and (best is None or j > best[0])
+                        ):
+                            best = (j, cand)
                 if best is not None:
                     target = best[1]
         if target is not None:

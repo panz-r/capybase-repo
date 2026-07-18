@@ -4860,3 +4860,31 @@ def test_r45_typed_field_in_class():
     assert ("field", "X") in kinds, f"in-class field X dropped; got {kinds}"
     assert ("field", "name") in kinds, f"in-class field name dropped; got {kinds}"
     assert ("method", "Do") in kinds
+
+
+# ---------------------------------------------------------------------------
+# Round 46 — dup-bodied 2-way rename + whitespace-collapse identical_sides
+# ---------------------------------------------------------------------------
+
+
+def test_r46_dup_bodied_2way_rename_both_found():
+    """r46 (HIGH): when two base entities share identical substantial bodies and
+    both are renamed on one side, ``detect_renames_2way`` lost the second rename
+    — ``base_by_content`` used ``setdefault`` (first-wins), so the second
+    dup-bodied base was invisible. Only ``foo→qux`` paired; ``bar→plip`` was
+    treated as a fresh addition, producing a duplicate-definition merge. The 3-way
+    ``_detect_renames`` was fixed for this in round 27 (list-of-candidates) but
+    the fix was never back-ported to the 2-way core. Now both pair."""
+    from capybase.adapters.abstract_parser import detect_renames_2way, StructuralUnit
+    def mk(name, body, kind="function"):
+        return StructuralUnit(kind=kind, name=name, body=body, span=(0, 1),
+                              fingerprint=ap.unit_body_fingerprint(body, lang="python"))
+    body = "def x():\n    return 12345678"  # substantial (>8 chars)
+    base = [mk("foo", body), mk("bar", body)]
+    side = [mk("qux", body), mk("plip", body)]
+    renames, removed = detect_renames_2way(base, side, lang="python")
+    rename_map = dict(renames)
+    assert ("function", "qux") in rename_map, f"foo->qux not paired; got {rename_map}"
+    assert ("function", "plip") in rename_map, f"bar->plip not paired; got {rename_map}"
+    assert rename_map[("function", "qux")] == ("function", "foo")
+    assert rename_map[("function", "plip")] == ("function", "bar")

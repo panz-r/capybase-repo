@@ -660,3 +660,30 @@ def test_r40_disjoint_preserves_trailing_newline():
         assert (r.text or "").endswith("\n"), (
             f"trailing newline lost: {r.text!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Round 46 — _normalize newline-collapse in identical_sides
+# ---------------------------------------------------------------------------
+
+
+def test_r46_identical_sides_not_confused_by_newline_vs_space():
+    """r46 (HIGH): ``_normalize`` collapsed ALL whitespace (including newlines
+    → spaces), so ``identical_sides`` treated sides differing only by ``\\n``
+    vs space as the same change. But in Python, ``return foo`` (one statement)
+    vs ``return\\nfoo`` (two expression statements) are semantically different.
+    Both parse as valid Python with different ASTs, so the downstream syntax
+    check missed the divergence — a silent wrong merge. Now preserves newline
+    boundaries in the comparison."""
+    # Both sides differ from base and from each other only in whitespace,
+    # but the newline changes the AST structure.
+    base = "old"
+    current = "return foo"
+    replayed = "return\nfoo"
+    r = resolve_structurally(_unit(base, current, replayed))
+    # Must NOT resolve as identical_sides — they're semantically different.
+    if r.rule == "identical_sides":
+        raise AssertionError(
+            f"identical_sides treated return foo == return\\nfoo (different ASTs); "
+            f"rule={r.rule} text={r.text!r}"
+        )

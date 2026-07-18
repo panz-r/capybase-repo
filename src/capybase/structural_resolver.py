@@ -81,10 +81,22 @@ def _normalize(text: str) -> str:
     We do NOT use quality.py's punctuation-stripping normalize here: for
     "are the two sides the same change?" we want to ignore incidental whitespace
     (trailing spaces, line-ending differences) but NOT rewrite structural
-    punctuation, since that could mask a real difference. Whitespace collapse is
-    the conservative choice.
+    punctuation, since that could mask a real difference.
+
+    CRITICAL: newline boundaries are PRESERVED. Collapsing newlines to spaces
+    masks semantic divergence in Python (``return foo`` is one statement;
+    ``return\\nfoo`` is two — both parse as valid Python with DIFFERENT ASTs).
+    The prior ``" ".join(text.split())`` collapsed newlines, so two sides
+    differing only by ``\\n`` vs space were treated as identical, silently
+    picking one and dropping the other's structural intent. Now each line is
+    independently whitespace-stripped, with newline boundaries preserved.
     """
-    return " ".join((text or "").split())
+    if not text:
+        return ""
+    lines = text.split("\n")
+    # Strip trailing/leading space within each line, collapse runs of
+    # spaces/tabs to a single space — but keep newlines as line separators.
+    return "\n".join(" ".join(line.split()) for line in lines)
 
 
 def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:

@@ -4256,6 +4256,10 @@ def detect_renames_2way(
       were renamed away (so a merge walk doesn't re-emit the old name).
     """
     # Index base entities by (kind, body-content) for exact-content matching.
+    # List-of-candidates (mirrors the 3-way _detect_renames base_by_fp): when
+    # two base entities share identical body content (common for stubs/wrappers),
+    # BOTH must be reachable — otherwise the second rename target finds the
+    # already-consumed first base and silently loses the pairing.
     base_by_content: dict = {}
     # For the Jaccard fallback: base entities with substantial content, keyed for
     # token-set similarity. Only built when fuzzy matching is requested.
@@ -4263,15 +4267,13 @@ def detect_renames_2way(
     for e in base_units:
         content = entity_body_content(e.body, lang=lang)
         key = (e.kind, content)
-        # If two base entities share body content, keep the first; renames are
-        # ambiguous in that case and we decline to guess.
-        base_by_content.setdefault(key, e)
+        base_by_content.setdefault(key, []).append(e)
         if (
             fuzzy_body_threshold is not None
             and content
             and len(content) >= _RENAME_SUBSTANTIAL_BODY_MIN
         ):
-            base_body_tokens.setdefault(key, frozenset(content.split()))
+            base_body_tokens.setdefault(key, []).append(frozenset(content.split()))
     side_names_by_kind: dict = {}
     for e in side_units:
         side_names_by_kind.setdefault(e.kind, set()).add(e.name)
@@ -4298,45 +4300,53 @@ def detect_renames_2way(
         content = entity_body_content(e.body, lang=lang)
         # 1) Exact body-content match (the primary, high-precision signal).
         key = (e.kind, content)
-        base_match = base_by_content.get(key)
-        if base_match is not None and base_match.identity != e.identity:
+        base_match = None
+        for cand in base_by_content.get(key, []):
+            if cand.identity in consumed_base_ids:
+                continue
+            if cand.identity == e.identity:
+                continue
             # The base entity's old name must be GONE from this side (renamed,
             # not duplicated). If the old name still exists, this is a copy.
-            if base_match.name in side_names_by_kind.get(e.kind, set()):
-                base_match = None
+            if cand.name in side_names_by_kind.get(e.kind, set()):
+                continue
             # Substantial-body guard: empty/comment-only bodies normalize to
             # trivially-short content (e.g. ``}``), so two unrelated stub
             # functions would falsely pair. Require either a name similarity
             # above the threshold or a body long enough to be meaningful.
-            if base_match is not None and not _confirms_rename(base_match, e, content):
-                base_match = None
-        else:
+            if not _confirms_rename(cand, e, content):
+                continue
+            base_match = cand
+            break
+        if base_match is None:
             base_match = None
         # 2) Jaccard fallback: a rename that also edited the body. Only when no
         # exact match fired and fuzzy matching is enabled.
         if base_match is None and fuzzy_body_threshold is not None and content:
             tk = frozenset(content.split())
             best: tuple[float, object] | None = None
-            for bkey, oks in base_body_tokens.items():
+            for bkey, oks_list in base_body_tokens.items():
                 if bkey[0] != e.kind:
                     continue
-                b_unit = base_by_content[bkey]
-                if b_unit.identity in consumed_base_ids:
-                    continue
-                # Old name must be gone from this side (renamed away, not copied).
-                if b_unit.name in side_names_by_kind.get(e.kind, set()):
-                    continue
-                inter = len(tk & oks)
-                union = len(tk | oks)
-                if union == 0:
-                    continue
-                j = inter / union
-                if (
-                    j >= fuzzy_body_threshold
-                    and len(content) >= _RENAME_SUBSTANTIAL_BODY_MIN
-                    and (best is None or j > best[0])
-                ):
-                    best = (j, b_unit)
+                # oks_list is now a list of token-sets (one per dup-bodied base).
+                base_cands = base_by_content.get(bkey, [])
+                for oks, b_unit in zip(oks_list, base_cands):
+                    if b_unit.identity in consumed_base_ids:
+                        continue
+                    # Old name must be gone from this side (renamed away, not copied).
+                    if b_unit.name in side_names_by_kind.get(e.kind, set()):
+                        continue
+                    inter = len(tk & oks)
+                    union = len(tk | oks)
+                    if union == 0:
+                        continue
+                    j = inter / union
+                    if (
+                        j >= fuzzy_body_threshold
+                        and len(content) >= _RENAME_SUBSTANTIAL_BODY_MIN
+                        and (best is None or j > best[0])
+                    ):
+                        best = (j, b_unit)
             if best is not None:
                 base_match = best[1]
         if base_match is None:
