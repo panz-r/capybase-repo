@@ -98,6 +98,31 @@ def test_audit_clean_when_symbol_survives_by_name():
     assert breaks == []
 
 
+def test_audit_flags_kind_change_at_same_name():
+    """A kind-changing refactor at the same name (e.g. function foo converted to
+    class foo) is a behavior change for any call site — ``foo()`` now constructs
+    an instance instead of calling a function. The guardian built final_names
+    from name only, so the same-name-different-kind collision looked "still
+    defined" and the edge was silently treated as resolved. The edge's
+    body_fingerprint carries the original kind; the audit must verify the kind
+    still matches on the primary name-match path."""
+    a = build_commit_symbols(_files(a="def foo():\n    return 1\n"))
+    b = build_commit_symbols(_files(b="def main():\n    return foo()\n"))
+    edges = build_dependency_graph({"A": a, "B": b}, ["A", "B"])
+    # Final tree: foo was converted from function to class (same name, kind change).
+    final = {
+        "x.py": structural.enumerate_entities(
+            "class foo:\n    pass\n", "python"),
+    }
+    breaks = audit_cross_commit_dependencies(edges, final)
+    foo_breaks = [b for b in breaks if b.symbol == "foo"]
+    assert len(foo_breaks) == 1, (
+        f"kind change (function→class) at same name silently resolved; "
+        f"breaks={[(b.symbol, b.break_type) for b in breaks]}"
+    )
+    assert foo_breaks[0].break_type == "missing_definition"
+
+
 def test_audit_clean_when_no_cross_commit_dependency():
     """A window where no commit uses a symbol another defines → no edges, no
     breaks, even if the final tree differs."""

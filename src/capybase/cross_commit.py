@@ -315,11 +315,17 @@ def audit_cross_commit_dependencies(
     """
     from capybase.adapters import structural
 
-    # Index the final tree: names present anywhere, plus bodies for rename match.
+    # Index the final tree: (name, kind) pairs present anywhere, names present
+    # anywhere, plus bodies for rename match. The kind matters: a kind-changing
+    # refactor at the same name (function→class) is a behavior change for any
+    # call site — foo() now constructs an instance instead of calling a function.
+    # Indexing name-only would silently treat that as "still defined".
+    final_name_kinds: set[tuple[str, str]] = set()
     final_names: set[str] = set()
     final_by_body: dict[tuple[str, str], str] = {}  # (kind, body_fp) → name
     for path, ents in final_tree_entities.items():
         for e in ents:
+            final_name_kinds.add((e.name, e.kind))
             final_names.add(e.name)
             bf = structural.entity_body_fingerprint(e, "") or ""
             if bf:
@@ -328,8 +334,17 @@ def audit_cross_commit_dependencies(
     breaks: list[DependencyBreak] = []
     seen: set[tuple[str, str, str]] = set()
     for edge in edges:
+        # The original definer's kind (from body_fingerprint); None when the edge
+        # has no fingerprint (older call sites). When known, the symbol must
+        # survive under the SAME kind — a kind change at the same name is a
+        # behavior change, not a resolution.
+        edge_kind = edge.body_fingerprint[0] if edge.body_fingerprint else None
         if edge.symbol in final_names:
-            continue  # still defined by name somewhere → resolved
+            if edge_kind is None or (edge.symbol, edge_kind) in final_name_kinds:
+                continue  # still defined by name (and same kind) → resolved
+            # Same name, DIFFERENT kind → fall through to the missing/rename
+            # check below. The body won't match (different kind), so it reports
+            # as missing_definition — the kind change broke the call site.
         key = (edge.symbol, edge.definer, edge.user)
         if key in seen:
             continue
