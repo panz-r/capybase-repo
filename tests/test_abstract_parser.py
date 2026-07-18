@@ -4798,3 +4798,65 @@ def test_r45_kotlin_val_keyword_field():
     assert ("field", "name") in _kinds_of_flat(flat), (
         f"Kotlin val field dropped; got {_kinds_of_flat(flat)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 45 — Java/C#/C++ keywordless typed fields (Type name [= init];)
+# ---------------------------------------------------------------------------
+
+
+def test_r45_java_typed_field_with_modifiers():
+    """r45 (HIGH): Java/C#/C++ typed fields (``<modifiers> Type name [= init];``)
+    were silently dropped — the field regex only recognized the Rust/JS shape
+    (``kw name``). A keywordless type-first field extractor (mirroring the
+    keywordless method extractor) now recovers them for Java/C#/C++."""
+    flat = _flat("static final int COUNT = 10;\n", "java")
+    assert ("field", "COUNT") in _kinds_of_flat(flat), (
+        f"Java typed field dropped; got {_kinds_of_flat(flat)}"
+    )
+    # Without initializer.
+    flat = _flat("private final String name;\n", "java")
+    assert ("field", "name") in _kinds_of_flat(flat)
+
+
+def test_r45_csharp_typed_field():
+    """r45: C# typed fields with modifiers."""
+    flat = _flat("public static readonly int X = 5;\n", "csharp")
+    assert ("field", "X") in _kinds_of_flat(flat), (
+        f"C# typed field dropped; got {_kinds_of_flat(flat)}"
+    )
+
+
+def test_r45_cpp_typed_field():
+    """r45: C++ file-scope typed fields."""
+    flat = _flat("static const int MAX = 100;\n", "cpp")
+    assert ("field", "MAX") in _kinds_of_flat(flat)
+
+
+def test_r45_typed_field_not_misclassified_as_function():
+    """r45 REGRESSION: a type-first field must NOT be confused with a bodyless
+    function declaration. ``int foo();`` is a function (has parens); ``int foo
+    = 5;`` is a field (has =). The extractor must distinguish."""
+    flat = _flat("int foo();\n", "cpp")
+    kinds = _kinds_of_flat(flat)
+    assert ("function", "foo") in kinds, f"bodyless function misclassified; got {kinds}"
+    flat = _flat("int foo = 5;\n", "cpp")
+    kinds = _kinds_of_flat(flat)
+    assert ("field", "foo") in kinds, f"typed field misclassified; got {kinds}"
+
+
+def test_r45_typed_field_in_class():
+    """r45: in-class typed fields (Java/C# member variables) must also surface."""
+    flat = _flat(
+        "public class P {\n"
+        "    public static readonly int X = 5;\n"
+        "    private String name;\n"
+        "    public void Do() { }\n"
+        "}\n",
+        "csharp",
+    )
+    kinds = _kinds_of_flat(flat)
+    assert ("class", "P") in kinds
+    assert ("field", "X") in kinds, f"in-class field X dropped; got {kinds}"
+    assert ("field", "name") in kinds, f"in-class field name dropped; got {kinds}"
+    assert ("method", "Do") in kinds

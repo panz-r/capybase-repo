@@ -1563,6 +1563,11 @@ def _emit_assoc_item_at_semicolon(
     su: StructuralUnit | None = None
     # (1) Field-shaped: ``const``/``static``/``let`` binding.
     fname = _field_name_from_buf(stmt_text)
+    # Keywordless type-first field (Java/C#/C++/Kotlin member variables):
+    # ``<modifier>* Type name [= init];``. The field regex only handles
+    # keyword-first forms; type-first forms were dropped.
+    if fname is None:
+        fname = _typed_field_name_from_buf(stmt_text, language)
     # The body/span include preceding attributes/doc-comments (matching braced
     # items) — slice from the pre-noise ``body_start``, not ``name_start``.
     body_text = src[body_start : semi_idx + 1]
@@ -2254,30 +2259,50 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                             )
                         )
                 else:
-                    # Top-level bodyless FUNCTION declaration (C/C++/Java header
-                    # files: ``int foo();``). Previously dropped — the assoc-item
-                    # emitter only fires inside containers, and the field regex
-                    # doesn't recognize function signatures. Without this, a
-                    # C/C++ header lost its entire API surface (no entities to
-                    # pair across a rename/diff). Reuse the keywordless signature
-                    # name extractor (handles return-type-then-name shapes).
-                    mname = _assoc_item_func_name(stmt_text)
-                    if mname is not None:
+                    # Keywordless type-first FIELD (Java/C#/C++/Kotlin:
+                    # ``<modifier>* Type name [= init];``). The field regex only
+                    # recognizes keyword-first forms (``const name``); these
+                    # type-first forms were silently dropped. Try the typed-field
+                    # extractor BEFORE the bodyless-function path (a field has no
+                    # parens after the name; a function does).
+                    tfname = _typed_field_name_from_buf(stmt_text, language)
+                    if tfname is not None:
                         end_row = cur_row_at(i)
                         body_start = stmt_start
                         body = src[body_start : i + 1]
                         start_row_f = cur_row_at(body_start)
                         existing_f = {u.name for u in units if u.name}
-                        if mname not in existing_f:
+                        if tfname not in existing_f:
                             units.append(
                                 StructuralUnit(
-                                    kind=KIND_FUNCTION,
-                                    name=mname,
+                                    kind=KIND_FIELD,
+                                    name=tfname,
                                     span=(start_row_f, end_row),
                                     body=body,
                                     fingerprint=unit_body_fingerprint(body, lang=language),
                                 )
                             )
+                    else:
+                        # Top-level bodyless FUNCTION declaration (C/C++/Java
+                        # header files: ``int foo();``). Reuse the keywordless
+                        # signature name extractor.
+                        mname = _assoc_item_func_name(stmt_text)
+                        if mname is not None:
+                            end_row = cur_row_at(i)
+                            body_start = stmt_start
+                            body = src[body_start : i + 1]
+                            start_row_f = cur_row_at(body_start)
+                            existing_f = {u.name for u in units if u.name}
+                            if mname not in existing_f:
+                                units.append(
+                                    StructuralUnit(
+                                        kind=KIND_FUNCTION,
+                                        name=mname,
+                                        span=(start_row_f, end_row),
+                                        body=body,
+                                        fingerprint=unit_body_fingerprint(body, lang=language),
+                                    )
+                                )
             # A ``;`` ends the statement; the next one starts after it. Only
             # advance at TOP LEVEL: a ``;`` inside braces (e.g. the
             # ``return 1;`` inside ``const f = function() { ... };``) must NOT
@@ -3524,6 +3549,82 @@ def _field_name_from_buf(buf: str) -> str | None:
     if m:
         return m.group(1)
     return None
+
+
+#: Languages that use type-first field declarations (``<Type> name [= init];``)
+#: at file/class scope. Rust/JS/TS use keyword-first (``let name: Type``); Go
+#: is newline-terminated (handled separately). Restricted to avoid false
+#: positives in languages where ``Type name;`` at file scope is unusual.
+_TYPED_FIELD_LANGUAGES = frozenset({
+    "java", "csharp", "cs", "cpp", "c++", "c", "h", "kotlin", "scala",
+    "swift", "dart", "objc",
+})
+
+#: Modifiers that may precede a type-first field declaration.
+_TYPED_FIELD_MODIFIERS = frozenset({
+    "public", "private", "protected", "internal", "static", "final",
+    "readonly", "abstract", "sealed", "const", "inline", "extern",
+    "volatile", "transient", "native", "synchronized", "open", "data",
+    "lateinit", "lazy", "override", "mutating", "mut", "unsafe",
+})
+
+
+def _typed_field_name_from_buf(buf: str, language: str | None) -> str | None:
+    """Recover the name from a type-first field declaration.
+
+    Handles the Java/C#/C++/Kotlin shape ``<modifier>* <Type> <name> [= init];``
+    (e.g. ``static final int COUNT = 10``, ``private String name;``). The name
+    is the identifier immediately before ``=`` (or, without an initializer,
+    the LAST identifier before ``;``/end). Requires at least a Type + name
+    (two identifier tokens) so a bare ``foo();`` (a call) isn't matched — and
+    is gated to languages that use this form. Returns ``None`` for shapes the
+    keyworded ``_field_name_from_buf`` already handles or for method signatures.
+    """
+    if language is None or language not in _TYPED_FIELD_LANGUAGES:
+        return None
+    t = buf.strip().rstrip(";").strip()
+    if not t:
+        return None
+    # A typed FIELD has no parameter list. If the statement contains ``(`` it's
+    # a method/function signature (possibly with trailing qualifiers like
+    # ``const = 0``) — reject so the bodyless-method path handles it.
+    if "(" in t:
+        return None
+    toks = t.split()
+    if len(toks) < 2:
+        return None
+    # Strip leading modifiers to reach the Type token.
+    idx = 0
+    while idx < len(toks) and toks[idx] in _TYPED_FIELD_MODIFIERS:
+        idx += 1
+    remaining = toks[idx:]
+    if len(remaining) < 2:
+        return None  # only a modifier + one token — not a typed field
+    # If there's an ``=``, the name is the identifier just before it.
+    if "=" in remaining:
+        eq_i = remaining.index("=")
+        if eq_i < 1:
+            return None
+        name_tok = remaining[eq_i - 1]
+    else:
+        # No initializer: name is the LAST identifier token.
+        name_tok = remaining[-1]
+    # The name must be a valid identifier (not a keyword/punctuation). If the
+    # token has a ``(`` glued to it (``foo();``), it's a method signature, not
+    # a field — reject so the bodyless-method path handles it.
+    if "(" in name_tok:
+        return None
+    name_tok = re.split(r"[<(\[{,:]", name_tok, maxsplit=1)[0]
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
+        return None
+    # Reject if the "name" is followed by ``(`` — that's a method signature,
+    # not a field (the bodyless-method path handles it).
+    name_idx = remaining.index(name_tok) if name_tok in remaining else -1
+    if name_idx >= 0 and name_idx + 1 < len(remaining):
+        nxt = remaining[name_idx + 1]
+        if nxt.startswith("("):
+            return None
+    return name_tok
 
 
 #: Patterns for newline/expression-body declarations the brace machine misses
