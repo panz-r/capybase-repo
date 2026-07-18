@@ -45,6 +45,31 @@ def test_extract_code_block_none_when_only_json_fence():
     assert _extract_markdown_code_block(raw) is None
 
 
+def test_extract_code_block_tilde_fence_supported():
+    """CommonMark §4.5 defines tilde fences (``~~~``) as equivalent to backtick
+    fences. A model that emits the merged code under a tilde fence must be
+    recognized — previously only backtick fences were parsed, so a valid
+    CommonMark response was silently dropped (fall-through to legacy JSON)."""
+    raw = "~~~python\nprint('merged code')\n~~~\n```json\n{\"needs_human\": false}\n```"
+    assert _extract_markdown_code_block(raw) == "print('merged code')"
+
+
+def test_iter_fenced_blocks_tilde_and_backtick_do_not_cross_close():
+    """A tilde fence must NOT close a backtick fence and vice versa (CommonMark:
+    the closing fence uses the same fence char as the opener)."""
+    from capybase.adapters.parsers import _iter_fenced_blocks
+    # Backtick opener, tilde INSIDE the block (must be literal content), backtick closer.
+    raw = "```\nsome ~~~ inside\n```"
+    blocks = list(_iter_fenced_blocks(raw))
+    assert len(blocks) == 1, f"tilde inside backtick fence misparsed: {blocks}"
+    assert blocks[0][1] == "some ~~~ inside"
+    # Tilde opener, backtick closer must NOT close it (no close → unclosed block).
+    raw2 = "~~~python\ncode\n```"
+    blocks2 = list(_iter_fenced_blocks(raw2))
+    # Unclosed (the ``` doesn't close a ~~~ fence) → no complete block yielded.
+    assert blocks2 == [], f"backtick wrongly closed tilde fence: {blocks2}"
+
+
 def test_markdown_layout_preserves_embedded_quotes_and_newlines():
     """The JSON-escaping failure mode: code with embedded \" and newlines."""
     raw = (

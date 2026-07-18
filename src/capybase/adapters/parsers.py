@@ -482,21 +482,33 @@ def _iter_fenced_blocks(raw: str):
     bare fence). ``body`` is the raw text between the fences. ``is_code_block``
     distinguishes the merged-code block (any non-``json`` fence) from the
     metadata JSON fence so the markdown-code layout can split the two.
+
+    Supports BOTH backtick fences (`` ``` ``) and tilde fences (``~~~``) per
+    CommonMark §4.5. A closing fence must use the SAME fence char as the opener
+    and a run length ≥ the opener's — a tilde line never closes a backtick
+    fence and vice versa.
     """
     lines = raw.split("\n")
     i = 0
     n = len(lines)
     while i < n:
         stripped = lines[i].strip()
+        # Detect an opening fence: a run of backticks or tildes (≥3 chars).
+        fence_char = None
         if stripped.startswith("```"):
-            # The opening fence's backtick run length. Per CommonMark, a fence
-            # opened with N backticks is closed ONLY by a line whose backtick
-            # run is N or longer — a shorter ```` ``` ```` inside the block is
-            # literal content. Without this, a merged-code block containing a
-            # ```` ``` ```` line (Markdown/docs/config files, a code-comment with
-            # triple-backticks) was prematurely closed and the block truncated to
-            # the fragment after the inner fence (silent data loss).
-            open_run = len(stripped) - len(stripped.lstrip("`"))
+            fence_char = "`"
+        elif stripped.startswith("~~~"):
+            fence_char = "~"
+        if fence_char is not None:
+            # The opening fence's run length. Per CommonMark, a fence opened with
+            # N chars is closed ONLY by a line whose run is N or longer AND uses
+            # the SAME fence char — a shorter run inside the block is literal
+            # content, and a different-char fence never closes it. Without the
+            # length guard, a merged-code block containing a ``` line
+            # (Markdown/docs/config files, a code-comment with triple-backticks)
+            # was prematurely closed and the block truncated to the fragment
+            # after the inner fence (silent data loss).
+            open_run = len(stripped) - len(stripped.lstrip(fence_char))
             # info string = everything after the opening fence
             info = stripped[open_run:].strip()
             buf: list[str] = []
@@ -504,8 +516,9 @@ def _iter_fenced_blocks(raw: str):
             closed = False
             while j < n:
                 ln_stripped = lines[j].strip()
-                if ln_stripped.startswith("```"):
-                    close_run = len(ln_stripped) - len(ln_stripped.lstrip("`"))
+                # Only a SAME-char fence can close; tilde ≠ backtick.
+                if ln_stripped.startswith(fence_char * 3):
+                    close_run = len(ln_stripped) - len(ln_stripped.lstrip(fence_char))
                     if close_run >= open_run:
                         closed = True
                         break

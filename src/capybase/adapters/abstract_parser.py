@@ -231,25 +231,48 @@ _STRING_LIT_RE = re.compile(
     r"'(?:\\.|[^'\\])*'"  # single-quoted
 )
 # Rust raw strings: r"...", r#"..."#, r##"..."##, br#"..."#, rb#"..."#.
-# The closer is ``"`` + exactly N ``#`` matching the opener. Handles embedded
-# quotes (content stops only at ``"`` + the matching ``#`` run). Without this,
-# raw strings with embedded quotes split the _STRING_LIT_RE match, exposing their
-# content to comment/identifier extraction (false renames, phantom symbols).
+# C++ raw strings: R"(...)", R"x(...)x", R"DELIM(...)DELIM" with optional
+# prefixes LR/u8R/uR/UR. The Rust closer is ``"`` + exactly N ``#`` matching the
+# opener; the C++ closer is ``)DELIM"`` matching the opener's delimiter. Both
+# handle embedded quotes (content stops only at the matching closer). Without
+# this, raw strings with embedded quotes split the _STRING_LIT_RE match,
+# exposing their content to comment/identifier extraction (false renames,
+# phantom symbols). The C++ uppercase ``R`` forms must be recognized too, or a
+# C++ rename touching a raw-string value fails to pair in the fingerprint layer
+# (parser-level brace tracking already handles them via _match_cpp_raw_prefix).
+# Two patterns (can't be one alternation: the Rust closer backreferences the
+# ``#``-run capture, the C++ closer backreferences the delimiter capture, and a
+# backreference can't be conditional). Apply C++ first (longer prefixes), then
+# Rust.
+_CPP_RAW_STRING_RE = re.compile(
+    # DELIM is any run of non-paren/quote/backslash chars (incl. empty). The
+    # closer is )<DELIM>" (paren, delimiter, quote) — NOT ")<DELIM>".
+    r'(?<![A-Za-z0-9_])(?:u8R|uR|UR|LR|R)"([^()\\]*)\(.*?\)\1"',
+    re.DOTALL,
+)
 _RAW_STRING_RE = re.compile(
     r'(?<![A-Za-z0-9_])(?:br|rb|r)(#*)"((?:(?!"\1).)*?)"\1',
     re.DOTALL,  # raw strings can span multiple lines; '.' must match '\n'
 )
 
 
+def _blank_raw_strings(text: str) -> str:
+    """Blank Rust and C++ raw strings (length-preserving). C++ first (its longer
+    prefixes like ``u8R`` would otherwise be partially consumed by the Rust
+    branch's ``r`` alternative), then Rust."""
+    text = _CPP_RAW_STRING_RE.sub(lambda m: "_" * len(m.group(0)), text)
+    return _RAW_STRING_RE.sub(lambda m: "_" * len(m.group(0)), text)
+
+
 def _blank_all_strings(text: str) -> str:
     """Blank ALL string-literal contents (raw + regular), length-preserving.
 
-    Pre-blanks Rust raw strings (which ``_STRING_LIT_RE`` can't model), then
-    blanks the remaining regular/triple-quoted strings. Used by the
+    Pre-blanks Rust and C++ raw strings (which ``_STRING_LIT_RE`` can't model),
+    then blanks the remaining regular/triple-quoted strings. Used by the
     fingerprint/normalization layer so raw-string content doesn't leak into
     fingerprints or comment detection.
     """
-    text = _RAW_STRING_RE.sub(lambda m: "_" * len(m.group(0)), text)
+    text = _blank_raw_strings(text)
     return _STRING_LIT_RE.sub(lambda m: "_" * len(m.group(0)), text)
 
 
@@ -448,6 +471,7 @@ def normalize_body(text: str, *, lang: str | None = None) -> str:
         for ln in _filter_code_lines(text.split("\n"), lang=lang)
     ]
     joined = "\n".join(kept)
+    joined = _CPP_RAW_STRING_RE.sub("'_'", joined)
     joined = _RAW_STRING_RE.sub("'_'", joined)
     blanked = _STRING_LIT_RE.sub("'_'", joined)
     return " ".join(blanked.split())
@@ -512,6 +536,7 @@ def _line_bracket_delta(raw: str) -> int:
     # Strip inline comments first: a ``# ...`` / ``// ...`` comment may
     # contain unbalanced brackets that must not count.
     stripped = _strip_inline_comment(raw)
+    stripped = _CPP_RAW_STRING_RE.sub("'_'", stripped)
     stripped = _RAW_STRING_RE.sub("'_'", stripped)
     blanked = _STRING_LIT_RE.sub("'_'", stripped)
     delta = 0
@@ -533,6 +558,7 @@ def _ends_with_backslash_continuation(raw: str) -> bool:
     """
     # Blank strings/comments first so a trailing ``\\`` in those contexts is ignored.
     stripped = _strip_inline_comment(raw)
+    stripped = _CPP_RAW_STRING_RE.sub("'_'", stripped)
     stripped = _RAW_STRING_RE.sub("'_'", stripped)
     blanked = _STRING_LIT_RE.sub("'_'", stripped).rstrip()
     if not blanked or not blanked.endswith("\\"):

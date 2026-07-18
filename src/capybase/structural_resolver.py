@@ -1961,6 +1961,28 @@ def _container_trailer(
             end_idx = idx
             break
     if end_idx < 0:
-        return [last]  # couldn't locate → conservative single-brace trailer
+        # The merged last entity's last line isn't in the base enclosing text —
+        # the last base entity was renamed/replaced. Falling back to just ``[last]``
+        # would silently drop any trailing comment/attribute between the last
+        # entity and the close brace. Recover the trailer by scanning backwards
+        # from the close brace through trailing comment/blank lines: a comment
+        # line (per the language's comment markers) or a blank line is trailer;
+        # the first non-comment, non-blank line is the last entity's close.
+        from capybase.adapters.language import adapter_for
+        try:
+            prefixes = adapter_for(language).comment_line_prefixes
+        except Exception:
+            prefixes = ("//",)
+        trailer_start = len(enc_lines) - 1  # the close brace line
+        for idx in range(len(enc_lines) - 2, 0, -1):  # skip header (idx 0)
+            stripped_ln = enc_lines[idx].strip()
+            if not stripped_ln:
+                trailer_start = idx
+                continue
+            if any(stripped_ln.startswith(p) for p in prefixes):
+                trailer_start = idx
+                continue
+            break  # hit the last entity's content; stop
+        return enc_lines[trailer_start:]
     # Trailer = everything after the last base entity's last line, through close.
     return enc_lines[end_idx + 1:]

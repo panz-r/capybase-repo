@@ -1678,14 +1678,18 @@ def _blank_text_strings(text: str) -> str:
     triple-quotes, f-strings, escapes). F-string interpolations are restored
     post-blanking.
     """
-    from capybase.adapters.abstract_parser import _STRING_LIT_RE, _RAW_STRING_RE
+    from capybase.adapters.abstract_parser import (
+        _STRING_LIT_RE, _blank_raw_strings,
+    )
 
-    # (1) Pre-blank Rust raw strings: r#"..."#, r##"..."##, etc. The closer is
-    # exactly N '#' chars matching the opener. A dedicated regex with a
-    # backreference captures the hash count.
+    # (1) Pre-blank Rust AND C++ raw strings: r#"..."#, r##"..."##, etc., plus
+    # C++ R"DELIM(...)DELIM" (and LR/u8R/uR/UR prefixes). A dedicated regex with
+    # a backreference captures the hash count / delimiter. C++ raw strings use
+    # uppercase R; without this, a C++ rename touching a raw-string value leaks
+    # content into fingerprints here too.
     def _blank_raw(m: re.Match) -> str:
         return " " * len(m.group(0))
-    text = _RAW_STRING_RE.sub(_blank_raw, text)
+    text = _blank_raw_strings(text)
 
     # (2) Track string spans for f-string interpolation restoration.
     string_spans: list[tuple[int, int]] = []

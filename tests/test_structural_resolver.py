@@ -333,6 +333,50 @@ def test_region_covered_pure_deletion_within_span_still_accepted():
     ) is True
 
 
+def test_container_trailer_preserved_when_last_entity_renamed():
+    # When the last base entity was renamed/modified, its merged body's last
+    # line is NOT in the base enclosing text, so the needle scan found nothing
+    # and fell back to just the closing brace — silently dropping a trailing
+    # comment that sat between the last entity and the close. The trailer must
+    # be recovered by scanning backwards from the close brace through trailing
+    # comment/blank lines.
+    from capybase.structural_resolver import _container_trailer
+    enc_lines = [
+        "impl Foo {",
+        "    fn old_name() {",   # base entity, renamed in the merge
+        "        1",
+        "    }",
+        "    // trailing",       # important trailing comment in base
+        "}",
+    ]
+    # Renamed entity body whose last line is unfamiliar to the base.
+    bodies_renamed = ["fn new_name() {\n        1\n    weird_end"]
+    trailer = _container_trailer(enc_lines, bodies_renamed, "rust")
+    assert trailer == ["    // trailing", "}"], (
+        f"trailing comment dropped on rename: {trailer!r}"
+    )
+
+
+def test_container_trailer_preserved_for_unchanged_last_entity():
+    # Regression guard: the existing needle-scan path (unchanged last entity)
+    # must still work — its merged body's last line IS in the base, so the
+    # trailer is found directly.
+    from capybase.structural_resolver import _container_trailer
+    enc_lines = [
+        "impl Foo {",
+        "    fn keep() {",
+        "        1",
+        "    }",
+        "    // trailing",
+        "}",
+    ]
+    bodies = ["fn keep() {\n        1\n    }"]
+    trailer = _container_trailer(enc_lines, bodies, "rust")
+    assert trailer == ["    // trailing", "}"], (
+        f"trailing comment lost on unchanged entity: {trailer!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Rule 1: delete_side — accept a deliberate deletion (modify/delete disambiguation)
 #

@@ -4389,6 +4389,39 @@ def test_r39_cpp_raw_string_does_not_corrupt_brace_depth():
     )
 
 
+def test_r47_cpp_raw_string_blanked_in_fingerprint_layer():
+    """r47 (MEDIUM): C++ raw strings ``R"x(...)x"`` / ``R"DELIM(...)DELIM"`` (and
+    the prefixed forms ``LR``, ``u8R``, ``uR``, ``UR``) leaked through the
+    fingerprint-layer string blanking (``_blank_all_strings``). The
+    ``_RAW_STRING_RE`` prefix was lowercase-only (``br|rb|r``), so the uppercase
+    C++ ``R`` opener wasn't matched; the fallback ``_STRING_LIT_RE`` then matched
+    the inner content piecewise, stopping at each embedded ``"``. Two raw strings
+    differing only in value content (with embedded quotes) produced DIFFERENT
+    blanked text, so a C++ rename touching a raw-string value failed to pair."""
+    from capybase.adapters.abstract_parser import _blank_all_strings
+    # Two raw strings differing only in value content (embedded quotes present).
+    a = 'R"x(has "VALUE_A" inside)x"'
+    b = 'R"x(has "VALUE_B" inside)x"'
+    assert _blank_all_strings(a) == _blank_all_strings(b), (
+        f"C++ raw string content leaked; "
+        f"{_blank_all_strings(a)!r} != {_blank_all_strings(b)!r}"
+    )
+    # The prefixed forms (LR, u8R, uR, UR) must also blank consistently.
+    for pref in ("LR", "u8R", "uR", "UR"):
+        c = f'{pref}"x(has "VALUE_A" inside)x"'
+        d = f'{pref}"x(has "VALUE_B" inside)x"'
+        assert _blank_all_strings(c) == _blank_all_strings(d), (
+            f"{pref}-prefixed C++ raw string leaked; "
+            f"{_blank_all_strings(c)!r} != {_blank_all_strings(d)!r}"
+        )
+    # And a delimited raw string ``R"DELIM(...)DELIM"`` with the delim char in
+    # content must blank as one unit (not split at an inner quote).
+    e = 'R"DELIM(a "b" c)DELIM"'
+    assert _blank_all_strings(e) == "_" * len(e), (
+        f"delimited C++ raw string not blanked whole: {_blank_all_strings(e)!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Round 39 — Family A: signature/body correctness
 # ---------------------------------------------------------------------------
