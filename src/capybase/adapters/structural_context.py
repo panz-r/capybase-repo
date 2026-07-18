@@ -114,7 +114,12 @@ def _render_import_surface(diff: StructuralDiff3Way) -> str:
             cur_drops.append(a.name)
         elif ck == _CHANGE_KIND_DELETED_BOTH:
             pass  # removed by both — not a survivor
-        # Track survivors (union of all sides' present imports).
+        # Track survivors (union of all sides' present imports). A ``deleted_both``
+        # import (present in base, absent from BOTH sides) is NOT a survivor —
+        # both sides deliberately removed it. Remembering it would tell the model
+        # the merge "must include" it, resurrecting a deliberately-deleted import.
+        if ck == _CHANGE_KIND_DELETED_BOTH:
+            continue
         if a.base is not None:
             remember(a.name)
         if a.left is not None:

@@ -463,3 +463,55 @@ def test_r10_match_entities_no_double_pair_to_one_target():
     assert len(cov.dropped) == 1, (
         f"expected exactly one dropped entity; got {[d.name for d in cov.dropped]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round 44 — structural diff + context: convergence, deleted-by-both imports
+# ---------------------------------------------------------------------------
+
+
+def test_r44_identical_convergence_not_a_conflict():
+    """r44 (HIGH): when both sides make the IDENTICAL change to the same body
+    (true convergence), the diff flagged MODIFIED_BOTH — a structural conflict
+    — misleading the model to "synthesize" an already-agreed change. Now
+    recognizes convergence (left == right) as an agreed change, not a conflict."""
+    from capybase.adapters.structural_diff import compute_structural_diff_3way
+    base = "def foo():\n    return old_value\n"
+    left = "def foo():\n    return new_value\n"   # both sides converge
+    right = "def foo():\n    return new_value\n"
+    diff = compute_structural_diff_3way(base, left, right, "python")
+    assert len(diff.structural_conflicts) == 0, (
+        f"identical convergence flagged as conflict: {len(diff.structural_conflicts)}"
+    )
+
+
+def test_r44_genuine_modified_both_still_conflict():
+    """r44 REGRESSION: when both sides modify DIFFERENTLY, it's still a genuine
+    conflict. The convergence fix must not mask real divergent edits."""
+    from capybase.adapters.structural_diff import compute_structural_diff_3way
+    base = "def foo():\n    return old\n"
+    left = "def foo():\n    return left\n"   # divergent
+    right = "def foo():\n    return right\n"
+    diff = compute_structural_diff_3way(base, left, right, "python")
+    assert len(diff.structural_conflicts) >= 1, (
+        f"divergent modified-both must still conflict; got {len(diff.structural_conflicts)}"
+    )
+
+
+def test_r44_deleted_by_both_import_not_resurrected():
+    """r44 (HIGH): an import deleted by BOTH sides was resurrected in the
+    structural context's 'merged imports must include' directive — the model
+    was told to re-add an import both branches deliberately removed (silent
+    wrong output). Now a deleted-by-both import is excluded from survivors."""
+    import capybase.adapters.abstract_parser  # resolve import cycle
+    from capybase.adapters.structural_diff import compute_structural_diff_3way
+    from capybase.adapters.structural_context import render_structural_context
+    base = "import os\n\ndef foo(): return 1\n"
+    left = "import re\n\ndef foo(): return 1\n"   # drops os, adds re
+    right = "\ndef foo(): return 1\n"              # drops os
+    diff = compute_structural_diff_3way(base, left, right, "python")
+    ctx = render_structural_context(diff)
+    # 'os' was deleted by both sides — must NOT appear in "must include".
+    assert "must include: os" not in ctx and "must include: os," not in ctx, (
+        f"deleted-by-both import 'os' resurrected: {ctx!r}"
+    )

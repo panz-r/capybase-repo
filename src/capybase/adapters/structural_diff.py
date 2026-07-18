@@ -308,6 +308,14 @@ def _classify_alignment(
         l_changed = _bodies_differ(base, left, lang=lang)
         r_changed = _bodies_differ(base, right, lang=lang)
         if l_changed and r_changed:
+            # True convergence: both sides made the IDENTICAL change to the same
+            # body. That's an AGREED change, not a conflict (mirrors the
+            # ADDED_BOTH vs ADDED_BOTH_CONFLICT distinction for adds). Without
+            # this, a converged fix was flagged MODIFIED_BOTH — a structural
+            # conflict — mis-leading the model to "synthesize" an already-agreed
+            # change.
+            if not _bodies_differ(left, right, lang=lang):
+                return _CHANGE_KIND_MODIFIED_LEFT  # agreed change; take either side
             return _CHANGE_KIND_MODIFIED_BOTH
         if l_changed:
             return _CHANGE_KIND_MODIFIED_LEFT
