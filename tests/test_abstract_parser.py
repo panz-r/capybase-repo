@@ -1165,6 +1165,50 @@ def test_go_receiver_method_name_recovered():
     assert "Stop" in methods
 
 
+def test_go_receiver_method_multi_return_signature():
+    """A Go receiver method with a multi-return type ``(int, error)`` must keep
+    its name and METHOD kind. The previous code used the LAST balanced paren
+    group (which is the return type for multi-return methods) and took the token
+    before it — that token is ``)`` (closing the param list), failing the
+    identifier regex, so the method lost its name and was misclassified as a
+    bare FUNCTION. This breaks every ``io.Reader.Read``/``io.Writer.Write``/
+    error-returning Go method."""
+    src = (
+        "package main\n"
+        "type S struct{}\n"
+        "func (s *S) MultiReturn() (int, error) { return 1, nil }\n"
+        "func (s *S) MultiReturnArgs(a int) (int, error) { return 1, nil }\n"
+    )
+    ir = ap.parse_file(src, language="go")
+    flat = ap.all_units_flat(ir)
+    methods = sorted(u.name for u in flat if u.kind == "method")
+    assert "MultiReturn" in methods, f"multi-return method lost: {methods}"
+    assert "MultiReturnArgs" in methods, f"multi-return+args method lost: {methods}"
+    # And NOT misclassified as a bare function.
+    fns = [u.name for u in flat if u.kind == "function"]
+    assert "MultiReturn" not in fns and "MultiReturnArgs" not in fns
+
+
+def test_go_receiver_method_func_param_type():
+    """A Go receiver method taking a callback parameter of function type
+    (``cb func(int) error``) must keep its name. The previous reverse keyword
+    scan found the INNER ``func`` (from the parameter type) rather than the
+    declaration's leading ``func``, then the non-receiver branch took the token
+    after the leading ``func`` — ``(`` of the receiver — failing the regex.
+    Any Go method taking a callback lost its name and kind."""
+    src = (
+        "package main\n"
+        "type S struct{}\n"
+        "func (s *S) FuncParam(cb func()) {}\n"
+        "func (s *S) FuncParamTyped(cb func(int) error) {}\n"
+    )
+    ir = ap.parse_file(src, language="go")
+    flat = ap.all_units_flat(ir)
+    methods = sorted(u.name for u in flat if u.kind == "method")
+    assert "FuncParam" in methods, f"func-param method lost: {methods}"
+    assert "FuncParamTyped" in methods, f"typed func-param method lost: {methods}"
+
+
 def test_go_type_struct_is_class_not_field():
     """Fix #5: ``type X struct {}`` put the name BEFORE ``struct``, so the
     class-keyword path (which expects the name AFTER) found none, and the

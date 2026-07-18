@@ -2570,42 +2570,63 @@ def _go_declaration_name(
     """
     # Receiver method: ``func (recv) Name (params)`` — only for func keywords.
     if last_kw in ("func",):
-        joined = " ".join(toks)
-        # Find the last balanced ``(...)`` run ending the buffer.
-        paren_open = _last_balanced_paren_open(joined)
-        # Receiver shape: ``func ( recv ) Name (params)`` — TWO paren groups.
-        # The non-receiver ``func Name(params)`` has ONE. Detect the receiver by
-        # checking whether the token right after ``func`` is ``(``.
-        after_kw = toks[last_kw_idx + 1 :] if last_kw_idx + 1 < len(toks) else []
-        is_receiver = bool(after_kw) and after_kw[0].startswith("(")
+        # The caller's reverse keyword scan may have found an INNER ``func``
+        # (from a parameter type like ``cb func(int) error``) rather than the
+        # declaration's leading ``func``. The declaration's ``func`` is always
+        # the FIRST ``func`` token in the buffer — it leads the Go statement.
+        decl_func_idx = last_kw_idx
+        for k, t in enumerate(toks):
+            if t == "func" or re.split(r"[<(:\[{]", t, maxsplit=1)[0] == "func":
+                decl_func_idx = k
+                break
+        after_decl = (
+            toks[decl_func_idx + 1 :] if decl_func_idx + 1 < len(toks) else []
+        )
+        # Receiver shape: ``func ( recv ) Name (params)`` — the token right
+        # after the declaration's ``func`` is ``(`` (the receiver).
+        is_receiver = bool(after_decl) and after_decl[0].startswith("(")
         if is_receiver:
-            # Receiver method: name is the identifier just before the param list.
-            if paren_open > 0:
-                before = joined[:paren_open].rstrip()
-                if before:
-                    name_tok = before.split()[-1]
-                    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
-                        return name_tok, is_receiver
+            # Receiver method: the name is the identifier BETWEEN the receiver
+            # close ``)`` and the parameter-list open ``(``. We must NOT use the
+            # "last balanced paren" approach here: for a multi-return method
+            # ``func (s *S) Name() (int, error)`` the last balanced group is the
+            # return type ``(int, error)``, and the token before it is ``)`` of
+            # the param list — which fails the identifier regex → name lost.
+            # Scan the joined buffer for the receiver group end, then take the
+            # identifier token right after it (before any subsequent ``(``).
+            joined = " ".join(toks[decl_func_idx + 1 :])
+            # Walk char-by-char to find the receiver group's matching ``)``.
+            depth = 0
+            recv_end = -1
+            for ci, c in enumerate(joined):
+                if c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                    if depth == 0:
+                        recv_end = ci
+                        break
+            if recv_end >= 0:
+                rest = joined[recv_end + 1 :].strip()
+                # ``rest`` is ``Name(params)`` (or ``Name[T](params)``). The
+                # name is the token up to the first ``(`` or ``[``.
+                name_end = len(rest)
+                for sep in ("(", "["):
+                    p = rest.find(sep)
+                    if p >= 0 and p < name_end:
+                        name_end = p
+                name_tok = rest[:name_end].strip()
+                # The name may carry leading glue (rare); split on whitespace
+                # and take the last chunk in case of a leading modifier token.
+                if name_tok:
+                    name_tok = name_tok.split()[-1]
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
+                    return name_tok, True
         else:
             # Non-receiver: ``func Name(params)`` or generic ``func Name[T any](params)``.
             # The name is the identifier right after ``func``. For generics the
             # type-param list ``[T any]`` may be glued to the name
-            # (``Map[T``) — strip it. The previous code used the
-            # "last balanced ()" + take-token-before approach, which misread
-            # generic signatures (the inner ``func(T) U`` param type's parens
-            # confused the scan → name=None). The name is always the token
-            # directly after ``func``.
-            #
-            # subtlety: the reverse keyword scan in the caller may have
-            # found an INNER ``func`` (from a param type like ``f func(T) U``)
-            # rather than the declaration's ``func``. The declaration's ``func``
-            # is the FIRST ``func`` token in the buffer (it leads the statement).
-            # Find it and take the name right after.
-            decl_func_idx = last_kw_idx
-            for k, t in enumerate(toks):
-                if t == "func" or re.split(r"[<(:\[{]", t, maxsplit=1)[0] == "func":
-                    decl_func_idx = k
-                    break
+            # (``Map[T``) — strip it.
             if decl_func_idx + 1 < len(toks):
                 cand = toks[decl_func_idx + 1]
                 cand = re.split(r"\[", cand, maxsplit=1)[0]
@@ -4275,8 +4296,19 @@ def detect_renames_2way(
         ):
             base_body_tokens.setdefault(key, []).append(frozenset(content.split()))
     side_names_by_kind: dict = {}
+    # Side identities that identity-match a base unit (same ``(kind, name)``):
+    # these are genuine unchanged/modified entities on the side, NOT rename
+    # candidates. Without this guard, a side entity whose body happens to match
+    # a DIFFERENT base (two base fns with identical substantial bodies) is
+    # mispaired as a rename of that other base — silently mis-attributing the
+    # real rename and producing a duplicate entity downstream. Mirrors the 3-way
+    # ``_detect_renames`` ``identity_matched_side_ids`` guard.
+    side_identities_matched: set = set()
+    base_identities = {e.identity for e in base_units}
     for e in side_units:
         side_names_by_kind.setdefault(e.kind, set()).add(e.name)
+        if e.identity in base_identities:
+            side_identities_matched.add(e.identity)
 
     def _confirms_rename(base_match, side_entity, content: str) -> bool:
         """The name/substantial-body guard: is this a real rename, not a
@@ -4297,6 +4329,11 @@ def detect_renames_2way(
     removed: set = set()
     consumed_base_ids: set = set()
     for e in side_units:
+        # An unchanged/modified side entity (identity-matches a base) is never a
+        # rename candidate. Skipping it here means its body can't be mis-paired
+        # to a DIFFERENT base that shares the same body content.
+        if e.identity in side_identities_matched:
+            continue
         content = entity_body_content(e.body, lang=lang)
         # 1) Exact body-content match (the primary, high-precision signal).
         key = (e.kind, content)

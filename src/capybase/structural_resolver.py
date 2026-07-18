@@ -1009,17 +1009,24 @@ def _region_covered(
     differ, decline (return False) so the conflict escalates.
 
     Exception: a pure DELETION (``r_replacement == []``) is covered whenever the
-    spanning side emitted no content at the deletion's positional offset — its
-    own ``offset >= len(emitted)`` check is sound regardless of span length
-    (a deletion adds nothing, so a shorter emitted list still correctly
-    indicates the line is gone). Applying the length guard to deletions would
-    wrongly reject agreed deletions (both sides drop the same trailing line).
+    spanning side emitted no content at the deletion's positional offset AND the
+    deletion is fully contained within the spanning side's span. The
+    ``offset >= len(emitted)`` check is sound regardless of span length (a
+    deletion adds nothing, so a shorter emitted list still correctly indicates
+    the line is gone). The span-containment check (``r_end <= span_end``) is
+    essential: without it, a deletion that extends PAST the spanning side's span
+    would be declared "covered" and the base lines beyond the span (which the
+    spanning side deliberately kept) would be silently dropped from the merge.
+    Applying the length guard to deletions would wrongly reject agreed deletions
+    (both sides drop the same trailing line), so only containment is required.
     """
     if not r_replacement:
-        # A pure deletion is covered if the spanning side ALSO deleted that base
-        # line — i.e. it emitted no content at the deletion's positional offset.
-        # offset = r_start - span_start; if offset >= len(emitted), the spanning
-        # side's replacement didn't reach that base line (it was deleted too).
+        # A pure deletion is covered if (a) the deletion region is fully
+        # contained within the spanning side's span — otherwise base lines past
+        # the span get dropped — AND (b) the spanning side ALSO deleted that base
+        # line (emitted no content at the deletion's positional offset).
+        if r_end > span_end:
+            return False
         offset = r_start - span_start
         return offset >= len(emitted)
     if len(emitted) != (span_end - span_start):

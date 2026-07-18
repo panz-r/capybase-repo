@@ -306,6 +306,33 @@ def test_zealous_resolved_text_has_no_markers():
     assert "<<<" not in r.text and "===" not in r.text and ">>>" not in r.text
 
 
+def test_zealous_bails_when_deletion_spans_past_other_change():
+    # A pure deletion whose region extends PAST the spanning side's span would
+    # silently drop base lines the spanning side deliberately kept. The pure-
+    # deletion exception in _region_covered only checked the deletion's positional
+    # offset was past `emitted`, not that the deletion was contained within the
+    # spanning span. cur replaces base[1:4] (B,C,D) with X and keeps E; rep
+    # deletes base[3:5] (D,E). The deletion r_end=5 > cur's span_end=4 → must
+    # decline (escalate), not return 'A\nX\nE' (which drops E).
+    base = "A\nB\nC\nD\nE"
+    current = "A\nX\nE"
+    replayed = "A\nB\nC"
+    assert _try_zealous_merge(base, current, replayed) is None
+
+
+def test_region_covered_pure_deletion_within_span_still_accepted():
+    # The span-containment fix must not over-fire on a legitimate agreed
+    # deletion fully contained within the spanning side's span. cur replaces
+    # base[1:4] (B,C,D) with X; rep deletes base[2:3] (C) — deletion is within
+    # [1,4). The deletion of C is covered by cur's replacement (which also
+    # dropped C). _region_covered returns True.
+    from capybase.structural_resolver import _region_covered
+    assert _region_covered(
+        emitted=["X"], span_start=1, span_end=4,
+        r_start=2, r_end=3, r_replacement=[],
+    ) is True
+
+
 # ---------------------------------------------------------------------------
 # Rule 1: delete_side — accept a deliberate deletion (modify/delete disambiguation)
 #

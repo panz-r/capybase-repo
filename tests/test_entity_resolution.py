@@ -597,6 +597,66 @@ def test_canonical_detect_renames_trivial_body_guarded():
     assert renames == {}
 
 
+def test_canonical_detect_renames_unchanged_side_not_mispaired_as_rename():
+    """A side entity whose body happens to match a DIFFERENT base entity (two
+    base fns with identical substantial bodies) but whose OWN (kind, name)
+    identity-matches a base — i.e. it is unchanged/modified, NOT a rename —
+    must NOT be mispaired as a rename of the other base.
+
+    Without this guard, the unchanged ``foo`` (kept verbatim on the side) is
+    wrongly paired with base ``bar`` (renamed to ``baz``), so the real rename
+    (bar→baz) is missed AND the merge emits a duplicate foo. The 3-way diff's
+    ``_detect_renames`` has the guard (``identity_matched_side_ids``); the 2-way
+    core lacked it."""
+    body = (
+        "def fn():\n"
+        "    if not data:\n"
+        "        raise ValueError('bad')\n"
+        "    acc = 0\n"
+        "    for item in data:\n"
+        "        acc += item\n"
+        "    return acc\n"
+    )
+    base = [
+        _entity("function", "foo", "def foo():\n" + body),
+        _entity("function", "bar", "def bar():\n" + body),
+    ]
+    # foo is UNCHANGED on the side; bar is renamed to baz (same substantial body).
+    side = [
+        _entity("function", "foo", "def foo():\n" + body),
+        _entity("function", "baz", "def baz():\n" + body),
+    ]
+    renames, removed = detect_renames_2way(base, side)
+    assert renames == {("function", "baz"): ("function", "bar")}, renames
+    assert removed == {("function", "bar")}, removed
+
+
+def test_canonical_detect_renames_jaccard_unchanged_side_not_mispaired():
+    """The unchanged-side guard must also apply to the Jaccard (fuzzy body)
+    fallback path, not just the exact-body-match path."""
+    body = (
+        "def fn():\n"
+        "    x = compute_thing()\n"
+        "    y = transform(x)\n"
+        "    z = validate(y)\n"
+        "    return z + 100\n"
+    )
+    base = [
+        _entity("function", "foo", "def foo():\n" + body),
+        _entity("function", "bar", "def bar():\n" + body),
+    ]
+    # foo unchanged; bar renamed to baz with a body edit (still Jaccard-similar).
+    side = [
+        _entity("function", "foo", "def foo():\n" + body),
+        _entity("function", "baz", "def baz():\n" + body + "    log('done')\n"),
+    ]
+    renames, removed = detect_renames_2way(base, side, fuzzy_body_threshold=0.80)
+    # Only the real rename (bar→baz) should appear; foo must not be mispaired.
+    assert ("function", "baz") in renames, renames
+    assert ("function", "foo") not in renames, renames
+    assert removed == {("function", "bar")}, removed
+
+
 def test_entity_body_content_oneliner_splits_at_scope():
     """The canonical body signal splits single-line bodies at the scope opener
     (``:`` for Python, ``{`` for brace langs) so the inline body isn't folded
