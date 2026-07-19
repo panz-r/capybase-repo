@@ -23,6 +23,45 @@ def _orch(repo: Path) -> Orchestrator:
     return Orchestrator(Config(), repo=str(repo), out=lambda *_a, **_k: None)
 
 
+def test_run_tests_escalates_when_required_but_no_command(repo: Path):
+    """Bug #10: when tests.required=True but the per-label command (pre_continue
+    or final) is explicitly unset (None/empty), _run_tests silently returned
+    True — skipping a user-REQUIRED test gate. A required gate with no command
+    is a misconfiguration that should escalate (return False) rather than
+    silently pass. The separate 'default command not found in this repo' path
+    (a Go/JS repo with no pytest) is a different, narrower exception and stays
+    a pass-with-warning."""
+    from capybase.orchestrator import StepResult
+    cfg = Config()
+    cfg.tests.required = True
+    cfg.tests.pre_continue = None  # explicitly unset
+    cfg.tests.final = None
+    orch = Orchestrator(cfg, repo=str(repo), out=lambda *_a, **_k: None)
+    result = StepResult(step_index=0, units_by_path={})
+    # With required=True and no command, must NOT silently pass.
+    passed = orch._run_tests("pre_continue", result)
+    assert passed is False, (
+        f"required test gate with no command silently passed: {passed}"
+    )
+
+
+def test_run_tests_passes_when_not_required_and_no_command(repo: Path):
+    """Regression guard: when tests.required=False (the permissive case) and no
+    command is set, _run_tests correctly passes (no gate configured → continue).
+    The bug #10 fix only escalates when required=True."""
+    from capybase.orchestrator import StepResult
+    cfg = Config()
+    cfg.tests.required = False
+    cfg.tests.pre_continue = None
+    cfg.tests.final = None
+    orch = Orchestrator(cfg, repo=str(repo), out=lambda *_a, **_k: None)
+    result = StepResult(step_index=0, units_by_path={})
+    passed = orch._run_tests("pre_continue", result)
+    assert passed is True, (
+        f"non-required gate with no command should pass: {passed}"
+    )
+
+
 def test_repo_has_cargo_root_manifest(repo: Path):
     (repo / "Cargo.toml").write_text('[package]\nname="x"\nversion="0"\n')
     assert _repo_has_cargo(repo)

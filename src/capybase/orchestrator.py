@@ -5683,6 +5683,24 @@ class Orchestrator:
     def _run_tests(self, label: str, result: StepResult) -> bool:
         cmd = getattr(self.config.tests, label) if hasattr(self.config.tests, label) else None
         if not cmd:
+            # Bug #10: when tests.required=True but the per-label command is
+            # explicitly unset, the prior code silently returned True — skipping
+            # a user-REQUIRED test gate. A required gate with no command is a
+            # misconfiguration that must escalate (return False) so the rebase
+            # doesn't continue past a gate the user demanded. When required=False
+            # (the permissive case), no command means no gate configured → pass.
+            if getattr(self.config.tests, "required", False):
+                self.journal.emit(
+                    "tests_required_but_no_command",
+                    {"label": label},
+                    step_index=self.step,
+                )
+                self.out(
+                    f"  tests.required is set but no `{label}` command is "
+                    f"configured; cannot run the required test gate. Set "
+                    f"[tests] {label} to your suite's command."
+                )
+                return False
             return True
         # Whether the configured command is the shipped default (vs an explicit
         # user choice). The default is Python-centric ("pytest"); for a repo it
