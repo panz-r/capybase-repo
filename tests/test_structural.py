@@ -140,6 +140,26 @@ def test_referenced_symbols_extracts_identifiers():
     assert "return" not in names  # keywords excluded
 
 
+def test_referenced_symbols_recovers_dynamic_dispatch_string_args():
+    """Bug #7 (BUG D): string-blanking (to keep docstrings/prose out of the
+    reference set) also hid identifiers passed as literal strings to dynamic-
+    dispatch patterns: ``getattr(obj, "name")``, ``obj.__dict__["field"]``,
+    ``d["key"]``. A cross-commit dependency referenced only this way was missed.
+    The recovery pass scans the ORIGINAL text for these three dispatch shapes
+    and adds the string-literal identifier to the reference set."""
+    # getattr(obj, "method_name") — the "method_name" is a real reference.
+    names = S.referenced_symbols('    fn = getattr(obj, "method_name")', "python")
+    assert "method_name" in names, (
+        f"getattr dynamic-dispatch reference lost: {names}"
+    )
+    # obj.__dict__["field"] — the "field" is a real reference.
+    names2 = S.referenced_symbols('    v = obj.__dict__["field"]', "python")
+    assert "field" in names2, f"__dict__ subscript reference lost: {names2}"
+    # d["key"] — the "key" is a real reference (dict dispatch).
+    names3 = S.referenced_symbols('    v = handlers["on_click"]', "python")
+    assert "on_click" in names3, f"subscript dispatch reference lost: {names3}"
+
+
 @pytest.mark.parametrize("lang,leaked_keyword", [
     ("go", "func"), ("go", "package"), ("go", "chan"), ("go", "defer"),
     ("rust", "fn"), ("rust", "crate"), ("rust", "unsafe"), ("rust", "let"),

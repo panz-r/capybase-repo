@@ -1513,6 +1513,41 @@ def _reserved_keywords(language: str) -> frozenset[str]:
     return _RESERVED_KEYWORDS.get(lang, frozenset())
 
 
+# Patterns for dynamic-dispatch references whose arguments are STRING LITERALS.
+# These are real symbol references that string-blanking would hide (bug #7/BUG D):
+#   getattr(obj, "name")     — Python attribute dispatch
+#   obj.__dict__["field"]    — Python dict-of-attributes dispatch
+#   d["key"]                 — dict/handler-table dispatch (Python, JS, Rust)
+# The recovered identifier (the string-literal content) is added to the
+# reference set BEFORE blanking so it survives into ``uses``.
+_DYNAMIC_DISPATCH_PATTERNS = [
+    # getattr(obj, "name") / getattr(obj, 'name')
+    re.compile(r'\bgetattr\s*\(\s*[^,]+,\s*["\']([A-Za-z_][\w]*)["\']'),
+    # obj.__dict__["field"] / obj.__dict__['field']
+    re.compile(r'\.__dict__\s*\[\s*["\']([A-Za-z_][\w]*)["\']\s*\]'),
+    # d["key"] — a subscript with a string-literal key (conservative: only
+    # identifier-shaped keys, not arbitrary strings, to avoid prose leakage).
+    re.compile(r'\[\s*["\']([A-Za-z_][\w]*)["\']\s*\]'),
+]
+
+
+def _extract_dynamic_dispatch_refs(text: str) -> list[str]:
+    """Identifiers passed as string-literal args to dynamic-dispatch patterns.
+
+    Scans the ORIGINAL (pre-blanking) text for ``getattr(obj, \"name\")``,
+    ``obj.__dict__[\"field\"]``, and ``d[\"key\"]`` patterns and returns the
+    identifier-shaped string-literal contents. These are real symbol references
+    that the blanket string-blanking in :func:`referenced_symbols` would hide
+    (bug #7/BUG D) — a cross-commit dependency referenced only via getattr was
+    silently missed, so a subsequent drop went unflagged.
+    """
+    out: list[str] = []
+    for pat in _DYNAMIC_DISPATCH_PATTERNS:
+        for m in pat.finditer(text):
+            out.append(m.group(1))
+    return out
+
+
 def referenced_symbols(text: str, language: str) -> list[str]:
     """Extract likely symbol names referenced in ``text``.
 
@@ -1538,6 +1573,12 @@ def referenced_symbols(text: str, language: str) -> list[str]:
     # Blank string-literal contents so identifiers inside strings (docstrings,
     # error messages) don't enter the reference set. Reuses the parser's regex
     # (handles escapes, triple-quotes). Length-preserving to keep positions.
+    # BUT first, recover identifiers from dynamic-dispatch patterns whose args
+    # are STRING LITERALS — these are real references that blanking would hide:
+    # ``getattr(obj, "name")``, ``obj.__dict__["field"]``, ``d["key"]``. Without
+    # this recovery (bug #7/BUG D), a cross-commit dependency referenced only
+    # via getattr/subscript was silently missed.
+    dynamic_refs = _extract_dynamic_dispatch_refs(text)
     text = _blank_text_strings(text)
     # Blank comment regions so identifiers inside comments (# / // / /* */)
     # don't enter the reference set either — a symbol mentioned only in prose
@@ -1547,6 +1588,11 @@ def referenced_symbols(text: str, language: str) -> list[str]:
 
     out: list[str] = []
     seen: set[str] = set()
+    # Seed with the recovered dynamic-dispatch refs (they'd otherwise be blanked).
+    for r in dynamic_refs:
+        if r not in seen and r not in reserved and len(r) > 1 and not r.isdigit():
+            out.append(r)
+            seen.add(r)
     cur = ""
     for ch in text:
         if ch.isalnum() or ch == "_":
