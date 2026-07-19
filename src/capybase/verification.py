@@ -278,28 +278,36 @@ class PreservationHeuristicValidator:
     name = "preservation_heuristic"
 
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
-        # Value-resolution fast path: when both sides preserve the same statement
-        # shape and only a value diverged (a return, an assignment to the same
-        # target), a verbatim copy of one side is the CORRECT resolution — the
-        # base operation is preserved and the value is resolved. Don't flag it.
-        cf = ctx.unit.structural_metadata.get("conflict_features")
-        if isinstance(cf, dict) and cf.get("value_resolution"):
-            return VerificationCheckResult(
-                name=self.name,
-                passed=True,
-                severity="warning",
-                message="value-resolution conflict: one side's value selected (base op preserved)",
-                features={
-                    "copied_one_side": False,
-                    "value_resolution": True,
-                },
-            )
         cur = ctx.unit.current.text.strip()
         rep = ctx.unit.replayed.text.strip()
         resolved = ctx.candidate.resolved_text.strip()
         copied_current = bool(cur) and resolved == cur
         copied_replayed = bool(rep) and resolved == rep
         copied_one = copied_current or copied_replayed
+        # Value-resolution fast path: when both sides preserve the same statement
+        # shape and only a value diverged (a return, an assignment to the same
+        # target), a verbatim copy of one side is the CORRECT resolution — the
+        # base operation is preserved and the value is resolved. Don't flag it.
+        # BUT only when the merge IS genuinely one-sided (copied_one) — a
+        # SYNTHESIZED resolution (neither side verbatim) is NOT automatically
+        # safe even for a value-resolution conflict; it could drop a side-effect
+        # call. Phase 5.1: enforce the one-sided-merge contract at the carve-out.
+        cf = ctx.unit.structural_metadata.get("conflict_features")
+        if (
+            isinstance(cf, dict)
+            and cf.get("value_resolution")
+            and copied_one
+        ):
+            return VerificationCheckResult(
+                name=self.name,
+                passed=True,
+                severity="warning",
+                message="value-resolution conflict: one side's value selected (base op preserved)",
+                features={
+                    "copied_one_side": True,
+                    "value_resolution": True,
+                },
+            )
         return VerificationCheckResult(
             name=self.name,
             passed=not copied_one,
@@ -384,8 +392,26 @@ class BothSidesRepresentedValidator:
         # resolution — the base operation is preserved. The token-set "both sides
         # represented" pressure is wrong here (two return values or two assignments
         # to the same target don't compose), so don't flag a dropped side.
+        # Value-resolution fast path (Phase 5.1 contract enforcement): only
+        # suppress the both-sides-represented check when the candidate IS a
+        # one-sided merge (verbatim copy of one side). A SYNTHESIZED resolution
+        # (neither side verbatim) is NOT automatically safe even for a value-
+        # resolution conflict — it could drop a side-effect call. The carve-out
+        # relieves the token-set pressure that's wrong for two-values-same-target,
+        # but only when the merge genuinely picked one value.
+        cur_text = (ctx.unit.current.text or "").strip()
+        rep_text = (ctx.unit.replayed.text or "").strip()
+        resolved_text = (ctx.candidate.resolved_text or "").strip()
+        copied_one = (
+            (bool(cur_text) and resolved_text == cur_text)
+            or (bool(rep_text) and resolved_text == rep_text)
+        )
         cf = ctx.unit.structural_metadata.get("conflict_features")
-        if isinstance(cf, dict) and cf.get("value_resolution"):
+        if (
+            isinstance(cf, dict)
+            and cf.get("value_resolution")
+            and copied_one
+        ):
             return VerificationCheckResult(
                 name=self.name,
                 passed=True,
@@ -1016,20 +1042,28 @@ class VerifierModelValidator:
             dropped.append("current")
         if not preserves_replayed:
             dropped.append("replayed")
-        # Value-resolution override: when both sides preserved the same statement
-        # shape and only a value diverged (a return, an assignment to the same
-        # target), a one-sided merge IS the correct resolution — the base
-        # operation is preserved and the value is resolved. The critic judges
-        # "did the resolution preserve each side's intent?", which for a value
-        # conflict means "did it keep one of the divergent values?" — picking
-        # either side satisfies that. So a verdict flagging the dropped side is
-        # not a defect here; relax it to a pass so the critic doesn't fight a
-        # correct value resolution (the deterministic validators already pass).
+        # Value-resolution override (Phase 5.1 contract enforcement): when both
+        # sides preserved the same statement shape and only a value diverged, a
+        # ONE-SIDED merge IS the correct resolution. The critic judges "did the
+        # resolution preserve each side's intent?", which for a value conflict
+        # means "did it keep one of the divergent values?" — picking either side
+        # satisfies that. BUT only when the candidate IS genuinely one-sided
+        # (verbatim copy of one side). A SYNTHESIZED resolution (neither side
+        # verbatim) is NOT automatically safe even for a value-resolution — it
+        # could drop a side-effect call. The critic must still judge those.
+        cur_text = (ctx.unit.current.text or "").strip()
+        rep_text = (ctx.unit.replayed.text or "").strip()
+        resolved_text = (ctx.candidate.resolved_text or "").strip()
+        copied_one = (
+            (bool(cur_text) and resolved_text == cur_text)
+            or (bool(rep_text) and resolved_text == rep_text)
+        )
         cf = ctx.unit.structural_metadata.get("conflict_features")
         if (
             isinstance(cf, dict)
             and cf.get("value_resolution")
             and not preserves_both
+            and copied_one
         ):
             preserves_both = True
             dropped = []

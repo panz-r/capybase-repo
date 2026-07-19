@@ -194,6 +194,35 @@ def test_value_resolution_absent_still_enforces_both_sides():
     assert any(w.validator == "both_sides_represented" for w in res.warnings)
 
 
+def test_value_resolution_synthesized_merge_not_auto_accepted():
+    """Phase 5.1 contract enforcement: the value-resolution carve-out must ONLY
+    fire when the candidate is a genuine ONE-SIDED merge (verbatim copy of one
+    side). A SYNTHESIZED resolution (neither side verbatim) that drops a side's
+    content must still be flagged — even for a value-resolution conflict. The
+    prior code suppressed the validators unconditionally on the feature flag,
+    so a synthesized merge that dropped a side-effect call was silently accepted."""
+    worktree = (
+        "def f():\n<<<<<<< H\n    return compute(x)\n=======\n"
+        "    return compute(y)\n>>>>>>> b\n"
+    )
+    unit = _unit_with_value_resolution(
+        "def f():\n    return compute(z)\n",
+        "    return compute(x)", "    return compute(y)",
+        worktree, vr_feature="return",
+    )
+    # A SYNTHESIZED resolution that NEITHER side verbatim — drops both calls'
+    # args. This must NOT be auto-accepted by the value-resolution carve-out.
+    cand = _candidate("    return None")
+    res = _engine().verify(unit, cand)
+    # The preservation_heuristic must fire (the candidate isn't a one-sided copy).
+    # It flags "resolved text differs from both sides" — a synthesized merge the
+    # LLM/critic must judge, not auto-accept.
+    warnings = [w.validator for w in res.warnings]
+    assert "preservation_heuristic" in warnings or "both_sides_represented" in warnings, (
+        f"value-resolution carve-out auto-accepted a synthesized merge: {warnings}"
+    )
+
+
 def test_pure_deletion_side_no_false_positive():
     """A side that only DELETED base content (no additions) imposes no
     requirement — representing "nothing new" is trivially satisfied."""
