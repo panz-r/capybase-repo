@@ -758,3 +758,64 @@ def test_r46_identical_sides_not_confused_by_newline_vs_space():
             f"identical_sides treated return foo == return\\nfoo (different ASTs); "
             f"rule={r.rule} text={r.text!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Prose value-resolution rule (Issue 1 from the live realworld eval)
+# ---------------------------------------------------------------------------
+
+
+def test_text_value_resolution_version_bump_picks_later():
+    """The headline case from the live eval: a CHANGELOG/version-string conflict
+    where both sides edited the SAME prose line differently (a version bump).
+    Every code-shaped resolver rule declines (no entities, same-line two-sided
+    edit); the LLM struggles on these. The prose value-resolution rule takes
+    the lexicographically-later value (the 'newer version' heuristic)."""
+    base = "## [1.2.0] - 2024-01-01"
+    cur = "## [1.2.1] - 2024-02-01"
+    rep = "## [1.3.0] - 2024-03-01"
+    r = resolve_structurally(_unit(base, cur, rep))
+    assert r.resolved, f"should resolve; got rule={r.rule}"
+    assert "1.3.0" in r.text, f"should pick the later version 1.3.0; got {r.text!r}"
+
+
+def test_text_value_resolution_changelog_release_notes():
+    """A multi-line changelog entry where both sides set a different version
+    header + release notes on the same lines."""
+    base = "# Unreleased\n\n- some change\n"
+    cur = "# 0.12.1\n\n- some change\n"
+    rep = "# 0.13.0\n\n- some change\n"
+    r = resolve_structurally(_unit(base, cur, rep))
+    assert r.resolved, f"should resolve; rule={r.rule}"
+    assert "0.13.0" in r.text, f"should pick the later version; got {r.text!r}"
+
+
+def test_text_value_resolution_does_not_fire_on_real_code():
+    """Regression guard: a real code conflict (a function signature with a
+    one-token diff) must NOT fire the prose rule — that would silently pick
+    one side's code over the other's without understanding semantics."""
+    base = "fn process() -> i32 { 1 }"
+    cur = "fn process() -> i64 { 1 }"
+    rep = "fn process() -> u32 { 1 }"
+    r = resolve_structurally(_unit(base, cur, rep))
+    # Must NOT resolve via the prose rule (it has fn/->{}) — either declines
+    # or resolves via a different rule that understands the shape.
+    assert r.rule != "text_value_resolution", (
+        f"prose rule fired on real code (fn signature); rule={r.rule} text={r.text!r}"
+    )
+
+
+def test_text_value_resolution_declines_on_multi_hunk():
+    """The rule fires only on SINGLE-region conflicts (one value bump). A
+    multi-hunk prose conflict is ambiguous — decline."""
+    base = "v1\nv2\n"
+    cur = "v1a\nv2\n"
+    rep = "v1\nv2a\n"
+    # This is two separate single-line edits (disjoint) — the line rules handle
+    # it. The prose rule should not fire on the multi-region shape.
+    r = resolve_structurally(_unit(base, cur, rep))
+    # Either resolves via a line rule (disjoint) or declines — but NOT via
+    # text_value_resolution (which is single-region only).
+    assert r.rule != "text_value_resolution", (
+        f"prose rule fired on multi-hunk; rule={r.rule}"
+    )

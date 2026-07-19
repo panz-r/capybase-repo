@@ -196,6 +196,17 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if merged is not None:
             return StructuralResolution(rule="token_disjoint", text=merged)
 
+        # Prose value-resolution (Issue 1 from the live realworld eval): both
+        # sides edited the SAME prose line differently (a version-string bump,
+        # a changelog header, a date). Every code-shaped rule above declines
+        # (no entities, same-line two-sided edit); the LLM struggles on these.
+        # Takes the lexicographically-later value (the 'newer version' heuristic).
+        # Conservative: fires only on non-code languages (markdown/text/yaml)
+        # AND small, single-value-diff conflicts.
+        merged = _try_text_value_resolution(unit)
+        if merged is not None:
+            return StructuralResolution(rule="text_value_resolution", text=merged)
+
         # Rules 8-10: easy-merge unions. Every rule above DELIBERATELY declines
         # pure insertions/appends (their relative order is ambiguous). These
         # rules resolve the common "both sides appended distinct items" shapes
@@ -548,6 +559,120 @@ def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
 # shapes with a deterministic ordering (current-appends, then replayed-appends).
 # A wrong guess still fails the validation pipeline and falls through, so the
 # opinionated ordering is safe. Each rule is a pure ``str | None`` function.
+
+
+#: Keywords/punctuation that signal REAL CODE (not prose). If any appears in the
+#: changed lines, the prose value-resolution rule declines — it must not pick
+#: one side's code over the other's without understanding semantics.
+_CODE_SIGNALS = frozenset({
+    "fn", "def", "func", "function", "fun", "struct", "class", "impl",
+    "enum", "trait", "interface", "module", "pub", "private", "public",
+    "static", "const", "let", "var", "import", "use", "package",
+    "return", "if", "else", "for", "while", "match", "switch", "case",
+    "async", "await", "yield", "try", "catch", "throw", "raise",
+})
+#: The line budget for the prose rule — a "value bump" is small (a header, a
+#: version line, a date). Larger regions are structural changes, not value bumps.
+_TEXT_VALUE_MAX_LINES = 8
+
+#: Code languages where the prose rule must NOT fire (a ``x = 1`` value bump in
+#: a .py file is a real assignment, not prose). Markdown/text/yaml/toml/None
+#: (unknown) qualify for the prose rule.
+_CODE_LANGUAGES_FOR_TEXT_RULE = frozenset({
+    "python", "py", "rust", "rs", "javascript", "js", "typescript", "ts",
+    "jsx", "tsx", "go", "golang", "java", "c", "cpp", "c++", "csharp", "cs",
+    "kotlin", "swift", "scala", "dart", "php",
+})
+
+
+def _try_text_value_resolution(unit: ConflictUnit) -> str | None:
+    """Resolve a prose value-bump conflict by taking the lexicographically-later
+    value (the 'newer version' heuristic).
+
+    Fires when ALL hold:
+    - The conflict's language is NOT a code language (python/rust/js/ts/go/
+      java/c/cpp/csharp/kotlin/swift/scala/dart/php). Markdown, text, yaml,
+      tol, and None (unknown) qualify — these are prose/config where a value
+      bump is a safe deterministic pick.
+    - Each side (base/current/replayed) is ≤ :data:`_TEXT_VALUE_MAX_LINES` lines
+      (a value bump, not a structural change).
+    - The conflict is NOT code-shaped: no code keyword and no ``;``/``{``/``}``
+      in the text (defense in depth even for non-code languages; some YAML/JSON
+      has braces and should go through dict_union instead).
+    - Both sides differ from base, AND from each other, AND all three tokenize
+      to the SAME token count with exactly one contiguous differing token span.
+      This is the "same context, one value changed" shape (a version string,
+      a date, a URL).
+
+    When all conditions hold, the merge takes the lexicographically-later of
+    current/replayed for the differing span (the winner). Declines (returns
+    None) otherwise.
+
+    Issue 1 from the live realworld eval: ~19 of 39 Rust "escalations" were
+    CHANGELOG.md / release-notes prose conflicts (version-string bumps) that
+    every code-shaped rule declined and the LLM struggled on. These files are
+    classified as language='markdown' (or None for plain text), so the language
+    gate admits them while excluding real code (``x = 1`` in a .py file).
+    """
+    import re as _re
+    # Language gate: only fire for non-code (prose/config) languages. A .py
+    # assignment ``x = 1`` looks like a value bump to the tokenizer but IS code
+    # — the language gate excludes it. Markdown/text/yaml/toml/None qualify.
+    lang = (unit.language or "").strip().lower()
+    if lang in _CODE_LANGUAGES_FOR_TEXT_RULE:
+        return None
+    base = unit.base.text or ""
+    current = unit.current.text or ""
+    replayed = unit.replayed.text or ""
+    # All three sides must be small (a value bump, not a structural change).
+    for s in (base, current, replayed):
+        if s.count("\n") + 1 > _TEXT_VALUE_MAX_LINES:
+            return None
+    # Must NOT be code-shaped (defense in depth). Check for code signals.
+    combined = (base + " " + current + " " + replayed).split()
+    for tok in combined:
+        head = _re.split(r"[^A-Za-z_]", tok, maxsplit=1)[0]
+        if head.lower() in _CODE_SIGNALS:
+            return None
+    for ch in (";", "{", "}"):
+        if ch in base or ch in current or ch in replayed:
+            return None
+    # The ``=`` operator (assignment) is a strong code signal: ``x = 1`` is a
+    # Python/Rust assignment, not a prose value bump. Markdown headings (``===``)
+    # or URLs are caught by the 3+ run check below — only a SINGLE ``=`` token
+    # (an assignment) triggers the decline.
+    for s in (base, current, replayed):
+        toks = s.split()
+        if any(t == "=" or (t.endswith("=") and len(t) <= 3 and t != "==") for t in toks):
+            return None
+        if any("=" in t and not t.startswith("http") and len([c for c in t if c == "="]) == 1
+               and t not in ("==", "===") and not t.startswith("#")
+               for t in toks):
+            # A token with a single embedded ``=`` that isn't a heading/URL/==.
+            # e.g. ``key=value`` is ambiguous; decline conservatively.
+            return None
+    cur_toks = current.split()
+    rep_toks = replayed.split()
+    base_toks = base.split()
+    if not cur_toks or len(cur_toks) != len(rep_toks) or len(cur_toks) != len(base_toks):
+        return None
+    if cur_toks == base_toks or rep_toks == base_toks:
+        return None  # one-sided — other rules handle this
+    if cur_toks == rep_toks:
+        return None  # identical_sides handles this
+    first_diff = -1
+    last_diff = -1
+    for i, (a, b) in enumerate(zip(cur_toks, rep_toks)):
+        if a != b:
+            if first_diff < 0:
+                first_diff = i
+            last_diff = i
+    cur_span = " ".join(cur_toks[first_diff : last_diff + 1])
+    rep_span = " ".join(rep_toks[first_diff : last_diff + 1])
+    winner_toks = rep_toks if rep_span > cur_span else cur_toks
+    merged_toks = list(cur_toks)
+    merged_toks[first_diff : last_diff + 1] = winner_toks[first_diff : last_diff + 1]
+    return " ".join(merged_toks)
 
 
 def _try_list_union(base: str, current: str, replayed: str) -> str | None:
