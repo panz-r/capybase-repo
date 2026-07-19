@@ -106,6 +106,54 @@ def _deepest_last_stmt(node: ast.stmt) -> ast.stmt:
     return cur
 
 
+#: AST nodes whose ``.body`` is GUARDED — the body executes conditionally on a
+#: test/iterator/with-item. When the descent passes through one, the guard must
+#: match across all three sides or the inner statement's divergence is NOT a pure
+#: value resolution (a one-sided merge would drop the differing guard logic).
+_GUARDED_BODY_TYPES = (
+    ast.If, ast.For, ast.While, ast.With, ast.AsyncFor, ast.AsyncWith,
+)
+# Python <3.11 compat: Try also has a guarded body (the try block).
+try:
+    _GUARDED_BODY_TYPES = (*_GUARDED_BODY_TYPES, ast.Try, ast.ExceptHandler)
+except AttributeError:  # pragma: no cover
+    pass
+
+
+def _descent_guards(node: ast.stmt) -> list[ast.AST]:
+    """The guard expressions (``If.test``, ``For.iter``, ``With.items``, ...)
+    encountered descending to the deepest last statement, in descent order.
+
+    Empty for an unguarded descent (the leaf is reached through function/module
+    bodies only, or is the top node itself). Used to verify the surrounding
+    conditional/loop context matches across the three sides — ``if flag: y=1``
+    vs ``if not flag: y=3`` have the same assignment target but DIFFERENT
+    guards, so a one-sided merge would drop a branch's condition logic.
+    """
+    guards: list[ast.AST] = []
+    cur: ast.AST = node
+    while True:
+        if isinstance(cur, _GUARDED_BODY_TYPES):
+            # Extract the guard: If.test / While.test / For.iter / With.items /
+            # Try (no scalar guard — the body is guarded by "no exception",
+            # treat the whole try node as the guard so differing try-blocks
+            # don't false-classify).
+            if isinstance(cur, (ast.If, ast.While)):
+                guards.append(cur.test)  # type: ignore[attr-defined]
+            elif isinstance(cur, (ast.For, ast.AsyncFor)):
+                guards.append(cur.iter)  # type: ignore[attr-defined]
+            elif isinstance(cur, (ast.With, ast.AsyncWith)):
+                guards.append(tuple(cur.items))  # type: ignore[attr-defined]
+            elif isinstance(cur, (ast.Try, ast.ExceptHandler)):
+                guards.append(cur)  # the node itself as a structural guard
+        body = getattr(cur, "body", None)
+        if isinstance(body, list) and body:
+            cur = body[-1]
+            continue
+        break
+    return guards
+
+
 def _classify_python(base: str, cur: str, rep: str) -> ValueResolution | None:
     """Value-resolution classification via the Python ast.
 
@@ -136,6 +184,30 @@ def _classify_python(base: str, cur: str, rep: str) -> ValueResolution | None:
     # All three must be the same statement type.
     if not (type(bs) is type(cs) is type(rs)):
         return None
+    # If the descent passed through conditional/loop guards, the guards must
+    # match across all three sides. ``if flag: y=1`` vs ``if not flag: y=3``
+    # share the assignment target ``y`` but the conditions differ — a one-sided
+    # merge would drop a branch's condition logic (silent wrong merge). Compare
+    # the guard ASTs by their unparsed source (structural equality at the same
+    # descent depth).
+    gb, gc, gr = (
+        _descent_guards(mb.body[-1]),
+        _descent_guards(mc.body[-1]),
+        _descent_guards(mr.body[-1]),
+    )
+    if not (len(gb) == len(gc) == len(gr)):
+        return None
+    for gb_i, gc_i, gr_i in zip(gb, gc, gr):
+        try:
+            sb, sc, sr = (
+                ast.unparse(gb_i),
+                ast.unparse(gc_i),
+                ast.unparse(gr_i),
+            )
+        except Exception:  # noqa: BLE001 - unparse can fail on exotic nodes
+            return None
+        if not (sb == sc == sr):
+            return None
     if isinstance(bs, ast.Return):
         return ValueResolution(kind="return", target="")
     if isinstance(bs, ast.Assign):

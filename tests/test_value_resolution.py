@@ -102,6 +102,54 @@ def test_python_different_statement_types():
     assert classify_value_resolution("return 1", "return 2", "x = 3", "python") is None
 
 
+def test_python_conditional_with_different_guard_not_value_resolution():
+    """When the deepest last statement is reached by descending through a
+    conditional (``if``), the GUARD must match across all three sides. ``if flag:
+    y = 1`` vs ``if not flag: y = 3`` have the same assignment target ``y`` but
+    DIFFERENT conditions — a one-sided merge would drop one branch's condition
+    logic entirely (silent wrong merge). The descent into the ``if`` body must
+    verify the condition is identical before treating the inner assignment as a
+    pure value resolution."""
+    r = classify_value_resolution(
+        "if flag:\n    y = 1",
+        "if flag:\n    y = 2",
+        "if not flag:\n    y = 3",  # different guard
+        "python",
+    )
+    assert r is None, (
+        f"conditionally-guarded assignment with differing guards wrongly "
+        f"classified as value resolution: {r}"
+    )
+
+
+def test_python_conditional_with_same_guard_is_value_resolution():
+    """Regression guard: when the guard IS identical across all three sides, the
+    inner assignment IS a value resolution (the guard is preserved by taking
+    either side)."""
+    r = classify_value_resolution(
+        "if flag:\n    y = 1",
+        "if flag:\n    y = 2",
+        "if flag:\n    y = 3",  # same guard
+        "python",
+    )
+    assert r is not None and r.kind == "assignment" and r.target == "y"
+
+
+def test_python_return_in_different_branches_not_value_resolution():
+    """``if x: return 1`` vs ``if z: return 3`` — same statement type (return)
+    but different guards. A one-sided merge drops one branch's condition; this
+    is NOT a value resolution."""
+    r = classify_value_resolution(
+        "if x:\n    return 1",
+        "if x:\n    return 2",
+        "if z:\n    return 3",  # different guard
+        "python",
+    )
+    assert r is None, (
+        f"return in differently-guarded branches wrongly classified: {r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Family A (Rust / brace-delimited): regex-based
 # ---------------------------------------------------------------------------
