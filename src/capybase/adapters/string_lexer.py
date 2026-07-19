@@ -513,6 +513,8 @@ def blank_strings_and_comments(
     blank_strings: bool = True,
     blank_comments: bool = True,
     preserve_fstring_interpolation: bool = False,
+    string_char: str = "_",
+    comment_char: str = " ",
 ) -> str:
     """Blank string-literal and comment contents (length-preserving).
 
@@ -527,9 +529,9 @@ def blank_strings_and_comments(
             Family B (Python/Ruby, ``#`` comments) — matching the historical
             default of every blanking site.
         blank_strings: when True (default), replace string-literal contents with
-            ``"_"`` (length-preserving).
+            ``string_char`` (length-preserving; default ``"_"``).
         blank_comments: when True (default), replace comment contents with
-            ``" "`` (length-preserving).
+            ``comment_char`` (length-preserving; default ``" "``).
         preserve_fstring_interpolation: when True, the ``{...}`` interpolation
             of an f-string is emitted VERBATIM (as code) rather than blanked.
             The validator path needs this (it must see ``{foo()}`` calls so a
@@ -548,16 +550,20 @@ def blank_strings_and_comments(
         blank_strings=blank_strings,
         blank_comments=blank_comments,
         preserve_fstring_interpolation=preserve_fstring_interpolation,
+        string_char=string_char,
+        comment_char=comment_char,
     )
 
 
 def blank_strings(text: str, lang: str | None = None, *,
-                  preserve_fstring_interpolation: bool = False) -> str:
+                  preserve_fstring_interpolation: bool = False,
+                  string_char: str = "_") -> str:
     """Blank ONLY string-literal contents (comments preserved). Thin wrapper."""
     return blank_strings_and_comments(
         text, lang,
         blank_strings=True, blank_comments=False,
         preserve_fstring_interpolation=preserve_fstring_interpolation,
+        string_char=string_char,
     )
 
 

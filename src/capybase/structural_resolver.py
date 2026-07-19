@@ -1289,7 +1289,7 @@ def _strip_decl_header(body: str, lang: str | None = None) -> str:
     # the prior _STRING_LIT_RE-only version leaked raw-string content, so a
     # ':' or '{' inside a raw string could false-trigger the header split.
     from capybase.adapters.string_lexer import blank_strings
-    blanked = blank_strings(body, lang).replace("_", " ")
+    blanked = blank_strings(body, lang, string_char=" ")
     if lang in (None, "python", "ruby"):
         # Python one-liner: ``def f(): return 1`` → header is ``def f():``
         idx = blanked.find(":")

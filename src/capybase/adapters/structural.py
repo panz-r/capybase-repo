@@ -1689,11 +1689,12 @@ def _blank_line_strings(line: str, lang: str | None = None) -> str:
     (regular, triple-quote, Rust raw, C++ raw, char literals) — the prior
     ``_STRING_LIT_RE``-only version leaked raw-string content, so a definition
     pattern inside a Rust raw string could false-match.
+
+    Uses ``string_char=" "`` (spaces) so identifier underscores in CODE are NOT
+    touched (the prior .replace('_', ' ') corrupted ``real_fn`` → ``real fn``).
     """
     from capybase.adapters.string_lexer import blank_strings
-    # blank_strings uses '_' by default; remap to spaces to preserve the prior
-    # contract (spaces, not underscores).
-    return blank_strings(line, lang).replace("_", " ")
+    return blank_strings(line, lang, string_char=" ")
 
 
 def _blank_text_strings(text: str) -> str:
