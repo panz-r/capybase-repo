@@ -190,7 +190,10 @@ def build_commit_symbols(
         lang = _language_for_path(path)
         if lang is None or not structural.is_available(lang):
             continue
-        ents = structural.enumerate_entities(text, lang)
+        # recursive=True: methods/fields NESTED inside a class must enter
+        # ``defines`` (bug #6/BUG C — the guardian's whole point is catching
+        # cross-commit method drops, which requires method-level visibility).
+        ents = structural.enumerate_entities(text, lang, recursive=True)
         if ents is None:
             continue
         for e in ents:
@@ -212,7 +215,7 @@ def build_commit_symbols(
             lang = _language_for_path(path)
             if lang is None or not structural.is_available(lang):
                 continue
-            ents = structural.enumerate_entities(text, lang)
+            ents = structural.enumerate_entities(text, lang, recursive=True)
             if ents is None:
                 continue
             for e in ents:

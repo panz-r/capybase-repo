@@ -39,6 +39,26 @@ def test_build_commit_symbols_captures_defines_and_uses():
     assert "foo" not in syms.uses
 
 
+def test_build_commit_symbols_captures_nested_method_definitions():
+    """Bug #6 (BUG C): methods/fields NESTED inside a class were invisible to the
+    cross-commit guardian — ``enumerate_entities`` returned top-level only, so a
+    method defined in commit A and referenced in commit B was never tracked. The
+    guardian's whole point is catching cross-commit method drops, so methods must
+    enter ``defines``."""
+    files = _files(app=(
+        "class Foo:\n"
+        "    def method(self):\n"
+        "        return 1\n"
+    ))
+    syms = build_commit_symbols(files)
+    # The class IS captured (top-level).
+    assert ("class", "Foo") in syms.defines
+    # The nested method MUST also be captured (the bug: it wasn't).
+    assert ("method", "method") in syms.defines or any(
+        k == "method" for k, n in syms.defines if n == "method"
+    ), f"nested method invisible to cross-commit guardian: {syms.defines}"
+
+
 def test_build_dependency_graph_creates_edge_for_cross_commit_use():
     """Commit A defines ``helper``; commit B (later) calls ``helper`` → an edge
     A→B exists (B depends on A's definition)."""

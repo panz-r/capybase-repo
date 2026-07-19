@@ -176,9 +176,10 @@ def enclosing_node(
 # ---------------------------------------------------------------------------
 
 def enumerate_entities(
-    source: str, language: str, container_span: tuple[int, int] | None = None
+    source: str, language: str, container_span: tuple[int, int] | None = None,
+    *, recursive: bool = False,
 ) -> list[Entity] | None:
-    """List the coarse top-level entities in ``source``.
+    """List the coarse entities in ``source``.
 
     Parses ``source`` via the abstract parser and returns one :class:`Entity`
     per structural unit that is a *direct child of a container* (module, class,
@@ -219,6 +220,12 @@ def enumerate_entities(
         ]
 
     if container_span is None:
+        if recursive:
+            # Whole module, ALL units (top-level + nested methods/fields).
+            # Used by the cross-commit guardian, which must track method-level
+            # definitions across commits (a method defined in commit A and
+            # referenced in commit B is a cross-commit dependency).
+            return to_entities(abstract_parser.all_units_flat(ir))
         # Whole module: top-level units only (methods/fields are children,
         # surfaced only via their parent or a container_span query).
         return to_entities(ir.units)
