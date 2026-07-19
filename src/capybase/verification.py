@@ -2299,6 +2299,17 @@ def _py_compile_errors(source: str) -> list[str]:
         Path(tmp_path).unlink(missing_ok=True)
 
 
+#: Rust error codes whose message text DRIFTS between a marker-blanked baseline
+#: and a spliced candidate (the splice shifts line numbers / paths, so the same
+#: crate-path resolution error renders with a slightly different message). For
+#: these codes only, the diagnostic delta keys on the CODE alone (not the
+#: message) so a pre-existing E0432 in baseline suppresses an E0432 in the
+#: candidate. Other codes (E0425 'cannot find value', E0308 'mismatched types')
+#: are NOT drift-tolerant — a candidate E0425 for a different symbol than the
+#: baseline's is genuinely new and must NOT be suppressed.
+_DRIFT_TOLERANT_CODES = frozenset({"E0432", "E0433"})
+
+
 def compute_diagnostic_delta(
     baseline_errors, after_errors, *, suppress_codes: set[str] | None = None
 ) -> list[str]:
@@ -2332,15 +2343,28 @@ def compute_diagnostic_delta(
     suppress_codes = suppress_codes or set()
 
     def _key_and_msg(item):
-        """Return (dedup_key, display_message, code) for a str or Diagnostic."""
+        """Return (dedup_key, display_message, code) for a str or Diagnostic.
+
+        The key is message-based by default (a merge that moves a pre-existing
+        error to a new line is not 'new', but a genuinely new message is). For
+        codes in ``_DRIFT_TOLERANT_CODES`` (crate-path resolution errors whose
+        message text drifts between baseline and candidate because the splice
+        shifts line numbers / paths), the key is the CODE alone — so an E0432 in
+        baseline suppresses an E0432 in the candidate even if the message text
+        differs. This is narrowly scoped: other codes (E0425 'cannot find value',
+        E0308 'mismatched types', etc.) are NOT drift-tolerant — a candidate
+        E0425 for a DIFFERENT symbol than the baseline's E0425 is genuinely new.
+        """
         # Diagnostic-shaped: has .message and .code attributes.
         msg = getattr(item, "message", None)
         if msg is not None:
             code = (getattr(item, "code", "") or "").strip()
             msg_s = str(msg).strip()
-            # Key on code when present (drift-tolerant); else on message.
-            key = code if code else msg_s
-            return key, msg_s, code
+            # Drift-tolerant codes: key on code alone (crate-path resolution).
+            if code in _DRIFT_TOLERANT_CODES:
+                return code, msg_s, code
+            # All others: key on message (the existing behavior).
+            return msg_s, msg_s, code
         # Bare string.
         msg_s = str(item).strip()
         return msg_s, msg_s, ""

@@ -926,18 +926,14 @@ def test_compute_diagnostic_delta_empty_when_nothing_new():
     assert compute_diagnostic_delta([], []) == []
 
 
-def test_compute_diagnostic_delta_codes_match_suppresses_message_drift():
-    """When Diagnostics are passed (with .code), the delta keys on (code) so an
-    E0432 'unresolved import' in the candidate that differs trivially in message
-    text from the baseline E0432 (e.g. line-number embedded, or a slightly
-    different unresolved path introduced by the splice) is correctly suppressed
-    as a pre-existing error class. Without this, a near-correct Rust merge whose
-    crate-path errors drift in message text between baseline and candidate was
-    rejected as a 'new error' (Issue 3 from the live realworld eval)."""
+def test_compute_diagnostic_delta_drift_tolerant_codes_suppress_message_drift():
+    """For drift-tolerant codes (E0432/E0433 — crate-path resolution errors whose
+    message text drifts between a marker-blanked baseline and a spliced
+    candidate), the delta keys on the CODE alone so a pre-existing E0432 in
+    baseline suppresses an E0432 in the candidate even if the message text
+    differs (Issue 3 from the live realworld eval)."""
     from capybase.adapters.lsp import Diagnostic
     from capybase.verification import compute_diagnostic_delta
-    # Baseline has an E0432 with one message; candidate has E0432 with a
-    # slightly-different message (different unresolved path from the splice).
     baseline = [
         Diagnostic(severity="error", code="E0432",
                    message="unresolved import: crate::foo"),
@@ -948,9 +944,30 @@ def test_compute_diagnostic_delta_codes_match_suppresses_message_drift():
         Diagnostic(severity="error", code="E0308", message="mismatched types"),  # genuinely new
     ]
     new = compute_diagnostic_delta(baseline, after)
-    # The E0432 is suppressed (same code as baseline); the E0308 is new.
+    # The E0432 is suppressed (drift-tolerant code in baseline); the E0308 is new.
     assert len(new) == 1, f"expected 1 new error, got {new}"
     assert "mismatched types" in new[0]
+
+
+def test_compute_diagnostic_delta_non_drift_codes_not_suppressed_by_code():
+    """Regression guard: a non-drift-tolerant code (E0425 'cannot find value') is
+    NOT suppressed by code-match alone — a candidate E0425 for a DIFFERENT symbol
+    than the baseline's E0425 is genuinely new. (This was the regression that
+    broke test_cargo_catches_introduced_error when code-keying was too broad.)"""
+    from capybase.adapters.lsp import Diagnostic
+    from capybase.verification import compute_diagnostic_delta
+    baseline = [
+        Diagnostic(severity="error", code="E0425",
+                   message="cannot find value `marker_garbage`"),
+    ]
+    after = [
+        Diagnostic(severity="error", code="E0425",
+                   message="cannot find value `zzz`"),  # DIFFERENT symbol
+    ]
+    new = compute_diagnostic_delta(baseline, after)
+    assert len(new) == 1, (
+        f"E0425 for a different symbol must NOT be suppressed by code-match: {new}"
+    )
 
 
 def test_compute_diagnostic_delta_suppress_codes_drops_configured():
