@@ -379,81 +379,49 @@ def match_entities(
     # pairs in the resolver/3-way-diff but NOT here, causing a false 'dropped'
     # flag while the merge correctly recognized the rename.
     from capybase.adapters.abstract_parser import entity_body_content as _body_content
-    # List-of-candidates: when two targets share identical body content (common
-    # for stubs/wrappers), BOTH must be reachable — otherwise the second source
-    # finds the already-consumed first target and silently loses the pairing.
-    target_by_body: dict[tuple[str, str], list[Entity]] = {}
-    target_body_tokens: dict[tuple[str, str], list[frozenset[str]]] = {}
-    for e in targets:
-        bf = _body_content(e.body or "", lang=lang) or ""
-        if bf:
-            key = (e.kind, bf)
-            target_by_body.setdefault(key, []).append(e)
-            target_body_tokens.setdefault(key, []).append(frozenset(_token_set(bf)))
 
     out: list[EntityMatch] = []
+    # Compute the rename map ONCE via the canonical detect_renames_2way core
+    # (targets = base, sources = side). This centralizes ALL rename guards
+    # (identity_matched, consumed_base_ids, substantial-body, name-similarity,
+    # Jaccard fallback) in one place — the prior inline reimplementation drifted
+    # from the canonical core (rounds 27→46→47 ported fixes one-directionally).
+    # detect_renames_2way returns {side_identity: base_identity} = {source → target}.
+    from capybase.adapters.abstract_parser import detect_renames_2way
+    rename_map, _removed = detect_renames_2way(
+        targets, sources,
+        fuzzy_body_threshold=_RENAME_BODY_JACCARD_THRESHOLD,
+        lang=lang,
+    )
+    # Index targets by identity for the rename lookup.
+    target_by_identity = {(t.kind, t.name): t for t in targets}
     # Targets already claimed by an earlier source's rename pairing. Prevents
-    # two sources with identical bodies from both pairing to the same target
-    # (mirrors detect_renames_2way's consumed_base_ids).
+    # two sources with identical bodies from both pairing to the same target.
     consumed_targets: set[tuple[str, str]] = set()
     for src in sources:
-        # 1. Exact (kind, name) match.
+        # 1. Exact (kind, name) match — always takes priority over a rename.
         exact = target_by_name.get((src.kind, src.name))
         if exact is not None:
             out.append(EntityMatch(source=src, target=exact, kind=MATCH_SAME_NAME))
             continue
-        # 2. Rename: body-content match across a different name.
-        bf = _body_content(src.body or "", lang=lang) or ""
+        # 2. Rename: look up the source's identity in the canonical rename map.
         target: Entity | None = None
-        if bf:
-            # Exact body match: iterate candidates to find an unconsumed one.
-            for direct in target_by_body.get((src.kind, bf), []):
-                if (direct.kind, direct.name) in consumed_targets:
-                    continue
-                if src.name in target_names_by_kind.get(src.kind, set()):
-                    break  # source name still present → not a rename
-                if (
-                    _name_similarity(direct.name, src.name) >= _RENAME_NAME_SIMILARITY_THRESHOLD
-                    or _body_is_substantial(bf)
-                ):
-                    target = direct
-                    break
-            if target is None:
-                # Jaccard fallback for a rename that also edited the body.
-                tk = frozenset(_token_set(bf))
-                best: tuple[float, Entity] | None = None
-                for key, oks_list in target_body_tokens.items():
-                    if key[0] != src.kind:
-                        continue
-                    cands = target_by_body.get(key, [])
-                    for oks, cand in zip(oks_list, cands):
-                        if (cand.kind, cand.name) in consumed_targets:
-                            continue
-                        if src.name in target_names_by_kind.get(src.kind, set()):
-                            break  # source name still present → not a rename
-                        inter = len(tk & oks)
-                        union = len(tk | oks)
-                        if union == 0:
-                            continue
-                        j = inter / union
-                        if (
-                            j >= _RENAME_BODY_JACCARD_THRESHOLD
-                            and _body_is_substantial(bf)
-                            and (best is None or j > best[0])
-                        ):
-                            best = (j, cand)
-                if best is not None:
-                    target = best[1]
+        src_identity = (src.kind, src.name)
+        tgt_identity = rename_map.get(src_identity)
+        if tgt_identity is not None and tgt_identity not in consumed_targets:
+            target = target_by_identity.get(tgt_identity)
+            if target is not None:
+                consumed_targets.add(tgt_identity)
         if target is not None:
-            consumed_targets.add((target.kind, target.name))
             out.append(EntityMatch(source=src, target=target, kind=MATCH_RENAMED))
         elif embedder is not None:
-            # 3. Semantic embedding tier : for an otherwise-
-            # unmatched source, embed its body and each same-kind target body
-            # (different name required — a copy is not a rename). Pairs by cosine
-            # with the conjunction rule: high cosine alone (≥0.85) confirms a
-            # rename; mid cosine (0.70–0.85) needs a corroborating Jaccard/name
-            # signal. Never raises — a failed embed leaves the source unmatched.
+            # 3. Semantic embedding tier: for an otherwise-unmatched source, embed
+            # its body and each same-kind target body (different name required — a
+            # copy is not a rename). Pairs by cosine with the conjunction rule:
+            # high cosine alone (≥0.85) confirms a rename; mid cosine (0.70–0.85)
+            # needs a corroborating Jaccard/name signal. Never raises — a failed
+            # embed leaves the source unmatched.
+            bf = _body_content(src.body or "", lang=lang) or ""
             emb_match = _embedding_rename_match(
                 src, targets, target_names_by_kind, bf, embedder, lang, consumed_targets,
             )
@@ -909,8 +877,14 @@ def _name_similarity(a: str, b: str) -> float:
 
 
 def _body_is_substantial(body_fp: str) -> bool:
-    """True when a body has enough content to be a reliable rename signal."""
-    return len(body_fp) >= 8
+    """True when a body has enough content to be a reliable rename signal.
+
+    Uses the canonical :data:`_RENAME_SUBSTANTIAL_BODY_MIN` from
+    :mod:`abstract_parser` so the threshold has a single home (the prior local
+    ``len >= 8`` literal was a third copy that drifted by convention).
+    """
+    from capybase.adapters.abstract_parser import _RENAME_SUBSTANTIAL_BODY_MIN
+    return len(body_fp) >= _RENAME_SUBSTANTIAL_BODY_MIN
 
 
 def _split_header_body(entity: Entity) -> tuple[str, str]:
