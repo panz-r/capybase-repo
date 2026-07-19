@@ -4999,6 +4999,26 @@ def test_r45_typed_field_in_class():
     assert ("method", "Do") in kinds
 
 
+def test_multi_declaration_typed_field_emits_all_names():
+    """Bug #4: Java/C#/C++ multi-declaration ``int x, y, z;`` emitted only the
+    LAST name (z) — the typed-field extractor took the last identifier before
+    ``;`` and ignored comma-separated names. A rename/diff touching x or y was
+    invisible. Must emit a FIELD per name (x, y, z)."""
+    flat = _flat(
+        "public class C {\n"
+        "    int x, y, z;\n"
+        "    private static final String A = \"a\", B = \"b\";\n"
+        "}\n",
+        "csharp",
+    )
+    kinds = _kinds_of_flat(flat)
+    assert ("class", "C") in kinds
+    for name in ("x", "y", "z"):
+        assert ("field", name) in kinds, f"multi-decl name {name} dropped; got {kinds}"
+    for name in ("A", "B"):
+        assert ("field", name) in kinds, f"multi-decl+init name {name} dropped; got {kinds}"
+
+
 # ---------------------------------------------------------------------------
 # Round 46 — dup-bodied 2-way rename + whitespace-collapse identical_sides
 # ---------------------------------------------------------------------------

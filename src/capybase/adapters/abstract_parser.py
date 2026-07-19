@@ -1589,11 +1589,14 @@ def _emit_assoc_item_at_semicolon(
     su: StructuralUnit | None = None
     # (1) Field-shaped: ``const``/``static``/``let`` binding.
     fname = _field_name_from_buf(stmt_text)
-    # Keywordless type-first field (Java/C#/C++/Kotlin member variables):
-    # ``<modifier>* Type name [= init];``. The field regex only handles
-    # keyword-first forms; type-first forms were dropped.
+    typed_names: list[str] = []
     if fname is None:
-        fname = _typed_field_name_from_buf(stmt_text, language)
+        # Keywordless type-first field (Java/C#/C++/Kotlin member variables):
+        # ``<modifier>* Type name [= init];``. Returns a LIST (multi-declaration
+        # ``int x, y, z;`` emits one name per declarand). The field regex only
+        # handles keyword-first forms; type-first forms were dropped.
+        typed_names = _typed_field_name_from_buf(stmt_text, language)
+        fname = typed_names[0] if typed_names else None
     # The body/span include preceding attributes/doc-comments (matching braced
     # items) — slice from the pre-noise ``body_start``, not ``name_start``.
     body_text = src[body_start : semi_idx + 1]
@@ -1605,6 +1608,17 @@ def _emit_assoc_item_at_semicolon(
             body=body_text,
             fingerprint=unit_body_fingerprint(body_text, lang=language),
         )
+        # Bug #4: multi-declaration (``int x, y, z;``) — emit one FIELD per
+        # additional declarand. The first name was already emitted above.
+        for extra in typed_names[1:]:
+            if extra not in existing and extra != fname:
+                units.append(StructuralUnit(
+                    kind=KIND_FIELD,
+                    name=extra,
+                    span=(start_row, end_row),
+                    body=body_text,
+                    fingerprint=unit_body_fingerprint(body_text, lang=language),
+                ))
     else:
         # (2) Bodyless function/method signature: ``fn foo(&self);`` etc.
         mname = _assoc_item_func_name(stmt_text)
@@ -2290,24 +2304,26 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
                     # recognizes keyword-first forms (``const name``); these
                     # type-first forms were silently dropped. Try the typed-field
                     # extractor BEFORE the bodyless-function path (a field has no
-                    # parens after the name; a function does).
-                    tfname = _typed_field_name_from_buf(stmt_text, language)
-                    if tfname is not None:
+                    # parens after the name; a function does). Returns a LIST
+                    # (multi-declaration ``int x, y, z;`` emits one name each).
+                    tnames = _typed_field_name_from_buf(stmt_text, language)
+                    if tnames:
                         end_row = cur_row_at(i)
                         body_start = stmt_start
                         body = src[body_start : i + 1]
                         start_row_f = cur_row_at(body_start)
                         existing_f = {u.name for u in units if u.name}
-                        if tfname not in existing_f:
-                            units.append(
-                                StructuralUnit(
-                                    kind=KIND_FIELD,
-                                    name=tfname,
-                                    span=(start_row_f, end_row),
-                                    body=body,
-                                    fingerprint=unit_body_fingerprint(body, lang=language),
+                        for tfname in tnames:
+                            if tfname not in existing_f:
+                                units.append(
+                                    StructuralUnit(
+                                        kind=KIND_FIELD,
+                                        name=tfname,
+                                        span=(start_row_f, end_row),
+                                        body=body,
+                                        fingerprint=unit_body_fingerprint(body, lang=language),
+                                    )
                                 )
-                            )
                     else:
                         # Top-level bodyless FUNCTION declaration (C/C++/Java
                         # header files: ``int foo();``). Reuse the keywordless
@@ -3616,62 +3632,107 @@ _TYPED_FIELD_MODIFIERS = frozenset({
 })
 
 
-def _typed_field_name_from_buf(buf: str, language: str | None) -> str | None:
-    """Recover the name from a type-first field declaration.
+def _typed_field_name_from_buf(buf: str, language: str | None) -> list[str]:
+    """Recover the name(s) from a type-first field declaration.
 
     Handles the Java/C#/C++/Kotlin shape ``<modifier>* <Type> <name> [= init];``
-    (e.g. ``static final int COUNT = 10``, ``private String name;``). The name
-    is the identifier immediately before ``=`` (or, without an initializer,
-    the LAST identifier before ``;``/end). Requires at least a Type + name
-    (two identifier tokens) so a bare ``foo();`` (a call) isn't matched — and
-    is gated to languages that use this form. Returns ``None`` for shapes the
-    keyworded ``_field_name_from_buf`` already handles or for method signatures.
+    (e.g. ``static final int COUNT = 10``, ``private String name;``). Returns a
+    LIST of names — multi-declarations (``int x, y, z;``) emit one name per
+    declarand. Requires at least a Type + name (two identifier tokens) so a bare
+    ``foo();`` (a call) isn't matched — and is gated to languages that use this
+    form. Returns an EMPTY list for shapes the keyworded ``_field_name_from_buf``
+    already handles or for method signatures.
     """
     if language is None or language not in _TYPED_FIELD_LANGUAGES:
-        return None
+        return []
     t = buf.strip().rstrip(";").strip()
     if not t:
-        return None
+        return []
     # A typed FIELD has no parameter list. If the statement contains ``(`` it's
     # a method/function signature (possibly with trailing qualifiers like
     # ``const = 0``) — reject so the bodyless-method path handles it.
     if "(" in t:
-        return None
+        return []
     toks = t.split()
     if len(toks) < 2:
-        return None
+        return []
     # Strip leading modifiers to reach the Type token.
     idx = 0
     while idx < len(toks) and toks[idx] in _TYPED_FIELD_MODIFIERS:
         idx += 1
     remaining = toks[idx:]
     if len(remaining) < 2:
-        return None  # only a modifier + one token — not a typed field
-    # If there's an ``=``, the name is the identifier just before it.
+        return []  # only a modifier + one token — not a typed field
+    # If there's an ``=``, the name is the identifier just before it. A multi-
+    # declaration with initializers (``int a = 1, b = 2;``) is split on commas
+    # at the declarand level; the name is the token before each ``=``.
     if "=" in remaining:
         eq_i = remaining.index("=")
         if eq_i < 1:
-            return None
+            return []
         name_tok = remaining[eq_i - 1]
-    else:
-        # No initializer: name is the LAST identifier token.
-        name_tok = remaining[-1]
-    # The name must be a valid identifier (not a keyword/punctuation). If the
-    # token has a ``(`` glued to it (``foo();``), it's a method signature, not
-    # a field — reject so the bodyless-method path handles it.
-    if "(" in name_tok:
-        return None
-    name_tok = re.split(r"[<(\[{,:]", name_tok, maxsplit=1)[0]
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name_tok):
-        return None
-    # Reject if the "name" is followed by ``(`` — that's a method signature,
-    # not a field (the bodyless-method path handles it).
-    name_idx = remaining.index(name_tok) if name_tok in remaining else -1
-    if name_idx >= 0 and name_idx + 1 < len(remaining):
-        nxt = remaining[name_idx + 1]
-        if nxt.startswith("("):
-            return None
-    return name_tok
+        # For multi-init (``a = 1, b = 2``), split the whole remaining on commas
+        # and take the name token before each ``=``.
+        names = _extract_multi_declarand_names(remaining)
+        return names if names else ([_clean_ident(name_tok)] if _is_valid_ident(name_tok) else [])
+    # No initializer: name is the LAST identifier token. For a multi-declaration
+    # without initializers (``int x, y, z;``), the names are the comma-separated
+    # identifiers after the Type.
+    names = _extract_multi_declarand_names(remaining)
+    if names:
+        return names
+    # Single declarand fallback.
+    name_tok = remaining[-1]
+    if _is_valid_ident(name_tok):
+        return [_clean_ident(name_tok)]
+    return []
+
+
+def _is_valid_ident(tok: str) -> bool:
+    """True when ``tok`` is a valid identifier (after stripping type glue)."""
+    cleaned = _clean_ident(tok)
+    return bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", cleaned))
+
+
+def _clean_ident(tok: str) -> str:
+    """Strip type/glue suffixes (``<``, ``(``, ``[``, ``,``, ``:``) from a token."""
+    return re.split(r"[<(\[{,:]", tok, maxsplit=1)[0]
+
+
+def _extract_multi_declarand_names(remaining: list[str]) -> list[str]:
+    """Extract declarand names from a comma-separated declaration.
+
+    For ``int x, y, z`` (remaining after Type = ['x,', 'y,', 'z']) → ['x','y','z'].
+    For ``int a = 1, b = 2`` (remaining = ['a', '=', '1,', 'b', '=', '2']) → ['a','b'].
+    Returns [] if no valid identifiers found or the shape isn't multi-declarand.
+    The FIRST token is the Type (already stripped by the caller) — names start
+    from index 0 of ``remaining`` (the caller passes post-Type tokens).
+    """
+    # Re-join and split on top-level commas to get each declarand.
+    joined = " ".join(remaining)
+    # If there's no comma, this isn't a multi-declaration.
+    if "," not in joined:
+        return []
+    # Split on commas (naive — doesn't handle commas in generics like Map<K,V>,
+    # but those are rare in field declarations and the single-name fallback
+    # handles them conservatively by returning []).
+    declarands = joined.split(",")
+    names: list[str] = []
+    for decl in declarands:
+        decl_toks = decl.split()
+        if not decl_toks:
+            continue
+        # The name is the identifier before ``=`` if present, else the last token.
+        if "=" in decl_toks:
+            eq_i = decl_toks.index("=")
+            if eq_i < 1:
+                continue
+            name_tok = decl_toks[eq_i - 1]
+        else:
+            name_tok = decl_toks[-1]
+        if _is_valid_ident(name_tok):
+            names.append(_clean_ident(name_tok))
+    return names
 
 
 #: Patterns for newline/expression-body declarations the brace machine misses
