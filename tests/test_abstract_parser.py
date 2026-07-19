@@ -1959,6 +1959,30 @@ def test_go_free_function_not_method():
     assert any(u.name == "helper" for u in funcs)
 
 
+def test_go_func_literal_in_body_no_phantom_unit():
+    """Bug #2: a Go func literal inside a function body (``h := func(){...}``)
+    produced a phantom nested ``function name=None`` child. The func literal's
+    ``{`` opened a declaration brace (the brace machine classified it as a
+    function), but it's an EXPRESSION (an assignment RHS), not a declaration.
+    Now that all_units_flat exposes nested units (bug #6 fix), this phantom
+    would pollute the cross-commit guardian's defines set."""
+    src = (
+        "package main\n"
+        "func main() {\n"
+        "    h := func(x int) int { return x * 2 }\n"
+        "    _ = h(5)\n"
+        "}\n"
+    )
+    ir = ap.parse_file(src, language="go")
+    flat = ap.all_units_flat(ir)
+    # Only `main` should appear — no phantom function with name=None.
+    funcs = [(u.kind, u.name) for u in flat if u.kind == "function"]
+    assert ("function", None) not in funcs, (
+        f"func literal produced a phantom nested function: {funcs}"
+    )
+    assert ("function", "main") in funcs
+
+
 # --- Family/language mismatch robustness ---
 
 def test_family_mismatch_does_not_crash():

@@ -2910,6 +2910,32 @@ def _classify_a_brace(
         and b.count("(") > b.count(")")
     ):
         return None
+    # Bug #2: Go func literal as a short-decl RHS INSIDE a function body
+    # (``h := func(){...}`` within ``func main() { ... }``) — the ``func`` keyword
+    # is present but IMMEDIATELY PRECEDED by Go's ``:=`` short-decl operator, so
+    # it's an EXPRESSION (a function literal value assigned to a local), not a
+    # declaration. The brace opens the literal's body, not a named scope. Without
+    # this guard, a phantom nested ``function name=None`` child was emitted — now
+    # visible via all_units_flat (bug #6 fix) and polluting the cross-commit
+    # guardian's defines set.
+    #
+    # Restricted to Go's ``:=`` (not bare ``=``): the buffer can merge a prior
+    # statement's ``=`` into the func's buffer (e.g. Kotlin ``val x = "y" fun load()``),
+    # and ``=`` is ambiguous (could be a prior statement's assignment). Go's ``:=``
+    # is unambiguous — it's the short-decl operator that introduces the binding,
+    # and it only appears at the start of a statement, so a ``:=`` immediately
+    # before ``func`` is reliably a func-literal RHS. JS ``var f = function(){}``
+    # at top level is handled by the brace_depth > 0 gate (top-level bindings ARE
+    # declarations); in-body JS func literals assigned via ``=`` are rare and the
+    # phantom, if any, is a child unit (lower impact than Go's common ``h := func()``).
+    if (
+        last_kw in _A_FUNC_KEYWORDS
+        and language == "go"
+        and brace_depth > 0
+        and last_kw_idx > 0
+        and toks[last_kw_idx - 1] == ":="
+    ):
+        return None
 
     # Determine the name: the identifier right after the keyword.
     name: str | None = None
