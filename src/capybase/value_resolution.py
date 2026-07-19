@@ -271,7 +271,19 @@ def _classify_family_a(base: str, cur: str, rep: str) -> ValueResolution | None:
     if mb_ and mc_ and mr_:
         tb, tc, tr = mb_.group("target"), mc_.group("target"), mr_.group("target")
         if tb == tc == tr:
-            return ValueResolution(kind="assignment", target=tb)
+            # The full binding signature (everything up to and including the
+            # target — ``let mut x``, ``let x``, ``const N``, ``self.x``) must
+            # match across all three sides. ``let mut x = 1`` vs ``let x = 2``
+            # share the target ``x`` but the ``mut`` keyword is semantically
+            # significant in Rust (affects the borrow checker); a one-sided
+            # merge picking the non-mut side would silently change mutability.
+            # Comparing the prefix up to the target end catches any modifier
+            # difference (mut, visibility, const-vs-let, type annotation).
+            sig_b = b[: mb_.end("target")].strip()
+            sig_c = c[: mc_.end("target")].strip()
+            sig_r = r[: mr_.end("target")].strip()
+            if sig_b == sig_c == sig_r:
+                return ValueResolution(kind="assignment", target=tb)
     return None
 
 

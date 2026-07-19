@@ -179,6 +179,38 @@ def test_rust_different_targets_not_value_resolution():
     ) is None
 
 
+def test_rust_mutability_difference_not_value_resolution():
+    """``let mut x = 1`` vs ``let x = 2`` — the ``mut`` keyword is semantically
+    significant in Rust (affects the borrow checker; a non-mut binding can't be
+    re-assigned). The Family-A regex swallowed ``mut`` as an optional modifier
+    and classified by target ``x`` only, so a one-sided merge could pick the
+    non-mut side and silently change (or break) the binding's mutability. The
+    full binding signature (``let mut x`` vs ``let x``) must match across all
+    three sides for a pure value resolution."""
+    r = classify_value_resolution(
+        "let mut x = 1;",
+        "let x = 2;",      # cur dropped mut
+        "let mut x = 3;",
+        "rust",
+    )
+    assert r is None, (
+        f"mutability difference (let mut vs let) wrongly classified: {r}"
+    )
+
+
+def test_rust_same_mutability_is_value_resolution():
+    """Regression guard: when all three sides use the SAME mutability, the
+    assignment IS a value resolution."""
+    r1 = classify_value_resolution(
+        "let mut x = 1;", "let mut x = 2;", "let mut x = 3;", "rust"
+    )
+    assert r1 is not None and r1.kind == "assignment" and r1.target == "x"
+    r2 = classify_value_resolution(
+        "let x = 1;", "let x = 2;", "let x = 3;", "rust"
+    )
+    assert r2 is not None and r2.kind == "assignment" and r2.target == "x"
+
+
 def test_javascript_return_value_conflict():
     r = classify_value_resolution(
         "return 'hi'", "return 'howdy'", "return 'hello'", "javascript"
