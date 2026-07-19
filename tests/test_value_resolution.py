@@ -222,6 +222,44 @@ def test_family_a_malformed_returns_none():
     assert classify_value_resolution("{{{", "}}}", "junk", "rust") is None
 
 
+def test_family_a_multi_statement_side_not_value_resolution():
+    """Phase 5.2: a side with MULTIPLE statements (``x = 1; y = 2``) must NOT
+    classify as a value resolution. The regex matched the FIRST assignment and
+    ignored the rest, so a one-sided merge would drop the second statement
+    entirely. Only SINGLE-statement sides qualify."""
+    # cur has two statements; rep has one. The classifier must not fire on the
+    # first assignment of cur (it would license dropping y = 2).
+    r = classify_value_resolution(
+        "x = 1",
+        "x = 2; y = 3",   # two statements
+        "x = 4",
+        "rust",
+    )
+    assert r is None, f"multi-statement side wrongly classified: {r}"
+
+
+def test_family_a_bare_return_vs_valued_return_not_value_resolution():
+    """Phase 5.2: a bare ``return`` (early-exit, no value) vs ``return 5`` (a
+    valued return) is a CONTROL-FLOW change, not a value resolution. Picking
+    one side changes whether the function returns a value at all. All three
+    sides must be bare OR all three must return a value."""
+    # base and cur are bare returns; rep returns a value.
+    r = classify_value_resolution(
+        "return",
+        "return",
+        "return 5",   # valued return — different control-flow shape
+        "rust",
+    )
+    assert r is None, f"bare-vs-valued return wrongly classified: {r}"
+
+
+def test_family_a_all_bare_returns_is_value_resolution():
+    """Regression guard: three bare returns (all early-exits) IS a value
+    resolution (picking either is fine — they're control-flow-identical)."""
+    r = classify_value_resolution("return", "return", "return", "rust")
+    assert r is not None and r.kind == "return"
+
+
 # ---------------------------------------------------------------------------
 # Dispatch + unknown language
 # ---------------------------------------------------------------------------

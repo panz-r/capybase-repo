@@ -259,13 +259,46 @@ def _classify_family_a(base: str, cur: str, rep: str) -> ValueResolution | None:
     resolution (all sides lead with ``return``) or an assignment value
     resolution (all sides bind/assign the SAME target, RHS diverges). Different
     leading keywords or different targets → ``None``.
+
+    Phase 5.2 tightening: rejects multi-statement sides (a side with ``;`` or a
+    newline separating two statements would let the classifier match the first
+    and license dropping the second), and bare-vs-valued return divergence (a
+    bare ``return`` vs ``return 5`` is a control-flow change, not a value
+    resolution — picking one side changes whether the function returns a value).
     """
     b, c, r = (base or "").strip(), (cur or "").strip(), (rep or "").strip()
     if not (b and c and r):
         return None
+    # Phase 5.2: reject multi-statement sides. A side with a top-level ``;`` or
+    # a newline (Family-A statement separators) carries more than one statement;
+    # a one-sided merge would drop the others. Strip trailing ``;`` first (a
+    # single statement's terminator is fine), then check for any remaining
+    # separator. This is conservative — a ``;`` inside a string/bracket would
+    # false-decline, but the union/disjoint rules catch those cases anyway.
+    def _is_single_statement(s: str) -> bool:
+        # Strip a single trailing ``;`` (the common statement terminator).
+        s = s.rstrip()
+        if s.endswith(";"):
+            s = s[:-1]
+        # Any remaining ``;`` or newline ⇒ multi-statement.
+        return ";" not in s and "\n" not in s
+    if not all(_is_single_statement(s) for s in (b, c, r)):
+        return None
     # Return value resolution: all three lead with `return`.
     if _A_RETURN_RE.match(b) and _A_RETURN_RE.match(c) and _A_RETURN_RE.match(r):
-        return ValueResolution(kind="return", target="")
+        # Phase 5.2: bare-vs-valued return is a control-flow change. All three
+        # must be bare returns OR all three must return a value.
+        def _is_bare_return(s: str) -> bool:
+            m = _A_RETURN_RE.match(s)
+            if m is None:
+                return False
+            # Everything after the ``return`` keyword (and optional modifiers).
+            after = s[m.end():].strip().rstrip(";").strip()
+            return after == ""
+        bare_b, bare_c, bare_r = _is_bare_return(b), _is_bare_return(c), _is_bare_return(r)
+        if bare_b == bare_c == bare_r:
+            return ValueResolution(kind="return", target="")
+        return None  # mixed bare/valued — control-flow change
     # Assignment value resolution: all three assign/bind the SAME target.
     mb_, mc_, mr_ = _A_ASSIGN_RE.match(b), _A_ASSIGN_RE.match(c), _A_ASSIGN_RE.match(r)
     if mb_ and mc_ and mr_:
