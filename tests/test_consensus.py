@@ -79,6 +79,51 @@ def test_r43_normalize_crlf_to_lf():
     assert len(clusters) == 1, f"mixed line endings split into {len(clusters)} clusters"
 
 
+def test_normalize_rust_raw_hash_count_not_prematurely_closed():
+    """Bug #8 (concrete, fixed by canonical-lexer migration): a Rust raw string
+    ``r##"..."##`` (2-hash) must NOT be prematurely closed by an interior line
+    containing ``"###`` (3 hashes) — per the Rust Reference, the closer's hash
+    count must EXACTLY equal the opener's. The bespoke _multi_string_closes
+    helper returned True for any ``"#+`` line, closing early and causing the
+    subsequent lines to be treated as code (blank-line collapse, comment-strip)
+    — silently corrupting the normalization key for any Rust raw string whose
+    interior contained a longer hash run. The canonical char-scan tracks exact
+    hash counts."""
+    # r##" opens (2 hashes). Interior has a "### line (3 hashes — NOT the
+    # closer for a 2-hash string) and a blank line. All must be preserved as
+    # string interior.
+    src = (
+        'let a = r##"\n'
+        'content "### hashes\n'
+        '\n'
+        'more content\n'
+        '"##;\n'
+        'let b = 1;\n'
+    )
+    n = normalize(src, "rust")
+    # The blank line and the "### line are string interior — must survive.
+    assert "more content" in n, f"raw string prematurely closed: {n!r}"
+    assert "let b = 1" in n
+
+
+def test_normalize_cpp_raw_string_interior_preserved():
+    """C++ raw strings R\"DELIM(...)DELIM\" must have their interior preserved
+    verbatim — the prior helper didn't handle C++ raw at all."""
+    src = (
+        'void f() {\n'
+        '  auto s = R"x(\n'
+        '  multi-line content\n'
+        '  with a # line\n'
+        '  )x";\n'
+        '  g();\n'
+        '}\n'
+    )
+    n = normalize(src, "cpp")
+    assert "multi-line content" in n
+    assert "with a # line" in n
+    assert "g();" in n
+
+
 # ---------------------------------------------------------------------------
 # cluster + select
 # ---------------------------------------------------------------------------

@@ -1652,16 +1652,21 @@ def find_symbol_definitions(
     return snippets
 
 
-def _blank_line_strings(line: str) -> str:
+def _blank_line_strings(line: str, lang: str | None = None) -> str:
     """Replace string-literal contents with spaces (length-preserving).
 
     Used by :func:`_find_definition_span` to prevent definition-pattern matches
     INSIDE string literals (e.g. ``let s = "fn foo() { not real }";``). Blanking
     (not removing) preserves character positions so column-relative logic in the
-    caller is unaffected. Handles ``"..."``, ``'...'``, and triple-quoted forms.
+    caller is unaffected. Handles ALL string forms via the canonical lexer
+    (regular, triple-quote, Rust raw, C++ raw, char literals) — the prior
+    ``_STRING_LIT_RE``-only version leaked raw-string content, so a definition
+    pattern inside a Rust raw string could false-match.
     """
-    from capybase.adapters.abstract_parser import _STRING_LIT_RE
-    return _STRING_LIT_RE.sub(lambda m: " " * len(m.group(0)), line)
+    from capybase.adapters.string_lexer import blank_strings
+    # blank_strings uses '_' by default; remap to spaces to preserve the prior
+    # contract (spaces, not underscores).
+    return blank_strings(line, lang).replace("_", " ")
 
 
 def _blank_text_strings(text: str) -> str:
@@ -1867,7 +1872,7 @@ def _find_definition_span(source: str, name: str, language: str) -> tuple[int, i
         # Blank string-literal contents so definition-pattern matching can't fire
         # on text inside strings (e.g. ``let s = "fn foo() { not real }";``).
         # Length-preserving blanking keeps character positions intact.
-        stripped = _blank_line_strings(stripped)
+        stripped = _blank_line_strings(stripped, language)
         # Exact prefix match (the common case for Python/Rust/Go/JS), including
         # an optional leading ``async``/``await`` modifier (Python ``async def``,
         # JS ``async function``) which the patterns don't enumerate.

@@ -1284,9 +1284,12 @@ def _strip_decl_header(body: str, lang: str | None = None) -> str:
     if "\n" in body:
         return body.split("\n", 1)[1]
     # Find the header boundary on a string-blanked copy (so ':'/'{' inside a
-    # string in the header doesn't trigger a false split).
-    from capybase.adapters.abstract_parser import _STRING_LIT_RE
-    blanked = _STRING_LIT_RE.sub(lambda m: " " * len(m.group(0)), body)
+    # string in the header doesn't trigger a false split). Uses the canonical
+    # lexer so EVERY string form is handled (Rust raw, C++ raw, triple-quote) —
+    # the prior _STRING_LIT_RE-only version leaked raw-string content, so a
+    # ':' or '{' inside a raw string could false-trigger the header split.
+    from capybase.adapters.string_lexer import blank_strings
+    blanked = blank_strings(body, lang).replace("_", " ")
     if lang in (None, "python", "ruby"):
         # Python one-liner: ``def f(): return 1`` → header is ``def f():``
         idx = blanked.find(":")

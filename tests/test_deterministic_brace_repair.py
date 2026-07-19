@@ -275,3 +275,27 @@ def test_r44_try_balance_braces_no_false_repair_on_valid_code():
     from capybase.verification import _try_balance_braces
     # Python floor division — balanced, no repair needed.
     assert _try_balance_braces("x = {a // 2}\ny = 1\n", "python") is None
+
+
+def test_brace_balance_rust_raw_string_with_braces():
+    """The canonical lexer migration: a Rust raw string containing ``{``/``}``
+    must not corrupt the brace count. The prior regex-based _mask_strings_and_
+    comments leaked raw-string content (it only matched ``"..."`` and split the
+    raw string at the embedded quote), so an embedded ``}`` would be counted as
+    a brace close → phantom imbalance → false splice-repair."""
+    from capybase.verification import _braces_balanced, _brace_imbalance_line
+    # A balanced Rust fn whose raw string contains braces.
+    src = 'fn f() {\n    let s = r#"contains { and } braces"#;\n    g()\n}\n'
+    assert _braces_balanced(src, "rust"), (
+        f"raw-string braces corrupted brace count: imbalance at "
+        f"{_brace_imbalance_line(src, 'rust')}"
+    )
+
+
+def test_brace_balance_cpp_raw_string_with_braces():
+    """Same fix for C++ raw strings R\"(...)\" with embedded braces."""
+    from capybase.verification import _braces_balanced
+    src = 'void f() {\n  auto s = R"x(contains { and } braces)x";\n  g();\n}\n'
+    assert _braces_balanced(src, "cpp"), (
+        f"C++ raw-string braces corrupted brace count"
+    )

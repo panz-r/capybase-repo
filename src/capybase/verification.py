@@ -1683,24 +1683,19 @@ def _mask_strings_and_comments(text: str, language: str | None) -> str:
     string is hidden), then strips the language-correct line-comment marker.
     Without string-first ordering, a ``//`` or ``#`` inside a string cut it
     open and a brace before it counted as code → phantom imbalance.
+
+    Uses the canonical :mod:`string_lexer` so EVERY string form is handled
+    (Rust raw ``r#\"...\"#``, C++ raw ``R\"(...)\"``, Python triple-quotes,
+    char literals vs lifetimes) — the prior regex-based mask leaked raw-string
+    content, corrupting the brace count when a raw string contained ``{``/``}``.
     """
-    import re
-    # Mask strings/chars first (length-preserving-ish; content → spaces).
-    masked = re.sub(r'"(?:\\.|[^"\\])*"', lambda m: " " * len(m.group(0)), text)
-    masked = re.sub(r"'(?:\\.|[^'\\])*'", lambda m: " " * len(m.group(0)), masked)
-    # Now strip the language-correct line comment to end-of-line.
-    markers = _comment_markers_for(language)
-    if not markers:
-        return masked
-    out_lines = []
-    for line in masked.split("\n"):
-        cut = len(line)
-        for marker in markers:
-            idx = line.find(marker)
-            if 0 <= idx < cut:
-                cut = idx
-        out_lines.append(line[:cut])
-    return "\n".join(out_lines)
+    from capybase.adapters.string_lexer import blank_strings_and_comments
+    # blank_strings_and_comments is length-preserving (strings → '_', comments →
+    # ' '). For brace counting, any non-brace placeholder is equivalent; we use
+    # the default masking and let callers count braces on the result. The
+    # comment-stripping (to end-of-line) the prior code did is subsumed: the
+    # lexer blanks the comment content in-place, which is brace-neutral.
+    return blank_strings_and_comments(text, language)
 
 
 def _braces_balanced(text: str, language: str | None = None) -> bool:

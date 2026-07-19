@@ -599,9 +599,185 @@ def blank_raw_strings(text: str) -> str:
     return rust.sub(lambda m: "_" * len(m.group(0)), text)
 
 
+def multiline_string_line_mask(text: str, lang: str | None = None) -> list[bool]:
+    """For each line of ``text``, True if the line is INSIDE a multi-line string.
+
+    A multi-line string is one that opens on a prior line and hasn't closed by
+    the start of this line (Python triple-quote, Rust raw ``r#"..."#``, C++ raw
+    ``R"DELIM(...)DELIM"``, JS template literal). A line whose OWN opener is
+    closed on the same line is NOT "inside" (the string didn't span).
+
+    Used by the consensus normalizer (and any other site that needs to preserve
+    multi-line string interior verbatim — docstrings, raw SQL, etc.) to decide
+    which lines to skip comment-stripping / blank-collapse on. This replaces the
+    bespoke ``_multi_string_open_count`` / ``_multi_string_closes`` heuristics,
+    which (a) didn't handle C++ raw strings and (b) matched closers by a
+    hash-count-blind ``"#+`` regex (closing a 2-hash string on a 3-hash line).
+
+    The mask is computed by running the char-scan and tracking, per newline,
+    whether the scan was mid-string at that point.
+    """
+    n = len(text)
+    st = _LexState()
+    # A line is "interior" if the scan is inside a SPANNING string (triple-quote,
+    # raw, template) at the START of the line. Single-line strings (regular
+    # "..." / '...' / char) never span, so they don't contribute.
+    slash = _lang_uses_slash_comments(lang)
+    hash_c = not slash
+    # Process char by char, but only track state transitions (don't build
+    # blanked output — we only need the mask).
+    lines = text.split("\n")
+    mask = [False] * len(lines)
+    line_idx = 0
+    i = 0
+    # Mark line_idx as interior if we're in a spanning string at its start.
+    # "Spanning" = triple-quote, raw (hash_count > 0), cpp_raw, or template.
+    def _in_spanning() -> bool:
+        return (
+            st.in_str in ("triple_d", "triple_s", "`")
+            or (st.in_str == '"' and (st.hash_count > 0 or st.in_cpp_raw))
+        )
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if ch == "\n":
+            line_idx += 1
+            if line_idx < len(lines) and _in_spanning():
+                mask[line_idx] = True
+            i += 1
+            continue
+        # Replicate the state transitions (simplified — no blanking needed).
+        if st.in_line_comment:
+            i += 1
+            continue
+        if st.in_block_comment:
+            if ch == "*" and nxt == "/":
+                st.in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if st.in_str is not None:
+            if ch == "\\":
+                if st.in_str == '"' and st.hash_count > 0:
+                    i += 1
+                    continue
+                i += 2
+                continue
+            if st.in_str == "char" and ch == "'":
+                st.in_str = None
+                i += 1
+                continue
+            if st.in_str == "'" and ch == "'":
+                st.in_str = None
+                i += 1
+                continue
+            if st.in_str == "`" and ch == "`":
+                st.in_str = None
+                i += 1
+                continue
+            if st.in_str == '"':
+                if st.in_cpp_raw:
+                    delim = st.cpp_raw_delim
+                    need = ")" + delim
+                    start = i - len(need)
+                    if start >= 0 and text[start:i] == need:
+                        st.in_str = None
+                        st.in_cpp_raw = False
+                        st.cpp_raw_delim = ""
+                        i += 1
+                        continue
+                    i += 1
+                    continue
+                if st.hash_count > 0:
+                    hc = st.hash_count
+                    tail = text[i + 1 : i + 1 + hc]
+                    after = text[i + 1 + hc] if i + 1 + hc < n else ""
+                    if (
+                        len(tail) == hc and tail == "#" * hc and after != "#"
+                    ):
+                        st.in_str = None
+                        st.hash_count = 0
+                        i += 1 + hc
+                        continue
+                    i += 1
+                    continue
+                st.in_str = None
+                i += 1
+                continue
+            if st.in_str in ("triple_d", "triple_s"):
+                marker = '"""' if st.in_str == "triple_d" else "'''"
+                if text[i : i + 3] == marker:
+                    st.in_str = None
+                    i += 3
+                    continue
+                i += 1
+                continue
+            i += 1
+            continue
+        # Transitions INTO string/comment.
+        if slash and ch == "/" and nxt == "/":
+            st.in_line_comment = True
+            i += 2
+            continue
+        if slash and ch == "/" and nxt == "*":
+            st.in_block_comment = True
+            i += 2
+            continue
+        if hash_c and ch == "#":
+            st.in_line_comment = True
+            i += 1
+            continue
+        if ch == '"':
+            if text[i : i + 3] == '"""':
+                st.in_str = "triple_d"
+                i += 3
+                continue
+            cpp_delim = _match_cpp_raw_prefix(text, i, n)
+            if cpp_delim is not None:
+                st.in_str = '"'
+                st.in_cpp_raw = True
+                st.cpp_raw_delim = cpp_delim
+                i += 1
+                continue
+            st.in_str = '"'
+            st.hash_count = _match_string_prefix(text, i)
+            i += 1
+            continue
+        if ch == "'":
+            if text[i : i + 3] == "'''":
+                st.in_str = "triple_s"
+                i += 3
+                continue
+            nxt1 = text[i + 1] if i + 1 < n else ""
+            nxt2 = text[i + 2] if i + 2 < n else ""
+            prev = text[i - 1] if i > 0 else ""
+            if (
+                slash
+                and (nxt1.isalpha() or nxt1 == "_")
+                and nxt2 != "'"
+                and not (prev.isalnum() or prev == "_")
+            ):
+                i += 1
+                continue
+            if prev in _HEXDIGITS and nxt1 in _HEXDIGITS and nxt2 != "'":
+                i += 1
+                continue
+            st.in_str = "char"
+            i += 1
+            continue
+        if ch == "`":
+            st.in_str = "`"
+            i += 1
+            continue
+        i += 1
+    return mask
+
+
 __all__ = [
     "blank_strings_and_comments",
     "blank_strings",
     "blank_comments",
     "blank_raw_strings",
+    "multiline_string_line_mask",
 ]
