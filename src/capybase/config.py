@@ -190,6 +190,15 @@ class PolicyConfig(BaseModel):
     )
     supported_file_kinds: list[str] = Field(default_factory=lambda: ["text"])
     max_retries_per_unit: int = 2
+    # CEGIS convergence threshold: if the model produces a candidate whose
+    # NORMALIZED form (comments stripped + whitespace collapsed + lines sorted)
+    # has been seen this many times, the loop is cycling on the same essential
+    # output — escalate instead of wasting more tokens. Catches the case the
+    # exact-hash oscillation backstop misses: a model making slightly-different
+    # mistakes each retry (different whitespace, comment reordering) that are
+    # cosmetically distinct but semantically identical. Default 2 (fires on the
+    # 2nd normalized-duplicate); 0 = disabled (rely on exact-hash backstop only).
+    cegis_convergence_threshold: int = 2
     # Separate retry budget for verifier-critic disagreements. A critic-driven
     # retry (the model produced a structurally-valid merge the LLM judge flagged
     # for dropped intent) consumes THIS budget, NOT max_retries_per_unit — so a

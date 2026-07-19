@@ -446,3 +446,48 @@ def test_risk_escalates_on_suspected_validator_error():
     engine = RiskEngine()
     decision = engine.decide(vr, retry_count=0, suspected_validator_error=True)
     assert decision.action == "escalate"
+
+
+# ---------------------------------------------------------------------------
+# CEGIS convergence detection (Issue 4 from the live realworld eval)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_for_convergence_collapses_cosmetic_variation():
+    """The convergence-detection normalizer strips comments + collapses
+    whitespace + sorts tokens, so two candidates that differ only cosmetically
+    (whitespace, comment reordering) hash to the same value. This is what lets
+    the convergence backstop catch cycling the exact-hash oscillation backstop
+    misses."""
+    from capybase.orchestrator import _normalize_for_convergence
+    # Two candidates: same code, different whitespace + a comment added.
+    a = "fn foo() {\n    let x = 1;\n    bar(x)\n}\n"
+    b = "fn foo() {\n  let x = 1;  // added comment\n  bar(x)\n}\n"
+    na = _normalize_for_convergence(a, "rust")
+    nb = _normalize_for_convergence(b, "rust")
+    assert na == nb, (
+        f"cosmetic variation should normalize equal:\n  {na!r}\n  {nb!r}"
+    )
+
+
+def test_normalize_for_convergence_distinguishes_real_changes():
+    """Regression guard: two candidates with GENUINELY different code (a real
+    semantic change) must NOT normalize to the same value — the convergence
+    backstop must not fire on legitimate retry variation."""
+    from capybase.orchestrator import _normalize_for_convergence
+    a = "fn foo() {\n    let x = 1;\n}\n"
+    b = "fn foo() {\n    let x = 2;\n}\n"  # different value
+    na = _normalize_for_convergence(a, "rust")
+    nb = _normalize_for_convergence(b, "rust")
+    assert na != nb, (
+        f"real value change should normalize differently:\n  {na!r}\n  {nb!r}"
+    )
+
+
+def test_cegis_convergence_threshold_config_exists():
+    """The config field exists with the documented default (2 = fire on the 2nd
+    normalized-duplicate; 0 = disabled)."""
+    from capybase.config import Config
+    cfg = Config()
+    assert cfg.policy.cegis_convergence_threshold == 2
+

@@ -96,6 +96,10 @@ class UnitOutcome:
     # (the model was right and the validator was wrong), (3) a third identical
     # attempt = genuine stuck loop.
     _seen_candidate_hashes: dict[str, int] = field(default_factory=dict)
+    # Normalized-form hashes (comments stripped + whitespace collapsed + lines
+    # sorted) for the convergence check (Issue 4). Catches cosmetic-variation
+    # cycling the exact-hash oscillation backstop misses.
+    _seen_normalized_hashes: dict[str, int] = field(default_factory=dict)
     # Explainable-retrieval reasons (#9 step 5): one human-readable string per
     # retrieved few-shot example used in the prompt, recording WHY each was
     # chosen (same path/region kind/conflict shape, score, prior outcome). Empty
@@ -119,6 +123,31 @@ class StepResult:
     reason: str | None = None
     tests_passed: bool | None = None
     continued: bool = False
+
+
+def _normalize_for_convergence(text: str, language: str | None) -> str:
+    """Normalize candidate text for CEGIS convergence detection (Issue 4).
+
+    Strips comments + blank strings + collapses whitespace + sorts lines, so
+    two candidates that differ only cosmetically (whitespace, comment
+    reordering, blank-line counts) hash to the same value. Catches the cycling
+    pattern the exact-hash oscillation backstop misses: a model making
+    slightly-different mistakes each retry that are semantically identical.
+    """
+    try:
+        from capybase.adapters.string_lexer import blank_strings_and_comments
+        # Blank comments + strings (both become placeholder chars), then strip
+        # placeholder chars + collapse whitespace + sort lines.
+        blanked = blank_strings_and_comments(text, language)
+        # Remove the placeholder chars (underscores from string blanking) so
+        # string-literal-value changes don't count as cosmetic. Then split on
+        # whitespace, sort the tokens, and rejoin — line order + within-line
+        # whitespace don't matter for "is this the same essential code".
+        tokens = [t for t in blanked.replace("_", " ").split() if t]
+        return " ".join(sorted(tokens))
+    except Exception:
+        # Fallback: whitespace-collapse only (no comment stripping).
+        return " ".join(sorted(text.split()))
 
 
 def _resolved_buffer(
@@ -5066,6 +5095,18 @@ class Orchestrator:
                 outcome._seen_candidate_hashes[cand_hash] = (
                     outcome._seen_candidate_hashes.get(cand_hash, 0) + 1
                 )
+                # Normalized hash (Issue 4): strip comments + collapse whitespace
+                # + sort lines, so cosmetic variation (whitespace, comment
+                # reordering) is caught as cycling. Uses the canonical lexer
+                # (Phase 1) for comment/blank stripping.
+                norm_text = _normalize_for_convergence(
+                    cand.resolved_text, unit.language)
+                norm_hash = _hashlib.sha256(
+                    norm_text.encode("utf-8")
+                ).hexdigest()[:16]
+                outcome._seen_normalized_hashes[norm_hash] = (
+                    outcome._seen_normalized_hashes.get(norm_hash, 0) + 1
+                )
             if self.config.journal.enabled and self.config.journal.store_candidates:
                 self.journal.store_candidate(cand)
             if self.config.journal.enabled and self.config.journal.store_raw_responses:
@@ -5189,6 +5230,37 @@ class Orchestrator:
                     f"budget {osc_budget})"
                 )
                 return outcome
+            # Convergence backstop (Issue 4): if the model produces a candidate
+            # whose NORMALIZED form (comments stripped + whitespace collapsed +
+            # lines sorted) has been seen ≥ cegis_convergence_threshold times,
+            # the loop is cycling on the same essential output despite cosmetic
+            # variation. Decoupled from the retry budget so it fires earlier than
+            # the exact-hash oscillation check above. Catches the live-eval
+            # sea-orm-0013 pattern (900s of slightly-different-but-equivalent
+            # candidates). Default threshold 2; 0 = disabled.
+            conv_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
+            if conv_threshold > 0 and cand.resolved_text:
+                norm_count = outcome._seen_normalized_hashes.get(norm_hash, 0)
+                if norm_count >= conv_threshold and norm_hash != cand_hash:
+                    # Only fire when the normalized hash differs from the exact
+                    # hash (exact-repeat is already handled above). This ensures
+                    # the convergence check catches ONLY cosmetic-variation
+                    # cycling, not exact repeats.
+                    self.journal.emit(
+                        "candidate_rejected",
+                        {"candidate_id": cand.candidate_id,
+                         "action": "escalate", "via": "convergence",
+                         "reason": f"normalized candidate seen {norm_count}× (threshold {conv_threshold}) — cosmetic-variation cycling",
+                         "retry_count": retry_count},
+                        step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                    )
+                    outcome.escalated = True
+                    outcome.retry_count = retry_count
+                    outcome.reason = (
+                        f"candidate convergence (normalized form {norm_count}×, "
+                        f"threshold {conv_threshold})"
+                    )
+                    return outcome
             # Seed the retry: hard failures PLUS the critic's verdict (if any) as
             # a synthesized VerificationFailure, so the repair prompt the model
             # sees on the next attempt carries the critic's concrete feedback
