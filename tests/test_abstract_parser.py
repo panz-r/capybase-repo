@@ -869,6 +869,66 @@ def test_render_context_shows_changes():
     assert "synthesize" in text
 
 
+def test_render_context_added_both_conflict_not_called_modified():
+    """Bug #9a: when the only structural conflict is ADDED_BOTH_CONFLICT (both
+    sides ADDED a unit with divergent bodies — neither MODIFIED anything), the
+    SUMMARY line must NOT say 'modified by both sides'. The unit was ADDED, not
+    MODIFIED. Mislabeling could mislead the LLM into the wrong reconciliation."""
+    base = "def existing():\n    pass\n"
+    left = "def existing():\n    pass\n\ndef helper():\n    return 1\n"
+    right = "def existing():\n    pass\n\ndef helper():\n    return 2\n"
+    diff = sd.compute_structural_diff_3way(base, left, right, language="python")
+    text = sc.render_structural_context(diff)
+    assert "helper" in text
+    # The SUMMARY line (starting "Structural conflicts:") is the mislabel site.
+    summary_line = next(
+        (ln for ln in text.split("\n") if ln.startswith("Structural conflicts:")),
+        "",
+    )
+    assert "modified by both" not in summary_line.lower(), (
+        f"ADDED_BOTH_CONFLICT summary mislabeled as 'modified': {summary_line!r}"
+    )
+    assert "added by both" in summary_line.lower(), (
+        f"summary should say 'added by both': {summary_line!r}"
+    )
+
+
+def test_render_import_surface_handles_renamed_imports():
+    """Bug #9b: _render_import_surface had no _CHANGE_KIND_RENAMED branch, so a
+    renamed import (rare — requires a content fingerprint on the import) fell
+    through and was dropped from the change lists AND double-counted in
+    survivors (both old and new names). A renamed import should appear as a
+    drop of the old name + add of the new name, with only the new name in
+    survivors."""
+    # Construct a diff with a single renamed module_stmt directly.
+    from capybase.adapters.structural_diff import (
+        AlignedUnit, _CHANGE_KIND_RENAMED,
+    )
+    from capybase.adapters.abstract_parser import KIND_MODULE_STMT
+    from capybase.adapters.structural_context import _render_import_surface
+
+    class _U:
+        """Minimal AlignedUnit stand-in."""
+        def __init__(self, kind, name, base=None, left=None, right=None, change_kind=None):
+            self.kind = kind
+            self.name = name
+            self.base = type("X", (), {"name": base})() if base else None
+            self.left = type("X", (), {"name": left})() if left else None
+            self.right = type("X", (), {"name": right})() if right else None
+            self.change_kind = change_kind
+
+    # An import renamed old_path -> new_path.
+    renamed = _U(KIND_MODULE_STMT, "old_path",
+                 base="old_path", left="new_path", right="new_path",
+                 change_kind=_CHANGE_KIND_RENAMED)
+    diff = type("D", (), {"aligned": [renamed]})()
+    out = _render_import_surface(diff)
+    # The rename should surface (old dropped, new added). It must NOT be empty.
+    assert out != "", "renamed import dropped from import surface entirely"
+    # The NEW name should appear as an addition; the OLD should not be a survivor.
+    assert "new_path" in out
+
+
 def test_render_context_no_changes_returns_empty():
     """No changes → empty annotation (nothing to tell the model)."""
     src = "def foo():\n    return 1\n"

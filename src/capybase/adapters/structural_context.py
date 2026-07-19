@@ -114,6 +114,22 @@ def _render_import_surface(diff: StructuralDiff3Way) -> str:
             cur_drops.append(a.name)
         elif ck == _CHANGE_KIND_DELETED_BOTH:
             pass  # removed by both — not a survivor
+        elif ck == _CHANGE_KIND_RENAMED:
+            # Bug #9b: a renamed import (rare — requires a content fingerprint on
+            # the import) is old-name-dropped + new-name-added. Surface it in
+            # both change lists so the LLM sees the rename, and remember ONLY the
+            # NEW name as a survivor (the old name was renamed away).
+            new_name = (a.left.name if a.left else None) or (a.right.name if a.right else None)
+            old_name = a.base.name if a.base else a.name
+            if new_name:
+                cur_adds.append(new_name)
+                rep_adds.append(new_name)
+            if old_name and old_name != new_name:
+                cur_drops.append(old_name)
+                rep_drops.append(old_name)
+            if new_name:
+                remember(new_name)
+            continue  # already handled survivors above; skip the generic remember
         # Track survivors (union of all sides' present imports). A ``deleted_both``
         # import (present in base, absent from BOTH sides) is NOT a survivor —
         # both sides deliberately removed it. Remembering it would tell the model
@@ -218,7 +234,11 @@ def render_structural_context(
         else:
             lines.append(f"  {a.kind.upper()} {a.name}: {label}")
 
-    # Structural conflicts: units both sides modified.
+    # Structural conflicts: units both sides modified OR both added with divergent
+    # bodies. Sub-classify the summary label: ADDED_BOTH_CONFLICT is "added by both
+    # sides (different bodies)", MODIFIED_BOTH is "modified by both sides". Lumping
+    # them together (the prior code always said "modified") mislabeled an addition
+    # conflict as a modification, potentially misleading the LLM's reconciliation.
     conflicts = diff.structural_conflicts
     if conflicts:
         names = ", ".join(
@@ -227,8 +247,10 @@ def render_structural_context(
             else c.name
             for c in conflicts
         )
+        all_added = all(c.change_kind == _CHANGE_KIND_ADDED_BOTH_CONFLICT for c in conflicts)
+        kind_label = "added by both sides (different bodies)" if all_added else "modified by both sides"
         lines.append(
-            f"Structural conflicts: {len(conflicts)} unit(s) modified by both sides ({names}) — "
+            f"Structural conflicts: {len(conflicts)} unit(s) {kind_label} ({names}) — "
             "synthesize both changes."
         )
     else:
