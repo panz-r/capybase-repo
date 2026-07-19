@@ -378,6 +378,13 @@ def _detect_renames(
     time) and applies a 3-way-specific "deleted by BOTH sides" constraint that the
     2-way core doesn't have, so it is kept as a distinct 3-way entry point rather
     than forced through the 2-way signature.
+
+    CONSISTENCY CONTRACT: the shared guards (identity_matched_side_ids,
+    consumed_base_ids/consumed_side_ids, dup-bodied candidate iteration,
+    substantial-body via _fingerprint_has_content) MIRROR the 2-way core's guards.
+    A fix to one MUST be ported to the other; the test
+    ``test_3way_and_2way_rename_cores_agree`` enforces this by running both on the
+    same inputs and asserting the per-side rename pairings match.
     """
     # Index DELETED base units by body fingerprint. A base unit is a rename
     # candidate only when it's gone from the side in question (classified as a

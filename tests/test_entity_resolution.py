@@ -769,6 +769,60 @@ def test_fingerprint_and_body_content_invariant():
         )
 
 
+def test_3way_and_2way_rename_cores_agree():
+    """The 3-way _detect_renames and the 2-way detect_renames_2way must AGREE
+    on per-side rename pairings for the same base+side inputs. This enforces
+    the consistency contract (Phase 2.2): a guard added to one core MUST be
+    ported to the other; this test catches drift.
+
+    The 3-way core keys on unit.fingerprint (the precomputed digest); the 2-way
+    keys on entity_body_content. Per test_fingerprint_and_body_content_invariant
+    these are equal for content-bearing bodies, so a body-content rename pairs
+    in BOTH cores or NEITHER.
+    """
+    from capybase.adapters.abstract_parser import StructuralUnit
+    from capybase.adapters.structural_diff import (
+        compute_structural_diff_3way, _CHANGE_KIND_RENAMED,
+    )
+
+    # A realistic rename scenario: base has `foo` with a substantial body; BOTH
+    # sides rename it to `bar` (agreed rename) — this is where the 3-way core's
+    # "deleted by both sides" refinement ALLOWS the pairing (right also dropped
+    # the old name), so it should agree with the 2-way core.
+    body_text = (
+        "def foo():\n"
+        "    if not data:\n"
+        "        raise ValueError('bad')\n"
+        "    return sum(data)\n"
+    )
+    base_src = body_text
+    left_src = body_text.replace("def foo", "def bar")   # rename foo->bar
+    right_src = body_text.replace("def foo", "def bar")  # both rename identically
+
+    # 2-way core: base vs left (the renaming side).
+    base_u = [StructuralUnit(kind="function", name="foo", span=(0, 4), body=base_src)]
+    left_u = [StructuralUnit(kind="function", name="bar", span=(0, 4), body=left_src)]
+    renames_2w, _ = detect_renames_2way(base_u, left_u, lang="python")
+    # Expected: bar (left) renamed from foo (base).
+    assert renames_2w == {("function", "bar"): ("function", "foo")}, renames_2w
+
+    # 3-way core: base, left, right → the agreed rename should surface as RENAMED.
+    diff = compute_structural_diff_3way(base_src, left_src, right_src, language="python")
+    renamed = [a for a in diff.aligned if a.change_kind == _CHANGE_KIND_RENAMED]
+    assert len(renamed) == 1, (
+        f"3-way core missed the agreed rename that 2-way found; "
+        f"kinds={[a.change_kind for a in diff.aligned]}"
+    )
+    assert renamed[0].left is not None and renamed[0].left.name == "bar"
+    assert renamed[0].base is not None and renamed[0].base.name == "foo"
+
+    # A non-rename case must agree too: both cores reject a copy (old name kept).
+    side_copy = [StructuralUnit(kind="function", name="foo", span=(0, 4), body=base_src),
+                 StructuralUnit(kind="function", name="bar", span=(0, 4), body=base_src)]
+    renames_copy, _ = detect_renames_2way(base_u, side_copy, lang="python")
+    assert renames_copy == {}, f"2-way misclassified a copy as rename: {renames_copy}"
+
+
 
 
 # --- H1 regression: 3-way rename must not drop added_both_conflict ---
