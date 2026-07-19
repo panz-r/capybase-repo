@@ -357,6 +357,15 @@ class ValidationConfig(BaseModel):
     # field, falling back to "2021".
     rustc_path: str = "rustc"
     rust_edition: str = ""
+    # Rust error codes to SUPPRESS in the diagnostic delta (treat as not-new
+    # even when genuinely introduced). The live realworld eval (Issue 3) showed
+    # near-correct Rust merges rejected for E0432/E0433 (crate-path resolution
+    # errors undecidable without the full dependency tree). Set to
+    # ["E0432", "E0433"] to tolerate these when running outside a full crate.
+    # Empty (default) = no suppression (strict). Also suppresses same-code errors
+    # that drift in message text between baseline and candidate via code-keyed
+    # delta matching (engages automatically when Diagnostics carry .code).
+    rust_suppress_codes: list[str] = []
     # Clippy lint check (cargo clippy) for Rust: a quality check that runs in
     # Phase B on the fully-spliced file and flags clippy findings the merge
     # INTRODUCES (compared to a pre-conflict baseline, so a repo's pre-existing

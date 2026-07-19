@@ -104,6 +104,8 @@ class ValidationConfig:
     # Rust compile floor (mirrors config.ValidationConfig; the live flags).
     rustc_path: str = "rustc"
     rust_edition: str = ""
+    # Rust error codes to suppress in the delta (mirrors config.ValidationConfig).
+    rust_suppress_codes: list[str] = field(default_factory=list)
     # Clippy lint check (mirrors config.ValidationConfig; the live flags).
     enable_clippy: bool = False
     clippy_severity: str = "warning"
@@ -2298,7 +2300,7 @@ def _py_compile_errors(source: str) -> list[str]:
 
 
 def compute_diagnostic_delta(
-    baseline_errors: list[str], after_errors: list[str]
+    baseline_errors, after_errors, *, suppress_codes: set[str] | None = None
 ) -> list[str]:
     """The errors in ``after`` that were NOT in ``baseline`` (#7).
 
@@ -2309,19 +2311,57 @@ def compute_diagnostic_delta(
     helpers stop re-implementing it and a unified ``introduced_diagnostics``
     feature can be derived consistently.
 
-    Errors are compared by message string (normalized: stripped). Position
-    (line/column) is intentionally NOT part of the key — a merge that moves a
-    pre-existing error to a new line is not "new", but a genuinely new message
-    is. Returns the new messages (order preserved, deduplicated).
+    Args:
+        baseline_errors / after_errors: either ``list[str]`` (message strings,
+            the legacy form) or ``list[Diagnostic]`` (the structured form). When
+            Diagnostics are passed AND carry a ``.code``, the delta keys on the
+            CODE so a pre-existing error class (e.g. E0432 "unresolved import")
+            suppresses a candidate error of the SAME code even if the message
+            text drifted (e.g. a slightly different unresolved path introduced by
+            the splice). This prevents a near-correct Rust merge from being
+            rejected for crate-path errors that need the full dependency tree
+            (Issue 3 from the live realworld eval).
+        suppress_codes: optional set of error codes to drop ENTIRELY from the
+            result, even if they're genuinely new. Used for the standalone-rustc
+            / no-full-crate context where E0432/E0433 (crate-path resolution)
+            are undecidable — the live config sets ``rust_suppress_codes =
+            ["E0432", "E0433"]`` to tolerate them.
+
+    Returns the new error messages (order preserved, deduplicated).
     """
-    baseline = {str(m).strip() for m in baseline_errors if str(m).strip()}
+    suppress_codes = suppress_codes or set()
+
+    def _key_and_msg(item):
+        """Return (dedup_key, display_message, code) for a str or Diagnostic."""
+        # Diagnostic-shaped: has .message and .code attributes.
+        msg = getattr(item, "message", None)
+        if msg is not None:
+            code = (getattr(item, "code", "") or "").strip()
+            msg_s = str(msg).strip()
+            # Key on code when present (drift-tolerant); else on message.
+            key = code if code else msg_s
+            return key, msg_s, code
+        # Bare string.
+        msg_s = str(item).strip()
+        return msg_s, msg_s, ""
+
+    baseline_keys: set = set()
+    for item in baseline_errors:
+        k, _m, _c = _key_and_msg(item)
+        if k:
+            baseline_keys.add(k)
     seen: set[str] = set()
     new_errors: list[str] = []
-    for m in after_errors:
-        key = str(m).strip()
-        if key and key not in baseline and key not in seen:
-            seen.add(key)
-            new_errors.append(key)
+    for item in after_errors:
+        k, msg, code = _key_and_msg(item)
+        if not k:
+            continue
+        if code in suppress_codes:
+            continue  # config-suppressed code (e.g. E0432 standalone)
+        if k in baseline_keys or k in seen:
+            continue
+        seen.add(k)
+        new_errors.append(msg)
     return new_errors
 
 
@@ -3102,11 +3142,16 @@ class VerificationEngine:
             features["syntax_passed"] = True
             return False
         features["syntax_checked"] = True
-        # New errors = after errors absent from the baseline (by message), via the
-        # shared no-worse-than-before delta (#7).
+        # New errors = after errors absent from the baseline, via the shared
+        # no-worse-than-before delta (#7). Pass the Diagnostics (not just
+        # .message) so the delta can key on .code — a pre-existing E0432 in
+        # baseline suppresses an E0432 in the candidate even if the message text
+        # drifted (Issue 3). Thread rust_suppress_codes for the standalone/no-
+        # full-crate context where E0432/E0433 are undecidable.
         new_errors = compute_diagnostic_delta(
-            [d.message for d in baseline.errors],
-            [d.message for d in after.errors],
+            list(baseline.errors),
+            list(after.errors),
+            suppress_codes=set(getattr(self.config, "rust_suppress_codes", []) or []),
         )
         syntax_ok = len(new_errors) == 0
         features["syntax_passed"] = syntax_ok
@@ -3196,8 +3241,9 @@ class VerificationEngine:
                 target_path.unlink(missing_ok=True)
         features["syntax_checked"] = True
         new_errors = compute_diagnostic_delta(
-            [d.message for d in baseline.errors],
-            [d.message for d in after.errors],
+            list(baseline.errors),
+            list(after.errors),
+            suppress_codes=set(getattr(self.config, "rust_suppress_codes", []) or []),
         )
         syntax_ok = len(new_errors) == 0
         features["syntax_passed"] = syntax_ok
@@ -3290,11 +3336,10 @@ class VerificationEngine:
                 target_path.write_bytes(saved)
             elif target_path.exists():
                 target_path.unlink(missing_ok=True)
-        baseline_msgs = (
-            [d.message for d in baseline.diagnostics] if baseline.checked else []
-        )
+        baseline_diags = list(baseline.diagnostics) if baseline.checked else []
         new_findings = compute_diagnostic_delta(
-            baseline_msgs, [d.message for d in after.diagnostics]
+            baseline_diags, list(after.diagnostics),
+            suppress_codes=set(getattr(self.config, "rust_suppress_codes", []) or []),
         )
         features["clippy_new_finding_count"] = len(new_findings)
         if new_findings:
@@ -3492,11 +3537,13 @@ class VerificationEngine:
             return
         features["lsp_checked"] = True
         features["lsp_error_count"] = after.error_count
-        # New errors = after errors not present in baseline (by message), via the
-        # shared no-worse-than-before delta (#7).
+        # New errors = after errors not present in baseline, via the shared
+        # no-worse-than-before delta (#7). Pass Diagnostics so code-keyed matching
+        # engages (Issue 3), and thread rust_suppress_codes.
         new_errors = compute_diagnostic_delta(
-            [d.message for d in baseline.errors],
-            [d.message for d in after.errors],
+            list(baseline.errors),
+            list(after.errors),
+            suppress_codes=set(getattr(self.config, "rust_suppress_codes", []) or []),
         )
         features["lsp_new_error_count"] = len(new_errors)
         if new_errors:

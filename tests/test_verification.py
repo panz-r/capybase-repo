@@ -926,6 +926,55 @@ def test_compute_diagnostic_delta_empty_when_nothing_new():
     assert compute_diagnostic_delta([], []) == []
 
 
+def test_compute_diagnostic_delta_codes_match_suppresses_message_drift():
+    """When Diagnostics are passed (with .code), the delta keys on (code) so an
+    E0432 'unresolved import' in the candidate that differs trivially in message
+    text from the baseline E0432 (e.g. line-number embedded, or a slightly
+    different unresolved path introduced by the splice) is correctly suppressed
+    as a pre-existing error class. Without this, a near-correct Rust merge whose
+    crate-path errors drift in message text between baseline and candidate was
+    rejected as a 'new error' (Issue 3 from the live realworld eval)."""
+    from capybase.adapters.lsp import Diagnostic
+    from capybase.verification import compute_diagnostic_delta
+    # Baseline has an E0432 with one message; candidate has E0432 with a
+    # slightly-different message (different unresolved path from the splice).
+    baseline = [
+        Diagnostic(severity="error", code="E0432",
+                   message="unresolved import: crate::foo"),
+    ]
+    after = [
+        Diagnostic(severity="error", code="E0432",
+                   message="unresolved import: crate::foo::bar"),  # drifted
+        Diagnostic(severity="error", code="E0308", message="mismatched types"),  # genuinely new
+    ]
+    new = compute_diagnostic_delta(baseline, after)
+    # The E0432 is suppressed (same code as baseline); the E0308 is new.
+    assert len(new) == 1, f"expected 1 new error, got {new}"
+    assert "mismatched types" in new[0]
+
+
+def test_compute_diagnostic_delta_suppress_codes_drops_configured():
+    """The configurable crate-path suppression set drops matching codes even
+    when they're genuinely new (not in baseline) — for the standalone-rustc /
+    no-full-crate context where E0432/E0433 are undecidable."""
+    from capybase.adapters.lsp import Diagnostic
+    from capybase.verification import compute_diagnostic_delta
+    baseline = []  # no baseline errors
+    after = [
+        Diagnostic(severity="error", code="E0432", message="unresolved import"),
+        Diagnostic(severity="error", code="E0433", message="could not find type"),
+        Diagnostic(severity="error", code="E0308", message="mismatched types"),
+    ]
+    # With suppression of E0432/E0433, only the real error (E0308) survives.
+    new = compute_diagnostic_delta(
+        baseline, after, suppress_codes={"E0432", "E0433"})
+    assert len(new) == 1, f"expected only E0308 to survive, got {new}"
+    assert "mismatched types" in new[0]
+    # Without suppression, all three are new (the default behavior).
+    new_default = compute_diagnostic_delta(baseline, after)
+    assert len(new_default) == 3
+
+
 def test_py_compile_syntax_delta_catches_a_new_error():
     """A merge that introduces a syntax error the clean baseline didn't have is
     flagged with the new error count (not just a bare fail)."""
