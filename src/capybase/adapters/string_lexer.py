@@ -605,6 +605,224 @@ def blank_raw_strings(text: str) -> str:
     return rust.sub(lambda m: "_" * len(m.group(0)), text)
 
 
+def enumerate_comment_spans(
+    text: str, lang: str | None = None
+) -> list[tuple[int, int, str]]:
+    """Every comment region in ``text`` as ``(start_byte, end_byte_exclusive, text)``.
+
+    Runs the canonical char-scan state machine to detect comment regions (``//``
+    line, ``/* */`` block for Family A; ``#`` line for Family B), tracking byte-
+    exact spans. Comments INSIDE string literals are NOT counted (the string
+    absorbs them). Rust nested block comments (``/* /* */ */``) are handled.
+
+    This is the foundation for the deferred-comment-reconciliation system:
+    classify → mask → reconcile. The spans align exactly with the original text
+    (``text[start:end] == comment_text``), so the masked view and the restoration
+    are offset-correct.
+
+    Args:
+        text: the source text.
+        lang: the language (selects comment style). ``None`` defaults to Family B.
+
+    Returns:
+        A list of ``(start, end, comment_text)`` tuples in source order.
+    """
+    n = len(text)
+    slash = _lang_uses_slash_comments(lang)
+    hash_c = not slash
+    st = _LexState()
+    spans: list[tuple[int, int, str]] = []
+    comment_start: int | None = None  # byte offset where the current comment began
+    # Rust nested block-comment depth (/* /* */ */ is ONE comment). Family A
+    # block comments nest in Rust but NOT in C/C++/JS. Track depth for Rust only.
+    block_depth = 0
+
+    i = 0
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+
+        # --- newline: close a line comment ---
+        if ch == "\n":
+            if st.in_line_comment:
+                st.in_line_comment = False
+                if comment_start is not None:
+                    spans.append((comment_start, i, text[comment_start:i]))
+                    comment_start = None
+            i += 1
+            continue
+
+        if st.in_line_comment:
+            i += 1
+            continue
+
+        if st.in_block_comment:
+            # Rust nested block comments: /* /* */ */ is one comment. Track depth.
+            if slash and lang == "rust" and ch == "/" and nxt == "*":
+                block_depth += 1
+                i += 2
+                continue
+            if ch == "*" and nxt == "/":
+                if slash and lang == "rust" and block_depth > 0:
+                    block_depth -= 1
+                    if block_depth > 0:
+                        # Still nested — don't close yet.
+                        i += 2
+                        continue
+                st.in_block_comment = False
+                end = i + 2
+                if comment_start is not None:
+                    spans.append((comment_start, end, text[comment_start:end]))
+                    comment_start = None
+                i += 2
+                continue
+            i += 1
+            continue
+
+        # Inside a string — skip (don't detect comments).
+        if st.in_str is not None:
+            if ch == "\\":
+                if st.in_str == '"' and st.hash_count > 0:
+                    i += 1
+                    continue
+                i += 2
+                continue
+            if st.in_str == "char" and ch == "'":
+                st.in_str = None
+                i += 1
+                continue
+            if st.in_str == "'" and ch == "'":
+                st.in_str = None
+                i += 1
+                continue
+            if st.in_str == "`" and ch == "`":
+                st.in_str = None
+                i += 1
+                continue
+            if st.in_str == '"':
+                if st.in_cpp_raw:
+                    delim = st.cpp_raw_delim
+                    need = ")" + delim
+                    start_check = i - len(need)
+                    if start_check >= 0 and text[start_check:i] == need:
+                        st.in_str = None
+                        st.in_cpp_raw = False
+                        st.cpp_raw_delim = ""
+                        i += 1
+                        continue
+                    i += 1
+                    continue
+                if st.hash_count > 0:
+                    hc = st.hash_count
+                    tail = text[i + 1 : i + 1 + hc]
+                    after = text[i + 1 + hc] if i + 1 + hc < n else ""
+                    if len(tail) == hc and tail == "#" * hc and after != "#":
+                        st.in_str = None
+                        st.hash_count = 0
+                        i += 1 + hc
+                        continue
+                    i += 1
+                    continue
+                st.in_str = None
+                i += 1
+                continue
+            if st.in_str in ("triple_d", "triple_s"):
+                marker = '"""' if st.in_str == "triple_d" else "'''"
+                if text[i : i + 3] == marker:
+                    st.in_str = None
+                    i += 3
+                    continue
+                i += 1
+                continue
+            i += 1
+            continue
+
+        # Inside f-string interpolation — skip (code inside {}).
+        if st.in_fstring_interp is not None and st.fstring_depth > 0:
+            if ch == "{":
+                st.fstring_depth += 1
+                i += 1
+                continue
+            if ch == "}":
+                st.fstring_depth -= 1
+                if st.fstring_depth == 0:
+                    st.in_str = st.in_fstring_interp
+                    st.in_fstring_interp = None
+                i += 1
+                continue
+            i += 1
+            continue
+
+        # --- transitions INTO a comment ---
+        if slash and ch == "/" and nxt == "/":
+            st.in_line_comment = True
+            comment_start = i
+            i += 2
+            continue
+        if slash and ch == "/" and nxt == "*":
+            st.in_block_comment = True
+            block_depth = 1  # nested block-comment depth (Rust `/* /* */ */`)
+            comment_start = i
+            i += 2
+            continue
+        if hash_c and ch == "#":
+            st.in_line_comment = True
+            comment_start = i
+            i += 1
+            continue
+
+        # --- transitions INTO a string (so we don't mis-detect // inside) ---
+        if ch == '"':
+            if text[i : i + 3] == '"""':
+                st.in_str = "triple_d"
+                i += 3
+                continue
+            cpp_delim = _match_cpp_raw_prefix(text, i, n)
+            if cpp_delim is not None:
+                st.in_str = '"'
+                st.in_cpp_raw = True
+                st.cpp_raw_delim = cpp_delim
+                i += 1
+                continue
+            st.in_str = '"'
+            st.hash_count = _match_string_prefix(text, i)
+            i += 1
+            continue
+        if ch == "'":
+            if text[i : i + 3] == "'''":
+                st.in_str = "triple_s"
+                i += 3
+                continue
+            nxt1 = text[i + 1] if i + 1 < n else ""
+            nxt2 = text[i + 2] if i + 2 < n else ""
+            prev = text[i - 1] if i > 0 else ""
+            if (
+                slash
+                and (nxt1.isalpha() or nxt1 == "_")
+                and nxt2 != "'"
+                and not (prev.isalnum() or prev == "_")
+            ):
+                i += 1
+                continue
+            if prev in _HEXDIGITS and nxt1 in _HEXDIGITS and nxt2 != "'":
+                i += 1
+                continue
+            st.in_str = "char"
+            i += 1
+            continue
+        if ch == "`":
+            st.in_str = "`"
+            i += 1
+            continue
+
+        i += 1
+
+    # If the file ends mid-line-comment (no trailing newline), emit the span.
+    if comment_start is not None and (st.in_line_comment or st.in_block_comment):
+        spans.append((comment_start, n, text[comment_start:n]))
+    return spans
+
+
 def multiline_string_line_mask(text: str, lang: str | None = None) -> list[bool]:
     """For each line of ``text``, True if the line is INSIDE a multi-line string.
 
