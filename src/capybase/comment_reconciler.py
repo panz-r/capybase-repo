@@ -213,8 +213,137 @@ def select_comment_frontier(
     return frontier
 
 
+# ---------------------------------------------------------------------------
+# CommentPlan — the structured output the reconciler model produces
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CommentAction:
+    """One disposition for one comment lineage."""
+    lineage_id: str
+    operation: str          # keep | rewrite | move | merge | delete | preserve_verbatim
+    text: str = ""          # the new comment text (for rewrite/move/merge)
+    confidence: float = 0.0
+
+
+@dataclass
+class CommentPlan:
+    """The structured output of the comment-reconciliation model.
+
+    A list of CommentActions, one per frontier lineage. The CST editor applies
+    these deterministically — the LLM never directly edits executable text.
+    """
+    actions: list[CommentAction] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# CST editor — deterministic plan application
+# ---------------------------------------------------------------------------
+
+
+def _executable_tokens(text: str, lang: str | None) -> str:
+    """The executable token stream of ``text`` (comments + strings blanked).
+
+    Used for the hard invariant: after applying a CommentPlan, the executable
+    token stream must be IDENTICAL to the frozen code. If it differs, the plan
+    corrupted the code → revert.
+    """
+    from capybase.adapters.string_lexer import blank_strings_and_comments
+    blanked = blank_strings_and_comments(text, lang)
+    return " ".join(blanked.replace("_", " ").split())
+
+
+class ApplyError(Exception):
+    """The comment plan could not be applied safely (executable code changed)."""
+
+
+def apply_comment_plan(
+    resolved_text: str,
+    frontier: list[LedgerEntry],
+    plan: CommentPlan,
+    lang: str,
+) -> str:
+    """Apply a CommentPlan to the resolved text, deterministically.
+
+    Each action operates on the RESOLVED version's comment spans (byte offsets
+    in ``resolved_text``). For ``rewrite``, the comment's content is replaced
+    in-place. For ``delete``, the comment is blanked. For ``keep``/``preserve_verbatim``,
+    no-op. After applying, the executable token stream is verified — if it
+    changed (the plan corrupted code), raises :class:`ApplyError`.
+
+    The LLM NEVER directly edits executable text — this function is the sole
+    splice point, and it enforces the invariant.
+    """
+    # Build a lookup: lineage_id → resolved-version entry.
+    by_lineage: dict[str, LedgerEntry] = {}
+    for e in frontier:
+        if e.version == "resolved":
+            by_lineage[e.lineage_id] = e
+
+    # Collect all (start, end, replacement_text) edits, sorted by start (descending
+    # so earlier offsets aren't shifted by later edits).
+    edits: list[tuple[int, int, str]] = []
+    for action in plan.actions:
+        entry = by_lineage.get(action.lineage_id)
+        if entry is None:
+            continue  # action targets a non-resolved entry (deleted comment) — skip
+        if action.operation == "keep" or action.operation == "preserve_verbatim":
+            continue  # no-op
+        if action.operation == "delete":
+            # Blank the comment region (replace with spaces, preserve newlines).
+            replacement = "\n".join(
+                " " * len(line) if line.strip() else line
+                for line in resolved_text[entry.start:entry.end].split("\n")
+            )
+            edits.append((entry.start, entry.end, replacement))
+        elif action.operation in ("rewrite", "move", "merge"):
+            # Replace the comment content with the new text.
+            # Preserve the comment syntax prefix (// or # or /* */).
+            new_text = action.text.strip()
+            if not new_text:
+                continue  # empty rewrite = delete (skip)
+            # Determine the comment prefix from the original.
+            orig = entry.text
+            if orig.startswith("//"):
+                new_full = "// " + new_text.replace("\n", "\n// ")
+            elif orig.startswith("#"):
+                new_full = "# " + new_text.replace("\n", "\n# ")
+            elif orig.startswith("/*"):
+                new_full = "/* " + new_text + " */"
+            else:
+                new_full = new_text  # bare replacement (rare)
+            edits.append((entry.start, entry.end, new_full))
+
+    if not edits:
+        return resolved_text  # no edits → no change
+
+    # Apply edits in DESCENDING start order (so earlier offsets aren't shifted).
+    edits.sort(key=lambda e: e[0], reverse=True)
+    result_chars = list(resolved_text)
+    # Apply from the end: replace [start:end] with the replacement.
+    # Since we're working with a char list and offsets, splice from the end.
+    result = resolved_text
+    for start, end, replacement in edits:
+        result = result[:start] + replacement + result[end:]
+
+    # HARD INVARIANT: the executable token stream must be unchanged.
+    frozen_tokens = _executable_tokens(resolved_text, lang)
+    result_tokens = _executable_tokens(result, lang)
+    if frozen_tokens != result_tokens:
+        raise ApplyError(
+            f"comment plan changed executable tokens "
+            f"(frozen={frozen_tokens[:80]!r}... vs result={result_tokens[:80]!r}...)"
+        )
+    return result
+
+
 __all__ = [
     "LedgerEntry",
     "build_comment_ledger",
     "select_comment_frontier",
+    "CommentAction",
+    "CommentPlan",
+    "ApplyError",
+    "apply_comment_plan",
 ]
