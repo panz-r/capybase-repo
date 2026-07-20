@@ -4587,6 +4587,17 @@ class Orchestrator:
                         advisories=self._recent_advisories(),
                     )
                     return result
+            # Phase 3: Comment reconciliation (deferred-comment system). After
+            # the code passes Phase-B validation, reconcile deferred (prose)
+            # comments in a second CEGIS pass. The comment pass can ONLY modify
+            # comments — the executable-token-equality invariant prevents any
+            # code corruption. Skipped entirely when no deferred comments overlap
+            # the conflict region (zero overhead). Gated by
+            # config.future.enable_comment_reconciliation (default True).
+            if self.config.future.enable_comment_reconciliation:
+                buffer = self._reconcile_comments(
+                    path, buffer, accepted, originals[path], units, language,
+                ) or buffer
             # Stage the validated file (it was already written to the worktree
             # in Phase 1; re-write in case the CEGIS loop changed it, then stage).
             self._write_and_stage(path, buffer, result, accepted=accepted)
@@ -4601,6 +4612,112 @@ class Orchestrator:
         else:
             self._record_outcomes_to_memory(result)
         return result
+
+    def _reconcile_comments(
+        self, path: str, buffer: str,
+        accepted: list, original: str,
+        units: list, language: str | None,
+    ) -> str | None:
+        """Phase 3: reconcile deferred (prose) comments after code passes validation.
+
+        The comment pass can ONLY modify comments — the executable-token-equality
+        invariant (enforced in apply_comment_plan) prevents any code corruption.
+        Skipped entirely when no deferred comments overlap the conflict region.
+
+        Returns the reconciled buffer (or None if skipped/failed → keep original).
+        """
+        lang = (language or "").strip().lower()
+        # MVP: Rust only (the live-eval corpus is Rust; Python is a follow-up).
+        if lang not in ("rust", "rs"):
+            return None
+        try:
+            from capybase.adapters.string_lexer import enumerate_comment_spans
+            from capybase.comment_reconciler import (
+                build_comment_ledger, select_comment_frontier,
+                build_comment_reconcile_prompt, parse_comment_plan,
+                apply_comment_plan, ApplyError,
+            )
+        except ImportError:
+            return None
+
+        # Cheap pre-check: if there are NO deferred comments, skip entirely
+        # (zero overhead — the "skip when no affected comments" gate).
+        spans = enumerate_comment_spans(buffer, lang)
+        if not spans:
+            return None
+        # Gather the three git versions from the first unit's sides.
+        if not units:
+            return None
+        unit = units[0]
+        base_text = unit.base.text or ""
+        current_text = unit.current.text or ""
+        replayed_text = unit.replayed.text or ""
+        # Compute conflict byte ranges in the resolved buffer (the marker_span
+        # line range → byte range in the resolved file). For MVP, use the full
+        # buffer (conservative — all comments are candidates for the frontier).
+        # The frontier selector's "differs across versions" check is the real filter.
+        ledger = build_comment_ledger(
+            base_text, current_text, replayed_text, buffer, lang,
+        )
+        frontier = select_comment_frontier(ledger)
+        if not frontier:
+            self.journal.emit(
+                "comment_phase_skipped",
+                {"reason": "no frontier comments (all unchanged or non-deferred)"},
+                step_index=self.step, path=path,
+            )
+            return None
+
+        self.journal.emit(
+            "comment_phase_started",
+            {"frontier_size": len(frontier)},
+            step_index=self.step, path=path,
+        )
+
+        # CEGIS loop (budget = comment_reconciliation_retries).
+        budget = getattr(self.config.policy, "comment_reconciliation_retries", 1)
+        current_buffer = buffer
+        for attempt in range(budget + 1):
+            prompt = build_comment_reconcile_prompt(
+                frontier, current_buffer, base_text, current_text, replayed_text, lang,
+            )
+            # Call the model via the resolution engine's raw-complete path.
+            try:
+                raw = self.resolution_engine.raw_complete(
+                    prompt, model=self.config.model,
+                )
+            except Exception:
+                break  # model failure → keep original buffer
+            plan = parse_comment_plan(raw)
+            if plan is None:
+                continue  # unparseable → retry
+            self.journal.emit(
+                "comment_plan_generated",
+                {"actions": len(plan.actions), "attempt": attempt},
+                step_index=self.step, path=path,
+            )
+            try:
+                result = apply_comment_plan(current_buffer, frontier, plan, lang)
+                # Disposition counts for the audit.
+                kept = sum(1 for a in plan.actions if a.operation in ("keep", "preserve_verbatim"))
+                rewritten = sum(1 for a in plan.actions if a.operation == "rewrite")
+                deleted = sum(1 for a in plan.actions if a.operation == "delete")
+                self.journal.emit(
+                    "comment_reconciled",
+                    {"kept": kept, "rewritten": rewritten, "deleted": deleted},
+                    step_index=self.step, path=path,
+                )
+                return result
+            except ApplyError:
+                # The plan corrupted code → retry with feedback.
+                continue
+        # All attempts failed → keep the original buffer (code is NOT corrupted).
+        self.journal.emit(
+            "comment_phase_skipped",
+            {"reason": "all reconciliation attempts failed (keeping original)"},
+            step_index=self.step, path=path,
+        )
+        return None
 
     def _whole_file_repair(
         self,

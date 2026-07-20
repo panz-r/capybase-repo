@@ -225,6 +225,11 @@ class PolicyConfig(BaseModel):
     # preserving the legacy behavior). A higher value grants more repair cycles
     # for multi-hunk conflicts where the model needs several shots.
     max_whole_file_repair_retries: int = 0
+    # Comment-reconciliation CEGIS retry budget. After the code passes, the
+    # comment pass gets this many repair iterations (plan → apply → verify).
+    # Default 1 (one propose + one repair if the first plan fails the executable-
+    # token invariant or the model produces an unparseable plan).
+    comment_reconciliation_retries: int = 1
     # Confidence-gated escalation: when the critic budget is exhausted, a
     # high-confidence critic flag (verifier_confidence >= this threshold)
     # escalates instead of accepting-with-warning. Uses the critic's own
@@ -603,6 +608,16 @@ class FutureConfig(BaseModel):
     # Below this the full-LLM path reproduces the block fine; above it
     # reproduction becomes unreliable and the decision-style prompt takes over.
     block_capture_min_lines: int = 50
+    # Deferred Comment Reconciliation: after the code-resolution pass produces
+    # test-passing code, a second CEGIS pass reconciles comments. Comments are
+    # classified (machine/legal/generated/doctest vs deferred-prose), deferred
+    # comments are masked from the code model (more context, less confusion),
+    # then reconciled in a structured pass that enforces executable-token
+    # equality (the comment pass can NEVER corrupt code). Skipped entirely when
+    # no deferred comments overlap the conflict region (zero overhead). Default
+    # ON (always-on integral part), but the skip-when-empty gate means files
+    # with no affected comments pay no cost.
+    enable_comment_reconciliation: bool = True
 
 
 class StructuralConfig(BaseModel):
