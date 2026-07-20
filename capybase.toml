@@ -139,6 +139,13 @@ require_no_markers = true
 require_exact_splice_scope = true
 require_syntax_if_supported = true
 reject_if_copies_one_side = true
+# Rust crate-path errors (E0432 "unresolved import", E0433 "could not find
+# type") are undecidable when the resolved file is checked standalone (without
+# the full crate's dependency tree). Suppress them in the diagnostic delta so
+# near-correct Rust merges aren't rejected for crate-path resolution failures.
+# Empty (default) = strict (flag all errors). For Rust-heavy repos, set to
+# ["E0432", "E0433"].
+rust_suppress_codes = []
 # Both-sides-represented (survey §5.1): flag a candidate that drops a side's
 # additions entirely (a tweaked-but-one-sided merge the copy heuristic misses).
 reject_if_drops_a_side = true
