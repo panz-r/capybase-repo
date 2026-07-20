@@ -605,6 +605,44 @@ def blank_raw_strings(text: str) -> str:
     return rust.sub(lambda m: "_" * len(m.group(0)), text)
 
 
+def mask_deferable_comments(
+    text: str, lang: str | None = None
+) -> tuple[str, list[tuple[int, int, str]]]:
+    """Mask ONLY deferable (prose) comments, preserving non-deferable ones verbatim.
+
+    Runs :func:`enumerate_comment_spans` + :func:`classify_spans`, then blanks
+    each DEFERRED comment's content with spaces (length-preserving). MACHINE
+    (directives), LEGAL (license), GENERATED (codegen), and DOCTEST (executable
+    examples) comments survive verbatim — they're code-significant.
+
+    Returns ``(masked_text, deferred_spans)`` where ``deferred_spans`` is the
+    list of ``(start, end, original_text)`` for the blanked comments — the
+    comment ledger's input for the reconciliation pass.
+
+    The masked text is length-preserving: ``len(masked) == len(text)`` and every
+    non-comment byte is unchanged. This is the "comment-free code view" sent to
+    the code-resolution model (more useful context, less confusion from stale
+    prose). The original text + deferred_spans remain in the sidecar ledger for
+    restoration.
+    """
+    from capybase.adapters.comment_classifier import (
+        classify_spans, CommentClass,
+    )
+    spans = enumerate_comment_spans(text, lang)
+    classified = classify_spans(spans, text, lang)
+    # Build the masked text: copy original, blank each DEFERRED span.
+    masked = list(text)  # mutable char list
+    deferred: list[tuple[int, int, str]] = []
+    for cc in classified:
+        if cc.cls == CommentClass.DEFERRED:
+            for j in range(cc.start, cc.end):
+                # Don't blank newlines (preserve line structure).
+                if masked[j] != "\n":
+                    masked[j] = " "
+            deferred.append((cc.start, cc.end, cc.text))
+    return "".join(masked), deferred
+
+
 def enumerate_comment_spans(
     text: str, lang: str | None = None
 ) -> list[tuple[int, int, str]]:

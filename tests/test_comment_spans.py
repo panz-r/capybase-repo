@@ -127,3 +127,58 @@ def test_comment_at_eof_no_newline():
     spans = enumerate_comment_spans(text, "rust")
     assert len(spans) == 1
     assert "at end" in spans[0][2]
+
+
+# ---------------------------------------------------------------------------
+# Selective masking (B1) — mask_deferable_comments
+# ---------------------------------------------------------------------------
+
+
+def test_mask_deferable_comments_blanks_prose_only():
+    """Only DEFERRED comments are blanked; MACHINE/LEGAL/GENERATED/DOCTEST
+    survive verbatim. Length-preserving (offsets unchanged)."""
+    from capybase.adapters.string_lexer import mask_deferable_comments
+    text = (
+        "// Copyright 2024 Acme.\n"           # LEGAL — survives
+        "fn foo() {\n"
+        "    // max retries\n"                 # DEFERRED — blanked
+        "    let x = 1;\n"
+        "}\n"
+    )
+    masked, deferred = mask_deferable_comments(text, "rust")
+    assert len(masked) == len(text), "length must be preserved"
+    # LEGAL comment survives.
+    assert "Copyright 2024 Acme" in masked
+    # DEFERRED comment is blanked (content → spaces).
+    assert "max retries" not in masked
+    # Code survives.
+    assert "fn foo()" in masked
+    assert "let x = 1;" in masked
+    # Exactly 1 deferred span recorded.
+    assert len(deferred) == 1
+    assert "max retries" in deferred[0][2]  # the original text
+
+
+def test_mask_deferable_comments_empty_when_no_prose():
+    """When there are no DEFERRED comments, the masked text equals the original
+    and the deferred list is empty."""
+    from capybase.adapters.string_lexer import mask_deferable_comments
+    text = "#[derive(Debug)]\nfn foo() { let x = 1; }\n"
+    masked, deferred = mask_deferable_comments(text, "rust")
+    assert masked == text
+    assert deferred == []
+
+
+def test_mask_deferable_comments_preserves_offsets():
+    """The masked text's non-comment content must align byte-for-byte with the
+    original (only comment chars are replaced, by spaces)."""
+    from capybase.adapters.string_lexer import mask_deferable_comments
+    text = "let x = 1; // a comment\n"
+    masked, deferred = mask_deferable_comments(text, "rust")
+    # The code part (before the comment) is unchanged.
+    code_part = "let x = 1; "
+    assert masked[:len(code_part)] == code_part
+    # The comment part is all spaces (same length).
+    comment_part = "// a comment"
+    masked_comment = masked[len(code_part):len(code_part) + len(comment_part)]
+    assert set(masked_comment) == {" "}
