@@ -84,12 +84,15 @@ def test_duplicate_function_caught():
 
 
 def test_duplicate_assignment_caught():
-    """A bare module-level assignment defined twice (tree-sitter misses these)."""
+    """A bare module-level assignment defined twice (tree-sitter misses these).
+    Variable reassignment is LEGAL Python (config overrides, etc.) so it's
+    severity WARNING (feeds the risk engine) not ERROR (hard-reject)."""
     whole = 'MAX_RETRIES = 3\nMAX_RETRIES = 5\n'
     res = _verify_file(whole)
     dup = [f for f in res.hard_failures if f.validator == "duplicate_definition"]
     assert len(dup) == 1
     assert dup[0].detail == {"kind": "variable", "name": "MAX_RETRIES", "lines": [1, 2]}
+    assert dup[0].severity == "warning"  # not error — variable reassignment is legal
 
 
 def test_duplicate_definition_message_has_line_for_attribution():
@@ -624,4 +627,60 @@ def test_unattributed_validator_passes_when_all_attributed():
     res = _unattributed_result("def main():\n    return 1\n\ndef helper():\n    return 2\n")
     assert res.passed
     assert res.features["unattributed_code_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Baseline-aware duplicate definitions (live-eval defect: 5 Python cases with
+# sim=1.00 rejected because the oracle ITSELF has "duplicate" assignments that
+# are legitimate real-world code patterns — config overrides, matplotlib fig
+# reassignment, etc. The check must only flag NEW duplicates the merge
+# introduces, not pre-existing ones in the baseline.)
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_definition_not_flagged_if_in_baseline():
+    """A duplicate that already existed in the base file (pre-conflict) must NOT
+    be flagged — it's a pre-existing pattern, not a merge defect. The check must
+    be baseline-aware (no-worse-than-before), the same principle the syntax
+    diagnostic-delta uses."""
+    # The original (pre-conflict) file has a legitimate reassignment.
+    original = (
+        "mode = 'full'\n"
+        "mode = 'partial'\n"
+        "<<<<<<< H\nx = 1\n=======\nx = 2\n>>>>>>> b\n"
+    )
+    # The resolved file keeps the legitimate reassignment + resolves the conflict.
+    resolved = (
+        "mode = 'full'\n"
+        "mode = 'partial'\n"
+        "x = 2\n"
+    )
+    res = _engine().verify_file("app.py", "python", original, [(None, resolved)])
+    dup = [f for f in res.hard_failures if f.validator == "duplicate_definition"]
+    assert dup == [], (
+        f"pre-existing duplicate (in baseline) wrongly flagged: "
+        f"{[f.message for f in dup]}"
+    )
+
+
+def test_duplicate_definition_variable_is_warning_not_error():
+    """A duplicate VARIABLE (reassignment) is severity WARNING, not ERROR — it's
+    legal Python. Only FUNCTION/CLASS duplicates are ERROR (the genuine 'both
+    sides concatenated' merge defect). This prevents false-positive rejections
+    on real-world code with config overrides (5 live-eval cases, sim=1.00)."""
+    whole = "fig = plt.figure()\nfig = plt.figure()\n"
+    res = _verify_file(whole)
+    dup = [f for f in res.hard_failures if f.validator == "duplicate_definition"]
+    assert len(dup) == 1
+    assert dup[0].severity == "warning"
+
+
+def test_duplicate_definition_function_is_error():
+    """Regression guard: a duplicate FUNCTION is still severity ERROR — the
+    genuine merge defect (both sides concatenated the same function)."""
+    whole = "def foo():\n    return 1\n\ndef foo():\n    return 2\n"
+    res = _verify_file(whole)
+    dup = [f for f in res.hard_failures if f.validator == "duplicate_definition"]
+    assert len(dup) == 1
+    assert dup[0].severity == "error"
 

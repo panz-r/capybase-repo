@@ -3068,7 +3068,7 @@ class VerificationEngine:
         # error. These catch the two "plausible but wrong" merge shapes a small
         # model produces that pass line/token validators: a duplicated block
         # (both sides present, just twice) and stacked terminators (dead code).
-        self._run_duplicate_definition_check(path, language, whole, hard, features)
+        self._run_duplicate_definition_check(path, language, whole, hard, features, original=original)
         self._run_unreachable_code_check(path, language, whole, hard, features)
 
         # LSP / type-checker diagnostics (Phase B): reject NEW errors.
@@ -3395,6 +3395,8 @@ class VerificationEngine:
         whole: str,
         hard: list[VerificationFailure],
         features: dict[str, float | int | str | bool],
+        *,
+        original: str = "",
     ) -> None:
         """Reject a merge that defines the same name twice in one scope.
 
@@ -3404,6 +3406,13 @@ class VerificationEngine:
         and the token-set validators pass), just defined twice. This is almost
         always a wrong merge — a deliberate redefinition is rare in a conflict
         region — so severity is ``error`` and feeds the whole-file repair loop.
+
+        BASELINE-AWARE: duplicates that already existed in the pre-conflict file
+        (the marker-blanked ``original``) are NOT flagged — they're pre-existing
+        real-world patterns (config overrides, matplotlib fig reassignment, etc.)
+        that the oracle itself contains. Only duplicates the MERGE INTRODUCES
+        (not in the baseline) are flagged. This follows the same no-worse-than-
+        before principle as the syntax diagnostic-delta.
 
         Python uses stdlib ``ast`` (catches classes/functions AND bare
         module-level assignments like ``FEATURE_FLAGS = {...}`` that
@@ -3432,18 +3441,45 @@ class VerificationEngine:
             # syntax check owns reporting that. Record not-checked and stop.
             return
         features["duplicate_definition_checked"] = True
-        features["duplicate_definition_count"] = len(dupes)
-        for kind, name, rows in dupes:
+        # Baseline-aware: compute the duplicates in the marker-blanked original
+        # and suppress any (kind, name) pair that already existed pre-conflict.
+        # This prevents false-positives on real-world patterns like config
+        # overrides or matplotlib fig reassignment that are legitimate in the
+        # original code (the live eval showed 5 sim=1.00 cases rejected for
+        # this reason — the oracle ITSELF has these "duplicates").
+        baseline_keys: set[tuple[str, str]] = set()
+        if original and contains_markers(original):
+            baseline_text = _blank_markers(original, language or "python")
+            if language == "python":
+                baseline_dupes = _py_duplicate_definitions(baseline_text)
+            else:
+                try:
+                    baseline_dupes = structural.duplicate_definitions(baseline_text, "rust")
+                except Exception:
+                    baseline_dupes = None
+            if baseline_dupes:
+                baseline_keys = {(d[0], d[1]) for d in baseline_dupes}
+        # Filter out pre-existing duplicates.
+        new_dupes = [(k, n, r) for k, n, r in dupes if (k, n) not in baseline_keys]
+        features["duplicate_definition_count"] = len(new_dupes)
+        for kind, name, rows in new_dupes:
             # The leading row is the FIRST definition; the message leads with
             # the last duplicate's line so repair attribution (which parses
             # "line N" from the message) lands on the offending (duplicate)
             # occurrence, not the legitimate original.
             loc = rows[-1]
             where = ", ".join(str(r) for r in rows)
+            # Variable reassignment (``X = 1`` then ``X = 2``) is LEGAL Python —
+            # it's a common real-world pattern (config overrides, matplotlib fig
+            # reassignment, state updates). Only FUNCTION/CLASS redefinition is a
+            # genuine merge defect (the "both sides concatenated" failure shape).
+            # Demote variable duplicates to WARNING (feed the risk engine but
+            # don't hard-reject + feed the repair loop).
+            sev = "warning" if kind == "variable" else "error"
             hard.append(
                 VerificationFailure(
                     validator="duplicate_definition",
-                    severity="error",
+                    severity=sev,
                     message=(
                         f"line {loc}: {kind} '{name}' defined more than once "
                         f"in the same scope (at lines {where})"
