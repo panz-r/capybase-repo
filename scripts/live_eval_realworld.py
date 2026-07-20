@@ -92,7 +92,14 @@ def load_cases(*, limit: int | None = None, lang: str | None = None) -> list[Cas
             continue
         c = Case(
             id=d.get("id", f.stem),
-            path=d.get("path", f"{f.stem}.rs"),
+            # Use the ACTUAL conflict_path from the dataset (includes the real
+            # file extension like CHANGELOG.md, Cargo.toml, etc.) instead of the
+            # synthetic conflict_NNNN.rs. This lets the orchestrator's
+            # detect_language correctly classify the file — 49 of 175 cases had
+            # mismatched extensions (CHANGELOG.md tagged as "rust", Cargo.toml
+            # tagged as "rust", etc.) causing the structural parser to fail and
+            # the prose value-resolution rule to decline.
+            path=d.get("conflict_path") or d.get("path", f"{f.stem}.rs"),
             language=d.get("language", "rust"),
             base=d["base"], current=d["current"], replayed=d["replayed"],
             expected_resolved=d["expected_resolved"],
