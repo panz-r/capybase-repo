@@ -193,3 +193,130 @@ def test_mask_sides_returns_raw_when_unsupported_language():
 
     masked = _mask_sides_if_enabled(_FakeUnit())
     assert masked == ("c", "b", "r")  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# J2 — selective reveal on the repair prompt
+# ---------------------------------------------------------------------------
+
+
+def _make_unit(worktree: str, language: str = "rust"):
+    """Build a minimal ConflictUnit for context-builder tests."""
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+    return ConflictUnit(
+        session_id="s", step_index=0, path="a.rs", language=language,
+        unit_id="u1", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="base"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="1"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="2"),
+        original_worktree_text=worktree,
+        marker_span=(2, 4),
+    )
+
+
+def test_context_builder_populates_high_trust_constraints():
+    """When masking is on AND the primary context has high-trust deferred
+    comments, ContextBuilder.build surfaces them in high_trust_constraints."""
+    from capybase.context_builder import ContextBuilder
+
+    worktree = (
+        "// MUST NOT retry authentication failures\n"
+        "fn fetch() {\n"
+        "<<<<<<< H\n"
+        "    1\n"
+        "=======\n"
+        "    2\n"
+        ">>>>>>> b\n"
+        "}\n"
+    )
+    unit = _make_unit(worktree)
+    cb = ContextBuilder(context_lines=5, mask_deferred_comments=True)
+    ctx = cb.build(unit)
+    assert any("MUST NOT retry" in c for c in ctx.high_trust_constraints), \
+        ctx.high_trust_constraints
+    # Masked out of the primary context (model doesn't see prose on attempt 0).
+    assert "MUST NOT retry" not in ctx.primary_text
+
+
+def test_context_builder_skips_normal_trust_constraints():
+    """Normal-trust prose is masked but NOT added to high_trust_constraints
+    (only invariant-bearing comments are reveal candidates)."""
+    from capybase.context_builder import ContextBuilder
+
+    worktree = (
+        "// returns the result of the computation\n"
+        "fn fetch() {\n"
+        "<<<<<<< H\n"
+        "    1\n"
+        "=======\n"
+        "    2\n"
+        ">>>>>>> b\n"
+        "}\n"
+    )
+    unit = _make_unit(worktree)
+    cb = ContextBuilder(context_lines=5, mask_deferred_comments=True)
+    ctx = cb.build(unit)
+    assert ctx.high_trust_constraints == []
+
+
+def test_repair_prompt_reveals_high_trust_on_attempt_ge_1():
+    """build_repair_prompt (attempt >= 1) renders the TRUSTED INVARIANTS block
+    when context.high_trust_constraints is non-empty. The block labels the
+    comments as UNTRUSTED DATA (design §4)."""
+    from capybase.resolution_engine import build_repair_prompt
+    from capybase.conflict_model import (
+        ConflictUnit, ConflictSide, ContextBundle,
+        CandidateResolution, VerificationFailure,
+    )
+
+    unit = ConflictUnit(
+        session_id="s", step_index=0, path="a.rs", language="rust",
+        unit_id="u1", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="x"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="1"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="2"),
+        original_worktree_text="x",
+    )
+    context = ContextBundle(
+        primary_text="x",
+        high_trust_constraints=["MUST NOT retry authentication failures"],
+    )
+    candidate = CandidateResolution(
+        candidate_id="c1", unit_id="u1", model_name="m",
+        prompt_version="v", resolved_text="1",
+    )
+    failures = [VerificationFailure(validator="syntax", message="error", severity="error")]
+    prompt = build_repair_prompt(unit, context, candidate, failures, attempt=1)
+    assert "TRUSTED INVARIANTS" in prompt
+    assert "MUST NOT retry authentication failures" in prompt
+    assert "UNTRUSTED DATA" in prompt
+
+
+def test_repair_prompt_omits_reveal_on_first_attempt():
+    """build_repair_prompt (attempt=0) never renders the reveal block — the
+    design's 'first code attempt can omit these hints' rule."""
+    from capybase.resolution_engine import build_repair_prompt
+    from capybase.conflict_model import (
+        ConflictUnit, ConflictSide, ContextBundle,
+        CandidateResolution, VerificationFailure,
+    )
+
+    unit = ConflictUnit(
+        session_id="s", step_index=0, path="a.rs", language="rust",
+        unit_id="u1", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="x"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="1"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="2"),
+        original_worktree_text="x",
+    )
+    context = ContextBundle(
+        primary_text="x",
+        high_trust_constraints=["MUST NOT retry authentication failures"],
+    )
+    candidate = CandidateResolution(
+        candidate_id="c1", unit_id="u1", model_name="m",
+        prompt_version="v", resolved_text="1",
+    )
+    failures = [VerificationFailure(validator="syntax", message="error", severity="error")]
+    prompt = build_repair_prompt(unit, context, candidate, failures, attempt=0)
+    assert "TRUSTED INVARIANTS" not in prompt

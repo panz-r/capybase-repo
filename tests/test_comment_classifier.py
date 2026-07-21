@@ -143,3 +143,49 @@ def test_classify_spans_labels_each():
     assert CommentClass.LEGAL in classes
     assert CommentClass.GENERATED in classes
     assert CommentClass.DEFERRED in classes
+
+
+# ---------------------------------------------------------------------------
+# Trust classification (Part J1) — high-trust deferred comments are candidates
+# for selective reveal to the code model on repair (design §4).
+# ---------------------------------------------------------------------------
+
+
+def test_invariant_keyword_comment_is_high_trust():
+    """A deferred comment containing an invariant keyword (MUST, NEVER, etc.) is
+    high-trust — a candidate for selective reveal on repair."""
+    from capybase.adapters.comment_classifier import classify_comment_trust
+    text = "// MUST NOT retry authentication failures"
+    cls, trust = classify_comment_trust(text, "rust")
+    assert cls == CommentClass.DEFERRED
+    assert trust == "high"
+
+
+def test_no_keyword_prose_is_normal_trust():
+    """A plain prose comment without invariant keywords is normal-trust."""
+    from capybase.adapters.comment_classifier import classify_comment_trust
+    cls, trust = classify_comment_trust("// returns the result", "rust")
+    assert trust == "normal"
+
+
+def test_high_trust_keywords_covered():
+    """The high-trust keyword set covers the design's invariant vocabulary."""
+    from capybase.adapters.comment_classifier import classify_comment_trust, HIGH_TRUST_KEYWORDS
+    # A few representative keywords from each category.
+    for kw in ("MUST", "SHALL", "REQUIRED", "NEVER", "ALWAYS", "invariant",
+               "thread-safe", "atomic", "idempotent", "precondition"):
+        assert kw.lower() in HIGH_TRUST_KEYWORDS, kw
+
+
+def test_non_deferable_comments_are_normal_trust():
+    """Machine/legal/generated/doctest comments are never high-trust for reveal
+    purposes — they're preserved verbatim through both passes anyway."""
+    from capybase.adapters.comment_classifier import classify_comment_trust
+    for text, lang in [
+        ("//noinspection Foo", "rust"),
+        ("// Copyright 2024 Acme", "rust"),
+        ("// generated file; do not edit", "rust"),
+    ]:
+        cls, trust = classify_comment_trust(text, lang)
+        assert cls != CommentClass.DEFERRED
+        assert trust == "normal"

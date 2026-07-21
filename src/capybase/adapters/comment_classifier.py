@@ -45,6 +45,7 @@ class ClassifiedComment:
     end: int                 # byte offset (exclusive)
     text: str                # the comment text (text[start:end])
     cls: CommentClass        # the classification
+    trust: str = "normal"    # "high" | "normal" — selective-reveal candidacy (J1)
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +102,56 @@ _PYTHON_DOCTEST_PATTERN = re.compile(r"^\s*>>>?\s", re.MULTILINE)
 _RUST_DOCTEST_PATTERN = re.compile(r"```\s*(?:rust|no_run|ignore|should_panic)?\s*\n", re.MULTILINE)
 
 
+# ---------------------------------------------------------------------------
+# High-trust keyword set (Part J1) — invariant vocabulary from design §4.
+# A deferred comment containing any of these is a candidate for selective
+# reveal as a structured constraint block on the repair prompt (advisory —
+# the verifier-model jury is the actual check). Case-insensitive, matched as
+# whole words (so "MUST" doesn't false-fire on "mustard").
+# ---------------------------------------------------------------------------
+
+HIGH_TRUST_KEYWORDS: frozenset[str] = frozenset({
+    # RFC-2119 / specification language
+    "must", "shall", "required", "never", "always",
+    # Invariant / contract vocabulary
+    "invariant", "precondition", "postcondition", "pre-condition",
+    "post-condition", "guarantee", "guaranteed",
+    # Concurrency / correctness
+    "thread-safe", "threadsafe", "atomic", "idempotent", "reentrant",
+    "lock-free", "wait-free",
+    # Safety / bounds
+    "unsafe", "bounds-checked", "null-safe", "overflow-safe",
+})
+
+
+_TRUST_KEYWORD_RE = re.compile(
+    r"\b(" + "|".join(re.escape(k) for k in HIGH_TRUST_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_trust(comment_text: str, stripped: str, cls: CommentClass) -> str:
+    """The trust level of a comment for selective-reveal purposes.
+
+    Returns ``"high"`` or ``"normal"``. High-trust heuristics (deterministic,
+    no LLM) per design §4:
+
+    - Invariant keywords (MUST, NEVER, atomic, thread-safe, ...).
+    - Non-deferable comments (MACHINE/LEGAL/GENERATED/DOCTEST) are always
+      ``"normal"`` — they're preserved verbatim through both passes and don't
+      participate in reveal.
+
+    The masker continues to blank ALL deferred comments (including high-trust);
+    reveal is a separate path that surfaces high-trust ones as a labeled data
+    block on the repair prompt, NOT as unmasked prose.
+    """
+    if cls != CommentClass.DEFERRED:
+        return "normal"
+    if _TRUST_KEYWORD_RE.search(comment_text) or _TRUST_KEYWORD_RE.search(stripped):
+        return "high"
+    return "normal"
+
+
 def classify_comment(comment_text: str, lang: str | None = None) -> CommentClass:
     """Classify a single comment's text into a :class:`CommentClass`.
 
@@ -146,6 +197,30 @@ def classify_comment(comment_text: str, lang: str | None = None) -> CommentClass
     return CommentClass.DEFERRED
 
 
+def classify_comment_trust(
+    comment_text: str, lang: str | None = None,
+) -> tuple[CommentClass, str]:
+    """Classify a comment AND assess its trust level for selective reveal.
+
+    Returns ``(cls, trust)`` where ``trust`` is ``"high"`` or ``"normal"``.
+    High-trust deferred comments (those containing invariant keywords per the
+    design's §4 vocabulary) are candidates for selective reveal as a structured
+    constraint block on the repair prompt. The masker still blanks them; reveal
+    is a separate advisory path.
+
+    Non-deferable comments (MACHINE/LEGAL/GENERATED/DOCTEST) are always
+    ``"normal"`` — they're preserved verbatim and don't participate in reveal.
+    """
+    cls = classify_comment(comment_text, lang)
+    stripped = comment_text.lstrip()
+    for prefix in ("///", "//!", "//", "/*", "*/", "#!", "#=", "#", '"""', "'''", "*"):
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix):].lstrip()
+            break
+    trust = _classify_trust(comment_text, stripped, cls)
+    return cls, trust
+
+
 def classify_spans(
     spans: list[tuple[int, int, str]],
     text: str,
@@ -154,21 +229,24 @@ def classify_spans(
     """Classify a list of comment spans (from :func:`enumerate_comment_spans`).
 
     Each span ``(start, end, comment_text)`` is classified independently. Returns
-    a list of :class:`ClassifiedComment` in source order.
+    a list of :class:`ClassifiedComment` in source order, with the ``trust``
+    field populated for selective-reveal candidacy (J1).
     """
-    return [
-        ClassifiedComment(
-            start=start, end=end, text=comment_text,
-            cls=classify_comment(comment_text, lang),
-        )
-        for start, end, comment_text in spans
-    ]
+    out: list[ClassifiedComment] = []
+    for start, end, comment_text in spans:
+        cls, trust = classify_comment_trust(comment_text, lang)
+        out.append(ClassifiedComment(
+            start=start, end=end, text=comment_text, cls=cls, trust=trust,
+        ))
+    return out
 
 
 __all__ = [
     "CommentClass",
     "ClassifiedComment",
     "NON_DEFERABLE",
+    "HIGH_TRUST_KEYWORDS",
     "classify_comment",
+    "classify_comment_trust",
     "classify_spans",
 ]

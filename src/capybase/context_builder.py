@@ -156,10 +156,27 @@ class ContextBuilder:
         # masked separately in _prompt_sides (resolution_engine.py); masking
         # here covers the primary context window (the enclosing-node view or
         # the line window). Zero overhead when no deferred comments are present.
+        high_trust_constraints: list[str] = []
         if self.mask_deferred_comments:
             try:
                 from capybase.adapters.string_lexer import mask_deferable_comments
-                primary, _ = mask_deferable_comments(primary, unit.language)
+                from capybase.adapters.comment_classifier import classify_comment_trust
+                primary, deferred_spans = mask_deferable_comments(primary, unit.language)
+                # Selective reveal (J1/J2, design §4): collect the high-trust
+                # deferred comments (invariant-bearing) for the repair prompt.
+                # The masker blanked them; we surface their TEXT (encoded as
+                # untrusted data) on repair attempts >= 1.
+                for _start, _end, comment_text in deferred_spans:
+                    _cls, trust = classify_comment_trust(comment_text, unit.language)
+                    if trust == "high":
+                        # Strip the comment prefix for a cleaner constraint line.
+                        cleaned = comment_text.strip()
+                        for pfx in ("///", "//!", "//", "/*", "*/", "#!", "#=", "#", '"""', "'''", "*"):
+                            if cleaned.startswith(pfx):
+                                cleaned = cleaned[len(pfx):].strip()
+                                break
+                        if cleaned:
+                            high_trust_constraints.append(cleaned)
             except Exception:  # noqa: BLE001 — masking is advisory
                 pass
         # Rough token estimate (~4 chars/token). Good enough for budgeting;
@@ -257,6 +274,7 @@ class ContextBuilder:
             structural_view=structural_view,
             history_context=history_text,
             obligations_context=obligations_text,
+            high_trust_constraints=high_trust_constraints,
         )
 
     def _build_history_context(self, unit: ConflictUnit) -> str:

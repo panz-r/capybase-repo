@@ -233,6 +233,16 @@ class ContextBundle(BaseModel):
     # by the context builder from its future_obligations_block + branch_intent_block.
     # Empty when neither applies.
     obligations_context: str = ""
+    # High-trust deferred comments (Part J2, design §4): invariant-bearing
+    # comments (MUST/NEVER/atomic/thread-safe/...) that were masked from the
+    # code-resolution model on the first attempt. Revealed as a structured
+    # ``## TRUSTED INVARIANTS`` block on the REPAIR prompt (attempt >= 1) when
+    # the CEGIS loop is fixing a specific failure — the model needs the invariant
+    # to avoid reintroducing the same defect. Treated as UNTRUSTED DATA (a
+    # labeled field, never concatenated into the system prompt as instructions).
+    # Empty on the first attempt (the design's "first code attempt can omit
+    # these hints" rule).
+    high_trust_constraints: list[str] = Field(default_factory=list)
     token_estimate: int = 0
 
 
