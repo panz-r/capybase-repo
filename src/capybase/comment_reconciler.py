@@ -14,6 +14,7 @@ editor needs for deterministic plan application.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 from capybase.adapters.string_lexer import enumerate_comment_spans
 from capybase.adapters.comment_classifier import (
@@ -464,6 +465,228 @@ def parse_comment_plan(raw_response: str) -> CommentPlan | None:
     return CommentPlan(actions=actions)
 
 
+# ---------------------------------------------------------------------------
+# Plan hashing — convergence/oscillation detection for the CEGIS loop (H1)
+# ---------------------------------------------------------------------------
+
+
+def plan_hash(plan: CommentPlan) -> str:
+    """Exact hash of a plan's action set.
+
+    Two plans with the same set of (lineage_id, operation, text) triples produce
+    the same hash. Used for oscillation detection — the exact-repeat backstop.
+    Order-independent (sorted) so a plan that lists actions in a different order
+    but with identical content is treated as the same plan.
+    """
+    triples = sorted(
+        (a.lineage_id, a.operation, a.text) for a in plan.actions
+    )
+    return repr(triples)
+
+
+def plan_norm_hash(plan: CommentPlan) -> str:
+    """Normalized hash — cosmetic-variation-invariant.
+
+    Lowercases the ``text``, collapses whitespace, and keys on
+    ``(lineage_id, operation, normalized_text)``. Catches a model cycling on
+    the same essential disposition with surface-form variation (e.g. capitalizing
+    differently, rewording identically-meaning prose). Mirrors the code CEGIS's
+    ``_seen_normalized_hashes`` (orchestrator.py:5350-5380).
+    """
+    triples = sorted(
+        (a.lineage_id, a.operation, " ".join((a.text or "").lower().split()))
+        for a in plan.actions
+    )
+    return repr(triples)
+
+
+# ---------------------------------------------------------------------------
+# The reconciliation CEGIS loop (Part D3 / G3+H1+H2)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ReconcileOutcome:
+    """Result of :func:`run_comment_cegis`.
+
+    ``buffer`` is the reconciled buffer on success, or the original (frozen)
+    buffer on failure (the caller keeps it either way). ``events`` is the
+    audit trail (start/skip/cycling/escalated/succeeded) — each a
+    ``(event_name, payload)`` tuple the caller journals. ``last_feedback`` is
+    the final :class:`CommentFailure` list (for the review bundle).
+    """
+    buffer: str
+    succeeded: bool
+    skipped: bool = False
+    events: list = field(default_factory=list)
+    last_feedback: list = field(default_factory=list)
+    attempts_made: int = 0
+
+
+def run_comment_cegis(
+    *,
+    buffer: str,
+    frontier: list[LedgerEntry],
+    base: str,
+    current: str,
+    replayed: str,
+    lang: str,
+    propose: "Callable[[str], str]",
+    budget: int = 1,
+    convergence_threshold: int = 2,
+) -> ReconcileOutcome:
+    """Run the comment-reconciliation CEGIS loop on ``buffer``.
+
+    Pure of I/O — the model call is the injected ``propose(prompt) -> raw_response``
+    callable, and the journal/review-bundle side effects are returned as
+    ``outcome.events`` for the caller to emit. This makes the loop unit-testable
+    without an orchestrator; the orchestrator's ``_reconcile_comments`` is a
+    thin wrapper that supplies ``propose`` and consumes ``events``.
+
+    Loop structure mirrors the code CEGIS in ``_resolve_unit``:
+
+    1. ``propose`` → parse → ``apply_comment_plan`` (executable-token invariant).
+    2. Deterministic §9 verifiers → ``CommentFailure`` counterexamples.
+    3. On failure: thread ``feedback`` into the next attempt's prompt (G2) and
+       advance ``current_buffer`` (the code is correct; only prose failed).
+    4. Convergence detection via two hash dicts (exact + normalized). On
+       cycling, stop early (no point burning the budget on the same plan).
+    5. On exhaustion/convergence: return the original buffer + an
+       ``escalated`` event so the caller writes a review bundle. Code is NEVER
+       corrupted — the executable-token invariant in ``apply_comment_plan`` is
+       the hard safety net, and on failure we keep the frozen buffer.
+
+    Returns :class:`ReconcileOutcome`.
+    """
+    # Lazy import to avoid the import cycle: comment_verifiers imports
+    # CommentPlan/LedgerEntry from this module, so we can't import it at the
+    # top. The failure types are pure dataclasses — cheap to construct.
+    try:
+        from capybase.comment_verifiers import CommentFailure, verify_comment_plan
+    except ImportError:  # pragma: no cover — comment_verifiers always available
+        CommentFailure = None  # type: ignore[assignment,misc]
+        verify_comment_plan = None  # type: ignore[assignment]
+
+    def _failure(kind: str, lid: str, msg: str):
+        if CommentFailure is not None:
+            return CommentFailure(kind=kind, lineage_id=lid, message=msg)
+        # Fallback: a plain namespace so the loop still runs.
+        class _F:
+            __slots__ = ("kind", "lineage_id", "message")
+            def __init__(self, kind, lineage_id, message):
+                self.kind = kind
+                self.lineage_id = lineage_id
+                self.message = message
+        return _F(kind, lid, msg)
+
+    if not frontier:
+        return ReconcileOutcome(
+            buffer=buffer, succeeded=False, skipped=True,
+            events=[("comment_phase_skipped",
+                     {"reason": "no frontier comments (all unchanged or non-deferred)"})],
+        )
+    events: list = [("comment_phase_started", {"frontier_size": len(frontier)})]
+    current_buffer = buffer
+    feedback: list[CommentFailure] | None = None
+    seen_hashes: dict[str, int] = {}
+    seen_norm_hashes: dict[str, int] = {}
+    last_feedback: list[CommentFailure] = []
+    attempts_made = 0
+    for attempt in range(budget + 1):
+        attempts_made = attempt + 1
+        prompt = build_comment_reconcile_prompt(
+            frontier, current_buffer, base, current, replayed, lang,
+            attempt=attempt, feedback=feedback,
+        )
+        try:
+            raw = propose(prompt)
+        except Exception as exc:  # noqa: BLE001 — model failure escalates
+            last_feedback = [_failure(
+                "MODEL_CALL_FAILED", "",
+                f"propose raised: {type(exc).__name__}: {exc}",
+            )]
+            events.append(("comment_model_call_failed",
+                           {"attempt": attempt, "error": str(exc)}))
+            break
+        plan = parse_comment_plan(raw)
+        if plan is None:
+            feedback = [_failure(
+                "PARSE_FAILED", "",
+                "the response was not a valid CommentPlan JSON object",
+            )]
+            last_feedback = feedback
+            events.append(("comment_plan_unparseable", {"attempt": attempt}))
+            continue
+        events.append(("comment_plan_generated",
+                       {"actions": len(plan.actions), "attempt": attempt}))
+        try:
+            result = apply_comment_plan(current_buffer, frontier, plan, lang)
+        except ApplyError as exc:
+            feedback = [_failure(
+                "EXECUTABLE_TOKEN_DIFF", "",
+                f"applying the plan would change executable code "
+                f"(forbidden). Detail: {exc}",
+            )]
+            last_feedback = feedback
+            events.append(("comment_apply_failed", {"attempt": attempt}))
+            continue
+        # Deterministic §9 verifiers — concrete counterexamples.
+        # NOTE: we deliberately do NOT advance current_buffer to `result` here.
+        # The frontier's resolved entries carry byte offsets into the ORIGINAL
+        # buffer; if a prior rewrite changed the comment length, those offsets
+        # would be stale on the next apply. Re-prompting against the original
+        # buffer keeps the frontier valid. The model sees the verifier feedback
+        # (the counterexample), not its prior partial rewrite — that's the
+        # signal that drives convergence, not the intermediate buffer state.
+        failures = verify_comment_plan(plan, frontier, result, lang) if verify_comment_plan else []
+        if failures:
+            feedback = failures
+            last_feedback = failures
+            ph = plan_hash(plan)
+            nh = plan_norm_hash(plan)
+            seen_hashes[ph] = seen_hashes.get(ph, 0) + 1
+            seen_norm_hashes[nh] = seen_norm_hashes.get(nh, 0) + 1
+            cycling = (
+                seen_hashes[ph] >= 2
+                or (convergence_threshold > 0
+                    and seen_norm_hashes[nh] >= convergence_threshold)
+            )
+            if cycling:
+                events.append(("comment_plan_cycling", {
+                    "reason": f"plan seen {seen_hashes[ph]}x exact / "
+                              f"{seen_norm_hashes[nh]}x normalized",
+                    "attempt": attempt,
+                }))
+                break
+            continue
+        # Success.
+        kept = sum(1 for a in plan.actions if a.operation in ("keep", "preserve_verbatim"))
+        rewritten = sum(1 for a in plan.actions if a.operation == "rewrite")
+        moved = sum(1 for a in plan.actions if a.operation == "move")
+        merged = sum(1 for a in plan.actions if a.operation == "merge")
+        deleted = sum(1 for a in plan.actions if a.operation == "delete")
+        events.append(("comment_reconciled", {
+            "kept": kept, "rewritten": rewritten, "moved": moved,
+            "merged": merged, "deleted": deleted, "attempts": attempts_made,
+        }))
+        return ReconcileOutcome(
+            buffer=result, succeeded=True, events=events,
+            attempts_made=attempts_made,
+        )
+    # Exhausted / converged / model-unavailable → escalate.
+    feedback_summary = "; ".join(
+        f"[{f.kind}] {f.lineage_id}: {f.message[:120]}" for f in last_feedback
+    ) or "(no feedback recorded)"
+    events.append(("comment_reconciliation_failed", {
+        "frontier_size": len(frontier), "attempts": attempts_made,
+        "last_feedback": feedback_summary,
+    }))
+    return ReconcileOutcome(
+        buffer=buffer, succeeded=False, events=events,
+        last_feedback=last_feedback, attempts_made=attempts_made,
+    )
+
+
 __all__ = [
     "LedgerEntry",
     "build_comment_ledger",
@@ -474,4 +697,8 @@ __all__ = [
     "apply_comment_plan",
     "build_comment_reconcile_prompt",
     "parse_comment_plan",
+    "plan_hash",
+    "plan_norm_hash",
+    "ReconcileOutcome",
+    "run_comment_cegis",
 ]

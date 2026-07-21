@@ -8,6 +8,8 @@ synthetic CommentPlans to verify the CST editor + invariant).
 
 from __future__ import annotations
 
+import json
+
 from capybase.adapters.string_lexer import (
     enumerate_comment_spans, mask_deferable_comments,
 )
@@ -15,6 +17,7 @@ from capybase.adapters.comment_classifier import classify_comment, CommentClass
 from capybase.comment_reconciler import (
     build_comment_ledger, select_comment_frontier,
     CommentPlan, CommentAction, apply_comment_plan,
+    run_comment_cegis,
 )
 
 
@@ -169,3 +172,203 @@ def test_round_trip_mask_and_reconcile():
     frontier = select_comment_frontier(ledger)
     assert frontier == []  # unchanged across all versions → not in frontier
     # The original buffer is used as-is (no reconciliation needed).
+
+
+# ---------------------------------------------------------------------------
+# CEGIS loop — run_comment_cegis (Parts G3 + H1/H2)
+# ---------------------------------------------------------------------------
+
+
+def _make_frontier(base, cur, rep, resolved, lang="rust"):
+    ledger = build_comment_ledger(base, cur, rep, resolved, lang)
+    return select_comment_frontier(ledger)
+
+
+def _plan_json(*actions):
+    """Build a CommentPlan JSON string from (lineage_id, operation, text) tuples."""
+    out = []
+    for lid, op, text in actions:
+        a = {"lineage_id": lid, "operation": op}
+        if text is not None:
+            a["text"] = text
+        out.append(a)
+    return json.dumps({"actions": out})
+
+
+def test_cegis_loop_succeeds_on_first_attempt():
+    """A clean plan (every lineage dispositioned, no stale idents) succeeds on
+    the first attempt and emits the comment_reconciled event."""
+    base = "fn foo() {\n    // uses MAX_RETRIES\n    let x = MAX_RETRIES;\n}\n"
+    rep = "fn foo() {\n    // uses MAX_RETRIES_UPDATED\n    let x = MAX_RETRIES;\n}\n"
+    resolved = base
+    frontier = _make_frontier(base, base, rep, resolved)
+    lid = [e for e in frontier if e.version == "resolved"][0].lineage_id
+
+    def propose(prompt):
+        return _plan_json((lid, "rewrite", "uses MAX_RETRIES for retry"))
+
+    outcome = run_comment_cegis(
+        buffer=resolved, frontier=frontier,
+        base=base, current=base, replayed=rep, lang="rust",
+        propose=propose, budget=1,
+    )
+    assert outcome.succeeded
+    assert outcome.attempts_made == 1
+    assert "uses MAX_RETRIES for retry" in outcome.buffer
+    # The comment_reconciled event must be in the trail.
+    event_names = [e[0] for e in outcome.events]
+    assert "comment_reconciled" in event_names
+    assert "comment_phase_started" in event_names
+
+
+def test_cegis_loop_threads_feedback_on_stale_identifier():
+    """When the first plan fails STALE_IDENTIFIER, the second attempt's prompt
+    contains the feedback (the counterexample). A successful second plan returns
+    the reconciled buffer."""
+    base = "fn foo() {\n    // uses MAX_RETRIES\n    let x = MAX_RETRIES;\n}\n"
+    rep = "fn foo() {\n    // uses MAX_RETRIES_NEW\n    let x = MAX_RETRIES;\n}\n"
+    resolved = base
+    frontier = _make_frontier(base, base, rep, resolved)
+    lid = [e for e in frontier if e.version == "resolved"][0].lineage_id
+
+    prompts_seen = []
+
+    def propose(prompt):
+        prompts_seen.append(prompt)
+        if len(prompts_seen) == 1:
+            # First attempt: reference a removed identifier → STALE.
+            return _plan_json((lid, "rewrite", "uses REMOVED_CONST for retry"))
+        # Second attempt: the prompt must contain the STALE feedback.
+        assert "STALE_IDENTIFIER" in prompt
+        assert "REMOVED_CONST" in prompt
+        assert "prior-attempt feedback" in prompt
+        return _plan_json((lid, "rewrite", "uses MAX_RETRIES for retry"))
+
+    outcome = run_comment_cegis(
+        buffer=resolved, frontier=frontier,
+        base=base, current=base, replayed=rep, lang="rust",
+        propose=propose, budget=2,
+    )
+    assert outcome.succeeded
+    assert outcome.attempts_made == 2
+    assert "uses MAX_RETRIES for retry" in outcome.buffer
+
+
+def test_cegis_loop_escalates_on_convergence():
+    """When the model keeps returning the same failing plan, the loop detects
+    convergence and escalates (rather than burning the whole budget). The
+    original buffer is preserved (code NOT corrupted)."""
+    base = "fn foo() {\n    // uses MAX_RETRIES\n    let x = 1;\n}\n"
+    rep = "fn foo() {\n    // uses MAX_RETRIES_NEW\n    let x = 1;\n}\n"
+    resolved = base
+    frontier = _make_frontier(base, base, rep, resolved)
+    lid = [e for e in frontier if e.version == "resolved"][0].lineage_id
+
+    # Always return the same stale plan — convergence after the 2nd occurrence.
+    def propose(prompt):
+        return _plan_json((lid, "rewrite", "uses REMOVED_CONST for retry"))
+
+    outcome = run_comment_cegis(
+        buffer=resolved, frontier=frontier,
+        base=base, current=base, replayed=rep, lang="rust",
+        propose=propose, budget=5, convergence_threshold=2,
+    )
+    assert not outcome.succeeded
+    event_names = [e[0] for e in outcome.events]
+    assert "comment_plan_cycling" in event_names
+    assert "comment_reconciliation_failed" in event_names
+    # Code is preserved.
+    assert outcome.buffer == resolved
+    # The escalation carries the last feedback.
+    assert outcome.last_feedback
+    assert outcome.last_feedback[0].kind == "STALE_IDENTIFIER"
+
+
+def test_cegis_loop_escalates_on_budget_exhaustion():
+    """When the model returns different failing plans each time (no convergence
+    but no success either), the loop exhausts the budget and escalates."""
+    base = "fn foo() {\n    // uses MAX_RETRIES\n    let x = 1;\n}\n"
+    rep = "fn foo() {\n    // uses MAX_RETRIES_NEW\n    let x = 1;\n}\n"
+    resolved = base
+    frontier = _make_frontier(base, base, rep, resolved)
+    lid = [e for e in frontier if e.version == "resolved"][0].lineage_id
+
+    n = [0]
+
+    def propose(prompt):
+        n[0] += 1
+        # Each attempt fails with a DIFFERENT stale identifier (no convergence).
+        return _plan_json((lid, "rewrite", f"uses REMOVED_{n[0]} for retry"))
+
+    outcome = run_comment_cegis(
+        buffer=resolved, frontier=frontier,
+        base=base, current=base, replayed=rep, lang="rust",
+        propose=propose, budget=2, convergence_threshold=10,
+    )
+    assert not outcome.succeeded
+    assert outcome.attempts_made == 3  # budget=2 → 3 attempts (0, 1, 2)
+    event_names = [e[0] for e in outcome.events]
+    assert "comment_reconciliation_failed" in event_names
+    # No cycling event (different plan each time).
+    assert "comment_plan_cycling" not in event_names
+
+
+def test_cegis_loop_skips_when_no_frontier():
+    """An empty frontier (no deferred comments to reconcile) is a clean skip —
+    zero model calls, zero overhead."""
+    outcome = run_comment_cegis(
+        buffer="fn foo() { 1 }\n", frontier=[],
+        base="x", current="y", replayed="z", lang="rust",
+        propose=lambda p: pytest_fail_if_called(),
+        budget=5,
+    )
+    assert outcome.skipped
+    assert not outcome.succeeded
+    event_names = [e[0] for e in outcome.events]
+    assert "comment_phase_skipped" in event_names
+
+
+def pytest_fail_if_called():
+    raise AssertionError("propose should not be called when frontier is empty")
+
+
+def test_cegis_loop_escalates_on_model_call_failure():
+    """If propose raises, the loop escalates with MODEL_CALL_FAILED feedback."""
+    base = "fn foo() {\n    // uses MAX_RETRIES\n    let x = 1;\n}\n"
+    rep = "fn foo() {\n    // uses MAX_RETRIES_NEW\n    let x = 1;\n}\n"
+    resolved = base
+    frontier = _make_frontier(base, base, rep, resolved)
+
+    def propose(prompt):
+        raise RuntimeError("connection refused")
+
+    outcome = run_comment_cegis(
+        buffer=resolved, frontier=frontier,
+        base=base, current=base, replayed=rep, lang="rust",
+        propose=propose, budget=5,
+    )
+    assert not outcome.succeeded
+    assert outcome.last_feedback
+    assert outcome.last_feedback[0].kind == "MODEL_CALL_FAILED"
+    assert "connection refused" in outcome.last_feedback[0].message
+
+
+def test_cegis_loop_escalates_on_unparseable_response():
+    """If the model returns garbage, the loop threads PARSE_FAILED feedback and
+    escalates when the budget is exhausted."""
+    base = "fn foo() {\n    // uses MAX_RETRIES\n    let x = 1;\n}\n"
+    rep = "fn foo() {\n    // uses MAX_RETRIES_NEW\n    let x = 1;\n}\n"
+    resolved = base
+    frontier = _make_frontier(base, base, rep, resolved)
+
+    def propose(prompt):
+        return "this is not JSON at all"
+
+    outcome = run_comment_cegis(
+        buffer=resolved, frontier=frontier,
+        base=base, current=base, replayed=rep, lang="rust",
+        propose=propose, budget=1,
+    )
+    assert not outcome.succeeded
+    assert outcome.last_feedback
+    assert outcome.last_feedback[0].kind == "PARSE_FAILED"

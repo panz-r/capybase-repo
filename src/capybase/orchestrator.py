@@ -4620,9 +4620,15 @@ class Orchestrator:
     ) -> str | None:
         """Phase 3: reconcile deferred (prose) comments after code passes validation.
 
+        Thin wrapper around :func:`run_comment_cegis` (the testable loop body).
         The comment pass can ONLY modify comments — the executable-token-equality
-        invariant (enforced in apply_comment_plan) prevents any code corruption.
-        Skipped entirely when no deferred comments overlap the conflict region.
+        invariant (enforced in ``apply_comment_plan``) prevents any code
+        corruption. On failure the original (comment-verbatim) buffer is kept;
+        a ``comment_reconciliation_failed`` event + review bundle surface the
+        unresolved frontier to a human reviewer.
+
+        Skipped entirely (zero overhead) when no deferred comments are in the
+        frontier.
 
         Returns the reconciled buffer (or None if skipped/failed → keep original).
         """
@@ -4633,14 +4639,12 @@ class Orchestrator:
         try:
             from capybase.adapters.string_lexer import enumerate_comment_spans
             from capybase.comment_reconciler import (
-                build_comment_ledger, select_comment_frontier,
-                build_comment_reconcile_prompt, parse_comment_plan,
-                apply_comment_plan, ApplyError,
+                build_comment_ledger, select_comment_frontier, run_comment_cegis,
             )
         except ImportError:
             return None
 
-        # Cheap pre-check: if there are NO deferred comments, skip entirely
+        # Cheap pre-check: if there are NO comments at all, skip entirely
         # (zero overhead — the "skip when no affected comments" gate).
         spans = enumerate_comment_spans(buffer, lang)
         if not spans:
@@ -4652,71 +4656,53 @@ class Orchestrator:
         base_text = unit.base.text or ""
         current_text = unit.current.text or ""
         replayed_text = unit.replayed.text or ""
-        # Compute conflict byte ranges in the resolved buffer (the marker_span
-        # line range → byte range in the resolved file). For MVP, use the full
-        # buffer (conservative — all comments are candidates for the frontier).
-        # The frontier selector's "differs across versions" check is the real filter.
         ledger = build_comment_ledger(
             base_text, current_text, replayed_text, buffer, lang,
         )
         frontier = select_comment_frontier(ledger)
-        if not frontier:
-            self.journal.emit(
-                "comment_phase_skipped",
-                {"reason": "no frontier comments (all unchanged or non-deferred)"},
-                step_index=self.step, path=path,
-            )
-            return None
 
-        self.journal.emit(
-            "comment_phase_started",
-            {"frontier_size": len(frontier)},
-            step_index=self.step, path=path,
-        )
-
-        # CEGIS loop (budget = comment_reconciliation_retries).
         budget = getattr(self.config.policy, "comment_reconciliation_retries", 1)
-        current_buffer = buffer
-        for attempt in range(budget + 1):
-            prompt = build_comment_reconcile_prompt(
-                frontier, current_buffer, base_text, current_text, replayed_text, lang,
+        conv_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
+
+        def _propose(prompt: str) -> str:
+            # json_mode=True — the output contract is a CommentPlan JSON.
+            return self.resolution_engine.raw_complete(
+                prompt, model=self.config.model, json_mode=True,
             )
-            # Call the model via the resolution engine's raw-complete path.
-            try:
-                raw = self.resolution_engine.raw_complete(
-                    prompt, model=self.config.model,
-                )
-            except Exception:
-                break  # model failure → keep original buffer
-            plan = parse_comment_plan(raw)
-            if plan is None:
-                continue  # unparseable → retry
-            self.journal.emit(
-                "comment_plan_generated",
-                {"actions": len(plan.actions), "attempt": attempt},
-                step_index=self.step, path=path,
-            )
-            try:
-                result = apply_comment_plan(current_buffer, frontier, plan, lang)
-                # Disposition counts for the audit.
-                kept = sum(1 for a in plan.actions if a.operation in ("keep", "preserve_verbatim"))
-                rewritten = sum(1 for a in plan.actions if a.operation == "rewrite")
-                deleted = sum(1 for a in plan.actions if a.operation == "delete")
-                self.journal.emit(
-                    "comment_reconciled",
-                    {"kept": kept, "rewritten": rewritten, "deleted": deleted},
-                    step_index=self.step, path=path,
-                )
-                return result
-            except ApplyError:
-                # The plan corrupted code → retry with feedback.
-                continue
-        # All attempts failed → keep the original buffer (code is NOT corrupted).
-        self.journal.emit(
-            "comment_phase_skipped",
-            {"reason": "all reconciliation attempts failed (keeping original)"},
-            step_index=self.step, path=path,
+
+        outcome = run_comment_cegis(
+            buffer=buffer, frontier=frontier,
+            base=base_text, current=current_text, replayed=replayed_text, lang=lang,
+            propose=_propose, budget=budget, convergence_threshold=conv_threshold,
         )
+        # Replay the loop's events into the journal.
+        for ev_name, ev_payload in outcome.events:
+            self.journal.emit(ev_name, ev_payload, step_index=self.step, path=path)
+        if outcome.succeeded:
+            return outcome.buffer
+        # On escalation (exhausted/converged/model-failure), surface a review
+        # bundle so a human sees the unresolved frontier comments. Code is NOT
+        # corrupted — outcome.buffer is the original (comment-verbatim) buffer.
+        if not outcome.skipped and outcome.last_feedback:
+            feedback_summary = "; ".join(
+                f"[{f.kind}] {f.lineage_id}: {f.message[:120]}"
+                for f in outcome.last_feedback
+            )
+            try:
+                write_review_bundle(
+                    self.paths,
+                    reason=f"comment reconciliation failed ({outcome.attempts_made} "
+                           f"attempt(s)): {feedback_summary}",
+                    step_index=self.step,
+                    unit=unit,
+                    advisories=[
+                        "The frozen, test-passing code is intact and staged. "
+                        "Only the deferred-comment reconciliation could not "
+                        "converge. Review the frontier comments manually."
+                    ],
+                )
+            except Exception:  # noqa: BLE001 — review bundle is advisory
+                pass
         return None
 
     def _whole_file_repair(
