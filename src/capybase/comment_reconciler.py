@@ -893,6 +893,13 @@ class ReconcileOutcome:
     # with these as seed_failures. Empty when the pass succeeded or no
     # high-trust conflict was detected (the common failure → plain escalation).
     code_reopen_request: list = field(default_factory=list)
+    # FR1b flight recorder: the per-boundary artifact trace. Each entry is a
+    # dict {boundary, kind, content, ext?} capturing raw artifact data at the
+    # §1 boundaries. The orchestrator's _run_comment_pass iterates this and
+    # calls Journal.store_comment_artifact for each (content-addressed). Kept
+    # on the outcome so the pure run_comment_cegis stays I/O-free; the I/O is
+    # the orchestrator's responsibility. Empty when the pass is skipped.
+    trace: list = field(default_factory=list)
 
 
 def run_comment_cegis(
@@ -958,6 +965,26 @@ def run_comment_cegis(
                      {"reason": "no frontier comments (all unchanged or non-deferred)"})],
         )
     events: list = [("comment_phase_started", {"frontier_size": len(frontier)})]
+    trace: list = []
+    # FR1b: capture the loop-entry artifacts (the §1 "unit input" + "comment
+    # ledger" + "comment candidate before application" boundaries).
+    import json as _json
+    trace.append({"boundary": "unit_input", "kind": "frozen_code",
+                  "content": buffer, "ext": "txt"})
+    trace.append({"boundary": "unit_input", "kind": "ledger",
+                  "content": _json.dumps([
+                      {"lineage_id": e.lineage_id, "version": e.version,
+                       "text": e.text, "cls": e.cls.value, "start": e.start,
+                       "end": e.end, "anchor_symbol": e.anchor_symbol,
+                       "line": e.line, "changed_with_code": e.changed_with_code,
+                       "placement": e.placement,
+                       "referenced_identifiers": e.referenced_identifiers}
+                      for e in frontier
+                  ], indent=2), "ext": "json"})
+    trace.append({"boundary": "unit_input", "kind": "source_variants",
+                  "content": _json.dumps(
+                      {"base": base, "current": current, "replayed": replayed},
+                      indent=2), "ext": "json"})
     current_buffer = buffer
     feedback: list[CommentFailure] | None = None
     seen_hashes: dict[str, int] = {}
@@ -971,6 +998,9 @@ def run_comment_cegis(
             frontier, current_buffer, base, current, replayed, lang,
             attempt=attempt, feedback=feedback,
         )
+        # FR1b: capture the comment-model prompt.
+        trace.append({"boundary": f"attempt_{attempt}", "kind": "prompt",
+                      "content": prompt, "ext": "txt"})
         try:
             raw = propose(prompt)
         except Exception as exc:  # noqa: BLE001 — model failure escalates
@@ -981,6 +1011,9 @@ def run_comment_cegis(
             events.append(("comment_model_call_failed",
                            {"attempt": attempt, "error": str(exc)}))
             break
+        # FR1b: capture the comment-model response.
+        trace.append({"boundary": f"attempt_{attempt}", "kind": "response",
+                      "content": raw, "ext": "txt"})
         plan = parse_comment_plan(raw)
         if plan is None:
             feedback = [_failure(
@@ -991,6 +1024,14 @@ def run_comment_cegis(
             events.append(("comment_plan_unparseable", {"attempt": attempt}))
             continue
         last_plan = plan
+        # FR1b: capture the parsed plan.
+        trace.append({"boundary": f"attempt_{attempt}", "kind": "parsed_plan",
+                      "content": _json.dumps([
+                          {"lineage_id": a.lineage_id, "operation": a.operation,
+                           "text": a.text, "confidence": a.confidence,
+                           "derived_from": a.derived_from, "reason_code": a.reason_code}
+                          for a in plan.actions
+                      ], indent=2), "ext": "json"})
         events.append(("comment_plan_generated",
                        {"actions": len(plan.actions), "attempt": attempt}))
         try:
@@ -1004,6 +1045,24 @@ def run_comment_cegis(
             last_feedback = feedback
             events.append(("comment_apply_failed", {"attempt": attempt}))
             continue
+        # FR1b: capture candidate_before (the frozen buffer the plan was applied
+        # against) + candidate_after (the result).
+        trace.append({"boundary": f"attempt_{attempt}", "kind": "candidate_before",
+                      "content": current_buffer, "ext": "txt"})
+        trace.append({"boundary": f"attempt_{attempt}", "kind": "candidate_after",
+                      "content": result, "ext": "txt"})
+        # FR1b: capture the frozen executable-token fingerprint (the replay key).
+        try:
+            frozen_fp = _executable_tokens(current_buffer, lang)
+            import hashlib as _hashlib
+            fp_hash = _hashlib.sha256(frozen_fp.encode()).hexdigest()[:16]
+            trace.append({"boundary": f"attempt_{attempt}", "kind": "fingerprint",
+                          "content": _json.dumps(
+                              {"fingerprint": fp_hash,
+                               "frozen_tokens": frozen_fp[:500]}),
+                          "ext": "json", "key_override": fp_hash})
+        except Exception:  # noqa: BLE001 — fingerprint is advisory
+            pass
         # Deterministic §9 verifiers — concrete counterexamples.
         # NOTE: we deliberately do NOT advance current_buffer to `result` here.
         # The frontier's resolved entries carry byte offsets into the ORIGINAL
@@ -1013,6 +1072,14 @@ def run_comment_cegis(
         # (the counterexample), not its prior partial rewrite — that's the
         # signal that drives convergence, not the intermediate buffer state.
         failures = verify_comment_plan(plan, frontier, result, lang) if verify_comment_plan else []
+        # FR1b: capture the structured verifier results (the CommentFailure list).
+        if failures:
+            trace.append({"boundary": f"attempt_{attempt}", "kind": "verifier_results",
+                          "content": _json.dumps([
+                              {"kind": f.kind, "lineage_id": f.lineage_id,
+                               "message": f.message}
+                              for f in failures
+                          ], indent=2), "ext": "json"})
         if failures:
             feedback = failures
             last_feedback = failures
@@ -1045,7 +1112,7 @@ def run_comment_cegis(
         }))
         return ReconcileOutcome(
             buffer=result, succeeded=True, events=events,
-            attempts_made=attempts_made, final_plan=plan,
+            attempts_made=attempts_made, final_plan=plan, trace=trace,
         )
     # Exhausted / converged / model-unavailable → escalate.
     feedback_summary = "; ".join(
@@ -1073,7 +1140,7 @@ def run_comment_cegis(
     return ReconcileOutcome(
         buffer=buffer, succeeded=False, events=events,
         last_feedback=last_feedback, attempts_made=attempts_made,
-        final_plan=last_plan,
+        final_plan=last_plan, trace=trace,
         code_reopen_request=reopen_requests,
     )
 

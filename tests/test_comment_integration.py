@@ -629,3 +629,96 @@ def test_code_reopen_request_includes_comment_code_contract_conflict_event():
     )
     event_names = [e[0] for e in outcome.events]
     assert "comment_code_contract_conflict" in event_names
+
+
+# ---------------------------------------------------------------------------
+# FR1b — flight recorder trace in ReconcileOutcome
+# ---------------------------------------------------------------------------
+
+
+def test_flight_recorder_trace_populated_on_success():
+    """A successful comment pass populates outcome.trace with the §1 boundaries."""
+    base = "fn foo() {\n    // uses MAX_RETRIES\n    let x = MAX_RETRIES;\n}\n"
+    rep = "fn foo() {\n    // uses MAX_RETRIES_UPDATED\n    let x = MAX_RETRIES;\n}\n"
+    resolved = base
+    frontier = _make_frontier(base, base, rep, resolved)
+    lid = [e for e in frontier if e.version == "resolved"][0].lineage_id
+
+    def propose(prompt):
+        return _plan_json((lid, "rewrite", "uses MAX_RETRIES for retry"))
+
+    outcome = run_comment_cegis(
+        buffer=resolved, frontier=frontier,
+        base=base, current=base, replayed=rep, lang="rust",
+        propose=propose, budget=1,
+    )
+    assert outcome.succeeded
+    assert len(outcome.trace) > 0, "trace should be populated"
+    # The trace carries the §1 boundaries.
+    kinds = {e["kind"] for e in outcome.trace}
+    assert "frozen_code" in kinds, "frozen_code (unit input) missing"
+    assert "ledger" in kinds, "ledger missing"
+    assert "prompt" in kinds, "comment prompt missing"
+    assert "response" in kinds, "comment response missing"
+    assert "candidate_after" in kinds, "candidate_after missing"
+
+
+def test_flight_recorder_trace_empty_on_skip():
+    """A skipped pass (no frontier) has an empty trace."""
+    outcome = run_comment_cegis(
+        buffer="fn foo() { 1 }\n", frontier=[],
+        base="x", current="y", replayed="z", lang="rust",
+        propose=lambda p: "", budget=1,
+    )
+    assert outcome.skipped
+    assert outcome.trace == []
+
+
+def test_flight_recorder_trace_captures_fingerprint():
+    """The trace includes the executable-token fingerprint (the replay key)."""
+    base = "fn foo() {\n    // uses MAX_RETRIES\n    let x = MAX_RETRIES;\n}\n"
+    rep = "fn foo() {\n    // uses MAX_RETRIES_NEW\n    let x = MAX_RETRIES;\n}\n"
+    resolved = base
+    frontier = _make_frontier(base, base, rep, resolved)
+    lid = [e for e in frontier if e.version == "resolved"][0].lineage_id
+
+    def propose(prompt):
+        return _plan_json((lid, "rewrite", "uses MAX_RETRIES for retry"))
+
+    outcome = run_comment_cegis(
+        buffer=resolved, frontier=frontier,
+        base=base, current=base, replayed=rep, lang="rust",
+        propose=propose, budget=1,
+    )
+    fps = [e for e in outcome.trace if e["kind"] == "fingerprint"]
+    assert len(fps) >= 1
+    # The fingerprint entry has a key_override (the sha256 hash) for replay.
+    assert "key_override" in fps[0]
+    assert len(fps[0]["key_override"]) == 16  # 16-char hex prefix
+
+
+def test_flight_recorder_trace_captures_verifier_results_on_failure():
+    """When verifiers reject a plan, the trace carries the structured results."""
+    base = "fn foo() {\n    // uses MAX_RETRIES\n    let x = MAX_RETRIES;\n}\n"
+    rep = "fn foo() {\n    // uses MAX_RETRIES_NEW\n    let x = MAX_RETRIES;\n}\n"
+    resolved = base
+    frontier = _make_frontier(base, base, rep, resolved)
+    lid = [e for e in frontier if e.version == "resolved"][0].lineage_id
+
+    # A plan that fails STALE_IDENTIFIER.
+    def propose(prompt):
+        return _plan_json((lid, "rewrite", "uses REMOVED_CONST for retry"))
+
+    outcome = run_comment_cegis(
+        buffer=resolved, frontier=frontier,
+        base=base, current=base, replayed=rep, lang="rust",
+        propose=propose, budget=1, convergence_threshold=10,
+    )
+    assert not outcome.succeeded
+    verifier_results = [e for e in outcome.trace if e["kind"] == "verifier_results"]
+    assert len(verifier_results) >= 1
+    # The content is JSON with the structured CommentFailure.
+    import json
+    data = json.loads(verifier_results[0]["content"])
+    assert isinstance(data, list)
+    assert any("STALE_IDENTIFIER" in r.get("kind", "") for r in data)

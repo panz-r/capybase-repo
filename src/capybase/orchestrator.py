@@ -4772,6 +4772,26 @@ class Orchestrator:
         # Replay the loop's events into the journal.
         for ev_name, ev_payload in outcome.events:
             self.journal.emit(ev_name, ev_payload, step_index=self.step, path=path)
+        # FR1b: persist the flight-recorder trace (content-addressed). Each
+        # trace entry is {boundary, kind, content, ext?, key_override?}. This is
+        # the data the shadow jury (Phase 4) and the final enforcement phase
+        # (Phase 5) replay against — no rerunning the code-resolution stages.
+        if getattr(outcome, "trace", None) and self.config.journal.enabled:
+            for entry in outcome.trace:
+                try:
+                    key, _ = self.journal.store_comment_artifact(
+                        entry["kind"], entry["content"],
+                        ext=entry.get("ext", "txt"),
+                        key=entry.get("key_override"),
+                    )
+                    self.journal.emit(
+                        "comment_artifact",
+                        {"boundary": entry["boundary"], "kind": entry["kind"],
+                         "key": key, "path": str(path)},
+                        step_index=self.step, path=path,
+                    )
+                except Exception:  # noqa: BLE001 — flight recorder is advisory
+                    pass
         return outcome
 
     def _finalize_comment_pass(self, path: str, outcome, units: list) -> None:
