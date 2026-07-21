@@ -104,10 +104,21 @@ def build_comment_ledger(
         ("resolved", resolved, resolved_entities),
     ]
     entries: list[LedgerEntry] = []
-    # Collect all deferred comments per version.
+    # Collect all deferred comments per version. For Python, also include
+    # docstring spans (triple-quoted strings in docstring position) — they're
+    # STRING LITERALS, not comments, so enumerate_comment_spans misses them.
+    # K3: docstrings are classified like comments (DEFERRED unless they match
+    # MACHINE/LEGAL/DOCTEST) and reconciled via the triple-quote prefix.
+    include_docstrings = lang in ("python", "py")
     raw_by_version: dict[str, list[ClassifiedComment]] = {}
     for vname, vtext, _vents in versions:
         spans = enumerate_comment_spans(vtext, lang)
+        if include_docstrings:
+            try:
+                from capybase.adapters.string_lexer import enumerate_docstring_spans
+                spans = spans + enumerate_docstring_spans(vtext, lang)
+            except Exception:  # noqa: BLE001 — advisory
+                pass
         classified = classify_spans(spans, vtext, lang)
         raw_by_version[vname] = [c for c in classified if c.cls == CommentClass.DEFERRED]
 

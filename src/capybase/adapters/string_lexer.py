@@ -861,6 +861,107 @@ def enumerate_comment_spans(
     return spans
 
 
+def enumerate_docstring_spans(
+    text: str, lang: str | None = None,
+) -> list[tuple[int, int, str]]:
+    """Python docstring spans — triple-quoted strings in docstring position.
+
+    A docstring is the first statement of a module, class, or function body and
+    must be a string literal (``\"\"\"...\"\"\"`` or ``'''...'''``). Docstrings
+    are STRING LITERALS, not comments, so :func:`enumerate_comment_spans` doesn't
+    see them. This function finds them via Python's :mod:`ast` module (the
+    canonical source — handles every legal docstring position, including
+    nested-function bodies and class-level docstrings).
+
+    Returns ``(start_byte, end_byte_exclusive, docstring_text)`` for each
+    docstring, in source order. The reconciler treats docstrings like comments
+    (DEFERRED unless they match MACHINE/LEGAL/DOCTEST patterns) and the CST
+    editor rewrites them via the triple-quote prefix in :func:`_format_comment`.
+
+    Non-Python languages yield ``[]`` (graceful degradation). Syntax errors in
+    the text also yield ``[]`` — the reconciler never breaks on unparseable input.
+    """
+    if lang not in ("python", "py"):
+        return []
+    try:
+        import ast
+    except ImportError:  # pragma: no cover — ast is stdlib
+        return []
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+
+    spans: list[tuple[int, int, str]] = []
+
+    def _visit(node) -> None:
+        # Module docstring.
+        if isinstance(node, ast.Module):
+            ds = ast.get_docstring(node, clean=False)
+            if ds is not None and node.body and isinstance(node.body[0], ast.Expr):
+                _record(node.body[0])
+        # Function/method docstring.
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            ds = ast.get_docstring(node, clean=False)
+            if ds is not None and node.body and isinstance(node.body[0], ast.Expr):
+                _record(node.body[0])
+        # Class docstring.
+        elif isinstance(node, ast.ClassDef):
+            ds = ast.get_docstring(node, clean=False)
+            if ds is not None and node.body and isinstance(node.body[0], ast.Expr):
+                _record(node.body[0])
+        for child in ast.iter_child_nodes(node):
+            _visit(child)
+
+    def _record(expr_node: ast.Expr) -> None:
+        """Record the byte span of a docstring-bearing Expr statement."""
+        val = expr_node.value
+        # ast.Constant is the modern node for all string literals (ast.Str was
+        # removed in Python 3.14; ast.Constant.value holds the string).
+        if not isinstance(val, ast.Constant):
+            return
+        v = val.value
+        if not isinstance(v, str):
+            return
+        # ast line/col are 0-based at the START of the statement (which is the
+        # start of the string literal in docstring position). end_lineno is the
+        # last line; end_col_offset is the col on the last line.
+        try:
+            start_byte = _line_col_to_byte(text, val.lineno - 1, val.col_offset)
+            end_lineno = val.end_lineno or val.lineno
+            end_col = val.end_col_offset if val.end_col_offset is not None else val.col_offset + len(v) + 2
+            end_byte = _line_col_to_byte(text, end_lineno - 1, end_col)
+        except (AttributeError, IndexError):
+            return
+        # Clip to valid range (defensive — ast offsets can be tricky).
+        start_byte = max(0, min(start_byte, len(text)))
+        end_byte = max(start_byte, min(end_byte, len(text)))
+        content = text[start_byte:end_byte]
+        if content:
+            spans.append((start_byte, end_byte, content))
+
+    _visit(tree)
+    return spans
+
+
+def _line_col_to_byte(text: str, lineno: int, col: int) -> int:
+    """Convert 0-based (lineno, col) to a byte offset in ``text``.
+
+    Walks line-by-line because Python source uses 1-based lineno / 0-based col
+    offsets that don't account for multi-byte chars (we treat the text as a
+    byte/char stream — same assumption the rest of the lexer makes).
+    """
+    offset = 0
+    cur_line = 0
+    for i, ch in enumerate(text):
+        if cur_line == lineno:
+            return i + col
+        if ch == "\n":
+            cur_line += 1
+    # Fell through — lineno was past the end.
+    return len(text)
+
+
 def multiline_string_line_mask(text: str, lang: str | None = None) -> list[bool]:
     """For each line of ``text``, True if the line is INSIDE a multi-line string.
 
@@ -1041,5 +1142,8 @@ __all__ = [
     "blank_strings",
     "blank_comments",
     "blank_raw_strings",
+    "enumerate_comment_spans",
+    "enumerate_docstring_spans",
+    "mask_deferable_comments",
     "multiline_string_line_mask",
 ]

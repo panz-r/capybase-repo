@@ -182,3 +182,115 @@ def test_mask_deferable_comments_preserves_offsets():
     comment_part = "// a comment"
     masked_comment = masked[len(code_part):len(code_part) + len(comment_part)]
     assert set(masked_comment) == {" "}
+
+
+# ---------------------------------------------------------------------------
+# K3 — Python docstring spans (triple-quoted strings as first statement)
+# ---------------------------------------------------------------------------
+
+
+def test_docstring_spans_finds_module_docstring():
+    """A module-level docstring (first statement) is found."""
+    from capybase.adapters.string_lexer import enumerate_docstring_spans
+    text = '"""Module docstring."""\nx = 1\n'
+    spans = enumerate_docstring_spans(text, "python")
+    assert len(spans) == 1
+    start, end, content = spans[0]
+    assert "Module docstring" in content
+    assert text[start:end] == content
+
+
+def test_docstring_spans_finds_function_docstring():
+    """A function's docstring (first statement in body) is found."""
+    from capybase.adapters.string_lexer import enumerate_docstring_spans
+    text = (
+        "def foo():\n"
+        '    """Does foo."""\n'
+        "    return 1\n"
+    )
+    spans = enumerate_docstring_spans(text, "python")
+    assert len(spans) == 1
+    assert "Does foo" in spans[0][2]
+
+
+def test_docstring_spans_finds_class_docstring():
+    """A class's docstring is found."""
+    from capybase.adapters.string_lexer import enumerate_docstring_spans
+    text = (
+        "class Foo:\n"
+        '    """A class."""\n'
+        "    pass\n"
+    )
+    spans = enumerate_docstring_spans(text, "python")
+    assert len(spans) == 1
+    assert "A class" in spans[0][2]
+
+
+def test_docstring_spans_triple_single_quote():
+    """Triple-single-quote docstrings are also found."""
+    from capybase.adapters.string_lexer import enumerate_docstring_spans
+    text = "'''Single-quote docstring.'''\nx = 1\n"
+    spans = enumerate_docstring_spans(text, "python")
+    assert len(spans) == 1
+    assert "Single-quote docstring" in spans[0][2]
+
+
+def test_docstring_spans_ignores_non_docstring_strings():
+    """A string NOT in docstring position (not the first statement) is NOT found."""
+    from capybase.adapters.string_lexer import enumerate_docstring_spans
+    text = (
+        "def foo():\n"
+        "    x = 1\n"
+        '    s = "not a docstring"\n'
+        "    return s\n"
+    )
+    spans = enumerate_docstring_spans(text, "python")
+    # No docstrings (the function's first statement is `x = 1`, not a string).
+    assert spans == []
+
+
+def test_docstring_spans_ignores_strings_in_expressions():
+    """A bare string expression NOT as first statement is not a docstring."""
+    from capybase.adapters.string_lexer import enumerate_docstring_spans
+    text = (
+        "def foo():\n"
+        '    """real docstring"""\n'
+        '    "not a docstring"\n'  # expression statement, not first
+        "    return 1\n"
+    )
+    spans = enumerate_docstring_spans(text, "python")
+    assert len(spans) == 1
+    assert "real docstring" in spans[0][2]
+
+
+def test_docstring_spans_multiline():
+    """Multi-line docstrings are captured in full."""
+    from capybase.adapters.string_lexer import enumerate_docstring_spans
+    text = (
+        "def foo():\n"
+        '    """First line.\n'
+        "    Second line.\n"
+        '    """\n'
+        "    return 1\n"
+    )
+    spans = enumerate_docstring_spans(text, "python")
+    assert len(spans) == 1
+    content = spans[0][2]
+    assert "First line" in content
+    assert "Second line" in content
+
+
+def test_docstring_spans_returns_empty_for_non_python():
+    """Non-Python languages yield no docstring spans (graceful degradation)."""
+    from capybase.adapters.string_lexer import enumerate_docstring_spans
+    text = 'fn foo() { 1 }\n'
+    spans = enumerate_docstring_spans(text, "rust")
+    assert spans == []
+
+
+def test_docstring_spans_returns_empty_for_no_docstrings():
+    """Code with no docstrings yields no spans."""
+    from capybase.adapters.string_lexer import enumerate_docstring_spans
+    text = "def foo():\n    return 1\n"
+    spans = enumerate_docstring_spans(text, "python")
+    assert spans == []

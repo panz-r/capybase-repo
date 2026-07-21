@@ -372,3 +372,70 @@ def test_cegis_loop_escalates_on_unparseable_response():
     assert not outcome.succeeded
     assert outcome.last_feedback
     assert outcome.last_feedback[0].kind == "PARSE_FAILED"
+
+
+# ---------------------------------------------------------------------------
+# K3 — Python docstring reconciliation end-to-end
+# ---------------------------------------------------------------------------
+
+
+def test_python_docstring_reconciliation():
+    """A Python function's docstring that references a renamed identifier is
+    in the frontier and can be rewritten via the reconciler."""
+    base = (
+        "def fetch():\n"
+        '    """Uses OLD_NAME for the lookup."""\n'
+        "    return OLD_NAME\n"
+    )
+    rep = (
+        "def fetch():\n"
+        '    """Uses NEW_NAME for the lookup."""\n'
+        "    return NEW_NAME\n"
+    )
+    resolved = base
+    ledger = build_comment_ledger(base, base, rep, resolved, "python")
+    frontier = select_comment_frontier(ledger)
+    assert len(frontier) >= 1, "docstring not in frontier"
+    # The resolved-version entry's lineage.
+    resolved_entries = [e for e in frontier if e.version == "resolved"]
+    assert resolved_entries, "no resolved entry"
+    lid = resolved_entries[0].lineage_id
+    # Rewrite to use NEW_NAME.
+    plan = CommentPlan(actions=[
+        CommentAction(lineage_id=lid, operation="rewrite",
+                      text="Uses NEW_NAME for the lookup."),
+    ])
+    result = apply_comment_plan(resolved, frontier, plan, "python")
+    # The docstring is rewritten to reference NEW_NAME.
+    assert '"""Uses NEW_NAME for the lookup."""' in result
+    assert "Uses OLD_NAME" not in result
+    # The code is unchanged (we only rewrote the docstring — resolved=base).
+    assert "return OLD_NAME" in result
+
+
+def test_python_docstring_not_in_frontier_when_unchanged():
+    """A docstring identical across all versions is NOT in the frontier."""
+    text = (
+        "def fetch():\n"
+        '    """Unchanged docstring."""\n'
+        "    return 1\n"
+    )
+    ledger = build_comment_ledger(text, text, text, text, "python")
+    frontier = select_comment_frontier(ledger)
+    assert frontier == []
+
+
+def test_python_docstring_skipped_when_doctest():
+    """A docstring containing a Python doctest (>>>) is DOCTEST, not DEFERRED —
+    excluded from the ledger (preserved verbatim)."""
+    text = (
+        "def fetch():\n"
+        '    """Example:\n'
+        "    >>> fetch()\n"
+        "    1\n"
+        '    """\n'
+        "    return 1\n"
+    )
+    ledger = build_comment_ledger(text, text, text, text, "python")
+    # No DEFERRED entries (the doctest is DOCTEST class — filtered out).
+    assert all(e.cls != CommentClass.DEFERRED for e in ledger) or not ledger
