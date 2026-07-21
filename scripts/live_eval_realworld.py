@@ -207,6 +207,12 @@ def _config_for(case: Case) -> Config:
     # in the live eval with sim >= 0.95).
     if case.language == "rust":
         cfg.validation.rust_suppress_codes = ["E0432", "E0433"]
+    # Phase 4 shadow jury: opt-in via env var. When enabled, the jury runs
+    # AFTER each successful comment pass and records hypothetical routing
+    # decisions (no merge effect). The data is stored as jury_verdict artifacts
+    # under --preserve-flights for offline analysis.
+    if os.environ.get("CAPYBASE_SHADOW_JURY", "").lower() in ("1", "true", "yes"):
+        cfg.future.enable_shadow_jury = True
     return cfg
 
 
