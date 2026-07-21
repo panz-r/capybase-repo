@@ -274,3 +274,104 @@ def test_parse_comment_plan_tolerates_reasoning_field():
     assert plan is not None
     assert len(plan.actions) == 1
     assert plan.actions[0].text == "uses NEW_NAME"
+
+
+# ---------------------------------------------------------------------------
+# Multi-language: K1 (gate) + K2 (prefix generalization)
+# ---------------------------------------------------------------------------
+
+
+def test_format_comment_rust_line():
+    """// line comment: each line gets the // prefix."""
+    from capybase.comment_reconciler import _format_comment
+    out = _format_comment("hello\nworld", "// old comment", "rust")
+    assert out == "// hello\n// world"
+
+
+def test_format_comment_python_hash():
+    """# line comment: each line gets the # prefix."""
+    from capybase.comment_reconciler import _format_comment
+    out = _format_comment("hello\nworld", "# old comment", "python")
+    assert out == "# hello\n# world"
+
+
+def test_format_comment_javascript_line():
+    """// line comment for JS/TS works the same as Rust."""
+    from capybase.comment_reconciler import _format_comment
+    out = _format_comment("hello", "// old comment", "javascript")
+    assert out == "// hello"
+
+
+def test_format_comment_jsdoc_block():
+    """JSDoc /** ... */ block: wrapped with the JSDoc delimiters."""
+    from capybase.comment_reconciler import _format_comment
+    orig = ["/**", " * Adds two numbers.", " */"]
+    out = _format_comment("Adds two numbers.\nReturns the sum.", "\n".join(orig), "javascript")
+    assert out.startswith("/**")
+    assert out.endswith(" */")
+    assert " * Adds two numbers." in out
+    assert " * Returns the sum." in out
+
+
+def test_format_comment_jsdoc_single_line():
+    """Single-line JSDoc: /** text */."""
+    from capybase.comment_reconciler import _format_comment
+    out = _format_comment("Adds two numbers.", "/** old text */", "javascript")
+    assert out == "/** Adds two numbers. */"
+
+
+def test_format_comment_block_c_style():
+    """C-style /* ... */ block (not JSDoc)."""
+    from capybase.comment_reconciler import _format_comment
+    out = _format_comment("hello world", "/* old */", "cpp")
+    assert out == "/* hello world */"
+
+
+def test_format_comment_python_docstring_triple_quote():
+    """Python triple-quoted docstring: wrapped with the matching triple-quote."""
+    from capybase.comment_reconciler import _format_comment
+    out = _format_comment("Returns the sum.", '"""old docstring"""', "python")
+    assert out == '"""Returns the sum."""'
+    # Triple-single-quote variant.
+    out2 = _format_comment("Returns the sum.", "'''old'''", "python")
+    assert out2 == "'''Returns the sum.'''"
+
+
+def test_apply_comment_plan_works_for_python_hash_comment():
+    """End-to-end: apply_comment_plan rewrites a Python # comment."""
+    from capybase.comment_reconciler import (
+        build_comment_ledger, select_comment_frontier,
+        CommentPlan, CommentAction, apply_comment_plan,
+    )
+    base = "def foo():\n    # uses X\n    return 1\n"
+    rep = "def foo():\n    # uses Y\n    return 1\n"
+    resolved = base
+    ledger = build_comment_ledger(base, base, rep, resolved, "python")
+    frontier = select_comment_frontier(ledger)
+    lid = [e for e in frontier if e.version == "resolved"][0].lineage_id
+    plan = CommentPlan(actions=[
+        CommentAction(lineage_id=lid, operation="rewrite", text="uses Z"),
+    ])
+    result = apply_comment_plan(resolved, frontier, plan, "python")
+    assert "# uses Z" in result
+    assert "return 1" in result  # code unchanged
+
+
+def test_apply_comment_plan_works_for_javascript_line_comment():
+    """End-to-end: apply_comment_plan rewrites a JS // comment."""
+    from capybase.comment_reconciler import (
+        build_comment_ledger, select_comment_frontier,
+        CommentPlan, CommentAction, apply_comment_plan,
+    )
+    base = "function foo() {\n    // uses X\n    return 1;\n}\n"
+    rep = "function foo() {\n    // uses Y\n    return 1;\n}\n"
+    resolved = base
+    ledger = build_comment_ledger(base, base, rep, resolved, "javascript")
+    frontier = select_comment_frontier(ledger)
+    lid = [e for e in frontier if e.version == "resolved"][0].lineage_id
+    plan = CommentPlan(actions=[
+        CommentAction(lineage_id=lid, operation="rewrite", text="uses Z"),
+    ])
+    result = apply_comment_plan(resolved, frontier, plan, "javascript")
+    assert "// uses Z" in result
+    assert "return 1;" in result  # code unchanged

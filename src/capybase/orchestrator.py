@@ -4648,8 +4648,15 @@ class Orchestrator:
         Returns the reconciled buffer (or None if skipped/failed → keep original).
         """
         lang = (language or "").strip().lower()
-        # MVP: Rust only (the live-eval corpus is Rust; Python is a follow-up).
-        if lang not in ("rust", "rs"):
+        # Phase 2: Rust + Python (# comments) + JS/TS (// and /* */, including
+        # JSDoc /** */). enumerate_comment_spans + classify_spans already handle
+        # these families (Family A //, Family B #). Python DOCSTRINGS (triple-
+        # quoted strings) need separate span infrastructure (K3) — for now the
+        # Python path covers # comments only.
+        if lang not in (
+            "rust", "rs", "python", "py",
+            "javascript", "js", "typescript", "ts",
+        ):
             return None
         try:
             from capybase.adapters.string_lexer import enumerate_comment_spans

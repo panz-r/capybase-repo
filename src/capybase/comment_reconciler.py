@@ -259,6 +259,51 @@ class ApplyError(Exception):
     """The comment plan could not be applied safely (executable code changed)."""
 
 
+def _format_comment(new_text: str, orig: str, lang: str) -> str:
+    """Format ``new_text`` as a comment matching the syntax of ``orig``.
+
+    Detects the comment style from the original comment's leading characters
+    and reapplies it to the new text. Handles (K2):
+
+    - ``//`` line comments (Rust, JS, TS, Go, C/C++, Java, ...) — each line
+      gets the ``// `` prefix.
+    - ``#`` line comments (Python, Ruby, shell, ...) — each line gets ``# ``.
+    - ``/** ... */`` JSDoc block comments — wrapped with the JSDoc delimiters
+      (the leading ``*`` per line is preserved).
+    - ``/* ... */`` block comments (C-family) — wrapped with ``/* ... */``.
+    - Triple-quoted Python docstrings (``\"\"\"...\"\"\"`` or ``'''...'''``) —
+      wrapped with the matching triple-quote.
+
+    Falls back to a bare replacement when the original syntax can't be detected
+    (rare). The executable-token invariant in :func:`apply_comment_plan` is the
+    safety net — if the formatting mangles the comment into something that
+    changes the token stream, the invariant catches it and the plan is rejected.
+    """
+    stripped_orig = orig.lstrip()
+    # JSDoc: /** ... */ (must check BEFORE /* since /** startswith /*).
+    if stripped_orig.startswith("/**"):
+        lines = new_text.split("\n")
+        if len(lines) == 1:
+            return f"/** {new_text} */"
+        body = "\n".join(f" * {ln}" for ln in lines)
+        return f"/**\n{body}\n */"
+    # Block comment: /* ... */
+    if stripped_orig.startswith("/*"):
+        return f"/* {new_text} */"
+    # Python docstring: """ or '''
+    if stripped_orig.startswith('"""') or stripped_orig.startswith("'''"):
+        quote = stripped_orig[:3]
+        return f"{quote}{new_text}{quote}"
+    # Line comment: // (check before # — some adapters use both)
+    if stripped_orig.startswith("//"):
+        return "// " + new_text.replace("\n", "\n// ")
+    # Line comment: #
+    if stripped_orig.startswith("#"):
+        return "# " + new_text.replace("\n", "\n# ")
+    # Fallback: bare replacement (rare — the invariant will catch any damage).
+    return new_text
+
+
 def apply_comment_plan(
     resolved_text: str,
     frontier: list[LedgerEntry],
@@ -299,21 +344,16 @@ def apply_comment_plan(
             )
             edits.append((entry.start, entry.end, replacement))
         elif action.operation in ("rewrite", "move", "merge"):
-            # Replace the comment content with the new text.
-            # Preserve the comment syntax prefix (// or # or /* */).
-            new_text = action.text.strip()
+            # Replace the comment content with the new text, preserving the
+            # comment syntax prefix detected from the original. The prefix
+            # logic is generalized (K2) to handle line comments (//, #), block
+            # comments (/* */), JSDoc (/** */), and triple-quoted docstrings
+            # (""" """, ''' ''') so the same path serves Rust/Python/JS/TS.
+            new_text = (action.text or "").strip()
             if not new_text:
                 continue  # empty rewrite = delete (skip)
-            # Determine the comment prefix from the original.
             orig = entry.text
-            if orig.startswith("//"):
-                new_full = "// " + new_text.replace("\n", "\n// ")
-            elif orig.startswith("#"):
-                new_full = "# " + new_text.replace("\n", "\n# ")
-            elif orig.startswith("/*"):
-                new_full = "/* " + new_text + " */"
-            else:
-                new_full = new_text  # bare replacement (rare)
+            new_full = _format_comment(new_text, orig, lang)
             edits.append((entry.start, entry.end, new_full))
 
     if not edits:
