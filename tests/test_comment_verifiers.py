@@ -238,3 +238,75 @@ def test_keep_does_not_trigger_stale_check():
     failures = verify_comment_plan(plan, frontier, resolved, "rust")
     # No failures (keep is valid; MAX_RETRIES is in the code).
     assert failures == [], failures
+
+
+# ---------------------------------------------------------------------------
+# Q — STYLE_VIOLATION verifier (§9)
+# ---------------------------------------------------------------------------
+
+
+def test_style_violation_rambling_rewrite():
+    """A rewrite >5× the longest source variant → STYLE_VIOLATION (rambling)."""
+    from capybase.comment_verifiers import verify_comment_plan, STYLE_VIOLATION
+    base = "fn foo() {\n    // short\n    1\n}\n"
+    rep = "fn foo() {\n    // also short\n    1\n}\n"
+    resolved = base
+    frontier = _frontier_with_resolved(base, base, rep, resolved)
+    lid = _resolved_lineage_id(frontier, "short")
+    rambling = "this is a very long comment that goes on and on far beyond " * 10
+    plan = CommentPlan(actions=[
+        CommentAction(lineage_id=lid, operation="rewrite", text=rambling),
+    ])
+    failures = verify_comment_plan(plan, frontier, resolved, "rust")
+    style = [f for f in failures if f.kind == STYLE_VIOLATION]
+    assert len(style) == 1
+    assert lid in style[0].lineage_id or style[0].lineage_id == lid
+
+
+def test_style_violation_comment_syntax_leakage():
+    """A rewrite containing // or # mid-line (a comment-within-a-comment) →
+    STYLE_VIOLATION."""
+    from capybase.comment_verifiers import verify_comment_plan, STYLE_VIOLATION
+    base = "fn foo() {\n    // docs\n    1\n}\n"
+    rep = "fn foo() {\n    // also docs\n    1\n}\n"
+    resolved = base
+    frontier = _frontier_with_resolved(base, base, rep, resolved)
+    lid = _resolved_lineage_id(frontier, "docs")
+    plan = CommentPlan(actions=[
+        CommentAction(lineage_id=lid, operation="rewrite",
+                      text="docs // with nested comment"),
+    ])
+    failures = verify_comment_plan(plan, frontier, resolved, "rust")
+    style = [f for f in failures if f.kind == STYLE_VIOLATION]
+    assert len(style) >= 1
+
+
+def test_style_violation_clean_rewrite_passes():
+    """A clean, reasonably-sized rewrite → no STYLE_VIOLATION."""
+    from capybase.comment_verifiers import verify_comment_plan, STYLE_VIOLATION
+    base = "fn foo() {\n    // uses MAX_RETRIES\n    let x = MAX_RETRIES;\n}\n"
+    rep = "fn foo() {\n    // uses MAX_RETRIES_NEW\n    let x = MAX_RETRIES;\n}\n"
+    resolved = base
+    frontier = _frontier_with_resolved(base, base, rep, resolved)
+    lid = _resolved_lineage_id(frontier, "MAX_RETRIES")
+    plan = CommentPlan(actions=[
+        CommentAction(lineage_id=lid, operation="rewrite",
+                      text="uses MAX_RETRIES for retry"),
+    ])
+    failures = verify_comment_plan(plan, frontier, resolved, "rust")
+    assert all(f.kind != STYLE_VIOLATION for f in failures), failures
+
+
+def test_style_violation_skipped_for_keep():
+    """keep/preserve_verbatim don't run the style check (no new text)."""
+    from capybase.comment_verifiers import verify_comment_plan, STYLE_VIOLATION
+    base = "fn foo() {\n    // docs\n    1\n}\n"
+    rep = "fn foo() {\n    // changed docs\n    1\n}\n"
+    resolved = base
+    frontier = _frontier_with_resolved(base, base, rep, resolved)
+    lid = _resolved_lineage_id(frontier, "docs")
+    plan = CommentPlan(actions=[
+        CommentAction(lineage_id=lid, operation="keep"),
+    ])
+    failures = verify_comment_plan(plan, frontier, resolved, "rust")
+    assert all(f.kind != STYLE_VIOLATION for f in failures), failures

@@ -41,6 +41,8 @@ INVALID_ANCHOR = "INVALID_ANCHOR"
 UNACCOUNTED_COMMENT = "UNACCOUNTED_COMMENT"
 DUPLICATE_COMMENT = "DUPLICATE_COMMENT"
 DIRECTIVE_CHANGED = "DIRECTIVE_CHANGED"
+STYLE_VIOLATION = "STYLE_VIOLATION"
+DOC_SIGNATURE_MISMATCH = "DOC_SIGNATURE_MISMATCH"
 
 
 @dataclass(frozen=True)
@@ -256,6 +258,89 @@ def _check_stale_identifier(plan, code_idents) -> list[CommentFailure]:
     return out
 
 
+#: Maximum line length for the STYLE_VIOLATION line-length check. Mirrors the
+#: common style-guide default; a rewrite producing a line longer than this when
+#: no source variant did is a style regression.
+_STYLE_MAX_LINE = 120
+
+#: A rewrite longer than this multiple of the longest source variant is
+#: "rambling" (the model padded the comment with irrelevant content).
+_RAMBLING_FACTOR = 5
+
+
+def _check_style_violation(plan, frontier_by_id) -> list[CommentFailure]:
+    """§9 STYLE_VIOLATION — deterministic style heuristics (no LLM).
+
+    Catches degenerate rewrites the executable-token invariant can't see:
+    - **Rambling**: rewrite text > ``_RAMBLING_FACTOR`` × the longest source
+      variant (the model padded with irrelevant content).
+    - **Comment-syntax leakage**: the rewrite text contains ``//`` or ``#``
+      mid-line (a comment-within-a-comment — the model tried to nest syntax).
+    - **Degenerate text**: the rewrite is just punctuation/whitespace or a
+      single word.
+    - **Line-length**: the rewrite produces a line > ``_STYLE_MAX_LINE`` chars
+      when no source variant had a line that long.
+
+    ``keep``/``preserve_verbatim`` are exempt (no new text).
+    """
+    out: list[CommentFailure] = []
+    for a in plan.actions:
+        if a.operation not in ("rewrite", "move", "merge"):
+            continue
+        text = (a.text or "").strip()
+        if not text:
+            continue
+        entries = frontier_by_id.get(a.lineage_id, [])
+        # The source variants for this lineage.
+        source_texts = [e.text for e in entries]
+        source_lens = [len((t or "").strip()) for t in source_texts]
+        max_source = max(source_lens) if source_lens else 0
+        issues: list[str] = []
+        # Rambling.
+        if max_source > 0 and len(text) > max_source * _RAMBLING_FACTOR:
+            issues.append(
+                f"rewrite is {len(text)} chars, {_RAMBLING_FACTOR}× the longest "
+                f"source variant ({max_source} chars) — likely rambling"
+            )
+        # Comment-syntax leakage: // or # mid-line (after the first char).
+        for line in text.split("\n"):
+            stripped = line.lstrip()
+            # Find // or # not at the start (a nested comment marker).
+            mid = stripped[1:] if len(stripped) > 1 else ""
+            if "//" in mid or (mid and "#" in mid):
+                issues.append(
+                    f"rewrite contains comment-syntax (// or #) mid-line: "
+                    f"{line.strip()[:60]!r}"
+                )
+                break
+        # Degenerate text: just punctuation or a single short word.
+        alnum = sum(1 for c in text if c.isalnum())
+        if alnum < 3:
+            issues.append(
+                f"rewrite text is degenerate (little alphanumeric content): "
+                f"{text[:40]!r}"
+            )
+        # Line-length: any line > _STYLE_MAX_LINE when no source had one.
+        source_max_line = 0
+        for st in source_texts:
+            for ln in (st or "").split("\n"):
+                if len(ln) > source_max_line:
+                    source_max_line = len(ln)
+        for line in text.split("\n"):
+            if len(line) > _STYLE_MAX_LINE and source_max_line <= _STYLE_MAX_LINE:
+                issues.append(
+                    f"rewrite produces a {len(line)}-char line; no source "
+                    f"variant exceeded {_STYLE_MAX_LINE} chars"
+                )
+                break
+        if issues:
+            out.append(CommentFailure(
+                kind=STYLE_VIOLATION, lineage_id=a.lineage_id,
+                message="; ".join(issues),
+            ))
+    return out
+
+
 def verify_comment_plan(
     plan: CommentPlan,
     frontier: list[LedgerEntry],
@@ -290,6 +375,8 @@ def verify_comment_plan(
     if not any(f.kind in (INVALID_ANCHOR, DIRECTIVE_CHANGED) for f in failures):
         code_idents = _code_identifier_set(resolved_text, lang)
         failures.extend(_check_stale_identifier(plan, code_idents))
+    # STYLE_VIOLATION runs on every plan (cheap, no resolved-file parse).
+    failures.extend(_check_style_violation(plan, frontier_by_id))
     return failures
 
 
@@ -301,4 +388,6 @@ __all__ = [
     "UNACCOUNTED_COMMENT",
     "DUPLICATE_COMMENT",
     "DIRECTIVE_CHANGED",
+    "STYLE_VIOLATION",
+    "DOC_SIGNATURE_MISMATCH",
 ]
