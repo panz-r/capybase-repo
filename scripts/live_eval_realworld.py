@@ -78,6 +78,11 @@ class CaseResult:
     matches_oracle: float = 0.0
     elapsed: float = 0.0
     reason: str = ""
+    # FR2a flight recorder: the orchestrator's session_id (the per-case artifact
+    # root under .rebase-agent/sessions/<session_id>/). Populated when
+    # --preserve-flights copies the session dir out; None otherwise. The flight
+    # manifest maps case_id → session_id → artifacts for replay.
+    session_id: str = ""
 
 
 def load_cases(*, limit: int | None = None, lang: str | None = None) -> list[Case]:
@@ -239,7 +244,8 @@ def _token_jaccard(a: str, b: str) -> float:
     return len(ta & tb) / len(u) if u else 0.0
 
 
-def run_case(case: Case, client: OpenAICompatibleClient) -> CaseResult:
+def run_case(case: Case, client: OpenAICompatibleClient, *,
+             flights_dir: Path | None = None) -> CaseResult:
     res = CaseResult(id=case.id, language=case.language, dataset=case.dataset)
     t0 = time.time()
     # Use /var/tmp (root pool, 1.4T free) instead of the default /tmp (a 30G
@@ -272,6 +278,22 @@ def run_case(case: Case, client: OpenAICompatibleClient) -> CaseResult:
         except Exception as exc:
             res.escalated = True
             res.reason = f"orch raised: {type(exc).__name__}: {str(exc)[:100]}"
+        # FR2a flight recorder: copy the per-case session artifacts out of the
+        # temp repo BEFORE the TemporaryDirectory cleanup fires. The session
+        # root contains the full §1 artifact list (prompts, responses,
+        # candidates, validations, comment_artifacts/, journal.jsonl, review
+        # bundle). Without this copy the temp dir deletes everything.
+        res.session_id = getattr(orch, "session_id", "")
+        if flights_dir is not None and res.session_id:
+            try:
+                import shutil
+                dest = flights_dir / "flights" / case.id / res.session_id
+                src = getattr(orch.paths, "root", None)
+                if src is not None and src.exists():
+                    shutil.copytree(src, dest, dirs_exist_ok=True)
+            except Exception as exc:  # noqa: BLE001 — flight recorder is advisory
+                # Don't fail the case over a copy error; just note it.
+                res.reason = (res.reason + f" | flight copy failed: {exc}").strip(" |")
         # Read the resolved file.
         final = repo / case.path
         content = final.read_text() if final.exists() else ""
@@ -295,7 +317,15 @@ def main():
     ap.add_argument("--case-timeout", type=int, default=900,
                     help="Per-case wall-clock cap (seconds); 0 = no cap. Prevents one "
                          "hard case (endless CEGIS retries) from stalling the run.")
+    ap.add_argument("--preserve-flights", default=None,
+                    help="Directory to copy per-case orchestrator session artifacts into "
+                         "(FR2a flight recorder). Produces <dir>/flights/<case_id>/<session_id>/ "
+                         "and <dir>/manifest.json. Required for shadow-jury replay.")
     args = ap.parse_args()
+
+    flights_dir = Path(args.preserve_flights) if args.preserve_flights else None
+    if flights_dir is not None:
+        flights_dir.mkdir(parents=True, exist_ok=True)
 
     cases = load_cases(limit=args.limit, lang=args.lang)
     print(f"loaded {len(cases)} cases (lang={args.lang or 'all'})")
@@ -340,7 +370,7 @@ def main():
         result_holder: list = []
         def _worker():
             try:
-                result_holder.append(run_case(case, client))
+                result_holder.append(run_case(case, client, flights_dir=flights_dir))
             except Exception as exc:
                 result_holder.append(CaseResult(
                     id=case.id, language=case.language, dataset=case.dataset,
@@ -370,6 +400,27 @@ def main():
         results.append(r)
         # Incremental write: a kill won't lose progress.
         out.write_text(json.dumps([r.__dict__ for r in results], indent=2))
+        # FR2a/FR2b: incremental flight manifest write. Maps case_id →
+        # session_id → verdict → artifacts, so the shadow jury can replay
+        # cases without rerunning code resolution. The manifest is the
+        # resume source of truth for flights (alongside the results JSON).
+        if flights_dir is not None:
+            manifest_path = flights_dir / "manifest.json"
+            manifest: list = []
+            if manifest_path.exists():
+                try:
+                    manifest = json.loads(manifest_path.read_text())
+                except Exception:
+                    manifest = []
+            manifest = [m for m in manifest if m.get("case_id") != r.id]
+            manifest.append({
+                "case_id": r.id, "session_id": r.session_id,
+                "language": r.language, "dataset": r.dataset,
+                "verdict": verdict, "elapsed": round(r.elapsed, 1),
+                "matches_oracle": round(r.matches_oracle, 3),
+                "escalated": r.escalated, "reason": r.reason[:200],
+            })
+            manifest_path.write_text(json.dumps(manifest, indent=2))
 
     elapsed = time.time() - t_start
     print("\n" + "=" * 64)
