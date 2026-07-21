@@ -129,6 +129,33 @@ class Journal:
     def store_snapshot(self, name: str, data: bytes | str) -> Path:
         return self.write_artifact(self.paths.snapshots, name, data)
 
+    def store_comment_artifact(
+        self, kind: str, content: bytes | str, *,
+        key: str | None = None, ext: str = "txt",
+    ) -> tuple[str, Path]:
+        """Content-addressed store for comment-pass flight-recorder artifacts.
+
+        Writes ``content`` under ``paths.comment_artifacts/<kind>/<key>.<ext>``
+        and returns ``(key, path)``. ``key`` defaults to the sha256 of the
+        content (first 16 hex chars) — content-addressed so identical content
+        dedupes across attempts and the hash is the replay key for the shadow
+        jury. ``kind`` ∈ {"prompt", "response", "ledger", "frontier",
+        "candidate_before", "candidate_after", "frozen_code", "fingerprint",
+        "verifier_results", "evidence_packet", "jury_verdict", ...}.
+
+        Returns ``(key, path)`` so the caller can journal the key for replay.
+        """
+        import hashlib
+        if isinstance(content, str):
+            data_bytes = content.encode("utf-8")
+        else:
+            data_bytes = content
+        if key is None:
+            key = hashlib.sha256(data_bytes).hexdigest()[:16]
+        subdir = self.paths.comment_artifacts / kind
+        target = self.write_artifact(subdir, f"{key}.{ext}", content)
+        return key, target
+
     # ------------------------------------------------------------------ read
 
     def read_events(self) -> list[JournalEvent]:

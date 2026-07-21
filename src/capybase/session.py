@@ -35,6 +35,12 @@ class SessionPaths:
         self.candidates = self.root / "candidates"
         self.validations = self.root / "validations"
         self.final = self.root / "final"
+        # Phase 4 flight recorder: content-addressed comment-pass artifacts
+        # (prompt, response, ledger, frontier, candidate before/after, frozen
+        # code + fingerprint, structured verifier results, jury evidence
+        # packets + verdicts). Keyed by sha256(content)[:16] so identical
+        # content dedupes across attempts and the hash is the replay key.
+        self.comment_artifacts = self.root / "comment_artifacts"
 
     def mkdirs(self) -> None:
         for d in (
@@ -45,6 +51,7 @@ class SessionPaths:
             self.candidates,
             self.validations,
             self.final,
+            self.comment_artifacts,
         ):
             d.mkdir(parents=True, exist_ok=True)
 
