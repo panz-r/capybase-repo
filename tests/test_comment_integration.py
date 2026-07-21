@@ -524,3 +524,108 @@ def test_post_comment_gate_skipped_when_buffer_unchanged():
     the call site is what skips it. Confirm the method exists."""
     from capybase.orchestrator import Orchestrator
     assert hasattr(Orchestrator, "_verify_post_comment")
+
+
+# ---------------------------------------------------------------------------
+# S — §10 code-reopening (the capstone)
+# ---------------------------------------------------------------------------
+
+
+def test_synthesize_code_reopen_requests_for_high_trust_failure():
+    """When the comment pass fails AND a high-trust deferred comment is in the
+    rejected lineages, _synthesize_code_reopen_requests produces a reopen
+    request carrying the contract text."""
+    from capybase.comment_reconciler import _synthesize_code_reopen_requests, LedgerEntry
+    from capybase.adapters.comment_classifier import CommentClass
+    from capybase.comment_verifiers import CommentFailure, STALE_IDENTIFIER
+    # A high-trust deferred comment (MUST keyword).
+    frontier = [LedgerEntry(
+        lineage_id="LC1", version="resolved",
+        text="// MUST NOT retry authentication failures",
+        cls=CommentClass.DEFERRED, start=0, end=40,
+    )]
+    # The verifiers rejected LC1.
+    feedback = [CommentFailure(
+        kind=STALE_IDENTIFIER, lineage_id="LC1", message="...",
+    )]
+    requests = _synthesize_code_reopen_requests(frontier, feedback)
+    assert len(requests) == 1
+    assert requests[0]["lineage_id"] == "LC1"
+    assert requests[0]["trust"] == "high"
+    assert "MUST NOT retry" in requests[0]["comment_text"]
+
+
+def test_synthesize_code_reopen_requests_skips_normal_trust():
+    """A normal-trust comment failure does NOT trigger code-reopening (only
+    high-trust invariants can re-open the code merge)."""
+    from capybase.comment_reconciler import _synthesize_code_reopen_requests, LedgerEntry
+    from capybase.adapters.comment_classifier import CommentClass
+    from capybase.comment_verifiers import CommentFailure, STALE_IDENTIFIER
+    frontier = [LedgerEntry(
+        lineage_id="LC1", version="resolved",
+        text="// a normal prose comment",
+        cls=CommentClass.DEFERRED, start=0, end=25,
+    )]
+    feedback = [CommentFailure(
+        kind=STALE_IDENTIFIER, lineage_id="LC1", message="...",
+    )]
+    requests = _synthesize_code_reopen_requests(frontier, feedback)
+    assert requests == []
+
+
+def test_synthesize_code_reopen_requests_empty_on_success():
+    """No reopen requests when there's no feedback (the pass succeeded)."""
+    from capybase.comment_reconciler import _synthesize_code_reopen_requests, LedgerEntry
+    from capybase.adapters.comment_classifier import CommentClass
+    frontier = [LedgerEntry(
+        lineage_id="LC1", version="resolved",
+        text="// MUST NOT retry", cls=CommentClass.DEFERRED,
+        start=0, end=20,
+    )]
+    requests = _synthesize_code_reopen_requests(frontier, [])
+    assert requests == []
+
+
+def test_run_comment_cegis_populates_code_reopen_request():
+    """When the CEGIS loop fails on a high-trust comment, the outcome carries
+    code_reopen_request."""
+    base = "fn foo() {\n    // MUST NOT retry auth\n    retry_auth();\n}\n"
+    rep = "fn foo() {\n    // MUST NOT retry auth (updated)\n    retry_auth();\n}\n"
+    resolved = base
+    frontier = _make_frontier(base, base, rep, resolved)
+    lid = [e for e in frontier if e.version == "resolved"][0].lineage_id
+
+    # Always return a plan that fails STALE (references a removed identifier).
+    def propose(prompt):
+        return _plan_json((lid, "rewrite", "uses REMOVED_CONST for the MUST"))
+
+    outcome = run_comment_cegis(
+        buffer=resolved, frontier=frontier,
+        base=base, current=base, replayed=rep, lang="rust",
+        propose=propose, budget=1, convergence_threshold=10,
+    )
+    assert not outcome.succeeded
+    # The high-trust comment (MUST keyword) was rejected → reopen request fires.
+    assert len(outcome.code_reopen_request) >= 1
+    assert outcome.code_reopen_request[0]["trust"] == "high"
+
+
+def test_code_reopen_request_includes_comment_code_contract_conflict_event():
+    """When code_reopen_request is populated, a comment_code_contract_conflict
+    event is in the outcome's events (for audit)."""
+    base = "fn foo() {\n    // MUST NOT retry\n    retry();\n}\n"
+    rep = "fn foo() {\n    // MUST NOT retry (v2)\n    retry();\n}\n"
+    resolved = base
+    frontier = _make_frontier(base, base, rep, resolved)
+    lid = [e for e in frontier if e.version == "resolved"][0].lineage_id
+
+    def propose(prompt):
+        return _plan_json((lid, "rewrite", "uses REMOVED_CONST"))
+
+    outcome = run_comment_cegis(
+        buffer=resolved, frontier=frontier,
+        base=base, current=base, replayed=rep, lang="rust",
+        propose=propose, budget=1, convergence_threshold=10,
+    )
+    event_names = [e[0] for e in outcome.events]
+    assert "comment_code_contract_conflict" in event_names

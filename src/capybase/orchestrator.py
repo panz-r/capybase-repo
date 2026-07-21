@@ -4443,6 +4443,9 @@ class Orchestrator:
         accepted_by_path: dict[str, list] = {}  # path -> [(unit, candidate), ...]
         # Snapshot the original worktree text per path so Phase 2 can re-splice.
         originals: dict[str, str] = {}
+        # Stash for §10 code-reopening (_resolve_comment_contract_conflicts
+        # needs the original to re-splice after a re-resolve).
+        self._step_originals = originals
 
         # ---- Phase 1: resolve + write all files (no staging, no cargo) ----
         for path, units in result.units_by_path.items():
@@ -4649,24 +4652,64 @@ class Orchestrator:
     ) -> str | None:
         """Phase 3: reconcile deferred (prose) comments after code passes validation.
 
-        Thin wrapper around :func:`run_comment_cegis` (the testable loop body).
-        The comment pass can ONLY modify comments — the executable-token-equality
-        invariant (enforced in ``apply_comment_plan``) prevents any code
-        corruption. On failure the original (comment-verbatim) buffer is kept;
-        a ``comment_reconciliation_failed`` event + review bundle surface the
-        unresolved frontier to a human reviewer.
+        Runs the comment pass via :meth:`_run_comment_pass`. §10 code-reopening:
+        when the pass detects a high-trust contract conflict (a deferred
+        invariant comment the verifiers can't reconcile), re-enters
+        :meth:`_resolve_unit` for the affected unit with the conflict as a
+        seed_failure, then re-runs the comment pass on the new code. Bounded by
+        ``PolicyConfig.max_comment_to_code_repair_retries`` (default 1). On
+        exhaustion or when reopening is disabled, the frozen code is kept and a
+        review bundle surfaces the unresolved comments.
 
-        Skipped entirely (zero overhead) when no deferred comments are in the
-        frontier.
+        The comment pass can ONLY modify comments — the executable-token-equality
+        invariant prevents any code corruption. §10 re-opens code via
+        ``_resolve_unit`` (the ``_whole_file_repair`` precedent), NOT by relaxing
+        the comment pass.
 
         Returns the reconciled buffer (or None if skipped/failed → keep original).
         """
+        outcome = self._run_comment_pass(path, buffer, accepted, original, units, language)
+        if outcome is None:
+            return None  # skipped (no comments / unsupported language)
+        # §10: the outer code↔comment loop. If the pass failed AND detected a
+        # high-trust contract conflict, re-open the code CEGIS for the affected
+        # unit, then re-run the comment pass on the new code.
+        reopen_budget = getattr(self.config.policy, "max_comment_to_code_repair_retries", 1)
+        current_buffer = outcome.buffer
+        current_outcome = outcome
+        reopen_attempts = 0
+        while (not current_outcome.succeeded
+               and current_outcome.code_reopen_request
+               and reopen_attempts < reopen_budget):
+            reopen_attempts += 1
+            new_buffer = self._resolve_comment_contract_conflicts(
+                path, current_buffer, accepted, units, language,
+                current_outcome.code_reopen_request,
+            )
+            if new_buffer is None:
+                break  # the re-resolve escalated → stop the outer loop
+            # Re-run the comment pass on the re-resolved code.
+            current_buffer = new_buffer
+            next_outcome = self._run_comment_pass(
+                path, current_buffer, accepted, original, units, language,
+            )
+            if next_outcome is None:
+                break
+            current_outcome = next_outcome
+        # Finalize: journal the report + write review bundle on failure.
+        self._finalize_comment_pass(path, current_outcome, units)
+        return current_outcome.buffer if current_outcome.succeeded else None
+
+    def _run_comment_pass(
+        self, path: str, buffer: str,
+        accepted: list, original: str,
+        units: list, language: str | None,
+    ):
+        """Run ONE comment-reconciliation pass. Returns the ReconcileOutcome
+        (or None when skipped — no comments / unsupported language). Does NOT
+        journal the final report or write a review bundle (the caller,
+        :meth:`_reconcile_comments`, does that once after the §10 loop settles)."""
         lang = (language or "").strip().lower()
-        # Phase 2: Rust + Python (# comments) + JS/TS (// and /* */, including
-        # JSDoc /** */). enumerate_comment_spans + classify_spans already handle
-        # these families (Family A //, Family B #). Python DOCSTRINGS (triple-
-        # quoted strings) need separate span infrastructure (K3) — for now the
-        # Python path covers # comments only.
         if lang not in (
             "rust", "rs", "python", "py",
             "javascript", "js", "typescript", "ts",
@@ -4681,12 +4724,9 @@ class Orchestrator:
         except ImportError:
             return None
 
-        # Cheap pre-check: if there are NO comments at all, skip entirely
-        # (zero overhead — the "skip when no affected comments" gate).
         spans = enumerate_comment_spans(buffer, lang)
         if not spans:
             return None
-        # Gather the three git versions from the first unit's sides.
         if not units:
             return None
         unit = units[0]
@@ -4696,19 +4736,11 @@ class Orchestrator:
         ledger = build_comment_ledger(
             base_text, current_text, replayed_text, buffer, lang,
         )
-        # §6: compute conflict byte ranges from the units' marker_spans (line
-        # ranges mapped to byte offsets in the resolved buffer) so the frontier
-        # selector's overlap check is active. Without this the selector relies
-        # on text-differs alone (the legacy behavior).
         conflict_byte_ranges = self._conflict_byte_ranges(units, buffer)
         frontier_result = select_comment_frontier_with_fast_paths(
             ledger, conflict_byte_ranges=conflict_byte_ranges,
         )
         frontier = frontier_result.entries
-        # §6 fast paths: apply deterministic dispositions (e.g. delete for
-        # attached-node-deleted) BEFORE the LLM pass. These don't need the
-        # model — they're structural. Apply them to the buffer directly; the
-        # executable-token invariant in apply_comment_plan still guards.
         if frontier_result.fast_path_actions:
             try:
                 buffer = apply_comment_plan(
@@ -4728,7 +4760,6 @@ class Orchestrator:
         conv_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
 
         def _propose(prompt: str) -> str:
-            # json_mode=True — the output contract is a CommentPlan JSON.
             return self.resolution_engine.raw_complete(
                 prompt, model=self.config.model, json_mode=True,
             )
@@ -4741,9 +4772,11 @@ class Orchestrator:
         # Replay the loop's events into the journal.
         for ev_name, ev_payload in outcome.events:
             self.journal.emit(ev_name, ev_payload, step_index=self.step, path=path)
-        # §13: render the reconciliation report for the audit trail. On success
-        # it's journaled (so the accept report / logs can surface it); on
-        # failure it's attached to the review bundle.
+        return outcome
+
+    def _finalize_comment_pass(self, path: str, outcome, units: list) -> None:
+        """Journal the §13 report + write a review bundle on failure."""
+        unit = units[0] if units else None
         try:
             from capybase.comment_reconciler import render_reconciliation_report
             report = render_reconciliation_report(
@@ -4758,12 +4791,10 @@ class Orchestrator:
             )
         except Exception:  # noqa: BLE001 — report is advisory
             report = None
-        if outcome.succeeded:
-            return outcome.buffer
-        # On escalation (exhausted/converged/model-failure), surface a review
-        # bundle so a human sees the unresolved frontier comments. Code is NOT
-        # corrupted — outcome.buffer is the original (comment-verbatim) buffer.
-        if not outcome.skipped and outcome.last_feedback:
+        if outcome.succeeded or outcome.skipped:
+            return
+        # Failure: surface a review bundle.
+        if outcome.last_feedback:
             feedback_summary = "; ".join(
                 f"[{f.kind}] {f.lineage_id}: {f.message[:120]}"
                 for f in outcome.last_feedback
@@ -4784,6 +4815,111 @@ class Orchestrator:
                 )
             except Exception:  # noqa: BLE001 — review bundle is advisory
                 pass
+
+    def _resolve_comment_contract_conflicts(
+        self, path: str, buffer: str, accepted: list, units: list,
+        language: str | None, code_reopen_request: list,
+    ) -> str | None:
+        """§10: re-resolve the unit(s) whose code conflicts with a high-trust
+        comment-derived contract. Mirrors :meth:`_whole_file_repair`'s structure.
+
+        For each reopen request, synthesize a :class:`VerificationFailure`
+        carrying the contract text, attribute it to the unit whose accepted
+        candidate is at fault (via the request's ``anchor_symbol`` → enclosing
+        unit), and re-enter :meth:`_resolve_unit` with it as a seed_failure +
+        the previously-accepted candidate as seed_candidate (so the re-resolve
+        routes to ``build_repair_prompt``).
+
+        Returns the re-spliced buffer on success, or None when the re-resolve
+        escalated (the outer loop stops). Never corrupts code — the re-resolve
+        goes through the normal validation pipeline.
+        """
+        if not code_reopen_request or not accepted:
+            return None
+        try:
+            from capybase.conflict_model import VerificationFailure
+        except ImportError:
+            return None
+        # Attribute each reopen request to a unit. Best-effort: if the request
+        # carries an anchor_symbol, find the unit whose accepted candidate's
+        # resolved_text contains the anchor's entity name. Fallback: the first
+        # unit (the common single-conflict case).
+        def _unit_for_request(req: dict) -> int:
+            anchor = req.get("anchor_symbol", "")
+            if ":" in anchor:
+                name = anchor.split(":", 1)[1]
+                for idx, (u, cand) in enumerate(accepted):
+                    if name in (getattr(cand, "resolved_text", "") or ""):
+                        return idx
+            return 0
+
+        any_re_resolved = False
+        for req in code_reopen_request:
+            if not isinstance(req, dict):
+                continue
+            fault_idx = _unit_for_request(req)
+            if fault_idx >= len(accepted):
+                continue
+            unit, old_cand = accepted[fault_idx]
+            # Synthesize the contract failure. severity="warning" mirrors
+            # _whole_file_repair's splice_coherence failure — it's advisory
+            # feedback, not a hard syntax error.
+            contract_text = req.get("comment_text", "")
+            message = (
+                f"A high-trust comment-derived contract appears violated by the "
+                f"merged code. Comment (lineage {req.get('lineage_id', '?')}, "
+                f"trust={req.get('trust', 'high')}): {contract_text!r}. "
+                f"Reconcile the code to satisfy this invariant, or mark the "
+                f"comment for human review if the code is correct."
+            )
+            seed_failure = VerificationFailure(
+                validator="comment_contract",
+                severity="warning",
+                message=message,
+                detail={
+                    "lineage_id": req.get("lineage_id", ""),
+                    "trust": req.get("trust", "high"),
+                    "anchor_symbol": req.get("anchor_symbol", ""),
+                    "comment_text": contract_text,
+                },
+            )
+            seed_cand = old_cand if (
+                old_cand is not None and getattr(old_cand, "resolved_text", "")
+            ) else None
+            self.journal.emit(
+                "comment_code_reopen",
+                {"unit_id": unit.unit_id, "lineage_id": req.get("lineage_id", ""),
+                 "trust": req.get("trust", "high")},
+                step_index=self.step, path=path, unit_id=unit.unit_id,
+            )
+            outcome = self._resolve_unit(
+                unit, seed_failures=[seed_failure], seed_candidate=seed_cand,
+            )
+            if outcome.accepted is None:
+                # The re-resolve escalated → stop; the outer loop will finalize.
+                return None
+            accepted[fault_idx] = (unit, outcome.accepted)
+            any_re_resolved = True
+        if not any_re_resolved:
+            return None
+        # Re-splice the accepted candidates into the buffer for the next
+        # comment pass. _resolved_buffer reconstructs the full file.
+        try:
+            from capybase.orchestrator import _resolved_buffer
+            original = self._originals_for(path)
+            if original is not None:
+                return _resolved_buffer(original, accepted)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _originals_for(self, path: str) -> str | None:
+        """The original (pre-conflict) file text for ``path``, or None."""
+        # The originals dict is stashed on the instance by _resolve_step's
+        # caller (the Phase-2 loop). Access it defensively.
+        originals = getattr(self, "_step_originals", None)
+        if isinstance(originals, dict):
+            return originals.get(path)
         return None
 
     def _conflict_byte_ranges(

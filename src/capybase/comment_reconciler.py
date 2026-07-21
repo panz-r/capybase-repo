@@ -885,6 +885,14 @@ class ReconcileOutcome:
     last_feedback: list = field(default_factory=list)
     attempts_made: int = 0
     final_plan: CommentPlan | None = None
+    # §10 code-reopening: when the pass fails AND the frontier contained
+    # high-trust deferred comments whose reconciliation failed, this carries
+    # synthesized VerificationFailures for the OUTER code CEGIS loop. Each
+    # failure's detail dict carries: lineage_id, trust, anchor_symbol,
+    # comment_text, matched_keywords. The orchestrator re-enters _resolve_unit
+    # with these as seed_failures. Empty when the pass succeeded or no
+    # high-trust conflict was detected (the common failure → plain escalation).
+    code_reopen_request: list = field(default_factory=list)
 
 
 def run_comment_cegis(
@@ -1047,11 +1055,83 @@ def run_comment_cegis(
         "frontier_size": len(frontier), "attempts": attempts_made,
         "last_feedback": feedback_summary,
     }))
+    # §10 code-reopening: if the pass failed AND the frontier contained
+    # high-trust deferred comments whose reconciliation the verifiers rejected,
+    # synthesize VerificationFailures for the OUTER code CEGIS. The orchestrator
+    # re-enters _resolve_unit with these as seed_failures. This is the §10
+    # "comment reveals a likely code defect" path — distinct from a plain
+    # stale-comment (which is just rewritten). Only fires for high-trust
+    # invariants (MUST/NEVER/atomic/...) where the comment is more likely
+    # correct than the test-passing code.
+    reopen_requests = _synthesize_code_reopen_requests(frontier, last_feedback)
+    if reopen_requests:
+        events.append(("comment_code_contract_conflict", {
+            "reopen_count": len(reopen_requests),
+            "lineages": [r.get("lineage_id") for r in reopen_requests
+                         if isinstance(r, dict)],
+        }))
     return ReconcileOutcome(
         buffer=buffer, succeeded=False, events=events,
         last_feedback=last_feedback, attempts_made=attempts_made,
         final_plan=last_plan,
+        code_reopen_request=reopen_requests,
     )
+
+
+def _synthesize_code_reopen_requests(
+    frontier: list[LedgerEntry], last_feedback: list,
+) -> list:
+    """§10: synthesize VerificationFailures for high-trust contract conflicts.
+
+    A code-reopen request fires when:
+    - A frontier lineage is high-trust (its comment text matches the
+      HIGH_TRUST_KEYWORDS vocabulary from J1), AND
+    - The comment pass failed to reconcile it (the lineage appears in
+      ``last_feedback`` — the verifiers rejected every rewrite attempt).
+
+    The synthesized failure carries the contract text so the re-resolved code
+    model sees the invariant it must satisfy. Returns plain dicts (the
+    VerificationFailure pydantic model is constructed by the orchestrator, which
+    is the only consumer — keeps this module free of the conflict_model import).
+    """
+    if not frontier or not last_feedback:
+        return []
+    try:
+        from capybase.adapters.comment_classifier import classify_comment_trust, CommentClass
+    except ImportError:
+        return []
+    # The lineage_ids the verifiers rejected.
+    rejected_lineages: set[str] = set()
+    for f in last_feedback:
+        lid = getattr(f, "lineage_id", "") or ""
+        if lid:
+            rejected_lineages.add(lid)
+    if not rejected_lineages:
+        return []
+    # Find high-trust deferred comments among the rejected lineages. Use the
+    # resolved-version entry (the canonical text) when available; fall back to
+    # any version's entry.
+    seen_lineages: set[str] = set()
+    requests: list[dict] = []
+    for entry in frontier:
+        if entry.lineage_id in seen_lineages:
+            continue
+        if entry.lineage_id not in rejected_lineages:
+            continue
+        if entry.cls != CommentClass.DEFERRED:
+            continue
+        cls, trust = classify_comment_trust(entry.text, None)
+        if trust != "high":
+            continue
+        seen_lineages.add(entry.lineage_id)
+        requests.append({
+            "lineage_id": entry.lineage_id,
+            "trust": trust,
+            "anchor_symbol": entry.anchor_symbol,
+            "comment_text": entry.text.strip(),
+            "version": entry.version,
+        })
+    return requests
 
 
 __all__ = [

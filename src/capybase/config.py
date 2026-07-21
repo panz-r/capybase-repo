@@ -230,6 +230,14 @@ class PolicyConfig(BaseModel):
     # Default 1 (one propose + one repair if the first plan fails the executable-
     # token invariant or the model produces an unparseable plan).
     comment_reconciliation_retries: int = 1
+    # §10 code-reopening budget: when the comment pass detects a high-trust
+    # contract conflict (a deferred invariant comment the verifiers can't
+    # reconcile), the OUTER code CEGIS is re-entered with the conflict as a
+    # seed_failure. This bounds how many times the code↔comment loop can cycle.
+    # Default 1 (one reopening attempt; the design says "tightly bounded").
+    # 0 disables code-reopening entirely (comment conflicts always escalate to
+    # human review). Repeated cycling is itself evidence of an ambiguous merge.
+    max_comment_to_code_repair_retries: int = 1
     # Confidence-gated escalation: when the critic budget is exhausted, a
     # high-confidence critic flag (verifier_confidence >= this threshold)
     # escalates instead of accepting-with-warning. Uses the critic's own
