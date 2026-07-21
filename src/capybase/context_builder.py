@@ -157,11 +157,13 @@ class ContextBuilder:
         # here covers the primary context window (the enclosing-node view or
         # the line window). Zero overhead when no deferred comments are present.
         high_trust_constraints: list[str] = []
+        masked_primary = primary  # default: unmasked (when masking is off)
         if self.mask_deferred_comments:
             try:
                 from capybase.adapters.string_lexer import mask_deferable_comments
                 from capybase.adapters.comment_classifier import classify_comment_trust
                 primary, deferred_spans = mask_deferable_comments(primary, unit.language)
+                masked_primary = primary  # the masked view the code model sees
                 # Selective reveal (J1/J2, design §4): collect the high-trust
                 # deferred comments (invariant-bearing) for the repair prompt.
                 # The masker blanked them; we surface their TEXT (encoded as
@@ -275,6 +277,7 @@ class ContextBuilder:
             history_context=history_text,
             obligations_context=obligations_text,
             high_trust_constraints=high_trust_constraints,
+            masked_primary=masked_primary,
         )
 
     def _build_history_context(self, unit: ConflictUnit) -> str:

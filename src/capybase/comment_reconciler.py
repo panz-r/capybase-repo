@@ -860,6 +860,37 @@ def plan_norm_hash(plan: CommentPlan) -> str:
     return repr(triples)
 
 
+def flight_key(
+    frozen_fingerprint: str,
+    candidate_fingerprint: str,
+    ledger_fingerprint: str,
+    evidence_builder_version: str = "v1",
+    jury_prompt_version: str = "v1",
+    model_version: str = "",
+) -> str:
+    """FR3: the §1 content-addressed replay key for jury development.
+
+    Produces a stable hash from the inputs that determine a jury run's outcome:
+    the frozen code (what the jury inspects), the candidate comment (what it
+    evaluates), the ledger (the comment provenance), and the version stamps of
+    the evidence builder + jury prompt + model. This lets the same case be
+    replayed against a new jury version WITHOUT rerunning the code-resolution
+    stages — the design's content-addressed replay (§1).
+
+    Usage: ``flight_key(frozen_fp, candidate_fp, ledger_fp,
+    evidence_builder_version="ev2", jury_prompt_version="jp3")``. Changing any
+    version input busts the cache (forces a new jury evaluation); changing only
+    the frozen/candidate/ledger fingerprints keeps the same key for identical
+    inputs (dedup).
+    """
+    import hashlib
+    parts = "|".join([
+        frozen_fingerprint, candidate_fingerprint, ledger_fingerprint,
+        evidence_builder_version, jury_prompt_version, model_version,
+    ])
+    return hashlib.sha256(parts.encode("utf-8")).hexdigest()[:16]
+
+
 # ---------------------------------------------------------------------------
 # The reconciliation CEGIS loop (Part D3 / G3+H1+H2)
 # ---------------------------------------------------------------------------
@@ -1215,6 +1246,7 @@ __all__ = [
     "parse_comment_plan",
     "plan_hash",
     "plan_norm_hash",
+    "flight_key",
     "render_reconciliation_report",
     "ReconcileOutcome",
     "run_comment_cegis",

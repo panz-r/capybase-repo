@@ -243,6 +243,13 @@ class ContextBundle(BaseModel):
     # Empty on the first attempt (the design's "first code attempt can omit
     # these hints" rule).
     high_trust_constraints: list[str] = Field(default_factory=list)
+    # FR1c flight recorder: the masked primary context (deferred comments
+    # blanked) the code model actually saw. Populated by ContextBuilder.build
+    # when mask_deferred_comments is on. The code-model PROMPT (already stored
+    # via journal.store_prompt) contains the masked sides; this field captures
+    # the masked primary window so the flight recorder has the complete masked
+    # view without re-running the context builder. Empty when masking is off.
+    masked_primary: str = ""
     token_estimate: int = 0
 
 

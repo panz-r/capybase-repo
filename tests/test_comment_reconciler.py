@@ -665,3 +665,35 @@ def test_render_reconciliation_report_empty_plan():
     from capybase.comment_reconciler import render_reconciliation_report, CommentPlan
     report = render_reconciliation_report(plan=CommentPlan(actions=[]), succeeded=True)
     assert "Comment reconciliation" in report
+
+
+# ---------------------------------------------------------------------------
+# FR3 — flight_key (content-addressed replay key for jury development)
+# ---------------------------------------------------------------------------
+
+
+def test_flight_key_stable_for_same_inputs():
+    """Same inputs → same key (deterministic)."""
+    from capybase.comment_reconciler import flight_key
+    k1 = flight_key("abc", "def", "ghi", "ev1", "jp1", "m1")
+    k2 = flight_key("abc", "def", "ghi", "ev1", "jp1", "m1")
+    assert k1 == k2
+    assert len(k1) == 16  # 16-char hex prefix
+
+
+def test_flight_key_changes_with_version_inputs():
+    """Changing a version stamp busts the cache (new jury evaluation)."""
+    from capybase.comment_reconciler import flight_key
+    k1 = flight_key("abc", "def", "ghi", "ev1", "jp1", "m1")
+    k2 = flight_key("abc", "def", "ghi", "ev2", "jp1", "m1")  # evidence builder bumped
+    k3 = flight_key("abc", "def", "ghi", "ev1", "jp2", "m1")  # jury prompt bumped
+    k4 = flight_key("abc", "def", "ghi", "ev1", "jp1", "m2")  # model bumped
+    assert len({k1, k2, k3, k4}) == 4  # all distinct
+
+
+def test_flight_key_changes_with_content_inputs():
+    """Changing frozen/candidate/ledger fingerprint changes the key."""
+    from capybase.comment_reconciler import flight_key
+    k1 = flight_key("abc", "def", "ghi")
+    k2 = flight_key("abc", "def", "XYZ")  # ledger changed
+    assert k1 != k2
