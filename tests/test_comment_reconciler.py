@@ -375,3 +375,66 @@ def test_apply_comment_plan_works_for_javascript_line_comment():
     result = apply_comment_plan(resolved, frontier, plan, "javascript")
     assert "// uses Z" in result
     assert "return 1;" in result  # code unchanged
+
+
+# ---------------------------------------------------------------------------
+# P1+P2 — derived_from + reason_code fields (§12)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_comment_plan_reads_derived_from():
+    """The parser reads the derived_from provenance field (§12)."""
+    from capybase.comment_reconciler import parse_comment_plan
+    raw = '''{"actions": [
+        {"lineage_id": "LC1", "operation": "rewrite",
+         "text": "merged comment", "reason_code": "MERGE_CONFLICT_RESOLVED",
+         "derived_from": ["base:LC1", "replayed:LC1"], "confidence": 0.9}
+    ]}'''
+    plan = parse_comment_plan(raw)
+    assert plan is not None
+    a = plan.actions[0]
+    assert a.derived_from == ["base:LC1", "replayed:LC1"]
+    assert a.reason_code == "MERGE_CONFLICT_RESOLVED"
+
+
+def test_parse_comment_plan_handles_missing_derived_from():
+    """Actions without derived_from/reason_code default to empty (backward
+    compatible with plans produced before P1/P2)."""
+    from capybase.comment_reconciler import parse_comment_plan
+    raw = '''{"actions": [
+        {"lineage_id": "LC1", "operation": "keep"}
+    ]}'''
+    plan = parse_comment_plan(raw)
+    assert plan is not None
+    a = plan.actions[0]
+    assert a.derived_from == []
+    assert a.reason_code == ""
+
+
+def test_parse_comment_plan_handles_scalar_derived_from():
+    """A scalar derived_from (mistake by the model) is wrapped into a list
+    rather than crashing the parser."""
+    from capybase.comment_reconciler import parse_comment_plan
+    raw = '''{"actions": [
+        {"lineage_id": "LC1", "operation": "rewrite",
+         "text": "x", "derived_from": "base:LC1"}
+    ]}'''
+    plan = parse_comment_plan(raw)
+    assert plan is not None
+    assert plan.actions[0].derived_from == ["base:LC1"]
+
+
+def test_prompt_requests_derived_from_and_reason_code():
+    """The reconcile prompt's output contract requests derived_from + reason_code
+    so the model emits provenance."""
+    from capybase.comment_reconciler import build_comment_reconcile_prompt
+    base = "fn foo() {\n    // old\n    1\n}\n"
+    rep = "fn foo() {\n    // new\n    1\n}\n"
+    ledger = build_comment_ledger(base, base, rep, base, "rust")
+    frontier = select_comment_frontier(ledger)
+    prompt = build_comment_reconcile_prompt(
+        frontier, base, base, base, rep, "rust",
+    )
+    assert "derived_from" in prompt
+    assert "reason_code" in prompt
+    assert "MERGE_CONFLICT_RESOLVED" in prompt  # enumerated example

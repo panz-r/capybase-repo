@@ -237,6 +237,16 @@ class CommentAction:
     operation: str          # keep | rewrite | move | merge | delete | preserve_verbatim
     text: str = ""          # the new comment text (for rewrite/move/merge)
     confidence: float = 0.0
+    # §12 rationale traceability: the source lineage ids the new text was
+    # derived from (provenance the §13 audit report surfaces). For
+    # rewrite/move/merge the model lists the input variants it combined.
+    derived_from: list[str] = field(default_factory=list)
+    # §12 reason code: an enumerated tag explaining WHY the disposition was
+    # chosen. Guided by the prompt (ATTACHED_CODE_REMOVED, IDENTIFIER_RENAMED,
+    # STALE_NARRATION, MERGE_CONFLICT_RESOLVED, BEHAVIOR_CHANGED, etc.).
+    # Free-form but structured — surfaced in the audit report's "Notable
+    # decisions" section.
+    reason_code: str = ""
 
 
 @dataclass
@@ -478,13 +488,19 @@ def build_comment_reconcile_prompt(
         "",
         "Return a JSON object with this shape:",
         '{"actions": [{"lineage_id": "LC1", "operation": "rewrite", '
-        '"text": "new comment", "reasoning": "why", "confidence": 0.9}]}',
+        '"text": "new comment", "reasoning": "why", "reason_code": "IDENTIFIER_RENAMED", '
+        '"derived_from": ["base:LC1"], "confidence": 0.9}]}',
         "",
         "Operations: keep, rewrite, move, merge, delete, preserve_verbatim.",
         'For "rewrite"/"move"/"merge", include the new "text" field.',
         'Include a one-line "reasoning" field per non-"keep" action stating '
         "WHY you chose that disposition (this is parsed and ignored by the "
         "splicer — it forces you to think about each edit before emitting it).",
+        'For "rewrite"/"move"/"merge", include "reason_code" (one of: '
+        "ATTACHED_CODE_REMOVED, IDENTIFIER_RENAMED, STALE_NARRATION, "
+        "MERGE_CONFLICT_RESOLVED, BEHAVIOR_CHANGED, INVARIANT_PRESERVED, "
+        "OTHER) and \"derived_from\" (the list of source version:lineage_id "
+        "variants the new text was derived from, for provenance).",
     ])
     return "\n".join(lines)
 
@@ -505,11 +521,16 @@ def parse_comment_plan(raw_response: str) -> CommentPlan | None:
     for a in actions_raw:
         if not isinstance(a, dict):
             continue
+        derived_raw = a.get("derived_from", [])
+        if not isinstance(derived_raw, list):
+            derived_raw = [str(derived_raw)]
         actions.append(CommentAction(
             lineage_id=str(a.get("lineage_id", "")),
             operation=str(a.get("operation", "keep")),
             text=str(a.get("text", "")),
             confidence=float(a.get("confidence", 0.0)),
+            derived_from=[str(x) for x in derived_raw],
+            reason_code=str(a.get("reason_code", "")),
         ))
     if not actions:
         return None
