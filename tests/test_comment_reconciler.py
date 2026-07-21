@@ -172,3 +172,105 @@ def test_apply_keep_is_noop():
     ])
     result = apply_comment_plan(resolved, frontier, plan, "rust")
     assert result == resolved  # unchanged
+
+
+# ---------------------------------------------------------------------------
+# Attempt-aware prompt + feedback block (Part G2)
+# ---------------------------------------------------------------------------
+
+
+def test_build_prompt_first_attempt_is_byte_identical_to_legacy():
+    """The first iteration (attempt=0, feedback=None) produces the exact same
+    prompt as the pre-G2 signature — backward-compatible for any caller that
+    hasn't been updated."""
+    from capybase.comment_reconciler import build_comment_reconcile_prompt
+    base = "fn foo() {\n    // old\n    1\n}\n"
+    rep = "fn foo() {\n    // new\n    1\n}\n"
+    resolved = base
+    ledger = build_comment_ledger(base, base, rep, resolved, "rust")
+    frontier = select_comment_frontier(ledger)
+    # Old-style call (no attempt/feedback kwargs) and new-style with attempt=0
+    # and feedback=None must produce the same prompt.
+    legacy = build_comment_reconcile_prompt(
+        frontier, resolved, base, base, rep, "rust",
+    )
+    new_style = build_comment_reconcile_prompt(
+        frontier, resolved, base, base, rep, "rust",
+        attempt=0, feedback=None,
+    )
+    assert legacy == new_style
+
+
+def test_build_prompt_renders_feedback_block_on_second_attempt():
+    """When feedback (from the §9 verifiers) is non-empty, the prompt includes
+    a `### prior-attempt feedback` block with each failure's message — the
+    counterexample the model must address on this attempt."""
+    from capybase.comment_reconciler import build_comment_reconcile_prompt
+    from capybase.comment_verifiers import CommentFailure, STALE_IDENTIFIER
+    base = "fn foo() {\n    // old\n    1\n}\n"
+    rep = "fn foo() {\n    // new\n    1\n}\n"
+    resolved = base
+    ledger = build_comment_ledger(base, base, rep, resolved, "rust")
+    frontier = select_comment_frontier(ledger)
+    feedback = [CommentFailure(
+        kind=STALE_IDENTIFIER, lineage_id="LC1",
+        message="references identifier(s) not present: ['REMOVED_CONST']",
+    )]
+    prompt = build_comment_reconcile_prompt(
+        frontier, resolved, base, base, rep, "rust",
+        attempt=1, feedback=feedback,
+    )
+    assert "prior-attempt feedback" in prompt
+    assert "REMOVED_CONST" in prompt
+    assert "STALE_IDENTIFIER" in prompt
+
+
+def test_build_prompt_omits_feedback_block_on_first_attempt():
+    """attempt=0 never renders the feedback block (no prior attempt yet)."""
+    from capybase.comment_reconciler import build_comment_reconcile_prompt
+    from capybase.comment_verifiers import CommentFailure, STALE_IDENTIFIER
+    base = "fn foo() {\n    // old\n    1\n}\n"
+    rep = "fn foo() {\n    // new\n    1\n}\n"
+    resolved = base
+    ledger = build_comment_ledger(base, base, rep, resolved, "rust")
+    frontier = select_comment_frontier(ledger)
+    feedback = [CommentFailure(
+        kind=STALE_IDENTIFIER, lineage_id="LC1", message="should not appear",
+    )]
+    prompt = build_comment_reconcile_prompt(
+        frontier, resolved, base, base, rep, "rust",
+        attempt=0, feedback=feedback,  # ignored on attempt 0
+    )
+    assert "prior-attempt feedback" not in prompt
+    assert "should not appear" not in prompt
+
+
+def test_build_prompt_mentions_reasoning_field():
+    """The plan-first step instructs the model to emit a `reasoning` field per
+    non-keep action — the build_repair_prompt pattern that forces the model to
+    articulate WHY before emitting the disposition."""
+    from capybase.comment_reconciler import build_comment_reconcile_prompt
+    base = "fn foo() {\n    // old\n    1\n}\n"
+    rep = "fn foo() {\n    // new\n    1\n}\n"
+    resolved = base
+    ledger = build_comment_ledger(base, base, rep, resolved, "rust")
+    frontier = select_comment_frontier(ledger)
+    prompt = build_comment_reconcile_prompt(
+        frontier, resolved, base, base, rep, "rust",
+    )
+    assert "reasoning" in prompt.lower()
+
+
+def test_parse_comment_plan_tolerates_reasoning_field():
+    """The parser must accept (and ignore) the `reasoning` field without
+    breaking — it's plan-first scaffolding, not part of the application."""
+    from capybase.comment_reconciler import parse_comment_plan
+    raw = '''{"actions": [
+        {"lineage_id": "LC1", "operation": "rewrite",
+         "text": "uses NEW_NAME", "reasoning": "old name was renamed",
+         "confidence": 0.9}
+    ]}'''
+    plan = parse_comment_plan(raw)
+    assert plan is not None
+    assert len(plan.actions) == 1
+    assert plan.actions[0].text == "uses NEW_NAME"

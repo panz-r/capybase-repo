@@ -350,6 +350,9 @@ def build_comment_reconcile_prompt(
     current: str,
     replayed: str,
     lang: str,
+    *,
+    attempt: int = 0,
+    feedback: list | None = None,
 ) -> str:
     """Build the comment-reconciliation prompt (§8 of the design doc).
 
@@ -359,6 +362,14 @@ def build_comment_reconcile_prompt(
     - The §8 rules (do not invent rationale, update renamed identifiers, prefer
       deleting stale narration, etc.).
     - A JSON output contract for the CommentPlan.
+    - (When ``attempt >= 1`` and ``feedback`` is non-empty) a
+      ``### prior-attempt feedback`` block with each :class:`CommentFailure` —
+      the concrete counterexamples the model must address this iteration. This
+      mirrors ``build_repair_prompt``'s feedback threading: without it, the
+      retry budget burns the same prompt against the same buffer.
+
+    The first iteration (``attempt=0, feedback=None``) is byte-identical to the
+    pre-G2 signature, so callers that haven't been updated see no change.
 
     The model returns a CommentPlan JSON; ``parse_resolution_json`` parses it.
     """
@@ -398,13 +409,30 @@ def build_comment_reconcile_prompt(
         lines.append(f"\n--- {lid} ---")
         for e in entries:
             lines.append(f"  {e.version}: {e.text.strip()!r}")
+    # Prior-attempt feedback: the §9 verifier counterexamples from the previous
+    # iteration. Rendered only when attempt >= 1 AND feedback is non-empty.
+    # The first iteration has no feedback (byte-identical to the legacy prompt).
+    if attempt >= 1 and feedback:
+        lines.extend([
+            "",
+            "### prior-attempt feedback (your previous plan was rejected — address these)",
+        ])
+        for f in feedback:
+            kind = getattr(f, "kind", "?")
+            lid = getattr(f, "lineage_id", "") or "(plan-wide)"
+            msg = getattr(f, "message", str(f))
+            lines.append(f"- [{kind}] {lid}: {msg}")
     lines.extend([
         "",
         "Return a JSON object with this shape:",
-        '{"actions": [{"lineage_id": "LC1", "operation": "rewrite", "text": "new comment", "confidence": 0.9}]}',
+        '{"actions": [{"lineage_id": "LC1", "operation": "rewrite", '
+        '"text": "new comment", "reasoning": "why", "confidence": 0.9}]}',
         "",
         "Operations: keep, rewrite, move, merge, delete, preserve_verbatim.",
         'For "rewrite"/"move"/"merge", include the new "text" field.',
+        'Include a one-line "reasoning" field per non-"keep" action stating '
+        "WHY you chose that disposition (this is parsed and ignored by the "
+        "splicer — it forces you to think about each edit before emitting it).",
     ])
     return "\n".join(lines)
 
