@@ -208,6 +208,19 @@ def _critic_warning(validation: VerificationResult) -> VerificationWarning | Non
     return None
 
 
+def _juror_verdict_to_dict(v) -> dict:
+    """Serialize a JurorVerdict (or None) for the jury_shadow artifact."""
+    if v is None:
+        return {"verdict": None}
+    return {
+        "verdict": v.verdict, "subtype": v.subtype,
+        "evidence_ids": list(v.evidence_ids), "witness": v.witness,
+        "confidence_band": v.confidence_band,
+        "explanation": v.explanation[:200], "juror": v.juror,
+    }
+
+
+
 def _critic_failure(
     warning: VerificationWarning, dropped_units: list | None = None
 ) -> VerificationFailure:
@@ -4698,6 +4711,22 @@ class Orchestrator:
             current_outcome = next_outcome
         # Finalize: journal the report + write review bundle on failure.
         self._finalize_comment_pass(path, current_outcome, units)
+        # SJ6: run the shadow jury AFTER the comment pass settles. The jury
+        # evaluates the final plan's rewritten comments as untrusted semantic
+        # sensors — it records hypothetical routing decisions WITHOUT affecting
+        # the merge. Opt-in via config.future.enable_shadow_jury (default False).
+        # Runs only on success (the frozen code is what the jury inspects).
+        if getattr(self.config.future, "enable_shadow_jury", False) and current_outcome.succeeded:
+            try:
+                unit = units[0] if units else None
+                self._run_shadow_jury(
+                    path, current_outcome, units, language,
+                    base_text=(unit.base.text or "") if unit else "",
+                    current_text=(unit.current.text or "") if unit else "",
+                    replayed_text=(unit.replayed.text or "") if unit else "",
+                )
+            except Exception:  # noqa: BLE001 — shadow jury is purely advisory
+                pass
         return current_outcome.buffer if current_outcome.succeeded else None
 
     def _run_comment_pass(
@@ -4835,6 +4864,135 @@ class Orchestrator:
                 )
             except Exception:  # noqa: BLE001 — review bundle is advisory
                 pass
+
+    def _run_shadow_jury(
+        self, path: str, outcome, units: list, language: str | None,
+        base_text: str, current_text: str, replayed_text: str,
+    ) -> None:
+        """SJ6: run the shadow jury AFTER a successful comment pass.
+
+        The jury evaluates the final plan's rewritten comments as untrusted
+        semantic sensors. It atomizes claims, builds evidence packets, runs the
+        contradiction + provenance jurors, and the deterministic chair routes.
+        Every route is ``shadow_record`` — NO merge effect. The data is
+        journaled as ``jury_shadow_*`` events + stored as ``jury_verdict``
+        artifacts for offline analysis.
+
+        This is the design's JURY_SHADOW setting: "the jury evaluates
+        candidates and records hypothetical actions, but its output does not
+        affect the merge."
+
+        Failures are purely advisory — a jury LLM error or parse failure
+        journals a ``jury_shadow_skipped`` event and returns. The frozen code
+        is never touched.
+        """
+        if not outcome.succeeded or not outcome.final_plan:
+            return  # only run on success with a plan
+        lang = (language or "").strip().lower()
+        frozen_code = outcome.buffer
+        if not frozen_code:
+            return
+        try:
+            from capybase.comment_claims import (
+                build_atomize_prompt, parse_atomized_claims, classify_claim_origin,
+            )
+            from capybase.jury_evidence import build_evidence_packet
+            from capybase.shadow_jury import (
+                ContradictionJuror, ProvenanceJuror, DeterministicChair,
+            )
+        except ImportError:
+            return
+        # The LLM complete callable (reuses the resolution engine).
+        def _complete(prompt: str) -> str:
+            return self.resolution_engine.raw_complete(prompt, model=self.config.model)
+        # Re-build the ledger to get the source variants for provenance.
+        from capybase.comment_reconciler import build_comment_ledger
+        ledger = build_comment_ledger(
+            base_text, current_text, replayed_text, frozen_code, lang,
+        )
+        chair = DeterministicChair(shadow_mode=True)
+        claims_evaluated = 0
+        for action in outcome.final_plan.actions:
+            if action.operation not in ("rewrite", "move", "merge"):
+                continue  # only evaluate rewritten comments
+            if not action.text.strip():
+                continue
+            # SJ1: atomize the rewritten comment into claims.
+            try:
+                atom_prompt = build_atomize_prompt(
+                    action.text, action.lineage_id,
+                    [e.text for e in ledger if e.lineage_id == action.lineage_id], lang,
+                )
+                atom_raw = _complete(atom_prompt)
+                claims = parse_atomized_claims(atom_raw, action.lineage_id)
+            except Exception as exc:  # noqa: BLE001 — advisory
+                self.journal.emit(
+                    "jury_shadow_skipped",
+                    {"lineage_id": action.lineage_id,
+                     "reason": f"atomize failed: {type(exc).__name__}"},
+                    step_index=self.step, path=path,
+                )
+                continue
+            if not claims:
+                continue
+            for claim in claims:
+                claims_evaluated += 1
+                # SJ2: build the evidence packet.
+                packet = build_evidence_packet(
+                    claim, frozen_code, ledger, lang=lang,
+                    code_fingerprint="", unit_id=units[0].unit_id if units else "",
+                )
+                # SJ3+SJ4: run the jurors (independent calls).
+                try:
+                    c_verdict = ContradictionJuror(_complete).judge(packet)
+                    p_verdict = ProvenanceJuror(_complete).judge(packet)
+                except Exception as exc:  # noqa: BLE001 — advisory
+                    self.journal.emit(
+                        "jury_shadow_skipped",
+                        {"claim_id": claim.claim_id,
+                         "reason": f"juror failed: {type(exc).__name__}"},
+                        step_index=self.step, path=path,
+                    )
+                    continue
+                # SJ5: the deterministic chair routes.
+                decision = chair.route(claim, c_verdict, p_verdict, packet)
+                # Store the verdicts + decision as artifacts (content-addressed).
+                import json as _json
+                verdict_payload = {
+                    "claim_id": claim.claim_id,
+                    "claim_text": claim.text,
+                    "claim_origin": claim.origin,
+                    "claim_kind": claim.kind,
+                    "claim_modality": claim.modality,
+                    "contradiction_verdict": _juror_verdict_to_dict(c_verdict),
+                    "provenance_verdict": _juror_verdict_to_dict(p_verdict),
+                    "chair_decision": {
+                        "route": decision.route, "reason": decision.reason,
+                        "evidence_quorum_met": decision.evidence_quorum_met,
+                    },
+                }
+                try:
+                    key, _ = self.journal.store_comment_artifact(
+                        "jury_verdict", _json.dumps(verdict_payload, indent=2),
+                        ext="json",
+                    )
+                except Exception:  # noqa: BLE001 — advisory
+                    key = ""
+                self.journal.emit(
+                    "jury_shadow_decision",
+                    {"claim_id": claim.claim_id,
+                     "lineage_id": claim.lineage_id,
+                     "route": decision.route,
+                     "contradiction_verdict": (c_verdict.verdict if c_verdict else None),
+                     "provenance_verdict": (p_verdict.verdict if p_verdict else None),
+                     "artifact_key": key},
+                    step_index=self.step, path=path,
+                )
+        self.journal.emit(
+            "jury_shadow_completed",
+            {"claims_evaluated": claims_evaluated},
+            step_index=self.step, path=path,
+        )
 
     def _resolve_comment_contract_conflicts(
         self, path: str, buffer: str, accepted: list, units: list,

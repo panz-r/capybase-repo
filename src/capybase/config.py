@@ -626,6 +626,16 @@ class FutureConfig(BaseModel):
     # ON (always-on integral part), but the skip-when-empty gate means files
     # with no affected comments pay no cost.
     enable_comment_reconciliation: bool = True
+    # Phase 4 shadow jury (design §5): an untrusted semantic sensor that
+    # evaluates comment claims and records hypothetical routing decisions WITHOUT
+    # affecting the merge. Runs AFTER the comment pass succeeds and the buffer
+    # is frozen. Default False (opt-in for the live run). When True, the jury
+    # atomizes the final plan's rewritten comments into claims, builds evidence
+    # packets, runs the contradiction + provenance jurors, and the deterministic
+    # chair routes (all routes become shadow_record — no merge effect). The data
+    # is journaled as jury_shadow_* events + stored as jury_verdict artifacts
+    # for offline analysis. This is the design's JURY_SHADOW setting.
+    enable_shadow_jury: bool = False
 
 
 class StructuralConfig(BaseModel):
