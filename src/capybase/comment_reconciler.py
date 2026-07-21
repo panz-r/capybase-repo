@@ -168,39 +168,80 @@ def select_comment_frontier(
     *,
     conflict_byte_ranges: list[tuple[int, int]] | None = None,
 ) -> list[LedgerEntry]:
-    """The subset of ledger entries that need reconciliation.
+    """The subset of ledger entries that need LLM reconciliation.
 
-    A comment is in the frontier when ANY of:
-    - It's in the RESOLVED version (the code we're about to write — its comments
-      might be stale from the merge).
-    - It overlaps a conflict region (byte-range intersection).
-    - Its text differs across versions (both sides edited it, or one side changed it).
-    - Its anchor's code changed (the entity it documents was modified).
+    Backward-compatible thin wrapper over :func:`select_comment_frontier_with_fast_paths`.
+    Returns only the ``entries`` (the fast-path actions are available via the
+    richer function). Kept so existing callers see no change.
+    """
+    return select_comment_frontier_with_fast_paths(
+        ledger, conflict_byte_ranges=conflict_byte_ranges,
+    ).entries
 
-    Non-frontier comments are reattached verbatim (the fast path). For the MVP,
-    we use a conservative frontier: include all RESOLVED-version comments (since
-    that's the file we're writing) whose lineage has variants that differ, OR
-    that overlap the conflict region.
+
+@dataclass
+class FrontierResult:
+    """The frontier + deterministic fast-path dispositions (§6).
+
+    ``entries`` are the ledger entries that need LLM reconciliation. Comments
+    NOT in the frontier are reattached verbatim by the CST editor.
+
+    ``fast_path_actions`` are synthetic :class:`CommentAction`s the reconciler
+    applies WITHOUT consulting the LLM — currently just ``delete`` for the
+    §6 "attached-node-deleted" fast path (a comment whose anchor entity exists
+    in base/current/replayed but was removed from resolved). The §13 audit
+    report counts these alongside the LLM-produced actions.
+    """
+    entries: list[LedgerEntry] = field(default_factory=list)
+    fast_path_actions: list[CommentAction] = field(default_factory=list)
+
+
+def select_comment_frontier_with_fast_paths(
+    ledger: list[LedgerEntry],
+    *,
+    conflict_byte_ranges: list[tuple[int, int]] | None = None,
+) -> FrontierResult:
+    """The frontier + §6 deterministic fast paths.
+
+    A comment lineage is evaluated against these fast paths (in order); the
+    first match decides its disposition WITHOUT invoking the LLM:
+
+    1. **attached-node-deleted → delete**: the anchor entity exists in
+       base/current/replayed but NOT in resolved → synthetic ``delete`` action
+       (the comment's code is gone). Requires the ledger to carry
+       ``anchor_symbol``; lineages with empty anchors skip this path.
+    2. **both-same-normalized → keep**: all variants normalize to the same text
+       (whitespace/case-insensitive) → keep verbatim, exclude from frontier.
+    3. **both-unchanged → keep**: identical text across base/current/replayed
+       AND no conflict-region overlap → keep verbatim, exclude from frontier.
+
+    Lineages that don't match a fast path fall through to the differs/overlap
+    check: in the frontier if text differs across versions OR the comment
+    overlaps a conflict region.
+
+    ``conflict_byte_ranges`` activates the overlap check (byte-range
+    intersection in the RESOLVED buffer). When None (the legacy default), the
+    overlap check is inert and the frontier is driven by text-differs alone.
     """
     if not ledger:
-        return []
+        return FrontierResult()
     # Group by lineage_id.
     by_lineage: dict[str, list[LedgerEntry]] = {}
     for e in ledger:
         by_lineage.setdefault(e.lineage_id, []).append(e)
 
-    # A lineage needs reconciliation if its variants differ across versions.
+    def _normalize(text: str) -> str:
+        return " ".join((text or "").strip().lower().split())
+
     def _lineage_differs(entries: list[LedgerEntry]) -> bool:
         texts = {e.text.strip() for e in entries}
         if len(texts) > 1:
-            return True  # different text across versions
+            return True
         versions_seen = {e.version for e in entries}
-        # If a lineage appears in only SOME versions (added/deleted by one side).
         if not ({"base", "current", "replayed"} <= versions_seen or versions_seen == {"resolved"}):
             return True
         return False
 
-    # Check conflict-region overlap.
     def _overlaps_conflict(entry: LedgerEntry) -> bool:
         if not conflict_byte_ranges:
             return False
@@ -209,20 +250,68 @@ def select_comment_frontier(
                 return True
         return False
 
+    # Collect anchor symbols present in resolved vs the three source versions.
+    resolved_anchors: set[str] = set()
+    source_anchors: set[str] = set()
+    for e in ledger:
+        if e.anchor_symbol:
+            if e.version == "resolved":
+                resolved_anchors.add(e.anchor_symbol)
+            else:
+                source_anchors.add(e.anchor_symbol)
+
     frontier: list[LedgerEntry] = []
+    fast_path_actions: list[CommentAction] = []
     for lid, entries in by_lineage.items():
+        # Fast path 1: attached-node-deleted. The comment's anchor exists in
+        # source versions but not in resolved → the code it documented is gone.
+        lineage_anchors = {e.anchor_symbol for e in entries if e.anchor_symbol}
+        deleted_anchors = {
+            a for a in lineage_anchors
+            if a in source_anchors and a not in resolved_anchors
+        }
+        if deleted_anchors:
+            # Only emit a delete if there's NO resolved entry (the comment is
+            # truly gone from the output). A resolved entry means the comment
+            # survived even though its anchor moved — let the LLM handle it.
+            resolved_entries = [e for e in entries if e.version == "resolved"]
+            if not resolved_entries:
+                fast_path_actions.append(CommentAction(
+                    lineage_id=lid, operation="delete",
+                    reason_code="ATTACHED_CODE_REMOVED",
+                    confidence=1.0,
+                ))
+                continue
+        # Fast path 2: attached-node-deleted didn't apply. Check whether the
+        # lineage genuinely needs reconciliation.
         differs = _lineage_differs(entries)
         overlaps = any(_overlaps_conflict(e) for e in entries)
-        if differs or overlaps:
-            # Include the RESOLVED version's entry (the one we'll rewrite). If
-            # there's no resolved entry (the comment was deleted), include the
-            # base/current/replayed entry for the reconciler to disposition.
-            resolved_entries = [e for e in entries if e.version == "resolved"]
-            if resolved_entries:
-                frontier.extend(resolved_entries)
-            else:
-                frontier.extend(entries)
-    return frontier
+        if not differs and not overlaps:
+            # Fast path 3: both-unchanged → keep verbatim (exclude).
+            continue
+        # The lineage differs OR overlaps a conflict. But if all variants
+        # NORMALIZE to the same text (cosmetic-only difference) AND there's no
+        # conflict overlap, keep verbatim — the difference is surface noise.
+        # NOTE: this must NOT fire when the lineage is missing from some
+        # versions (an add/delete); _lineage_differs already caught that case
+        # above, so reaching here with differs=True due to missing versions
+        # means we skip the normalized check.
+        versions_seen = {e.version for e in entries}
+        missing_versions = not (
+            {"base", "current", "replayed"} <= versions_seen
+            or versions_seen == {"resolved"}
+        )
+        if not overlaps and not missing_versions:
+            normalized = {_normalize(e.text) for e in entries}
+            if len(normalized) == 1:
+                continue  # both-same-normalized → keep verbatim
+        # Fall through: needs LLM reconciliation.
+        resolved_entries = [e for e in entries if e.version == "resolved"]
+        if resolved_entries:
+            frontier.extend(resolved_entries)
+        else:
+            frontier.extend(entries)
+    return FrontierResult(entries=frontier, fast_path_actions=fast_path_actions)
 
 
 # ---------------------------------------------------------------------------

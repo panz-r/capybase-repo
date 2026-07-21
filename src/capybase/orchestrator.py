@@ -4675,7 +4675,8 @@ class Orchestrator:
         try:
             from capybase.adapters.string_lexer import enumerate_comment_spans
             from capybase.comment_reconciler import (
-                build_comment_ledger, select_comment_frontier, run_comment_cegis,
+                build_comment_ledger, select_comment_frontier_with_fast_paths,
+                CommentPlan, apply_comment_plan, run_comment_cegis,
             )
         except ImportError:
             return None
@@ -4695,7 +4696,33 @@ class Orchestrator:
         ledger = build_comment_ledger(
             base_text, current_text, replayed_text, buffer, lang,
         )
-        frontier = select_comment_frontier(ledger)
+        # §6: compute conflict byte ranges from the units' marker_spans (line
+        # ranges mapped to byte offsets in the resolved buffer) so the frontier
+        # selector's overlap check is active. Without this the selector relies
+        # on text-differs alone (the legacy behavior).
+        conflict_byte_ranges = self._conflict_byte_ranges(units, buffer)
+        frontier_result = select_comment_frontier_with_fast_paths(
+            ledger, conflict_byte_ranges=conflict_byte_ranges,
+        )
+        frontier = frontier_result.entries
+        # §6 fast paths: apply deterministic dispositions (e.g. delete for
+        # attached-node-deleted) BEFORE the LLM pass. These don't need the
+        # model — they're structural. Apply them to the buffer directly; the
+        # executable-token invariant in apply_comment_plan still guards.
+        if frontier_result.fast_path_actions:
+            try:
+                buffer = apply_comment_plan(
+                    buffer, frontier_result.entries,
+                    CommentPlan(actions=frontier_result.fast_path_actions), lang,
+                )
+                self.journal.emit(
+                    "comment_fast_path_applied",
+                    {"actions": len(frontier_result.fast_path_actions),
+                     "operations": [a.operation for a in frontier_result.fast_path_actions]},
+                    step_index=self.step, path=path,
+                )
+            except Exception:  # noqa: BLE001 — fast-path failure is advisory
+                pass
 
         budget = getattr(self.config.policy, "comment_reconciliation_retries", 1)
         conv_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
@@ -4740,6 +4767,39 @@ class Orchestrator:
             except Exception:  # noqa: BLE001 — review bundle is advisory
                 pass
         return None
+
+    def _conflict_byte_ranges(
+        self, units: list, buffer: str,
+    ) -> list[tuple[int, int]]:
+        """Map the units' ``marker_span`` line ranges to byte offsets in the
+        resolved ``buffer``. Used by the §6 frontier selector's overlap check.
+
+        ``marker_span`` is a 0-based ``[start_line, end_line]`` inclusive range.
+        We convert to byte offsets by walking the buffer's line starts. Returns
+        ``[]`` when no unit carries a marker span (whole-file units, etc.).
+        """
+        if not units or not buffer:
+            return []
+        # Build line-start byte offset table once.
+        line_starts = [0]
+        for i, ch in enumerate(buffer):
+            if ch == "\n":
+                line_starts.append(i + 1)
+        line_starts.append(len(buffer))  # sentinel for end-of-last-line
+        ranges: list[tuple[int, int]] = []
+        for u in units:
+            ms = getattr(u, "marker_span", None)
+            if ms is None:
+                continue
+            start_line, end_line = ms
+            # Clamp to valid range.
+            start_line = max(0, min(start_line, len(line_starts) - 1))
+            end_line = max(start_line, min(end_line + 1, len(line_starts) - 1))
+            start_byte = line_starts[start_line]
+            end_byte = line_starts[end_line]
+            if end_byte > start_byte:
+                ranges.append((start_byte, end_byte))
+        return ranges
 
     def _verify_post_comment(
         self, path: str, language: str | None,
