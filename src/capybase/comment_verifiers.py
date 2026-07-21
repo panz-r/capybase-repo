@@ -341,6 +341,63 @@ def _check_style_violation(plan, frontier_by_id) -> list[CommentFailure]:
     return out
 
 
+def _check_doc_signature_mismatch(plan, frontier, resolved_text, lang) -> list[CommentFailure]:
+    """§9 DOC_SIGNATURE_MISMATCH — documented params don't match the signature.
+
+    For each rewrite/move/merge action on a Python docstring/comment whose
+    enclosing function we can identify: parse the documented params from the
+    action's text and compare against the function's actual signature params.
+    Flag documented-but-not-in-signature params (the comment names a parameter
+    that doesn't exist — the model hallucinated or the signature changed).
+
+    No-op for non-Python (Rust rustdoc has no structured param convention).
+    ``keep``/``preserve_verbatim`` are exempt. Degrades gracefully when the
+    enclosing function can't be identified (no false positives).
+    """
+    if lang not in ("python", "py"):
+        return []
+    try:
+        from capybase.adapters.docstring_parser import (
+            parse_docstring_params, signature_params_for_enclosing,
+        )
+    except ImportError:
+        return []
+    out: list[CommentFailure] = []
+    for a in plan.actions:
+        if a.operation not in ("rewrite", "move", "merge"):
+            continue
+        text = a.text or ""
+        # Find the resolved-version entry for this action (it carries the byte
+        # offset we need to locate the enclosing function).
+        entry = None
+        for e in frontier:
+            if e.lineage_id == a.lineage_id and e.version == "resolved":
+                entry = e
+                break
+        if entry is None:
+            continue
+        # The enclosing function's signature params.
+        sig_params = signature_params_for_enclosing(resolved_text, lang, entry.start)
+        if not sig_params:
+            continue  # not inside a function, or unsupported — skip
+        # The documented params.
+        parsed = parse_docstring_params(text, lang)
+        if not parsed.params:
+            continue  # no recognized param convention in the rewrite — skip
+        # Documented but not in the signature → mismatch.
+        extra = sorted(parsed.params - sig_params)
+        if extra:
+            out.append(CommentFailure(
+                kind=DOC_SIGNATURE_MISMATCH, lineage_id=a.lineage_id,
+                message=(
+                    f"the rewritten docstring documents parameter(s) not in the "
+                    f"function's signature: {extra} (signature has {sorted(sig_params)}). "
+                    f"Update the docs to match the current parameters."
+                ),
+            ))
+    return out
+
+
 def verify_comment_plan(
     plan: CommentPlan,
     frontier: list[LedgerEntry],
@@ -377,6 +434,9 @@ def verify_comment_plan(
         failures.extend(_check_stale_identifier(plan, code_idents))
     # STYLE_VIOLATION runs on every plan (cheap, no resolved-file parse).
     failures.extend(_check_style_violation(plan, frontier_by_id))
+    # DOC_SIGNATURE_MISMATCH runs on Python rewrites whose enclosing function
+    # we can identify. Degrades gracefully (no-op) for other languages.
+    failures.extend(_check_doc_signature_mismatch(plan, frontier, resolved_text, lang))
     return failures
 
 
