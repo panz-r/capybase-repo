@@ -4610,9 +4610,23 @@ class Orchestrator:
             # the conflict region (zero overhead). Gated by
             # config.future.enable_comment_reconciliation (default True).
             if self.config.future.enable_comment_reconciliation:
+                pre_comment_buffer = buffer
                 buffer = self._reconcile_comments(
                     path, buffer, accepted, originals[path], units, language,
                 ) or buffer
+                # §11 post-comment verify_file gate: defense-in-depth. The
+                # executable-token invariant in apply_comment_plan makes
+                # comment-induced failures unlikely, but it's blind to
+                # comment-INTERNAL structure (a malformed doc-comment code
+                # fence, a docstring that breaks doctests). Re-run Phase-B
+                # validation on the comment buffer; revert to the frozen
+                # pre-comment buffer on failure so code is NEVER corrupted by
+                # the comment pass. Skipped when the pass was a no-op.
+                if buffer != pre_comment_buffer:
+                    buffer = self._verify_post_comment(
+                        path, language, buffer, pre_comment_buffer,
+                        originals[path], accepted,
+                    )
             # Stage the validated file (it was already written to the worktree
             # in Phase 1; re-write in case the CEGIS loop changed it, then stage).
             self._write_and_stage(path, buffer, result, accepted=accepted)
@@ -4726,6 +4740,69 @@ class Orchestrator:
             except Exception:  # noqa: BLE001 — review bundle is advisory
                 pass
         return None
+
+    def _verify_post_comment(
+        self, path: str, language: str | None,
+        comment_buffer: str, pre_comment_buffer: str,
+        original: str, accepted: list,
+    ) -> str:
+        """§11 post-comment defense-in-depth gate.
+
+        Re-runs Phase-B ``verify_file`` on the comment-reconciled buffer. The
+        executable-token invariant in :meth:`_reconcile_comments` /
+        :func:`apply_comment_plan` makes comment-induced *test* failures
+        unlikely in principle (the model can't change code), but it operates on
+        TOKENS with comments blanked — a malformed Rust ``///`` doc comment
+        with a broken code fence, or a Python docstring that breaks doctests,
+        has identical executable tokens to a well-formed one. This gate catches
+        those residual cases.
+
+        On PASS: return ``comment_buffer`` unchanged.
+        On FAIL: journal ``comment_post_validation_failed``, revert to
+        ``pre_comment_buffer`` (the frozen, test-passing code), emit
+        ``comment_reclassified_machine_significant`` (best-effort lineage
+        attribution), return ``pre_comment_buffer``. Code is NEVER corrupted.
+        """
+        # verify_file splices resolutions into `original`; for a post-comment
+        # whole-file buffer we pass a single whole-file resolution (span=None)
+        # so _has_whole_file_span routes it past splicing and validates the
+        # buffer directly.
+        resolutions = [(None, comment_buffer)]
+        try:
+            validation = self.verification.verify_file(
+                path, language, original, resolutions,
+                repo_root=str(self.git.repo),
+            )
+        except Exception as exc:  # noqa: BLE001 — gate is defense-in-depth
+            self.journal.emit(
+                "comment_post_validation_failed",
+                {"reason": f"verify_file raised: {type(exc).__name__}: {exc}",
+                 "reverted": True},
+                step_index=self.step, path=path,
+            )
+            return pre_comment_buffer
+        if validation.passed:
+            return comment_buffer
+        # Failure: revert to the frozen buffer.
+        self.journal.emit(
+            "comment_post_validation_failed",
+            {"failures": [f.message for f in validation.hard_failures][:5],
+             "reverted": True},
+            step_index=self.step, path=path,
+        )
+        # Best-effort reclassify attribution: name the validator that failed
+        # so a human reviewer knows the comment pass likely triggered it.
+        # (Precise lineage attribution would require byte-range overlap between
+        # the failure's error line and the rewritten comment spans — deferred.)
+        self.journal.emit(
+            "comment_reclassified_machine_significant",
+            {"reason": "comment-reconciled buffer failed post-comment validation; "
+                       "reverted to frozen code. The rewritten comment likely "
+                       "introduced a syntax/doc-test break.",
+             "validators": [f.validator for f in validation.hard_failures][:5]},
+            step_index=self.step, path=path,
+        )
+        return pre_comment_buffer
 
     def _whole_file_repair(
         self,

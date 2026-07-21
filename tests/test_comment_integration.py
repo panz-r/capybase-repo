@@ -439,3 +439,88 @@ def test_python_docstring_skipped_when_doctest():
     ledger = build_comment_ledger(text, text, text, text, "python")
     # No DEFERRED entries (the doctest is DOCTEST class — filtered out).
     assert all(e.cls != CommentClass.DEFERRED for e in ledger) or not ledger
+
+
+# ---------------------------------------------------------------------------
+# M — post-comment verify_file gate (§11)
+# ---------------------------------------------------------------------------
+
+
+def test_post_comment_gate_reverts_on_validation_failure(monkeypatch):
+    """When the comment-reconciled buffer fails verify_file (e.g. a malformed
+    doc comment breaks brace balance), the post-gate reverts to the frozen
+    pre-comment buffer and emits a reclassify event."""
+    from capybase.orchestrator import Orchestrator
+    from capybase.conflict_model import VerificationResult, VerificationFailure
+
+    class _StubVerification:
+        def verify_file(self, path, language, original, resolutions, *, repo_root="."):
+            return VerificationResult(
+                candidate_id="c", unit_id="u", passed=False,
+                hard_failures=[VerificationFailure(
+                    validator="syntax", severity="error",
+                    message="unexpected closing brace",
+                    detail={"line": 3},
+                )],
+            )
+
+    class _StubGit:
+        repo = "."
+    class _StubJournal:
+        def emit(self, *a, **k): pass
+
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.verification = _StubVerification()
+    orch.git = _StubGit()
+    orch.journal = _StubJournal()
+    orch.step = 0
+
+    pre_comment = "fn foo() { let x = 1; }\n"
+    comment_buffer = "fn foo() { let x = 1; } // } extra brace\n"
+    result = orch._verify_post_comment(
+        path="a.rs", language="rust",
+        comment_buffer=comment_buffer, pre_comment_buffer=pre_comment,
+        original=pre_comment, accepted=[],
+    )
+    # Reverted to the frozen pre-comment buffer.
+    assert result == pre_comment
+
+
+def test_post_comment_gate_passes_clean_buffer(monkeypatch):
+    """When the comment-reconciled buffer passes verify_file, the post-gate
+    returns it unchanged (no revert)."""
+    from capybase.orchestrator import Orchestrator
+    from capybase.conflict_model import VerificationResult
+
+    class _StubVerification:
+        def verify_file(self, path, language, original, resolutions, *, repo_root="."):
+            return VerificationResult(
+                candidate_id="c", unit_id="u", passed=True, hard_failures=[],
+            )
+
+    class _StubGit:
+        repo = "."
+    class _StubJournal:
+        def emit(self, *a, **k): pass
+
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.verification = _StubVerification()
+    orch.git = _StubGit()
+    orch.journal = _StubJournal()
+    orch.step = 0
+
+    pre_comment = "fn foo() { let x = 1; }\n"
+    comment_buffer = "fn foo() { let x = 1; } // updated comment\n"
+    result = orch._verify_post_comment(
+        path="a.rs", language="rust",
+        comment_buffer=comment_buffer, pre_comment_buffer=pre_comment,
+        original=pre_comment, accepted=[],
+    )
+    assert result == comment_buffer
+
+
+def test_post_comment_gate_skipped_when_buffer_unchanged():
+    """The gate is callable — the `if buffer != pre_comment_buffer` guard at
+    the call site is what skips it. Confirm the method exists."""
+    from capybase.orchestrator import Orchestrator
+    assert hasattr(Orchestrator, "_verify_post_comment")
