@@ -716,6 +716,83 @@ def build_comment_reconcile_prompt(
     return "\n".join(lines)
 
 
+def render_reconciliation_report(
+    *,
+    plan: CommentPlan | None = None,
+    succeeded: bool = True,
+    last_feedback: list | None = None,
+    attempts: int = 0,
+) -> str:
+    """Render the §13 compact reconciliation report.
+
+    Produces the block attached to the review bundle so a human reviewer can see
+    at a glance what the comment pass did (or failed to do). Counts the
+    dispositions + lists notable decisions (each non-keep action with its
+    ``reason_code`` and ``derived_from``). On failure, surfaces the
+    ``last_feedback`` (the final verifier counterexamples).
+
+    ``plan`` is the final (successful or failed) plan. ``succeeded`` selects the
+    header tone. ``attempts`` is the CEGIS iteration count.
+    """
+    actions = (plan.actions if plan else [])
+    # Tally dispositions.
+    kept = sum(1 for a in actions if a.operation in ("keep", "preserve_verbatim"))
+    rewritten = sum(1 for a in actions if a.operation == "rewrite")
+    moved = sum(1 for a in actions if a.operation == "move")
+    merged = sum(1 for a in actions if a.operation == "merge")
+    deleted = sum(1 for a in actions if a.operation == "delete")
+    preserved = sum(1 for a in actions if a.operation == "preserve_verbatim")
+
+    lines: list[str] = ["## Comment reconciliation"]
+    if not succeeded:
+        lines.append(
+            f"**Status:** FAILED after {attempts} attempt(s). The frozen code is "
+            f"intact and staged; only the comment reconciliation did not converge."
+        )
+    elif attempts > 0:
+        lines.append(f"**Status:** succeeded in {attempts} attempt(s).")
+    lines.append("")
+    lines.append(f"- Preserved verbatim: {preserved}")
+    lines.append(f"- Kept unchanged: {kept}")
+    lines.append(f"- Rewritten: {rewritten}")
+    lines.append(f"- Moved: {moved}")
+    lines.append(f"- Merged: {merged}")
+    lines.append(f"- Deleted: {deleted}")
+    if last_feedback:
+        lines.append(f"- Unresolved: {len(last_feedback)}")
+    else:
+        lines.append("- Unresolved: 0")
+    lines.append("")
+
+    # Notable decisions: each non-keep action with a reason_code.
+    notable = [a for a in actions
+               if a.operation not in ("keep", "preserve_verbatim") and a.lineage_id]
+    if notable:
+        lines.append("Notable decisions:")
+        for a in notable:
+            parts = [f"- {a.lineage_id} {a.operation}"]
+            if a.reason_code:
+                parts.append(f"({a.reason_code})")
+            if a.text and len(a.text) < 80:
+                parts.append(f": {a.text!r}")
+            if a.derived_from:
+                parts.append(f"  derived_from: {a.derived_from}")
+            lines.append(" ".join(parts))
+        lines.append("")
+
+    # Failure feedback — the final verifier counterexamples.
+    if last_feedback:
+        lines.append("Last verifier feedback (why reconciliation stalled):")
+        for f in last_feedback:
+            kind = getattr(f, "kind", "?")
+            lid = getattr(f, "lineage_id", "") or "(plan-wide)"
+            msg = getattr(f, "message", str(f))
+            lines.append(f"- [{kind}] {lid}: {msg[:200]}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def parse_comment_plan(raw_response: str) -> CommentPlan | None:
     """Parse the model's response into a CommentPlan, or None on failure.
 
@@ -797,6 +874,9 @@ class ReconcileOutcome:
     audit trail (start/skip/cycling/escalated/succeeded) — each a
     ``(event_name, payload)`` tuple the caller journals. ``last_feedback`` is
     the final :class:`CommentFailure` list (for the review bundle).
+    ``final_plan`` is the last accepted (success) or last-attempted (failure)
+    CommentPlan — used by :func:`render_reconciliation_report` for the §13
+    audit. None when no plan was ever parsed.
     """
     buffer: str
     succeeded: bool
@@ -804,6 +884,7 @@ class ReconcileOutcome:
     events: list = field(default_factory=list)
     last_feedback: list = field(default_factory=list)
     attempts_made: int = 0
+    final_plan: CommentPlan | None = None
 
 
 def run_comment_cegis(
@@ -874,6 +955,7 @@ def run_comment_cegis(
     seen_hashes: dict[str, int] = {}
     seen_norm_hashes: dict[str, int] = {}
     last_feedback: list[CommentFailure] = []
+    last_plan: CommentPlan | None = None
     attempts_made = 0
     for attempt in range(budget + 1):
         attempts_made = attempt + 1
@@ -900,6 +982,7 @@ def run_comment_cegis(
             last_feedback = feedback
             events.append(("comment_plan_unparseable", {"attempt": attempt}))
             continue
+        last_plan = plan
         events.append(("comment_plan_generated",
                        {"actions": len(plan.actions), "attempt": attempt}))
         try:
@@ -954,7 +1037,7 @@ def run_comment_cegis(
         }))
         return ReconcileOutcome(
             buffer=result, succeeded=True, events=events,
-            attempts_made=attempts_made,
+            attempts_made=attempts_made, final_plan=plan,
         )
     # Exhausted / converged / model-unavailable → escalate.
     feedback_summary = "; ".join(
@@ -967,6 +1050,7 @@ def run_comment_cegis(
     return ReconcileOutcome(
         buffer=buffer, succeeded=False, events=events,
         last_feedback=last_feedback, attempts_made=attempts_made,
+        final_plan=last_plan,
     )
 
 
@@ -974,6 +1058,8 @@ __all__ = [
     "LedgerEntry",
     "build_comment_ledger",
     "select_comment_frontier",
+    "select_comment_frontier_with_fast_paths",
+    "FrontierResult",
     "CommentAction",
     "CommentPlan",
     "ApplyError",
@@ -982,6 +1068,7 @@ __all__ = [
     "parse_comment_plan",
     "plan_hash",
     "plan_norm_hash",
+    "render_reconciliation_report",
     "ReconcileOutcome",
     "run_comment_cegis",
 ]

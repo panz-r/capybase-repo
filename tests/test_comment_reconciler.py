@@ -612,3 +612,56 @@ def test_ledger_rename_bridging():
         lineages = {e.lineage_id for e in docs_entries}
         # At least the text-identical comments bridge into one lineage.
         assert len(lineages) <= 2  # may be 1 (bridged) or 2 (one per anchor)
+
+
+# ---------------------------------------------------------------------------
+# P3 — reconciliation audit report (§13)
+# ---------------------------------------------------------------------------
+
+
+def test_render_reconciliation_report_success():
+    """A successful reconciliation renders the §13-style report with counts
+    and notable decisions."""
+    from capybase.comment_reconciler import (
+        render_reconciliation_report, CommentAction, CommentPlan,
+    )
+    plan = CommentPlan(actions=[
+        CommentAction(lineage_id="LC1", operation="keep"),
+        CommentAction(lineage_id="LC2", operation="rewrite",
+                      text="updated", reason_code="IDENTIFIER_RENAMED",
+                      derived_from=["base:LC2", "replayed:LC2"]),
+        CommentAction(lineage_id="LC3", operation="delete",
+                      reason_code="ATTACHED_CODE_REMOVED"),
+    ])
+    report = render_reconciliation_report(plan=plan, succeeded=True)
+    assert "Comment reconciliation" in report
+    assert "Kept unchanged:" in report or "Kept:" in report
+    assert "Rewritten:" in report
+    assert "Deleted:" in report
+    # Notable decisions cite the reason_code + derived_from.
+    assert "IDENTIFIER_RENAMED" in report
+    assert "LC2" in report
+
+
+def test_render_reconciliation_report_failure_includes_feedback():
+    """A failed reconciliation includes the last_feedback in the report."""
+    from capybase.comment_reconciler import render_reconciliation_report, CommentPlan
+    from capybase.comment_verifiers import CommentFailure, STALE_IDENTIFIER
+    plan = CommentPlan(actions=[])
+    feedback = [CommentFailure(
+        kind=STALE_IDENTIFIER, lineage_id="LC1",
+        message="references REMOVED_CONST",
+    )]
+    report = render_reconciliation_report(
+        plan=plan, succeeded=False, last_feedback=feedback,
+    )
+    assert "Unresolved:" in report or "failed" in report.lower()
+    assert "STALE_IDENTIFIER" in report
+    assert "REMOVED_CONST" in report
+
+
+def test_render_reconciliation_report_empty_plan():
+    """An empty plan (skipped reconciliation) renders a minimal report."""
+    from capybase.comment_reconciler import render_reconciliation_report, CommentPlan
+    report = render_reconciliation_report(plan=CommentPlan(actions=[]), succeeded=True)
+    assert "Comment reconciliation" in report

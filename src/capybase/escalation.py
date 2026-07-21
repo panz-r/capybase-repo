@@ -27,6 +27,7 @@ def write_review_bundle(
     consensus: dict | None = None,
     resurrections: list | None = None,
     advisories: list[str] | None = None,
+    reconciliation_report: str | None = None,
 ) -> Path:
     """Write ``final/review-bundle.md`` and return its path.
 
@@ -45,6 +46,12 @@ def write_review_bundle(
     "history unavailable: rebase plan build failed"). When present, a
     ``## advisories`` section lists them so the human sees WHY a history feature
     may not have applied, not just that the conflict escalated.
+
+    ``reconciliation_report`` is the pre-rendered §13 comment-reconciliation
+    report (from :func:`comment_reconciler.render_reconciliation_report`).
+    When present, it's appended verbatim so the reviewer sees what the comment
+    pass did (or failed to do) — counts + notable decisions + last verifier
+    feedback. Rendered on BOTH success and failure (was failure-only before).
     """
     paths.final.mkdir(parents=True, exist_ok=True)
     out = paths.final / "review-bundle.md"
@@ -186,6 +193,12 @@ def write_review_bundle(
         lines.append("")
         for a in advisories:
             lines.append(f"- {a}")
+        lines.append("")
+
+    if reconciliation_report:
+        # The §13 comment-reconciliation report is pre-rendered by the caller
+        # (comment_reconciler.render_reconciliation_report). Append verbatim.
+        lines.append(reconciliation_report.rstrip("\n"))
         lines.append("")
 
     out.write_text("\n".join(lines), encoding="utf-8")

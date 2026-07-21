@@ -4741,6 +4741,23 @@ class Orchestrator:
         # Replay the loop's events into the journal.
         for ev_name, ev_payload in outcome.events:
             self.journal.emit(ev_name, ev_payload, step_index=self.step, path=path)
+        # §13: render the reconciliation report for the audit trail. On success
+        # it's journaled (so the accept report / logs can surface it); on
+        # failure it's attached to the review bundle.
+        try:
+            from capybase.comment_reconciler import render_reconciliation_report
+            report = render_reconciliation_report(
+                plan=outcome.final_plan, succeeded=outcome.succeeded,
+                last_feedback=outcome.last_feedback or None,
+                attempts=outcome.attempts_made,
+            )
+            self.journal.emit(
+                "comment_reconciliation_report",
+                {"report": report, "succeeded": outcome.succeeded},
+                step_index=self.step, path=path,
+            )
+        except Exception:  # noqa: BLE001 — report is advisory
+            report = None
         if outcome.succeeded:
             return outcome.buffer
         # On escalation (exhausted/converged/model-failure), surface a review
@@ -4763,6 +4780,7 @@ class Orchestrator:
                         "Only the deferred-comment reconciliation could not "
                         "converge. Review the frontier comments manually."
                     ],
+                    reconciliation_report=report,
                 )
             except Exception:  # noqa: BLE001 — review bundle is advisory
                 pass
