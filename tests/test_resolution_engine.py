@@ -205,10 +205,13 @@ def _unit_with_refined():
     """A unit whose worktree markers are wider than the diff3-minimized sides."""
     u = _unit()
     # Simulate diff3 finding tighter boundaries than the raw marker sides.
+    # The marker is embedded as a CODE identifier (not a comment) so it survives
+    # deferred-comment masking — the test verifies refined-sides wiring, not the
+    # masker (covered separately in test_comment_masking_wired.py).
     u.structural_metadata["diff3_refined"] = {
-        "current": "    return 2  # refined-current",
-        "base": "def f():\n    return 1  # refined-base",
-        "replayed": "    return 3  # refined-replayed",
+        "current": "    return REFINED_CURRENT",
+        "base": "def f():\n    return REFINED_BASE",
+        "replayed": "    return REFINED_REPLAYED",
     }
     return u
 
@@ -219,12 +222,12 @@ def test_resolve_prompt_uses_refined_sides_when_present():
     # The refined (minimal) side texts appear in the conflict-side sections,
     # NOT the raw marker sides. (The surrounding-context window still shows the
     # original worktree text — that is correct and separate from the sides.)
-    assert "refined-current" in prompt
-    assert "refined-base" in prompt
-    assert "refined-replayed" in prompt
+    assert "REFINED_CURRENT" in prompt
+    assert "REFINED_BASE" in prompt
+    assert "REFINED_REPLAYED" in prompt
     # The refined sides replace the raw sides in the dedicated side sections:
     # the BASE section must carry the refined-base marker, not just raw base.
-    assert prompt.count("refined-base") >= 1
+    assert prompt.count("REFINED_BASE") >= 1
 
 
 def test_intent_prompt_uses_refined_sides():
@@ -232,9 +235,9 @@ def test_intent_prompt_uses_refined_sides():
 
     u = _unit_with_refined()
     prompt = build_intent_prompt(u, ContextBuilder().build(u))
-    assert "refined-current" in prompt
-    assert "refined-replayed" in prompt
-    assert "refined-base" in prompt
+    assert "REFINED_CURRENT" in prompt
+    assert "REFINED_REPLAYED" in prompt
+    assert "REFINED_BASE" in prompt
 
 
 def test_code_prompt_uses_refined_sides():
@@ -242,8 +245,8 @@ def test_code_prompt_uses_refined_sides():
 
     u = _unit_with_refined()
     prompt = build_code_prompt(u, ContextBuilder().build(u), {"current_side_intent": [], "replayed_commit_intent": []})
-    assert "refined-current" in prompt
-    assert "refined-replayed" in prompt
+    assert "REFINED_CURRENT" in prompt
+    assert "REFINED_REPLAYED" in prompt
 
 
 def test_resolve_prompt_falls_back_to_raw_sides_without_refinement():
@@ -260,9 +263,9 @@ def test_refined_sides_property_reads_metadata():
     sides = u.refined_sides
     assert sides is not None
     assert sides == (
-        "    return 2  # refined-current",
-        "def f():\n    return 1  # refined-base",
-        "    return 3  # refined-replayed",
+        "    return REFINED_CURRENT",
+        "def f():\n    return REFINED_BASE",
+        "    return REFINED_REPLAYED",
     )
 
 

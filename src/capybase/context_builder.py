@@ -27,6 +27,7 @@ class ContextBuilder:
         min_examples: int = 3,
         use_enclosing_as_primary: bool = False,
         canonicalize_context: bool = False,
+        mask_deferred_comments: bool = True,
         cross_file_slice: bool = False,
         slice_search_globs: list[str] | None = None,
         slice_repo_root: str | None = None,
@@ -50,6 +51,10 @@ class ContextBuilder:
         self.repair_retriever_k = repair_retriever_k
         self.use_enclosing_as_primary = use_enclosing_as_primary
         self.canonicalize_context = canonicalize_context
+        # Deferred-comment masking (design §4): blank DEFERRED comments from
+        # the primary context window. Default True — the upstream half of the
+        # two-level comment architecture. See config StructuralConfig.
+        self.mask_deferred_comments = mask_deferred_comments
         # Cross-file dependency slicing (Rover / §1.2): resolve the
         # definitions of symbols the conflict code references across the repo
         # and surface them as ``related_snippets`` in the context bundle — the
@@ -144,6 +149,19 @@ class ContextBuilder:
         # exact indentation); only the context window is cleaned.
         if self.canonicalize_context:
             primary = canonicalize_context(primary, unit.language)
+        # Deferred-comment masking (upstream half of the two-level comment
+        # architecture, design §4): blank DEFERRED comments from the primary
+        # context window while keeping MACHINE/LEGAL/GENERATED/DOCTEST comments
+        # visible. Length-preserving + offset-correct. The conflict SIDES are
+        # masked separately in _prompt_sides (resolution_engine.py); masking
+        # here covers the primary context window (the enclosing-node view or
+        # the line window). Zero overhead when no deferred comments are present.
+        if self.mask_deferred_comments:
+            try:
+                from capybase.adapters.string_lexer import mask_deferable_comments
+                primary, _ = mask_deferable_comments(primary, unit.language)
+            except Exception:  # noqa: BLE001 — masking is advisory
+                pass
         # Rough token estimate (~4 chars/token). Good enough for budgeting;
         # a real tokenizer can be swapped in later without interface change.
         est = max(1, len(primary) // 4)

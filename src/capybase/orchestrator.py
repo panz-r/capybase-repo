@@ -1050,6 +1050,9 @@ class Orchestrator:
             min_examples=config.memory.min_examples_for_retrieval,
             use_enclosing_as_primary=config.structural.use_enclosing_as_primary,
             canonicalize_context=config.structural.canonicalize_context,
+            mask_deferred_comments=getattr(
+                config.structural, "mask_deferred_comments", True
+            ),
             cross_file_slice=config.structural.cross_file_slice,
             slice_search_globs=config.structural.slice_search_globs,
             slice_repo_root=str(self.git.repo),
@@ -1104,6 +1107,18 @@ class Orchestrator:
         self.resolution_engine = resolution_engine or ResolutionEngine(
             config.model, log_prompts_dir=log_prompts_dir,
         )
+        # Wire the deferred-comment masking toggle from config (the upstream
+        # half of the two-level comment architecture, design §4). When True
+        # (default), DEFERRED comments in the conflict sides are blanked before
+        # the code-resolution model sees them; the reconciliation pass (Phase 3)
+        # rewrites them later. Zero overhead for files with no deferred comments.
+        try:
+            from capybase.resolution_engine import set_mask_deferred_comments
+            set_mask_deferred_comments(
+                getattr(config.structural, "mask_deferred_comments", True)
+            )
+        except Exception:  # noqa: BLE001 — advisory; never break orchestrator init
+            pass
         self.verification = VerificationEngine.default(
             ValidationConfig.from_dict(config.validation.model_dump())
         )

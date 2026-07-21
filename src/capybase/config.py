@@ -647,6 +647,19 @@ class StructuralConfig(BaseModel):
     # to the model. Reduces noise for a 3B model prone to "lost in the middle."
     # Does NOT alter resolved_text — the model still emits exact indentation.
     canonicalize_context: bool = True
+    # Mask DEFERRED comments (prose, TODOs, invariants, narration) from the
+    # conflict sides + primary context shown to the code-resolution model, while
+    # leaving MACHINE/LEGAL/GENERATED/DOCTEST comments visible. The upstream
+    # half of the two-level comment architecture (design §4): the code model
+    # sees the executable code + machine-significant directives, but not stale
+    # prose that could confuse it. The reconciliation pass (Phase 3) then
+    # rewrites the deferred comments from provenance.
+    #
+    # Length-preserving and offset-correct: the executable-token stream is
+    # IDENTICAL before/after masking (verified by the round-trip invariant test).
+    # Zero overhead for files with no deferred comments — mask_deferable_comments
+    # returns the original text unchanged. Default True (always-on per design).
+    mask_deferred_comments: bool = True
     # Refine conflict boundaries with `git merge-file --diff3` to get the
     # tightest possible marker span (git may auto-resolve adjacent lines).
     refine_with_diff3: bool = True

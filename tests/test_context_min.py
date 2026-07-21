@@ -155,10 +155,13 @@ def test_canonicalize_in_context_strips_comments():
 
 
 def test_defaults_do_not_change_behavior():
-    """When neither option is set, behavior matches the original line-window."""
+    """When neither canonicalization nor masking is set, behavior matches the
+    original line-window. (mask_deferred_comments defaults to True per the
+    two-level comment architecture, so it's disabled here to test the raw
+    line-window baseline.)"""
     worktree = "# comment\ndef f():\n<<<<<<< H\n1\n=======\n2\n>>>>>>> b\n"
     unit = _unit("def f():\n    pass", "1", "2", worktree, span=(2, 4))
-    cb = ContextBuilder(context_lines=5)  # defaults: both off
+    cb = ContextBuilder(context_lines=5, mask_deferred_comments=False)  # both off
     ctx = cb.build(unit)
     assert "# comment" in ctx.primary_text  # not stripped
     assert "def f():" in ctx.primary_text  # line window includes surrounding code

@@ -90,11 +90,83 @@ def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
     that the worktree markers still wrap are stripped. Falls back to the raw
     marker sides when no refinement is recorded. Returns
     ``(current, base, replayed)``.
+
+    When ``mask_deferred_comments`` is enabled (the default, set by the
+    orchestrator from ``StructuralConfig.mask_deferred_comments``), DEFERRED
+    comments in the sides are blanked before the model sees them — the upstream
+    half of the two-level comment architecture (design §4). The model focuses
+    on executable code + machine-significant directives, not stale prose. The
+    deferred comments are reconciled later in Phase 3.
     """
     refined = unit.refined_sides
     if refined is not None:
-        return refined
-    return unit.current.text, unit.base.text, unit.replayed.text
+        cur, base, rep = refined
+    else:
+        cur, base, rep = unit.current.text, unit.base.text, unit.replayed.text
+    if _MASK_DEFERRED_COMMENTS:
+        cur, base, rep = _mask_sides_deferred(unit, cur, base, rep)
+    return cur, base, rep
+
+
+#: Module-level toggle for deferred-comment masking in the prompt. Mirrors the
+#: ``active_profile`` precedent. The orchestrator sets this from
+#: ``StructuralConfig.mask_deferred_comments`` (default True). Tests can flip it
+#: to isolate the masked vs. unmasked prompt paths.
+_MASK_DEFERRED_COMMENTS: bool = True
+
+
+def set_mask_deferred_comments(enabled: bool) -> None:
+    """Globally enable/disable deferred-comment masking in prompt sides."""
+    global _MASK_DEFERRED_COMMENTS
+    _MASK_DEFERRED_COMMENTS = enabled
+
+
+# Languages whose comments mask_deferable_comments handles reliably. Outside
+# this set the masker is a no-op (the sides pass through unchanged) — graceful
+# degradation, never wrong output.
+_MASKING_LANGUAGES = frozenset({
+    "rust", "rs",
+    "python", "py",
+    "javascript", "js", "typescript", "ts",
+    "go", "golang",
+    "c", "cpp", "c++", "java", "kotlin", "swift", "scala", "dart",
+    "csharp", "cs",
+    "php",
+})
+
+
+def _mask_sides_deferred(unit, cur: str, base: str, rep: str) -> tuple[str, str, str]:
+    """Mask DEFERRED comments in the three sides. No-op for unsupported langs."""
+    lang = (getattr(unit, "language", "") or "").strip().lower()
+    if lang not in _MASKING_LANGUAGES:
+        return cur, base, rep
+    try:
+        from capybase.adapters.string_lexer import mask_deferable_comments
+        cur_m, _ = mask_deferable_comments(cur, lang)
+        base_m, _ = mask_deferable_comments(base, lang)
+        rep_m, _ = mask_deferable_comments(rep, lang)
+        return cur_m, base_m, rep_m
+    except Exception:  # noqa: BLE001 — masking is advisory; never break the prompt
+        return cur, base, rep
+
+
+def _mask_sides_if_enabled(unit) -> tuple[str, str, str]:
+    """Public test hook for the masking logic. Returns the three sides
+    (current, base, replayed) with DEFERRED comments masked when enabled.
+
+    Used by tests/test_comment_masking_wired.py to verify the masking happens
+    without constructing a full ConflictUnit + ContextBundle. Production code
+    goes through ``_prompt_sides`` (which calls this internally when the toggle
+    is on).
+    """
+    refined = getattr(unit, "refined_sides", None)
+    if refined is not None:
+        cur, base, rep = refined
+    else:
+        cur = getattr(unit.current, "text", "")
+        base = getattr(unit.base, "text", "")
+        rep = getattr(unit.replayed, "text", "")
+    return _mask_sides_deferred(unit, cur, base, rep)
 
 
 def _side_intent_block(unit: ConflictUnit) -> str:
