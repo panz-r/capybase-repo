@@ -36,7 +36,14 @@ def detect_language(path: str) -> str | None:
     dot = path.rfind(".")
     if dot == -1:
         return None
-    return _EXT_LANG.get(path[dot:].lower())
+    ext = path[dot:].lower()
+    # Git conflict paths may carry a ':line:col' suffix (e.g.
+    # 'src/foo.rs:1:0'). Strip it so the extension lookup succeeds — without
+    # this, every conflict from `git diff --name-only -U0` style paths has
+    # language=None, which silently skips the comment pass + shadow jury.
+    if ":" in ext:
+        ext = ext.split(":")[0]
+    return _EXT_LANG.get(ext)
 
 
 def looks_like_text(data: bytes) -> bool:

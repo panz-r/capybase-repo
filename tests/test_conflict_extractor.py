@@ -64,3 +64,18 @@ def test_single_unit_has_no_sibling_metadata(conflicted_repo):
     units = ex.extract_file_units("app.py", step_index=1, session_id="s1")
     assert len(units) == 1
     assert "sibling_units" not in units[0].structural_metadata
+
+
+def test_detect_language_strips_linecol_suffix():
+    """Git conflict paths may carry a ':line:col' suffix (e.g. 'src/foo.rs:1:0').
+    detect_language must strip it so the extension lookup succeeds — without
+    this fix, every conflict from git has language=None, silently skipping the
+    comment pass + shadow jury."""
+    from capybase.conflict_extractor import detect_language
+    assert detect_language("src/foo.rs:1:0") == "rust"
+    assert detect_language("src/foo.rs") == "rust"
+    assert detect_language("lib/bar.py:5:10") == "python"
+    assert detect_language("lib/bar.py") == "python"
+    # No extension → None
+    assert detect_language("Makefile") is None
+    assert detect_language("Makefile:1:0") is None
