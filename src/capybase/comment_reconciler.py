@@ -37,7 +37,20 @@ class LedgerEntry:
     anchor_symbol: str = ""  # the enclosing entity's (kind, name), e.g. "function:foo"
     line: int = 0          # the 1-based line number (for display)
     # Whether the code attached to this comment's anchor changed across versions.
+    # Populated by build_comment_ledger when entities are available; stays False
+    # (the conservative default) when no structural info is present. Used by the
+    # §6 frontier fast paths and the §13 audit report.
     changed_with_code: bool = False
+    # §3 enrichment: comment placement relative to its anchor entity.
+    # "leading" (before the entity body), "trailing" (after), or "inline"
+    # (inside the body, or unknown when no entity). Computed when entities are
+    # available; defaults to "inline".
+    placement: str = "inline"
+    # §3 enrichment: identifier-shaped tokens mentioned in the comment text.
+    # Populated eagerly so the STALE_IDENTIFIER verifier and the prompt can
+    # reference them without re-extraction. Uses the same heuristic as
+    # comment_verifiers._comment_identifiers (CamelCase, snake_case, ALL_CAPS).
+    referenced_identifiers: list[str] = field(default_factory=list)
 
 
 def _anchor_for_span(
@@ -73,6 +86,76 @@ def _token_jaccard(a: str, b: str) -> float:
         return 1.0
     u = ta | tb
     return len(ta & tb) / len(u) if u else 0.0
+
+
+def _comment_referenced_identifiers(comment_text: str) -> list[str]:
+    """Identifier-shaped tokens mentioned in a comment (for the STALE check +
+    the §3 referenced_identifiers ledger field). Reuses the same shape heuristic
+    as comment_verifiers._looks_like_symbol so we don't double-define it."""
+    import re
+    ident_re = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,}")
+
+    def _looks_like_symbol(tok: str) -> bool:
+        n = len(tok)
+        if n < 4:
+            return False
+        has_under = "_" in tok
+        upper = sum(1 for c in tok if c.isupper())
+        lower = sum(1 for c in tok if c.islower())
+        digits = sum(1 for c in tok if c.isdigit())
+        if has_under and tok.isupper():
+            return True
+        if has_under and lower > 0:
+            return True
+        if not has_under and upper >= 2 and lower >= 1:
+            return True
+        if not has_under and tok.isupper() and upper >= 4 and digits == 0:
+            return True
+        return False
+
+    stripped = comment_text.lstrip()
+    for prefix in ("///", "//!", "//", "/*", "*/", "#!", "#=", "#", '"""', "'''", "*"):
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix):].lstrip()
+            break
+    return sorted({m.group(0) for m in ident_re.finditer(stripped)
+                   if _looks_like_symbol(m.group(0))})
+
+
+def _entity_for_anchor(
+    entities: list, anchor_symbol: str,
+) -> tuple[str, tuple[int, int] | None]:
+    """Find the entity matching ``anchor_symbol`` ("kind:name"). Returns
+    (body, span) or ("", None) when not found."""
+    if not anchor_symbol or not entities:
+        return "", None
+    # Parse "kind:name".
+    if ":" not in anchor_symbol:
+        return "", None
+    kind, name = anchor_symbol.split(":", 1)
+    for ent in entities:
+        if getattr(ent, "kind", "") == kind and (getattr(ent, "name", "") or "") == name:
+            return getattr(ent, "body", "") or "", getattr(ent, "span", None)
+    return "", None
+
+
+def _compute_placement(
+    comment_line: int, entity_span: tuple[int, int] | None,
+) -> str:
+    """§3 placement: leading / trailing / inline, relative to the anchor entity.
+
+    ``comment_line`` and ``entity_span`` use the abstract parser's 0-based line
+    coordinates. ``leading`` = before the entity's first line; ``trailing`` =
+    after its last line; ``inline`` = inside the body.
+    """
+    if entity_span is None:
+        return "inline"
+    start_line, end_line = entity_span
+    if comment_line < start_line:
+        return "leading"
+    if comment_line > end_line:
+        return "trailing"
+    return "inline"
 
 
 def build_comment_ledger(
@@ -133,7 +216,13 @@ def build_comment_ledger(
         ents = vents or []
         for cc in raw_by_version[vname]:
             anchor = _anchor_for_span(vtext, cc.start, lang, ents)
-            line = _line_of(vtext, cc.start)
+            comment_line = vtext[:cc.start].count("\n")  # 0-based
+            line = comment_line + 1  # 1-based for display
+            # Placement relative to the anchor entity (§3).
+            _, ent_span = _entity_for_anchor(ents, anchor)
+            placement = _compute_placement(comment_line, ent_span)
+            # Referenced identifiers (§3) — populated eagerly.
+            ref_ids = _comment_referenced_identifiers(cc.text)
             # Try to match an existing lineage at the same anchor with similar text.
             best_lineage = None
             best_sim = 0.0
@@ -158,7 +247,40 @@ def build_comment_ledger(
                 end=cc.end,
                 anchor_symbol=anchor,
                 line=line,
+                placement=placement,
+                referenced_identifiers=ref_ids,
             ))
+
+    # §3 enrichment: populate changed_with_code. For each anchor_symbol, compare
+    # the entity body across versions. If the body differs (or the entity is
+    # missing in some version), set changed_with_code=True on every entry with
+    # that anchor. Conservative: when entities aren't available (anchor is ""),
+    # the field stays False.
+    anchor_bodies: dict[str, set[str]] = {}
+    for vname, vtext, vents in versions:
+        ents = vents or []
+        for ent in ents:
+            kind = getattr(ent, "kind", "")
+            name = getattr(ent, "name", "") or ""
+            if not kind or not name:
+                continue
+            key = f"{kind}:{name}"
+            body = getattr(ent, "body", "") or ""
+            # Normalize: strip comment lines so a comment-only change doesn't
+            # count as a code change.
+            try:
+                from capybase.adapters.string_lexer import blank_strings_and_comments
+                normalized = blank_strings_and_comments(body, lang)
+            except Exception:  # noqa: BLE001
+                normalized = body
+            anchor_bodies.setdefault(key, set()).add(normalized)
+    if anchor_bodies:
+        for entry in entries:
+            if not entry.anchor_symbol:
+                continue
+            bodies = anchor_bodies.get(entry.anchor_symbol)
+            if bodies is not None and len(bodies) > 1:
+                entry.changed_with_code = True
 
     return entries
 
