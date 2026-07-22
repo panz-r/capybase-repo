@@ -626,16 +626,64 @@ class FutureConfig(BaseModel):
     # ON (always-on integral part), but the skip-when-empty gate means files
     # with no affected comments pay no cost.
     enable_comment_reconciliation: bool = True
-    # Phase 4 shadow jury (design §5): an untrusted semantic sensor that
-    # evaluates comment claims and records hypothetical routing decisions WITHOUT
-    # affecting the merge. Runs AFTER the comment pass succeeds and the buffer
-    # is frozen. Default False (opt-in for the live run). When True, the jury
-    # atomizes the final plan's rewritten comments into claims, builds evidence
-    # packets, runs the contradiction + provenance jurors, and the deterministic
-    # chair routes (all routes become shadow_record — no merge effect). The data
-    # is journaled as jury_shadow_* events + stored as jury_verdict artifacts
-    # for offline analysis. This is the design's JURY_SHADOW setting.
+    # Phase 4 comment jury (design §5). An untrusted semantic sensor that
+    # evaluates comment claims produced by the comment pass. Three operating
+    # modes:
+    #
+    #   ``off``    — the jury never runs (the default; zero overhead).
+    #   ``shadow`` — the design's JURY_SHADOW setting: the jury atomizes the
+    #                final plan's rewritten comments into claims, builds evidence
+    #                packets, runs the contradiction + provenance jurors, and the
+    #                deterministic chair routes — but EVERY route becomes
+    #                ``shadow_record`` (no merge effect). The data is journaled
+    #                as ``jury_shadow_*`` events + stored as ``jury_verdict``
+    #                artifacts for offline analysis. This is also the one-action
+    #                kill switch for ``enforce`` (set ``jury_mode = "shadow"`` to
+    #                return a live canary to no-merge-effect observation).
+    #   ``enforce``— the jury runs AFTER deterministic gates + comment
+    #                reconciliation + executable-fingerprint check, and its
+    #                routed outcomes are ACTED ON: accept only when no blocking
+    #                finding; comment_counterexample feeds a bounded jury-driven
+    #                comment CEGIS re-loop; human_review stops and preserves a
+    #                review bundle; code_reopen is gated by
+    #                ``enable_jury_code_reopen`` (default off → satisfied reopen
+    #                becomes human_review, never accept/suppression).
+    #
+    # The jury may NEVER override parsing, compilation, testing, fingerprint,
+    # policy, or other deterministic failures. All unknown/degraded states fail
+    # closed to human_review.
+    jury_mode: Literal["off", "shadow", "enforce"] = "off"
+    # BACK-COMPAT: the original opt-in flag. Setting ``enable_shadow_jury = true``
+    # is honored as ``jury_mode = "shadow"`` (read via the
+    # :func:`effective_jury_mode` helper). New deployments should set
+    # ``jury_mode`` directly. Kept so an existing toml/env still enables the
+    # shadow run without modification.
     enable_shadow_jury: bool = False
+    # Autonomous jury-driven code reopen. The shadow corpus contains no positive
+    # ``code_reopen`` example, so this is separately gated: default OFF. When OFF
+    # and a reopen request would otherwise be satisfied (full evidence quorum),
+    # the route becomes ``human_review`` — never ``accept`` and never silently
+    # suppressed. Turn on ONLY when positive-path evidence exists outside the
+    # shadow run (tracked as a residual risk, not part of the Python canary).
+    enable_jury_code_reopen: bool = False
+    # Jury-driven comment CEGIS loop budget (enforce mode). After the jury emits
+    # a ``comment_counterexample`` for a claim, the comment pass is re-run from
+    # the SAME frozen code + authoritative ledger with the counterexample as a
+    # seed failure. This bounds the re-loop; on exhaustion / no progress / a
+    # repeated counterexample, the case routes to ``human_review``. 0 disables
+    # jury-driven re-opening entirely (counterexamples route to human_review).
+    jury_comment_cegis_budget: int = 2
+    # Eligibility allowlist for the Python enforcement canary. The jury runs in
+    # ``enforce`` ONLY for languages/datasets in this envelope; everything else
+    # stays in shadow/off regardless of ``jury_mode``. Empty list = the
+    # language/dataset check is inert (all eligible). Populated by the canary
+    # config to the datasets represented in the shadow corpus.
+    jury_eligible_datasets: list[str] = Field(default_factory=list)
+    # Configuration + prompt version stamps recorded in the flight recorder so
+    # a replay is reconstructable and a config-version mismatch is detectable.
+    # Bumping these invalidates the replay cache (forces re-evaluation).
+    jury_config_version: str = "jury-cfg-v1"
+    jury_prompt_version: str = "jury-prompt-v1"
 
 
 class StructuralConfig(BaseModel):
@@ -983,3 +1031,24 @@ def _relocate_calibration_paths(cfg: "Config", config_dir: Path) -> None:
         cfg.calibration.model_profile_path = str(config_dir / _PROFILE_FILENAME)
     if cfg.calibration.model_path == _REPO_DEFAULT_CALIBRATION_PATH:
         cfg.calibration.model_path = str(config_dir / _CALIBRATION_FILENAME)
+
+
+#: The three jury operating modes, as a frozenset for validation.
+JURY_MODES = frozenset({"off", "shadow", "enforce"})
+
+
+def effective_jury_mode(future: "FutureConfig") -> str:
+    """Resolve the jury mode, honoring the back-compat ``enable_shadow_jury`` flag.
+
+    ``jury_mode`` is authoritative when set to anything but the default ``off``.
+    When ``jury_mode == "off"`` AND the legacy ``enable_shadow_jury`` is True,
+    treat it as ``"shadow"`` (back-compat for existing toml/env that opt into
+    the shadow run via the boolean). Otherwise return ``jury_mode`` as-is.
+
+    This is the single accessor the orchestrator + replay harness use, so the
+    back-compat migration lives in one place.
+    """
+    mode = getattr(future, "jury_mode", "off")
+    if mode == "off" and getattr(future, "enable_shadow_jury", False):
+        return "shadow"
+    return mode if mode in JURY_MODES else "off"
