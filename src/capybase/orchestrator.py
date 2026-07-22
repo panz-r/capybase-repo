@@ -220,6 +220,23 @@ def _juror_verdict_to_dict(v) -> dict:
     }
 
 
+def _persist_unit_hashes(orch, outcome) -> None:
+    """D1: copy a UnitOutcome's convergence hashes back to the per-step dict.
+
+    Called after every ``_resolve_unit`` return so that a subsequent
+    ``_whole_file_repair`` re-resolve of the same unit inherits the hashes —
+    the model can't cycle through the same cosmetic variations again.
+    """
+    step_hashes = getattr(orch, "_step_convergence_hashes", None)
+    if step_hashes is None or outcome is None:
+        return
+    uid = outcome.unit.unit_id
+    # Merge (don't overwrite — the re-resolve may have added new hashes too).
+    existing = step_hashes.get(uid, {})
+    existing.update(outcome._seen_normalized_hashes)
+    step_hashes[uid] = existing
+
+
 
 def _critic_failure(
     warning: VerificationWarning, dropped_units: list | None = None
@@ -4459,6 +4476,12 @@ class Orchestrator:
         # Stash for §10 code-reopening (_resolve_comment_contract_conflicts
         # needs the original to re-splice after a re-resolve).
         self._step_originals = originals
+        # D1: per-step convergence hashes, keyed by unit_id. Lifted from
+        # UnitOutcome (per-_resolve_unit-call) to per-step so that
+        # _whole_file_repair's re-resolve of the same unit inherits the
+        # convergence hashes from the first pass — the model can't cycle
+        # through the SAME cosmetic variations a second time. Reset each step.
+        self._step_convergence_hashes: dict[str, dict[str, int]] = {}
 
         # ---- Phase 1: resolve + write all files (no staging, no cargo) ----
         for path, units in result.units_by_path.items():
@@ -4471,6 +4494,7 @@ class Orchestrator:
             escalated_unit: UnitOutcome | None = None
             for unit in units:
                 outcome = self._resolve_unit(unit)
+                _persist_unit_hashes(self, outcome)  # D1: per-step convergence
                 result.outcomes.append(outcome)
                 if outcome.accepted is None:
                     escalated_unit = outcome
@@ -4479,12 +4503,28 @@ class Orchestrator:
             if escalated_unit is not None:
                 result.escalated = True
                 # Prefer the outcome's specific reason (e.g. "unit exceeded
-                # wall-time budget") when the escalation path set one; fall back
-                # to the generic per-unit message.
-                result.reason = (
-                    escalated_unit.reason
-                    or f"could not resolve {escalated_unit.unit.unit_id}"
-                )
+                # wall-time budget") when the escalation path set one. Fall
+                # back to the last validation's hard failures or the last
+                # candidate's failure kind, so the escalation reason is
+                # informative rather than the generic "could not resolve".
+                fallback = f"could not resolve {escalated_unit.unit.unit_id}"
+                if not escalated_unit.reason:
+                    # D5: try to extract a more specific reason from the last
+                    # validation or candidate attempt.
+                    last_val = escalated_unit.validation
+                    if last_val and last_val.hard_failures:
+                        msgs = [f.message[:80] for f in last_val.hard_failures[:3]]
+                        fallback += f" (last failures: {'; '.join(msgs)})"
+                    elif escalated_unit.attempts:
+                        last_cand = escalated_unit.attempts[-1]
+                        fk = getattr(last_cand, "failure_kind", "")
+                        if fk:
+                            fallback += f" (last candidate failure_kind: {fk})"
+                        else:
+                            fallback += " (no specific reason recorded)"
+                    else:
+                        fallback += " (no candidates generated)"
+                result.reason = escalated_unit.reason or fallback
                 self._record_outcomes_to_memory(result)
                 _alternates, _consensus = _extract_alternates(escalated_unit)
                 write_review_bundle(
@@ -5073,6 +5113,7 @@ class Orchestrator:
             outcome = self._resolve_unit(
                 unit, seed_failures=[seed_failure], seed_candidate=seed_cand,
             )
+            _persist_unit_hashes(self, outcome)  # D1: per-step convergence
             if outcome.accepted is None:
                 # The re-resolve escalated → stop; the outer loop will finalize.
                 return None
@@ -5270,6 +5311,7 @@ class Orchestrator:
         outcome = self._resolve_unit(
             unit, seed_failures=enriched_failures, seed_candidate=seed_cand,
         )
+        _persist_unit_hashes(self, outcome)  # D1: per-step convergence
         self.journal.emit(
             "candidate_validated",
             {
@@ -5291,6 +5333,17 @@ class Orchestrator:
         seed_candidate: "CandidateResolution | None" = None,
     ) -> UnitOutcome:
         outcome = UnitOutcome(unit=unit)
+        # D1: inherit per-step convergence hashes so _whole_file_repair's
+        # re-resolve of this unit sees the cosmetic variations already rejected
+        # by the first pass. Without this, the convergence detector resets and
+        # the model can cycle through the same variations again (6 LLM rounds
+        # × 240s = 600s+ per case). The hashes are copied back by
+        # _persist_unit_hashes at each call site after the loop returns.
+        step_hashes = getattr(self, "_step_convergence_hashes", None)
+        if step_hashes is not None:
+            prior = step_hashes.get(unit.unit_id)
+            if prior:
+                outcome._seen_normalized_hashes = dict(prior)
         # Build the per-unit history snapshot ONCE (#idea 5 cohesion). This
         # memoizes the HistoryContext/confidence/obligations/etc. so every
         # downstream mechanism (prompt, gates, probe, features, reuse) reads from

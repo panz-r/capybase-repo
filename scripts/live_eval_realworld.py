@@ -198,6 +198,11 @@ def _config_for(case: Case) -> Config:
     cfg.future.enable_structural_resolver = True
     cfg.future.enable_combination_search = True
     cfg.policy.max_retries_per_unit = 2  # cap CEGIS retries for throughput
+    # Per-unit wall-time budget: escalate cleanly at the orchestrator level
+    # (D2) rather than burning to the 600s harness cap and leaking the temp
+    # dir via an abandoned daemon thread. 180s = enough for 2-3 CEGIS retries
+    # at ~60s each; short enough that a multi-unit file still fits the case cap.
+    cfg.policy.max_wall_time_per_unit_seconds = 180
     # Grant more whole-file repair cycles for complex cases where the model
     # produces near-correct output that fails the cross-hunk validation.
     cfg.policy.max_whole_file_repair_retries = 2
@@ -251,18 +256,22 @@ def _token_jaccard(a: str, b: str) -> float:
 
 
 def run_case(case: Case, client: OpenAICompatibleClient, *,
-             flights_dir: Path | None = None) -> CaseResult:
+             flights_dir: Path | None = None,
+             td: str | None = None) -> CaseResult:
+    """Run one case. ``td`` is a pre-created temp dir (D3: the main thread owns
+    cleanup so a timeout-abandoned daemon thread doesn't leak the temp tree).
+    When ``td`` is None, a temp dir is created AND cleaned up within this call
+    (the pre-D3 behavior, for non-timeout callers)."""
     res = CaseResult(id=case.id, language=case.language, dataset=case.dataset)
     t0 = time.time()
-    # Use /var/tmp (root pool, 1.4T free) instead of the default /tmp (a 30G
-    # tmpfs that filled up on a previous run — the orchestrator's per-case
-    # session artifacts + git worktrees spike the usage).
-    with tempfile.TemporaryDirectory(prefix="capy-rw-", dir="/var/tmp") as td:
+    owns_td = td is None
+    if owns_td:
+        td = tempfile.mkdtemp(prefix="capy-rw-", dir="/var/tmp")
+    try:
         repo = Path(td) / "r"
         try:
             _materialize_conflict(case, repo)
         except _NoConflictError as exc:
-            # Not a real conflict — skip cleanly (not a capybase failure).
             res.elapsed = time.time() - t0
             res.escalated = True
             res.reason = f"skipped (no conflict): {exc}"
@@ -270,7 +279,6 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         except Exception as exc:
             res.elapsed = time.time() - t0
             res.reason = f"setup failed: {type(exc).__name__}: {str(exc)[:100]}"
-            # Treat setup failure as escalate (can't judge the merge)
             res.escalated = True
             return res
         cfg = _config_for(case)
@@ -285,10 +293,7 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
             res.escalated = True
             res.reason = f"orch raised: {type(exc).__name__}: {str(exc)[:100]}"
         # FR2a flight recorder: copy the per-case session artifacts out of the
-        # temp repo BEFORE the TemporaryDirectory cleanup fires. The session
-        # root contains the full §1 artifact list (prompts, responses,
-        # candidates, validations, comment_artifacts/, journal.jsonl, review
-        # bundle). Without this copy the temp dir deletes everything.
+        # temp repo. The session root contains the full §1 artifact list.
         res.session_id = getattr(orch, "session_id", "")
         if flights_dir is not None and res.session_id:
             try:
@@ -298,11 +303,16 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
                 if src is not None and src.exists():
                     shutil.copytree(src, dest, dirs_exist_ok=True)
             except Exception as exc:  # noqa: BLE001 — flight recorder is advisory
-                # Don't fail the case over a copy error; just note it.
                 res.reason = (res.reason + f" | flight copy failed: {exc}").strip(" |")
         # Read the resolved file.
         final = repo / case.path
         content = final.read_text() if final.exists() else ""
+    finally:
+        # D3: when the main thread owns the temp dir, it cleans up after the
+        # worker returns or times out. When we own it, clean up here.
+        if owns_td:
+            import shutil
+            shutil.rmtree(td, ignore_errors=True)
     res.elapsed = time.time() - t0
     res.marker_free = not _contains_markers(content) if content else False
     if case.language == "python":
@@ -373,10 +383,16 @@ def main():
         # retries) can't stall the whole run. Implemented via a watchdog thread
         # that interrupts the worker. If the cap fires, treat it as an escalate.
         import threading
+        import shutil
+        # D3: create the temp dir in the MAIN thread so we own cleanup. The
+        # worker receives it via `td=`; if the worker times out and is
+        # abandoned, the main thread cleans up here (no leaked temp trees).
+        case_td = tempfile.mkdtemp(prefix="capy-rw-", dir="/var/tmp")
         result_holder: list = []
         def _worker():
             try:
-                result_holder.append(run_case(case, client, flights_dir=flights_dir))
+                result_holder.append(run_case(case, client, flights_dir=flights_dir,
+                                              td=case_td))
             except Exception as exc:
                 result_holder.append(CaseResult(
                     id=case.id, language=case.language, dataset=case.dataset,
@@ -385,6 +401,9 @@ def main():
         th = threading.Thread(target=_worker, daemon=True)
         th.start()
         th.join(timeout=args.case_timeout or None)
+        # D3: clean up the temp dir from the main thread regardless of whether
+        # the worker finished or was abandoned.
+        shutil.rmtree(case_td, ignore_errors=True)
         if th.is_alive():
             # The worker is still in an LLM/CEGIS loop — abandon it (daemon) and
             # record an escalate. The next case starts fresh.

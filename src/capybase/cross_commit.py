@@ -76,10 +76,10 @@ def _language_for_path(path: str) -> str | None:
     source of truth, which surfaced this distinction.
     """
     _ensure_lang_maps()
-    dot = path.rfind(".")
-    if dot < 0:
-        return None
-    lang = _LANG_BY_EXT.get(path[dot:].lower())  # type: ignore[union-attr]
+    # Route through the canonical detect_language (handles :line:col suffixes
+    # in git conflict paths — the same bug that was fixed in conflict_extractor).
+    from capybase.conflict_extractor import detect_language
+    lang = detect_language(path)
     if lang is None:
         return None
     # Only scan languages the parser can structurally parse (have a family).
