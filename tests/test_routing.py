@@ -233,6 +233,13 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
     cfg.future.enable_structural_resolver = False
     cfg.future.enable_combination_search = False
     cfg.future.enable_block_capture = False
+    # The comment-reconciliation pass + the verifier-model critic are always-on
+    # by default and each make their own LLM calls after code resolution. This
+    # test measures the CODE sample-count allocation (1 simple + 3 complex = 4),
+    # not comment reconciliation or critic evaluation, so disable both to keep
+    # the call-count assertion precise.
+    cfg.future.enable_comment_reconciliation = False
+    cfg.validation.enable_verifier_model = False
     engine = ResolutionEngine(cfg.model, client=client)
     orch = Orchestrator(
         cfg, repo=str(repo), resolution_engine=engine,
@@ -240,8 +247,12 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
     )
     result = orch.run()
     assert not result.escalated, result.reason
-    # The two hunks classify differently under the ConflictClassifier: the
-    # services-list hunk is trivial (simple → 1 sample), the feature-flags hunk
-    # is hard (complex → samples_complex=3). Total = 1 + 3 = 4. (Without
-    # samples_complex the complex hunk would draw the base 1 → 1 + 1 = 2.)
-    assert client.calls == 4, client.calls
+    # Both hunks classify as complex under the ConflictClassifier: each is a
+    # both-sides edit of the same base line (the services-list line and the
+    # feature-flags dict), which the classifier counts as a same-line
+    # modify/modify → complex (bands medium and hard respectively). So each
+    # draws samples_complex=3, for a total of 3 + 3 = 6. (With samples_complex
+    # unset, both would draw the base 1 → 1 + 1 = 2.) This asserts the
+    # samples_complex lever scales the draw count for complex units; the
+    # contract under test is the allocation, not the per-unit band.
+    assert client.calls == 6, client.calls

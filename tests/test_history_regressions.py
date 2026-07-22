@@ -48,6 +48,13 @@ def _base_cfg(repo: Path) -> Config:
     cfg.tests.required = False
     cfg.tests.pre_continue = "true"
     cfg.tests.final = "true"
+    # The comment-reconciliation pass is always-on by default and legitimately
+    # makes LLM calls after a code resolution (even a reused one). Several tests
+    # in this module assert exact LLM call counts for the CODE path
+    # (e.g. zero calls after exact_history_reuse, or a precise sample count);
+    # those counts are about code resolution, not comment reconciliation, so
+    # disable the comment pass to keep the assertions meaningful.
+    cfg.future.enable_comment_reconciliation = False
     return cfg
 
 
