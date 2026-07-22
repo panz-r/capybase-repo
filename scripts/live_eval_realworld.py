@@ -212,12 +212,24 @@ def _config_for(case: Case) -> Config:
     # in the live eval with sim >= 0.95).
     if case.language == "rust":
         cfg.validation.rust_suppress_codes = ["E0432", "E0433"]
-    # Phase 4 shadow jury: opt-in via env var. When enabled, the jury runs
-    # AFTER each successful comment pass and records hypothetical routing
-    # decisions (no merge effect). The data is stored as jury_verdict artifacts
-    # under --preserve-flights for offline analysis.
-    if os.environ.get("CAPYBASE_SHADOW_JURY", "").lower() in ("1", "true", "yes"):
-        cfg.future.enable_shadow_jury = True
+    # Phase 4 comment jury. Three operating modes via CAPYBASE_JURY_MODE:
+    #   off     — never runs (default).
+    #   shadow  — records hypothetical routing decisions, NO merge effect. The
+    #             data is stored as jury_verdict artifacts under
+    #             --preserve-flights for offline analysis + replay.
+    #   enforce — acts on the four typed routes (accept / comment_counterexample
+    #             / human_review / code_reopen). The Python canary scope.
+    # The legacy CAPYBASE_SHADOW_JURY=1 maps to shadow (back-compat).
+    jury_mode = os.environ.get("CAPYBASE_JURY_MODE", "").strip().lower()
+    if jury_mode in ("off", "shadow", "enforce"):
+        cfg.future.jury_mode = jury_mode
+    elif os.environ.get("CAPYBASE_SHADOW_JURY", "").lower() in ("1", "true", "yes"):
+        cfg.future.enable_shadow_jury = True  # back-compat → effective shadow
+    # Autonomous code_reopen is separately gated (default off). Enable only when
+    # positive-path evidence exists outside the shadow corpus.
+    reopen = os.environ.get("CAPYBASE_JURY_CODE_REOPEN", "").strip().lower()
+    if reopen in ("1", "true", "yes"):
+        cfg.future.enable_jury_code_reopen = True
     return cfg
 
 
