@@ -673,12 +673,26 @@ class FutureConfig(BaseModel):
     # repeated counterexample, the case routes to ``human_review``. 0 disables
     # jury-driven re-opening entirely (counterexamples route to human_review).
     jury_comment_cegis_budget: int = 2
-    # Eligibility allowlist for the Python enforcement canary. The jury runs in
-    # ``enforce`` ONLY for languages/datasets in this envelope; everything else
-    # stays in shadow/off regardless of ``jury_mode``. Empty list = the
-    # language/dataset check is inert (all eligible). Populated by the canary
-    # config to the datasets represented in the shadow corpus.
+    # Eligibility allowlists for the enforcement canary. The jury runs in
+    # ``enforce`` ONLY when the conflict's language is in
+    # ``jury_eligible_languages`` (the orchestrator-enforceable gate — the
+    # orchestrator knows the file's language but not its dataset origin) AND
+    # (when set via the live harness) the dataset is in
+    # ``jury_eligible_datasets``. Everything else stays in shadow/off regardless
+    # of ``jury_mode``. Empty list = that check is inert (all eligible).
+    #
+    # The default ``["python"]`` restricts enforce to the validated envelope
+    # (the shadow corpus is Python-only). Expand only after a target language
+    # has its own shadow run + golden replay.
+    jury_eligible_languages: list[str] = Field(
+        default_factory=lambda: ["python"])
     jury_eligible_datasets: list[str] = Field(default_factory=list)
+    # Whether an enforce-mode ``human_review`` outcome BLOCKS the merge (returns
+    # None → the file keeps its frozen code + a review bundle is written, the
+    # rebase stops for that file) or is advisory (records + writes a bundle but
+    # lets the merge proceed). The brief's contract is block=True (the safe
+    # default); set False only for an observe-and-flag deployment.
+    jury_human_review_blocks: bool = True
     # Configuration + prompt version stamps recorded in the flight recorder so
     # a replay is reconstructable and a config-version mismatch is detectable.
     # Bumping these invalidates the replay cache (forces re-evaluation).
@@ -1052,3 +1066,29 @@ def effective_jury_mode(future: "FutureConfig") -> str:
     if mode == "off" and getattr(future, "enable_shadow_jury", False):
         return "shadow"
     return mode if mode in JURY_MODES else "off"
+
+
+def jury_eligible(future: "FutureConfig", language: str | None) -> bool:
+    """Whether the jury may run in ``enforce`` for a conflict of ``language``.
+
+    The orchestrator-enforceable eligibility gate. ``shadow`` mode is always
+    eligible (it's merge-neutral observation); ``enforce`` is restricted to the
+    languages in ``jury_eligible_languages`` (default Python — the validated
+    envelope). An empty allowlist means "all languages eligible" (opt-out of
+    the gate). This is the single place the orchestrator checks eligibility, so
+    the canary scope is enforced in one spot.
+    """
+    mode = effective_jury_mode(future)
+    if mode != "enforce":
+        return True  # shadow/off: no eligibility restriction (shadow is safe)
+    allowed = getattr(future, "jury_eligible_languages", []) or []
+    if not allowed:
+        return True  # empty allowlist = gate inert
+    lang = (language or "").strip().lower()
+    # Normalize common aliases so "py" matches "python".
+    aliases = {"py": "python", "rs": "rust",
+               "js": "javascript", "ts": "typescript"}
+    lang = aliases.get(lang, lang)
+    allowed_norm = {aliases.get(a.strip().lower(), a.strip().lower())
+                    for a in allowed}
+    return lang in allowed_norm

@@ -4760,8 +4760,22 @@ class Orchestrator:
         #            / human_review / code_reopen). The jury may NEVER override a
         #            deterministic failure; every degraded state fails closed.
         # Runs only on success (the frozen code is what the jury inspects).
-        from capybase.config import effective_jury_mode
+        from capybase.config import effective_jury_mode, jury_eligible
         jury_mode = effective_jury_mode(self.config.future)
+        # Eligibility gate (the canary envelope): enforce mode is restricted to
+        # the languages in jury_eligible_languages (default Python — the only
+        # language with a validated shadow corpus). An ineligible language
+        # downgrades to shadow (still observes, never acts) so the jury never
+        # enforces outside the validated envelope even when jury_mode=enforce.
+        if jury_mode == "enforce" and not jury_eligible(self.config.future, language):
+            jury_mode = "shadow"
+            self.journal.emit(
+                "jury_enforce_ineligible_downgrade",
+                {"language": language,
+                 "reason": "language outside jury_eligible_languages; "
+                           "downgraded enforce→shadow (observe only)"},
+                step_index=self.step, path=path,
+            )
         if jury_mode in ("shadow", "enforce") and current_outcome.succeeded:
             try:
                 unit = units[0] if units else None
@@ -5193,8 +5207,23 @@ class Orchestrator:
                 path, buffer, accepted, units, language, original, seeds, budget,
             ) or buffer
         # 3. human_review: write a review bundle + stop autonomous completion.
+        #    When jury_human_review_blocks (the default + the brief's contract),
+        #    return None so the caller keeps the frozen code and the rebase
+        #    stops for this file — the human must review the bundle. When False
+        #    (an observe-and-flag deployment), the merge proceeds and the bundle
+        #    is advisory.
         if has_human_review:
             self._write_jury_review_bundle(path, outcomes)
+            if getattr(self.config.future, "jury_human_review_blocks", True):
+                self.journal.emit(
+                    "jury_enforce_blocked",
+                    {"reason": "human_review outcome; merge blocked per "
+                     "jury_human_review_blocks",
+                     "outcomes": len([o for o in outcomes
+                                      if isinstance(o, HumanReviewOutcome)])},
+                    step_index=self.step, path=path,
+                )
+                return None  # block: keep frozen code, stop for human review
         return buffer
 
     def _jury_driven_comment_reloop(

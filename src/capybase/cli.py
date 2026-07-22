@@ -85,6 +85,28 @@ def build_parser() -> argparse.ArgumentParser:
             "failure never blocks a resolution."
         ),
     )
+    # Comment jury (Phase 4). The post-comment-pass semantic sensor that
+    # evaluates reconciled comment claims. off = never run; shadow = record
+    # hypothetical routes with NO merge effect (the safe observe mode);
+    # enforce = act on the four typed routes (accept / comment_counterexample
+    # / human_review / code_reopen), restricted to jury_eligible_languages.
+    # --no-jury is the one-action opt-out (sets mode off). These override the
+    # [future] jury_mode from capybase.toml for this invocation.
+    jury_group = p.add_mutually_exclusive_group()
+    jury_group.add_argument(
+        "--jury-mode",
+        choices=["off", "shadow", "enforce"],
+        default=None,
+        help="comment jury operating mode for this run (overrides capybase.toml "
+             "[future] jury_mode). shadow = observe + record, no merge effect; "
+             "enforce = act on routes (Python-eligible only); off = skip",
+    )
+    jury_group.add_argument(
+        "--no-jury",
+        action="store_true",
+        help="disable the comment jury entirely for this run (shorthand for "
+             "--jury-mode off)",
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("inspect", help="detect conflicts and write a review bundle; no mutation")
@@ -782,6 +804,16 @@ def main(argv: list[str] | None = None) -> int:
     # carry any capybase config. A repo-local ./capybase.toml still wins (per-repo
     # overrides); see Config.load for the full precedence.
     config = Config.load(config_dir=args.config)
+
+    # Comment jury CLI override (mutually exclusive group). --no-jury is the
+    # one-action opt-out; --jury-mode sets an explicit mode. Both override the
+    # [future] jury_mode from capybase.toml for this invocation only.
+    if getattr(args, "no_jury", False):
+        config.future.jury_mode = "off"
+        config.future.enable_shadow_jury = False
+    elif getattr(args, "jury_mode", None):
+        config.future.jury_mode = args.jury_mode
+        config.future.enable_shadow_jury = False  # explicit mode wins over legacy
 
     # The global --profile overrides the profile location for BOTH reading
     # (run/inspect/manual: the orchestrator overlay loads it from here) and
