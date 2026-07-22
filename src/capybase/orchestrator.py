@@ -4829,9 +4829,10 @@ class Orchestrator:
         conv_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
 
         def _propose(prompt: str) -> str:
-            return self.resolution_engine.raw_complete(
-                prompt, json_mode=True,
-            )
+            resp = self.resolution_engine.raw_complete(prompt, json_mode=True)
+            # raw_complete returns an LLMResponse object; the comment pass
+            # expects a str (the raw model output text).
+            return resp.text if hasattr(resp, "text") else str(resp)
 
         outcome = run_comment_cegis(
             buffer=buffer, frontier=frontier,
@@ -4944,7 +4945,8 @@ class Orchestrator:
             return
         # The LLM complete callable (reuses the resolution engine).
         def _complete(prompt: str) -> str:
-            return self.resolution_engine.raw_complete(prompt)
+            resp = self.resolution_engine.raw_complete(prompt)
+            return resp.text if hasattr(resp, "text") else str(resp)
         # Re-build the ledger to get the source variants for provenance.
         from capybase.comment_reconciler import build_comment_ledger
         ledger = build_comment_ledger(
