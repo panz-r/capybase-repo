@@ -237,7 +237,13 @@ class CorpusReplayReport:
     claim_decisions_replayed: int = 0
     per_claim_mismatches: list[ClaimReplay] = field(default_factory=list)
     reconstructed_route_counts: dict[str, int] = field(default_factory=dict)
+    # The recorded route distribution, summed from the per-claim replays
+    # (the recorded route each claim got during the live run, shadow OR enforce).
+    recorded_route_counts: dict[str, int] = field(default_factory=dict)
     golden_route_counts: dict[str, int] = field(default_factory=dict)
+    # Whether the corpus was recorded in enforce mode (vs shadow). Detected by
+    # whether ANY chair_decision.route is a real route (not shadow_record).
+    enforce_mode: bool = False
     # The 288-verbatim-comments preservation check (aggregate across corpus).
     verbatim_preserved: int = 0
     verbatim_byte_identical: bool = True
@@ -255,6 +261,13 @@ class CorpusReplayReport:
         Compared per-route so a golden zero-count (e.g. ``code_reopen: 0``)
         matches a reconstructed distribution that simply never produced that
         route (the key is absent rather than explicitly 0).
+
+        NOTE: the fixed ``golden_route_counts`` (12/6/4/0) is the SHADOW-corpus
+        target. For an ENFORCE-mode corpus the relevant comparison is
+        :attr:`matches_recorded` (reconstructed vs the corpus's own recorded
+        routes), since an enforce run has its own distribution that need not
+        equal the shadow corpus's. This property remains useful for the shadow
+        corpus + as a stop-condition signal.
         """
         recon = self.reconstructed_route_counts
         for route, expected in self.golden_route_counts.items():
@@ -262,6 +275,14 @@ class CorpusReplayReport:
                 return False
         # No reconstructed route outside the golden set.
         return set(recon).issubset(set(self.golden_route_counts))
+
+    @property
+    def matches_recorded(self) -> bool:
+        """True when the reconstructed routes reproduce the corpus's OWN recorded
+        routes (the per-claim match, aggregated). This is the correct replay
+        invariant for ANY corpus — shadow OR enforce — since it asserts the
+        deterministic router reproduces what was recorded, whatever that was."""
+        return not self.per_claim_mismatches
 
     @property
     def all_invariants_hold(self) -> bool:
@@ -276,27 +297,50 @@ class CorpusReplayReport:
 # ---------------------------------------------------------------------------
 
 
-def _golden_route_for(recorded_chair_reason: str) -> str:
-    """Extract the 'would route to <X>' golden route from a shadow-recorded
-    chair decision's reason.
+def _golden_route_for(chair_decision: dict) -> str:
+    """The recorded route the enforcement router should reproduce.
 
-    The recorded verdict files carry ``route: shadow_record`` (because the chair
-    ran in shadow mode during the live run). The reason string encodes the real
-    route: ``[SHADOW] would route to <route>: <detail>``. This extracts the
-    golden route the enforcement router is expected to reproduce.
+    Two recording shapes exist:
+
+    1. **Shadow mode**: the chair ran in shadow mode, so ``chair_decision.route``
+       is ``shadow_record`` and the real route is encoded in the reason string
+       as ``[SHADOW] would route to <route>: <detail>``. Decode it.
+    2. **Enforce mode**: the chair ran in non-shadow mode, so
+       ``chair_decision.route`` IS the real route directly (``accept``,
+       ``comment_counterexample``, ``code_reopen``, ``preserve_and_audit``,
+       ``human_review``...). Read it as-is, mapping the chair-internal routes
+       to their enforcement-outcome equivalents.
+
+    Returns the route in the enforcement-outcome vocabulary
+    (``accept`` / ``comment_counterexample`` / ``human_review`` / ``code_reopen``).
     """
-    if "would route to " in recorded_chair_reason:
-        after = recorded_chair_reason.split("would route to ", 1)[1]
-        route = after.split(":", 1)[0].strip()
-        # Map chair-internal preserve_and_audit → the enforcement outcome it
-        # becomes (human_review). The enforcement router converts
-        # preserve_and_audit + abstain + human_review into HumanReviewOutcome.
-        if route in ("preserve_and_audit", "abstain", "human_review"):
-            return "human_review"
-        if route in ("accept", "comment_counterexample", "code_reopen"):
-            return route
-        return "human_review"  # unknown → conservative
-    return "human_review"
+    route = str(chair_decision.get("route", "")).strip()
+    reason = str(chair_decision.get("reason", ""))
+    # Shadow mode: decode the real route from the [SHADOW] reason.
+    if route == "shadow_record" or "would route to " in reason:
+        if "would route to " in reason:
+            after = reason.split("would route to ", 1)[1]
+            decoded = after.split(":", 1)[0].strip()
+            return _normalize_route(decoded)
+        return "human_review"  # shadow with undecodable reason → conservative
+    # Enforce mode (or any non-shadow recording): the route is direct.
+    return _normalize_route(route)
+
+
+def _normalize_route(chair_route: str) -> str:
+    """Map a chair-internal route to its enforcement-outcome equivalent.
+
+    The chair can emit ``preserve_and_audit`` / ``abstain`` / ``human_review``
+    (all → ``human_review`` under enforcement) plus the four first-class routes.
+    Unknown → ``human_review`` (conservative)."""
+    r = chair_route.strip()
+    if r in ("preserve_and_audit", "abstain", "human_review"):
+        return "human_review"
+    if r in ("accept", "comment_counterexample", "code_reopen"):
+        return r
+    if r == "shadow_record":
+        return "human_review"  # shouldn't reach here; handled by caller
+    return "human_review"  # unknown → conservative
 
 
 def replay_session(
@@ -354,9 +398,11 @@ def replay_session(
             verdict_data.get("provenance_verdict"), "provenance")
         packet = _reconstruct_packet(claim, full_ledger)
 
-        # The recorded golden route (decoded from the shadow reason).
+        # The recorded golden route. In shadow mode it's decoded from the
+        # [SHADOW] reason; in enforce mode the chair_decision.route is the real
+        # route directly. _golden_route_for handles both shapes.
         recorded_chair = verdict_data.get("chair_decision", {}) or {}
-        golden_route = _golden_route_for(str(recorded_chair.get("reason", "")))
+        golden_route = _golden_route_for(recorded_chair)
 
         # Re-run the enforcement router.
         ctx = EnforcementContext(
@@ -484,6 +530,7 @@ def replay_corpus(
         return report
 
     all_reconstructed: dict[str, int] = {}
+    all_recorded: dict[str, int] = {}
     for entry in manifest:
         case_id = str(entry.get("case_id", ""))
         session_id = str(entry.get("session_id", ""))
@@ -504,13 +551,33 @@ def replay_corpus(
         for cr in res.claim_replays:
             all_reconstructed[cr.reconstructed_route] = (
                 all_reconstructed.get(cr.reconstructed_route, 0) + 1)
+            all_recorded[cr.recorded_route] = (
+                all_recorded.get(cr.recorded_route, 0) + 1)
             if not cr.match:
                 report.per_claim_mismatches.append(cr)
         if not res.idempotent:
             report.idempotent = False
 
     report.reconstructed_route_counts = all_reconstructed
+    report.recorded_route_counts = all_recorded
+    # Detect enforce mode: an enforce corpus has real recorded routes (not the
+    # shadow_record→decoded shadow shape). If any recorded route came through
+    # as a direct (non-shadow) route, this was an enforce recording.
+    report.enforce_mode = any(
+        route in ("accept", "comment_counterexample", "human_review", "code_reopen")
+        and all_recorded.get(route, 0) > 0
+        for route in all_recorded
+    ) and not _is_shadow_corpus(all_recorded)
     return report
+
+
+def _is_shadow_corpus(recorded_counts: dict[str, int]) -> bool:
+    """Heuristic: a shadow corpus's recorded routes sum to the golden 12/6/4/0.
+    Used to distinguish a shadow corpus (fixed golden target) from an enforce
+    corpus (its own recorded distribution)."""
+    return recorded_counts == {
+        "accept": 12, "comment_counterexample": 6, "human_review": 4,
+    }
 
 
 def _count_verbatim_preserved(flights_dir: Path) -> int:
@@ -584,10 +651,17 @@ def format_report(report: CorpusReplayReport) -> str:
     lines.append(f"- Verdict files replayed: {report.verdict_files_replayed}")
     lines.append(f"- Claim-level decisions replayed: {report.claim_decisions_replayed}")
     lines.append("")
-    lines.append("### Route distribution (reconstructed vs golden)")
-    lines.append(f"- Golden: {report.golden_route_counts}")
+    lines.append("### Route distribution (recorded vs reconstructed)")
+    mode_label = "ENFORCE" if report.enforce_mode else "SHADOW"
+    lines.append(f"- Recording mode: {mode_label}")
+    lines.append(f"- Recorded:    {report.recorded_route_counts}")
     lines.append(f"- Reconstructed: {report.reconstructed_route_counts}")
-    lines.append(f"- Matches golden: {'YES' if report.matches_golden else 'NO'}")
+    lines.append(f"- Matches recorded (replay reproduces the live routes): "
+                 f"{'YES' if report.matches_recorded else 'NO'}")
+    if not report.enforce_mode:
+        # The fixed golden (12/6/4/0) only applies to the shadow corpus.
+        lines.append(f"- Shadow golden: {report.golden_route_counts}")
+        lines.append(f"- Matches shadow golden: {'YES' if report.matches_golden else 'NO'}")
     lines.append("")
     lines.append("### Invariants")
     lines.append(f"- Verbatim comments preserved: {report.verbatim_preserved}")

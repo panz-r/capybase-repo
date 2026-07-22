@@ -205,27 +205,44 @@ class TestWrongCaseBoundaries:
 
 
 class TestReplayHelpers:
-    def test_golden_route_for_shadow_reason_decodes_correctly(self):
-        """The shadow-recorded chair reason encodes the real route; the decoder
-        maps it to the enforcement outcome it becomes."""
-        assert _golden_route_for(
-            "[SHADOW] would route to accept: claim X") == "accept"
-        assert _golden_route_for(
-            "[SHADOW] would route to comment_counterexample: X") == "comment_counterexample"
-        assert _golden_route_for(
-            "[SHADOW] would route to preserve_and_audit: X") == "human_review"
-        assert _golden_route_for(
-            "[SHADOW] would route to human_review: X") == "human_review"
-        assert _golden_route_for("[SHADOW] would route to code_reopen: X") == "code_reopen"
-        # Unknown → conservative human_review.
-        assert _golden_route_for("[SHADOW] would route to bogus: X") == "human_review"
-        assert _golden_route_for("no shadow marker") == "human_review"
+    def test_golden_route_for_shadow_mode_decodes_from_reason(self):
+        """Shadow recordings: route=shadow_record, real route in the [SHADOW]
+        reason. The decoder extracts it."""
+        assert _golden_route_for({"route": "shadow_record",
+            "reason": "[SHADOW] would route to accept: claim X"}) == "accept"
+        assert _golden_route_for({"route": "shadow_record",
+            "reason": "[SHADOW] would route to comment_counterexample: X"}) == "comment_counterexample"
+        assert _golden_route_for({"route": "shadow_record",
+            "reason": "[SHADOW] would route to preserve_and_audit: X"}) == "human_review"
+        assert _golden_route_for({"route": "shadow_record",
+            "reason": "[SHADOW] would route to human_review: X"}) == "human_review"
+        assert _golden_route_for({"route": "shadow_record",
+            "reason": "[SHADOW] would route to code_reopen: X"}) == "code_reopen"
+        # Unknown shadow route → conservative human_review.
+        assert _golden_route_for({"route": "shadow_record",
+            "reason": "[SHADOW] would route to bogus: X"}) == "human_review"
+
+    def test_golden_route_for_enforce_mode_reads_direct_route(self):
+        """Enforce recordings: the chair ran non-shadow, so chair_decision.route
+        IS the real route directly (no [SHADOW] decoding)."""
+        assert _golden_route_for({"route": "accept",
+            "reason": "claim X SUPPORTED: accept"}) == "accept"
+        assert _golden_route_for({"route": "comment_counterexample",
+            "reason": "claim X UNGROUNDED: comment counterexample"}) == "comment_counterexample"
+        assert _golden_route_for({"route": "preserve_and_audit",
+            "reason": "preserve + audit"}) == "human_review"
+        assert _golden_route_for({"route": "code_reopen",
+            "reason": "code reopen"}) == "code_reopen"
+        # Unknown direct route → conservative human_review.
+        assert _golden_route_for({"route": "bogus", "reason": "x"}) == "human_review"
+        assert _golden_route_for({}) == "human_review"
 
     def test_format_report_includes_all_sections(self):
         report = replay_corpus(FLIGHTS_ROOT)
         text = format_report(report)
         assert "Sessions replayed" in text
         assert "Route distribution" in text
-        assert "Matches golden" in text
+        assert "Matches recorded" in text
+        assert "Recording mode" in text
         assert "Invariants" in text
         assert "Idempotent" in text

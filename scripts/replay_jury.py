@@ -74,8 +74,11 @@ def main(argv: list[str] | None = None) -> int:
             "sessions_replayed": report.sessions_replayed,
             "verdict_files_replayed": report.verdict_files_replayed,
             "claim_decisions_replayed": report.claim_decisions_replayed,
+            "enforce_mode": report.enforce_mode,
+            "recorded_route_counts": report.recorded_route_counts,
             "golden_route_counts": report.golden_route_counts,
             "reconstructed_route_counts": report.reconstructed_route_counts,
+            "matches_recorded": report.matches_recorded,
             "matches_golden": report.matches_golden,
             "verbatim_preserved": report.verbatim_preserved,
             "verbatim_byte_identical": report.verbatim_byte_identical,
@@ -95,8 +98,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(format_report(report))
 
-    # Exit code: 0 when golden matches AND all invariants hold.
-    ok = report.matches_golden and report.all_invariants_hold
+    # Exit code: 0 when the replay reproduces the corpus's OWN recorded routes
+    # (matches_recorded — the correct invariant for both shadow AND enforce
+    # corpora) AND all invariants hold. For the shadow corpus specifically,
+    # matches_recorded is equivalent to matches_golden since recorded==golden.
+    ok = report.matches_recorded and report.all_invariants_hold
     return 0 if ok else 1
 
 
