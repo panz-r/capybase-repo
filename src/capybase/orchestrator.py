@@ -5092,18 +5092,36 @@ class Orchestrator:
                      "artifact_key": key},
                     step_index=self.step, path=path,
                 )
-                # Enforce mode: route to a typed outcome + journal it.
+                # Enforce mode: route to a typed outcome + journal it + persist
+                # the full decision record (reconstructable without re-running
+                # the model). The record carries mode, session/fingerprint/hash
+                # bindings, prompt/config versions, juror outputs, parsed
+                # verdicts, the aggregate finding, the final route, and the
+                # feature-gate state (the brief's flight-recorder fields).
                 if mode == "enforce" and enforce_router is not None:
                     eo = enforce_router.route(
                         claim, c_verdict, p_verdict, packet, enforce_ctx,
                     )
                     enforce_outcomes.append(eo)
+                    enforce_key = ""
+                    try:
+                        import json as _ej
+                        enforce_key, _ = self.journal.store_comment_artifact(
+                            "jury_enforce_decision",
+                            _ej.dumps(eo.decision_record, indent=2),
+                            ext="json",
+                        )
+                    except Exception:  # noqa: BLE001 — artifact is advisory
+                        pass
                     self.journal.emit(
                         "jury_enforce_decision",
                         {"claim_id": eo.claim_id, "lineage_id": eo.lineage_id,
                          "route": eo.route, "effective_verdict": eo.effective_verdict,
                          "reason": eo.reason[:300],
-                         "evidence_quorum_met": eo.evidence_quorum_met},
+                         "evidence_quorum_met": eo.evidence_quorum_met,
+                         "fingerprint_match": eo.decision_record.get(
+                             "fingerprint_match", True),
+                         "artifact_key": enforce_key},
                         step_index=self.step, path=path,
                     )
         self.journal.emit(
