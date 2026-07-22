@@ -346,6 +346,115 @@ sbcr_stagnation_limit = 10        # stop hill-climb after N consecutive non-impr
 sbcr_max_time_seconds = 15.0      # wall-clock budget for hill-climb on large blocks
 sbcr_max_iterations = 2000        # hard budget on fitness evaluations
 
+# --- Comment jury enforcement (Phase 4) -------------------------------------
+# off (default) | shadow | enforce. In 'enforce' the jury acts on the four
+# typed routes AFTER all deterministic gates + comment reconciliation + the
+# executable-fingerprint check. The jury may NEVER override a deterministic
+# failure. See the [jury] section below for the full canary envelope.
+#   KILL SWITCH: set jury_mode = "shadow" to return a live canary to no-merge-
+#   effect observation (one action, no code change).
+jury_mode = "off"
+# Autonomous jury-driven code reopen. Separately gated: the shadow corpus has
+# no positive code_reopen example, so this stays off for the Python canary.
+# When off, a satisfied reopen becomes human_review (never accept / suppression).
+enable_jury_code_reopen = false
+# The bounded jury-driven comment CEGIS re-loop budget (enforce mode). After a
+# jury comment_counterexample, the comment pass re-runs from the SAME frozen
+# code + ledger with the counterexample as a seed failure. 0 disables (→ human).
+jury_comment_cegis_budget = 2
+# Eligibility allowlist (the Python canary envelope — the datasets represented
+# in the shadow corpus). Empty = inert; the canary populates this list.
+jury_eligible_datasets = []
+# Replay + version-mismatch stamps (bump to invalidate the replay cache).
+jury_config_version = "jury-cfg-v1"
+jury_prompt_version = "jury-prompt-v1"
+
+
+# ---------------------------------------------------------------------------
+# [jury] — the Python enforcement canary configuration.
+#
+# This section is the machine-readable canary spec. It documents the exact
+# enabled scope, required gates, failure routes, loop budgets, comment
+# invariants, the code-reopen feature state, flight-recorder settings, the
+# kill switch, and the automatic stop conditions. Nothing safety-relevant is
+# implicit. Values here are read as documentation + defaults by tooling; the
+# authoritative runtime knobs are the [future] jury_* fields above.
+# ---------------------------------------------------------------------------
+[jury]
+# Mode + scope. The canary is PYTHON-ONLY, restricted to the eligibility
+# classes represented in the shadow corpus (the datasets below). Other
+# languages / datasets stay in shadow/off regardless of jury_mode.
+canary_mode = "enforce"            # the mode the canary runs in when enabled
+canary_language = "python"
+canary_datasets = [
+    "flask-history",
+    "requests-history",
+    "zenodo-hdiff",
+]
+# Repository allowlist controls. Empty allowlist = apply to every repo in the
+# canary's execution environment; populated = opt-in per repo.
+repository_allowlist = []
+# Required deterministic gates the jury runs ONLY after (the jury may never
+# override any of these). These are always-on; listed for explicitness.
+required_gates = [
+    "py_compile",
+    "ast_preserved",
+    "splice_scope",
+    "whole_file_syntax",
+    "executable_token_equality",
+]
+# Jury requirements (the conditions for a valid enforcement decision).
+jury_requirements = [
+    "both_jurors_produced_verdicts",
+    "evidence_references_resolve",
+    "evidence_packet_complete_and_consistent",
+    "executable_fingerprint_matches_frozen",
+    "context_truncation_accounted_for",
+    "session_candidate_ledger_hashes_bound",
+]
+# The four first-class routes + their failure behavior.
+failure_routes = [
+    "accept",                       # only when no blocking finding + all evidence
+    "comment_counterexample",       # → bounded comment CEGIS re-loop
+    "human_review",                 # → stop + preserve review bundle (safe terminal)
+    "code_reopen",                  # → gated (see code_reopen_feature_state)
+]
+# Loop budgets.
+loop_budgets = { comment_cegis = 2, jury_comment_cegis = 2, code_to_comment_repair = 1 }
+# Comment invariants (never relaxed by the jury).
+comment_invariants = [
+    "executable_token_stream_unchanged_after_comment_pass",
+    "unverifiable_inherited_claims_preserved_not_rewritten_or_deleted",
+    "machine_legal_generated_doctest_comments_preserved_verbatim",
+    "jury_never_directly_edits_source_code",
+]
+# Code-reopen feature state. Autonomous code_reopen stays DISABLED for the
+# Python canary (no positive-path evidence in the shadow corpus).
+code_reopen_feature_state = "disabled"
+# When a reopen quorum IS met but the gate is disabled, route to human_review
+# (never accept, never silent suppression).
+disabled_reopen_route = "human_review"
+# Flight-recorder settings — every enforced decision is reconstructable without
+# re-running the model (jury_verdict + jury_enforce_decision artifacts).
+flight_recorder = { enabled = true, persist_decision_records = true, persist_verdicts = true }
+# Kill switch: one action returns the system to shadow (no merge effect).
+kill_switch = { action = "set jury_mode = shadow", merge_effect = "none" }
+# Automatic STOP conditions. Enforce STOPS on any of these (safety); non-safety
+# drift (latency, moderate human-review-rate rise) alerts instead of shutting
+# down. These are encoded for monitoring/operations, not enforced in-process.
+stop_conditions = [
+    "any false or unsupported code reopen",
+    "any accepted candidate with an executable-fingerprint mismatch",
+    "any acceptance caused by missing, malformed, stale, or incomplete evidence",
+    "any confirmed incorrect comment change that the recorded jury evidence should have blocked",
+    "missing decision artifacts for an enforced route",
+    "divergence from golden replay without an approved configuration change",
+]
+alert_only_conditions = [
+    "increased latency",
+    "moderate increase in human-review rate",
+]
+
 
 # ---------------------------------------------------------------------------
 # First-use workflow (the safety-first commands)
