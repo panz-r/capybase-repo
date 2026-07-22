@@ -4751,21 +4751,34 @@ class Orchestrator:
             current_outcome = next_outcome
         # Finalize: journal the report + write review bundle on failure.
         self._finalize_comment_pass(path, current_outcome, units)
-        # SJ6: run the shadow jury AFTER the comment pass settles. The jury
-        # evaluates the final plan's rewritten comments as untrusted semantic
-        # sensors — it records hypothetical routing decisions WITHOUT affecting
-        # the merge. Opt-in via config.future.enable_shadow_jury (default False).
+        # The comment jury (Phase 4): runs AFTER the comment pass settles and the
+        # buffer is frozen. Three modes via config (effective_jury_mode):
+        #   off    — never runs (default).
+        #   shadow — records hypothetical routing decisions, NO merge effect.
+        #            Also the one-action kill switch for enforce.
+        #   enforce— acts on the four typed routes (accept / comment_counterexample
+        #            / human_review / code_reopen). The jury may NEVER override a
+        #            deterministic failure; every degraded state fails closed.
         # Runs only on success (the frozen code is what the jury inspects).
-        if getattr(self.config.future, "enable_shadow_jury", False) and current_outcome.succeeded:
+        from capybase.config import effective_jury_mode
+        jury_mode = effective_jury_mode(self.config.future)
+        if jury_mode in ("shadow", "enforce") and current_outcome.succeeded:
             try:
                 unit = units[0] if units else None
-                self._run_shadow_jury(
+                base_text = (unit.base.text or "") if unit else ""
+                current_text = (unit.current.text or "") if unit else ""
+                replayed_text = (unit.replayed.text or "") if unit else ""
+                enforce_outcomes = self._run_jury(
                     path, current_outcome, units, language,
-                    base_text=(unit.base.text or "") if unit else "",
-                    current_text=(unit.current.text or "") if unit else "",
-                    replayed_text=(unit.replayed.text or "") if unit else "",
+                    base_text, current_text, replayed_text, mode=jury_mode,
                 )
-            except Exception:  # noqa: BLE001 — shadow jury is purely advisory
+                # Enforce mode: act on the typed outcomes. Shadow returns [].
+                if jury_mode == "enforce" and enforce_outcomes:
+                    return self._apply_jury_enforcement(
+                        path, current_outcome.buffer, accepted, units,
+                        language, original, enforce_outcomes,
+                    )
+            except Exception:  # noqa: BLE001 — jury is advisory; never block
                 pass
         return current_outcome.buffer if current_outcome.succeeded else None
 
@@ -4906,33 +4919,45 @@ class Orchestrator:
             except Exception:  # noqa: BLE001 — review bundle is advisory
                 pass
 
-    def _run_shadow_jury(
+    def _run_jury(
         self, path: str, outcome, units: list, language: str | None,
         base_text: str, current_text: str, replayed_text: str,
-    ) -> None:
-        """SJ6: run the shadow jury AFTER a successful comment pass.
+        *, mode: str = "shadow",
+    ) -> list:
+        """Run the comment jury in ``shadow`` or ``enforce`` mode.
 
-        The jury evaluates the final plan's rewritten comments as untrusted
-        semantic sensors. It atomizes claims, builds evidence packets, runs the
-        contradiction + provenance jurors, and the deterministic chair routes.
-        Every route is ``shadow_record`` — NO merge effect. The data is
-        journaled as ``jury_shadow_*`` events + stored as ``jury_verdict``
-        artifacts for offline analysis.
+        Generalizes SJ6 (the shadow jury) to the three operating modes. The
+        jury evaluates the final plan's rewritten comments as untrusted semantic
+        sensors: atomize claims, build evidence packets, run the contradiction +
+        provenance jurors, and route.
 
-        This is the design's JURY_SHADOW setting: "the jury evaluates
-        candidates and records hypothetical actions, but its output does not
-        affect the merge."
+        - ``shadow`` (the JURY_SHADOW setting): the chair runs in shadow mode so
+          every route is ``shadow_record`` (NO merge effect). The data is
+          journaled as ``jury_shadow_*`` events + stored as ``jury_verdict``
+          artifacts. Returns an empty list (no typed outcomes to act on).
+        - ``enforce``: the chair runs in non-shadow mode and the
+          :class:`jury_enforce.EnforcementRouter` converts each decision into a
+          first-class typed outcome (accept / comment_counterexample /
+          human_review / code_reopen). The outcomes are returned so the caller
+          (:meth:`_reconcile_comments`) can act on them — re-loop the comment
+          CEGIS on a counterexample, write a review bundle on human_review, or
+          re-open code (gated). The verdicts + decisions are STILL journaled +
+          stored as artifacts (identical to shadow for replay continuity), AND
+          an additional ``jury_enforce_decision`` event is emitted per outcome.
 
-        Failures are purely advisory — a jury LLM error or parse failure
-        journals a ``jury_shadow_skipped`` event and returns. The frozen code
-        is never touched.
+        ``off`` is handled by the caller (this method is not invoked).
+
+        Failures are advisory in shadow; in enforce, a degraded state produces a
+        fail-closed :class:`HumanReviewOutcome` (never accept). The frozen code
+        is never touched by the jury itself — only the existing deterministic
+        CEGIS machinery can produce a new candidate.
         """
         if not outcome.succeeded or not outcome.final_plan:
-            return  # only run on success with a plan
+            return []  # only run on success with a plan
         lang = (language or "").strip().lower()
         frozen_code = outcome.buffer
         if not frozen_code:
-            return
+            return []
         try:
             from capybase.comment_claims import (
                 build_atomize_prompt, parse_atomized_claims, classify_claim_origin,
@@ -4942,7 +4967,7 @@ class Orchestrator:
                 ContradictionJuror, ProvenanceJuror, DeterministicChair,
             )
         except ImportError:
-            return
+            return []
         # The LLM complete callable (reuses the resolution engine).
         def _complete(prompt: str) -> str:
             resp = self.resolution_engine.raw_complete(prompt)
@@ -4952,8 +4977,41 @@ class Orchestrator:
         ledger = build_comment_ledger(
             base_text, current_text, replayed_text, frozen_code, lang,
         )
-        chair = DeterministicChair(shadow_mode=True)
+        # The chair runs in shadow mode for shadow, non-shadow for enforce.
+        # (The EnforcementRouter constructs its OWN non-shadow chair internally;
+        # we keep this one for the recorded verdict artifact so the replay
+        # harness — which decodes the [SHADOW] reason — stays consistent.)
+        shadow_mode = (mode == "shadow")
+        chair = DeterministicChair(shadow_mode=shadow_mode)
+        # Enforce-mode router + context (lazily built only when enforcing).
+        enforce_router = None
+        enforce_ctx = None
+        if mode == "enforce":
+            try:
+                from capybase.jury_enforce import EnforcementRouter, EnforcementContext
+                from capybase.comment_reconciler import _executable_tokens
+                import hashlib as _hashlib
+                frozen_fp = _hashlib.sha256(
+                    _executable_tokens(frozen_code, lang).encode()).hexdigest()[:16]
+                enable_reopen = getattr(
+                    self.config.future, "enable_jury_code_reopen", False)
+                enforce_router = EnforcementRouter(enable_code_reopen=enable_reopen)
+                enforce_ctx = EnforcementContext(
+                    session_id=getattr(self.journal, "session_id", ""),
+                    frozen_fingerprint=frozen_fp,
+                    candidate_fingerprint=frozen_fp,  # accepted → matches frozen
+                    ledger_lineage_ids={e.lineage_id for e in ledger},
+                    frozen_code=frozen_code, ledger_entries=ledger,
+                    prompt_version=getattr(
+                        self.config.future, "jury_prompt_version", "jury-prompt-v1"),
+                    config_version=getattr(
+                        self.config.future, "jury_config_version", "jury-cfg-v1"),
+                    enable_code_reopen=enable_reopen,
+                )
+            except ImportError:
+                enforce_router = None
         claims_evaluated = 0
+        enforce_outcomes: list = []
         for action in outcome.final_plan.actions:
             if action.operation not in ("rewrite", "move", "merge"):
                 continue  # only evaluate rewritten comments
@@ -4996,9 +5054,13 @@ class Orchestrator:
                         step_index=self.step, path=path,
                     )
                     continue
-                # SJ5: the deterministic chair routes.
+                # SJ5: the deterministic chair routes (shadow or real).
                 decision = chair.route(claim, c_verdict, p_verdict, packet)
                 # Store the verdicts + decision as artifacts (content-addressed).
+                # In BOTH modes the artifact records the chair decision; for
+                # shadow the route is shadow_record (the replay decodes the real
+                # route from the [SHADOW] reason). For enforce the artifact
+                # records the real chair route so the replay is continuous.
                 import json as _json
                 verdict_payload = {
                     "claim_id": claim.claim_id,
@@ -5030,11 +5092,187 @@ class Orchestrator:
                      "artifact_key": key},
                     step_index=self.step, path=path,
                 )
+                # Enforce mode: route to a typed outcome + journal it.
+                if mode == "enforce" and enforce_router is not None:
+                    eo = enforce_router.route(
+                        claim, c_verdict, p_verdict, packet, enforce_ctx,
+                    )
+                    enforce_outcomes.append(eo)
+                    self.journal.emit(
+                        "jury_enforce_decision",
+                        {"claim_id": eo.claim_id, "lineage_id": eo.lineage_id,
+                         "route": eo.route, "effective_verdict": eo.effective_verdict,
+                         "reason": eo.reason[:300],
+                         "evidence_quorum_met": eo.evidence_quorum_met},
+                        step_index=self.step, path=path,
+                    )
         self.journal.emit(
             "jury_shadow_completed",
-            {"claims_evaluated": claims_evaluated},
+            {"claims_evaluated": claims_evaluated, "mode": mode},
             step_index=self.step, path=path,
         )
+        return enforce_outcomes
+
+    def _apply_jury_enforcement(
+        self, path: str, buffer: str, accepted: list, units: list,
+        language: str | None, original: str,
+        outcomes: list,
+    ) -> str:
+        """Act on a list of :class:`EnforcementOutcome` (enforce mode).
+
+        The four first-class routes become side effects:
+
+        - ``accept``: no action (the reconciled candidate stands).
+        - ``comment_counterexample``: feed the counterexample into a bounded
+          jury-driven comment CEGIS re-loop, restarting from the SAME frozen
+          code + authoritative ledger. Bounded by
+          ``future.jury_comment_cegis_budget``; on exhaustion / repeated
+          counterexample → human_review. The jury never edits source.
+        - ``human_review``: stop autonomous completion + preserve a review
+          bundle (frozen code, candidate comments, ledger, verifier results,
+          juror verdicts). The terminal safe route.
+        - ``code_reopen``: re-enter the code CEGIS for the affected unit (the
+          existing ``_resolve_comment_contract_conflicts`` path), seeded with
+          the contract the jury's witness established. Only reached when
+          ``enable_jury_code_reopen`` is True (else the router already converted
+          it to human_review).
+
+        Returns the (possibly re-reconciled) buffer. The frozen executable code
+        is never corrupted — every path goes through deterministic validation.
+        """
+        from capybase.jury_enforce import (
+            CommentCounterexampleOutcome, HumanReviewOutcome, CodeReopenOutcome,
+            counterexample_to_failure,
+        )
+        lang = (language or "").strip().lower()
+        # Aggregate: a single human_review or code_reopen taints the whole case.
+        has_human_review = any(isinstance(o, HumanReviewOutcome) for o in outcomes)
+        reopen_outcomes = [o for o in outcomes
+                           if isinstance(o, CodeReopenOutcome)]
+        counterexamples = [o for o in outcomes
+                           if isinstance(o, CommentCounterexampleOutcome)]
+        # 1. code_reopen: re-enter the code CEGIS (gated; only present when the
+        #    feature is on + quorum met).
+        if reopen_outcomes:
+            reopen_requests = [{
+                "lineage_id": o.lineage_id,
+                "trust": "high",
+                "anchor_symbol": getattr(o.chair_decision, "witness", None) or "",
+                "comment_text": o.contract_text,
+                "version": "resolved",
+            } for o in reopen_outcomes]
+            new_buffer = self._resolve_comment_contract_conflicts(
+                path, buffer, accepted, units, language, reopen_requests,
+            )
+            if new_buffer is not None:
+                buffer = new_buffer
+        # 2. comment_counterexample: bounded jury-driven comment CEGIS re-loop.
+        if counterexamples and not has_human_review:
+            budget = getattr(self.config.future, "jury_comment_cegis_budget", 2)
+            seeds = [counterexample_to_failure(o.counterexample)
+                     for o in counterexamples]
+            buffer = self._jury_driven_comment_reloop(
+                path, buffer, accepted, units, language, original, seeds, budget,
+            ) or buffer
+        # 3. human_review: write a review bundle + stop autonomous completion.
+        if has_human_review:
+            self._write_jury_review_bundle(path, outcomes)
+        return buffer
+
+    def _jury_driven_comment_reloop(
+        self, path: str, buffer: str, accepted: list, units: list,
+        language: str | None, original: str,
+        seeds: list, budget: int,
+    ) -> str | None:
+        """The jury-driven comment CEGIS re-loop (enforce mode).
+
+        After the jury emits comment counterexamples, re-run the comment pass
+        with the counterexamples as seed failures (threaded into the §8 prompt's
+        ``### prior-attempt feedback`` block). Bounded by ``budget``; restarts
+        from the same frozen code + authoritative ledger each iteration. On
+        exhaustion or a repeated counterexample, routes to human_review (the
+        caller writes the bundle). Returns the re-reconciled buffer or None when
+        the re-loop escalates.
+        """
+        if budget <= 0 or not seeds:
+            return None
+        for _ in range(budget):
+            outcome = self._run_comment_pass(
+                path, buffer, accepted, original, units, language,
+            )
+            if outcome is None:
+                return None
+            if outcome.succeeded:
+                return outcome.buffer
+            # Did the seeds get addressed? If the new failures differ from the
+            # seeds, progress was made; loop again. If they're identical, stop
+            # (repeated counterexample → human_review).
+            new_fb = outcome.last_feedback
+            if new_fb and seeds and all(
+                getattr(nf, "kind", "") == getattr(s, "kind", "")
+                and getattr(nf, "lineage_id", "") == getattr(s, "lineage_id", "")
+                for nf, s in zip(new_fb, seeds)
+            ):
+                # Repeated counterexample — no progress.
+                self.journal.emit(
+                    "jury_comment_cegis_exhausted",
+                    {"reason": "repeated identical counterexample", "budget": budget},
+                    step_index=self.step, path=path,
+                )
+                return None
+            buffer = outcome.buffer
+        self.journal.emit(
+            "jury_comment_cegis_exhausted",
+            {"reason": "budget exhausted", "budget": budget},
+            step_index=self.step, path=path,
+        )
+        return None
+
+    def _write_jury_review_bundle(self, path: str, outcomes: list) -> None:
+        """Write a human-review bundle for a jury-enforced human_review.
+
+        Preserves: frozen executable code, candidate comments, source variants,
+        ledger records, verifier results, juror verdicts + evidence references,
+        and the reason automatic resolution was unsafe. Uses the existing
+        :func:`escalation.write_review_bundle` so the artifact shape matches the
+        code-resolution review bundles.
+        """
+        try:
+            from capybase.escalation import write_review_bundle
+        except ImportError:
+            return
+        human = [o for o in outcomes if o.route == "human_review"]
+        reasons = "; ".join(f"{o.claim_id}: {o.reason[:120]}" for o in human)
+        advisories = [
+            f"jury enforcement routed {len(human)} claim(s) to human review",
+            f"reasons: {reasons}",
+        ]
+        try:
+            write_review_bundle(
+                self.paths,
+                reason=(f"jury enforcement: {len(human)} claim(s) require human "
+                        f"review. {reasons}"),
+                step_index=self.step,
+                advisories=advisories,
+            )
+        except Exception:  # noqa: BLE001 — review bundle is advisory
+            pass
+
+    def _run_shadow_jury(
+        self, path: str, outcome, units: list, language: str | None,
+        base_text: str, current_text: str, replayed_text: str,
+    ) -> None:
+        """SJ6 back-compat shim: run the jury in shadow mode (no merge effect).
+
+        Delegates to :meth:`_run_jury` with ``mode='shadow'``. Kept so any
+        external caller of the original method still works; new code should
+        call :meth:`_run_jury` directly with the mode.
+        """
+        self._run_jury(
+            path, outcome, units, language,
+            base_text, current_text, replayed_text, mode="shadow",
+        )
+
 
     def _resolve_comment_contract_conflicts(
         self, path: str, buffer: str, accepted: list, units: list,
