@@ -48,10 +48,26 @@ from capybase.shadow_jury import JurorVerdict
 
 # The brief's golden route distribution (re-derived from the 22 recorded
 # verdict files by re-running the deterministic chair in non-shadow mode).
+# This is what the SHADOW corpus RECORDED (the target a shadow replay must
+# reproduce). Post-hardening, the reconstructed shadow distribution differs by
+# one documented conservative delta (see HARDENED_ROUTES) because fix D
+# (routing matrix: inherited+UNGROUNDED_NEW_CLAIM → human_review, was
+# fall-through accept) flips one claim accept→human_review.
 GOLDEN_ROUTES = {
     "accept": 12,
     "comment_counterexample": 6,
     "human_review": 4,
+    "code_reopen": 0,
+}
+
+# The post-hardening reconstructed distribution for the shadow corpus. One
+# documented conservative delta vs GOLDEN_ROUTES: zenodo-hdiff-0039/LC2.1
+# (inherited claim the provenance juror couldn't ground) now routes to
+# human_review instead of accept — strictly safer. The brief permits this.
+HARDENED_ROUTES = {
+    "accept": 11,
+    "comment_counterexample": 6,
+    "human_review": 5,
     "code_reopen": 0,
 }
 
@@ -387,6 +403,25 @@ def replay_session(
     full_ledger = _build_full_ledger(source_variants_path, frozen_code, "python")
     ledger_lineage_ids = {getattr(e, "lineage_id", "") for e in full_ledger}
 
+    # Load any jury_enforce_decision artifacts (enforce-mode recordings). These
+    # carry the ACTUAL EnforcementRouter outcome per claim — which may differ
+    # from the jury_verdict's chair_decision.route (the chair is the §9-matrix
+    # input; the router applies the fail-closed binding checks on top, so e.g.
+    # a chair 'accept' can become a router 'human_review' when acceptance is
+    # blocked). Keyed by claim_id so the replay compares against what actually
+    # happened, not just the chair's matrix decision.
+    enforce_decisions: dict[str, dict] = {}
+    enforce_dir = comment_dir / "jury_enforce_decision"
+    if enforce_dir.is_dir():
+        for efp in sorted(enforce_dir.glob("*.json")):
+            try:
+                edata = _load_json(efp)
+            except Exception:  # noqa: BLE001 — corrupt artifact
+                continue
+            cid = str(edata.get("claim_id", ""))
+            if cid:
+                enforce_decisions[cid] = edata
+
     router = EnforcementRouter(enable_code_reopen=enable_code_reopen)
 
     for vfp in verdict_files:
@@ -398,11 +433,17 @@ def replay_session(
             verdict_data.get("provenance_verdict"), "provenance")
         packet = _reconstruct_packet(claim, full_ledger)
 
-        # The recorded golden route. In shadow mode it's decoded from the
-        # [SHADOW] reason; in enforce mode the chair_decision.route is the real
-        # route directly. _golden_route_for handles both shapes.
-        recorded_chair = verdict_data.get("chair_decision", {}) or {}
-        golden_route = _golden_route_for(recorded_chair)
+        # The recorded route the replay must reproduce. Prefer the
+        # jury_enforce_decision artifact (the ACTUAL router outcome) when one
+        # exists for this claim; otherwise fall back to the chair_decision from
+        # the jury_verdict (shadow recordings, or enforce recordings where no
+        # enforce_decision was persisted).
+        enforce_record = enforce_decisions.get(claim.claim_id)
+        if enforce_record and "route" in enforce_record:
+            golden_route = _normalize_route(str(enforce_record["route"]))
+        else:
+            recorded_chair = verdict_data.get("chair_decision", {}) or {}
+            golden_route = _golden_route_for(recorded_chair)
 
         # Re-run the enforcement router.
         ctx = EnforcementContext(

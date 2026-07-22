@@ -78,6 +78,35 @@ def test_build_evidence_packet_includes_tests_when_supplied():
     assert test_evs[0].result == "passed"
 
 
+def test_build_evidence_packet_dedupes_duplicate_versions():
+    """When a lineage has two ledger entries with the SAME version (e.g. the
+    same comment text appears twice in the resolved buffer, both classified
+    'resolved'), the packet must NOT emit two evidence items with the same ID.
+
+    The evidence ID scheme is SRC:<version>:<lineage>, so a duplicate version
+    would produce a duplicate ID — which validate_evidence_packet flags as
+    invalid → a false fail-closed human_review. build_evidence_packet dedupes
+    by version (keeping the first). Surfaced by the gemma-4-e4b live run:
+    zenodo-hdiff-0093/LC1.2 and zenodo-hdiff-0097/LC1.1."""
+    claim = Claim(claim_id="LC1.1", lineage_id="LC1", text="Retries errors")
+    code = "fn fetch() { 1 }\n"
+    # Two 'resolved' entries for the same lineage (duplicate version).
+    ledger = _ledger("LC1", "function:fetch", [
+        ("resolved", "// first resolved"),
+        ("resolved", "// second resolved"),  # duplicate version
+        ("base", "// base"),
+    ])
+    packet = build_evidence_packet(claim, code, ledger, lang="rust")
+    src_evs = [e for e in packet.evidence if e.kind == "source_comment"]
+    ids = [e.id for e in src_evs]
+    # No duplicate IDs.
+    assert len(ids) == len(set(ids)), f"duplicate evidence IDs: {ids}"
+    # Only one 'resolved' (the first), plus base.
+    assert "SRC:resolved:LC1" in ids
+    assert "SRC:base:LC1" in ids
+    assert ids.count("SRC:resolved:LC1") == 1
+
+
 # ---------------------------------------------------------------------------
 # Packet validator
 # ---------------------------------------------------------------------------

@@ -171,11 +171,23 @@ def build_evidence_packet(
     # Find the claim's lineage in the ledger to get the anchor_symbol.
     anchor_symbol = ""
     source_variants: list[tuple[str, str]] = []  # (version, text)
+    seen_versions: set[str] = set()  # dedupe by version — see note below
     for entry in ledger_entries:
         if getattr(entry, "lineage_id", "") == claim.lineage_id:
             if not anchor_symbol:
                 anchor_symbol = getattr(entry, "anchor_symbol", "")
-            source_variants.append((getattr(entry, "version", ""), getattr(entry, "text", "")))
+            version = getattr(entry, "version", "")
+            # The evidence ID scheme is SRC:<version>:<lineage>, so two ledger
+            # entries with the SAME version (e.g. the same comment text appears
+            # twice in the resolved buffer, both classified "resolved") would
+            # produce a duplicate evidence ID — which validate_evidence_packet
+            # flags as invalid → a false fail-closed human_review. Dedupe by
+            # version, keeping the first occurrence (they're the same provenance
+            # class for the packet's purpose).
+            if version in seen_versions:
+                continue
+            seen_versions.add(version)
+            source_variants.append((version, getattr(entry, "text", "")))
     # Signature evidence.
     sig = _extract_signature(frozen_code, anchor_symbol, lang)
     if sig:

@@ -230,12 +230,32 @@ def parse_juror_verdict(raw_response: str, juror_name: str) -> JurorVerdict | No
         claim_id=str(data.get("claim_id", "")),
         verdict=verdict,
         subtype=str(data.get("subtype", "")),
-        evidence_ids=[str(x) for x in ev_ids],
+        evidence_ids=[_normalize_evidence_id(str(x)) for x in ev_ids],
         witness=witness,
         confidence_band=str(data.get("confidence_band", "medium")),
         explanation=str(data.get("explanation", "")),
         juror=juror_name,
     )
+
+
+def _normalize_evidence_id(eid: str) -> str:
+    """Normalize a single evidence ID (lenient — handles small-model quirks).
+
+    Small models (e.g. gemma-4-e4b) occasionally wrap evidence IDs in square
+    brackets — ``[SRC:base:LC1]`` instead of ``SRC:base:LC1`` — because they
+    model the JSON list element as a bracketed token. Without normalization the
+    EnforcementRouter's evidence-reference resolver fails to match the bracketed
+    string against the packet's evidence IDs, producing a false fail-closed
+    human_review (the juror cited the right evidence, just cosmetically wrapped).
+
+    Strip a SINGLE pair of wrapping square brackets so the ID resolves. Only the
+    wrapping pair is stripped — internal brackets (none in the ID scheme) are
+    left alone.
+    """
+    eid = eid.strip()
+    if len(eid) >= 2 and eid[0] == "[" and eid[-1] == "]":
+        return eid[1:-1]
+    return eid
 
 
 # ---------------------------------------------------------------------------
@@ -452,6 +472,15 @@ class DeterministicChair:
                 if claim.kind in ("rationale", "external_dependency", "historical_statement"):
                     return "preserve_and_audit"
                 return "human_review"  # inherited contract unverifiable → human
+            if effective == "UNGROUNDED_NEW_CLAIM":
+                # The origin classifier marked this claim inherited, but the
+                # provenance juror could not ground it in any source variant — a
+                # provenance/origin disagreement. The claim's actual provenance
+                # is ambiguous; route to human review rather than accepting a
+                # potentially-synthesized clause on the inherited origin's
+                # trust. (Accepting here would let an ungrounded clause through
+                # on the inherited fast-path — the fall-through bug this fixes.)
+                return "human_review"
             if effective == "SUPPORTED":
                 return "accept"
             return "accept"  # NON_CHECKABLE inherited → accept (preserve)

@@ -161,6 +161,57 @@ was a product bug):
 
 ---
 
+## gemma-4-e4b enforcement live run
+
+A full 98-case Python live run against `gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf`
+on DESKTOP-NOVA (`192.168.50.235:8086`), `CAPYBASE_JURY_MODE=enforce`,
+179 minutes:
+
+| Metric | Shadow corpus | gemma-4-e4b enforce |
+|---|---|---|
+| PASS / ESC / WRONG | 59 / 37 / 2 | **65 / 32 / 1** |
+| Jury activations (claims evaluated) | 22 / 8 sessions | 13 / 3 sessions |
+| Enforce routes | — | accept 2 · cc 6 · hr 5 · code_reopen 0 |
+
+Net **+6 PASS, −5 ESC, −1 WRONG** vs the shadow corpus. Zero false code
+reopens, zero fingerprint violations, byte-identical executable tokens
+throughout, every degraded state fail-closed. The run validated the full
+enforce pipeline end-to-end against a real small model.
+
+### Four defects found + fixed by the live data
+
+- **A. Bracketed evidence IDs** (`shadow_jury.py`): gemma-4-e4b occasionally
+  emits `[SRC:base:LC1]` (wrapped in square brackets). `parse_juror_verdict`
+  now strips a single wrapping pair so the evidence-reference resolver
+  matches them (2/26 IDs affected; was a false fail-closed human_review).
+- **B. Replay route precedence** (`jury_replay.py`): the replay now prefers
+  the `jury_enforce_decision` artifact's route (the ACTUAL router outcome)
+  over the `jury_verdict`'s `chair_decision.route` (the §9-matrix input),
+  since the router may block a chair `accept` → `human_review`.
+- **C. Duplicate evidence IDs** (`jury_evidence.py`): when a lineage has two
+  ledger entries with the same version (the same comment twice in the resolved
+  buffer), `build_evidence_packet` produced a duplicate `SRC:<v>:<l>` ID,
+  which `validate_evidence_packet` flagged → false fail-closed. Now deduped
+  by version.
+- **D. Routing-matrix gap** (`shadow_jury.py`): an *inherited* claim the
+  provenance juror couldn't ground (effective `UNGROUNDED_NEW_CLAIM`) fell
+  through to the `NON_CHECKABLE → accept` branch. Now routes to
+  `human_review` (ambiguous provenance). This is a **documented conservative
+  delta**: the shadow corpus's `zenodo-hdiff-0039/LC2.1` flips
+  accept→human_review, making the reconstructed shadow distribution 11/6/5
+  (vs the recorded 12/6/4) — strictly safer, permitted by the brief.
+
+### Not defects (model quality / expected)
+
+- `zenodo-hdiff-0015` (the 1 WRONG): sim 0.993 but `py_compile` fails — a
+  subtle syntax slip in gemma's near-perfect output. Model quality.
+- 3 `PASS→ESCALATE` convergence cases (sim 0.94–0.99): resolver cycled on
+  near-correct candidates. Pre-existing resolver behavior.
+- `zenodo-hdiff-0009` went `WRONG→PASS`: previously syntax-invalid, now
+  resolves cleanly (sim 0.99) — a genuine improvement.
+
+---
+
 ## Production configuration
 
 The exact machine-readable canary config lives in `capybase.toml`. Runtime

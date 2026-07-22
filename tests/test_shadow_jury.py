@@ -49,11 +49,36 @@ def test_parse_juror_verdict_garbage_falls_back_safely():
     The lenient parser salvages an empty dict from garbage; parse_juror_verdict
     maps the missing verdict to NON_CHECKABLE (the safest abstention). This is
     the graceful-degrade contract — a malformed response never produces a wrong
-    action, just an abstention.
-    """
-    v = parse_juror_verdict("not json at all", "contradiction")
+    action, just an abstention."""
+    v = parse_juror_verdict("this is not json at all", "contradiction")
     assert v is not None
     assert v.verdict == "NON_CHECKABLE"
+
+
+def test_parse_juror_verdict_normalizes_bracketed_evidence_ids():
+    """Small models (e.g. gemma-4-e4b) occasionally wrap evidence IDs in square
+    brackets — ``[SRC:base:LC1]`` instead of ``SRC:base:LC1``. The parser
+    strips a single wrapping pair so the EnforcementRouter's evidence-reference
+    resolver can match them (otherwise the bracketed string is unresolvable → a
+    false fail-closed human_review). Observed in the gemma-4-e4b live run:
+    2 of 26 evidence IDs were bracketed."""
+    raw = json.dumps({
+        "claim_id": "LC1.1", "verdict": "SUPPORTED",
+        "evidence_ids": ["[SRC:base:LC1]", "[SRC:resolved:LC1]", "CODE:f:L1-5"],
+    })
+    v = parse_juror_verdict(raw, "contradiction")
+    assert v.evidence_ids == ["SRC:base:LC1", "SRC:resolved:LC1", "CODE:f:L1-5"]
+
+
+def test_normalize_evidence_id_only_strips_wrapping_pair():
+    """Only a single wrapping bracket pair is stripped; internal brackets
+    (none in the ID scheme, but defensive) are left alone."""
+    from capybase.shadow_jury import _normalize_evidence_id
+    assert _normalize_evidence_id("[SRC:base:LC1]") == "SRC:base:LC1"
+    assert _normalize_evidence_id("SRC:base:LC1") == "SRC:base:LC1"
+    assert _normalize_evidence_id(" [SRC:base:LC1] ") == "SRC:base:LC1"
+    assert _normalize_evidence_id("[]") == ""
+    assert _normalize_evidence_id("CODE:f:[L1]") == "CODE:f:[L1]"  # internal kept
 
 
 # ---------------------------------------------------------------------------
@@ -246,3 +271,23 @@ def test_chair_inherited_rationale_unverifiable_preserved():
     packet = build_evidence_packet(claim, "fn f() { 1 }", [], lang="rust")
     d = chair.route(claim, c, p, packet)
     assert d.route == "preserve_and_audit"
+
+
+def test_chair_inherited_ungrounded_routes_to_human_review():
+    """Inherited claim + UNGROUNDED_NEW_CLAIM → human_review (NOT accept).
+
+    The origin classifier marked this claim inherited, but the provenance juror
+    could not ground it in any source variant — a provenance/origin
+    disagreement. The claim's actual provenance is ambiguous, so route to human
+    review rather than accepting a potentially-synthesized clause on the
+    inherited origin's trust. Previously this fell through to the NON_CHECKABLE
+    'accept' branch (a routing-matrix gap surfaced by the gemma-4-e4b live run:
+    zenodo-hdiff-0097/LC1.1)."""
+    chair = DeterministicChair(shadow_mode=False)
+    claim = Claim(claim_id="C1", lineage_id="LC1", text="some ungrounded claim",
+                  origin="inherited_paraphrase", kind="implementation_description")
+    c = JurorVerdict(claim_id="C1", verdict="NON_CHECKABLE", juror="contradiction")
+    p = JurorVerdict(claim_id="C1", verdict="UNGROUNDED_NEW_CLAIM", juror="provenance")
+    packet = build_evidence_packet(claim, "fn f() { 1 }", [], lang="rust")
+    d = chair.route(claim, c, p, packet)
+    assert d.route == "human_review"

@@ -50,20 +50,38 @@ pytestmark = pytest.mark.skipif(
 
 
 class TestGoldenReproduction:
-    def test_reconstructed_routes_match_golden_distribution(self):
-        report = replay_corpus(FLIGHTS_ROOT)
-        assert report.matches_golden, (
-            f"reconstructed {report.reconstructed_route_counts} != golden "
-            f"{report.golden_route_counts}"
-        )
+    #: The documented conservative delta from the recorded shadow golden
+    #: (12/6/4/0). Fix D (routing-matrix hardening: an inherited claim the
+    #: provenance juror cannot ground now routes to human_review instead of
+    #: falling through to accept) flips ONE claim (zenodo-hdiff-0039/LC2.1)
+    #: from accept → human_review. The brief permits "a difference that results
+    #: from an intentional, documented hardening change and is at least as
+    #: conservative as the recorded route" — accept → human_review is strictly
+    #: more conservative. So the post-hardening reconstructed distribution is
+    #: 11/6/5, not 12/6/4.
+    HARDENED_ROUTES = {"accept": 11, "comment_counterexample": 6,
+                       "human_review": 5, "code_reopen": 0}
+    #: The single documented conservative-delta claim.
+    DELTA_CLAIM = ("zenodo-hdiff-0039", "LC2.1", "accept", "human_review")
 
-    def test_golden_route_counts_are_exactly_12_6_4_0(self):
+    def test_reconstructed_routes_match_hardened_distribution(self):
+        """Reconstructed routes match the post-hardening distribution
+        (11/6/5/0), documenting the one conservative accept→human_review delta."""
         report = replay_corpus(FLIGHTS_ROOT)
         counts = report.reconstructed_route_counts
-        assert counts.get("accept", 0) == 12
-        assert counts.get("comment_counterexample", 0) == 6
-        assert counts.get("human_review", 0) == 4
-        assert counts.get("code_reopen", 0) == 0
+        for route, expected in self.HARDENED_ROUTES.items():
+            assert counts.get(route, 0) == expected, (
+                f"{route}: reconstructed {counts.get(route, 0)} != "
+                f"hardened {expected}; full {counts}"
+            )
+
+    def test_recorded_shadow_routes_are_still_12_6_4_0(self):
+        """The RECORDED shadow routes are unchanged (12/6/4/0); only the
+        reconstructed routes harden."""
+        report = replay_corpus(FLIGHTS_ROOT)
+        assert report.recorded_route_counts.get("accept", 0) == 12
+        assert report.recorded_route_counts.get("comment_counterexample", 0) == 6
+        assert report.recorded_route_counts.get("human_review", 0) == 4
 
     def test_replay_reaches_all_22_recorded_verdicts(self):
         """All 33 jury activations produced 22 claim-level verdict files; the
@@ -72,16 +90,19 @@ class TestGoldenReproduction:
         assert report.verdict_files_replayed == 22
         assert report.claim_decisions_replayed == 22
 
-    def test_no_per_claim_mismatches(self):
-        """Every claim's reconstructed route must match its recorded golden
-        route — no per-case or per-claim divergence."""
+    def test_only_documented_conservative_delta_remains(self):
+        """The ONLY per-claim mismatch is the one documented accept→human_review
+        hardening delta (zenodo-hdiff-0039/LC2.1). No other divergence."""
         report = replay_corpus(FLIGHTS_ROOT)
-        assert report.per_claim_mismatches == [], (
-            "per-claim mismatches: " + "; ".join(
-                f"{c.case_id}/{c.claim_id}: {c.reason}"
-                for c in report.per_claim_mismatches[:5]
-            )
+        case_id, claim_id, recorded, reconstructed = self.DELTA_CLAIM
+        actual = [(c.case_id, c.claim_id, c.recorded_route, c.reconstructed_route)
+                  for c in report.per_claim_mismatches]
+        assert actual == [(case_id, claim_id, recorded, reconstructed)], (
+            f"expected only the documented conservative delta, got: {actual}"
         )
+        # And it IS conservative: human_review is safer than accept.
+        assert reconstructed == "human_review"
+        assert recorded == "accept"
 
     def test_sessions_with_jury_verdicts_were_replayed(self):
         """The 8 sessions with jury_verdict artifacts must all be replayed."""
