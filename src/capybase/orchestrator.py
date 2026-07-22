@@ -4830,7 +4830,7 @@ class Orchestrator:
 
         def _propose(prompt: str) -> str:
             return self.resolution_engine.raw_complete(
-                prompt, model=self.config.model, json_mode=True,
+                prompt, json_mode=True,
             )
 
         outcome = run_comment_cegis(
@@ -4944,7 +4944,7 @@ class Orchestrator:
             return
         # The LLM complete callable (reuses the resolution engine).
         def _complete(prompt: str) -> str:
-            return self.resolution_engine.raw_complete(prompt, model=self.config.model)
+            return self.resolution_engine.raw_complete(prompt)
         # Re-build the ledger to get the source variants for provenance.
         from capybase.comment_reconciler import build_comment_ledger
         ledger = build_comment_ledger(
