@@ -244,7 +244,8 @@ class TestRenderFailureIntegration:
         rendered = _render_failure(f)
         assert "identical to CURRENT" in rendered
         assert "conflict type: additive" in rendered
-        assert "How to address: integrate them" in rendered
+        assert "DELTA-COMPLETION TASK" in rendered
+        assert "ADD the above line(s)" in rendered
         assert "+ fn b() { 2 }" in rendered
         assert "+ use crate::x;" in rendered
         assert "deferred to the comment pass" in rendered

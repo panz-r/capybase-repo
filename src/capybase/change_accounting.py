@@ -181,6 +181,44 @@ def _anchor_of(line: str) -> str:
     return m.group(1) if m else ""
 
 
+def _structural_suffix(line: str) -> str:
+    """Everything AFTER the leading identifier in a line — the structural
+    'shape' that remains when the name is stripped. Used to detect rename-type
+    exclusive conflicts where two lines have DIFFERENT leading identifiers but
+    the SAME trailing structure (e.g. ``Self { stream }`` vs ``Sse { stream }``
+    — a type rename; the constructor body is identical)."""
+    m = _ANCHOR_RE.match(line)
+    if not m:
+        return _norm(line)
+    return _norm(line[m.end():])
+
+
+#: Matches a brace-grouped item list line — either a full ``use path::{A, B}``
+#: import OR a continuation line ``path::{A, B},`` from a multi-line use
+#: statement. The key signal is ``identifiers::{comma, separated, items}``.
+_IMPORT_LIST_RE = re.compile(
+    r"^\s*(?:pub\s+)?(?:use\s+)?"
+    r"([\w:]+)"          # the path prefix (crate::module / util)
+    r"::\s*\{([^}]*)\}"  # the brace-grouped item list
+    r"\s*,?\s*;?\s*$"    # optional trailing comma/semicolon
+)
+
+
+def _is_import_list_line(line: str) -> bool:
+    """True when the line is a ``use path::{A, B, C}`` import-list form."""
+    return bool(_IMPORT_LIST_RE.match(line))
+
+
+def _import_list_items(line: str) -> frozenset[str]:
+    """The items inside a ``use path::{A, B, C}`` brace group, as a set.
+    Returns an empty set when the line isn't an import-list form."""
+    m = _IMPORT_LIST_RE.match(line)
+    if not m:
+        return frozenset()
+    items = m.group(2)
+    return frozenset(i.strip() for i in items.split(",") if i.strip())
+
+
 def derive_missing_obligations(
     base: str, current: str, replayed: str, resolved: str,
 ) -> list[BranchObligation]:
@@ -268,6 +306,35 @@ def derive_missing_obligations(
                     anchor and anchor in res_anchors
                     and res_anchors[anchor] != norm
                 )
+                # Import-list refinement: two ``path::{a, b}`` lines with the
+                # same path prefix but different brace items are ADDITIVE (one
+                # adds items to the list), NOT exclusive — even though they
+                # share the anchor. Only treat as exclusive when neither is a
+                # superset of the other (a genuine replacement). This catches
+                # ``util::{MapErrLayer, Oneshot}`` vs ``util::{BoxCloneService,
+                # MapErrLayer, Oneshot}`` — the second ADDS BoxCloneService.
+                if exclusive and _is_import_list_line(changed):
+                    for res_line in res.splitlines():
+                        if _norm(res_line) != norm and _is_import_list_line(res_line):
+                            added_items = _import_list_items(changed)
+                            cand_items = _import_list_items(res_line)
+                            if added_items and cand_items:
+                                if added_items >= cand_items or cand_items >= added_items:
+                                    exclusive = False  # one is a superset → additive
+                                    break
+                # Rename-type exclusive: different leading identifiers but the
+                # SAME trailing structure (e.g. ``Self { stream }`` vs
+                # ``Sse { stream }`` — a type rename). When the anchors differ
+                # but the structural suffix matches, it's still exclusive.
+                if not exclusive:
+                    suffix = _structural_suffix(changed)
+                    if suffix and len(suffix) >= 4:
+                        for res_line in res.splitlines():
+                            if (_structural_suffix(res_line) == suffix
+                                    and _norm(res_line) != norm
+                                    and _anchor_of(res_line) != anchor):
+                                exclusive = True
+                                break
                 obligations.append(BranchObligation(
                     line=changed, channel=channel, status=status,
                     side=other_label, operation=op, exclusive=exclusive,

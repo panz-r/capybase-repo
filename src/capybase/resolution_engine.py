@@ -1635,7 +1635,18 @@ def _render_failure(f: VerificationFailure) -> str:
                 f"(conflict type: {conflict_type}):")
             for line in missing:
                 parts.append(f"      + {line}")
-            parts.append(f"    How to address: {action}")
+            if conflict_type == "additive":
+                # Delta-completion framing: the candidate is the correct
+                # scaffold; the model just needs to ADD these specific items.
+                # This is a much smaller search problem than re-merging.
+                parts.append(
+                    f"    DELTA-COMPLETION TASK: keep {copied.upper()} as your "
+                    f"starting point and ADD the above line(s) to it. For "
+                    f"import-list changes (path::{{A, B}}), merge the new items "
+                    f"into the existing brace group. Do NOT remove or change "
+                    f"anything else in your candidate.")
+            else:
+                parts.append(f"    How to address: {action}")
             deferred = f.detail.get("deferred_comments", 0)
             if deferred:
                 parts.append(
