@@ -345,6 +345,14 @@ sbcr_min_candidate_ratio = 0.5    # reject candidates < this fraction of the lar
 sbcr_stagnation_limit = 10        # stop hill-climb after N consecutive non-improving evals
 sbcr_max_time_seconds = 15.0      # wall-clock budget for hill-climb on large blocks
 sbcr_max_iterations = 2000        # hard budget on fitness evaluations
+# Deterministic import-union editor (Rust): AFTER the model produces a
+# candidate, if change-accounting detects it copied one side and dropped an
+# additive ``use`` import leaf, insert the missing leaf mechanically — no
+# second model call. Tier-A primitive: deterministic, idempotent,
+# transactional, conservative (AMBIGUOUS on doubt). Strict no-op when no
+# import is missing or a safety precondition fails; cargo/rustc remains
+# authoritative after the edit. Default ON.
+enable_import_union = true
 
 # --- Comment jury enforcement (Phase 4) -------------------------------------
 # off (default) | shadow | enforce. In 'enforce' the jury acts on the four

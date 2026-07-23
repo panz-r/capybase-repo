@@ -626,6 +626,19 @@ class FutureConfig(BaseModel):
     # ON (always-on integral part), but the skip-when-empty gate means files
     # with no affected comments pay no cost.
     enable_comment_reconciliation: bool = True
+    # Deterministic import-union editor (Rust): after the model produces a
+    # candidate, if change-accounting detects it copied one side verbatim and
+    # thereby dropped an additive ``use`` import leaf from the other side,
+    # insert the missing leaf mechanically — no second model call. This is the
+    # first Tier-A primitive of an obligation-driven structural merge layer:
+    # deterministic, idempotent, transactional, and conservative (AMBIGUOUS on
+    # any doubt). The existing cargo/rustc gauntlet remains the authoritative
+    # check AFTER the edit. Default ON (it is a strict no-op on every non-
+    # APPLIED path — no imports missing, or no compatible destination, or a
+    # safety precondition fails → the candidate is untouched and the normal
+    # preservation → repair flow proceeds unchanged). Flip off to force the
+    # model to handle every import merge itself.
+    enable_import_union: bool = True
     # Phase 4 comment jury (design §5). An untrusted semantic sensor that
     # evaluates comment claims produced by the comment pass. Three operating
     # modes:

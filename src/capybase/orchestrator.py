@@ -6034,6 +6034,49 @@ class Orchestrator:
             # LLM calls, so validating all N is cheap. If none pass, the winner
             # (and its failures) feeds the CEGIS repair loop below.
             cand = winner
+            # Deterministic import-union editor (Tier-A structural primitive).
+            # AFTER the model produces a candidate, if change-accounting detects
+            # it copied one side verbatim and thereby dropped an additive Rust
+            # ``use`` import leaf, insert the missing leaf mechanically — no
+            # second model call. This runs BEFORE the no-op cache + verification
+            # so the import-fixed candidate is validated normally (cargo/rustc
+            # remains authoritative) and a preservation_heuristic failure that
+            # would have fired on the unfixed candidate is prevented. On every
+            # non-APPLIED outcome the candidate is untouched (strict no-op), so
+            # the normal preservation → repair flow proceeds unchanged. Runs
+            # every loop iteration; idempotency makes that safe (a leaf already
+            # present is not re-added). See src/capybase/import_union.py.
+            if (getattr(self.config.future, "enable_import_union", True)
+                    and (unit.language or "") == "rust"
+                    and cand.resolved_text):
+                try:
+                    from capybase.change_accounting import derive_missing_obligations
+                    from capybase.import_union import propose_import_union, STATUS_APPLIED
+                    _obligations = derive_missing_obligations(
+                        unit.base.text or "", unit.current.text or "",
+                        unit.replayed.text or "", cand.resolved_text,
+                    )
+                    if _obligations:
+                        _iu = propose_import_union(cand.resolved_text, _obligations)
+                        if _iu.status == STATUS_APPLIED and _iu.text != cand.resolved_text:
+                            self.journal.emit(
+                                "import_union_applied",
+                                {"certificate": _iu.certificate,
+                                 "candidate_id": cand.candidate_id},
+                                step_index=self.step, path=unit.path,
+                                unit_id=unit.unit_id,
+                            )
+                            cand = cand.model_copy(update={
+                                "resolved_text": _iu.text,
+                                "provenance": (cand.provenance or "plain_llm") + "+import_union",
+                            })
+                except Exception:  # noqa: BLE001 — never break the resolution loop
+                    self.journal.emit(
+                        "import_union_skipped",
+                        {"reason": "internal error (candidate untouched)"},
+                        step_index=self.step, path=unit.path,
+                        unit_id=unit.unit_id,
+                    )
             # No-op short-circuit (the analysis's "eliminate avoidable slow
             # retries"): if this EXACT candidate was already validated in this
             # loop (same resolved_text hash), reuse the prior result instead of
