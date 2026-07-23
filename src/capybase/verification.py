@@ -336,9 +336,23 @@ class PreservationHeuristicValidator:
                     base_raw, cur, rep, resolved)
             except Exception:  # noqa: BLE001 — best-effort; fall back to flag
                 missing, deferred = None, []
-            if missing is not None and not missing:
-                # The copy is fully accounted for — PASS (no lost executable
-                # intent). Comment changes are deferred to the comment pass.
+            # When ALL missing obligations are EXCLUSIVE (mutually-exclusive
+            # alternatives at the same position — the candidate chose one side's
+            # value for a field/type/assignment the other side changed
+            # differently), copying one side is a VALID resolution: the model
+            # made a defensible choice between two alternatives. PASS — there
+            # are no genuinely-dropped ADDITIONS. Only ADDITIVE missing
+            # obligations (real new content the candidate lacks) warrant a
+            # repair. This is the fix for exclusive-conflict convergence: the
+            # heuristic no longer forces a retry on a correct either/or choice.
+            additive_missing = ([o for o in missing if not o.exclusive]
+                                if missing is not None else None)
+            if missing is not None and not additive_missing:
+                # The copy is fully accounted for — either no missing
+                # obligations at all, or all missing ones are EXCLUSIVE
+                # (mutually-exclusive alternatives where the model's choice is
+                # valid). PASS — no genuinely-dropped ADDITIONS.
+                all_excl = bool(missing) and all(o.exclusive for o in missing)
                 return VerificationCheckResult(
                     name=self.name,
                     passed=True,
@@ -346,6 +360,7 @@ class PreservationHeuristicValidator:
                     message=(
                         "resolved text copies one side verbatim, but every "
                         "executable change from the other side is accounted for "
+                        f"({'mutually-exclusive choice' if all_excl else 'present or comment-only-deferred'})"
                         "(present or comment-only-deferred)"
                     ),
                     detail={
@@ -361,25 +376,17 @@ class PreservationHeuristicValidator:
                         "change_accounted": True,
                     },
                 )
-            if missing:
-                # Actionable: name the specific missing lines so the model can
-                # act on them. Distinguish EXCLUSIVE (mutually-exclusive
-                # alternatives at the same position — the model should CHOOSE,
-                # not integrate) from ADDITIVE (genuinely new content to add).
-                # Telling a small model to "integrate" an exclusive conflict
-                # asks for the impossible, which is why it converges.
-                missing_lines = [o.line.strip() for o in missing[:8]]
-                all_exclusive = all(o.exclusive for o in missing)
+            if additive_missing:
+                # Actionable: name the specific ADDITIVE missing lines (genuinely
+                # dropped additions) so the model can integrate them. EXCLUSIVE
+                # obligations (mutually-exclusive alternatives) already PASSED
+                # above — only real additions need repair. Distinguish mixed
+                # cases (some additive, some exclusive) for clear feedback.
+                missing_lines = [o.line.strip() for o in additive_missing[:8]]
                 any_exclusive = any(o.exclusive for o in missing)
                 copied_label = "CURRENT" if copied_current else "REPLAYED"
                 other_label = "REPLAYED" if copied_current else "CURRENT"
-                if all_exclusive:
-                    conflict_type = "exclusive"
-                    action = ("These are mutually-exclusive alternatives at the "
-                              "same position — keep your selection OR switch to "
-                              "the other side's value; both are valid. Do NOT "
-                              "try to combine them.")
-                elif any_exclusive:
+                if any_exclusive:
                     conflict_type = "mixed"
                     action = ("Some are mutually-exclusive choices (keep or "
                               "switch) and some are additions to integrate.")
@@ -398,7 +405,7 @@ class PreservationHeuristicValidator:
                         "copied_current": copied_current,
                         "copied_replayed": copied_replayed,
                         "missing_lines": missing_lines,
-                        "missing_count": len(missing),
+                        "missing_count": len(additive_missing),
                         "copied_side": copied_label.lower(),
                         "conflict_type": conflict_type,
                         "action": action,
@@ -409,7 +416,7 @@ class PreservationHeuristicValidator:
                         "copied_current_side": copied_current,
                         "copied_replayed_side": copied_replayed,
                         "change_accounted": False,
-                        "conflict_exclusive": all_exclusive,
+                        "conflict_exclusive": False,
                     },
                 )
             # missing is None (change-accounting failed) → fall back to flag.
