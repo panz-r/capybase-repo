@@ -239,9 +239,12 @@ def derive_missing_obligations(
     rep = replayed or ""
     res = resolved or ""
     # Determine which side was copied (resolved == one side, whitespace-trimmed).
-    if res.strip() == cur.strip() and cur.strip():
+    # An empty resolved == empty side IS a copy (the model resolved to the
+    # deletion side). Allow it when at least one side is non-empty (both empty
+    # is a degenerate conflict with no signal).
+    if res.strip() == cur.strip() and (cur.strip() or rep.strip()):
         copied_side, other_text, other_label = "current", rep, "replayed"
-    elif res.strip() == rep.strip() and rep.strip():
+    elif res.strip() == rep.strip() and (rep.strip() or cur.strip()):
         copied_side, other_text, other_label = "replayed", cur, "current"
     else:
         return []  # not an exact-side copy; this analysis doesn't apply
@@ -364,9 +367,9 @@ def derive_deferred_comments(
     cur = current or ""
     rep = replayed or ""
     res = resolved or ""
-    if res.strip() == cur.strip() and cur.strip():
+    if res.strip() == cur.strip() and (cur.strip() or rep.strip()):
         other_text, other_label = rep, "replayed"
-    elif res.strip() == rep.strip() and rep.strip():
+    elif res.strip() == rep.strip() and (rep.strip() or cur.strip()):
         other_text, other_label = cur, "current"
     else:
         return []

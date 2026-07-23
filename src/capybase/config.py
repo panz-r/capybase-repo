@@ -645,6 +645,14 @@ class FutureConfig(BaseModel):
     # Tier-A primitive: deterministic, idempotent, transactional (brace-balance
     # checked after removal). Symmetric to import-union. Default ON.
     enable_deletion_union: bool = True
+    # Deterministic block-insertion editor (Rust): when change-accounting
+    # detects the model dropped a contiguous additive block (macro-gated code,
+    # re-exports, doc comments) from the other side, transplant the block
+    # verbatim at its correct position (determined by anchor lines). Tier-A
+    # primitive: deterministic, idempotent, transactional (brace-balance
+    # checked), conservative (AMBIGUOUS when anchors can't be uniquely located).
+    # Default ON.
+    enable_block_insertion: bool = True
     # Phase 4 comment jury (design §5). An untrusted semantic sensor that
     # evaluates comment claims produced by the comment pass. Three operating
     # modes:

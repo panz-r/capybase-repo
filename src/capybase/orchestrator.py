@@ -5739,6 +5739,30 @@ class Orchestrator:
                         unit_id=unit.unit_id,
                     )
 
+            # 3. Block-insertion (additive non-import blocks).
+            if getattr(self.config.future, "enable_block_insertion", True):
+                from capybase.block_insertion import propose_block_insertion
+                from capybase.import_union import STATUS_APPLIED as _APPLIED
+                # Determine which side was dropped (for anchor detection).
+                _cur_text = unit.current.text or ""
+                _rep_text = unit.replayed.text or ""
+                _other = _rep_text if edited_text.strip() == _cur_text.strip() else _cur_text
+                r3 = propose_block_insertion(
+                    edited_text, obligations,
+                    base_text=base_text, other_side_text=_other,
+                )
+                if r3.status == _APPLIED and r3.text != edited_text:
+                    certificates.append(("block_insertion", r3.certificate))
+                    edited_text = r3.text
+                    provenance_suffix += "+block_insertion"
+                    self.journal.emit(
+                        "block_insertion_applied",
+                        {"certificate": r3.certificate,
+                         "candidate_id": cand.candidate_id},
+                        step_index=self.step, path=unit.path,
+                        unit_id=unit.unit_id,
+                    )
+
             if edited_text != cand.resolved_text:
                 cand = cand.model_copy(update={
                     "resolved_text": edited_text,

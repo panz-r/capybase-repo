@@ -285,6 +285,15 @@ class PreservationHeuristicValidator:
         resolved = ctx.candidate.resolved_text.strip()
         copied_current = bool(cur) and resolved == cur
         copied_replayed = bool(rep) and resolved == rep
+        # Empty-side copy: when the candidate is empty AND one side is empty,
+        # the model resolved to the deletion side. The bool(side) guard above
+        # would miss this (empty is falsy). Allow copied_one=True for the
+        # empty-side case so change-accounting can classify it (it's usually
+        # an exclusive choice — delete vs add — which should PASS).
+        if not resolved and not cur:
+            copied_current = True
+        if not resolved and not rep:
+            copied_replayed = True
         copied_one = copied_current or copied_replayed
         # Value-resolution fast path: when both sides preserve the same statement
         # shape and only a value diverged (a return, an assignment to the same
