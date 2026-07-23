@@ -226,6 +226,57 @@ def test_verify_file_rust_rejects_noncompiling_merge(tmp_path):
 
 
 @skip_no_rustc
+def test_verify_file_rust_suppresses_crate_path_errors_standalone(tmp_path):
+    """A correct Rust merge that uses ``crate::`` paths passes whole-file
+    validation even under standalone rustc (no Cargo.toml context), because
+    E0432/E0433 (unresolved crate paths) are undecidable standalone and are
+    suppressed per ``rust_suppress_codes``. Without this suppression, correct
+    merges cycle: rustc false-positives on ``use crate::...``, the candidate is
+    rejected + repaired identically, and it converges. Surfaced by the
+    gemma-4-e4b Rust run (6 E0433 escalation cases at sim 0.89-1.0)."""
+    # A conflict whose correct merge references crate:: paths (unresolvable
+    # standalone → E0433). Standalone rustc fails; the suppression must drop it.
+    conflict = (
+        "use crate::config::Setting;\n"
+        "\n"
+        "pub fn label(s: &Setting) -> String {\n"
+        "<<<<<<< H\n"
+        '    format!("[{}]", s.name)\n'
+        "=======\n"
+        '    format!("({})", s.name)\n'
+        ">>>>>>> b\n"
+        "}\n"
+    )
+    span = _span_of_markers(conflict)
+    correct = '    format!("[{}] {}", s.name, s.name)'
+    cfg = ValidationConfig(rust_suppress_codes=["E0432", "E0433"])
+    eng = VerificationEngine.default(cfg)
+    res = eng.verify_file(
+        "src/cfg.rs", "rust", conflict, [(span, correct)],
+        repo_root=str(tmp_path),  # no Cargo.toml → standalone rustc path
+    )
+    # The crate-path E0433 is suppressed → the merge passes.
+    assert res.passed, (
+        f"crate-path error should be suppressed standalone; got: "
+        f"{[f.message for f in res.hard_failures]}")
+    assert res.features["syntax_checked"] is True
+
+
+@skip_no_rustc
+def test_verify_file_rust_does_not_suppress_real_syntax_errors(tmp_path):
+    """A genuine syntax error (unclosed delimiter) is NOT suppressed even with
+    rust_suppress_codes set — only crate-path resolution errors are."""
+    span = _span_of_markers(_RUST_CONFLICT)
+    cfg = ValidationConfig(rust_suppress_codes=["E0432", "E0433"])
+    eng = VerificationEngine.default(cfg)
+    res = eng.verify_file(
+        "src/cfg.rs", "rust", _RUST_CONFLICT, [(span, _RUST_BROKEN)],
+        repo_root=str(tmp_path),
+    )
+    assert not res.passed  # the broken merge (unclosed delim) still fails
+
+
+@skip_no_rustc
 def test_verify_file_rust_respects_edition_override(tmp_path):
     # An explicit edition override is honored. config.rust_edition set to 2021
     # with a source valid in 2021.

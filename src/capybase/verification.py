@@ -3044,6 +3044,28 @@ class VerificationEngine:
                     except FileNotFoundError:
                         ok = True  # tool vanished between resolve & run → skip
                         msg = "rustc not available; syntax not checked"
+                    # Standalone rustc on a loose .rs can't resolve crate::
+                    # / super:: paths (no Cargo.toml context), so it FALSE-
+                    # POSITIVES on E0432/E0433 for any correct file that does
+                    # ``use crate::...``. These are exactly the codes
+                    # rust_suppress_codes is meant to drop (undecidable
+                    # standalone); suppress them here so a correct merge isn't
+                    # rejected + cycled on a phantom crate-path error. The
+                    # cargo path (when a real crate is available) already
+                    # suppresses them via compute_diagnostic_delta.
+                    if not ok:
+                        suppress = set(
+                            getattr(self.config, "rust_suppress_codes", [])
+                            or [])
+                        if suppress and any(
+                            f"[{code}]" in msg for code in suppress
+                        ):
+                            ok = True  # suppressed: undecidable standalone
+                            msg = (
+                                f"rustc standalone: suppressed crate-path "
+                                f"error(s) per rust_suppress_codes (undecidable "
+                                f"without a crate context): {msg[:80]}"
+                            )
                     syntax_ok = ok
                     if not ok and self.config.require_syntax_if_supported:
                         hard.append(
