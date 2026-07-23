@@ -5659,6 +5659,101 @@ class Orchestrator:
         accepted[fault_idx] = (unit, outcome.accepted)
         return accepted
 
+    def _apply_deterministic_closure(
+        self, unit: ConflictUnit, cand: CandidateResolution,
+    ) -> CandidateResolution:
+        """Run all applicable Tier-A structural primitives on a candidate.
+
+        Composes import-union, deletion-application, and block-insertion in
+        sequence. Each is a pure function; on non-APPLIED the candidate is
+        untouched. Derives obligations ONCE (with the correct base hunk), then
+        feeds them to each primitive. The primitives are complementary (no
+        overlap): import-union handles additive import leaves, deletion handles
+        DROPPED_DELETION obligations, block-insertion handles additive blocks.
+
+        Runs every loop iteration; idempotency makes that safe. On any internal
+        error the original candidate is returned unchanged (never breaks the
+        resolution loop).
+        """
+        if not cand.resolved_text:
+            return cand
+        if (unit.language or "") not in ("rust",):
+            return cand  # v1 primitives are Rust-only
+        try:
+            from capybase.change_accounting import derive_missing_obligations
+            # Use the base HUNK (diff3-refined or re-derived), not the full
+            # base file — see PreservationHeuristicValidator.verify.
+            base_text = unit.base.text or ""
+            refined = unit.structural_metadata.get("diff3_refined")
+            if isinstance(refined, dict) and refined.get("base") is not None:
+                base_text = refined["base"]
+            else:
+                from capybase.conflict_extractor import _base_hunk_via_diff3
+                bh = _base_hunk_via_diff3(
+                    base_text, unit.current.text or "",
+                    unit.replayed.text or "")
+                if bh is not None:
+                    base_text = bh
+            obligations = derive_missing_obligations(
+                base_text, unit.current.text or "",
+                unit.replayed.text or "", cand.resolved_text,
+            )
+            if not obligations:
+                return cand
+
+            provenance_suffix = ""
+            edited_text = cand.resolved_text
+            certificates = []
+
+            # 1. Import-union (additive import leaves).
+            if getattr(self.config.future, "enable_import_union", True):
+                from capybase.import_union import (
+                    propose_import_union, STATUS_APPLIED as _APPLIED)
+                r = propose_import_union(edited_text, obligations)
+                if r.status == _APPLIED and r.text != edited_text:
+                    certificates.append(("import_union", r.certificate))
+                    edited_text = r.text
+                    provenance_suffix += "+import_union"
+                    self.journal.emit(
+                        "import_union_applied",
+                        {"certificate": r.certificate,
+                         "candidate_id": cand.candidate_id},
+                        step_index=self.step, path=unit.path,
+                        unit_id=unit.unit_id,
+                    )
+
+            # 2. Deletion-application (DROPPED_DELETION obligations).
+            if getattr(self.config.future, "enable_deletion_union", True):
+                from capybase.deletion_union import propose_deletion_application
+                from capybase.import_union import STATUS_APPLIED as _APPLIED
+                r2 = propose_deletion_application(edited_text, obligations)
+                if r2.status == _APPLIED and r2.text != edited_text:
+                    certificates.append(("deletion_union", r2.certificate))
+                    edited_text = r2.text
+                    provenance_suffix += "+deletion_union"
+                    self.journal.emit(
+                        "deletion_union_applied",
+                        {"certificate": r2.certificate,
+                         "candidate_id": cand.candidate_id},
+                        step_index=self.step, path=unit.path,
+                        unit_id=unit.unit_id,
+                    )
+
+            if edited_text != cand.resolved_text:
+                cand = cand.model_copy(update={
+                    "resolved_text": edited_text,
+                    "provenance": (cand.provenance or "plain_llm") + provenance_suffix,
+                })
+        except Exception:  # noqa: BLE001 — never break the resolution loop
+            self.journal.emit(
+                "deterministic_closure_skipped",
+                {"reason": "internal error (candidate untouched)",
+                 "candidate_id": cand.candidate_id},
+                step_index=self.step, path=unit.path,
+                unit_id=unit.unit_id,
+            )
+        return cand
+
     def _resolve_unit(
         self, unit: ConflictUnit, *, seed_failures: list | None = None,
         seed_candidate: "CandidateResolution | None" = None,
@@ -6045,62 +6140,18 @@ class Orchestrator:
             # LLM calls, so validating all N is cheap. If none pass, the winner
             # (and its failures) feeds the CEGIS repair loop below.
             cand = winner
-            # Deterministic import-union editor (Tier-A structural primitive).
-            # AFTER the model produces a candidate, if change-accounting detects
-            # it copied one side verbatim and thereby dropped an additive Rust
-            # ``use`` import leaf, insert the missing leaf mechanically — no
-            # second model call. This runs BEFORE the no-op cache + verification
-            # so the import-fixed candidate is validated normally (cargo/rustc
-            # remains authoritative) and a preservation_heuristic failure that
-            # would have fired on the unfixed candidate is prevented. On every
-            # non-APPLIED outcome the candidate is untouched (strict no-op), so
-            # the normal preservation → repair flow proceeds unchanged. Runs
-            # every loop iteration; idempotency makes that safe (a leaf already
-            # present is not re-added). See src/capybase/import_union.py.
-            if (getattr(self.config.future, "enable_import_union", True)
-                    and (unit.language or "") == "rust"
-                    and cand.resolved_text):
-                try:
-                    from capybase.change_accounting import derive_missing_obligations
-                    from capybase.import_union import propose_import_union, STATUS_APPLIED
-                    # Use the base HUNK (diff3-refined or re-derived), not the
-                    # full base file — see PreservationHeuristicValidator.verify.
-                    _base_text = unit.base.text or ""
-                    _refined = unit.structural_metadata.get("diff3_refined")
-                    if isinstance(_refined, dict) and _refined.get("base") is not None:
-                        _base_text = _refined["base"]
-                    else:
-                        from capybase.conflict_extractor import _base_hunk_via_diff3
-                        _bh = _base_hunk_via_diff3(
-                            _base_text, unit.current.text or "",
-                            unit.replayed.text or "")
-                        if _bh is not None:
-                            _base_text = _bh
-                    _obligations = derive_missing_obligations(
-                        _base_text, unit.current.text or "",
-                        unit.replayed.text or "", cand.resolved_text,
-                    )
-                    if _obligations:
-                        _iu = propose_import_union(cand.resolved_text, _obligations)
-                        if _iu.status == STATUS_APPLIED and _iu.text != cand.resolved_text:
-                            self.journal.emit(
-                                "import_union_applied",
-                                {"certificate": _iu.certificate,
-                                 "candidate_id": cand.candidate_id},
-                                step_index=self.step, path=unit.path,
-                                unit_id=unit.unit_id,
-                            )
-                            cand = cand.model_copy(update={
-                                "resolved_text": _iu.text,
-                                "provenance": (cand.provenance or "plain_llm") + "+import_union",
-                            })
-                except Exception:  # noqa: BLE001 — never break the resolution loop
-                    self.journal.emit(
-                        "import_union_skipped",
-                        {"reason": "internal error (candidate untouched)"},
-                        step_index=self.step, path=unit.path,
-                        unit_id=unit.unit_id,
-                    )
+            # Deterministic closure: run all applicable Tier-A structural
+            # primitives in sequence (import-union → deletion-application →
+            # block-insertion) on the candidate BEFORE verification. Each is a
+            # pure function with the APPLIED/NOT_APPLICABLE/BLOCKED/AMBIGUOUS
+            # contract; on every non-APPLIED outcome the candidate is untouched.
+            # Together they close mechanically-satisfiable obligations without a
+            # second model call: missing import leaves are inserted, dropped
+            # deletions are removed, additive blocks are transplanted. The
+            # existing cargo/rustc gauntlet remains authoritative after the edit.
+            # Runs every loop iteration; idempotency makes that safe. See
+            # src/capybase/import_union.py, deletion_union.py, block_insertion.py.
+            cand = self._apply_deterministic_closure(unit, cand)
             # No-op short-circuit (the analysis's "eliminate avoidable slow
             # retries"): if this EXACT candidate was already validated in this
             # loop (same resolved_text hash), reuse the prior result instead of

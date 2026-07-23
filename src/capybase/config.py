@@ -639,6 +639,12 @@ class FutureConfig(BaseModel):
     # preservation → repair flow proceeds unchanged). Flip off to force the
     # model to handle every import merge itself.
     enable_import_union: bool = True
+    # Deterministic deletion-application editor (Rust): when change-accounting
+    # detects the model copied a side that KEPT lines the other side intended to
+    # DELETE (a DROPPED_DELETION obligation), remove those lines mechanically.
+    # Tier-A primitive: deterministic, idempotent, transactional (brace-balance
+    # checked after removal). Symmetric to import-union. Default ON.
+    enable_deletion_union: bool = True
     # Phase 4 comment jury (design §5). An untrusted semantic sensor that
     # evaluates comment claims produced by the comment pass. Three operating
     # modes:
