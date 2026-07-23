@@ -653,6 +653,12 @@ class FutureConfig(BaseModel):
     # checked), conservative (AMBIGUOUS when anchors can't be uniquely located).
     # Default ON.
     enable_block_insertion: bool = True
+    # Deterministic manifest-union editor (TOML/Cargo.toml): unions feature
+    # arrays, workspace member arrays, and transplants new dependency entries.
+    # Tier-A primitive: deterministic, idempotent, transactional (bracket-balance
+    # checked), conservative. Version bumps are NOT unioned (exclusive choices).
+    # Default ON.
+    enable_manifest_union: bool = True
     # Phase 4 comment jury (design §5). An untrusted semantic sensor that
     # evaluates comment claims produced by the comment pass. Three operating
     # modes:

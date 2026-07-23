@@ -5677,8 +5677,9 @@ class Orchestrator:
         """
         if not cand.resolved_text:
             return cand
-        if (unit.language or "") not in ("rust",):
-            return cand  # v1 primitives are Rust-only
+        lang = unit.language or ""
+        if lang not in ("rust", "toml"):
+            return cand  # v1 primitives are Rust + TOML only
         try:
             from capybase.change_accounting import derive_missing_obligations
             # Use the base HUNK (diff3-refined or re-derived), not the full
@@ -5758,6 +5759,29 @@ class Orchestrator:
                     self.journal.emit(
                         "block_insertion_applied",
                         {"certificate": r3.certificate,
+                         "candidate_id": cand.candidate_id},
+                        step_index=self.step, path=unit.path,
+                        unit_id=unit.unit_id,
+                    )
+
+            # 4. Manifest-union (TOML feature/array unions, line transplants).
+            if lang == "toml" and getattr(self.config.future, "enable_manifest_union", True):
+                from capybase.manifest_union import propose_manifest_union
+                from capybase.import_union import STATUS_APPLIED as _APPLIED
+                _cur_text2 = unit.current.text or ""
+                _rep_text2 = unit.replayed.text or ""
+                _other2 = _rep_text2 if edited_text.strip() == _cur_text2.strip() else _cur_text2
+                r4 = propose_manifest_union(
+                    edited_text, obligations,
+                    base_text=base_text, other_side_text=_other2,
+                )
+                if r4.status == _APPLIED and r4.text != edited_text:
+                    certificates.append(("manifest_union", r4.certificate))
+                    edited_text = r4.text
+                    provenance_suffix += "+manifest_union"
+                    self.journal.emit(
+                        "manifest_union_applied",
+                        {"certificate": r4.certificate,
                          "candidate_id": cand.candidate_id},
                         step_index=self.step, path=unit.path,
                         unit_id=unit.unit_id,
