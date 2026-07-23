@@ -3334,12 +3334,18 @@ class VerificationEngine:
         # no-worse-than-before delta (#7). Pass the Diagnostics (not just
         # .message) so the delta can key on .code — a pre-existing E0432 in
         # baseline suppresses an E0432 in the candidate even if the message text
-        # drifted (Issue 3). Thread rust_suppress_codes for the standalone/no-
-        # full-crate context where E0432/E0433 are undecidable.
+        # drifted (Issue 3).
+        #
+        # IMPORTANT (E0433 phase-scoping): do NOT pass suppress_codes here. The
+        # cargo path has FULL CRATE CONTEXT — crate-path errors (E0432/E0433)
+        # are decidable in this phase (cargo can resolve them). A genuinely-new
+        # E0433 from cargo means a broken import and MUST be a hard failure.
+        # The suppress_codes are only for the standalone-rustc path (isolated
+        # snippet, no crate context, where E0433 is undecidable). Conflating
+        # the two would let a broken merge pass final validation.
         new_errors = compute_diagnostic_delta(
             list(baseline.errors),
             list(after.errors),
-            suppress_codes=set(getattr(self.config, "rust_suppress_codes", []) or []),
         )
         syntax_ok = len(new_errors) == 0
         features["syntax_passed"] = syntax_ok
@@ -3428,10 +3434,12 @@ class VerificationEngine:
             elif target_path.exists():
                 target_path.unlink(missing_ok=True)
         features["syntax_checked"] = True
+        # Phase-scoped: cargo manifest check has full crate context — do NOT
+        # pass suppress_codes (E0432/E0433 are decidable here, unlike the
+        # isolated standalone-rustc path).
         new_errors = compute_diagnostic_delta(
             list(baseline.errors),
             list(after.errors),
-            suppress_codes=set(getattr(self.config, "rust_suppress_codes", []) or []),
         )
         syntax_ok = len(new_errors) == 0
         features["syntax_passed"] = syntax_ok
