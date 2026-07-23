@@ -329,7 +329,26 @@ class PreservationHeuristicValidator:
                 from capybase.change_accounting import (
                     derive_missing_obligations, derive_deferred_comments,
                 )
+                # Use the base HUNK, not the full base file. The conflict unit's
+                # base side is the ENTIRE base file (set at extraction time),
+                # but current/replayed are the marker-block interiors (hunk-
+                # sized). Diffing full_file → hunk produces thousands of
+                # spurious "removed" lines that drown the real obligation signal.
+                # The diff3-refined base hunk (already computed by the conflict
+                # extractor, or re-derivable via _base_hunk_via_diff3) is the
+                # correct shape: it matches the current/replayed hunk scope.
+                # This mirrors _value_resolution_of's base-text derivation
+                # (conflict_extractor.py:704-718).
                 base_raw = ctx.unit.base.text or ""
+                refined = ctx.unit.structural_metadata.get("diff3_refined")
+                if isinstance(refined, dict) and refined.get("base") is not None:
+                    base_raw = refined["base"]
+                else:
+                    from capybase.conflict_extractor import _base_hunk_via_diff3
+                    base_hunk = _base_hunk_via_diff3(
+                        ctx.unit.base.text or "", cur, rep)
+                    if base_hunk is not None:
+                        base_raw = base_hunk
                 missing = derive_missing_obligations(
                     base_raw, cur, rep, resolved)
                 deferred = derive_deferred_comments(

@@ -172,6 +172,17 @@ def _obligation_suffix(unit, cand) -> str:
         cur = (unit.current.text or "") if unit else ""
         rep = (unit.replayed.text or "") if unit else ""
         res = (cand.resolved_text or "") if cand else ""
+        # Use the base HUNK (diff3-refined or re-derived), not the full base
+        # file — the unit's base is the whole file but cur/rep are hunk-sized.
+        # See PreservationHeuristicValidator.verify for the same fix.
+        refined = unit.structural_metadata.get("diff3_refined") if unit else None
+        if isinstance(refined, dict) and refined.get("base") is not None:
+            base = refined["base"]
+        else:
+            from capybase.conflict_extractor import _base_hunk_via_diff3
+            base_hunk = _base_hunk_via_diff3(base, cur, rep)
+            if base_hunk is not None:
+                base = base_hunk
         missing = derive_missing_obligations(base, cur, rep, res)
         if not missing:
             return ""
@@ -6052,8 +6063,21 @@ class Orchestrator:
                 try:
                     from capybase.change_accounting import derive_missing_obligations
                     from capybase.import_union import propose_import_union, STATUS_APPLIED
+                    # Use the base HUNK (diff3-refined or re-derived), not the
+                    # full base file — see PreservationHeuristicValidator.verify.
+                    _base_text = unit.base.text or ""
+                    _refined = unit.structural_metadata.get("diff3_refined")
+                    if isinstance(_refined, dict) and _refined.get("base") is not None:
+                        _base_text = _refined["base"]
+                    else:
+                        from capybase.conflict_extractor import _base_hunk_via_diff3
+                        _bh = _base_hunk_via_diff3(
+                            _base_text, unit.current.text or "",
+                            unit.replayed.text or "")
+                        if _bh is not None:
+                            _base_text = _bh
                     _obligations = derive_missing_obligations(
-                        unit.base.text or "", unit.current.text or "",
+                        _base_text, unit.current.text or "",
                         unit.replayed.text or "", cand.resolved_text,
                     )
                     if _obligations:
