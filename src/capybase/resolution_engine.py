@@ -1617,13 +1617,44 @@ def _render_failure(f: VerificationFailure) -> str:
     """
     parts = [f"- [{f.validator}] {f.message}"]
     if f.detail:
-        for key, val in f.detail.items():
-            # Truncate long values (e.g. full AST fingerprints) to keep the
-            # prompt focused on the actionable signal.
-            sval = str(val)
-            if len(sval) > 200:
-                sval = sval[:200] + " …"
-            parts.append(f"    {key}: {sval}")
+        # Special-case: the change-accounting missing_lines — render as a
+        # constructive delta-completion instruction (the specific lines to
+        # integrate), not the generic key-value dump. A small model seeing
+        # "missing_lines: ['...']" can't act on it; naming the exact lines
+        # to add breaks the copy-one-side convergence loop.
+        missing = f.detail.get("missing_lines")
+        if (missing and isinstance(missing, list)
+                and f.validator == "preservation_heuristic"):
+            copied = f.detail.get("copied_side", "one side")
+            other = "REPLAYED" if copied == "current" else "CURRENT"
+            parts.append(
+                f"    Your candidate is identical to {copied.upper()}. The "
+                f"following executable change(s) from {other} are NOT accounted "
+                f"for — integrate them into the candidate (or, if the candidate "
+                f"already provides the same behavior differently, keep it):")
+            for line in missing:
+                parts.append(f"      + {line}")
+            deferred = f.detail.get("deferred_comments", 0)
+            if deferred:
+                parts.append(
+                    f"    ({deferred} comment-only change(s) from {other} are "
+                    f"deferred to the comment pass and do not need integrating now.)")
+            # Render remaining detail keys (minus the ones already surfaced).
+            for key, val in f.detail.items():
+                if key in ("missing_lines", "copied_side", "deferred_comments"):
+                    continue
+                sval = str(val)
+                if len(sval) > 200:
+                    sval = sval[:200] + " …"
+                parts.append(f"    {key}: {sval}")
+        else:
+            for key, val in f.detail.items():
+                # Truncate long values (e.g. full AST fingerprints) to keep the
+                # prompt focused on the actionable signal.
+                sval = str(val)
+                if len(sval) > 200:
+                    sval = sval[:200] + " …"
+                parts.append(f"    {key}: {sval}")
     return "\n".join(parts)
 
 

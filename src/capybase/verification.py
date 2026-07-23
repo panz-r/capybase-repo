@@ -310,26 +310,93 @@ class PreservationHeuristicValidator:
                     "value_resolution": True,
                 },
             )
-        # Actionable message: when the model copies one side verbatim, tell it
-        # HOW to fix it. If BOTH sides changed from base (an additive conflict —
-        # each side added/changed distinct content), the correct resolution
-        # COMBINES both sides' additions, not picks one. A small model that sees
-        # only "copies one side verbatim" often re-proposes the SAME side (it
-        # reads the feedback as "pick the other side" rather than "combine") and
-        # converges. The enriched message breaks that loop by naming the action.
-        base = (ctx.unit.base.text or "").strip()
-        both_changed = bool(cur) and bool(rep) and cur != base and rep != base
-        if copied_one and both_changed:
-            message = (
-                "resolved text copies one side verbatim, but BOTH sides changed "
-                "from the base — do NOT pick one side. Combine BOTH sides' "
-                "additions into a single resolution that preserves every "
-                "distinctive line from each side."
-            )
-        elif copied_one:
-            message = "resolved text copies one side verbatim"
-        else:
-            message = "resolved text differs from both sides"
+        # Change accounting: "candidate == one side" is not itself proof of a
+        # lost intent. The other side's base-relative changes may be already
+        # present (EQUIVALENT — the copy is correct), comment-only (DEFERRED —
+        # the comment pass handles them), formatting (IGNORED), or genuinely
+        # missing executable code (the actionable case). Compute the SPECIFIC
+        # missing obligations so the repair loop can give the model a
+        # constructive counterexample ("integrate THIS line") instead of the
+        # generic "you copied one side" that small models can't act on.
+        #
+        # When the copy is fully accounted for (no missing executable/directive
+        # obligations), PASS — this is the fix for false-positive convergence
+        # where copying one side IS correct (the other side's changes are all
+        # present/equivalent/comment-only). When obligations are missing, carry
+        # the exact missing lines in `detail` for the repair prompt.
+        if copied_one:
+            try:
+                from capybase.change_accounting import (
+                    derive_missing_obligations, derive_deferred_comments,
+                )
+                base_raw = ctx.unit.base.text or ""
+                missing = derive_missing_obligations(
+                    base_raw, cur, rep, resolved)
+                deferred = derive_deferred_comments(
+                    base_raw, cur, rep, resolved)
+            except Exception:  # noqa: BLE001 — best-effort; fall back to flag
+                missing, deferred = None, []
+            if missing is not None and not missing:
+                # The copy is fully accounted for — PASS (no lost executable
+                # intent). Comment changes are deferred to the comment pass.
+                return VerificationCheckResult(
+                    name=self.name,
+                    passed=True,
+                    severity="warning",
+                    message=(
+                        "resolved text copies one side verbatim, but every "
+                        "executable change from the other side is accounted for "
+                        "(present or comment-only-deferred)"
+                    ),
+                    detail={
+                        "copied_current": copied_current,
+                        "copied_replayed": copied_replayed,
+                        "change_accounting": "all_accounted_for",
+                        "deferred_comments": len(deferred),
+                    },
+                    features={
+                        "copied_one_side": True,
+                        "copied_current_side": copied_current,
+                        "copied_replayed_side": copied_replayed,
+                        "change_accounted": True,
+                    },
+                )
+            if missing:
+                # Actionable: name the specific missing lines so the model can
+                # integrate them (the delta-completion counterexample).
+                missing_lines = [o.line.strip() for o in missing[:8]]
+                copied_label = "CURRENT" if copied_current else "REPLAYED"
+                other_label = "REPLAYED" if copied_current else "CURRENT"
+                return VerificationCheckResult(
+                    name=self.name,
+                    passed=False,
+                    severity="warning",
+                    message=(
+                        f"resolved text copies {copied_label} verbatim, but "
+                        f"{other_label} introduced executable changes not "
+                        f"accounted for — integrate them"
+                    ),
+                    detail={
+                        "copied_current": copied_current,
+                        "copied_replayed": copied_replayed,
+                        "missing_lines": missing_lines,
+                        "missing_count": len(missing),
+                        "copied_side": copied_label.lower(),
+                        "deferred_comments": len(deferred),
+                    },
+                    features={
+                        "copied_one_side": True,
+                        "copied_current_side": copied_current,
+                        "copied_replayed_side": copied_replayed,
+                        "change_accounted": False,
+                    },
+                )
+            # missing is None (change-accounting failed) → fall back to flag.
+        message = (
+            "resolved text copies one side verbatim"
+            if copied_one
+            else "resolved text differs from both sides"
+        )
         return VerificationCheckResult(
             name=self.name,
             passed=not copied_one,
@@ -338,7 +405,6 @@ class PreservationHeuristicValidator:
             detail={
                 "copied_current": copied_current,
                 "copied_replayed": copied_replayed,
-                "both_sides_changed_from_base": both_changed if copied_one else None,
             },
             features={
                 "copied_one_side": copied_one,

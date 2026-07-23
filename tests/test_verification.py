@@ -100,39 +100,51 @@ def test_flags_copying_one_side():
     assert any(w.validator == "preservation_heuristic" for w in res.warnings)
 
 
-def test_preservation_heuristic_actionable_combine_message_when_additive():
-    """When BOTH sides changed from base (an additive conflict) and the model
-    copies one side verbatim, the warning message must be ACTIONABLE — it tells
-    the model to COMBINE both sides rather than pick one. A small model seeing
-    only "copies one side verbatim" re-proposes the same side (it reads the
-    feedback as "pick the other side") and converges. This enriched message
-    breaks that loop. Surfaced by the gemma-4-e4b Rust run: 50 of 57
-    convergence cases were this pattern (sim 0.97+)."""
-    # base differs from both sides → additive conflict
-    worktree = "b\n<<<<<<< H\ncur\n=======\nrep\n>>>>>>> b\n"
-    unit = _unit("base", "current", "replayed", worktree)
-    cand = _candidate("current")  # model copied current verbatim
+def test_preservation_heuristic_actionable_missing_lines_when_additive():
+    """When BOTH sides changed from base and the model copies one side verbatim,
+    the warning must carry the SPECIFIC missing executable lines (change
+    accounting), not a generic 'you copied one side' message. A small model
+    seeing only 'copies one side' re-proposes the same side and converges.
+    Surfaced by the gemma-4-e4b Rust run: 50 convergence cases."""
+    # base differs from both sides; replayed added a line current lacks.
+    worktree = "b\n<<<<<<< H\ncur\n=======\nrepline\n>>>>>>> b\n"
+    unit = _unit("base", "current", "replayed\nrepline", worktree)
+    cand = _candidate("current")  # model copied current, dropped replayed's add
     res = _engine().verify(unit, cand)
     pres = [w for w in res.warnings if w.validator == "preservation_heuristic"]
-    assert pres, "preservation_heuristic should fire (copied one side)"
-    msg = pres[0].message
-    assert "do NOT pick one side" in msg, f"additive conflict needs combine guidance: {msg}"
-    assert "Combine BOTH sides" in msg
-    assert pres[0].detail.get("both_sides_changed_from_base") is True
+    assert pres, "preservation_heuristic should fire (missing obligation)"
+    assert pres[0].detail.get("missing_lines"), (
+        "should carry the specific missing line(s)")
+    assert "repline" in pres[0].detail["missing_lines"]
 
 
-def test_preservation_heuristic_plain_message_when_one_sided():
+def test_preservation_heuristic_passes_when_no_missing_obligations():
+    """When the model copies one side but the other side's executable changes
+    are all already present (EQUIVALENT) or comment-only (DEFERRED), the copy
+    is correct — the validator PASSES (no warning). This is the fix for
+    false-positive convergence where copying one side IS the right resolution."""
+    # both sides added the SAME line; model copied current → replayed's add
+    # is already present → no missing obligation → PASS.
+    worktree = "fn a() {}\n<<<<<<< H\nfn b() {}\n=======\nfn b() {}\n>>>>>>> b\n"
+    unit = _unit("fn a() {}", "fn a() {}\nfn b() {}", "fn a() {}\nfn b() {}", worktree)
+    cand = _candidate("fn a() {}\nfn b() {}")
+    res = _engine().verify(unit, cand)
+    # A passing preservation check produces NO warning (the check passed).
+    pres = [w for w in res.warnings if w.validator == "preservation_heuristic"]
+    assert not pres, "fully-accounted copy should not produce a warning"
+    assert res.features.get("change_accounted") is True, (
+        "features should confirm the copy was accounted for")
+
+
+def test_preservation_heuristic_passes_when_one_sided():
     """When only ONE side changed from base (the other equals base), copying the
-    changed side is plausibly correct — the plain message (no combine guidance)
-    is appropriate. The enriched combine message should NOT fire."""
-    worktree = "y\n<<<<<<< H\ncur\n=======\ny\n>>>>>>> b\n"
-    unit = _unit("y", "changed", "y", worktree)  # only current changed; replayed == base
-    cand = _candidate("changed")  # model copied the changed side
+    changed side is correct — no missing obligations → PASS (no warning)."""
+    worktree = "y\n<<<<<<< H\nchanged\n=======\ny\n>>>>>>> b\n"
+    unit = _unit("y", "changed", "y", worktree)  # only current changed
+    cand = _candidate("changed")
     res = _engine().verify(unit, cand)
     pres = [w for w in res.warnings if w.validator == "preservation_heuristic"]
-    assert pres
-    msg = pres[0].message
-    assert "do NOT pick one side" not in msg, "one-sided conflict should not get combine guidance"
+    assert not pres, "one-sided copy should PASS (no warning)"
 
 
 # ---------------------------------------------------------------------------
