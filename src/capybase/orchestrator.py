@@ -150,6 +150,34 @@ def _normalize_for_convergence(text: str, language: str | None) -> str:
         return " ".join(sorted(text.split()))
 
 
+def _obligation_suffix(unit, cand) -> str:
+    """A diagnostic suffix for convergence/oscillation escalation reasons:
+    the specific missing obligations (from change accounting) when the cycling
+    candidate copies one side.
+
+    When a candidate converges because it copies one side verbatim, naming the
+    exact dropped executable change(s) turns an opaque 'convergence' into an
+    actionable escalation reason — the human/jury knows WHAT was lost, not just
+    that the loop cycled. Returns "" when change-accounting doesn't apply (not
+    a one-sided copy) or the copy is fully accounted for.
+    """
+    try:
+        from capybase.change_accounting import derive_missing_obligations
+        base = (unit.base.text or "") if unit else ""
+        cur = (unit.current.text or "") if unit else ""
+        rep = (unit.replayed.text or "") if unit else ""
+        res = (cand.resolved_text or "") if cand else ""
+        missing = derive_missing_obligations(base, cur, rep, res)
+        if not missing:
+            return ""
+        lines = ", ".join(
+            repr(o.line.strip()[:50]) for o in missing[:3])
+        return (f" — stalled on {len(missing)} unaccounted branch change(s): "
+                f"{lines}")
+    except Exception:  # noqa: BLE001 — diagnostic; never break the escalation
+        return ""
+
+
 def _resolved_buffer(
     original: str, accepted: list[tuple[ConflictUnit, CandidateResolution]]
 ) -> str:
@@ -6162,6 +6190,7 @@ class Orchestrator:
                 outcome.reason = (
                     f"candidate oscillation (identical resolved_text {osc_count}×, "
                     f"budget {osc_budget})"
+                    + _obligation_suffix(unit, cand)
                 )
                 return outcome
             # Convergence backstop (Issue 4): if the model produces a candidate
@@ -6193,6 +6222,7 @@ class Orchestrator:
                     outcome.reason = (
                         f"candidate convergence (normalized form {norm_count}×, "
                         f"threshold {conv_threshold})"
+                        + _obligation_suffix(unit, cand)
                     )
                     return outcome
             # Seed the retry: hard failures PLUS the critic's verdict (if any) as
