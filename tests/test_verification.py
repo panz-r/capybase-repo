@@ -100,6 +100,41 @@ def test_flags_copying_one_side():
     assert any(w.validator == "preservation_heuristic" for w in res.warnings)
 
 
+def test_preservation_heuristic_actionable_combine_message_when_additive():
+    """When BOTH sides changed from base (an additive conflict) and the model
+    copies one side verbatim, the warning message must be ACTIONABLE — it tells
+    the model to COMBINE both sides rather than pick one. A small model seeing
+    only "copies one side verbatim" re-proposes the same side (it reads the
+    feedback as "pick the other side") and converges. This enriched message
+    breaks that loop. Surfaced by the gemma-4-e4b Rust run: 50 of 57
+    convergence cases were this pattern (sim 0.97+)."""
+    # base differs from both sides → additive conflict
+    worktree = "b\n<<<<<<< H\ncur\n=======\nrep\n>>>>>>> b\n"
+    unit = _unit("base", "current", "replayed", worktree)
+    cand = _candidate("current")  # model copied current verbatim
+    res = _engine().verify(unit, cand)
+    pres = [w for w in res.warnings if w.validator == "preservation_heuristic"]
+    assert pres, "preservation_heuristic should fire (copied one side)"
+    msg = pres[0].message
+    assert "do NOT pick one side" in msg, f"additive conflict needs combine guidance: {msg}"
+    assert "Combine BOTH sides" in msg
+    assert pres[0].detail.get("both_sides_changed_from_base") is True
+
+
+def test_preservation_heuristic_plain_message_when_one_sided():
+    """When only ONE side changed from base (the other equals base), copying the
+    changed side is plausibly correct — the plain message (no combine guidance)
+    is appropriate. The enriched combine message should NOT fire."""
+    worktree = "y\n<<<<<<< H\ncur\n=======\ny\n>>>>>>> b\n"
+    unit = _unit("y", "changed", "y", worktree)  # only current changed; replayed == base
+    cand = _candidate("changed")  # model copied the changed side
+    res = _engine().verify(unit, cand)
+    pres = [w for w in res.warnings if w.validator == "preservation_heuristic"]
+    assert pres
+    msg = pres[0].message
+    assert "do NOT pick one side" not in msg, "one-sided conflict should not get combine guidance"
+
+
 # ---------------------------------------------------------------------------
 # Both-sides-represented
 # ---------------------------------------------------------------------------

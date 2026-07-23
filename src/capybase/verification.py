@@ -310,18 +310,35 @@ class PreservationHeuristicValidator:
                     "value_resolution": True,
                 },
             )
+        # Actionable message: when the model copies one side verbatim, tell it
+        # HOW to fix it. If BOTH sides changed from base (an additive conflict —
+        # each side added/changed distinct content), the correct resolution
+        # COMBINES both sides' additions, not picks one. A small model that sees
+        # only "copies one side verbatim" often re-proposes the SAME side (it
+        # reads the feedback as "pick the other side" rather than "combine") and
+        # converges. The enriched message breaks that loop by naming the action.
+        base = (ctx.unit.base.text or "").strip()
+        both_changed = bool(cur) and bool(rep) and cur != base and rep != base
+        if copied_one and both_changed:
+            message = (
+                "resolved text copies one side verbatim, but BOTH sides changed "
+                "from the base — do NOT pick one side. Combine BOTH sides' "
+                "additions into a single resolution that preserves every "
+                "distinctive line from each side."
+            )
+        elif copied_one:
+            message = "resolved text copies one side verbatim"
+        else:
+            message = "resolved text differs from both sides"
         return VerificationCheckResult(
             name=self.name,
             passed=not copied_one,
             severity="warning",
-            message=(
-                "resolved text copies one side verbatim"
-                if copied_one
-                else "resolved text differs from both sides"
-            ),
+            message=message,
             detail={
                 "copied_current": copied_current,
                 "copied_replayed": copied_replayed,
+                "both_sides_changed_from_base": both_changed if copied_one else None,
             },
             features={
                 "copied_one_side": copied_one,
