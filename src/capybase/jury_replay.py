@@ -203,6 +203,33 @@ def _compute_fingerprint(frozen_code_path: Path, lang: str = "python") -> str:
     return hashlib.sha256(tokens.encode()).hexdigest()[:16]
 
 
+def _detect_lang(code: str, case_id: str = "") -> str:
+    """Detect the language of a frozen-code buffer for executable-tokenization.
+
+    The replay harness must tokenize candidate_before/after + frozen_code with
+    the CORRECT language, or the executable-token invariant check produces false
+    mismatches (e.g. computing Rust tokens with the Python lexer mangles ``//``
+    comments + ``fn`` keywords). The flight artifacts don't carry an explicit
+    language field, so we detect from content heuristics (+ the case_id hint,
+    which encodes the dataset but not the language). Falls back to "python"
+    only when no signal is found (the historical default).
+    """
+    if not code:
+        return "python"
+    # Rust signals: fn/pub fn/impl/use crate/let mut/-> etc.
+    rust_hits = sum(1 for kw in ("fn ", "pub fn", "impl ", "use crate",
+                                 "let mut", "->", "extern crate", "mod ")
+                    if kw in code)
+    py_hits = sum(1 for kw in ("def ", "import ", "from ", "self.",
+                               "__init__", "    return", "    if __")
+                  if kw in code)
+    if rust_hits > py_hits:
+        return "rust"
+    if py_hits > rust_hits:
+        return "python"
+    return "python"  # default (historical)
+
+
 # ---------------------------------------------------------------------------
 # Replay result types
 # ---------------------------------------------------------------------------
@@ -395,12 +422,16 @@ def replay_session(
     frozen_code_path = _find_one("frozen_code/*.txt", comment_dir)
     frozen_code = (frozen_code_path.read_text("utf-8")
                    if frozen_code_path else "")
+    # Detect the language from the frozen code so executable tokens are computed
+    # with the correct lexer (a Rust corpus tokenized as Python produces false
+    # fingerprint mismatches). Falls back to python when undetectable.
+    lang = _detect_lang(frozen_code, case_id)
     frozen_fingerprint = ""
     if frozen_code_path:
-        frozen_fingerprint = _compute_fingerprint(frozen_code_path, "python")
+        frozen_fingerprint = _compute_fingerprint(frozen_code_path, lang)
 
     source_variants_path = _find_one("source_variants/*.json", comment_dir)
-    full_ledger = _build_full_ledger(source_variants_path, frozen_code, "python")
+    full_ledger = _build_full_ledger(source_variants_path, frozen_code, lang)
     ledger_lineage_ids = {getattr(e, "lineage_id", "") for e in full_ledger}
 
     # Load any jury_enforce_decision artifacts (enforce-mode recordings). These
@@ -667,11 +698,14 @@ def _check_verbatim_byte_identical(flights_dir: Path) -> bool:
             # Compare the canonical (first/last) before vs after by executable
             # token stream. The hashes in the filenames differ when text
             # differs, but the executable-token stream MUST be identical.
+            # Detect the language from the buffer so the correct lexer is used
+            # (a Rust buffer tokenized as Python produces false mismatches).
             try:
-                before = _executable_tokens(
-                    before_files[-1].read_text("utf-8"), "python")
-                after = _executable_tokens(
-                    after_files[-1].read_text("utf-8"), "python")
+                before_text = before_files[-1].read_text("utf-8")
+                after_text = after_files[-1].read_text("utf-8")
+                lang = _detect_lang(before_text, case_dir.name)
+                before = _executable_tokens(before_text, lang)
+                after = _executable_tokens(after_text, lang)
             except Exception:  # noqa: BLE001 — advisory
                 continue
             if before != after:
