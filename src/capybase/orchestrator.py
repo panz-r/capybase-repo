@@ -100,6 +100,11 @@ class UnitOutcome:
     # sorted) for the convergence check (Issue 4). Catches cosmetic-variation
     # cycling the exact-hash oscillation backstop misses.
     _seen_normalized_hashes: dict[str, int] = field(default_factory=dict)
+    # No-op cache (the analysis's "eliminate avoidable slow retries"): maps a
+    # candidate's resolved_text hash → its VerificationResult. When the model
+    # re-proposes the same candidate (common after a preservation-heuristic
+    # retry), the validation is reused instead of re-running compilation/tests.
+    _candidate_validation_cache: dict[str, object] = field(default_factory=dict)
     # Explainable-retrieval reasons (#9 step 5): one human-readable string per
     # retrieved few-shot example used in the prompt, recording WHY each was
     # chosen (same path/region kind/conflict shape, score, prior outcome). Empty
@@ -6029,7 +6034,35 @@ class Orchestrator:
             # LLM calls, so validating all N is cheap. If none pass, the winner
             # (and its failures) feeds the CEGIS repair loop below.
             cand = winner
-            validation = self.verification.verify(unit, cand)
+            # No-op short-circuit (the analysis's "eliminate avoidable slow
+            # retries"): if this EXACT candidate was already validated in this
+            # loop (same resolved_text hash), reuse the prior result instead of
+            # re-running verification (compilation, tests, diagnostics). A
+            # model that re-proposes the same candidate after a preservation-
+            # heuristic retry wastes a full validation cycle for zero new
+            # information. The oscillation/convergence backstop (below) catches
+            # the cycle and escalates — this just skips the expensive re-check.
+            import hashlib as _hashlib
+
+            cand_hash = ""
+            if cand.resolved_text:
+                cand_hash = _hashlib.sha256(
+                    cand.resolved_text.encode("utf-8")
+                ).hexdigest()[:16]
+            prior_val = outcome._candidate_validation_cache.get(cand_hash)
+            if prior_val is not None:
+                validation = prior_val  # reuse: same candidate → same result
+                self.journal.emit(
+                    "candidate_validation_reused",
+                    {"candidate_id": cand.candidate_id,
+                     "hash": cand_hash,
+                     "reason": "identical resolved_text — validation cached"},
+                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                )
+            else:
+                validation = self.verification.verify(unit, cand)
+                if cand_hash:
+                    outcome._candidate_validation_cache[cand_hash] = validation
             self._journal_validation(unit, cand, validation)
             if not validation.passed and len(candidates) > 1:
                 for trial in candidates[1:]:
@@ -6042,18 +6075,10 @@ class Orchestrator:
             outcome.validation = validation
             outcome.attempts.append(cand)
             # Track candidate hashes for oscillation detection (CEGIS resilience).
-            # The escalation check runs AFTER the risk decision below — only when
-            # the decision is "retry" — so it never fires before the normal budget.
-            # Empty resolved_text (parse failure / refusal) is excluded: a broken
-            # response repeating isn't "the model cycling on the same correct code"
-            # — it's a different failure class the existing retry budget handles.
-            import hashlib as _hashlib
-
-            cand_hash = ""
-            if cand.resolved_text:
-                cand_hash = _hashlib.sha256(
-                    cand.resolved_text.encode("utf-8")
-                ).hexdigest()[:16]
+            # cand_hash is already computed above (for the no-op cache). The
+            # escalation check runs AFTER the risk decision — only when the
+            # decision is "retry" — so it never fires before the normal budget.
+            if cand_hash:
                 outcome._seen_candidate_hashes[cand_hash] = (
                     outcome._seen_candidate_hashes.get(cand_hash, 0) + 1
                 )
