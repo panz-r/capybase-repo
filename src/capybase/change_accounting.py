@@ -290,12 +290,8 @@ def derive_missing_obligations(
         # PRESENT if any whitespace-normalized form of the line is in the
         # candidate (re-indented additions count as accounted for).
         status = "MISSING" if norm not in res_norm else "PRESENT"
-        if status == "MISSING":
-            # A removed line that's missing from the candidate is usually the
-            # branch's intentional deletion — not an obligation to integrate.
-            # Only ADDED executable/directive lines that are absent are
-            # actionable (the model dropped a real addition).
-            if op == "added":
+        if op == "added" and status == "MISSING":
+            # An ADDED line absent from the candidate = a dropped addition.
                 # EXCLUSIVE detection: does the candidate already have a line
                 # at the same structural anchor (same field/var/fn name) with a
                 # DIFFERENT value? If so, this is a mutually-exclusive choice,
@@ -339,6 +335,18 @@ def derive_missing_obligations(
                     line=changed, channel=channel, status=status,
                     side=other_label, operation=op, exclusive=exclusive,
                 ))
+        elif op == "removed" and status == "PRESENT":
+            # A REMOVED line still present in the candidate = a dropped
+            # deletion. The other side intended to DELETE this line (e.g.
+            # removed an unsafe fallback call), but the model copied the side
+            # that kept it — the deletion was not applied. This is a genuine
+            # obligation: the candidate should remove the line. (The analysis's
+            # DELETE operation — previously invisible because removed lines
+            # produced no "missing line" to request.)
+            obligations.append(BranchObligation(
+                line=changed, channel=channel, status="DROPPED_DELETION",
+                side=other_label, operation="removed", exclusive=False,
+            ))
     return obligations
 
 

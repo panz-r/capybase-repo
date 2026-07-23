@@ -392,19 +392,30 @@ class PreservationHeuristicValidator:
                     },
                 )
             if additive_missing:
-                # Actionable: name the specific ADDITIVE missing lines (genuinely
-                # dropped additions) so the model can integrate them. EXCLUSIVE
-                # obligations (mutually-exclusive alternatives) already PASSED
-                # above — only real additions need repair. Distinguish mixed
-                # cases (some additive, some exclusive) for clear feedback.
-                missing_lines = [o.line.strip() for o in additive_missing[:8]]
+                # Actionable: name the specific obligations so the model can
+                # act on them. Separate ADDITIONS (lines to add) from
+                # DELETIONS (lines the other side removed that the candidate
+                # still has — should be deleted). EXCLUSIVE obligations already
+                # PASSED above.
+                add_lines = [o.line.strip() for o in additive_missing
+                             if o.operation == "added"][:8]
+                del_lines = [o.line.strip() for o in additive_missing
+                             if o.status == "DROPPED_DELETION"][:8]
+                missing_lines = add_lines + del_lines  # backwards-compatible
                 any_exclusive = any(o.exclusive for o in missing)
                 copied_label = "CURRENT" if copied_current else "REPLAYED"
                 other_label = "REPLAYED" if copied_current else "CURRENT"
                 if any_exclusive:
                     conflict_type = "mixed"
                     action = ("Some are mutually-exclusive choices (keep or "
-                              "switch) and some are additions to integrate.")
+                              "switch) and some are changes to apply.")
+                elif del_lines and not add_lines:
+                    conflict_type = "deletion"
+                    action = "remove the line(s) below from the candidate"
+                elif del_lines and add_lines:
+                    conflict_type = "mixed_add_del"
+                    action = ("add the marked additions AND remove the marked "
+                              "deletions from the candidate")
                 else:
                     conflict_type = "additive"
                     action = "integrate them into the candidate"
@@ -417,6 +428,11 @@ class PreservationHeuristicValidator:
                         f"{other_label} has unaccounted changes ({conflict_type})"
                     ),
                     detail={
+                        "copied_current": copied_current,
+                        "copied_replayed": copied_replayed,
+                        "missing_lines": missing_lines,
+                        "addition_lines": add_lines,
+                        "deletion_lines": del_lines,
                         "copied_current": copied_current,
                         "copied_replayed": copied_replayed,
                         "missing_lines": missing_lines,

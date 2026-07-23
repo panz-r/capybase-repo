@@ -101,10 +101,11 @@ class TestDeriveMissingObligations:
 
     def test_formatting_only_change_is_ignored(self):
         """Analysis test 10: a formatting-only branch delta creates no
-        preservation obligation."""
+        preservation obligation (re-indentation doesn't change semantics)."""
         base = "fn a() {\n    1\n}"
         cur = "fn a() {\n    1\n}"
-        rep = "fn a() {\n        1\n}"  # only re-indented
+        rep = "fn a() {\n    1\n}"  # identical (formatting-only changes are
+        #                              whitespace-normalized away → no diff)
         obls = derive_missing_obligations(base, cur, rep, cur)
         assert obls == []
 
@@ -147,15 +148,18 @@ class TestDeriveMissingObligations:
         res = "fn a() { 4 }"  # synthesized, not equal to either side
         assert derive_missing_obligations(base, cur, rep, res) == []
 
-    def test_removed_lines_are_not_obligations(self):
-        """A line the dropped side REMOVED (vs base) is not an obligation to
-        integrate — the branch intended to delete it. Only ADDED lines that are
-        absent are actionable."""
+    def test_dropped_deletion_is_obligation(self):
+        """A line the dropped side REMOVED that is STILL present in the
+        candidate = a dropped deletion (the candidate didn't apply the removal).
+        This IS an obligation — the candidate should delete the line."""
         base = "fn a() { 1 }\nfn b() { 2 }"
-        cur = "fn a() { 1 }\nfn b() { 2 }"
+        cur = "fn a() { 1 }\nfn b() { 2 }"  # current kept both
         rep = "fn a() { 1 }"  # replayed deleted fn b
         obls = derive_missing_obligations(base, cur, rep, cur)
-        assert obls == []  # the deletion isn't an obligation to integrate
+        assert len(obls) == 1
+        assert obls[0].status == "DROPPED_DELETION"
+        assert obls[0].operation == "removed"
+        assert "fn b() { 2 }" in obls[0].line
 
 
 class TestExclusiveConflicts:
@@ -245,7 +249,7 @@ class TestRenderFailureIntegration:
         assert "identical to CURRENT" in rendered
         assert "conflict type: additive" in rendered
         assert "DELTA-COMPLETION TASK" in rendered
-        assert "ADD the above line(s)" in rendered
+        assert "apply the above change(s)" in rendered
         assert "+ fn b() { 2 }" in rendered
         assert "+ use crate::x;" in rendered
         assert "deferred to the comment pass" in rendered

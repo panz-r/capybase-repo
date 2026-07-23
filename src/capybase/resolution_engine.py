@@ -1633,18 +1633,32 @@ def _render_failure(f: VerificationFailure) -> str:
                 f"    Your candidate is identical to {copied.upper()}. The "
                 f"following change(s) from {other} are NOT accounted for "
                 f"(conflict type: {conflict_type}):")
-            for line in missing:
-                parts.append(f"      + {line}")
-            if conflict_type == "additive":
+            add_lines = f.detail.get("addition_lines") or []
+            del_lines = f.detail.get("deletion_lines") or []
+            if add_lines or del_lines:
+                # Show additions with + and deletions with - (the diff convention).
+                for line in add_lines:
+                    parts.append(f"      + {line}")
+                for line in del_lines:
+                    parts.append(f"      - {line}  (remove this line)")
+            else:
+                # Backwards-compat: no add/del split — show all as additions.
+                for line in missing:
+                    parts.append(f"      + {line}")
+            if conflict_type in ("additive", "mixed_add_del"):
                 # Delta-completion framing: the candidate is the correct
-                # scaffold; the model just needs to ADD these specific items.
-                # This is a much smaller search problem than re-merging.
+                # scaffold; the model just needs to apply these specific edits.
                 parts.append(
                     f"    DELTA-COMPLETION TASK: keep {copied.upper()} as your "
-                    f"starting point and ADD the above line(s) to it. For "
+                    f"starting point and apply the above change(s). For "
                     f"import-list changes (path::{{A, B}}), merge the new items "
-                    f"into the existing brace group. Do NOT remove or change "
-                    f"anything else in your candidate.")
+                    f"into the existing brace group. For deletions, remove the "
+                    f"marked line(s). Do NOT change anything else.")
+            elif conflict_type == "deletion":
+                parts.append(
+                    f"    DELTA-COMPLETION TASK: keep {copied.upper()} as your "
+                    f"starting point and REMOVE the marked line(s). The other "
+                    f"side intentionally deleted them. Do NOT change anything else.")
             else:
                 parts.append(f"    How to address: {action}")
             deferred = f.detail.get("deferred_comments", 0)
@@ -1655,7 +1669,8 @@ def _render_failure(f: VerificationFailure) -> str:
             # Render remaining detail keys (minus the ones already surfaced).
             for key, val in f.detail.items():
                 if key in ("missing_lines", "copied_side", "deferred_comments",
-                           "action", "conflict_type"):
+                           "action", "conflict_type", "addition_lines",
+                           "deletion_lines"):
                     continue
                 sval = str(val)
                 if len(sval) > 200:
