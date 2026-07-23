@@ -158,6 +158,64 @@ class TestDeriveMissingObligations:
         assert obls == []  # the deletion isn't an obligation to integrate
 
 
+class TestExclusiveConflicts:
+    """The distinction that fixes the convergence loop: EXCLUSIVE conflicts
+    (mutually-exclusive alternatives — choose, don't integrate) vs ADDITIVE
+    (genuinely new content — integrate). Telling a small model to 'integrate'
+    an exclusive conflict asks for the impossible."""
+
+    def test_field_type_alternative_is_exclusive(self):
+        """Two different type signatures for the SAME field are exclusive —
+        the model should CHOOSE one, not combine them."""
+        base = "    _marker: PhantomData<S>,"
+        cur = "    _marker: PhantomData<fn(B) -> S>,"
+        rep = "    _marker: PhantomData<fn() -> S>,"
+        obls = derive_missing_obligations(base, cur, rep, cur)
+        assert len(obls) == 1
+        assert obls[0].exclusive is True
+
+    def test_additive_import_is_not_exclusive(self):
+        """A new ``use crate::b;`` is an ADDITION (coexists with
+        ``use crate::a;``), not an exclusive alternative."""
+        base = "use crate::a;\nfn main() {}"
+        cur = "use crate::a;\nfn main() {}"
+        rep = "use crate::a;\nuse crate::b;\nfn main() {}"
+        obls = derive_missing_obligations(base, cur, rep, cur)
+        assert len(obls) == 1
+        assert obls[0].exclusive is False
+
+    def test_new_function_is_not_exclusive(self):
+        """A new ``fn b()`` is an addition, not exclusive with ``fn a()``."""
+        base = "fn a() { 1 }"
+        cur = "fn a() { 1 }"
+        rep = "fn a() { 1 }\nfn b() { 2 }"
+        obls = derive_missing_obligations(base, cur, rep, cur)
+        assert len(obls) == 1
+        assert obls[0].exclusive is False
+
+    def test_assignment_target_alternative_is_exclusive(self):
+        """Two different values for the SAME assignment target are exclusive."""
+        base = "    let x = 1;"
+        cur = "    let x = 2;"
+        rep = "    let x = 3;"
+        obls = derive_missing_obligations(base, cur, rep, cur)
+        # `let x` — the anchor is `x`? Actually `let` captures `x` via the
+        # identifier regex. Both sides have `let x` → exclusive.
+        assert len(obls) == 1
+        assert obls[0].exclusive is True
+
+    def test_no_duplicate_obligations(self):
+        """A line modified in multiple contexts (e.g. a field in the struct
+        definition + its constructor) appears once, not duplicated."""
+        base = "struct S { _marker: PhantomData<S> }\nimpl S { fn new() -> S { S { _marker: PhantomData } } }"
+        cur = "struct S { _marker: PhantomData<fn(B) -> S> }\nimpl S { fn new() -> S { S { _marker: PhantomData } } }"
+        rep = "struct S { _marker: PhantomData<fn() -> S> }\nimpl S { fn new() -> S { S { _marker: PhantomData } } }"
+        obls = derive_missing_obligations(base, cur, rep, cur)
+        # The _marker line appears once (deduped), not twice.
+        marker_obls = [o for o in obls if "_marker" in o.line]
+        assert len(marker_obls) <= 1
+
+
 # ---------------------------------------------------------------------------
 # _render_failure integration (the delta-completion counterexample)
 # ---------------------------------------------------------------------------
@@ -165,28 +223,58 @@ class TestDeriveMissingObligations:
 
 class TestRenderFailureIntegration:
     def test_missing_lines_render_as_delta_completion(self):
-        """The repair prompt renders missing_lines as a constructive
-        'integrate THESE lines' instruction, not a generic key-value dump."""
+        """The repair prompt renders missing_lines with the conflict-type-aware
+        action instruction, not a generic key-value dump."""
         from capybase.resolution_engine import _render_failure
         from capybase.conflict_model import VerificationFailure
         f = VerificationFailure(
             validator="preservation_heuristic",
             severity="warning",
             message="resolved text copies CURRENT verbatim, but REPLAYED "
-                    "introduced executable changes not accounted for",
+                    "has unaccounted changes (additive)",
             detail={
                 "copied_side": "current",
                 "missing_lines": ["fn b() { 2 }", "use crate::x;"],
+                "conflict_type": "additive",
+                "action": "integrate them into the candidate",
                 "deferred_comments": 1,
                 "missing_count": 2,
             },
         )
         rendered = _render_failure(f)
         assert "identical to CURRENT" in rendered
-        assert "integrate them" in rendered
+        assert "conflict type: additive" in rendered
+        assert "How to address: integrate them" in rendered
         assert "+ fn b() { 2 }" in rendered
         assert "+ use crate::x;" in rendered
         assert "deferred to the comment pass" in rendered
+
+    def test_exclusive_conflict_renders_choose_instruction(self):
+        """An exclusive conflict renders 'keep your selection OR switch' —
+        NOT 'integrate' (which is impossible for mutually-exclusive
+        alternatives)."""
+        from capybase.resolution_engine import _render_failure
+        from capybase.conflict_model import VerificationFailure
+        f = VerificationFailure(
+            validator="preservation_heuristic",
+            severity="warning",
+            message="resolved text copies CURRENT verbatim, but REPLAYED "
+                    "has unaccounted changes (exclusive)",
+            detail={
+                "copied_side": "current",
+                "missing_lines": ["_marker: PhantomData<fn() -> S>,"],
+                "conflict_type": "exclusive",
+                "action": "These are mutually-exclusive alternatives at the "
+                          "same position — keep your selection OR switch to "
+                          "the other side's value; both are valid.",
+                "deferred_comments": 0,
+                "missing_count": 1,
+            },
+        )
+        rendered = _render_failure(f)
+        assert "conflict type: exclusive" in rendered
+        assert "keep your selection OR switch" in rendered
+        assert "integrate" not in rendered  # NOT an integration task
 
     def test_non_preservation_failure_renders_normally(self):
         """A syntax failure (no missing_lines) renders via the standard

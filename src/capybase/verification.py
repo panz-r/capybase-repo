@@ -363,18 +363,36 @@ class PreservationHeuristicValidator:
                 )
             if missing:
                 # Actionable: name the specific missing lines so the model can
-                # integrate them (the delta-completion counterexample).
+                # act on them. Distinguish EXCLUSIVE (mutually-exclusive
+                # alternatives at the same position — the model should CHOOSE,
+                # not integrate) from ADDITIVE (genuinely new content to add).
+                # Telling a small model to "integrate" an exclusive conflict
+                # asks for the impossible, which is why it converges.
                 missing_lines = [o.line.strip() for o in missing[:8]]
+                all_exclusive = all(o.exclusive for o in missing)
+                any_exclusive = any(o.exclusive for o in missing)
                 copied_label = "CURRENT" if copied_current else "REPLAYED"
                 other_label = "REPLAYED" if copied_current else "CURRENT"
+                if all_exclusive:
+                    conflict_type = "exclusive"
+                    action = ("These are mutually-exclusive alternatives at the "
+                              "same position — keep your selection OR switch to "
+                              "the other side's value; both are valid. Do NOT "
+                              "try to combine them.")
+                elif any_exclusive:
+                    conflict_type = "mixed"
+                    action = ("Some are mutually-exclusive choices (keep or "
+                              "switch) and some are additions to integrate.")
+                else:
+                    conflict_type = "additive"
+                    action = "integrate them into the candidate"
                 return VerificationCheckResult(
                     name=self.name,
                     passed=False,
                     severity="warning",
                     message=(
                         f"resolved text copies {copied_label} verbatim, but "
-                        f"{other_label} introduced executable changes not "
-                        f"accounted for — integrate them"
+                        f"{other_label} has unaccounted changes ({conflict_type})"
                     ),
                     detail={
                         "copied_current": copied_current,
@@ -382,6 +400,8 @@ class PreservationHeuristicValidator:
                         "missing_lines": missing_lines,
                         "missing_count": len(missing),
                         "copied_side": copied_label.lower(),
+                        "conflict_type": conflict_type,
+                        "action": action,
                         "deferred_comments": len(deferred),
                     },
                     features={
@@ -389,6 +409,7 @@ class PreservationHeuristicValidator:
                         "copied_current_side": copied_current,
                         "copied_replayed_side": copied_replayed,
                         "change_accounted": False,
+                        "conflict_exclusive": all_exclusive,
                     },
                 )
             # missing is None (change-accounting failed) → fall back to flag.

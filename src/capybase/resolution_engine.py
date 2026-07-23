@@ -1627,13 +1627,15 @@ def _render_failure(f: VerificationFailure) -> str:
                 and f.validator == "preservation_heuristic"):
             copied = f.detail.get("copied_side", "one side")
             other = "REPLAYED" if copied == "current" else "CURRENT"
+            action = f.detail.get("action", "integrate them into the candidate")
+            conflict_type = f.detail.get("conflict_type", "additive")
             parts.append(
                 f"    Your candidate is identical to {copied.upper()}. The "
-                f"following executable change(s) from {other} are NOT accounted "
-                f"for — integrate them into the candidate (or, if the candidate "
-                f"already provides the same behavior differently, keep it):")
+                f"following change(s) from {other} are NOT accounted for "
+                f"(conflict type: {conflict_type}):")
             for line in missing:
                 parts.append(f"      + {line}")
+            parts.append(f"    How to address: {action}")
             deferred = f.detail.get("deferred_comments", 0)
             if deferred:
                 parts.append(
@@ -1641,7 +1643,8 @@ def _render_failure(f: VerificationFailure) -> str:
                     f"deferred to the comment pass and do not need integrating now.)")
             # Render remaining detail keys (minus the ones already surfaced).
             for key, val in f.detail.items():
-                if key in ("missing_lines", "copied_side", "deferred_comments"):
+                if key in ("missing_lines", "copied_side", "deferred_comments",
+                           "action", "conflict_type"):
                     continue
                 sval = str(val)
                 if len(sval) > 200:

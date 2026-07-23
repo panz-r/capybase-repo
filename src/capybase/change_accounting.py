@@ -58,6 +58,16 @@ class BranchObligation:
     (comment/formatting). ``status`` is MISSING (absent from the candidate —
     the actionable signal) or PRESENT (already accounted for — no obligation).
     ``side`` is which branch introduced it ("current" or "replayed").
+
+    ``exclusive`` is True when the candidate already has a line at the same
+    structural position (same leading identifier — field name, assignment
+    target, function name) with a DIFFERENT value. This means the two sides
+    propose mutually-exclusive alternatives (e.g. two type signatures for the
+    same field: ``PhantomData<fn(B) -> S>`` vs ``PhantomData<fn() -> S>``).
+    An exclusive obligation is NOT an integration task — the model should
+    CHOOSE one side's value (both are valid), not try to combine them. Telling
+    a small model to "integrate" an exclusive conflict is asking for the
+    impossible, which is why it re-proposes the same side and converges.
     """
     line: str
     channel: str
@@ -68,6 +78,7 @@ class BranchObligation:
     # from the candidate is usually fine (the branch intended to delete it); an
     # added line that's missing is the actionable case.
     operation: str = "added"
+    exclusive: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +142,45 @@ def _norm(line: str) -> str:
     return " ".join(line.split())
 
 
+#: Extract the leading structural identifier from a code line — the field name,
+#: assignment target, or function/variable name that anchors the line's position.
+#: Used to detect EXCLUSIVE conflicts: when the candidate and the missing
+#: obligation share the same anchor but differ in value, they're mutually-
+#: exclusive alternatives (e.g. ``_marker: PhantomData<fn(B) -> S>`` vs
+#: ``_marker: PhantomData<fn() -> S>`` — same field, different type).
+_ANCHOR_RE = re.compile(
+    r"^\s*(?:pub\s+)?(?:async\s+)?(?:unsafe\s+)?(?:extern\s+)?"  # modifiers
+    r"(?:fn\s+|def\s+|class\s+|struct\s+|enum\s+|impl\s+)?"      # keyword (optional)
+    r"([A-Za-z_]\w*)"                                            # the identifier
+)
+
+#: Import/use/include statements. For these the anchor is the FULL import path
+#: (``crate::a`` vs ``crate::b`` are DIFFERENT additions, not exclusive), not
+#: just the ``use`` keyword (which would make every import look exclusive).
+_IMPORT_RE = re.compile(
+    r"^\s*(?:pub\s+)?(?:use\s+|import\s+|from\s+|#include\s+)"  # import keyword
+    r"(.+?)"                                                     # the path
+    r"\s*(?:;|::\{|\s+as\s|$)"                                   # terminator
+)
+
+
+def _anchor_of(line: str) -> str:
+    """The leading structural identifier of a line (for exclusive-conflict
+    detection). Returns "" when the line has no clear anchor.
+
+    For import/use/include statements, the anchor is the full import path
+    (so ``use crate::a;`` and ``use crate::b;`` are DIFFERENT — both can
+    coexist). For other statements, it's the field/var/function name (so
+    ``_marker: PhantomData<fn(B) -> S>`` and ``_marker: PhantomData<fn() -> S>``
+    share the anchor ``_marker`` → exclusive)."""
+    # Imports: anchor on the full path, not the keyword.
+    m = _IMPORT_RE.match(line)
+    if m:
+        return "import:" + m.group(1).strip().rstrip(";").strip()
+    m = _ANCHOR_RE.match(line)
+    return m.group(1) if m else ""
+
+
 def derive_missing_obligations(
     base: str, current: str, replayed: str, resolved: str,
 ) -> list[BranchObligation]:
@@ -165,8 +215,18 @@ def derive_missing_obligations(
 
     # The candidate's normalized line set (for PRESENT detection).
     res_norm = {_norm(l) for l in res.splitlines() if l.strip()}
+    # The candidate's anchor → line map (for EXCLUSIVE detection: a missing
+    # line whose anchor matches a candidate line at the same position is an
+    # alternative, not an addition).
+    res_anchors: dict[str, str] = {}
+    for l in res.splitlines():
+        a = _anchor_of(l)
+        if a and l.strip():
+            res_anchors.setdefault(a, _norm(l))
 
     obligations: list[BranchObligation] = []
+    seen_norm: set[str] = set()  # dedupe by normalized content (a line modified
+    #                                 in multiple contexts shouldn't appear twice)
     for line in diff:
         if line.startswith("+++") or line.startswith("---"):
             continue
@@ -182,18 +242,35 @@ def derive_missing_obligations(
         # Deferred / ignored channels never produce a code-phase obligation.
         if channel in ("comment", "formatting"):
             continue
+        # Dedupe: a line can appear in multiple diff hunks (e.g. the same field
+        # in a struct definition + its constructor). Only the first occurrence
+        # is an obligation; duplicates add noise without new signal.
+        norm = _norm(changed)
+        if norm in seen_norm:
+            continue
+        seen_norm.add(norm)
         # PRESENT if any whitespace-normalized form of the line is in the
         # candidate (re-indented additions count as accounted for).
-        status = "MISSING" if _norm(changed) not in res_norm else "PRESENT"
+        status = "MISSING" if norm not in res_norm else "PRESENT"
         if status == "MISSING":
             # A removed line that's missing from the candidate is usually the
             # branch's intentional deletion — not an obligation to integrate.
             # Only ADDED executable/directive lines that are absent are
             # actionable (the model dropped a real addition).
             if op == "added":
+                # EXCLUSIVE detection: does the candidate already have a line
+                # at the same structural anchor (same field/var/fn name) with a
+                # DIFFERENT value? If so, this is a mutually-exclusive choice,
+                # not an integration task — flag it so the feedback tells the
+                # model to CHOOSE, not integrate.
+                anchor = _anchor_of(changed)
+                exclusive = bool(
+                    anchor and anchor in res_anchors
+                    and res_anchors[anchor] != norm
+                )
                 obligations.append(BranchObligation(
                     line=changed, channel=channel, status=status,
-                    side=other_label, operation=op,
+                    side=other_label, operation=op, exclusive=exclusive,
                 ))
     return obligations
 
