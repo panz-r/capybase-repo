@@ -351,8 +351,19 @@ class PreservationHeuristicValidator:
                 # The copy is fully accounted for — either no missing
                 # obligations at all, or all missing ones are EXCLUSIVE
                 # (mutually-exclusive alternatives where the model's choice is
-                # valid). PASS — no genuinely-dropped ADDITIONS.
+                # defensible). PASS — no genuinely-dropped ADDITIONS.
+                #
+                # IMPORTANT: PASS here means "this validator has no preservation
+                # objection." For exclusive conflicts it does NOT mean the
+                # chosen alternative is semantically correct — that's a
+                # downstream concern (the jury / human review). We log the
+                # exclusive_choices explicitly so they're auditable, and set
+                # preservation_result=CHOICE_REQUIRED (vs CLEAR for the
+                # no-obligations case) so no component mistakes this for proof
+                # of semantic correctness.
                 all_excl = bool(missing) and all(o.exclusive for o in missing)
+                excl_lines = ([o.line.strip() for o in missing[:8]]
+                              if all_excl else [])
                 return VerificationCheckResult(
                     name=self.name,
                     passed=True,
@@ -361,12 +372,14 @@ class PreservationHeuristicValidator:
                         "resolved text copies one side verbatim, but every "
                         "executable change from the other side is accounted for "
                         f"({'mutually-exclusive choice' if all_excl else 'present or comment-only-deferred'})"
-                        "(present or comment-only-deferred)"
                     ),
                     detail={
                         "copied_current": copied_current,
                         "copied_replayed": copied_replayed,
-                        "change_accounting": "all_accounted_for",
+                        "change_accounting": (
+                            "choice_required" if all_excl
+                            else "all_accounted_for"),
+                        "exclusive_choices": excl_lines,
                         "deferred_comments": len(deferred),
                     },
                     features={
@@ -374,6 +387,8 @@ class PreservationHeuristicValidator:
                         "copied_current_side": copied_current,
                         "copied_replayed_side": copied_replayed,
                         "change_accounted": True,
+                        "preservation_result": (
+                            "choice_required" if all_excl else "clear"),
                     },
                 )
             if additive_missing:
