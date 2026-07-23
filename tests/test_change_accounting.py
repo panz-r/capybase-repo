@@ -120,6 +120,25 @@ class TestDeriveMissingObligations:
         assert obls[0].channel == "directive"
         assert "#[derive(Debug)]" in obls[0].line
 
+    def test_derive_attr_is_additive_not_exclusive(self):
+        """Two divergent ``#[derive(...)]`` lines are ADDITIVE (the model should
+        union the trait sets), not exclusive (a mutually-exclusive choice).
+        ``#[derive(Debug, Clone)]`` vs ``#[derive(Debug, Serialize)]`` — the
+        model should produce ``#[derive(Debug, Clone, Serialize)]``."""
+        from capybase.change_accounting import _derive_trait_set
+        # Helper sanity
+        assert _derive_trait_set("#[derive(Debug, Clone)]") == frozenset({"Debug", "Clone"})
+        assert _derive_trait_set("#![derive(Serialize)]") == frozenset({"Serialize"})
+        assert _derive_trait_set("not a derive") == frozenset()
+        # Divergent derives sharing a trait → additive
+        base = "#[derive(Debug)]\nstruct S { x: u32 }"
+        cur = "#[derive(Debug, Clone)]\nstruct S { x: u32 }"
+        rep = "#[derive(Debug, Serialize)]\nstruct S { x: u32 }"
+        obls = derive_missing_obligations(base, cur, rep, cur)
+        assert len(obls) == 1
+        assert obls[0].exclusive is False  # additive — model should union
+        assert obls[0].channel == "directive"
+
     def test_present_reindented_addition_not_missing(self):
         """A re-indented addition in the candidate counts as PRESENT (whitespace-
         normalized comparison), not MISSING."""

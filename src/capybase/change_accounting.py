@@ -219,6 +219,29 @@ def _import_list_items(line: str) -> frozenset[str]:
     return frozenset(i.strip() for i in items.split(",") if i.strip())
 
 
+#: Matches a ``#[derive(...)]`` or ``#[derive(...)]`` attribute and captures
+#: the comma-separated trait list inside the parens. Handles both outer
+#: (``#[derive(...)]``) and inner (``#![derive(...)]``) attributes.
+_DERIVE_RE = re.compile(
+    r"^\s*#!?\[derive\s*\(([^)]*)\)\]"
+)
+
+
+def _is_derive_attr(line: str) -> bool:
+    """True when the line is a ``#[derive(...)]`` attribute."""
+    return bool(_DERIVE_RE.match(line))
+
+
+def _derive_trait_set(line: str) -> frozenset[str]:
+    """The set of trait names inside a ``#[derive(Debug, Clone)]`` attribute.
+    Returns an empty set when the line isn't a derive attribute."""
+    m = _DERIVE_RE.match(line)
+    if not m:
+        return frozenset()
+    traits = m.group(1)
+    return frozenset(t.strip() for t in traits.split(",") if t.strip())
+
+
 def derive_missing_obligations(
     base: str, current: str, replayed: str, resolved: str,
 ) -> list[BranchObligation]:
@@ -321,6 +344,33 @@ def derive_missing_obligations(
                                 if added_items >= cand_items or cand_items >= added_items:
                                     exclusive = False  # one is a superset → additive
                                     break
+                # Derive-attribute refinement: two ``#[derive(...)]`` lines are
+                # usually ADDITIVE (one adds traits to the set), not exclusive.
+                # ``#[derive(Debug, Clone)]`` vs ``#[derive(Debug, Serialize)]``
+                # share Debug → the second ADDS Serialize. Only flag exclusive
+                # when the trait sets are completely DISJOINT (a genuine
+                # Debug-vs-Clone choice where picking one is a semantic decision).
+                # This mirrors the import-list superset check above.
+                if exclusive and _is_derive_attr(changed):
+                    missing_traits = _derive_trait_set(changed)
+                    if missing_traits:
+                        for res_line in res.splitlines():
+                            if (_norm(res_line) != norm
+                                    and _is_derive_attr(res_line)):
+                                cand_traits = _derive_trait_set(res_line)
+                                if cand_traits:
+                                    # Any shared trait → additive (union), not
+                                    # exclusive. The missing derive adds traits
+                                    # the candidate doesn't have yet.
+                                    if missing_traits & cand_traits:
+                                        exclusive = False
+                                        break
+                                    # No overlap but one is a superset of the
+                                    # other → also additive (replacement superset).
+                                    if (missing_traits >= cand_traits
+                                            or cand_traits >= missing_traits):
+                                        exclusive = False
+                                        break
                 # Rename-type exclusive: different leading identifiers but the
                 # SAME trailing structure (e.g. ``Self { stream }`` vs
                 # ``Sse { stream }`` — a type rename). When the anchors differ
