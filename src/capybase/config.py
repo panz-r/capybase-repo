@@ -659,6 +659,19 @@ class FutureConfig(BaseModel):
     # checked), conservative. Version bumps are NOT unioned (exclusive choices).
     # Default ON.
     enable_manifest_union: bool = True
+    # Deterministic attribute/meta-list union (Rust): unions #[derive(...)]
+    # trait lists and #[allow(...)] / #[warn(...)] lint lists. Policy-driven:
+    # cfg/repr/serde are opaque, deny/forbid are never unioned. Tier-A for
+    # built-in derives, Tier-B risk_flags for external derives. Default ON.
+    enable_attribute_meta_union: bool = True
+    # Deterministic named-field union (Rust): inserts struct fields that the
+    # model dropped. Same field name → exclusive; tuple structs → AMBIGUOUS;
+    # repr(C)/repr(packed)/serde → Tier-B risk_flags. Default ON.
+    enable_named_field_union: bool = True
+    # Deterministic keyed-item union (Rust): inserts methods, functions,
+    # associated items into impl/mod/trait blocks. Same item name → exclusive;
+    # macro_rules! → refused. Default ON.
+    enable_keyed_item_union: bool = True
     # Phase 4 comment jury (design §5). An untrusted semantic sensor that
     # evaluates comment claims produced by the comment pass. Three operating
     # modes:

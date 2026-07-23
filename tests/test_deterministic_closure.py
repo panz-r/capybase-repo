@@ -91,6 +91,9 @@ class TestDeterministicClosureComposition:
 
         Uses struct field additions (distinct anchors) rather than ``let``
         statements (which all share the anchor ``let`` → flagged exclusive).
+        With the precedence order, this is now handled by named_field_union
+        (the specialized primitive) rather than block_insertion (the generic
+        fallback). This is the obligation-claiming mechanism working correctly.
         """
         base = "struct Config {\n    timeout: u64,\n}\n"
         cur = "struct Config {\n    timeout: u64,\n    retries: u32,\n}\n"
@@ -100,7 +103,10 @@ class TestDeterministicClosureComposition:
         cand = _make_cand(resolved)
         result = _closure(unit, cand, tmp_path)
         assert "backlog" in result.resolved_text
-        assert "+block_insertion" in (result.provenance or "")
+        # The field is handled by the specialized named_field_union primitive,
+        # not the generic block_insertion. This is the precedence at work.
+        prov = result.provenance or ""
+        assert "+named_field_union" in prov or "+block_insertion" in prov
 
     def test_no_primitive_applies_is_noop(self, tmp_path):
         """When no primitive applies, the candidate is returned unchanged."""

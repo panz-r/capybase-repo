@@ -5705,87 +5705,82 @@ class Orchestrator:
             provenance_suffix = ""
             edited_text = cand.resolved_text
             certificates = []
+            # Obligation claiming: each primitive claims (closes) specific
+            # obligations. After each step, subtract its closed obligations so
+            # later primitives (especially the generic block_insertion) don't
+            # re-process them. This implements the precedence: specialized
+            # primitives go first, generic block_insertion gets the residual.
+            _remaining = list(obligations)
+            _cur_text = unit.current.text or ""
+            _rep_text = unit.replayed.text or ""
+            _other = _rep_text if edited_text.strip() == _cur_text.strip() else _cur_text
 
-            # 1. Import-union (additive import leaves).
-            if getattr(self.config.future, "enable_import_union", True):
-                from capybase.import_union import (
-                    propose_import_union, STATUS_APPLIED as _APPLIED)
-                r = propose_import_union(edited_text, obligations)
+            def _run_primitive(propose_fn, name, *, needs_other=False, **kwargs):
+                """Run one primitive, claim its obligations, update edited_text."""
+                nonlocal edited_text, provenance_suffix, _remaining, _other
+                from capybase.import_union import STATUS_APPLIED as _APPLIED
+                call_kwargs = dict(kwargs)
+                if needs_other:
+                    call_kwargs["other_side_text"] = _other
+                r = propose_fn(edited_text, _remaining, **call_kwargs)
                 if r.status == _APPLIED and r.text != edited_text:
-                    certificates.append(("import_union", r.certificate))
+                    certificates.append((name, r.certificate))
                     edited_text = r.text
-                    provenance_suffix += "+import_union"
+                    provenance_suffix += "+" + name
+                    # Claim: remove closed obligations from _remaining.
+                    closed_norms = set(r.certificate.get("closed_obligations", []))
+                    if closed_norms:
+                        _remaining = [
+                            ob for ob in _remaining
+                            if " ".join((getattr(ob, "line", "") or "").split())
+                            not in closed_norms
+                        ]
                     self.journal.emit(
-                        "import_union_applied",
+                        name + "_applied",
                         {"certificate": r.certificate,
                          "candidate_id": cand.candidate_id},
                         step_index=self.step, path=unit.path,
                         unit_id=unit.unit_id,
                     )
 
-            # 2. Deletion-application (DROPPED_DELETION obligations).
+            # Precedence order (advice §primitive coordination):
+            # 1. import_union    (additive import leaves)
+            # 2. deletion_union  (DROPPED_DELETION obligations)
+            # 3. attribute_meta  (derive/lint list unions)
+            # 4. named_field     (struct field additions)
+            # 5. keyed_item      (method/function insertions)
+            # 6. block_insertion (residual additive blocks)
+            # 7. manifest_union  (TOML-only, after block_insertion)
+
+            if getattr(self.config.future, "enable_import_union", True):
+                from capybase.import_union import propose_import_union
+                _run_primitive(propose_import_union, "import_union")
+
             if getattr(self.config.future, "enable_deletion_union", True):
                 from capybase.deletion_union import propose_deletion_application
-                from capybase.import_union import STATUS_APPLIED as _APPLIED
-                r2 = propose_deletion_application(edited_text, obligations)
-                if r2.status == _APPLIED and r2.text != edited_text:
-                    certificates.append(("deletion_union", r2.certificate))
-                    edited_text = r2.text
-                    provenance_suffix += "+deletion_union"
-                    self.journal.emit(
-                        "deletion_union_applied",
-                        {"certificate": r2.certificate,
-                         "candidate_id": cand.candidate_id},
-                        step_index=self.step, path=unit.path,
-                        unit_id=unit.unit_id,
-                    )
+                _run_primitive(propose_deletion_application, "deletion_union")
 
-            # 3. Block-insertion (additive non-import blocks).
+            if lang == "rust" and getattr(self.config.future, "enable_attribute_meta_union", True):
+                from capybase.attribute_meta_union import propose_attribute_meta_union
+                _run_primitive(propose_attribute_meta_union, "attribute_meta_union")
+
+            if lang == "rust" and getattr(self.config.future, "enable_named_field_union", True):
+                from capybase.named_field_union import propose_named_field_union
+                _run_primitive(propose_named_field_union, "named_field_union", needs_other=True)
+
+            if lang == "rust" and getattr(self.config.future, "enable_keyed_item_union", True):
+                from capybase.keyed_item_union import propose_keyed_item_union
+                _run_primitive(propose_keyed_item_union, "keyed_item_union", needs_other=True)
+
             if getattr(self.config.future, "enable_block_insertion", True):
                 from capybase.block_insertion import propose_block_insertion
-                from capybase.import_union import STATUS_APPLIED as _APPLIED
-                # Determine which side was dropped (for anchor detection).
-                _cur_text = unit.current.text or ""
-                _rep_text = unit.replayed.text or ""
-                _other = _rep_text if edited_text.strip() == _cur_text.strip() else _cur_text
-                r3 = propose_block_insertion(
-                    edited_text, obligations,
-                    base_text=base_text, other_side_text=_other,
-                )
-                if r3.status == _APPLIED and r3.text != edited_text:
-                    certificates.append(("block_insertion", r3.certificate))
-                    edited_text = r3.text
-                    provenance_suffix += "+block_insertion"
-                    self.journal.emit(
-                        "block_insertion_applied",
-                        {"certificate": r3.certificate,
-                         "candidate_id": cand.candidate_id},
-                        step_index=self.step, path=unit.path,
-                        unit_id=unit.unit_id,
-                    )
+                _run_primitive(propose_block_insertion, "block_insertion",
+                               needs_other=True, base_text=base_text)
 
-            # 4. Manifest-union (TOML feature/array unions, line transplants).
             if lang == "toml" and getattr(self.config.future, "enable_manifest_union", True):
                 from capybase.manifest_union import propose_manifest_union
-                from capybase.import_union import STATUS_APPLIED as _APPLIED
-                _cur_text2 = unit.current.text or ""
-                _rep_text2 = unit.replayed.text or ""
-                _other2 = _rep_text2 if edited_text.strip() == _cur_text2.strip() else _cur_text2
-                r4 = propose_manifest_union(
-                    edited_text, obligations,
-                    base_text=base_text, other_side_text=_other2,
-                )
-                if r4.status == _APPLIED and r4.text != edited_text:
-                    certificates.append(("manifest_union", r4.certificate))
-                    edited_text = r4.text
-                    provenance_suffix += "+manifest_union"
-                    self.journal.emit(
-                        "manifest_union_applied",
-                        {"certificate": r4.certificate,
-                         "candidate_id": cand.candidate_id},
-                        step_index=self.step, path=unit.path,
-                        unit_id=unit.unit_id,
-                    )
+                _run_primitive(propose_manifest_union, "manifest_union",
+                               needs_other=True, base_text=base_text)
 
             if edited_text != cand.resolved_text:
                 cand = cand.model_copy(update={
