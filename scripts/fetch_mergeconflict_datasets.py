@@ -205,6 +205,20 @@ DATASETS: dict[str, Dataset] = {
         source_url="https://github.com/tokio-rs/axum",
         merge_limit=200,
     ),
+    "ratatui-history": Dataset(
+        id="ratatui-history",
+        kind="git-history",
+        url="https://github.com/ratatui/ratatui.git",
+        extract_subdir="ratatui",
+        extractor="git_history",
+        license="MIT",
+        source_url="https://github.com/ratatui/ratatui",
+        # ratatui has the highest doc-comment density of any corpus repo (~33%:
+        # ~18.5k /// lines / ~55k code lines) — the best candidate for
+        # comment-overlapping conflicts the jury evaluates. The default scan
+        # window; bump if the comment-overlap rate is too low.
+        merge_limit=200,
+    ),
 }
 
 
