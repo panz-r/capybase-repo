@@ -1257,3 +1257,103 @@ def test_r42_nonempty_still_rejects_empty_on_normal_conflict():
     assert any(
         f.validator == "non_empty_resolution" for f in res.hard_failures
     ), "empty resolution on a normal conflict must still be rejected"
+
+
+# ---------------------------------------------------------------------------
+# Exclusive-choice proof classes (Phase 5)
+# ---------------------------------------------------------------------------
+
+def _unit_rust(base, current, replayed, worktree, path="src/lib.rs", metadata=None):
+    """Build a Rust ConflictUnit with optional structural_metadata."""
+    n_lines = len(worktree.split("\n"))
+    span = (0, max(0, n_lines - 1))
+    u = ConflictUnit(
+        session_id="s", step_index=1, path=path, language="rust",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=current),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=replayed),
+        original_worktree_text=worktree, marker_span=span,
+    )
+    if metadata:
+        u = u.model_copy(update={"structural_metadata": metadata})
+    return u
+
+
+def test_exclusive_safe_scalar_version_bump_passes():
+    """A version-string exclusive choice in a README/Cargo.toml → SAFE_SCALAR → PASS."""
+    base = 'tokio = { version = "1.51.2" }'
+    cur = 'tokio = { version = "1.52.2" }'
+    rep = 'tokio = { version = "1.51.3" }'
+    worktree = f'<<<<<<< A\n{cur}\n=======\n{rep}\n>>>>>>> B'
+    metadata = {
+        "conflict_features": {"commit_change_type": "config_update"},
+        "merge_direction": {"kind": "both_modify"},
+    }
+    # Use markdown language so rust_syntax doesn't fire on the TOML content.
+    n_lines = len(worktree.split("\n"))
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="README.md", language="markdown",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=cur),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=rep),
+        original_worktree_text=worktree, marker_span=(0, max(0, n_lines - 1)),
+        structural_metadata=metadata,
+    )
+    cand = _candidate(cur)
+    res = _engine().verify(unit, cand)
+    assert res.passed
+    assert res.features.get("exclusive_proof_class") == "SAFE_SCALAR"
+
+
+def test_exclusive_structural_code_does_not_pass():
+    """A struct-field-type exclusive choice in .rs → STRUCTURAL_CODE → not auto-PASS."""
+    base = "struct S {\n    marker: u32,\n}"
+    cur = "struct S {\n    marker: u64,\n}"
+    rep = "struct S {\n    marker: i32,\n}"
+    worktree = f"<<<<<<< A\n{cur}\n=======\n{rep}\n>>>>>>> B"
+    metadata = {
+        "conflict_features": {"touches_definition": True},
+        "merge_direction": {"kind": "both_modify"},
+    }
+    unit = _unit_rust(base, cur, rep, worktree, path="src/lib.rs", metadata=metadata)
+    cand = _candidate(cur)
+    res = _engine().verify(unit, cand)
+    # STRUCTURAL_CODE should NOT auto-pass — it falls through to the generic
+    # preservation warning (copied_one with unresolved exclusive obligation).
+    assert not res.passed or any(
+        w.validator == "preservation_heuristic" for w in res.warnings
+    ), "STRUCTURAL_CODE exclusive should not auto-pass"
+
+
+def test_exclusive_delete_modify_does_not_pass():
+    """A delete-vs-modify exclusive → DELETE_MODIFY → not auto-PASS."""
+    base = "fn old_code() {}"
+    cur = ""  # deleted
+    rep = "fn old_code() { /* modified */ }"
+    worktree = f"<<<<<<< A\n=======\n{rep}\n>>>>>>> B"
+    metadata = {
+        "conflict_features": {},
+        "merge_direction": {"kind": "modify_delete", "deleting_side": "current"},
+    }
+    unit = _unit_rust(base, cur, rep, worktree, path="src/lib.rs", metadata=metadata)
+    cand = _candidate("")  # model picked the deletion
+    res = _engine().verify(unit, cand)
+    # DELETE_MODIFY should NOT auto-pass.
+    preservation = [w for w in res.warnings if w.validator == "preservation_heuristic"]
+    assert len(preservation) > 0, "DELETE_MODIFY should produce a preservation warning"
+
+
+def test_exclusive_generic_passes():
+    """An unrecognized exclusive shape → GENERIC_EXCLUSIVE → PASS (back-compat)."""
+    base = 'const VERSION: &str = "1.0";'
+    cur = 'const VERSION: &str = "2.0";'
+    rep = 'const VERSION: &str = "1.5";'
+    worktree = f"<<<<<<< A\n{cur}\n=======\n{rep}\n>>>>>>> B"
+    # No special metadata — falls through to GENERIC_EXCLUSIVE.
+    unit = _unit_rust(base, cur, rep, worktree, path="src/lib.rs")
+    cand = _candidate(cur)
+    res = _engine().verify(unit, cand)
+    assert res.passed
+    assert res.features.get("exclusive_proof_class") == "GENERIC_EXCLUSIVE"

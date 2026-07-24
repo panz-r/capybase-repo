@@ -270,6 +270,65 @@ class ExactSpliceScopeValidator:
         )
 
 
+def _classify_exclusive_choice(
+    ctx: VerificationContext, missing: list,
+) -> str:
+    """Classify an exclusive-choice conflict into a proof class.
+
+    Not all exclusive choices are equally safe. Version bumps and config
+    values are defensible either/or choices (SAFE_SCALAR). Delete-vs-modify
+    conflicts may represent deliberate intent (DELETE_MODIFY). Structural
+    code conflicts (field types, function signatures) require a primitive or
+    compiler proof (STRUCTURAL_CODE). Unrecognized shapes default to the
+    generic pass (GENERIC_EXCLUSIVE).
+
+    Uses signals from ``structural_metadata`` (conflict_features,
+    merge_direction) that are already computed at extraction time.
+    """
+    unit = ctx.unit
+    cf = unit.structural_metadata.get("conflict_features")
+    cf = cf if isinstance(cf, dict) else {}
+    md = unit.structural_metadata.get("merge_direction")
+    md = md if isinstance(md, dict) else {}
+    path = unit.path or ""
+    lang = unit.language or ""
+
+    # DELETE_MODIFY: one side deleted the block, the other modified it.
+    # This is genuinely ambiguous — the deletion may be intentional. Don't
+    # auto-pass without evidence (rename/move/replacement).
+    if md.get("kind") == "modify_delete" or md.get("deleting_side"):
+        return "DELETE_MODIFY"
+
+    # STRUCTURAL_CODE: the conflict touches a structural definition (struct,
+    # enum, fn signature, impl) in a .rs source file. These require a
+    # structure-specific primitive or compiler-backed verification.
+    if lang == "rust" and path.endswith(".rs"):
+        if cf.get("touches_definition"):
+            return "STRUCTURAL_CODE"
+        # Also check entity-level ops: if both sides modified existing
+        # entities (not just added new ones), it's a structural rewrite.
+        ops_modified = cf.get("ops_modified", 0)
+        if ops_modified and ops_modified > 0:
+            return "STRUCTURAL_CODE"
+
+    # SAFE_SCALAR: version bumps, config values, doc URLs, changelog entries.
+    # Picking either side is defensible for these scalar/config choices.
+    if cf.get("commit_change_type") == "config_update":
+        return "SAFE_SCALAR"
+    if cf.get("value_resolution"):
+        return "SAFE_SCALAR"
+    # README.md and Cargo.toml version strings.
+    if lang in ("markdown", "toml") or path.endswith((".md", ".toml")):
+        return "SAFE_SCALAR"
+    # .stderr files (compiler diagnostic snapshots).
+    if path.endswith(".stderr"):
+        return "SAFE_SCALAR"
+
+    # GENERIC_EXCLUSIVE: unrecognized exclusive shape. Default to the
+    # current behavior (PASS) — the model made a defensible choice.
+    return "GENERIC_EXCLUSIVE"
+
+
 class PreservationHeuristicValidator:
     """Detect when a candidate copies one side verbatim and drops the other.
 
@@ -379,46 +438,81 @@ class PreservationHeuristicValidator:
                 # The copy is fully accounted for — either no missing
                 # obligations at all, or all missing ones are EXCLUSIVE
                 # (mutually-exclusive alternatives where the model's choice is
-                # defensible). PASS — no genuinely-dropped ADDITIONS.
-                #
-                # IMPORTANT: PASS here means "this validator has no preservation
-                # objection." For exclusive conflicts it does NOT mean the
-                # chosen alternative is semantically correct — that's a
-                # downstream concern (the jury / human review). We log the
-                # exclusive_choices explicitly so they're auditable, and set
-                # preservation_result=CHOICE_REQUIRED (vs CLEAR for the
-                # no-obligations case) so no component mistakes this for proof
-                # of semantic correctness.
+                # defensible).
                 all_excl = bool(missing) and all(o.exclusive for o in missing)
                 excl_lines = ([o.line.strip() for o in missing[:8]]
                               if all_excl else [])
-                return VerificationCheckResult(
-                    name=self.name,
-                    passed=True,
-                    severity="warning",
-                    message=(
-                        "resolved text copies one side verbatim, but every "
-                        "executable change from the other side is accounted for "
-                        f"({'mutually-exclusive choice' if all_excl else 'present or comment-only-deferred'})"
-                    ),
-                    detail={
-                        "copied_current": copied_current,
-                        "copied_replayed": copied_replayed,
-                        "change_accounting": (
-                            "choice_required" if all_excl
-                            else "all_accounted_for"),
-                        "exclusive_choices": excl_lines,
-                        "deferred_comments": len(deferred),
-                    },
-                    features={
-                        "copied_one_side": True,
-                        "copied_current_side": copied_current,
-                        "copied_replayed_side": copied_replayed,
-                        "change_accounted": True,
-                        "preservation_result": (
-                            "choice_required" if all_excl else "clear"),
-                    },
-                )
+                if not all_excl:
+                    # No missing obligations at all (or only PRESENT/comment-only).
+                    # The copy is fully accounted for. CLEAR pass.
+                    return VerificationCheckResult(
+                        name=self.name,
+                        passed=True,
+                        severity="warning",
+                        message=(
+                            "resolved text copies one side verbatim, but every "
+                            "executable change from the other side is accounted for "
+                            "(present or comment-only-deferred)"
+                        ),
+                        detail={
+                            "copied_current": copied_current,
+                            "copied_replayed": copied_replayed,
+                            "change_accounting": "all_accounted_for",
+                            "deferred_comments": len(deferred),
+                        },
+                        features={
+                            "copied_one_side": True,
+                            "copied_current_side": copied_current,
+                            "copied_replayed_side": copied_replayed,
+                            "change_accounted": True,
+                            "preservation_result": "clear",
+                        },
+                    )
+                # All missing obligations are EXCLUSIVE. Apply proof-class
+                # classification: not all exclusive choices are equally safe.
+                # The review feedback (Phase 5) correctly identifies that
+                # version bumps, struct field types, import restructures, and
+                # delete-vs-add are fundamentally different merge problems.
+                proof_class = _classify_exclusive_choice(ctx, missing)
+                if proof_class in ("DELETE_MODIFY", "STRUCTURAL_CODE"):
+                    # Unsafe exclusive: the choice may violate branch intent.
+                    # Fall through to the additive-missing path (which will
+                    # flag the exclusive obligations and retry), rather than
+                    # auto-passing. This converts dangerous exclusive choices
+                    # back to escalation.
+                    pass  # fall through to the warning below
+                else:
+                    # Safe exclusive (SAFE_SCALAR or GENERIC_EXCLUSIVE):
+                    # the model made a defensible choice. PASS — there are no
+                    # genuinely-dropped ADDITIONS. preservation_result =
+                    # CHOICE_REQUIRED so downstream consumers know this is an
+                    # auditable choice, not proof of semantic correctness.
+                    return VerificationCheckResult(
+                        name=self.name,
+                        passed=True,
+                        severity="warning",
+                        message=(
+                            "resolved text copies one side verbatim, but every "
+                            "executable change from the other side is an "
+                            f"exclusive choice ({proof_class})"
+                        ),
+                        detail={
+                            "copied_current": copied_current,
+                            "copied_replayed": copied_replayed,
+                            "change_accounting": "choice_required",
+                            "exclusive_choices": excl_lines,
+                            "exclusive_proof_class": proof_class,
+                            "deferred_comments": len(deferred),
+                        },
+                        features={
+                            "copied_one_side": True,
+                            "copied_current_side": copied_current,
+                            "copied_replayed_side": copied_replayed,
+                            "change_accounted": True,
+                            "preservation_result": "choice_required",
+                            "exclusive_proof_class": proof_class,
+                        },
+                    )
             if additive_missing:
                 # Actionable: name the specific obligations so the model can
                 # act on them. Separate ADDITIONS (lines to add) from
