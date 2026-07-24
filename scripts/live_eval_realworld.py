@@ -21,8 +21,8 @@ Verdict per case:
                isn't the only valid one (exclusive choices, import ordering,
                doc-comment style differences). Investigate before trusting.
   ESCALATE   — orch.run() escalated (human required). The SAFE outcome.
-  WRONG      — marker/brace failure OR sim < 0.80 (genuinely different from
-               the oracle).
+  ORACLE_DIVERGENT — marker/brace failure OR sim < 0.80 (genuinely different
+               from the oracle).
 
 IMPORTANT — VALIDATION GAP for Rust:
   The temp repo has NO Cargo.toml, so cargo check/test never runs. The
@@ -73,6 +73,9 @@ class Case:
     expected_resolved: str
     marker_original: str
     dataset: str = ""
+    conflict_path: str = ""
+    merge_sha: str = ""
+    source_url: str = ""
 
 
 class _NoConflictError(Exception):
@@ -91,7 +94,8 @@ class CaseResult:
     matches_oracle: float = 0.0
     elapsed: float = 0.0
     reason: str = ""
-    verdict: str = ""  # PASS | NEAR_MATCH | WRONG | ESCALATE
+    verdict: str = ""  # PASS | NEAR_MATCH | ORACLE_DIVERGENT | ESCALATE
+    compiles_cargo: bool | None = None  # None when cargo didn't run
     # FR2a flight recorder: the orchestrator's session_id (the per-case artifact
     # root under .rebase-agent/sessions/<session_id>/). Populated when
     # --preserve-flights copies the session dir out; None otherwise. The flight
@@ -124,6 +128,9 @@ def load_cases(*, limit: int | None = None, lang: str | None = None) -> list[Cas
             expected_resolved=d["expected_resolved"],
             marker_original=d["marker_original"],
             dataset=d.get("dataset", ""),
+            conflict_path=d.get("conflict_path", ""),
+            merge_sha=d.get("merge_sha", ""),
+            source_url=d.get("source_url", ""),
         )
         if lang and c.language != lang:
             continue
@@ -149,18 +156,43 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     return p
 
 
-def _materialize_conflict(case: Case, repo: Path) -> None:
+def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None = None) -> None:
     """Build a git history that produces the case's conflict markers on disk.
 
     Three commits: base, current (HEAD), replayed (the branch being rebased).
     A `git rebase` produces the UU conflict with case.marker_original on disk.
+
+    When ``crate_source`` is provided (pointing to a local clone of the case's
+    repo), the full crate tree at ``merge_sha`` is extracted first via
+    ``git archive``, then the conflict file versions are overlaid on top.
+    This gives the orchestrator's ``_run_cargo_syntax_check`` a real
+    ``Cargo.toml`` and the full ``src/`` tree to compile against — turning
+    the brace-balance gate into a real ``cargo check`` gate.
     """
-    # Sanity: marker_original must contain conflict markers for rebase to conflict.
-    # Some cases carry a pre-resolved marker_original (no <<<<<<<); for those we
-    # write the markers verbatim (orchestrator's conflict extractor will find them).
     repo.mkdir(parents=True, exist_ok=True)
     _git(repo, "init", "-q", "-b", "main")
-    # base commit
+
+    # Optionally extract the full crate tree at merge_sha from the clone.
+    # This provides Cargo.toml, Cargo.lock, and the full src/ tree so cargo
+    # check can actually run. Falls back to single-file mode when no clone.
+    if crate_source is not None:
+        merge_sha = getattr(case, "merge_sha", "") or ""
+        if merge_sha:
+            try:
+                import subprocess as _sp
+                # git archive writes a tar of the tree at merge_sha; extract into repo.
+                archive = _sp.run(
+                    ["git", "-C", str(crate_source), "archive", merge_sha],
+                    capture_output=True, check=True,
+                )
+                # Extract the tar into the repo directory.
+                _sp.run(["tar", "-xf", "-", "-C", str(repo)],
+                        input=archive.stdout, check=True)
+            except Exception:  # noqa: BLE001 — best-effort; fall back to single-file
+                pass
+
+    # Write the conflict file at its real path in all three versions.
+    # (Overlays on top of the extracted tree.)
     (repo / case.path).parent.mkdir(parents=True, exist_ok=True)
     (repo / case.path).write_text(case.base)
     _git(repo, "add", "-A")
@@ -190,7 +222,7 @@ def _materialize_conflict(case: Case, repo: Path) -> None:
         )
 
 
-def _config_for(case: Case) -> Config:
+def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     cfg = Config()
     cfg.model.base_url = os.environ.get("CAPYBASE_BASE_URL", "http://192.168.50.235:8086/v1")
     cfg.model.api_key = os.environ.get("CAPYBASE_API_KEY", "sk-local")
@@ -200,9 +232,12 @@ def _config_for(case: Case) -> Config:
     cfg.model.json_mode = True
     cfg.model.request_timeout_seconds = 600
     cfg.model.generation_timeout_seconds = 240
-    # Test gate: py_compile for Python; for Rust, no cheap reliable standalone
-    # check (crate paths fail outside the full checkout), so use 'true' and rely
-    # on the harness's brace-balance + marker-free checks.
+    # Test gate:
+    # - Python: py_compile (always available)
+    # - Rust with full crate: the orchestrator's _run_cargo_syntax_check runs
+    #   `cargo check` naturally (it finds the real Cargo.toml). We don't need
+    #   a separate test command — the syntax validator IS the cargo check.
+    # - Rust without crate: 'true' (brace-balance is the only gate).
     if case.language == "python":
         cfg.tests.pre_continue = f"python3 -m py_compile {case.path}"
     else:
@@ -286,11 +321,14 @@ def _token_jaccard(a: str, b: str) -> float:
 
 def run_case(case: Case, client: OpenAICompatibleClient, *,
              flights_dir: Path | None = None,
-             td: str | None = None) -> CaseResult:
+             td: str | None = None,
+             crate_source: Path | None = None) -> CaseResult:
     """Run one case. ``td`` is a pre-created temp dir (D3: the main thread owns
     cleanup so a timeout-abandoned daemon thread doesn't leak the temp tree).
     When ``td`` is None, a temp dir is created AND cleaned up within this call
-    (the pre-D3 behavior, for non-timeout callers)."""
+    (the pre-D3 behavior, for non-timeout callers).
+    ``crate_source``: when provided, the full crate tree at merge_sha is
+    extracted into the temp repo so cargo check can run."""
     res = CaseResult(id=case.id, language=case.language, dataset=case.dataset)
     t0 = time.time()
     owns_td = td is None
@@ -299,7 +337,7 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
     try:
         repo = Path(td) / "r"
         try:
-            _materialize_conflict(case, repo)
+            _materialize_conflict(case, repo, crate_source=crate_source)
         except _NoConflictError as exc:
             res.elapsed = time.time() - t0
             res.escalated = True
@@ -310,7 +348,7 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
             res.reason = f"setup failed: {type(exc).__name__}: {str(exc)[:100]}"
             res.escalated = True
             return res
-        cfg = _config_for(case)
+        cfg = _config_for(case, has_crate=crate_source is not None)
         engine = ResolutionEngine(cfg.model, client=client)
         orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
                             out=lambda *_a, **_k: None)
@@ -368,6 +406,11 @@ def main():
                          "and <dir>/manifest.json. Required for shadow-jury replay.")
     args = ap.parse_args()
 
+    # Shared cargo registry cache so dependencies are fetched once and reused
+    # across cases (the per-case temp repo is destroyed, but the cache persists).
+    # This is essential for full-crate materialization to be practical.
+    os.environ.setdefault("CARGO_HOME", "/var/tmp/capybase-cargo-cache")
+
     flights_dir = Path(args.preserve_flights) if args.preserve_flights else None
     if flights_dir is not None:
         flights_dir.mkdir(parents=True, exist_ok=True)
@@ -418,11 +461,19 @@ def main():
         # worker receives it via `td=`; if the worker times out and is
         # abandoned, the main thread cleans up here (no leaked temp trees).
         case_td = tempfile.mkdtemp(prefix="capy-rw-", dir="/var/tmp")
+        # Resolve the crate source clone for full-tree materialization.
+        # Maps dataset name → external-datasets clone dir. Enables cargo check.
+        crate_source = None
+        if case.merge_sha:
+            clone_name = case.dataset.replace("-history", "") if case.dataset else ""
+            clone_path = Path(__file__).resolve().parent.parent / "external-datasets" / clone_name
+            if clone_path.is_dir():
+                crate_source = clone_path
         result_holder: list = []
         def _worker():
             try:
                 result_holder.append(run_case(case, client, flights_dir=flights_dir,
-                                              td=case_td))
+                                              td=case_td, crate_source=crate_source))
             except Exception as exc:
                 result_holder.append(CaseResult(
                     id=case.id, language=case.language, dataset=case.dataset,
@@ -456,15 +507,15 @@ def main():
             #   sim >= 0.80 → NEAR_MATCH (defensible but imperfect — the oracle's
             #                  answer isn't the only valid one, e.g. exclusive
             #                  choices, import reordering, doc-comment style)
-            #   sim <  0.80 → WRONG (genuinely different from the oracle)
+            #   sim < 0.80 → ORACLE_DIVERGENT (genuinely different from the oracle)
             if r.matches_oracle >= 0.95:
                 verdict = "PASS"; pass_ct += 1
             elif r.matches_oracle >= 0.80:
                 verdict = "NEAR_MATCH"; near_ct += 1
             else:
-                verdict = "WRONG"; wrong_ct += 1
+                verdict = "ORACLE_DIVERGENT"; wrong_ct += 1
         else:
-            verdict = "WRONG"; wrong_ct += 1
+            verdict = "ORACLE_DIVERGENT"; wrong_ct += 1
         print(f"{verdict}  {r.elapsed:.0f}s  sim={r.matches_oracle:.2f}  {r.reason[:60]}")
         r.verdict = verdict
         results.append(r)
@@ -500,7 +551,7 @@ def main():
     print(f"PASS:       {pass_ct}")
     print(f"NEAR_MATCH: {near_ct}  (sim 0.80–0.95: defensible but imperfect)")
     print(f"ESCALATE:   {escalate_ct}")
-    print(f"WRONG:      {wrong_ct}  (sim < 0.80 or marker/brace failure)")
+    print(f"ORACLE_DIVERGENT: {wrong_ct}  (sim < 0.80 or marker/brace failure)")
     print(f"wall:       {elapsed:.0f}s ({elapsed/60:.1f}m) [this run only]")
     for lang in ("python", "rust"):
         sub = [r for r in results if r.language == lang]
@@ -509,7 +560,7 @@ def main():
         n = sum(1 for r in sub if not r.escalated and r.marker_free and r.compiles and 0.80 <= r.matches_oracle < 0.95)
         e = sum(1 for r in sub if r.escalated)
         w = len(sub) - p - n - e
-        print(f"  {lang}: {len(sub)} → PASS {p} / NEAR {n} / ESC {e} / WRONG {w}")
+        print(f"  {lang}: {len(sub)} → PASS {p} / NEAR {n} / ESC {e} / DIVERGE {w}")
     from collections import Counter
     dt = Counter(r.dataset for r in results)
     dp = Counter(r.dataset for r in results if not r.escalated and r.marker_free and r.compiles and r.matches_oracle >= 0.95)
@@ -518,7 +569,7 @@ def main():
     print("  by dataset:")
     for ds in sorted(dt):
         t = dt[ds]
-        print(f"    {ds:24s} {t:3d} → PASS {dp[ds]:3d} / NEAR {dn[ds]:3d} / ESC {de[ds]:3d} / WRONG {t-dp[ds]-dn[ds]-de[ds]:3d}")
+        print(f"    {ds:24s} {t:3d} → PASS {dp[ds]:3d} / NEAR {dn[ds]:3d} / ESC {de[ds]:3d} / DIVERGE {t-dp[ds]-dn[ds]-de[ds]:3d}")
 
     out = Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps([r.__dict__ for r in results], indent=2))
