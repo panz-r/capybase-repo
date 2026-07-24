@@ -232,6 +232,14 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     cfg.model.json_mode = True
     cfg.model.request_timeout_seconds = 600
     cfg.model.generation_timeout_seconds = 240
+    # Context window: gemma-4-e4b has ~8K tokens (~32K chars). Setting this
+    # enables the prompt builder's token-budget trimming (drops augmentation
+    # sections like few-shot/history when the prompt is too large). The conflict
+    # sides are NEVER trimmed (the model must see the actual conflict), but
+    # knowing the limit lets the harness escalate early on oversized conflicts
+    # instead of wasting 3 retries on empty responses.
+    # Override via CAPYBASE_CONTEXT_WINDOW for models with different limits.
+    cfg.model.context_window = int(os.environ.get("CAPYBASE_CONTEXT_WINDOW", "8192"))
     # Test gate:
     # - Python: py_compile (always available)
     # - Rust with full crate: the orchestrator's _run_cargo_syntax_check runs
