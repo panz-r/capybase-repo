@@ -249,12 +249,13 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     cfg.policy.max_retries_per_unit = 2  # cap CEGIS retries for throughput
     # Per-unit wall-time budget: escalate cleanly at the orchestrator level
     # (D2) rather than burning to the case cap and leaking the temp dir via an
-    # abandoned daemon thread. 240s accommodates an on-premise weak LLM where a
-    # single generation can take 80-120s (vs ~60s for a fast API model), leaving
-    # room for 2 CEGIS retries; short enough that a multi-unit file still fits
-    # the case cap. The gemma-4-e4b run lost 6 cases to a too-tight 180s budget
-    # (several at sim 0.90-0.97 — near-correct resolutions cut off mid-retry).
-    cfg.policy.max_wall_time_per_unit_seconds = 240
+    # abandoned daemon thread. 360s accommodates an on-premise weak LLM where a
+    # single generation can take 80-120s, plus CEGIS retries. The wall-time
+    # budget now EXCLUDES verification time (cargo check, rustc) — the budget
+    # caps model/CEGIS loop iterations, not compilation time. This prevents a
+    # slow first cargo check (dependency fetch) from eating the model's retry
+    # budget. The v3 run lost 5 cases to the old 240s budget (all sim >= 0.92).
+    cfg.policy.max_wall_time_per_unit_seconds = 360
     # Grant more whole-file repair cycles for complex cases where the model
     # produces near-correct output that fails the cross-hunk validation.
     cfg.policy.max_whole_file_repair_retries = 2

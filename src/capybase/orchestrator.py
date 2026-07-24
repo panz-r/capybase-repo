@@ -5851,6 +5851,12 @@ class Orchestrator:
         import time as _time
         unit_start = _time.monotonic()
         wall_budget = self.config.policy.max_wall_time_per_unit_seconds
+        # Track time spent in verification (cargo check, rustc, tests) so it
+        # can be excluded from the wall-time budget. The budget is meant to
+        # cap MODEL/CEGIS loop iterations, not compilation time — a slow
+        # first cargo check (dependency fetch) shouldn't eat the model's
+        # retry budget. (Phase 5 D1.)
+        _verify_time_accumulated = 0.0
         # seed_failures: when set (whole-file CEGIS), the unit is re-resolved
         # starting from the repair path with the file-level failures pre-seeded,
         # so the model gets the concrete cross-unit error on its first attempt.
@@ -5980,20 +5986,24 @@ class Orchestrator:
             # only retry_count would let an all-critic retry loop run forever.
             if (
                 wall_budget > 0.0
-                and (_time.monotonic() - unit_start) >= wall_budget
+                and (_time.monotonic() - unit_start - _verify_time_accumulated) >= wall_budget
                 and (retry_count > 0 or critic_retry_count > 0)
             ):
                 outcome.escalated = True
                 outcome.retry_count = retry_count
+                effective_elapsed = _time.monotonic() - unit_start - _verify_time_accumulated
                 outcome.reason = (
                     f"unit exceeded wall-time budget "
-                    f"({wall_budget:.0f}s) after {retry_count} attempt(s)"
+                    f"({wall_budget:.0f}s, excl. {_verify_time_accumulated:.0f}s verify) "
+                    f"after {retry_count} attempt(s)"
                 )
                 self.journal.emit(
                     "candidate_rejected",
                     {"candidate_id": cand.candidate_id,
                      "action": "escalate", "via": "wall_time",
                      "wall_seconds": round(_time.monotonic() - unit_start, 1),
+                     "verify_seconds": round(_verify_time_accumulated, 1),
+                     "effective_seconds": round(effective_elapsed, 1),
                      "retry_count": retry_count},
                     step_index=self.step, path=unit.path, unit_id=unit.unit_id,
                 )
@@ -6221,13 +6231,17 @@ class Orchestrator:
                     step_index=self.step, path=unit.path, unit_id=unit.unit_id,
                 )
             else:
+                _vt0 = _time.monotonic()
                 validation = self.verification.verify(unit, cand)
+                _verify_time_accumulated += _time.monotonic() - _vt0
                 if cand_hash:
                     outcome._candidate_validation_cache[cand_hash] = validation
             self._journal_validation(unit, cand, validation)
             if not validation.passed and len(candidates) > 1:
                 for trial in candidates[1:]:
+                    _vt1 = _time.monotonic()
                     trial_val = self.verification.verify(unit, trial)
+                    _verify_time_accumulated += _time.monotonic() - _vt1
                     self._journal_validation(unit, trial, trial_val)
                     if trial_val.passed:
                         cand = trial
