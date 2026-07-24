@@ -6274,6 +6274,46 @@ class Orchestrator:
             if self.config.journal.enabled and self.config.journal.store_raw_responses:
                 self.journal.store_response(unit.unit_id, retry_count, cand.raw_response)
 
+            # Compiled-candidate convergence escape hatch (Phase 6 D1).
+            # When the candidate is cycling (same normalized hash seen ≥
+            # convergence_threshold times), passes ALL hard validation (no
+            # syntax/compile errors), and is blocked ONLY by a STRUCTURAL_CODE
+            # preservation_heuristic warning, accept it instead of retrying.
+            # The model has already tried its best; the candidate compiles; the
+            # preservation concern is about a semantic choice (field type,
+            # import ordering) not correctness. "Do not spend additional
+            # iterations asking the same model to satisfy the same heuristic."
+            conv_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
+            if (conv_threshold > 0 and cand.resolved_text
+                    and not validation.hard_failures
+                    and norm_hash in outcome._seen_normalized_hashes
+                    and outcome._seen_normalized_hashes[norm_hash] >= conv_threshold):
+                blocking = [
+                    w for w in validation.warnings
+                    if w.validator == "preservation_heuristic"
+                    and w.detail.get("exclusive_proof_class") == "STRUCTURAL_CODE"
+                ]
+                non_preservation = [
+                    w for w in validation.warnings
+                    if w.validator not in ("preservation_heuristic",)
+                ]
+                if blocking and not non_preservation:
+                    # The ONLY blocker is a STRUCTURAL_CODE preservation warning
+                    # on a cycling, compiled candidate. Accept it.
+                    outcome.accepted = cand
+                    outcome.validation = validation
+                    outcome.reason = (
+                        f"convergence escape hatch: accepted cycling candidate "
+                        f"(compiled, STRUCTURAL_CODE preservation only, "
+                        f"seen {outcome._seen_normalized_hashes[norm_hash]}×)"
+                    )
+                    self._record_resolution_attempt(
+                        outcome, mechanism="convergence_escape_hatch",
+                        candidate=cand, validation=validation,
+                        decision="accept", reason=outcome.reason,
+                    )
+                    return outcome
+
             decision = self.risk.decide(
                 validation,
                 retry_count=retry_count,
