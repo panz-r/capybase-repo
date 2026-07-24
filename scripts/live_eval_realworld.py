@@ -14,12 +14,25 @@ NOT part of the hermetic test suite — makes real network calls. Run:
     .venv/bin/python scripts/live_eval_realworld.py [--limit N] [--lang rust|python]
 
 Verdict per case:
-  PASS     — orch.run() did not escalate; resolved file is marker-free AND
-             compiles (py_compile for Python, brace-balance for Rust).
-  ESCALATE — orch.run() escalated (human required). The SAFE outcome — not wrong.
-  WRONG    — orch.run() did NOT escalate but the resolved file has leftover
-             markers OR fails the compile check. This is the silent-wrong-output
-             signal the parser/resolver fixes are meant to eliminate.
+  PASS       — orch.run() did not escalate; resolved file is marker-free,
+               brace-balanced, AND sim >= 0.95 (matches the oracle closely).
+  NEAR_MATCH — marker-free and brace-balanced, but sim 0.80–0.95. The
+               resolution is defensible but imperfect — the oracle's answer
+               isn't the only valid one (exclusive choices, import ordering,
+               doc-comment style differences). Investigate before trusting.
+  ESCALATE   — orch.run() escalated (human required). The SAFE outcome.
+  WRONG      — marker/brace failure OR sim < 0.80 (genuinely different from
+               the oracle).
+
+IMPORTANT — VALIDATION GAP for Rust:
+  The temp repo has NO Cargo.toml, so cargo check/test never runs. The
+  orchestrator falls back to standalone rustc (with E0432/E0433 suppressed)
+  or silent-pass. The harness's post-check for Rust is brace-balance only.
+  So PASS/NEAR_MATCH for Rust means "marker-free + braces balanced + high
+  oracle similarity" — NOT "compiles in the real crate." Python cases DO
+  get py_compile. This gap is intentional (cheap standalone Rust checks are
+  undecidable without the full crate), but it means sim score is the primary
+  quality signal for Rust.
 
 The human merge (expected_resolved) is the oracle; we report token-Jaccard
 similarity to it as a QUALITY signal (real-world merges have multiple valid
@@ -78,6 +91,7 @@ class CaseResult:
     matches_oracle: float = 0.0
     elapsed: float = 0.0
     reason: str = ""
+    verdict: str = ""  # PASS | NEAR_MATCH | WRONG | ESCALATE
     # FR2a flight recorder: the orchestrator's session_id (the per-case artifact
     # root under .rebase-agent/sessions/<session_id>/). Populated when
     # --preserve-flights copies the session dir out; None otherwise. The flight
@@ -383,10 +397,11 @@ def main():
     client = OpenAICompatibleClient(cfg0.model)
     print(f"endpoint: {cfg0.model.base_url} model={cfg0.model.model}")
 
-    pass_ct = sum(1 for r in results if not r.escalated and r.marker_free and r.compiles)
+    pass_ct = sum(1 for r in results if not r.escalated and r.marker_free and r.compiles and r.matches_oracle >= 0.95)
+    near_ct = sum(1 for r in results if not r.escalated and r.marker_free and r.compiles and 0.80 <= r.matches_oracle < 0.95)
     escalate_ct = sum(1 for r in results if r.escalated)
     wrong_ct = sum(1 for r in results
-                   if not (r.escalated or (r.marker_free and r.compiles)))
+                   if not (r.escalated or (r.marker_free and r.compiles and r.matches_oracle >= 0.80)))
     t_start = time.time()
     skipped = 0
     for i, case in enumerate(cases, 1):
@@ -433,10 +448,25 @@ def main():
         if r.escalated:
             verdict = "ESCALATE"; escalate_ct += 1
         elif r.marker_free and r.compiles:
-            verdict = "PASS"; pass_ct += 1
+            # The resolution is marker-free and brace-balanced (or py_compiles
+            # for Python). But the live eval does NOT run cargo check/test for
+            # Rust — the temp repo has no Cargo.toml. So "compiles" here is a
+            # weak gate (brace balance only). Classify by oracle similarity:
+            #   sim >= 0.95 → PASS (matches the oracle closely)
+            #   sim >= 0.80 → NEAR_MATCH (defensible but imperfect — the oracle's
+            #                  answer isn't the only valid one, e.g. exclusive
+            #                  choices, import reordering, doc-comment style)
+            #   sim <  0.80 → WRONG (genuinely different from the oracle)
+            if r.matches_oracle >= 0.95:
+                verdict = "PASS"; pass_ct += 1
+            elif r.matches_oracle >= 0.80:
+                verdict = "NEAR_MATCH"; near_ct += 1
+            else:
+                verdict = "WRONG"; wrong_ct += 1
         else:
             verdict = "WRONG"; wrong_ct += 1
         print(f"{verdict}  {r.elapsed:.0f}s  sim={r.matches_oracle:.2f}  {r.reason[:60]}")
+        r.verdict = verdict
         results.append(r)
         # Incremental write: a kill won't lose progress.
         out.write_text(json.dumps([r.__dict__ for r in results], indent=2))
@@ -467,25 +497,28 @@ def main():
     print("REALWORLD LIVE EVAL SUMMARY")
     print("=" * 64)
     print(f"cases:    {len(results)} ({skipped} resumed, {len(results)-skipped} fresh this run)")
-    print(f"PASS:     {pass_ct}")
-    print(f"ESCALATE: {escalate_ct}")
-    print(f"WRONG:    {wrong_ct}")
-    print(f"wall:     {elapsed:.0f}s ({elapsed/60:.1f}m) [this run only]")
+    print(f"PASS:       {pass_ct}")
+    print(f"NEAR_MATCH: {near_ct}  (sim 0.80–0.95: defensible but imperfect)")
+    print(f"ESCALATE:   {escalate_ct}")
+    print(f"WRONG:      {wrong_ct}  (sim < 0.80 or marker/brace failure)")
+    print(f"wall:       {elapsed:.0f}s ({elapsed/60:.1f}m) [this run only]")
     for lang in ("python", "rust"):
         sub = [r for r in results if r.language == lang]
         if not sub: continue
-        p = sum(1 for r in sub if not r.escalated and r.marker_free and r.compiles)
+        p = sum(1 for r in sub if not r.escalated and r.marker_free and r.compiles and r.matches_oracle >= 0.95)
+        n = sum(1 for r in sub if not r.escalated and r.marker_free and r.compiles and 0.80 <= r.matches_oracle < 0.95)
         e = sum(1 for r in sub if r.escalated)
-        w = len(sub) - p - e
-        print(f"  {lang}: {len(sub)} → PASS {p} / ESC {e} / WRONG {w}")
+        w = len(sub) - p - n - e
+        print(f"  {lang}: {len(sub)} → PASS {p} / NEAR {n} / ESC {e} / WRONG {w}")
     from collections import Counter
     dt = Counter(r.dataset for r in results)
-    dp = Counter(r.dataset for r in results if not r.escalated and r.marker_free and r.compiles)
+    dp = Counter(r.dataset for r in results if not r.escalated and r.marker_free and r.compiles and r.matches_oracle >= 0.95)
+    dn = Counter(r.dataset for r in results if not r.escalated and r.marker_free and r.compiles and 0.80 <= r.matches_oracle < 0.95)
     de = Counter(r.dataset for r in results if r.escalated)
     print("  by dataset:")
     for ds in sorted(dt):
         t = dt[ds]
-        print(f"    {ds:24s} {t:3d} → PASS {dp[ds]:3d} / ESC {de[ds]:3d} / WRONG {t-dp[ds]-de[ds]:3d}")
+        print(f"    {ds:24s} {t:3d} → PASS {dp[ds]:3d} / NEAR {dn[ds]:3d} / ESC {de[ds]:3d} / WRONG {t-dp[ds]-dn[ds]-de[ds]:3d}")
 
     out = Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps([r.__dict__ for r in results], indent=2))
