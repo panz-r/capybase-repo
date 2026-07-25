@@ -573,6 +573,58 @@ class PreservationHeuristicValidator:
                     },
                 )
             # missing is None (change-accounting failed) → fall back to flag.
+        # For genuine merges (not copied_one), run the extended change-
+        # accounting that checks BOTH sides' additions against the candidate.
+        # This catches compile-valid wrong merges where the model silently
+        # drops a branch's contribution from a synthesized merge.
+        if not copied_one:
+            try:
+                from capybase.change_accounting import derive_missing_obligations
+                base_raw = ctx.unit.base.text or ""
+                refined = ctx.unit.structural_metadata.get("diff3_refined")
+                if isinstance(refined, dict) and refined.get("base") is not None:
+                    base_raw = refined["base"]
+                else:
+                    from capybase.conflict_extractor import _base_hunk_via_diff3
+                    base_hunk = _base_hunk_via_diff3(base_raw, cur, rep)
+                    if base_hunk is not None:
+                        base_raw = base_hunk
+                genuine_missing = derive_missing_obligations(
+                    base_raw, cur, rep, resolved)
+                if genuine_missing:
+                    # The genuine merge dropped branch changes. Produce an
+                    # advisory warning with specific line-level detail (for
+                    # the BothSidesRepresentedValidator and the jury to use).
+                    # Use passed=True so this doesn't force a retry — the
+                    # BothSidesRepresentedValidator already handles genuine
+                    # merges with its own retry budget. The detail enriches
+                    # the warning for auditability.
+                    add_lines = [o.line.strip() for o in genuine_missing
+                                 if o.operation == "added"][:8]
+                    return VerificationCheckResult(
+                        name=self.name,
+                        passed=True,
+                        severity="warning",
+                        message=(
+                            f"genuine merge may have dropped {len(genuine_missing)} "
+                            f"branch change(s) from "
+                            f"{', '.join(set(o.side for o in genuine_missing))}"
+                        ),
+                        detail={
+                            "copied_current": False,
+                            "copied_replayed": False,
+                            "missing_lines": add_lines,
+                            "genuine_merge_dropped": True,
+                            "missing_count": len(genuine_missing),
+                        },
+                        features={
+                            "copied_one_side": False,
+                            "change_accounted": True,
+                            "genuine_merge_dropped": True,
+                        },
+                    )
+            except Exception:  # noqa: BLE001 — best-effort
+                pass
         message = (
             "resolved text copies one side verbatim"
             if copied_one

@@ -186,6 +186,14 @@ def _obligation_suffix(unit, cand) -> str:
         missing = derive_missing_obligations(base, cur, rep, res)
         if not missing:
             return ""
+        # Only show the obligation suffix for one-sided copies (where it's
+        # actionable). For genuine merges, the obligation detection is
+        # advisory and may produce false positives when the base is the full
+        # file (not the hunk). The genuine-merge accounting in the validator
+        # handles these correctly; the suffix is just a diagnostic message.
+        res_stripped = res.strip() if res else ""
+        if res_stripped and res_stripped != (cur.strip() if cur else "") and res_stripped != (rep.strip() if rep else ""):
+            return ""  # genuine merge — skip the suffix
         lines = ", ".join(
             repr(o.line.strip()[:50]) for o in missing[:3])
         return (f" — stalled on {len(missing)} unaccounted branch change(s): "

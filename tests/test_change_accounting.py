@@ -314,3 +314,74 @@ class TestRenderFailureIntegration:
         assert "[syntax] unclosed delimiter" in rendered
         assert "line: 5" in rendered
         assert "col: 12" in rendered
+
+
+class TestGenuineMergeAccounting:
+    """Phase 7: detect dropped changes in genuine two-sided merges."""
+
+    def test_genuine_merge_drops_replayed_addition(self):
+        """A genuine merge that drops one side's addition is detected."""
+        base = "use std::io;\nfn main(){}"
+        cur = "use std::io;\nuse std::sync::Arc;\nfn main(){}"
+        rep = "use std::io;\nuse std::collections::HashMap;\nfn main(){}"
+        # Model merges but drops HashMap
+        resolved = "use std::io;\nuse std::sync::Arc;\nfn main(){}"
+        missing = derive_missing_obligations(base, cur, rep, resolved)
+        assert len(missing) == 1
+        assert "HashMap" in missing[0].line
+        assert missing[0].side == "replayed"
+
+    def test_genuine_merge_drops_current_addition(self):
+        """A genuine merge that drops current's addition is detected."""
+        base = "fn a(){}"
+        cur = "fn a(){}\nfn b(){}"
+        rep = "fn a(){}\nfn c(){}"
+        resolved = "fn a(){}\nfn c(){}"  # dropped b
+        missing = derive_missing_obligations(base, cur, rep, resolved)
+        assert len(missing) == 1
+        assert "fn b" in missing[0].line
+        assert missing[0].side == "current"
+
+    def test_genuine_merge_preserves_both(self):
+        """A merge that preserves both sides has zero missing."""
+        base = "fn a(){}"
+        cur = "fn a(){}\nfn b(){}"
+        rep = "fn a(){}\nfn c(){}"
+        resolved = "fn a(){}\nfn b(){}\nfn c(){}"
+        missing = derive_missing_obligations(base, cur, rep, resolved)
+        assert len(missing) == 0
+
+    def test_genuine_merge_exclusive_choice_not_flagged(self):
+        """Exclusive choices (same anchor, different value) are not flagged
+        as dropped additions — the proof-class system handles them."""
+        base = 'const VERSION: &str = "1.0";'
+        cur = 'const VERSION: &str = "2.0";'
+        rep = 'const VERSION: &str = "1.5";'
+        resolved = 'const VERSION: &str = "2.0";'  # picked current
+        missing = derive_missing_obligations(base, cur, rep, resolved)
+        # This is a one-sided copy (resolved == current), so the one-sided
+        # path handles it. But test the genuine-merge path explicitly:
+        resolved2 = 'const VERSION: &str = "2.1";'  # tweaked — genuine merge
+        missing2 = derive_missing_obligations(base, cur, rep, resolved2)
+        # Both sides' values differ from the candidate but same anchor → exclusive
+        assert len(missing2) == 0
+
+    def test_genuine_merge_list_union_not_flagged(self):
+        """A list union (both side's items present) is not flagged."""
+        base = 'ITEMS = ["a", "b"]'
+        cur = 'ITEMS = ["a", "b", "c"]'
+        rep = 'ITEMS = ["a", "b", "d"]'
+        resolved = 'ITEMS = ["a", "b", "c", "d"]'  # union
+        missing = derive_missing_obligations(base, cur, rep, resolved)
+        assert len(missing) == 0
+
+    def test_one_sided_copy_still_works(self):
+        """Back-compat: one-sided copy detection is unchanged."""
+        base = "fn a(){}"
+        cur = "fn a(){}\nfn b(){}"
+        rep = "fn a(){}\nfn c(){}"
+        resolved = cur  # copied current
+        missing = derive_missing_obligations(base, cur, rep, resolved)
+        assert len(missing) == 1
+        assert "fn c" in missing[0].line
+        assert missing[0].side == "replayed"

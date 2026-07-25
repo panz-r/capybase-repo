@@ -248,11 +248,15 @@ def derive_missing_obligations(
     """When ``resolved`` equals one side, compute the OTHER side's base-relative
     changes that are absent from the resolved text.
 
+    For genuine two-sided merges (resolved != either side), checks BOTH sides'
+    additive changes against the candidate and flags any that are missing.
+    This catches compile-valid wrong merges where the model synthesizes a merge
+    but silently drops a branch's contribution.
+
     Returns the MISSING obligations (executable + directive only — comment
     changes are deferred to the comment pass and don't block the code candidate;
     formatting changes are ignored). PRESENT changes (already in the candidate)
-    are NOT returned (no obligation). When the resolution doesn't exactly equal
-    either side, returns [] (this analysis only applies to exact-side copies).
+    are NOT returned (no obligation).
 
     The returned list is the actionable set: each is a specific line the model
     should integrate (or mark equivalent/superseded). An empty result means the
@@ -270,7 +274,8 @@ def derive_missing_obligations(
     elif res.strip() == rep.strip() and (rep.strip() or cur.strip()):
         copied_side, other_text, other_label = "replayed", cur, "current"
     else:
-        return []  # not an exact-side copy; this analysis doesn't apply
+        # Genuine two-sided merge: check BOTH sides' additive changes.
+        return _derive_missing_for_genuine_merge(base, cur, rep, res)
 
     # Diff base → other side: what did the dropped side change?
     base_lines = (base or "").splitlines()
@@ -399,6 +404,109 @@ def derive_missing_obligations(
             obligations.append(BranchObligation(
                 line=changed, channel=channel, status="DROPPED_DELETION",
                 side=other_label, operation="removed", exclusive=False,
+            ))
+    return obligations
+
+
+def _value_substring_preserved(side_line: str, cand_norm: str, base_lines: list[str]) -> bool:
+    """Check if a side's distinctive value content appears in the candidate line.
+
+    For list/set assignments like ``ENABLED_SERVICES = ["core", "cli", "scheduler"]``,
+    the distinctive content is the items NOT in the base (e.g. ``"scheduler"``).
+    If those items appear in the candidate's merged line (e.g. a union), the
+    side's contribution IS preserved even though the full line differs.
+    """
+    # Find the side's distinctive items: values in the side line that aren't
+    # in any base line at the same anchor.
+    side_stripped = side_line.strip()
+    # Extract quoted strings and bare identifiers from the side line
+    side_items = set(re.findall(r'"([^"]+)"', side_stripped))
+    side_items |= set(re.findall(r"'([^']+)'", side_stripped))
+    if not side_items:
+        return False  # no distinctive items to check
+    # Which items are NOT in the base? (Those are the side's additions.)
+    base_text = " ".join(base_lines)
+    distinctive = {item for item in side_items if item not in base_text}
+    if not distinctive:
+        return False  # nothing distinctive — can't tell
+    # Are ALL distinctive items in the candidate line?
+    return all(item in cand_norm for item in distinctive)
+
+
+def _derive_missing_for_genuine_merge(
+    base: str, current: str, replayed: str, resolved: str,
+) -> list[BranchObligation]:
+    """For genuine two-sided merges: check BOTH sides' additive changes.
+
+    When the candidate is a synthesized merge (not equal to either side), we
+    can't use the one-sided-copy analysis. Instead, compute each side's
+    base-relative ADDITIONS and check whether each appears in the candidate.
+    Any additive change from either side that's MISSING from the candidate
+    is a silently-dropped branch contribution.
+
+    This catches compile-valid wrong merges: the model synthesizes a merge
+    that compiles, but silently drops a variant, field, method, or import
+    from one side. The BothSidesRepresentedValidator catches this at token-
+    set granularity; this function produces the precise per-line counterexample.
+
+    Only ADDITIONS are checked (not modifications/deletions) — exclusive
+    choices and deletions are handled by the proof-class system.
+    """
+    res = resolved or ""
+    base_lines = (base or "").splitlines()
+    res_norm = {_norm(l) for l in res.splitlines() if l.strip()}
+
+    # Build the candidate's anchor map for exclusive detection: if a side's
+    # addition has the SAME anchor as an existing candidate line with a
+    # DIFFERENT value, it's an exclusive choice (the model picked the other
+    # side's value), not a dropped addition. Skip it.
+    res_anchors: dict[str, str] = {}
+    for l in res.splitlines():
+        a = _anchor_of(l)
+        if a and l.strip():
+            res_anchors.setdefault(a, _norm(l))
+
+    obligations: list[BranchObligation] = []
+    seen_norm: set[str] = set()
+
+    for side_text, side_label in ((current, "current"), (replayed, "replayed")):
+        side_lines = (side_text or "").splitlines()
+        diff = difflib.unified_diff(base_lines, side_lines, lineterm="", n=0)
+        for line in diff:
+            if line.startswith("+++") or line.startswith("---"):
+                continue
+            if not line.startswith("+"):
+                continue
+            changed = line[1:]
+            channel = classify_channel(changed)
+            if channel in ("comment", "formatting"):
+                continue
+            norm = _norm(changed)
+            if norm in seen_norm:
+                continue
+            # Is this side's addition present in the candidate?
+            if norm in res_norm:
+                continue  # PRESENT — no obligation
+            # Exclusive check: does the candidate already have a line at the
+            # same anchor with a DIFFERENT value? If so, this is a mutually-
+            # exclusive choice (the model picked the other side), not a
+            # dropped addition. Skip it — the proof-class system handles these.
+            anchor = _anchor_of(changed)
+            if anchor and anchor in res_anchors and res_anchors[anchor] != norm:
+                # Subtle case: the candidate line at this anchor might be a
+                # UNION of both sides' values (e.g. a merged list/set). If
+                # the side's distinctive content (the part that differs from
+                # base) appears as a substring of the candidate's line, it's
+                # preserved, not dropped. Check this before skipping.
+                cand_at_anchor = res_anchors[anchor]
+                if _value_substring_preserved(changed, cand_at_anchor, base_lines):
+                    continue  # value IS in the merged line — not dropped
+                continue  # exclusive choice — not a dropped addition
+            # MISSING — this side's addition was dropped from the merge.
+            seen_norm.add(norm)
+            obligations.append(BranchObligation(
+                line=changed, channel=channel, status="MISSING",
+                side=side_label, operation="added", exclusive=False,
             ))
     return obligations
 
