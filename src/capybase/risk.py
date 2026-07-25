@@ -259,12 +259,27 @@ class RiskEngine:
         # of "didn't actually merge" signal as copying one side — the candidate
         # silently lost a branch's change. Retry so the model gets another chance
         # to represent both sides; escalate if it keeps happening.
+        # BUT: for exclusive choices (SAFE_SCALAR, GENERIC_EXCLUSIVE), picking
+        # one side is defensible — retrying just oscillates between sides.
+        # Check the proof class before retrying.
         if "both_sides_represented" in warning_names and retry_count < budget:
-            return RiskDecision(
-                action="retry",
-                reasons=soft or ["dropped a side's additions"],
-                required_followups=soft,
+            # Check if this is an exclusive choice that the preservation
+            # validator already classified as safe.
+            pres_warning = next(
+                (w for w in result.warnings if w.validator == "preservation_heuristic"),
+                None,
             )
+            proof_class = None
+            if pres_warning and pres_warning.detail:
+                proof_class = pres_warning.detail.get("exclusive_proof_class")
+            if proof_class in ("SAFE_SCALAR", "GENERIC_EXCLUSIVE"):
+                pass  # Don't retry — picking one side is defensible
+            else:
+                return RiskDecision(
+                    action="retry",
+                    reasons=soft or ["dropped a side's additions"],
+                    required_followups=soft,
+                )
         # Intent-coverage floor: the deterministic
         # coverage check found a side's added structural units were dropped
         # below the configured fraction — a hard, quantitative backstop that

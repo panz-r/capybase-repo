@@ -2452,7 +2452,8 @@ class ResolutionEngine:
             return False
         return self.config.json_mode
 
-    def raw_complete(self, prompt: str, *, json_mode: bool = False) -> LLMResponse:
+    def raw_complete(self, prompt: str, *, json_mode: bool = False,
+                     temperature: float | None = None) -> LLMResponse:
         """One-shot completion: send ``prompt`` and return the raw response.
 
         Used by the block-capture layer (and any future decision-style prompt)
@@ -2461,6 +2462,10 @@ class ResolutionEngine:
         client call, but returns the raw :class:`LLMResponse` for the caller to
         parse with the decision-specific parser (not the candidate coercer).
         Raises on a request failure — the caller decides retry/fall-through.
+
+        ``temperature``: when provided, overrides the engine's default
+        temperature. Used by block_capture to force a lower temperature for
+        the keep/delete decision (a binary choice where determinism matters).
         """
         self._log_prompt(prompt, prompt_version="raw_complete")
         messages = [
@@ -2470,7 +2475,7 @@ class ResolutionEngine:
         return self.client.complete(
             messages,
             model=self.config.model,
-            temperature=self.config.temperature,
+            temperature=temperature if temperature is not None else self.config.temperature,
             max_tokens=self.config.max_tokens,
             json_mode=json_mode,
         )

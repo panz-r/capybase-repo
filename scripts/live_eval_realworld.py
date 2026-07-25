@@ -240,6 +240,13 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # instead of wasting 3 retries on empty responses.
     # Override via CAPYBASE_CONTEXT_WINDOW for models with different limits.
     cfg.model.context_window = int(os.environ.get("CAPYBASE_CONTEXT_WINDOW", "8192"))
+    # Reserve more tokens for completion + prompt boilerplate. The default
+    # completion_reserve=1024 only accounts for the model's output. But the
+    # prompt's fixed boilerplate (intro/contract/rules + existing-imports
+    # context + JSON formatting) adds ~800-1000 tokens that aren't trimmable.
+    # Without this reserve, files that fit the marker threshold but push the
+    # total prompt past the model's effective limit return empty responses.
+    cfg.model.completion_reserve = int(os.environ.get("CAPYBASE_COMPLETION_RESERVE", "2048"))
     # Test gate:
     # - Python: py_compile (always available)
     # - Rust with full crate: the orchestrator's _run_cargo_syntax_check runs

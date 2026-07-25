@@ -2481,7 +2481,16 @@ class Orchestrator:
         if self.config.journal.enabled and self.config.journal.store_prompts:
             self.journal.store_prompt(unit.unit_id, 0, prompt)
         try:
-            resp = self.resolution_engine.raw_complete(prompt, json_mode=False)
+            resp = self.resolution_engine.raw_complete(
+                prompt, json_mode=False,
+                # Use a low temperature for the keep/delete decision — it's a
+                # binary choice where determinism matters. A higher temperature
+                # caused the model to flip between keep_block and accept_deletion
+                # across runs (tokio-0098: V4 accept_deletion→sim=1.0, V5
+                # keep_block→sim=0.6). 0.1 is low enough for consistency without
+                # being fully greedy (which can get stuck on wrong answers).
+                temperature=0.1,
+            )
         except Exception as exc:  # noqa: BLE001 - request failed → fall through
             self.journal.emit(
                 "block_capture_request_failed",
