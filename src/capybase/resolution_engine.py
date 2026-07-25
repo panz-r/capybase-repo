@@ -803,6 +803,16 @@ def _resolve_prompt_parts(
     if sv and sv.get("sibling_entities"):
         joined = "\n".join(f"  - {sig}" for sig in sv["sibling_entities"])
         siblings_block = f"Other entities in this container (stay consistent with these):\n{joined}\n\n"
+    # Existing imports in the file: prevent the model from adding a duplicate
+    # import that already exists outside the conflict hunk. This is the #1
+    # cause of whole-file cargo-check failures (sim=1.0 but duplicate import).
+    # Folded into siblings_block (both are file-level context the model should
+    # be aware of) to avoid changing the _fit_to_budget signature.
+    if sv and sv.get("existing_imports"):
+        joined = "\n".join(f"  {imp}" for imp in sv["existing_imports"])
+        siblings_block += (
+            f"Imports already in this file (do NOT duplicate these):\n{joined}\n\n"
+        )
     few_shot = ""
     if context.retrieved_examples:
         # Cap at the profile's example_limit (default 2) and truncate each side

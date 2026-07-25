@@ -142,6 +142,15 @@ class ContextBuilder:
         # Populated by the structural enricher; advisory.
         if meta.get("sibling_entities"):
             structural_view["sibling_entities"] = meta["sibling_entities"]
+        # Existing imports in the file: extract all `use` / `pub use` lines
+        # from the full worktree text so the model can see imports that exist
+        # OUTSIDE the conflict hunk. This prevents the model from adding a
+        # duplicate import that already exists elsewhere in the file — the
+        # #1 cause of whole-file cargo-check failures (sim=1.0 but duplicate
+        # import at splice time).
+        existing_imports = _extract_existing_imports(unit.original_worktree_text)
+        if existing_imports:
+            structural_view["existing_imports"] = existing_imports
         # Token canonicalization: strip comment lines, docstrings, and blank
         # runs from the context shown to the model. This reduces noise for a
         # 3B model prone to "lost in the middle" — the model focuses on the
@@ -588,3 +597,29 @@ def _is_context_comment(stripped: str, language: str | None) -> bool:
         return False
     from capybase.adapters.language import adapter_for
     return stripped.startswith(adapter_for(language).comment_line_prefixes)
+
+
+def _extract_existing_imports(text: str) -> list[str]:
+    """Extract existing ``use`` / ``pub use`` lines from the full file text.
+
+    Returns a deduplicated list of import lines (stripped), limited to 30
+    entries to avoid bloating the context. These are shown to the model so it
+    doesn't add a duplicate import that already exists outside the conflict
+    hunk — the #1 cause of whole-file cargo-check failures.
+    """
+    if not text:
+        return []
+    imports: list[str] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        # Rust use statements
+        if s.startswith("use ") or s.startswith("pub use ") or s.startswith("pub(crate) use "):
+            if s not in seen:
+                seen.add(s)
+                imports.append(s)
+        if len(imports) >= 30:
+            break
+    return imports

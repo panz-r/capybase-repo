@@ -1921,14 +1921,25 @@ class Orchestrator:
         # all augmentation sections ARE trimmable by _fit_to_budget, so we do NOT
         # fold them in here — a tight window that forces augmentation trimming is
         # the documented, tested behavior, not a hopeless case. This guard fires
-        # only when the SIDES THEMSELVES don't fit: the prompt can't be made
-        # valid by any amount of trimming, so the LLM call is doomed. estimate_tokens
-        # is ~4 chars/token.
-        sides = (
-            (unit.base.text or "") + (unit.current.text or "")
-            + (unit.replayed.text or "")
-        )
-        essential = estimate_tokens(sides)
+        # only when the essential conflict content doesn't fit: the prompt can't
+        # be made valid by any amount of trimming, so the LLM call is doomed.
+        # estimate_tokens is ~4 chars/token.
+        #
+        # The essential content is NOT just the three hunk-interior sides
+        # (unit.base/current/replayed.text) — the prompt actually sends the
+        # full marker block (unit.original_worktree_text) which includes the
+        # entire file with conflict markers embedded. For a large file with a
+        # small conflict (e.g. a version-string bump in a 20K-char README),
+        # the hunk sides are tiny but the marker block is huge. Use the marker
+        # block text because that's what the model actually sees.
+        marker_text = unit.original_worktree_text or ""
+        if not marker_text:
+            # Fallback: sum the three sides (the pre-fix behavior).
+            marker_text = (
+                (unit.base.text or "") + (unit.current.text or "")
+                + (unit.replayed.text or "")
+            )
+        essential = estimate_tokens(marker_text)
         return essential > available, essential, available
 
     def _try_exact_reuse(self, unit: ConflictUnit) -> UnitOutcome | None:
