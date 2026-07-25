@@ -2705,6 +2705,45 @@ def compute_diagnostic_delta(
     return new_errors
 
 
+def reduce_cascade_errors(errors: list[str], *, max_root_causes: int = 3) -> list[str]:
+    """Reduce a list of compiler errors to root causes by suppressing cascades.
+
+    When a candidate has one root error (e.g. a missing import), the compiler
+    produces many cascaded errors (every use of the missing symbol). Sending
+    all of them to a weak model overwhelms it with noise. This function groups
+    errors by their error code prefix (e.g. ``E0432``, ``E0599``) and keeps
+    only the first error per code — the root cause. Additional distinct codes
+    are kept up to ``max_root_causes``.
+
+    This is a lightweight heuristic: it assumes errors with the same code in
+    the same compilation are likely cascades from the same root cause. This is
+    correct for most Rust compilation failures (a missing import cascades to
+    E0425/E0433 for every use; a type mismatch cascades to E0308 for every
+    call site).
+    """
+    if len(errors) <= max_root_causes:
+        return errors
+    # Extract error codes from the error messages (e.g. "E0432: ...").
+    import re
+    code_re = re.compile(r"\b(E\d{4})\b")
+    seen_codes: set[str] = set()
+    root_causes: list[str] = []
+    other: list[str] = []
+    for err in errors:
+        m = code_re.search(err)
+        code = m.group(1) if m else None
+        if code and code not in seen_codes:
+            seen_codes.add(code)
+            root_causes.append(err)
+        elif not code:
+            # No error code — keep it (might be a distinct root cause).
+            other.append(err)
+        # else: same code as an already-seen root cause → cascade, skip.
+    # Combine: root causes first (one per code), then unclassified errors.
+    result = root_causes + other
+    return result[:max_root_causes] if len(result) > max_root_causes else result
+
+
 # ---------------------------------------------------------------------------
 # Whole-file semantic checks (Python, stdlib ast): duplicate definitions and
 # unreachable code. These are the two "looks plausible, passes line/token
@@ -3526,14 +3565,15 @@ class VerificationEngine:
         features["syntax_tool"] = "cargo"
         features["syntax_new_error_count"] = len(new_errors)
         if new_errors and self.config.require_syntax_if_supported:
-            msg = "; ".join(m[:80] for m in new_errors[:3])
+            reduced = reduce_cascade_errors(new_errors)
+            msg = "; ".join(m[:80] for m in reduced[:3])
             hard.append(
                 VerificationFailure(
                     validator="syntax",
                     severity="error",
                     message=f"cargo check: {len(new_errors)} new error(s): {msg}",
                     detail={
-                        "new_errors": new_errors[:5],
+                        "new_errors": reduce_cascade_errors(new_errors)[:5],
                         "tool": "cargo",
                     },
                 )
@@ -3620,14 +3660,15 @@ class VerificationEngine:
         features["syntax_tool"] = "cargo"
         features["syntax_new_error_count"] = len(new_errors)
         if new_errors and self.config.require_syntax_if_supported:
-            msg = "; ".join(m[:80] for m in new_errors[:3])
+            reduced = reduce_cascade_errors(new_errors)
+            msg = "; ".join(m[:80] for m in reduced[:3])
             hard.append(
                 VerificationFailure(
                     validator="syntax",
                     severity="error",
                     message=f"cargo check: {len(new_errors)} new error(s): {msg}",
                     detail={
-                        "new_errors": new_errors[:5],
+                        "new_errors": reduce_cascade_errors(new_errors)[:5],
                         "tool": "cargo",
                         "manifest": True,
                     },
@@ -3953,14 +3994,15 @@ class VerificationEngine:
         )
         features["lsp_new_error_count"] = len(new_errors)
         if new_errors:
-            msg = "; ".join(m[:80] for m in new_errors[:3])
+            reduced = reduce_cascade_errors(new_errors)
+            msg = "; ".join(m[:80] for m in reduced[:3])
             hard.append(
                 VerificationFailure(
                     validator="lsp_diagnostics",
                     severity="error",
                     message=f"LSP introduced {len(new_errors)} new error(s): {msg}",
                     detail={
-                        "new_errors": new_errors[:5],
+                        "new_errors": reduce_cascade_errors(new_errors)[:5],
                         "tool": after.tool,
                     },
                 )
