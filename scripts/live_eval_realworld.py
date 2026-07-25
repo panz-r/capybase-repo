@@ -96,11 +96,50 @@ class CaseResult:
     reason: str = ""
     verdict: str = ""  # PASS | NEAR_MATCH | ORACLE_DIVERGENT | ESCALATE
     compiles_cargo: bool | None = None  # None when cargo didn't run
+    terminal_reason: str = ""  # disjoint escalation classification
     # FR2a flight recorder: the orchestrator's session_id (the per-case artifact
     # root under .rebase-agent/sessions/<session_id>/). Populated when
     # --preserve-flights copies the session dir out; None otherwise. The flight
     # manifest maps case_id → session_id → artifacts for replay.
     session_id: str = ""
+
+
+def _classify_terminal_reason(reason: str) -> str:
+    """Classify an escalation reason into a disjoint terminal category.
+
+    Returns one of:
+      OVERSIZED           — oversized guard fired (file too large for model)
+      MODEL_EMPTY         — model returned empty (not oversized)
+      MODEL_NEEDS_HUMAN   — model self-reported needs_human
+      CARGO_NO_PROGRESS   — convergence with cargo/syntax errors
+      PROOF_NO_PROGRESS   — convergence without cargo errors (preservation only)
+      WHOLE_FILE_FAILED   — whole-file repair couldn't resolve
+      WALL_TIME           — exceeded time budget
+      NO_CONFLICT         — git didn't produce a conflict
+      OTHER               — uncategorized
+    """
+    r = (reason or "").lower()
+    if "too large" in r or "oversized" in r:
+        return "OVERSIZED"
+    if "no conflict" in r or "skipped" in r:
+        return "NO_CONFLICT"
+    if "wall-time" in r or "wall_time" in r:
+        return "WALL_TIME"
+    if "needs_human" in r:
+        return "MODEL_NEEDS_HUMAN"
+    if "empty resolution" in r or "empty res" in r:
+        return "MODEL_EMPTY"
+    if "whole-file" in r or "whole_file" in r:
+        return "WHOLE_FILE_FAILED"
+    if "convergence" in r:
+        if "stalled" in r or "unaccounted" in r:
+            return "PROOF_NO_PROGRESS"
+        return "CARGO_NO_PROGRESS"
+    if "could not resolve" in r:
+        if "error:" in r or "syntax" in r or "delimiter" in r:
+            return "CARGO_NO_PROGRESS"
+        return "MODEL_EMPTY"
+    return "OTHER"
 
 
 def load_cases(*, limit: int | None = None, lang: str | None = None) -> list[Case]:
@@ -534,6 +573,7 @@ def main():
             verdict = "ORACLE_DIVERGENT"; wrong_ct += 1
         print(f"{verdict}  {r.elapsed:.0f}s  sim={r.matches_oracle:.2f}  {r.reason[:60]}")
         r.verdict = verdict
+        r.terminal_reason = _classify_terminal_reason(r.reason) if r.escalated else ""
         results.append(r)
         # Incremental write: a kill won't lose progress.
         out.write_text(json.dumps([r.__dict__ for r in results], indent=2))
@@ -586,6 +626,13 @@ def main():
     for ds in sorted(dt):
         t = dt[ds]
         print(f"    {ds:24s} {t:3d} → PASS {dp[ds]:3d} / NEAR {dn[ds]:3d} / ESC {de[ds]:3d} / DIVERGE {t-dp[ds]-dn[ds]-de[ds]:3d}")
+    # Terminal reason distribution for escalations
+    from collections import Counter as _C
+    tr = _C(r.terminal_reason for r in results if r.escalated)
+    if tr:
+        print(f"\n  escalation terminal reasons:")
+        for reason, count in tr.most_common():
+            print(f"    {reason:25s} {count}")
 
     out = Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps([r.__dict__ for r in results], indent=2))

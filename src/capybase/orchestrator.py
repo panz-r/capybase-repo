@@ -482,7 +482,23 @@ _ACTIONABLE_SOFT_WARNINGS: frozenset[str] = frozenset({
 })
 
 
-def _soft_warning_failures(validation: VerificationResult) -> list[VerificationFailure]:
+# Advisory-only validators: when hard failures (compiler/syntax errors) exist,
+# these warnings are demoted to advisory — they're shown in the prompt context
+# but NOT lifted to the failure list and NOT competing with the compiler error
+# for the model's attention. The rationale: fix the compilation error first;
+# the preservation concern may resolve itself or become moot after the fix.
+# When NO hard failures exist, these remain fully actionable.
+_ADVISORY_WHEN_HARD_EXISTS: frozenset[str] = frozenset({
+    "preservation_heuristic",   # one-sided merge heuristic — often resolves after compile fix
+    "unattributed_code",        # hallucinated unit — may disappear after structural fix
+})
+
+
+def _soft_warning_failures(
+    validation: VerificationResult,
+    *,
+    hard_failures: list | None = None,
+) -> list[VerificationFailure]:
     """Lift actionable soft-validator warnings into failure-shape prompt feedback.
 
     ``risk.decide`` retries on these warnings (``risk.py:156-213``), but the
@@ -500,16 +516,25 @@ def _soft_warning_failures(validation: VerificationResult) -> list[VerificationF
     ``propose()`` selects the targeted ``build_repair_prompt`` path against
     the previous candidate. ``verifier_model*`` warnings are excluded — they
     are handled by ``_critic_failure`` against the separate critic budget.
+
+    ``hard_failures``: when provided and non-empty, advisory-tier validators
+    (preservation_heuristic, unattributed_code) are skipped — their concerns
+    are secondary to the compiler error and would just confuse the model.
     """
+    has_hard = bool(hard_failures)
     out: list[VerificationFailure] = []
     for w in validation.warnings:
-        if w.validator in _ACTIONABLE_SOFT_WARNINGS:
-            out.append(VerificationFailure(
-                validator=w.validator,
-                severity="warning",
-                message=w.message,
-                detail=dict(w.detail),
-            ))
+        if w.validator not in _ACTIONABLE_SOFT_WARNINGS:
+            continue
+        # Advisory tier: skip when hard failures exist (compiler error dominates).
+        if has_hard and w.validator in _ADVISORY_WHEN_HARD_EXISTS:
+            continue
+        out.append(VerificationFailure(
+            validator=w.validator,
+            severity="warning",
+            message=w.message,
+            detail=dict(w.detail),
+        ))
     return out
 
 
@@ -6534,7 +6559,20 @@ class Orchestrator:
             # warning-driven retry left ``failures`` empty → propose() fell
             # through to a feedback-free build_resolve_prompt regeneration
             # (the critic-path comment above describes the same pathology).
-            failures.extend(_soft_warning_failures(validation))
+            failures.extend(_soft_warning_failures(validation, hard_failures=failures))
+            # Dominant-counterexample selection (Phase 8 Item 1): show the model
+            # ONE root-cause failure per iteration, not a concatenation of all
+            # failures. When hard failures exist (compiler/syntax errors), show
+            # only the first — it's the root cause. Fixing it may resolve
+            # cascaded errors and preservation concerns. When no hard failures
+            # exist, show only the first soft warning. This gives the weak model
+            # a single, precise repair obligation instead of competing signals.
+            if failures:
+                hard = [f for f in failures if f.severity == "error"]
+                if hard:
+                    failures = [hard[0]]  # dominant compiler error
+                else:
+                    failures = [failures[0]]  # dominant soft warning
             failures = failures or None
             # Track which budget this retry consumes. A recovery retry (model
             # self-reported needs_human; risk.decide granted a recovery attempt)
