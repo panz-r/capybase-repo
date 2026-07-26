@@ -114,7 +114,8 @@ def _classify_terminal_reason(reason: str) -> str:
       CARGO_NO_PROGRESS   — convergence with cargo/syntax errors
       PROOF_NO_PROGRESS   — convergence without cargo errors (preservation only)
       WHOLE_FILE_FAILED   — whole-file repair couldn't resolve
-      WALL_TIME           — exceeded time budget
+      WALL_TIME           — exceeded per-unit wall-time budget
+      CASE_TIMEOUT        — exceeded per-case timeout (900s+ of CEGIS retries)
       NO_CONFLICT         — git didn't produce a conflict
       OTHER               — uncategorized
     """
@@ -123,6 +124,8 @@ def _classify_terminal_reason(reason: str) -> str:
         return "OVERSIZED"
     if "no conflict" in r or "skipped" in r:
         return "NO_CONFLICT"
+    if "case timeout" in r:
+        return "CASE_TIMEOUT"
     if "wall-time" in r or "wall_time" in r:
         return "WALL_TIME"
     if "needs_human" in r:
@@ -301,6 +304,12 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     cfg.future.enable_structural_resolver = True
     cfg.future.enable_combination_search = True
     cfg.policy.max_retries_per_unit = 2  # cap CEGIS retries for throughput
+    # Recovery retry budget: when the model self-reports needs_human, give it
+    # one more attempt with a reframed prompt. Raised from 1 to 2 — the 12
+    # MODEL_NEEDS_HUMAN cases in V6 had sim >= 0.85 (most >= 0.97), suggesting
+    # the model CAN process these conflicts but gives up prematurely. A second
+    # recovery attempt with different framing may produce output.
+    cfg.policy.max_recovery_retries_per_unit = 2
     # Per-unit wall-time budget: escalate cleanly at the orchestrator level
     # (D2) rather than burning to the case cap and leaking the temp dir via an
     # abandoned daemon thread. 360s accommodates an on-premise weak LLM where a
@@ -452,9 +461,12 @@ def main():
     ap.add_argument("--out", default="/tmp/capybase-live/realworld-results.json")
     ap.add_argument("--skip-existing", action="store_true",
                     help="Skip cases whose id is already in --out (resume after a kill)")
-    ap.add_argument("--case-timeout", type=int, default=900,
+    ap.add_argument("--case-timeout", type=int, default=1200,
                     help="Per-case wall-clock cap (seconds); 0 = no cap. Prevents one "
-                         "hard case (endless CEGIS retries) from stalling the run.")
+                         "hard case (endless CEGIS retries) from stalling the run. "
+                         "Raised from 900 to 1200 in V6 — the dominant-counterexample "
+                         "repair (one fix per iteration) can take more iterations to "
+                         "converge but each is more focused.")
     ap.add_argument("--preserve-flights", default=None,
                     help="Directory to copy per-case orchestrator session artifacts into "
                          "(FR2a flight recorder). Produces <dir>/flights/<case_id>/<session_id>/ "
