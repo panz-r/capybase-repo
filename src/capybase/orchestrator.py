@@ -4684,6 +4684,49 @@ class Orchestrator:
                     # _has_whole_file_span guard; the buffer is the resolved
                     # text directly for such units.
                     buffer = _resolved_buffer(original, accepted)
+                    # Phase 9: whole-file import deduplication linker. Runs
+                    # AFTER splicing but BEFORE validation. Removes duplicate
+                    # `use` statements introduced when the model's per-unit
+                    # resolution adds an import that already exists elsewhere
+                    # in the file. The #1 cause of WHOLE_FILE_FAILED.
+                    if getattr(self.config.future, "enable_file_linker", True):
+                        try:
+                            from capybase.file_linker import deduplicate_imports
+                            deduped, dedup_count = deduplicate_imports(buffer, language)
+                            if dedup_count > 0:
+                                # Apply dedup to each unit's resolved_text so
+                                # the splice produces the deduped result.
+                                # Simpler: just write the deduped buffer and
+                                # update the last unit's resolved_text if it's
+                                # a whole-file unit. For multi-unit files, the
+                                # dedup is applied to the spliced buffer which
+                                # verify_file re-creates from spans — so we
+                                # need to patch the buffer that verify_file
+                                # receives.
+                                buffer = deduped
+                                # Also update spans_and_texts for verify_file:
+                                # replace the original text in the last accepted
+                                # unit with the deduped buffer when it's a
+                                # whole-file unit. For multi-unit, the dedup
+                                # only removes import lines that don't overlap
+                                # with any unit's span, so the splice is safe.
+                                if any(u.marker_span is None for u, _ in accepted):
+                                    accepted[-1] = (
+                                        accepted[-1][0],
+                                        accepted[-1][1].model_copy(
+                                            update={"resolved_text": deduped}),
+                                    )
+                                    spans_and_texts = [
+                                        (unit.marker_span, cand.resolved_text)
+                                        for unit, cand in accepted
+                                    ]
+                                self.journal.emit(
+                                    "file_linker_dedup",
+                                    {"duplicates_removed": dedup_count},
+                                    step_index=self.step, path=path,
+                                )
+                        except Exception:  # noqa: BLE001
+                            pass
                     file_validation = self.verification.verify_file(
                         path, language, original, spans_and_texts,
                         repo_root=str(self.git.repo),

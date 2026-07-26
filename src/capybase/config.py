@@ -672,6 +672,11 @@ class FutureConfig(BaseModel):
     # associated items into impl/mod/trait blocks. Same item name → exclusive;
     # macro_rules! → refused. Default ON.
     enable_keyed_item_union: bool = True
+    # Whole-file import deduplication linker (Phase 9): after per-unit
+    # resolution is spliced into the full file, remove duplicate `use`
+    # statements before whole-file cargo validation. The #1 cause of
+    # WHOLE_FILE_FAILED is duplicate imports at the file level. Default ON.
+    enable_file_linker: bool = True
     # Phase 4 comment jury (design §5). An untrusted semantic sensor that
     # evaluates comment claims produced by the comment pass. Three operating
     # modes:
