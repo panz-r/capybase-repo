@@ -5711,6 +5711,47 @@ class Orchestrator:
                 unit_id=unit_new.unit_id,
             )
             return det
+        # Deterministic import dedup repair (Phase 9): before spending an LLM
+        # call, try the file_linker's deduplicate_imports on the spliced
+        # buffer. This catches duplicate imports that survived the pre-validation
+        # pass (e.g. cross-file references or partial-group collisions the
+        # file_linker didn't catch on the first pass because the error
+        # messages guide a more targeted second dedup attempt). Mirrors how
+        # _try_deterministic_brace_repair works for braces above.
+        if getattr(self.config.future, "enable_file_linker", True):
+            try:
+                from capybase.file_linker import deduplicate_imports
+                spliced = _resolved_buffer(original, accepted)
+                # Check if any failure message mentions duplicate/import
+                has_import_error = any(
+                    "import" in (getattr(f, "message", "") or "").lower()
+                    or "defined more than once" in (getattr(f, "message", "") or "").lower()
+                    or "module_stmt" in (getattr(f, "detail", {}) or {}).get("message", "").lower()
+                    for f in failures
+                )
+                if has_import_error:
+                    deduped, dedup_count = deduplicate_imports(spliced)
+                    if dedup_count > 0:
+                        # Back-project: for whole-file units, update resolved_text.
+                        # For multi-unit, update the fault unit's resolved_text
+                        # with the deduped version of its contribution.
+                        unit_f, cand_f = accepted[fault_idx]
+                        if unit_f.marker_span is None:
+                            new_cand = cand_f.model_copy(
+                                update={"resolved_text": deduped,
+                                        "provenance": (cand_f.provenance or "plain_llm") + "+file_linker"})
+                            result = list(accepted)
+                            result[fault_idx] = (unit_f, new_cand)
+                            self.journal.emit(
+                                "file_linker_repair",
+                                {"duplicates_removed": dedup_count,
+                                 "candidate_id": new_cand.candidate_id},
+                                step_index=self.step, path=path,
+                                unit_id=unit_f.unit_id,
+                            )
+                            return result
+            except Exception:  # noqa: BLE001
+                pass
         unit, _old_cand = accepted[fault_idx]
         # Fix #3 — enriched feedback: build a splice-context snippet (the resolved
         # file ±5 lines around the error) so PROMPT_REPAIR shows the model the
