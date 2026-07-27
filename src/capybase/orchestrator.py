@@ -133,26 +133,35 @@ class StepResult:
 def _normalize_for_convergence(text: str, language: str | None) -> str:
     """Normalize candidate text for CEGIS convergence detection (Issue 4).
 
-    Strips comments + blank strings + collapses whitespace + sorts lines, so
-    two candidates that differ only cosmetically (whitespace, comment
-    reordering, blank-line counts) hash to the same value. Catches the cycling
-    pattern the exact-hash oscillation backstop misses: a model making
-    slightly-different mistakes each retry that are semantically identical.
+    Strips comments + collapses whitespace + sorts lines, so two candidates
+    that differ only cosmetically (whitespace, comment reordering, blank-line
+    counts) hash to the same value. Catches the cycling pattern the exact-hash
+    oscillation backstop misses: a model making slightly-different mistakes
+    each retry that are semantically identical.
+
+    String-literal VALUES are preserved (NOT blanked). A version bump
+    ``"1.28.1"`` → ``"1.29.0"`` is a genuine semantic change, not cosmetic
+    variation. The original implementation blanked strings then sorted tokens
+    into a bag, which erased version values AND destroyed line structure —
+    causing byte-identical candidates to be flagged as cosmetic cycling (the
+    tokio-0062/0080/0114 V7 regressions).
     """
     try:
         from capybase.adapters.string_lexer import blank_strings_and_comments
-        # Blank comments + strings (both become placeholder chars), then strip
-        # placeholder chars + collapse whitespace + sort lines.
-        blanked = blank_strings_and_comments(text, language)
-        # Remove the placeholder chars (underscores from string blanking) so
-        # string-literal-value changes don't count as cosmetic. Then split on
-        # whitespace, sort the tokens, and rejoin — line order + within-line
-        # whitespace don't matter for "is this the same essential code".
-        tokens = [t for t in blanked.replace("_", " ").split() if t]
-        return " ".join(sorted(tokens))
+        # Blank COMMENTS ONLY (not strings). String values are real semantic
+        # content. Comment text is cosmetic (a comment change is not a real
+        # code change).
+        blanked = blank_strings_and_comments(text, language, blank_strings=False)
+        # Collapse per-line whitespace, then sort LINES (not tokens). Line
+        # order is cosmetic for "same essential code" (the model may reorder
+        # independent items); within-line structure is NOT cosmetic (sorting
+        # tokens destroys block/brace structure and conflates unrelated lines).
+        lines = [" ".join(line.split()) for line in blanked.splitlines()]
+        return "\n".join(sorted(lines))
     except Exception:
-        # Fallback: whitespace-collapse only (no comment stripping).
-        return " ".join(sorted(text.split()))
+        # Fallback: whitespace-collapse + line-sort (no comment stripping).
+        lines = [" ".join(line.split()) for line in text.splitlines()]
+        return "\n".join(sorted(lines))
 
 
 def _obligation_suffix(unit, cand) -> str:
@@ -792,6 +801,185 @@ def _try_deterministic_brace_repair(
         explanation="deterministic brace-balance repair (splice junction)",
     )
     return [(wf_unit, wf_cand)]
+
+
+def _try_deterministic_prefix_dedup(
+    failures: list,
+    original: str,
+    accepted: list[tuple[ConflictUnit, CandidateResolution]],
+    fault_idx: int,
+) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+    """Strip a duplicated enclosing wrapper from resolved_text at the splice
+    junction.
+
+    Phase 10: two V7 regressions (sea-orm-0012/0018) failed because the marker
+    span excludes the enclosing wrapper (e.g. ``use crate::{`` before the span
+    and ``};`` after). A correct resolved_text that re-includes the wrapper
+    produces a doubled prefix after splicing:
+
+        use crate::{                                      ← existing wrapper
+        use crate::{error::*, ConnectionTrait, ...};      ← resolved (re-includes)
+        };                                                ← existing close
+
+    Rust reports "expected identifier, found keyword ``use``" — the cargo error
+    signature of a prefix collision. This repair detects when the resolved_text
+    redundantly re-states the wrapper that's already present outside the span,
+    strips the redundant wrapper lines from the resolved_text, and returns the
+    corrected accepted list.
+
+    Conservative: only acts when the line immediately before (or after) the
+    marker span shares a statement head with the resolved_text's first (or
+    last) line, AND stripping produces a brace-balanced result.
+    """
+    from capybase.conflict_model import CandidateResolution
+    from capybase.verification import _brace_imbalance_line
+
+    # Engagement gate: the cargo error signatures of prefix collision.
+    prefix_error_patterns = (
+        "expected identifier, found keyword",
+        "expected item after attributes",
+        "expected one of",
+    )
+    has_prefix_error = any(
+        any(p in (getattr(f, "message", "") or "").lower() for p in prefix_error_patterns)
+        for f in failures
+    )
+    if not has_prefix_error:
+        return None
+    if fault_idx < 0 or fault_idx >= len(accepted):
+        return None
+    unit, old_cand = accepted[fault_idx]
+    if unit.marker_span is None:
+        return None  # whole-file unit — no junction
+    start, end = unit.marker_span
+    orig_lines = original.split("\n")
+    resolved_lines = (old_cand.resolved_text or "").split("\n")
+    if not resolved_lines or not resolved_lines[0].strip():
+        return None
+    # The line immediately before the marker span in the original file.
+    prefix_line = orig_lines[start - 1].strip() if start > 0 else ""
+    # The line immediately after the marker span.
+    suffix_line = orig_lines[end + 1].strip() if end + 1 < len(orig_lines) else ""
+    res_first = resolved_lines[0].strip()
+    res_last = resolved_lines[-1].strip()
+
+    # Detect: the resolved_text's first line redundantly re-states the wrapper
+    # line before the span (same statement head, one is a prefix of the other).
+    strip_first = (
+        prefix_line
+        and _is_statement_line(prefix_line) and _is_statement_line(res_first)
+        and _same_statement_head(prefix_line, res_first)
+        and res_first.startswith(prefix_line)
+    )
+    # Symmetric: the resolved_text's last line redundantly re-states the wrapper
+    # line after the span.
+    # Symmetric: the resolved_text's last line redundantly re-states the wrapper
+    # line after the span. Two cases: (a) both are statement lines with the same
+    # head (e.g. two ``use`` lines), or (b) both are closing delimiters (``};``,
+    # ``)``, etc.) — the paired close of an opening wrapper that strip_first
+    # already detected. Closing delimiters aren't "statement lines" but they're
+    # wrapper fragments that must be stripped in tandem with the opening.
+    is_closing_delim = lambda s: s.strip() in ("};", ")", "]", "};", ">", "},")
+    strip_last = (
+        suffix_line
+        and res_last != res_first  # don't double-strip a single-line resolution
+        and (
+            # Case (a): both statement lines with same head.
+            (_is_statement_line(suffix_line) and _is_statement_line(res_last)
+             and _same_statement_head(suffix_line, res_last)
+             and res_last.endswith(suffix_line))
+            # Case (b): both are bare closing delimiters (paired with strip_first).
+            or (strip_first and is_closing_delim(suffix_line)
+                and res_last.strip() == suffix_line)
+        )
+    )
+    if not strip_first and not strip_last:
+        return None
+    # Strip the redundant wrapper lines from the resolved_text.
+    new_resolved = old_cand.resolved_text or ""
+    new_lines = new_resolved.split("\n")
+    if strip_first:
+        new_lines = new_lines[1:]
+    if strip_last and new_lines:
+        new_lines = new_lines[:-1]
+    new_resolved = "\n".join(new_lines)
+    # Back-project: replace the fault unit's resolved_text with the stripped
+    # version, then re-splice to verify the result is brace-balanced.
+    new_cand = old_cand.model_copy(update={
+        "resolved_text": new_resolved,
+        "provenance": (old_cand.provenance or "plain_llm") + "+prefix_dedup",
+    })
+    result = list(accepted)
+    result[fault_idx] = (unit, new_cand)
+    try:
+        spliced = _resolved_buffer(original, result)
+    except Exception:  # noqa: BLE001
+        return None
+    # Safety: the repaired splice must be brace-balanced.
+    _lang = unit.language
+    if _brace_imbalance_line(spliced, _lang) is not None:
+        return None
+    return result
+
+
+def _is_statement_line(line: str) -> bool:
+    """Whether a line is a structurally-significant statement (not blank/comment).
+
+    Used by ``_try_deterministic_prefix_dedup`` to decide whether a consecutive
+    duplicate line is a genuine doubled statement (worth stripping) versus a
+    cosmetic duplicate (blank line, comment) that shouldn't be touched.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return False
+    # Comments (Rust //, Python #, block /* * */).
+    if stripped.startswith("//") or stripped.startswith("#") or stripped.startswith("*"):
+        return False
+    # Statement keywords that indicate a real code boundary.
+    for kw in ("use ", "pub use", "pub fn", "fn ", "impl ", "struct ",
+               "enum ", "trait ", "mod ", "const ", "static ", "type ",
+               "import ", "from ", "def ", "class "):
+        if stripped.startswith(kw):
+            return True
+    return False
+
+
+_STATEMENT_KEYWORDS = (
+    "use ", "pub use", "pub fn", "fn ", "impl ", "struct ",
+    "enum ", "trait ", "mod ", "const ", "static ", "type ",
+    "import ", "from ", "def ", "class ",
+)
+
+
+def _statement_head(line: str) -> str:
+    """The leading keyword + module/path prefix of a statement line.
+
+    For ``use crate::{error::*, ...}`` → ``use crate::``. For ``pub fn foo()``
+    → ``pub fn``. Used to check whether two consecutive lines are the same
+    statement re-stated (a redundant wrapper vs its full form).
+    """
+    stripped = line.strip()
+    for kw in _STATEMENT_KEYWORDS:
+        if stripped.startswith(kw):
+            # For use/import, include the module path up to the first ``{`` or
+            # ``;`` — ``use crate::{...}`` and ``use crate::foo;`` share the
+            # ``use crate::`` head. For other keywords, just the keyword.
+            if kw in ("use ", "pub use"):
+                idx = stripped.find("{")
+                if idx > 0:
+                    return stripped[:idx]
+                return stripped
+            return kw
+    return ""
+
+
+def _same_statement_head(a: str, b: str) -> bool:
+    """Whether two lines share the same statement head AND one is a prefix of
+    the other (the signature of a redundant wrapper re-stated by the splice)."""
+    ha, hb = _statement_head(a), _statement_head(b)
+    if not ha or ha != hb:
+        return False
+    return a.strip().startswith(b.strip()) or b.strip().startswith(a.strip())
 
 
 def _extract_alternates(
@@ -1949,24 +2137,29 @@ class Orchestrator:
             return False, 0, 0  # unconfigured → no guard
         reserve = int(getattr(self.config.model, "completion_reserve", 1024) or 1024)
         available = max(0, window - reserve)
-        # Essential content = the three conflict sides (the untrimmable core).
-        # The prompt's fixed overhead (intro/contract/rules, ~200-400 tokens) and
-        # all augmentation sections ARE trimmable by _fit_to_budget, so we do NOT
-        # fold them in here — a tight window that forces augmentation trimming is
-        # the documented, tested behavior, not a hopeless case. This guard fires
-        # only when the essential conflict content doesn't fit: the prompt can't
-        # be made valid by any amount of trimming, so the LLM call is doomed.
-        # estimate_tokens is ~4 chars/token.
+        # Essential content = the text the prompt ACTUALLY sends to the model.
+        # The context_builder sends a windowed slice: lines[marker_start - ctx :
+        # marker_end + ctx], where ctx = ContextBuilder.context_lines (default
+        # 15). It does NOT send the full file. For a large file with a small
+        # conflict (e.g. a 1-line version bump in a 766-line file = 561 tokens
+        # of conflict), the prompt sends ~67 lines, not 766. Measuring the full
+        # marker block (original_worktree_text) caused 6 borderline OVERSIZED
+        # escalations in V7 that the prompt could actually fit.
         #
-        # The essential content is NOT just the three hunk-interior sides
-        # (unit.base/current/replayed.text) — the prompt actually sends the
-        # full marker block (unit.original_worktree_text) which includes the
-        # entire file with conflict markers embedded. For a large file with a
-        # small conflict (e.g. a version-string bump in a 20K-char README),
-        # the hunk sides are tiny but the marker block is huge. Use the marker
-        # block text because that's what the model actually sees.
+        # The prompt's fixed overhead (intro/contract/rules, ~200-400 tokens)
+        # and all augmentation sections ARE trimmable by _fit_to_budget, so we
+        # do NOT fold them in here — this guard fires only when the windowed
+        # conflict content itself doesn't fit. estimate_tokens is ~4 chars/tok.
         marker_text = unit.original_worktree_text or ""
-        if not marker_text:
+        if marker_text and unit.marker_span is not None:
+            # Window the marker block the same way context_builder does.
+            start, end = unit.marker_span
+            lines = marker_text.split("\n")
+            ctx = 15  # match ContextBuilder default (context_builder.py:23)
+            lo = max(0, start - ctx)
+            hi = min(len(lines) - 1, end + ctx)
+            marker_text = "\n".join(lines[lo : hi + 1])
+        elif not marker_text:
             # Fallback: sum the three sides (the pre-fix behavior).
             marker_text = (
                 (unit.base.text or "") + (unit.current.text or "")
@@ -5711,6 +5904,28 @@ class Orchestrator:
                 unit_id=unit_new.unit_id,
             )
             return det
+        # Deterministic prefix/suffix dedup repair (Phase 10): when the cargo
+        # error is "expected identifier, found keyword `use`" (or similar), the
+        # marker span excluded the enclosing wrapper (e.g. ``use crate::{``) and
+        # the splice doubled it. Strip the consecutive duplicate statement line.
+        det = _try_deterministic_prefix_dedup(
+            failures, original, accepted, fault_idx
+        )
+        if det is not None:
+            unit_new, cand_new = det[0]
+            self.journal.emit(
+                "candidate_validated",
+                {
+                    "candidate_id": cand_new.candidate_id,
+                    "passed": True,
+                    "whole_file_repair_for": unit_new.unit_id,
+                    "deterministic_prefix_dedup": True,
+                },
+                step_index=self.step,
+                path=path,
+                unit_id=unit_new.unit_id,
+            )
+            return det
         # Deterministic import dedup repair (Phase 9): before spending an LLM
         # call, try the file_linker's deduplicate_imports on the spliced
         # buffer. This catches duplicate imports that survived the pre-validation
@@ -6411,37 +6626,55 @@ class Orchestrator:
             if self.config.journal.enabled and self.config.journal.store_raw_responses:
                 self.journal.store_response(unit.unit_id, retry_count, cand.raw_response)
 
-            # Compiled-candidate convergence escape hatch (Phase 6 D1).
-            # When the candidate is cycling (same normalized hash seen ≥
-            # convergence_threshold times), passes ALL hard validation (no
-            # syntax/compile errors), and is blocked ONLY by a STRUCTURAL_CODE
-            # preservation_heuristic warning, accept it instead of retrying.
-            # The model has already tried its best; the candidate compiles; the
-            # preservation concern is about a semantic choice (field type,
-            # import ordering) not correctness. "Do not spend additional
-            # iterations asking the same model to satisfy the same heuristic."
+            # Compiled-candidate convergence escape hatch (Phase 6 D1, broadened
+            # Phase 10). When the candidate is cycling (same normalized hash
+            # seen ≥ convergence_threshold times), passes ALL hard validation
+            # (no syntax/compile errors), and is blocked ONLY by advisory
+            # warnings (the soft heuristics the risk layer retries on), accept
+            # it instead of retrying. The model has already tried its best; the
+            # candidate compiles; the blocking concern is a semantic judgment
+            # (field type, import ordering, both-sides representation) not a
+            # correctness defect. "Do not spend additional iterations asking the
+            # same model to satisfy the same heuristic."
+            #
+            # Phase 6 limited this to preservation_heuristic/STRUCTURAL_CODE,
+            # but V7 flight data showed the actual cycling blockers are
+            # both_sides_represented and unclassified proof_class (the hatch
+            # fired 0 times across 143 cases). Phase 10 broadens the advisory
+            # set to the validators the risk layer treats as retry-able soft
+            # warnings.
             conv_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
             if (conv_threshold > 0 and cand.resolved_text
                     and not validation.hard_failures
                     and norm_hash in outcome._seen_normalized_hashes
                     and outcome._seen_normalized_hashes[norm_hash] >= conv_threshold):
+                # Advisory validators: soft heuristics that signal a semantic
+                # judgment, not a correctness defect. When these are the ONLY
+                # blockers on a compiled, cycling candidate, accept it.
+                _ADVISORY = frozenset({
+                    "preservation_heuristic",
+                    "both_sides_represented",
+                    "obligation",
+                    "intent_coverage",
+                    "unattributed_code",
+                })
                 blocking = [
                     w for w in validation.warnings
-                    if w.validator == "preservation_heuristic"
-                    and w.detail.get("exclusive_proof_class") == "STRUCTURAL_CODE"
+                    if w.validator in _ADVISORY
                 ]
-                non_preservation = [
+                non_advisory = [
                     w for w in validation.warnings
-                    if w.validator not in ("preservation_heuristic",)
+                    if w.validator not in _ADVISORY
                 ]
-                if blocking and not non_preservation:
-                    # The ONLY blocker is a STRUCTURAL_CODE preservation warning
-                    # on a cycling, compiled candidate. Accept it.
+                if blocking and not non_advisory:
+                    # The ONLY blockers are advisory warnings on a cycling,
+                    # compiled candidate. Accept it.
+                    blocker_names = sorted({w.validator for w in blocking})
                     outcome.accepted = cand
                     outcome.validation = validation
                     outcome.reason = (
                         f"convergence escape hatch: accepted cycling candidate "
-                        f"(compiled, STRUCTURAL_CODE preservation only, "
+                        f"(compiled, advisory-only blockers {blocker_names}, "
                         f"seen {outcome._seen_normalized_hashes[norm_hash]}×)"
                     )
                     self._record_resolution_attempt(

@@ -484,6 +484,68 @@ def test_normalize_for_convergence_distinguishes_real_changes():
     )
 
 
+def test_normalize_distinguishes_string_values():
+    """V7 regression: string-literal value changes must NOT normalize equal.
+
+    The bug: the normalizer blanked string contents then sorted tokens into a
+    bag, so ``let x = "1.28.1"`` and ``let x = "1.29.0"`` hashed identically.
+    This caused byte-identical candidates to be flagged as "cosmetic cycling"
+    and escalated (tokio-0062/0080/0114). String values are real semantic
+    content — a version bump is a genuine change."""
+    from capybase.orchestrator import _normalize_for_convergence
+    a = 'fn foo() {\n    let x = "1.28.1";\n}\n'
+    b = 'fn foo() {\n    let x = "1.29.0";\n}\n'
+    na = _normalize_for_convergence(a, "rust")
+    nb = _normalize_for_convergence(b, "rust")
+    assert na != nb, (
+        f"string value change should normalize differently:\n  {na!r}\n  {nb!r}"
+    )
+
+
+def test_normalize_cargo_toml_version_line():
+    """V7 regression: Cargo.toml/README.md version-string conflicts.
+
+    The exact failing pattern: ``tokio = { version = "1.28.1", ... }`` vs
+    ``... "1.20.3" ...`` normalized identically because string contents were
+    erased. These must normalize differently — the version IS the conflict."""
+    from capybase.orchestrator import _normalize_for_convergence
+    a = 'tokio = { version = "1.28.1", features = ["full"] }'
+    b = 'tokio = { version = "1.20.3", features = ["full"] }'
+    na = _normalize_for_convergence(a, "rust")
+    nb = _normalize_for_convergence(b, "rust")
+    assert na != nb, (
+        f"version string change should normalize differently:\n  {na!r}\n  {nb!r}"
+    )
+
+
+def test_normalize_identical_candidates_hash_same():
+    """V7 regression guard: byte-identical candidates must NOT be flagged as
+    cosmetic cycling.
+
+    The convergence guard at orchestrator.py fires only when
+    ``norm_hash != cand_hash`` — for input with no comments/extra whitespace
+    (a single clean line), the normalized form equals the raw form, so
+    ``norm_hash == cand_hash`` and the guard correctly skips convergence.
+    The buggy normalizer made norm_hash differ (by erasing strings), so the
+    guard fired on identical text. After the fix, clean single-line input
+    has ``norm_hash == cand_hash``."""
+    import hashlib
+    from capybase.orchestrator import _normalize_for_convergence
+    text = 'tokio = { version = "1.28.1", features = ["full"] }'
+    cand_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+    norm_hash = hashlib.sha256(
+        _normalize_for_convergence(text, "rust").encode("utf-8")
+    ).hexdigest()[:16]
+    # For clean single-line input, normalization is identity → hashes equal.
+    # The convergence guard's ``norm_hash != cand_hash`` check then evaluates
+    # False, so convergence does NOT fire (correct — this is an exact repeat,
+    # handled by the oscillation backstop, not the cosmetic-variation check).
+    assert cand_hash == norm_hash, (
+        f"for clean input, norm should equal raw so the guard skips it:\n"
+        f"  cand={cand_hash}  norm={norm_hash}"
+    )
+
+
 def test_cegis_convergence_threshold_config_exists():
     """The config field exists with the documented default (2 = fire on the 2nd
     normalized-duplicate; 0 = disabled)."""

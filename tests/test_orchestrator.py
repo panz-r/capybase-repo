@@ -282,6 +282,131 @@ def test_run_does_not_skip_llm_when_window_disabled(conflicted_repo):
     assert has_candidate, "LLM should run normally when window is disabled"
 
 
+def test_oversized_guard_uses_hunk_not_full_file():
+    """V7 regression: the oversized guard measured the FULL file
+    (unit.original_worktree_text) but the prompt's context_builder only sends
+    a windowed slice (±15 lines around the marker span). A 1-line conflict in
+    a 766-line file (561 tokens of conflict) was measured as 6363 tokens and
+    escalated, even though the prompt only sends ~67 lines. The guard must
+    measure the windowed slice, not the full file."""
+    from capybase.config import Config
+    from capybase.orchestrator import Orchestrator
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+
+    # Build a large file: 800 lines, with a tiny conflict at lines 400-404.
+    padding = "\n".join(f"// line {i}" for i in range(400))
+    conflict_block = (
+        "<<<<<<< current\n"
+        'pub const VERSION: &str = "1.28.1";\n'
+        "=======\n"
+        'pub const VERSION: &str = "1.29.0";\n'
+        ">>>>>>> replayed\n"
+    )
+    padding_after = "\n".join(f"// line {i}" for i in range(400, 795))
+    full_text = padding + "\n" + conflict_block + padding_after
+    lines = full_text.split("\n")
+    # The marker block spans lines 400-404 (0-based: 400 is <<<<<<<).
+    # Find the marker start/end.
+    start = next(i for i, l in enumerate(lines) if l.startswith("<<<<<<<"))
+    end = next(i for i, l in enumerate(lines) if l.startswith(">>>>>>>"))
+
+    cfg = Config()
+    # An 8K window with 2K reserve → available = 6144 tokens. The full file
+    # is ~800 lines × ~10 chars = 8000 chars = 2000 tokens — would fit even
+    # the old way. Make the padding bigger to exceed 6144 tokens when full.
+    # Actually: to test the FIX, set window so the FULL file exceeds it but
+    # the windowed slice (±15 lines = ~35 lines) fits easily.
+    big_padding = "\n".join(f"// padding line {i} with extra text to pad length" for i in range(800))
+    full_text_big = big_padding + "\n" + conflict_block + big_padding
+    lines_big = full_text_big.split("\n")
+    start_big = next(i for i, l in enumerate(lines_big) if l.startswith("<<<<<<<"))
+    end_big = next(i for i, l in enumerate(lines_big) if l.startswith(">>>>>>>"))
+
+    cfg.model.context_window = 8192
+    cfg.model.completion_reserve = 2048
+    orch = Orchestrator(cfg, repo=".", resolution_engine=None,
+                        out=lambda *_a, **_k: None)
+    unit = ConflictUnit(
+        session_id="test", step_index=0, path="src/lib.rs", language="rust",
+        unit_id="src/lib.rs:1:0",
+        base=ConflictSide(label="BASE", text='pub const VERSION: &str = "1.28.1";'),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text='pub const VERSION: &str = "1.28.1";'),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text='pub const VERSION: &str = "1.29.0";'),
+        original_worktree_text=full_text_big,
+        marker_span=(start_big, end_big),
+    )
+    oversized, essential, available = orch._llm_oversized_for_window(unit)
+    # The full file is huge (~3500+ lines × 40 chars = ~35K tokens) but the
+    # windowed slice (±15 lines around a 5-line conflict = ~35 lines) is tiny.
+    full_tokens = len(full_text_big) // 4
+    assert essential < full_tokens, (
+        f"essential ({essential}) should be much smaller than full file "
+        f"({full_tokens}) — the guard must measure the windowed slice"
+    )
+    assert not oversized, (
+        f"a 1-line conflict in a big file should NOT be oversized: "
+        f"essential={essential} available={available}"
+    )
+
+
+def test_escape_hatch_accepts_advisory_cycling_candidate(repo):
+    """V7 regression: the convergence escape hatch fired 0 times across 143
+    cases because it only matched preservation_heuristic/STRUCTURAL_CODE. The
+    real cycling blockers were both_sides_represented (an advisory warning on
+    a passing candidate). Phase 10 broadens the advisory set. When a candidate
+    passes hard validation, cycles ≥ threshold, and is blocked ONLY by advisory
+    warnings, the hatch accepts it instead of escalating."""
+    # Build an ADDITIVE conflict (both sides add distinct lines, not a value-
+    # resolution) so both_sides_represented fires without the value-resolution
+    # suppression fast-path.
+    base = (
+        "def process():\n"
+        "    setup()\n"
+    )
+    upstream = (
+        "def process():\n"
+        "    setup()\n"
+        "    validate()\n"           # CURRENT adds validate()
+    )
+    replayed = (
+        "def process():\n"
+        "    setup()\n"
+        "    teardown()\n"           # REPLAYED adds teardown()
+    )
+    (repo / "app.py").write_text(base)
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
+    git(repo, "branch", "feat"); git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text(replayed)
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "add teardown")
+    git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text(upstream)
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "add validate")
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected conflict"
+
+    cfg = _config(repo)
+    cfg.policy.cegis_convergence_threshold = 2
+    cfg.policy.max_retries_per_unit = 5  # allow enough iterations to cycle
+    cfg.validation.reject_if_copies_one_side = False  # avoid separate hard blocker
+    # The model picks ONE side's addition (validate only), dropping teardown.
+    # both_sides_represented flags it as a warning (not hard). With the same
+    # payload repeated, it cycles → the escape hatch should accept it.
+    payload = _make_resolved_payload("    setup()\n    validate()")
+    client = CyclingClient([payload])
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    # The escape hatch should have accepted the cycling candidate — NOT escalated.
+    assert not result.escalated, (
+        f"escape hatch should accept advisory-only cycling candidate, "
+        f"but escalated: {result.reason}"
+    )
+
+
 def test_run_escalates_when_model_returns_markers(conflicted_repo):
     repo = conflicted_repo["repo"]
     # model keeps returning a leaked marker across all retries -> escalate

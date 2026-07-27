@@ -299,3 +299,103 @@ def test_brace_balance_cpp_raw_string_with_braces():
     assert _braces_balanced(src, "cpp"), (
         f"C++ raw-string braces corrupted brace count"
     )
+
+
+# ---------------------------------------------------------------------------
+# _try_deterministic_prefix_dedup: splice-junction prefix duplication (Phase 10)
+# ---------------------------------------------------------------------------
+
+from capybase.orchestrator import _try_deterministic_prefix_dedup  # noqa: E402
+
+
+def _prefix_failure(msg: str) -> VerificationFailure:
+    return VerificationFailure(
+        validator="cargo", severity="error",
+        message=msg, detail={},
+    )
+
+
+def test_prefix_dedup_strips_doubled_use_crate():
+    """V7 regression (sea-orm-0018): the marker span excludes the enclosing
+    ``use crate::{`` / ``};`` wrapper. A correct resolved_text that re-includes
+    the wrapper produces a doubled ``use crate::{`` after splicing → "expected
+    identifier, found keyword `use`". The repair strips the redundant wrapper
+    from the resolved_text so the existing wrapper (outside the span) is used."""
+    # The original file: the wrapper is OUTSIDE the marker span.
+    #   use crate::{            ← line 0 (outside span)
+    #   <<<<<<< HEAD            ← line 1 (span start)
+    #   ...body...
+    #   >>>>>>> feat            ← line 5 (span end)
+    #   };                      ← line 6 (outside span)
+    worktree = (
+        "use crate::{\n"
+        "<<<<<<< HEAD\n"
+        "    error::*, foo,\n"
+        "=======\n"
+        "    error::*, bar,\n"
+        ">>>>>>> feat\n"
+        "};\n"
+    )
+    unit = _unit(worktree=worktree, marker_span=(1, 5), uid="u:1")
+    # The model's resolution re-includes the FULL wrapper (redundant).
+    bad = _cand("u:1", "use crate::{\n    error::*, foo, bar,\n};")
+    accepted = [(unit, bad)]
+    failures = [_prefix_failure(
+        "error: expected identifier, found keyword `use`"
+    )]
+    # Before repair: the splice doubles the wrapper.
+    spliced_before = _resolved_buffer(worktree, accepted)
+    assert spliced_before.count("use crate::{") == 2, "precondition: doubled prefix"
+    result = _try_deterministic_prefix_dedup(failures, worktree, accepted, 0)
+    assert result is not None, "should detect and strip the doubled wrapper"
+    # After repair: only ONE wrapper remains (the one outside the span).
+    spliced_after = _resolved_buffer(worktree, result)
+    wrapper_count = spliced_after.count("use crate::{")
+    assert wrapper_count == 1, (
+        f"expected 1 wrapper after dedup, got {wrapper_count}:\n{spliced_after}"
+    )
+    # The result must be brace-balanced.
+    from capybase.verification import _brace_imbalance_line
+    assert _brace_imbalance_line(spliced_after, "rust") is None, (
+        f"repaired splice is brace-imbalanced:\n{spliced_after}"
+    )
+
+
+def test_prefix_dedup_defers_on_unrelated_error():
+    """A cargo error that isn't a prefix-collision signature → defer to LLM."""
+    worktree = (
+        "use crate::{\n<<<<<<< HEAD\nuse crate::x;\n=======\nuse crate::y;\n>>>>>>> feat\n};\n"
+    )
+    unit = _unit(worktree=worktree, marker_span=(1, 5), uid="u:1")
+    bad = _cand("u:1", "use crate::x;")
+    accepted = [(unit, bad)]
+    failures = [_prefix_failure("error[E0433]: failed to resolve: `crate::foo`")]
+    result = _try_deterministic_prefix_dedup(failures, worktree, accepted, 0)
+    assert result is None
+
+
+def test_prefix_dedup_defers_when_no_duplicate():
+    """If the spliced buffer has no consecutive duplicate statement lines,
+    there's nothing to strip → defer."""
+    worktree = (
+        "fn main() {\n<<<<<<< HEAD\n    let x = 1;\n=======\n    let y = 2;\n>>>>>>> feat\n}\n"
+    )
+    unit = _unit(worktree=worktree, marker_span=(1, 5), uid="u:1")
+    good = _cand("u:1", "    let x = 1;\n    let y = 2;")  # no duplication
+    accepted = [(unit, good)]
+    failures = [_prefix_failure("error: expected identifier, found keyword `let`")]
+    result = _try_deterministic_prefix_dedup(failures, worktree, accepted, 0)
+    assert result is None
+
+
+def test_prefix_dedup_does_not_strip_comments_or_blanks():
+    """Only structurally-significant statement lines are stripped — never
+    comments or blank lines (those are cosmetic duplicates)."""
+    from capybase.orchestrator import _is_statement_line
+    assert _is_statement_line("use std::io;")
+    assert _is_statement_line("pub fn foo() {}")
+    assert _is_statement_line("impl Foo for Bar {")
+    assert not _is_statement_line("")
+    assert not _is_statement_line("// a comment")
+    assert not _is_statement_line("# python comment")
+    assert not _is_statement_line("    let x = 1;")  # not a statement keyword prefix
