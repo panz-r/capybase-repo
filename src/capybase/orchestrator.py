@@ -4912,6 +4912,13 @@ class Orchestrator:
                 # shots to converge.
                 wf_budget = self.config.policy.max_whole_file_repair_retries or self.config.policy.max_retries_per_unit
                 file_validation = None  # type: ignore[assignment]
+                # Causal attribution (V8b reviewer feedback): track the failure
+                # signature across whole-file repair iterations so each repair
+                # mechanism's EFFECT can be recorded — did it actually change the
+                # failure shape, or fire without clearing the primary failure?
+                # This distinguishes "fired" from "caused recovery" (the Fix A
+                # projection overestimate came from conflating the two).
+                prev_failure_sig = None
                 while True:
                     spans_and_texts = [
                         (unit.marker_span, cand.resolved_text) for unit, cand in accepted
@@ -4970,6 +4977,28 @@ class Orchestrator:
                         step_index=self.step,
                         path=path,
                     )
+                    # Causal attribution: record whether the previous repair
+                    # mechanism changed the failure shape. NOT_ENGAGED = first
+                    # iteration (no prior mechanism); CLEARED = the prior repair
+                    # removed all failures (this iteration passed); REDUCED =
+                    # fewer/distinct failures remain; UNCHANGED = identical
+                    # signature (the mechanism fired but accomplished nothing —
+                    # the misattribution-prone case). Lets post-hoc analysis
+                    # count a fix as causal only when it CLEARED or REDUCED.
+                    cur_sig = _hard_failure_signature(file_validation.hard_failures)
+                    if prev_failure_sig is not None:
+                        if file_validation.passed:
+                            effect = "CLEARED"
+                        elif cur_sig == prev_failure_sig:
+                            effect = "UNCHANGED"
+                        else:
+                            effect = "REDUCED"
+                        self.journal.emit(
+                            "mechanism_effect",
+                            {"effect": effect, "wf_retry": wf_retries},
+                            step_index=self.step, path=path,
+                        )
+                    prev_failure_sig = cur_sig
                     if file_validation.passed or wf_retries >= wf_budget:
                         break
                     # Attribute the failure to a unit and re-resolve it with the

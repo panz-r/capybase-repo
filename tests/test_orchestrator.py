@@ -917,6 +917,22 @@ def test_whole_file_repair_recovers_and_accepts(multi_unit_conflicted_repo):
     # Both merges present after repair.
     assert "scheduler" in text and "reloader" in text
     assert '"cache": "on"' in text and '"metrics": "on"' in text
+    # Causal attribution (V8b reviewer feedback): the whole-file repair that
+    # cleared the failure must be recorded with effect=CLEARED — distinguishing
+    # 'the mechanism fired' from 'the mechanism caused recovery'. This is the
+    # signal that prevents the projection overestimate from Fix A (a dedup event
+    # firing was mistaken for causal recovery).
+    effects = []
+    for line in orch.paths.journal.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            d = json.loads(line)
+            if d["event_type"] == "mechanism_effect":
+                effects.append(d.get("payload", {}).get("effect"))
+    assert "CLEARED" in effects, (
+        f"a whole-file repair that recovered must record effect=CLEARED, "
+        f"got mechanism_effect events: {effects}"
+    )
 
 
 def test_file_linker_dedup_survives_whole_file_validation(repo, tmp_path):
