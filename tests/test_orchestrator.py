@@ -170,6 +170,38 @@ def test_run_resolves_and_continues(conflicted_repo):
     assert "replayed change" in log
 
 
+def test_run_passing_candidate_not_escalated_by_model_suspicion(conflicted_repo):
+    """V8 regression (sea-orm-history-0016): the model returned a correct merge
+    that passed all hard validation, but ALSO set suspected_validator_error=true.
+    Pre-fix, the risk engine escalated on suspicion before checking pass state,
+    throwing away a proven-correct resolution. The candidate must be accepted.
+
+    This reproduces the sea-orm-0016 shape end-to-end: a clean resolution paired
+    with a spurious suspicion flag. See test_risk.test_passing_candidate_not_
+    escalated_by_suspicion for the unit-level guard."""
+    repo = conflicted_repo["repo"]
+    # Same correct merge as test_run_resolves_and_continues, but the model also
+    # (mis)sets the suspicion flag — the bug condition.
+    payload = json.dumps({
+        "resolved_text": "    return 'hi' + 'howdy'",
+        "explanation": "merge both sides",
+        "self_reported_confidence": 0.8,
+        "suspected_validator_error": True,
+    })
+    engine = ResolutionEngine(_config(repo).model, client=CyclingClient([payload]))
+    orch = Orchestrator(
+        _config(repo), repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    # The candidate passed hard validation → suspicion must NOT override it.
+    assert not result.escalated, (
+        f"a passing candidate must not be escalated by model suspicion alone, "
+        f"but escalated: {result.reason}"
+    )
+    assert "<<<<<<<" not in (repo / "app.py").read_text()
+
+
 def test_run_journals_prompt_trims_when_context_window_is_tight(conflicted_repo):
     """With context_window set, an over-large prompt is trimmed and the trims
     are journaled on the candidate_generated event."""

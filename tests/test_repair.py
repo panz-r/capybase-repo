@@ -436,12 +436,20 @@ def test_risk_escalates_on_no_op_repair():
 
 def test_risk_escalates_on_suspected_validator_error():
     """The risk engine escalates immediately when the model flags
-    suspected_validator_error — the candidate is preserved for human review."""
+    suspected_validator_error on a candidate that genuinely failed a hard
+    validator check — the candidate is preserved for human review. (Monotonic
+    pass-state: suspicion is gated on ``not passed``; a passing candidate with
+    no hard failures cannot be escalated by suspicion alone — see
+    test_risk.test_passing_candidate_not_escalated_by_suspicion.)"""
     from capybase.risk import RiskEngine
     from capybase.verification import VerificationResult
     vr = VerificationResult(
         candidate_id="c1", unit_id="u", passed=False,
-        hard_failures=[], warnings=[], features={"language": "rust"},
+        hard_failures=[VerificationFailure(
+            validator="rust_syntax", severity="error",
+            message="error: expected one of `!`, `(`, found keyword `pub`",
+        )],
+        warnings=[], features={"language": "rust"},
     )
     engine = RiskEngine()
     decision = engine.decide(vr, retry_count=0, suspected_validator_error=True)

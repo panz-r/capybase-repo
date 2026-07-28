@@ -159,13 +159,22 @@ class RiskEngine:
         # suspected_validator_error: the model believes its code is correct
         # and the validator error is a false positive (e.g. from an unresolved
         # sibling hunk). Escalate immediately, preserving the candidate for
-        # human review. Both bypass the retry budget.
+        # human review. no_op_repair bypasses the retry budget unconditionally.
+        #
+        # Monotonic pass-state (V8 regression fix): suspicion is a *request to
+        # investigate a validator error*, and a candidate that passed ALL hard
+        # checks has no error to investigate. Gating on ``not result.passed``
+        # preserves the escape hatch's purpose (escalate a genuinely-failing
+        # candidate the model believes is misdiagnosed) while preventing a model
+        # assertion from overriding a proven-correct candidate. Flight-data
+        # audit (V7+V8, 286 cases): the flag fired 21 times, rescued a true
+        # false-positive zero times, over-rode a passing candidate 9 times.
         if failure_kind == "no_op_repair":
             return _escalate(result, [
                 "repair was a no-op (search == replace) — model sees nothing to fix",
                 "retrying would produce the identical candidate (infinite loop)",
             ])
-        if suspected_validator_error:
+        if suspected_validator_error and not result.passed:
             return _escalate(result, [
                 "model suspects the validator error is a false positive",
                 "candidate preserved for human review (suspected_validator_error=True)",

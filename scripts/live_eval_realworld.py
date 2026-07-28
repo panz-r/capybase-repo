@@ -145,7 +145,17 @@ def _classify_terminal_reason(reason: str) -> str:
     return "OTHER"
 
 
-def load_cases(*, limit: int | None = None, lang: str | None = None) -> list[Case]:
+def load_cases(
+    *,
+    limit: int | None = None,
+    lang: str | None = None,
+    case_ids: list[str] | None = None,
+) -> list[Case]:
+    """Load realworld conflict cases from extracted-testdata.
+
+    ``case_ids`` (when given) selects a subset by exact id match — used by the
+    ``--case`` flag for targeted single-case reruns (e.g. verifying a fix
+    against one case in seconds rather than a 5-hour full run)."""
     cases: list[Case] = []
     for f in sorted(TESTDATA.glob("*.json")):
         try:
@@ -175,6 +185,10 @@ def load_cases(*, limit: int | None = None, lang: str | None = None) -> list[Cas
             source_url=d.get("source_url", ""),
         )
         if lang and c.language != lang:
+            continue
+        # --case selection: exact-id allowlist for targeted reruns. Applied
+        # before the size guard so a selected case is never silently dropped.
+        if case_ids and c.id not in case_ids:
             continue
         # Skip pathologically huge conflicts (>48K chars ≈ blow context window).
         if len(c.marker_original) > 48 * 1024:
@@ -458,6 +472,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--lang", choices=("rust", "python"), default=None)
+    ap.add_argument("--case", action="append", default=None, metavar="CASE_ID",
+                    help="Select a specific case id (repeatable). Enables targeted "
+                         "single-case reruns in seconds instead of a full 5-hour run. "
+                         "Example: --case sea-orm-history-0016 --case tokio-history-0019")
     ap.add_argument("--out", default="/tmp/capybase-live/realworld-results.json")
     ap.add_argument("--skip-existing", action="store_true",
                     help="Skip cases whose id is already in --out (resume after a kill)")
@@ -482,7 +500,7 @@ def main():
     if flights_dir is not None:
         flights_dir.mkdir(parents=True, exist_ok=True)
 
-    cases = load_cases(limit=args.limit, lang=args.lang)
+    cases = load_cases(limit=args.limit, lang=args.lang, case_ids=args.case)
     print(f"loaded {len(cases)} cases (lang={args.lang or 'all'})")
     if not cases:
         print("no cases; exiting"); return

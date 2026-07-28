@@ -38,6 +38,26 @@ def test_escalate_on_scope_violation():
     assert d.action == "escalate"
 
 
+def test_passing_candidate_not_escalated_by_suspicion():
+    """V8 regression (sea-orm-history-0016): the model set
+    suspected_validator_error=true on a candidate that PASSED all hard checks.
+    Pre-fix this unconditionally escalated (the suspicion check ran before the
+    passed/hard_failures logic), wasting a proven-correct resolution. Monotonic
+    pass-state: a passing candidate has no validator error to be suspicious OF,
+    so suspicion cannot override a hard pass. It is accepted instead.
+
+    Flight-data audit (V7+V8): the flag fired 21 times, rescued a true
+    false-positive zero times, over-rode a passing candidate 9 times — so gating
+    on ``not passed`` breaks no legitimate escape-hatch path."""
+    eng = RiskEngine()
+    res = _result(True, {"syntax_passed": True})  # passed, no hard failures
+    d = eng.decide(res, retry_count=0, suspected_validator_error=True)
+    assert d.action == "accept", (
+        f"a passing candidate must not be escalated by model suspicion alone, "
+        f"got {d.action}: {d.reasons}"
+    )
+
+
 def test_retry_then_escalate_on_failures():
     eng = RiskEngine(max_retries_per_unit=2)
     res = _result(
