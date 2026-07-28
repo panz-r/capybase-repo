@@ -3178,6 +3178,7 @@ class VerificationEngine:
         resolutions: list[tuple[tuple[int, int], str]],
         *,
         repo_root: str = ".",
+        whole_text: str | None = None,
     ) -> VerificationResult:
         """Validate the file after *all* units in it have been resolved.
 
@@ -3198,6 +3199,13 @@ class VerificationEngine:
         ``repo_root`` is the cwd for the tool (needed for cargo projects and
         locating shadow test files).
 
+        ``whole_text`` (when provided) overrides the splice: the caller has
+        already produced the final file text (e.g. after ``file_linker``
+        import dedup) and wants THAT text validated — not a re-splice from
+        ``resolutions``. Mirrors the whole-file-span branch below. Without
+        it, a caller that dedups the spliced buffer would see its dedup
+        silently discarded (verify_file re-splices the un-deduped spans).
+
         Returns the same ``VerificationResult`` shape so ``RiskEngine.decide``
         and the orchestrator consume it unchanged. ``unit_id``/``candidate_id``
         are file-scoped (``<path>:file``) since this result is not tied to one
@@ -3207,7 +3215,12 @@ class VerificationEngine:
         hard: list[VerificationFailure] = []
         features: dict[str, float | int | str | bool] = {}
 
-        if not resolutions:
+        if whole_text is not None:
+            # Caller-provided final text (e.g. post file_linker dedup). Bypass
+            # the splice so the validated text matches what gets written to
+            # disk. See orchestrator's file_linker dedup call sites.
+            whole = whole_text
+        elif not resolutions:
             whole = original
         elif _has_whole_file_span(resolutions):
             # A whole-file unit (modify/delete) has marker_span=None: the

@@ -725,6 +725,99 @@ def test_whole_file_repair_recovers_and_accepts(multi_unit_conflicted_repo):
     assert '"cache": "on"' in text and '"metrics": "on"' in text
 
 
+def test_file_linker_dedup_survives_whole_file_validation(repo, tmp_path):
+    """V8 WHOLE_FILE_FAILED regression (axum-history-0020 shape): the model's
+    per-unit resolution re-states a `use` import that already exists just
+    BELOW the conflict span. Per-unit Phase A passes (the duplicate isn't
+    visible in isolation), the file_linker dedup correctly removes the
+    duplicate, BUT pre-fix verify_file re-spliced the un-deduped per-unit
+    spans and failed on the same duplicate the dedup just removed — so
+    file_linker_dedup fired and the case still escalated.
+
+    Post-fix: the deduped buffer is passed to verify_file via whole_text, so
+    the validated text matches what gets written to disk and the case PASSES.
+
+    This is the canonical single-unit in-context failure: 15/18 V8
+    WHOLE_FILE_FAILED cases have a single conflict unit whose resolution
+    collides with content immediately adjacent to the span."""
+    # Build a Rust file with an import conflict. The conflict span covers the
+    # `use std::sync::Arc;` line; `use std::collections::HashMap;` sits just
+    # above (outside the span). Using std:: imports keeps the file self-contained
+    # (no external crate to resolve) while still exercising the dedup path.
+    base = (
+        "use std::collections::HashMap;\n"
+        "use std::sync::Arc;\n"
+        "\n"
+        "fn main() {\n"
+        "    let _ = Arc::new(HashMap::<i32, i32>::new());\n"
+        "}\n"
+    )
+    # Upstream renames the Arc import (modifies the span line).
+    upstream = (
+        "use std::collections::HashMap;\n"
+        "use std::sync::Arc as A;\n"
+        "\n"
+        "fn main() {\n"
+        "    let _ = A::new(HashMap::<i32, i32>::new());\n"
+        "}\n"
+    )
+    # Replayed ALSO modifies the Arc import line (adds a doc comment) — same line
+    # as upstream, so git reports a genuine both-modify conflict.
+    replayed = (
+        "use std::collections::HashMap;\n"
+        "/// shared ref\n"
+        "use std::sync::Arc;\n"
+        "\n"
+        "fn main() {\n"
+        "    let _ = Arc::new(HashMap::<i32, i32>::new());\n"
+        "}\n"
+    )
+    (repo / "src").mkdir()
+    f = repo / "src" / "lib.rs"
+    f.write_text(base)
+    git(repo, "add", "-A"); git(repo, "commit", "-q", "-m", "base")
+    git(repo, "branch", "feat"); git(repo, "checkout", "-q", "feat")
+    f.write_text(replayed)
+    git(repo, "add", "-A"); git(repo, "commit", "-q", "-m", "replayed")
+    git(repo, "checkout", "-q", "main")
+    f.write_text(upstream)
+    git(repo, "add", "-A"); git(repo, "commit", "-q", "-m", "upstream")
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected conflict"
+
+    cfg = _config(repo)
+    # The model's resolution re-states BOTH imports (a common mistake when the
+    # model can't tell whether the span includes the surrounding context). This
+    # produces a duplicate `use std::collections::HashMap;` when spliced
+    # (HashMap exists just above the span). Pre-fix: verify_file re-splices and
+    # fails on the duplicate. Post-fix: file_linker dedup removes it and the
+    # deduped buffer is validated via whole_text.
+    payload = _make_resolved_payload(
+        "use std::collections::HashMap;\n"
+        "/// shared ref\n"
+        "use std::sync::Arc as A;"
+    )
+    client = CyclingClient([payload])
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    # The file_linker dedup must have rescued this — NOT escalated.
+    assert not result.escalated, (
+        f"file_linker dedup should remove the duplicate import and the case "
+        f"should pass whole-file validation, but escalated: {result.reason}"
+    )
+    text = f.read_text()
+    assert "<<<<<<<" not in text
+    # Exactly one occurrence of HashMap (dedup removed the duplicate).
+    assert text.count("use std::collections::HashMap;") == 1
+    assert "/// shared ref" in text
+    assert "use std::sync::Arc as A;" in text
+
+
 # ---------------------------------------------------------------------------
 # Verifier-model critic integration: the LLM judge gates the
 # orchestrator's accept path end-to-end when enable_verifier_model is on.

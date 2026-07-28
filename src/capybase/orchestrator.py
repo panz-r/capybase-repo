@@ -4883,36 +4883,21 @@ class Orchestrator:
                     # resolution adds an import that already exists elsewhere
                     # in the file. The #1 cause of WHOLE_FILE_FAILED.
                     if getattr(self.config.future, "enable_file_linker", True):
+                        pre_dedup_buffer = buffer
                         try:
                             from capybase.file_linker import deduplicate_imports
                             deduped, dedup_count = deduplicate_imports(buffer, language)
                             if dedup_count > 0:
-                                # Apply dedup to each unit's resolved_text so
-                                # the splice produces the deduped result.
-                                # Simpler: just write the deduped buffer and
-                                # update the last unit's resolved_text if it's
-                                # a whole-file unit. For multi-unit files, the
-                                # dedup is applied to the spliced buffer which
-                                # verify_file re-creates from spans — so we
-                                # need to patch the buffer that verify_file
-                                # receives.
+                                # The deduped buffer is the text that will be
+                                # written to disk (the loop writes `buffer` on
+                                # success). Validate THAT text, not a re-splice
+                                # of the un-deduped spans — otherwise verify_file
+                                # discards the dedup and fails on the same
+                                # duplicates it just removed (V8 WHOLE_FILE_FAILED
+                                # bug: file_linker_dedup fired, verify_file still
+                                # failed). Pass whole_text so verify_file bypasses
+                                # its internal splice.
                                 buffer = deduped
-                                # Also update spans_and_texts for verify_file:
-                                # replace the original text in the last accepted
-                                # unit with the deduped buffer when it's a
-                                # whole-file unit. For multi-unit, the dedup
-                                # only removes import lines that don't overlap
-                                # with any unit's span, so the splice is safe.
-                                if any(u.marker_span is None for u, _ in accepted):
-                                    accepted[-1] = (
-                                        accepted[-1][0],
-                                        accepted[-1][1].model_copy(
-                                            update={"resolved_text": deduped}),
-                                    )
-                                    spans_and_texts = [
-                                        (unit.marker_span, cand.resolved_text)
-                                        for unit, cand in accepted
-                                    ]
                                 self.journal.emit(
                                     "file_linker_dedup",
                                     {"duplicates_removed": dedup_count},
@@ -4920,9 +4905,13 @@ class Orchestrator:
                                 )
                         except Exception:  # noqa: BLE001
                             pass
+                    # When the file_linker dedup ran, validate the deduped
+                    # buffer directly (whole_text); otherwise re-splice from
+                    # the per-unit resolutions as before.
                     file_validation = self.verification.verify_file(
                         path, language, original, spans_and_texts,
                         repo_root=str(self.git.repo),
+                        whole_text=buffer if buffer != pre_dedup_buffer else None,
                     )
                     if self.config.journal.enabled and self.config.journal.store_validations:
                         self.journal.store_validation(file_validation)
@@ -5947,24 +5936,34 @@ class Orchestrator:
                 if has_import_error:
                     deduped, dedup_count = deduplicate_imports(spliced)
                     if dedup_count > 0:
-                        # Back-project: for whole-file units, update resolved_text.
-                        # For multi-unit, update the fault unit's resolved_text
-                        # with the deduped version of its contribution.
+                        # The dedup produced a complete, correct file. Represent
+                        # it as a whole-file unit carrying the deduped buffer —
+                        # the same pattern as _try_deterministic_brace_repair.
+                        # Back-projection onto individual units' resolved_text is
+                        # fragile (the duplicate import often lives in the
+                        # original text adjacent to the span, not inside it), and
+                        # a whole-file unit is the honest representation:
+                        # _resolved_buffer returns its resolved_text verbatim and
+                        # verify_file's _has_whole_file_span guard handles the
+                        # None span. Pre-fix this branch only fired for whole-file
+                        # units (marker_span is None) and silently discarded the
+                        # dedup for the common marker-block case (V8
+                        # WHOLE_FILE_FAILED bug).
                         unit_f, cand_f = accepted[fault_idx]
-                        if unit_f.marker_span is None:
-                            new_cand = cand_f.model_copy(
-                                update={"resolved_text": deduped,
-                                        "provenance": (cand_f.provenance or "plain_llm") + "+file_linker"})
-                            result = list(accepted)
-                            result[fault_idx] = (unit_f, new_cand)
-                            self.journal.emit(
-                                "file_linker_repair",
-                                {"duplicates_removed": dedup_count,
-                                 "candidate_id": new_cand.candidate_id},
-                                step_index=self.step, path=path,
-                                unit_id=unit_f.unit_id,
-                            )
-                            return result
+                        wf_unit = unit_f.model_copy(
+                            update={"marker_span": None, "unit_kind": "whole_file"})
+                        new_cand = cand_f.model_copy(
+                            update={"resolved_text": deduped,
+                                    "provenance": (cand_f.provenance or "plain_llm") + "+file_linker"})
+                        result = [(wf_unit, new_cand)]
+                        self.journal.emit(
+                            "file_linker_repair",
+                            {"duplicates_removed": dedup_count,
+                             "candidate_id": new_cand.candidate_id},
+                            step_index=self.step, path=path,
+                            unit_id=unit_f.unit_id,
+                        )
+                        return result
             except Exception:  # noqa: BLE001
                 pass
         unit, _old_cand = accepted[fault_idx]

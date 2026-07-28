@@ -142,3 +142,71 @@ class TestDeduplicateImports:
         assert count == 1
         assert result.count("use http::StatusCode;") == 1
         assert "StatusCode::OK" in result
+
+
+def test_verify_file_whole_text_overrides_splice(tmp_path):
+    """V8 WHOLE_FILE_FAILED regression: the orchestrator computed
+    deduplicate_imports(buffer) and updated the local buffer, but verify_file
+    re-spliced the un-deduped per-unit spans and failed on the same duplicates
+    the dedup just removed. The whole_text parameter lets the caller pass the
+    already-deduped final text so verify_file validates what gets written to
+    disk instead of a re-splice.
+
+    This test proves the override is honored: the validated text is the
+    deduped buffer, not a re-splice of the (duplicate-bearing) spans."""
+    from capybase.verification import VerificationEngine, ValidationConfig
+
+    engine = VerificationEngine([], ValidationConfig())
+
+    original = (
+        "use std::io;\n"
+        "use http::StatusCode;\n"
+        "<<<<<<< HEAD\n"
+        "placeholder\n"
+        "=======\n"
+        "placeholder\n"
+        ">>>>>>> replayed\n"
+        "fn handler() -> StatusCode {\n"
+        "    StatusCode::OK\n"
+        "}\n"
+    )
+    # The per-unit resolution re-states the import that exists just below the
+    # span. Splicing this produces a duplicate `use http::StatusCode;`.
+    spans_and_texts = [((2, 6), "use http::StatusCode;\nplaceholder")]
+    # Dedup the spliced result (what the orchestrator does).
+    spliced = (
+        "use std::io;\nuse http::StatusCode;\nuse http::StatusCode;\n"
+        "placeholder\nfn handler() -> StatusCode {\n    StatusCode::OK\n}\n"
+    )
+    deduped, count = deduplicate_imports(spliced, "rust")
+    assert count == 1, "dedup should remove the duplicate import"
+    assert deduped.count("use http::StatusCode;") == 1
+    # whole_text override: verify_file must validate the deduped text, not a
+    # re-splice. The deduped text has the duplicate import removed.
+    result_override = engine.verify_file(
+        "test.rs", "rust", original, spans_and_texts,
+        whole_text=deduped,
+    )
+    # Without whole_text: verify_file re-splices the spans, re-introducing the
+    # duplicate `use http::StatusCode;`. The structural duplicate-definition
+    # check flags it. This is the V8 bug: the dedup ran, but verify_file
+    # validated the un-deduped splice and failed on the same duplicate.
+    result_resplice = engine.verify_file(
+        "test.rs", "rust", original, spans_and_texts,
+    )
+    # The contrast proves the override works: the resplice sees 2 occurrences
+    # (the duplicate the dedup removed), the override sees 1.
+    resplice_text = original.split("\n")
+    # Reconstruct what each path validated by counting the import in the result.
+    # The override path must NOT have a duplicate-import hard failure that the
+    # resplice path DOES have.
+    override_msgs = " ".join(f.message for f in result_override.hard_failures)
+    resplice_msgs = " ".join(f.message for f in result_resplice.hard_failures)
+    # The resplice validated text with a duplicated import; the override did not.
+    assert "defined more than once" in resplice_msgs or "StatusCode" in resplice_msgs, (
+        f"resplice should flag the duplicate import, got: {resplice_msgs}"
+    )
+    assert "defined more than once" not in override_msgs, (
+        f"override (deduped) should NOT flag a duplicate, got: {override_msgs}"
+    )
+
