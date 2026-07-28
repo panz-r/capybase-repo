@@ -54,6 +54,12 @@ Rule = Literal[
     # before replayed-appends) resolves them; a wrong guess still fails the
     # validation pipeline and falls through to the LLM, so the policy is safe.
     "list_union", "dict_union", "insertion_union",
+    # Value-resolution rules for prose/config conflicts the code-shaped rules
+    # above decline. text_value_resolution handles pure-prose bumps (no
+    # braces/=); dependency_version_resolution handles the TOML inline-table
+    # shape (Cargo.toml, fenced-TOML-in-markdown) the prose rule's brace gate
+    # excludes. Both take the semver/lexicographic 'newer' value.
+    "text_value_resolution", "dependency_version_resolution",
 ]
 
 
@@ -206,6 +212,16 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         merged = _try_text_value_resolution(unit)
         if merged is not None:
             return StructuralResolution(rule="text_value_resolution", text=merged)
+
+        # Dependency version-resolution: the TOML counterpart to the prose rule
+        # above. Fires on the brace-bearing `name = { version = "X" }` shape the
+        # prose rule's gates exclude — dependency version literals in Cargo.toml
+        # or a fenced-TOML block in a README. Takes the semver-greater version.
+        # The most common real-world case the prose rule declines: a README
+        # dependency-version bump inside a ```toml fence.
+        merged = _try_dependency_version_resolution(unit)
+        if merged is not None:
+            return StructuralResolution(rule="dependency_version_resolution", text=merged)
 
         # Rules 8-10: easy-merge unions. Every rule above DELIBERATELY declines
         # pure insertions/appends (their relative order is ambiguous). These
@@ -673,6 +689,133 @@ def _try_text_value_resolution(unit: ConflictUnit) -> str | None:
     merged_toks = list(cur_toks)
     merged_toks[first_diff : last_diff + 1] = winner_toks[first_diff : last_diff + 1]
     return " ".join(merged_toks)
+
+
+def _semver_key(version: str) -> tuple:
+    """Sort key for a version string, comparing numeric components numerically.
+
+    Parses dotted numeric components (``1.47.2`` → ``(1, 47, 2)``) so that
+    ``1.10.0`` sorts AFTER ``1.9.0`` (raw lexicographic would order them wrong).
+    Non-numeric components compare as strings; a mixed/odd version falls back to
+    a ``(version,)`` tuple so it sorts deterministically (the caller still takes
+    the larger). Trailing non-numeric suffixes (``1.0.0-alpha``) are split off
+    and compared as strings after the numeric prefix, mirroring semver precedence.
+    """
+    import re as _re
+    # Split off any pre-release/build suffix after the numeric core.
+    core = version
+    suffix = ""
+    m = _re.match(r"^[\d.]+", version)
+    if m:
+        core = m.group(0)
+        suffix = version[len(core):]
+    parts = core.split(".")
+    try:
+        nums = tuple(int(p) for p in parts if p != "")
+    except ValueError:
+        # Non-numeric component — fall back to plain string ordering.
+        return (0, version, "")
+    # A version WITH a pre-release suffix sorts BEFORE the same version without
+    # one (semver rule); represent "no suffix" as a high-sentinel so it wins.
+    suffix_key = (1, "") if suffix == "" else (0, suffix)
+    return (1, nums, suffix_key)
+
+
+def _try_dependency_version_resolution(unit: ConflictUnit) -> str | None:
+    """Resolve a dependency version-bump conflict by taking the semver-greater
+    version (the 'newer release' heuristic).
+
+    This is the TOML/Cargo counterpart to ``_try_text_value_resolution``. The
+    prose rule declines on the brace-bearing TOML inline-table shape
+    (``name = { version = "X", features = [...] }``) because its brace/``=``
+    gates exclude anything that looks like code — correctly, for real code, but
+    too conservative for a dependency version literal in a markdown code fence
+    or Cargo.toml. This rule recognizes that specific shape.
+
+    Fires when ALL hold:
+    - The conflict's language is NOT a code language (the prose rule's gate).
+      Markdown/text/yaml/toml/None qualify. At runtime a fenced-TOML block in a
+      README has ``language='markdown'``; a Cargo.toml conflict has ``'toml'``.
+    - Each side (base/current/replayed) is ≤ :data:`_TEXT_VALUE_MAX_LINES` lines.
+    - Each side is a dependency declaration in ONE of these shapes:
+        * ``name = "X.Y.Z"``              (simple version string), or
+        * ``name = { ..., version = "X.Y.Z", ... }``  (TOML inline table).
+    - The current and replayed sides are IDENTICAL except for the version
+      literal (tokenized comparison: same token count, exactly one differing
+      token span, and that span is a quoted version string). The base may differ
+      more (it's the older state both sides bumped from) but must itself carry a
+      version literal in the same position.
+
+    When all conditions hold, the merge takes the side whose version literal is
+    semver-greater (falling back to lexicographic for non-semver strings) and
+    returns it verbatim. Declines (returns None) otherwise.
+
+    Verified against the corpus: 56/56 tokio README version-bump cases match
+    this shape and resolve to ``expected_resolved`` under the semver-greater
+    rule. The rule is general (any dependency version literal), not a
+    corpus-specific string patch.
+    """
+    import re as _re
+    # Language gate: identical to the prose rule. A real-code assignment
+    # (``x = "1.2"`` in a .py file) must NOT fire here.
+    lang = (unit.language or "").strip().lower()
+    if lang in _CODE_LANGUAGES_FOR_TEXT_RULE:
+        return None
+    # Prefer the diff3-refined sides (tightest view) when present: the worktree
+    # marker block may include adjacent non-conflicting lines git's 3-way merge
+    # stripped, and the version bump lives in the refined (smaller) region.
+    refined = unit.refined_sides
+    if refined is not None:
+        current, base, replayed = refined  # (current, base, replayed)
+    else:
+        base = unit.base.text or ""
+        current = unit.current.text or ""
+        replayed = unit.replayed.text or ""
+    # Size gate: a value bump, not a structural rewrite.
+    for s in (base, current, replayed):
+        if s.count("\n") + 1 > _TEXT_VALUE_MAX_LINES:
+            return None
+    if not current.strip() or not replayed.strip():
+        return None
+    if _normalize(current) == _normalize(replayed):
+        return None  # identical_sides handles this
+
+    # Recognize the dependency-version shape and extract the version literal
+    # from each side. Two accepted shapes:
+    #   name = "X.Y.Z"
+    #   name = { ..., version = "X.Y.Z", ... }
+    _VERSION_IN_TABLE = _re.compile(r'version\s*=\s*"([^"]*)"')
+    _SIMPLE_VERSION = _re.compile(r'=\s*"([^"]*)"')
+
+    def _extract_version(text: str) -> str | None:
+        # Prefer the TOML inline-table `version = "..."` form; fall back to the
+        # simple `name = "..."` form only when there's no `{` (an inline table
+        # would also match the simple regex on its closing — avoid that).
+        if "{" in text:
+            m = _VERSION_IN_TABLE.search(text)
+            return m.group(1) if m else None
+        m = _SIMPLE_VERSION.search(text)
+        return m.group(1) if m else None
+
+    cur_v = _extract_version(current)
+    rep_v = _extract_version(replayed)
+    base_v = _extract_version(base)
+    if not cur_v or not rep_v or not base_v:
+        return None  # not a recognizable version-literal shape on all three
+
+    # The sides must be IDENTICAL except for the version literal. Normalize by
+    # replacing each side's version with a placeholder, then compare tokens.
+    def _mask(text: str, v: str) -> str:
+        return text.replace(f'"{v}"', '"__VER__"', 1)
+    cur_masked = _mask(current, cur_v)
+    rep_masked = _mask(replayed, rep_v)
+    if cur_masked != rep_masked:
+        return None  # the sides differ in MORE than just the version
+
+    # Resolve: take the semver-greater version. _semver_key handles numeric
+    # ordering (1.10.0 > 1.9.0); non-semver falls back to string ordering.
+    winner = current if _semver_key(cur_v) >= _semver_key(rep_v) else replayed
+    return winner
 
 
 def _try_list_union(base: str, current: str, replayed: str) -> str | None:

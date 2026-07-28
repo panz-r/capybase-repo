@@ -819,3 +819,112 @@ def test_text_value_resolution_declines_on_multi_hunk():
     assert r.rule != "text_value_resolution", (
         f"prose rule fired on multi-hunk; rule={r.rule}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Dependency version-resolution (the TOML counterpart to the prose rule)
+# ---------------------------------------------------------------------------
+
+
+def _md_unit(base: str, current: str, replayed: str) -> ConflictUnit:
+    """Like _unit but tagged as markdown (the runtime language for README.md
+    conflicts). The dependency-version rule's language gate admits markdown/toml
+    and excludes code languages, so the unit must carry the right language."""
+    def _side(label, text):
+        return ConflictSide(label=label, text=text)  # type: ignore[arg-type]
+    return ConflictUnit(
+        session_id="s", step_index=0, path="README.md", unit_id="u",
+        language="markdown",
+        base=_side("BASE", base),
+        current=_side("CURRENT_UPSTREAM_SIDE", current),
+        replayed=_side("REPLAYED_COMMIT_SIDE", replayed),
+        original_worktree_text=base,
+    )
+
+
+def test_dependency_version_resolution_toml_inline_table():
+    """The headline case (tokio-history-0019): a fenced-TOML dependency block in
+    a README where both sides bumped the same `version = "..."` literal. The
+    prose rule declines on the braces/`=`; this rule recognizes the shape and
+    takes the semver-greater version."""
+    base = 'tokio = { version = "1.43.3", features = ["full"] }'
+    cur = 'tokio = { version = "1.47.2", features = ["full"] }'
+    rep = 'tokio = { version = "1.43.4", features = ["full"] }'
+    r = resolve_structurally(_md_unit(base, cur, rep))
+    assert r.resolved, f"should resolve; got rule={r.rule}"
+    assert r.rule == "dependency_version_resolution", f"rule={r.rule}"
+    assert "1.47.2" in r.text, f"should pick the greater version 1.47.2; got {r.text!r}"
+    # The whole side is returned (features list preserved).
+    assert 'features = ["full"]' in r.text
+
+
+def test_dependency_version_resolution_simple_version_string():
+    """The simple `name = "X.Y.Z"` form (no inline table)."""
+    base = 'tokio = "1.43.3"'
+    cur = 'tokio = "1.47.2"'
+    rep = 'tokio = "1.43.4"'
+    r = resolve_structurally(_md_unit(base, cur, rep))
+    assert r.resolved and r.rule == "dependency_version_resolution"
+    assert "1.47.2" in r.text
+
+
+def test_dependency_version_resolution_uses_semver_not_lexicographic():
+    """The semver vs lexicographic distinction: 1.10.0 > 1.9.0 numerically, but
+    raw lexicographic would order them wrong (1.9 > 1.10 as strings). The rule
+    must compare numerically."""
+    base = 'tokio = "1.8.0"'
+    cur = 'tokio = "1.10.0"'
+    rep = 'tokio = "1.9.0"'
+    r = resolve_structurally(_md_unit(base, cur, rep))
+    assert r.resolved, f"should resolve; rule={r.rule}"
+    assert "1.10.0" in r.text, (
+        f"semver comparison must pick 1.10.0 over 1.9.0; got {r.text!r}"
+    )
+
+
+def test_dependency_version_resolution_declines_on_code_language():
+    """Regression guard: a version-looking assignment in a real code file (.py)
+    must NOT fire — the language gate excludes code languages."""
+    base = 'tokio = "1.43.3"'
+    cur = 'tokio = "1.47.2"'
+    rep = 'tokio = "1.43.4"'
+    # _unit defaults to path="f.py" with no language → detect would be python.
+    # Force the code-language path explicitly.
+    def _side(label, text):
+        return ConflictSide(label=label, text=text)  # type: ignore[arg-type]
+    u = ConflictUnit(
+        session_id="s", step_index=0, path="f.py", unit_id="u",
+        language="python",
+        base=_side("BASE", base), current=_side("CURRENT_UPSTREAM_SIDE", cur),
+        replayed=_side("REPLAYED_COMMIT_SIDE", rep), original_worktree_text=base,
+    )
+    r = resolve_structurally(u)
+    assert r.rule != "dependency_version_resolution", (
+        f"rule must not fire on a code-language file; rule={r.rule}"
+    )
+
+
+def test_dependency_version_resolution_declines_on_non_version_difference():
+    """If the sides differ in something OTHER than the version literal (e.g. a
+    different features list), the rule must decline — only a version-only diff
+    is a safe deterministic pick."""
+    base = 'tokio = { version = "1.43.3", features = ["full"] }'
+    cur = 'tokio = { version = "1.47.2", features = ["full"] }'
+    rep = 'tokio = { version = "1.43.4", features = ["rt", "macros"] }'  # diff features
+    r = resolve_structurally(_md_unit(base, cur, rep))
+    assert r.rule != "dependency_version_resolution", (
+        f"rule must not fire when sides differ beyond the version; rule={r.rule}"
+    )
+
+
+def test_dependency_version_resolution_declines_on_multi_line():
+    """The rule fires only on small conflicts (≤8 lines). A multi-line
+    structural change is not a version bump — decline."""
+    base = "tokio = {\n    version = '1.43.3',\n    features = ['full'],\n}\n" * 2
+    cur = "tokio = {\n    version = '1.47.2',\n    features = ['full'],\n}\n" * 2
+    rep = "tokio = {\n    version = '1.43.4',\n    features = ['full'],\n}\n" * 2
+    r = resolve_structurally(_md_unit(base, cur, rep))
+    assert r.rule != "dependency_version_resolution", (
+        f"rule must not fire on oversized multi-line conflict; rule={r.rule}"
+    )
+
