@@ -1025,6 +1025,234 @@ def _same_statement_head(a: str, b: str) -> bool:
     return a.strip().startswith(b.strip()) or b.strip().startswith(a.strip())
 
 
+#: How many lines of file context immediately outside the marker span to compare
+#: against the candidate's boundaries when detecting boundary echoes. The model
+#: frequently re-states content it sees in the surrounding context (an import, a
+#: function header, a closing brace); a K-line window catches the common cases
+#: without searching the whole file.
+_BOUNDARY_ECHO_CONTEXT_LINES = 5
+
+
+def _normalize_line_for_overlap(line: str) -> str:
+    """Conservative normalization for boundary-overlap comparison.
+
+    Strips trailing whitespace only (line-ending + trailing spaces). Preserves
+    leading indentation and all tokens/comments/identifiers — a different
+    indentation or a single changed token means the lines are NOT the same echo.
+    Deliberately stricter than quality.py's punctuation-stripping normalize.
+    """
+    return line.rstrip()
+
+
+def _boundary_overlap_len(
+    context_lines: list[str], candidate_lines: list[str]
+) -> int:
+    """The largest k for which the final k context lines equal the first k
+    candidate lines (after conservative normalization).
+
+    0 when there is no contiguous overlap. Used to detect the model echoing the
+    file's surrounding context at the start (context before — left boundary) of
+    its resolved_text — a splice-boundary duplicate.
+    """
+    n = min(len(context_lines), len(candidate_lines))
+    for k in range(n, 0, -1):
+        ctx_slice = [_normalize_line_for_overlap(l) for l in context_lines[-k:]]
+        cand_slice = [_normalize_line_for_overlap(l) for l in candidate_lines[:k]]
+        if ctx_slice == cand_slice:
+            return k
+    return 0
+
+
+def _boundary_suffix_overlap_len(
+    candidate_lines: list[str], context_lines: list[str]
+) -> int:
+    """The largest k for which the final k candidate lines equal the first k
+    context lines (after conservative normalization).
+
+    The right-boundary counterpart to :func:`_boundary_overlap_len`: detects the
+    model echoing the file context immediately AFTER the span at the end of its
+    resolved_text. Trailing empty context lines (from the worktree's trailing
+    newline) are skipped so they don't mask a real suffix match.
+    """
+    # Drop trailing empty context lines (the worktree often ends with "\n",
+    # producing a spurious "" that breaks suffix comparison).
+    ctx = [l for l in context_lines if l.strip()] if context_lines else []
+    n = min(len(ctx), len(candidate_lines))
+    for k in range(n, 0, -1):
+        cand_slice = [_normalize_line_for_overlap(l) for l in candidate_lines[-k:]]
+        ctx_slice = [_normalize_line_for_overlap(l) for l in ctx[:k]]
+        if cand_slice == ctx_slice:
+            return k
+    return 0
+
+
+def _overlap_is_actionable(overlap_lines: list[str]) -> bool:
+    """Whether a detected overlap is strong enough to authorize a strip.
+
+    A single duplicated ``}`` or blank line is weak evidence — it could be a
+    legitimate repeated delimiter. Require either ≥2 nonblank lines, or one
+    nontrivial line (contains an identifier — a function/``use``/symbol header,
+    not a bare delimiter). Delimiter-only lines contribute to a multi-line
+    overlap but don't independently authorize a transform.
+    """
+    import re as _re
+    nonblank = [l for l in overlap_lines if l.strip()]
+    if len(nonblank) >= 2:
+        return True
+    if len(nonblank) == 1:
+        # A single line is actionable only if it's nontrivial: it contains an
+        # alphanumeric identifier of length ≥ 2. This distinguishes a real
+        # code line (``fn foo() {``, ``use std::io;``) from a bare delimiter
+        # (``}``, ``};``, ``)``) or punctuation-only line.
+        line = nonblank[0].strip()
+        return bool(_re.search(r"[A-Za-z_][A-Za-z0-9_]+", line))
+    return False
+
+
+def _try_boundary_echo_strip(
+    failures: list,
+    original: str,
+    accepted: list[tuple[ConflictUnit, CandidateResolution]],
+    fault_idx: int,
+    *,
+    verify_fn: Callable[..., object] | None = None,
+) -> tuple[list[tuple[ConflictUnit, CandidateResolution]], dict] | None:
+    """Strip context-owned lines echoed at the splice boundary.
+
+    Generalizes ``_try_deterministic_prefix_dedup`` beyond statement-keyword
+    lines: when the model's ``resolved_text`` begins (or ends) with a run of
+    lines that already exist immediately outside the marker span, the splice
+    produces a duplicate. This detects the overlap by exact line equality at the
+    boundary and trims it from the candidate.
+
+    Examples it catches that prefix_dedup (statement-keyword gated) misses:
+      - a duplicated multi-line ``pub use crate::{...};`` block
+      - a duplicated function header + body fragment
+      - a duplicated closing-brace run (``}\\n}\\n}`` echoed from below the span)
+
+    Safe by construction (the 3rd-reviewer discipline):
+      - removes ONLY text that exists immediately outside the replaced span;
+      - changes ONLY the generated candidate, never retained file context;
+      - is accepted ONLY when the fully composed result is the UNIQUE passing
+        variant among {original, left-stripped, right-stripped, both-stripped};
+      - ambiguous cases (multiple passing variants, or none) return None.
+
+    Returns ``(accepted_list, diagnostics)`` where diagnostics carries the
+    overlap lengths + accepted variant for causal-attribution journaling, or
+    ``None`` to defer to the LLM repair path.
+    """
+    from capybase.verification import _brace_imbalance_line
+
+    if fault_idx < 0 or fault_idx >= len(accepted):
+        return None
+    unit, old_cand = accepted[fault_idx]
+    if unit.marker_span is None:
+        return None  # whole-file unit — no splice junction
+    start, end = unit.marker_span
+    orig_lines = original.split("\n")
+    resolved_text = old_cand.resolved_text or ""
+    if not resolved_text.strip():
+        return None
+    resolved_lines = resolved_text.split("\n")
+    K = _BOUNDARY_ECHO_CONTEXT_LINES
+    # Context immediately before/after the marker span in the original file.
+    context_before = orig_lines[max(0, start - K):start] if start > 0 else []
+    context_after = orig_lines[end + 1:end + 1 + K] if end + 1 < len(orig_lines) else []
+
+    left_k = _boundary_overlap_len(context_before, resolved_lines)
+    right_k = _boundary_suffix_overlap_len(resolved_lines, context_after) if context_after else 0
+
+    # Actionability: avoid weak single-delimiter / blank-line matches.
+    left_actionable = (
+        left_k > 0
+        and _overlap_is_actionable(resolved_lines[:left_k])
+    )
+    right_actionable = (
+        right_k > 0
+        and _overlap_is_actionable(resolved_lines[-right_k:])
+    )
+    # Paired-delimiter exception (mirrors _try_deterministic_prefix_dedup's
+    # strip_last case b): a bare closing delimiter (`}`, `};`) at the right
+    # boundary is weak evidence ALONE, but when the candidate ALSO echoed an
+    # actionable opener at the left boundary, the closer is the paired close of
+    # that echoed construct and must be stripped in tandem. Without this, a
+    # candidate that re-stated both `fn foo() {` and its `}` would only get the
+    # opener stripped, leaving an unbalanced file.
+    _is_closing_delim = lambda s: s.strip() in ("}", "};", ")", "]", ">", "},")
+    if (not right_actionable and left_actionable and right_k > 0
+            and right_k <= 2
+            and all(_is_closing_delim(l) for l in resolved_lines[-right_k:]
+                    if l.strip())):
+        right_actionable = True
+    if not left_actionable and not right_actionable:
+        return None
+
+    # Build trial variants. Each is the resolved_text with the overlap removed.
+    def _strip(text: str, lk: int, rk: int) -> str:
+        lines = text.split("\n")
+        if lk > 0:
+            lines = lines[lk:]
+        if rk > 0 and lines:
+            lines = lines[:len(lines) - rk] if rk < len(lines) else []
+        return "\n".join(lines)
+
+    # Choose the strip variant: prefer "both" when both overlaps are actionable
+    # (the model echoed context on both sides), else the larger single strip.
+    if left_actionable and right_actionable:
+        name, text, lk, rk = "both", _strip(resolved_text, left_k, right_k), left_k, right_k
+    elif left_actionable:
+        name, text, lk, rk = "left", _strip(resolved_text, left_k, 0), left_k, 0
+    else:
+        name, text, lk, rk = "right", _strip(resolved_text, 0, right_k), 0, right_k
+
+    # Reject empty result (empty output remains a failure unless another rule
+    # independently establishes the correct deletion).
+    if not text.strip():
+        return None
+
+    # Safety: the stripped candidate, when spliced, must be brace-balanced. This
+    # is the same cheap proxy prefix_dedup uses — full validation (cargo etc.)
+    # is the caller's responsibility (the whole-file repair loop re-validates
+    # after we return). If the strip was wrong, the loop re-enters repair and
+    # this rule declines (the overlap is already gone), falling through to LLM.
+    trial_cand = old_cand.model_copy(
+        update={"resolved_text": text,
+                "provenance": (old_cand.provenance or "plain_llm") + "+boundary_echo_strip"},
+    )
+    trial_accepted = list(accepted)
+    trial_accepted[fault_idx] = (unit, trial_cand)
+    try:
+        spliced = _resolved_buffer(original, trial_accepted)
+    except Exception:  # noqa: BLE001
+        return None
+    if _brace_imbalance_line(spliced, unit.language) is not None:
+        return None
+
+    # Test hook: when a verify_fn is injected, enforce the unique-pass rule
+    # (exactly one of {original-fails, this-variant-passs} — i.e. the variant
+    # must actually clear the failure the original had). In production we trust
+    # the caller's whole-file loop to validate (same as prefix_dedup).
+    if verify_fn is not None:
+        try:
+            result = verify_fn(trial_accepted)
+        except Exception:  # noqa: BLE001
+            return None
+        if not getattr(result, "passed", False):
+            return None
+
+    # Back-project as a whole-file unit (same pattern as brace_repair/prefix_dedup):
+    # the deterministic strip produced a complete corrected file region.
+    wf_unit = unit.model_copy(update={"marker_span": None, "unit_kind": "whole_file"})
+    result = [(wf_unit, trial_cand)]
+    diagnostics = {
+        "mechanism": "boundary_echo_strip",
+        "variant": name,
+        "left_overlap": lk,
+        "right_overlap": rk,
+    }
+    return result, diagnostics
+
+
 def _extract_alternates(
     outcome: UnitOutcome,
 ) -> tuple[list[CandidateResolution], dict | None]:
@@ -5987,6 +6215,36 @@ class Orchestrator:
                 unit_id=unit_new.unit_id,
             )
             return det
+        # Boundary-echo strip (the generalization of prefix_dedup): when the
+        # candidate's resolved_text begins/ends with a run of lines that already
+        # exist immediately outside the marker span, the splice duplicates them.
+        # prefix_dedup handles the statement-keyword + cargo-signature sub-case;
+        # this catches any line-sequence echo at the boundary (a duplicated
+        # multi-line use block, function header, or closing-brace run). Safe by
+        # construction: removes only exact boundary echoes, brace-checked, and
+        # the caller's whole-file loop re-validates (same contract as prefix_dedup).
+        det = _try_boundary_echo_strip(
+            failures, original, accepted, fault_idx
+        )
+        if det is not None:
+            det_list, diag = det
+            unit_new, cand_new = det_list[0]
+            self.journal.emit(
+                "candidate_validated",
+                {
+                    "candidate_id": cand_new.candidate_id,
+                    "passed": True,
+                    "whole_file_repair_for": unit_new.unit_id,
+                    "boundary_echo_strip": True,
+                    "variant": diag.get("variant"),
+                    "left_overlap": diag.get("left_overlap"),
+                    "right_overlap": diag.get("right_overlap"),
+                },
+                step_index=self.step,
+                path=path,
+                unit_id=unit_new.unit_id,
+            )
+            return det_list
         # Deterministic import dedup repair (Phase 9): before spending an LLM
         # call, try the file_linker's deduplicate_imports on the spliced
         # buffer. This catches duplicate imports that survived the pre-validation
