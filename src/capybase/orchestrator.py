@@ -171,6 +171,42 @@ def _normalize_for_convergence(text: str, language: str | None) -> str:
         return "\n".join(sorted(lines))
 
 
+def _normalize_failure_message(message: str) -> str:
+    """Normalize a hard-failure message for the no-progress signature (Fix C).
+
+    Strips volatile line/column numbers so the SAME error at a shifted location
+    still counts as "no progress" (the model moved the bug but didn't fix it).
+    Preserves symbol names, error kinds, and diagnostic codes — so a genuinely
+    different error (different symbol, different failure class) still registers
+    as a changed signature. Example:
+      "line 142: function 'foo' defined more than once (at lines 142, 160)"
+      → "line N: function 'foo' defined more than once (at lines N, N)"
+    """
+    import re
+    return re.sub(r"\b\d+\b", "N", message)
+
+
+def _hard_failure_signature(failures) -> frozenset:
+    """A multiset signature of a candidate's hard failures for the no-progress
+    guard (Fix C). Returns ``frozenset(Counter(...).items())`` — a hashable
+    multiset of ``(validator, normalized_message)`` tuples that preserves error
+    counts, so:
+
+    * the SAME error at a shifted line → identical signature → "no progress";
+    * a DIFFERENT symbol/error → different signature → progress/exploring;
+    * one error fixed, three remain → different (smaller-count) signature → progress.
+
+    Keys on failure shape, not candidate hashes, so it catches the empty-output
+    transport loop (random UUIDs defeat the hash backstops; the content-hash
+    checks are also gated on non-empty resolved_text) AND genuine stuck-on-one-
+    compiler-error cycling. ``failures`` is a list of VerificationFailure."""
+    from collections import Counter
+    return frozenset(Counter(
+        (f.validator, _normalize_failure_message(f.message))
+        for f in failures
+    ).items())
+
+
 def _obligation_suffix(unit, cand) -> str:
     """A diagnostic suffix for convergence/oscillation escalation reasons:
     the specific missing obligations (from change accounting) when the cycling
@@ -6785,19 +6821,19 @@ class Orchestrator:
                 unit_id=unit.unit_id,
             )
             # No-progress guard (Fix C, V8 CASE_TIMEOUT): if the hard-failure
-            # SIGNATURE (set of (validator, message)) is unchanged across N
-            # consecutive attempts, the loop is producing zero new information —
-            # escalate. Keys on failure shape, not candidate hashes, so it catches
-            # the empty-output transport loop (random UUIDs defeat the hash
-            # backstops; the content-hash checks are also gated on non-empty
-            # resolved_text) AND genuine stuck-on-one-compiler-error cycling.
-            # N = cegis_convergence_threshold (default 2) for consistency with the
-            # convergence backstop below. Disabled when threshold is 0.
+            # SIGNATURE (multiset of (validator, normalized_message)) is unchanged
+            # across N consecutive attempts, the loop is producing zero new
+            # information — escalate. Keys on failure shape, not candidate hashes,
+            # so it catches the empty-output transport loop (random UUIDs defeat
+            # the hash backstops; the content-hash checks are also gated on non-
+            # empty resolved_text) AND genuine stuck-on-one-compiler-error cycling.
+            # The message is normalized (line numbers → N) so the same error at a
+            # shifted location still counts as no-progress; symbol names and error
+            # kinds are preserved so a genuinely different error registers as
+            # change. N = cegis_convergence_threshold (default 2); 0 disables.
             np_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
             if np_threshold > 0:
-                sig = frozenset(
-                    (f.validator, f.message) for f in validation.hard_failures
-                )
+                sig = _hard_failure_signature(validation.hard_failures)
                 outcome._recent_hard_failure_sigs.append(sig)
                 recent = outcome._recent_hard_failure_sigs[-np_threshold:]
                 if len(recent) >= np_threshold and len(set(recent)) == 1:

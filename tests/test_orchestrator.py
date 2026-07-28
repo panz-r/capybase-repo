@@ -497,6 +497,55 @@ def test_no_progress_guard_escalates_on_identical_failure_signature(repo):
     )
 
 
+def test_hard_failure_signature_normalizes_line_numbers():
+    """Fix C-v2 (reviewer feedback): the (validator, message) signature was too
+    coarse — the SAME error at a shifted line number (the model moved the bug
+    but didn't fix it) produced a 'changed' signature, so the guard would NOT
+    fire on a genuine stuck loop. Normalizing line numbers → N makes the same
+    error at a different location still count as 'no progress'.
+
+    Conversely, symbol names and error kinds are preserved, so a genuinely
+    DIFFERENT error (different symbol) still registers as a changed signature."""
+    from capybase.conflict_model import VerificationFailure
+    from capybase.orchestrator import _hard_failure_signature
+
+    # Same error (duplicate 'foo') at DIFFERENT line numbers across attempts.
+    sig_a = _hard_failure_signature([VerificationFailure(
+        validator="duplicate_definition",
+        message="line 142: function 'foo' defined more than once (at lines 142, 160)",
+    )])
+    sig_b = _hard_failure_signature([VerificationFailure(
+        validator="duplicate_definition",
+        message="line 150: function 'foo' defined more than once (at lines 150, 172)",
+    )])
+    assert sig_a == sig_b, (
+        "same error at a shifted line must normalize to the same signature "
+        "(else the guard misses genuine stuck loops)"
+    )
+
+    # A DIFFERENT symbol → different signature (the loop IS exploring).
+    sig_c = _hard_failure_signature([VerificationFailure(
+        validator="duplicate_definition",
+        message="line 150: function 'bar' defined more than once (at lines 150, 172)",
+    )])
+    assert sig_a != sig_c, (
+        "different symbol must produce a different signature (else the guard "
+        "would conflate distinct errors and fire prematurely)"
+    )
+
+    # Fewer errors (one fixed) → different signature (progress).
+    sig_two = _hard_failure_signature([
+        VerificationFailure(validator="rust_syntax", message="error at line 5"),
+        VerificationFailure(validator="rust_syntax", message="error at line 9"),
+    ])
+    sig_one = _hard_failure_signature([
+        VerificationFailure(validator="rust_syntax", message="error at line 5"),
+    ])
+    assert sig_two != sig_one, (
+        "fixing one of two errors must change the signature (progress detected)"
+    )
+
+
 def test_no_progress_guard_does_not_fire_when_signature_changes(repo):
     """Fix C companion: the no-progress guard must NOT fire when the hard-failure
     signature is changing across attempts (the loop IS making progress / trying
