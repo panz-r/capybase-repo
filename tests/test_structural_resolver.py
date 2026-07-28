@@ -821,6 +821,34 @@ def test_text_value_resolution_declines_on_multi_hunk():
     )
 
 
+def test_text_value_resolution_declines_on_version_vs_prose_heading():
+    """Latent wrong-merge guard (axum-0001): a CHANGELOG heading reorganization
+    has a version-like token on one side ("0.12.6") and a prose token on the
+    other ("Unreleased"). The correct merge keeps BOTH headings (a section
+    reorganization), not a value pick. Without this guard the rule takes the
+    lexicographically-later token — "Unreleased" (uppercase U > "0") — silently
+    dropping the version section. The rule must decline this mixed case.
+
+    Runtime language for CHANGELOG.md is 'markdown' (detect_language maps .md),
+    so the language gate admits it; the version-vs-prose guard is what catches
+    the wrong-merge shape."""
+    def _side(label, text):
+        return ConflictSide(label=label, text=text)  # type: ignore[arg-type]
+    u = ConflictUnit(
+        session_id="s", step_index=0, path="CHANGELOG.md", unit_id="u",
+        language="markdown",  # what detect_language returns at runtime
+        base=_side("BASE", "# 0.12.5"),
+        current=_side("CURRENT_UPSTREAM_SIDE", "# Unreleased"),
+        replayed=_side("REPLAYED_COMMIT_SIDE", "# 0.12.6"),
+        original_worktree_text="# 0.12.5",
+    )
+    r = resolve_structurally(u)
+    assert r.rule != "text_value_resolution", (
+        f"prose rule fired on version-vs-prose heading (silent wrong-merge); "
+        f"rule={r.rule} text={r.text!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Dependency version-resolution (the TOML counterpart to the prose rule)
 # ---------------------------------------------------------------------------

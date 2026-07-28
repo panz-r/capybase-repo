@@ -685,6 +685,18 @@ def _try_text_value_resolution(unit: ConflictUnit) -> str | None:
             last_diff = i
     cur_span = " ".join(cur_toks[first_diff : last_diff + 1])
     rep_span = " ".join(rep_toks[first_diff : last_diff + 1])
+    # Version-vs-prose guard (axum-0001 regression): a CHANGELOG heading
+    # reorganization has a version-like token on one side ("0.12.6") and a prose
+    # token on the other ("Unreleased"). The correct merge keeps BOTH headings
+    # (a section reorganization), not a value pick. Without this guard the rule
+    # takes the lexicographically-later token — "Unreleased" (uppercase U > "0")
+    # — silently dropping the version section. A genuine version bump has
+    # version-like tokens on BOTH sides (1.47.2 vs 1.43.4); a reorganization has
+    # a version on one side and prose on the other. Decline the mixed case.
+    import re as _ver_re
+    _is_version_like = lambda s: bool(_ver_re.search(r"\d+\.\d+", s))
+    if _is_version_like(cur_span) != _is_version_like(rep_span):
+        return None  # one side is a version, the other is prose — reorg, not a bump
     winner_toks = rep_toks if rep_span > cur_span else cur_toks
     merged_toks = list(cur_toks)
     merged_toks[first_diff : last_diff + 1] = winner_toks[first_diff : last_diff + 1]
