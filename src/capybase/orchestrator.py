@@ -1109,6 +1109,86 @@ def _overlap_is_actionable(overlap_lines: list[str]) -> bool:
     return False
 
 
+def _strip_boundary_echo(
+    resolved_text: str,
+    original: str,
+    marker_span: tuple[int, int] | None,
+    language: str | None,
+) -> tuple[str, dict] | None:
+    """Pure core of the boundary-echo strip: detect and remove context-owned
+    lines echoed at the splice boundary of ``resolved_text``.
+
+    Returns ``(stripped_text, diagnostics)`` when an actionable echo is found and
+    the stripped result is brace-balanced (when spliced), else ``None``. The
+    diagnostics dict carries ``variant`` / ``left_overlap`` / ``right_overlap``
+    for causal-attribution journaling.
+
+    Shared by both call sites:
+      - the whole-file repair loop (``_try_boundary_echo_strip``), which runs
+        after a candidate passes per-unit validation but fails whole-file
+        composition;
+      - the per-unit pre-validation pass (``_apply_deterministic_closure``),
+        which runs BEFORE per-unit syntax validation so a wrapping echo that
+        would cause a parse failure is caught before escalation (the
+        reachability gap that axum-0029 hit).
+    """
+    from capybase.verification import _brace_imbalance_line
+    from capybase.adapters.parsers import splice_resolution
+
+    if marker_span is None or not resolved_text.strip():
+        return None
+    start, end = marker_span
+    orig_lines = original.split("\n")
+    resolved_lines = resolved_text.split("\n")
+    K = _BOUNDARY_ECHO_CONTEXT_LINES
+    context_before = orig_lines[max(0, start - K):start] if start > 0 else []
+    context_after = orig_lines[end + 1:end + 1 + K] if end + 1 < len(orig_lines) else []
+
+    left_k = _boundary_overlap_len(context_before, resolved_lines)
+    right_k = _boundary_suffix_overlap_len(resolved_lines, context_after) if context_after else 0
+
+    left_actionable = left_k > 0 and _overlap_is_actionable(resolved_lines[:left_k])
+    right_actionable = right_k > 0 and _overlap_is_actionable(resolved_lines[-right_k:])
+    # Paired-delimiter exception: a bare closer at the right boundary is
+    # strippable when paired with an actionable left overlap (the closer of the
+    # echoed opener). Mirrors prefix_dedup's strip_last case b.
+    _is_closing_delim = lambda s: s.strip() in ("}", "};", ")", "]", ">", "},")
+    if (not right_actionable and left_actionable and right_k > 0
+            and right_k <= 2
+            and all(_is_closing_delim(l) for l in resolved_lines[-right_k:] if l.strip())):
+        right_actionable = True
+    if not left_actionable and not right_actionable:
+        return None
+
+    def _strip(text: str, lk: int, rk: int) -> str:
+        lines = text.split("\n")
+        if lk > 0:
+            lines = lines[lk:]
+        if rk > 0 and lines:
+            lines = lines[:len(lines) - rk] if rk < len(lines) else []
+        return "\n".join(lines)
+
+    if left_actionable and right_actionable:
+        name, text, lk, rk = "both", _strip(resolved_text, left_k, right_k), left_k, right_k
+    elif left_actionable:
+        name, text, lk, rk = "left", _strip(resolved_text, left_k, 0), left_k, 0
+    else:
+        name, text, lk, rk = "right", _strip(resolved_text, 0, right_k), 0, right_k
+
+    if not text.strip():
+        return None  # empty result remains a failure
+
+    # Safety: the stripped candidate spliced into the file must be brace-balanced.
+    try:
+        spliced = splice_resolution(original, marker_span, text)
+    except Exception:  # noqa: BLE001
+        return None
+    if _brace_imbalance_line(spliced, language) is not None:
+        return None
+
+    return text, {"variant": name, "left_overlap": lk, "right_overlap": rk}
+
+
 def _try_boundary_echo_strip(
     failures: list,
     original: str,
@@ -1141,98 +1221,27 @@ def _try_boundary_echo_strip(
     overlap lengths + accepted variant for causal-attribution journaling, or
     ``None`` to defer to the LLM repair path.
     """
-    from capybase.verification import _brace_imbalance_line
-
     if fault_idx < 0 or fault_idx >= len(accepted):
         return None
     unit, old_cand = accepted[fault_idx]
-    if unit.marker_span is None:
-        return None  # whole-file unit — no splice junction
-    start, end = unit.marker_span
-    orig_lines = original.split("\n")
     resolved_text = old_cand.resolved_text or ""
-    if not resolved_text.strip():
-        return None
-    resolved_lines = resolved_text.split("\n")
-    K = _BOUNDARY_ECHO_CONTEXT_LINES
-    # Context immediately before/after the marker span in the original file.
-    context_before = orig_lines[max(0, start - K):start] if start > 0 else []
-    context_after = orig_lines[end + 1:end + 1 + K] if end + 1 < len(orig_lines) else []
-
-    left_k = _boundary_overlap_len(context_before, resolved_lines)
-    right_k = _boundary_suffix_overlap_len(resolved_lines, context_after) if context_after else 0
-
-    # Actionability: avoid weak single-delimiter / blank-line matches.
-    left_actionable = (
-        left_k > 0
-        and _overlap_is_actionable(resolved_lines[:left_k])
+    stripped = _strip_boundary_echo(
+        resolved_text, original, unit.marker_span, unit.language,
     )
-    right_actionable = (
-        right_k > 0
-        and _overlap_is_actionable(resolved_lines[-right_k:])
-    )
-    # Paired-delimiter exception (mirrors _try_deterministic_prefix_dedup's
-    # strip_last case b): a bare closing delimiter (`}`, `};`) at the right
-    # boundary is weak evidence ALONE, but when the candidate ALSO echoed an
-    # actionable opener at the left boundary, the closer is the paired close of
-    # that echoed construct and must be stripped in tandem. Without this, a
-    # candidate that re-stated both `fn foo() {` and its `}` would only get the
-    # opener stripped, leaving an unbalanced file.
-    _is_closing_delim = lambda s: s.strip() in ("}", "};", ")", "]", ">", "},")
-    if (not right_actionable and left_actionable and right_k > 0
-            and right_k <= 2
-            and all(_is_closing_delim(l) for l in resolved_lines[-right_k:]
-                    if l.strip())):
-        right_actionable = True
-    if not left_actionable and not right_actionable:
+    if stripped is None:
         return None
+    text, diag = stripped
 
-    # Build trial variants. Each is the resolved_text with the overlap removed.
-    def _strip(text: str, lk: int, rk: int) -> str:
-        lines = text.split("\n")
-        if lk > 0:
-            lines = lines[lk:]
-        if rk > 0 and lines:
-            lines = lines[:len(lines) - rk] if rk < len(lines) else []
-        return "\n".join(lines)
-
-    # Choose the strip variant: prefer "both" when both overlaps are actionable
-    # (the model echoed context on both sides), else the larger single strip.
-    if left_actionable and right_actionable:
-        name, text, lk, rk = "both", _strip(resolved_text, left_k, right_k), left_k, right_k
-    elif left_actionable:
-        name, text, lk, rk = "left", _strip(resolved_text, left_k, 0), left_k, 0
-    else:
-        name, text, lk, rk = "right", _strip(resolved_text, 0, right_k), 0, right_k
-
-    # Reject empty result (empty output remains a failure unless another rule
-    # independently establishes the correct deletion).
-    if not text.strip():
-        return None
-
-    # Safety: the stripped candidate, when spliced, must be brace-balanced. This
-    # is the same cheap proxy prefix_dedup uses — full validation (cargo etc.)
-    # is the caller's responsibility (the whole-file repair loop re-validates
-    # after we return). If the strip was wrong, the loop re-enters repair and
-    # this rule declines (the overlap is already gone), falling through to LLM.
+    # Test hook: when a verify_fn is injected, enforce the unique-pass rule
+    # (the stripped variant must actually pass full validation). In production
+    # we trust the caller's whole-file loop to validate (same as prefix_dedup).
     trial_cand = old_cand.model_copy(
         update={"resolved_text": text,
                 "provenance": (old_cand.provenance or "plain_llm") + "+boundary_echo_strip"},
     )
-    trial_accepted = list(accepted)
-    trial_accepted[fault_idx] = (unit, trial_cand)
-    try:
-        spliced = _resolved_buffer(original, trial_accepted)
-    except Exception:  # noqa: BLE001
-        return None
-    if _brace_imbalance_line(spliced, unit.language) is not None:
-        return None
-
-    # Test hook: when a verify_fn is injected, enforce the unique-pass rule
-    # (exactly one of {original-fails, this-variant-passs} — i.e. the variant
-    # must actually clear the failure the original had). In production we trust
-    # the caller's whole-file loop to validate (same as prefix_dedup).
     if verify_fn is not None:
+        trial_accepted = list(accepted)
+        trial_accepted[fault_idx] = (unit, trial_cand)
         try:
             result = verify_fn(trial_accepted)
         except Exception:  # noqa: BLE001
@@ -1244,12 +1253,7 @@ def _try_boundary_echo_strip(
     # the deterministic strip produced a complete corrected file region.
     wf_unit = unit.model_copy(update={"marker_span": None, "unit_kind": "whole_file"})
     result = [(wf_unit, trial_cand)]
-    diagnostics = {
-        "mechanism": "boundary_echo_strip",
-        "variant": name,
-        "left_overlap": lk,
-        "right_overlap": rk,
-    }
+    diagnostics = {"mechanism": "boundary_echo_strip", **diag}
     return result, diagnostics
 
 
@@ -6361,6 +6365,37 @@ class Orchestrator:
         lang = unit.language or ""
         if lang not in ("rust", "toml"):
             return cand  # v1 primitives are Rust + TOML only
+        # Boundary-echo strip (reachability fix): run BEFORE per-unit syntax
+        # validation so a wrapping echo (the model re-states the enclosing
+        # `use tower::{...};` block around the span) is caught before it causes a
+        # parse failure and escalates. Without this, the whole-file-repair echo
+        # strip is unreachable for parse-echo cases (axum-0029): the candidate
+        # fails per-unit syntax, exhausts the retry budget, and escalates before
+        # the whole-file loop ever runs. Reuses the same _strip_boundary_echo
+        # core the whole-file path uses. Safe-by-construction (exact boundary
+        # echoes only, brace-checked); runs before the obligations gate below
+        # because a wrapping-echo candidate may have zero missing obligations.
+        try:
+            stripped = _strip_boundary_echo(
+                cand.resolved_text, unit.original_worktree_text,
+                unit.marker_span, unit.language,
+            )
+            if stripped is not None:
+                text, diag = stripped
+                cand = cand.model_copy(
+                    update={"resolved_text": text,
+                            "provenance": (cand.provenance or "plain_llm") + "+boundary_echo_strip"},
+                )
+                self.journal.emit(
+                    "boundary_echo_strip",
+                    {"variant": diag["variant"],
+                     "left_overlap": diag["left_overlap"],
+                     "right_overlap": diag["right_overlap"],
+                     "stage": "per_unit"},
+                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                )
+        except Exception:  # noqa: BLE001
+            pass
         try:
             from capybase.change_accounting import derive_missing_obligations
             # Use the base HUNK (diff3-refined or re-derived), not the full

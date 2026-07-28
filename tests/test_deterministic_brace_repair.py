@@ -620,3 +620,64 @@ def test_boundary_echo_strip_declines_on_unbalanced_result():
             "if a variant is accepted, the re-spliced result must be balanced"
         )
 
+
+# ---------------------------------------------------------------------------
+# Per-unit reachability: _strip_boundary_echo (the shared core)
+# ---------------------------------------------------------------------------
+
+
+def test_strip_boundary_echo_catches_wrapping_echo_per_unit():
+    """The reachability fix (axum-0029 shape): the model re-stated the enclosing
+    `use tower::{...};` wrapper around the conflict span. At per-unit time this
+    produces a nested-duplicate parse error (`use tower:{ use tower:{...} }`)
+    that fails syntax validation and escalates BEFORE the whole-file repair loop.
+    The _strip_boundary_echo core — now called from _apply_deterministic_closure
+    BEFORE validation — catches the echo and strips it, so the candidate reaches
+    validation clean.
+
+    This test verifies the core helper directly (the per-unit call site wraps it
+    in try/except and applies it to cand.resolved_text)."""
+    from capybase.orchestrator import _strip_boundary_echo
+    # The conflict span sits inside a `use tower::{...};` block. The marker
+    # covers only the inner member lines; the wrapper is outside the span.
+    worktree = (
+        "use tower::{\n"                       # line 0 — wrapper opener (context BEFORE)
+        "<<<<<<< HEAD\n"                        # line 1
+        "    util::{MapErrLayer},\n"            # line 2 (current)
+        "=======\n"                             # line 3
+        "    util::{BoxCloneService, MapErrLayer},\n"  # line 4 (replayed)
+        ">>>>>>> feat\n"                        # line 5
+        "    ServiceExt,\n"                     # line 6 — wrapper member (context AFTER)
+        "};\n"                                  # line 7 — wrapper closer (context AFTER)
+    )
+    # The model echoed the enclosing wrapper on BOTH sides of the conflict.
+    # (Exact echo — the overlap detector requires verbatim line match.)
+    resolved = (
+        "use tower::{\n"
+        "    util::{BoxCloneService, MapErrLayer},\n"
+        "    ServiceExt,\n"
+        "};"
+    )
+    result = _strip_boundary_echo(resolved, worktree, (1, 5), "rust")
+    assert result is not None, "should strip the wrapping echo"
+    text, diag = result
+    # The stripped text should no longer contain the echoed wrapper opener.
+    assert not text.startswith("use tower")
+    assert "BoxCloneService" in text  # the actual conflict content survives
+    assert diag["left_overlap"] >= 1
+
+
+def test_strip_boundary_echo_declines_on_clean_candidate():
+    """The core helper declines when there's no boundary echo — a candidate that
+    correctly resolves only the span content passes through unchanged."""
+    from capybase.orchestrator import _strip_boundary_echo
+    worktree = (
+        "use tower::{\n"
+        "<<<<<<< HEAD\n    util::{MapErrLayer},\n=======\n"
+        "    util::{BoxCloneService, MapErrLayer},\n>>>>>>> feat\n"
+        "    ServiceExt,\n};\n"
+    )
+    # A clean resolution (no wrapper echo).
+    resolved = "    util::{BoxCloneService, MapErrLayer},"
+    assert _strip_boundary_echo(resolved, worktree, (1, 5), "rust") is None
+
