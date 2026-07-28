@@ -6904,6 +6904,16 @@ class Orchestrator:
                      "outcome": "pending"},
                     step_index=self.step, path=unit.path, unit_id=unit.unit_id,
                 )
+            elif cand.failure_kind in (
+                "request_failed", "truncated", "parse_failed", "lsp_failed",
+            ):
+                # Technical/transport failures route on the retry_count budget
+                # (risk.py routes these failure kinds via retry_count < budget).
+                # Pre-fix these fell into the critic branch below because the
+                # critic also flags every empty/garbage candidate (critic_warning
+                # is not None), so retry_count never incremented and the loop
+                # spun until the wall budget — the V8 CASE_TIMEOUT bug.
+                retry_count += 1
             elif critic_warning is not None:
                 critic_retry_count += 1
             else:

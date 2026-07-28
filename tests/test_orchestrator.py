@@ -607,6 +607,58 @@ def test_run_retries_after_transient_error(conflicted_repo):
     assert "<<<<<<<" not in (repo / "app.py").read_text()
 
 
+def test_run_escalates_fast_on_repeated_transient_failures(conflicted_repo):
+    """V8 CASE_TIMEOUT regression (axum-0036, sea-orm-0015, tokio-0109): repeated
+    request_failed candidates (HTTP 400 / empty output) spun the retry loop
+    indefinitely because retry_count never incremented — every retry was
+    misclassified as a critic_retry (the critic also flags empty candidates),
+    so risk.decide's 'retry_count < budget' check was always true and only the
+    360s wall budget stopped it (~22 attempts, ~29 min per case).
+
+    Post-fix: technical failures (request_failed/truncated/parse_failed/
+    lsp_failed) increment retry_count, so the loop escalates after
+    max_retries_per_unit retries — not after the wall budget."""
+    from tests.test_resolution_engine import MetaClient
+
+    repo = conflicted_repo["repo"]
+    cfg = _config(repo)
+    cfg.policy.max_retries_per_unit = 2  # the default; make it explicit
+    # Recovery retry stays ON (the production default) — the V8 spin scenario
+    # had recovery retry on; the bug was that request_failed retries were
+    # misclassified as critic retries, so retry_count stayed 0 and risk.decide's
+    # 'retry_count < budget' check was always true. Only the wall budget stopped
+    # it. Post-fix retry_count increments, terminating via the budget.
+    # Repeated request_failed (the model API returns errors indefinitely).
+    seq = [RuntimeError("HTTP Error 400: Bad Request")] * 50
+    engine = ResolutionEngine(cfg.model, client=MetaClient(seq))
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    # Must escalate (not spin forever). The escalation terminates via the retry
+    # budget now that retry_count increments on request_failed — pre-fix
+    # retry_count stayed 0 (the counter misclassification) and only the wall
+    # budget stopped it.
+    assert result.escalated, "repeated transient failures must escalate"
+    # The core proof: retry_count must increment on request_failed. Pre-fix it
+    # stayed at 0 across ALL attempts (verified in V8 flight journals:
+    # sea-orm-0015, axum-0036, tokio-0109 all showed retry_count=0 for 22-26
+    # attempts). With the fix, at least one rejection carries retry_count > 0.
+    events = []
+    for line in orch.paths.journal.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            d = json.loads(line)
+            if d["event_type"] == "candidate_rejected":
+                events.append(d.get("payload", {}))
+    assert any(e.get("retry_count", 0) > 0 for e in events), (
+        "retry_count must increment on request_failed (pre-fix it stayed 0 — "
+        "the V8 CASE_TIMEOUT root cause); "
+        f"rejection events: {events}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Multi-unit-per-file (the regression class this whole fix targets)
 # ---------------------------------------------------------------------------
@@ -1185,7 +1237,19 @@ def test_wall_time_budget_escalates_non_converging_unit(distinct_additions_repo,
                         out=lambda *_a, **_k: None)
     result = orch.run()
     assert result.escalated
-    assert "wall-time" in (result.reason or ""), result.reason
+    # The loop is bounded — it escalates rather than spinning forever. After the
+    # canned responses exhaust, CyclingClient repeats the critic-verdict JSON,
+    # which parses as an empty resolution (failure_kind=request_failed). Pre-Fix-B
+    # these retries were misclassified as critic retries (retry_count stayed 0),
+    # so ONLY the wall-time budget terminated the loop. Post-Fix-B retry_count
+    # increments on request_failed, so the loop can terminate via the retry
+    # budget, the wall budget, or the needs_human absolute escalation (the empty
+    # resolution carries needs_human=True). All three are valid bounded outcomes;
+    # the point is the loop does NOT spin forever.
+    reason = result.reason or ""
+    assert ("wall-time" in reason
+            or "max retries exhausted" in reason
+            or "needs_human" in reason), result.reason
 
 
 def test_wall_time_disabled_does_not_escalate(conflicted_repo, verifier_critic_enabled):
