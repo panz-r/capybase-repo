@@ -453,6 +453,99 @@ def test_run_escalates_when_model_returns_markers(conflicted_repo):
     assert (orch.paths.final / "review-bundle.md").exists()
 
 
+def test_no_progress_guard_escalates_on_identical_failure_signature(repo):
+    """Fix C (V8 CASE_TIMEOUT): when the hard-failure SIGNATURE (set of
+    (validator, message) tuples) is unchanged across cegis_convergence_threshold+1
+    consecutive attempts, the loop is producing zero new information → escalate
+    immediately. Keys on failure shape, not candidate hashes, so it catches
+    stuck loops the content-hash backstops miss (e.g. empty-output transport
+    loops where each candidate gets a fresh random UUID).
+
+    Here the model cycles a candidate that consistently fails the same way. The
+    guard fires after threshold+1 identical signatures — before the retry budget
+    or wall budget would."""
+    # Build a conflict (the standard value-resolution shape).
+    base = "def f():\n    return 'hello'\n"
+    (repo / "app.py").write_text(base)
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
+    git(repo, "branch", "feat"); git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text("def f():\n    return 'howdy'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "replayed")
+    git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text("def f():\n    return 'hi'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "upstream")
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected conflict"
+
+    cfg = _config(repo)
+    cfg.policy.cegis_convergence_threshold = 2  # the default; explicit
+    cfg.policy.max_retries_per_unit = 50  # large, so the guard fires first
+    # A candidate that consistently leaks a marker → same hard-failure signature
+    # every attempt (no_conflict_markers validator).
+    payload = _make_resolved_payload("    return 1\n<<<<<<< leaked\n")
+    engine = ResolutionEngine(cfg.model, client=CyclingClient([payload]))
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert result.escalated
+    # The no-progress guard should fire (identical signature across attempts).
+    assert "no hard-failure progress" in (result.reason or "") or "identical" in (result.reason or ""), (
+        f"no-progress guard should fire on identical failure signature, got: {result.reason}"
+    )
+
+
+def test_no_progress_guard_does_not_fire_when_signature_changes(repo):
+    """Fix C companion: the no-progress guard must NOT fire when the hard-failure
+    signature is changing across attempts (the loop IS making progress / trying
+    different things). This proves the guard is keyed on signature IDENTITY, not
+    just attempt count — it won't prematurely cut a loop that's exploring.
+
+    Here the model alternates between two DIFFERENT failure classes (leaked
+    markers vs empty resolution), so the signatures never repeat. The guard
+    never fires; the loop terminates via the normal retry budget instead."""
+    base = "def f():\n    return 'hello'\n"
+    (repo / "app.py").write_text(base)
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
+    git(repo, "branch", "feat"); git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text("def f():\n    return 'howdy'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "replayed")
+    git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text("def f():\n    return 'hi'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "upstream")
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected conflict"
+
+    cfg = _config(repo)
+    cfg.policy.cegis_convergence_threshold = 2
+    # Alternate between TWO distinct failure classes: leaked markers
+    # (no_conflict_markers validator) and empty resolution
+    # (non_empty_resolution validator). Different validators → different
+    # signatures → the guard's set(recent) is never length-1 → no fire.
+    payloads = [
+        _make_resolved_payload("    return 1\n<<<<<<< leaked\n"),  # markers
+        _make_resolved_payload(""),  # empty
+        _make_resolved_payload("    return 1\n<<<<<<< leaked\n"),  # markers
+        _make_resolved_payload(""),  # empty
+        _make_resolved_payload("    return 1\n<<<<<<< leaked\n"),  # markers
+    ]
+    engine = ResolutionEngine(cfg.model, client=FakeClient(payloads))
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert result.escalated  # still escalates (all candidates fail)
+    # But NOT via the no-progress guard — the signatures alternated, never
+    # repeating for threshold consecutive attempts.
+    assert "no hard-failure progress" not in (result.reason or ""), (
+        f"guard must not fire when signatures change, got: {result.reason}"
+    )
+
+
 def test_run_escalates_on_needs_human(conflicted_repo):
     repo = conflicted_repo["repo"]
     payload = json.dumps({"resolved_text": "    return 1", "needs_human": True})

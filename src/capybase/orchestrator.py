@@ -100,6 +100,13 @@ class UnitOutcome:
     # sorted) for the convergence check (Issue 4). Catches cosmetic-variation
     # cycling the exact-hash oscillation backstop misses.
     _seen_normalized_hashes: dict[str, int] = field(default_factory=dict)
+    # Recent hard-failure signatures (Fix C: no-progress guard). Each entry is a
+    # frozenset of (validator, message) tuples from one attempt's hard_failures.
+    # When the last N signatures are identical, the loop is producing zero new
+    # information → escalate. Keys on FAILURE shape (not candidate hashes) so it
+    # catches the empty-output transport loop AND genuine stuck-on-one-error
+    # cycling that the content-hash backstops structurally cannot reach.
+    _recent_hard_failure_sigs: list = field(default_factory=list)
     # No-op cache (the analysis's "eliminate avoidable slow retries"): maps a
     # candidate's resolved_text hash → its VerificationResult. When the model
     # re-proposes the same candidate (common after a preservation-heuristic
@@ -6777,6 +6784,41 @@ class Orchestrator:
                 path=unit.path,
                 unit_id=unit.unit_id,
             )
+            # No-progress guard (Fix C, V8 CASE_TIMEOUT): if the hard-failure
+            # SIGNATURE (set of (validator, message)) is unchanged across N
+            # consecutive attempts, the loop is producing zero new information —
+            # escalate. Keys on failure shape, not candidate hashes, so it catches
+            # the empty-output transport loop (random UUIDs defeat the hash
+            # backstops; the content-hash checks are also gated on non-empty
+            # resolved_text) AND genuine stuck-on-one-compiler-error cycling.
+            # N = cegis_convergence_threshold (default 2) for consistency with the
+            # convergence backstop below. Disabled when threshold is 0.
+            np_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
+            if np_threshold > 0:
+                sig = frozenset(
+                    (f.validator, f.message) for f in validation.hard_failures
+                )
+                outcome._recent_hard_failure_sigs.append(sig)
+                recent = outcome._recent_hard_failure_sigs[-np_threshold:]
+                if len(recent) >= np_threshold and len(set(recent)) == 1:
+                    validators = sorted({v for v, _ in sig}) or ["(none)"]
+                    self.journal.emit(
+                        "candidate_rejected",
+                        {"candidate_id": cand.candidate_id,
+                         "action": "escalate", "via": "no_progress",
+                         "reason": (f"identical hard-failure signature across "
+                                    f"{len(recent)} attempts ({validators})"),
+                         "retry_count": retry_count},
+                        step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                    )
+                    outcome.escalated = True
+                    outcome.retry_count = retry_count
+                    outcome.reason = (
+                        f"no hard-failure progress: identical signature across "
+                        f"{len(recent)} attempts ({validators})"
+                        + _obligation_suffix(unit, cand)
+                    )
+                    return outcome
             # Oscillation backstop (CEGIS resilience): if the SAME resolved_text
             # has been seen more times than the retry budget allows, the model is
             # cycling — escalate instead of wasting more tokens. This fires only
