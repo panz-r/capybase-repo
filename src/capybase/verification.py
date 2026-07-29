@@ -106,6 +106,11 @@ class ValidationConfig:
     rust_edition: str = ""
     # Rust error codes to suppress in the delta (mirrors config.ValidationConfig).
     rust_suppress_codes: list[str] = field(default_factory=list)
+    # C/C++ compile floor (mirrors config.ValidationConfig; gcc/clang -fsyntax-only).
+    cc_path: str = "gcc"
+    cxx_path: str = "g++"
+    c_std: str = "c11"
+    cpp_std: str = "c++17"
     # Clippy lint check (mirrors config.ValidationConfig; the live flags).
     enable_clippy: bool = False
     clippy_severity: str = "warning"
@@ -2912,6 +2917,67 @@ def _compile_rust(
     finally:
         Path(tmp_path).unlink(missing_ok=True)
         Path(out_path).unlink(missing_ok=True)
+
+
+def _compile_ccs(
+    source: str, *, cc_path: str = "gcc", std: str = "c11", suffix: str = ".c",
+    timeout: float = 30.0,
+) -> tuple[bool, str]:
+    """Syntax/parse-check C/C++ source via ``gcc``/``clang`` ``-fsyntax-only``.
+
+    The ``_compile_rust`` analog for C/C++: writes the source to a temp file and
+    asks the compiler to run parsing + semantic analysis WITHOUT producing an
+    object file (``-fsyntax-only`` runs the front end only, no codegen, no link).
+    ``-std=`` selects the language standard. Returns ``(True, "cc ok")`` on
+    success or ``(False, first_error_line)`` on failure.
+
+    Unlike ``rustc`` (whose error lines start with ``error``), gcc/clang prefix
+    diagnostics with ``file:line:col:``, so the first line CONTAINING
+    ``" error:"`` is the actionable diagnostic the CEGIS repair loop wants.
+
+    A 30s timeout bounds runaway compiles (``-fsyntax-only`` on a single TU
+    should be subsecond; 30s is generous). Any invocation failure (missing
+    binary, crash, timeout) maps to ``(False, message)``; ``FileNotFoundError``
+    is re-raised so the caller can gate hard-rejection on the tool actually
+    being available (``_resolve``), keeping a missing compiler a "not checked"
+    non-failure rather than a false syntax failure.
+
+    Headers (``.h``/``.hpp``) compile standalone under ``-fsyntax-only``
+    (declarations-only are valid translation units), so no ``.c`` driver wrapper
+    is needed.
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=suffix, delete=False, encoding="utf-8"
+    ) as tf:
+        tf.write(source)
+        tmp_path = tf.name
+    try:
+        proc = subprocess.run(
+            [cc_path, "-fsyntax-only", f"-std={std}", tmp_path],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if proc.returncode == 0:
+            return True, "cc ok"
+        err = (proc.stderr or "").strip()
+        if not err:
+            return False, "cc failed"
+        # gcc/clang format: ``file:line:col: error: msg``. Find the first line
+        # carrying a real ``error:`` (a ``warning:`` or caret line isn't it).
+        # Fall back to the first non-empty line (e.g. ``gcc: error: ...`` for a
+        # bad flag, which has no file prefix).
+        for line in err.splitlines():
+            if " error:" in line or line.startswith("error"):
+                return False, line
+        return False, err.splitlines()[0]
+    except FileNotFoundError:
+        # compiler absent — caller treats this as "not checked", not a failure.
+        raise
+    except subprocess.TimeoutExpired:
+        return False, f"cc timed out after {timeout:g}s"
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
 
 # The Rust editions rustc accepts for ``--edition``. 2024 stabilized in Rust

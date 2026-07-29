@@ -388,6 +388,18 @@ class ValidationConfig(BaseModel):
     # that drift in message text between baseline and candidate via code-keyed
     # delta matching (engages automatically when Diagnostics carry .code).
     rust_suppress_codes: list[str] = []
+    # C/C++ compile floor (gcc/clang -fsyntax-only). Mirrors the Rust fields
+    # above: a per-unit validator (Phase A) catches parse errors in the CEGIS
+    # loop; a whole-file gate (Phase B) runs on the spliced TU. ``cc_path`` /
+    # ``cxx_path`` select the compiler (gcc/g++ primary; clang/clang++ also
+    # work — the resolver honors whichever is on PATH). ``c_std`` / ``cpp_std``
+    # set the ``-std=`` flag; defaults (c11 / c++17) are widely supported
+    # baselines. Degrades to "not checked" (never crashes) when the compiler is
+    # absent — the same graceful-degrade contract as rustc.
+    cc_path: str = "gcc"
+    cxx_path: str = "g++"
+    c_std: str = "c11"
+    cpp_std: str = "c++17"
     # Clippy lint check (cargo clippy) for Rust: a quality check that runs in
     # Phase B on the fully-spliced file and flags clippy findings the merge
     # INTRODUCES (compared to a pre-conflict baseline, so a repo's pre-existing
