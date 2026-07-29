@@ -401,6 +401,34 @@ def test_prefix_dedup_does_not_strip_comments_or_blanks():
     assert not _is_statement_line("    let x = 1;")  # not a statement keyword prefix
 
 
+def test_prefix_dedup_recognizes_c_cpp_statement_lines():
+    """C/C++ function/field headers are statement lines so a doubled header at a
+    splice junction is eligible for deterministic prefix-dedup. Regression guard
+    for the C/C++ type-introducer keywords added to _STATEMENT_KEYWORDS."""
+    from capybase.orchestrator import _is_statement_line, _same_statement_head
+    # C/C++ leading forms are recognized.
+    assert _is_statement_line("int main(void) {")
+    assert _is_statement_line("void process(int n) {")
+    assert _is_statement_line("struct point create(void) {")
+    assert _is_statement_line("char *read_line(void) {")
+    assert _is_statement_line("static int counter = 0;")  # static already a kw
+    assert _is_statement_line("int x = 1;")  # doubled assignment is dedupable too
+    # Rust/Python behavior unchanged (no regression on the proven langs).
+    assert _is_statement_line("pub fn foo() {}")
+    assert _is_statement_line("def bar():")
+    # Comments still rejected (the # filter is Python-comment semantics; a C/C++
+    # preprocessor # line is conservatively treated as non-statement, which only
+    # means a doubled #include falls back to the normal merge — correct).
+    assert not _is_statement_line("#include <stdio.h>")
+    assert not _is_statement_line("// C++ comment")
+    # Two DIFFERENT functions with the same type head must NOT be treated as the
+    # same statement (no false-positive dedup): same head "int " but neither is a
+    # prefix of the other.
+    assert not _same_statement_head("int main(void) {", "int compute(void) {")
+    # A genuine doubled header (one a prefix of the other) IS the same head.
+    assert _same_statement_head("int main", "int main(void) {")
+
+
 # ---------------------------------------------------------------------------
 # _try_boundary_echo_strip: generic splice-boundary echo removal
 # (the generalization of prefix_dedup to any line-sequence overlap)

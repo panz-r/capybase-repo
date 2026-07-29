@@ -980,7 +980,11 @@ def _is_statement_line(line: str) -> bool:
     # Statement keywords that indicate a real code boundary.
     for kw in ("use ", "pub use", "pub fn", "fn ", "impl ", "struct ",
                "enum ", "trait ", "mod ", "const ", "static ", "type ",
-               "import ", "from ", "def ", "class "):
+               "import ", "from ", "def ", "class ",
+               # C/C++ type-introducer leading forms (function/field headers).
+               "int ", "void ", "char ", "double ", "float ", "long ",
+               "short ", "unsigned ", "signed ", "bool ", "auto ",
+               "namespace ", "template "):
         if stripped.startswith(kw):
             return True
     return False
@@ -990,6 +994,10 @@ _STATEMENT_KEYWORDS = (
     "use ", "pub use", "pub fn", "fn ", "impl ", "struct ",
     "enum ", "trait ", "mod ", "const ", "static ", "type ",
     "import ", "from ", "def ", "class ",
+    # C/C++ type-introducer leading forms (function/field headers).
+    "int ", "void ", "char ", "double ", "float ", "long ",
+    "short ", "unsigned ", "signed ", "bool ", "auto ",
+    "namespace ", "template ",
 )
 
 
