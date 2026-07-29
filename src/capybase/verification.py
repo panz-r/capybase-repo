@@ -1981,6 +1981,7 @@ def _is_rust_resolution_error(msg: str) -> bool:
 # catching real defects over suppressing noise.
 _CCS_SEMANTIC_PATTERNS = (
     "undeclared identifier",          # gcc/clang: use of undeclared identifier
+    "implicit declaration of function",  # gcc C-mode: undeclared function (C-specific)
     "was not declared in this scope",  # g++ scope resolution
     "has not been declared",          # g++ forward-decl-only
     "no matching function",           # overload resolution (needs full TU)
@@ -2303,6 +2304,116 @@ class RustSyntaxValidator:
             message=msg,
             detail={"diagnostic": msg},
             features={"rust_syntax_checked": True, "syntax_passed": ok},
+        )
+
+
+class CcsSyntaxValidator:
+    """Per-unit C/C++ syntax check (CEGIS loop hardening).
+
+    The C/C++ analog of ``RustSyntaxValidator``: catches parse-level syntax
+    errors (a stray brace, a missing semicolon, an unterminated string) in the
+    CEGIS loop so a malformed candidate is fed the exact compile error on the
+    FIRST retry — not deferred vaguely to Phase B. Splices the candidate into
+    the worktree, blanks sibling conflict markers to ``//`` comments (so the
+    spliced TU parses even in a multi-hunk file), and runs
+    ``_compile_ccs`` (``gcc``/``g++ -fsyntax-only``).
+
+    C/C++-only (``c``/``cpp``/``c++``); no-op (passes) for other languages.
+    Skips when the compiler is absent or the marker span is unknown. Defer to
+    Phase B when braces are unbalanced (a per-unit splice filling a span inside
+    a larger construct is structurally incomplete). Semantic errors (undeclared
+    identifiers, type mismatches — anything needing full translation-unit
+    context) are filtered via ``_is_ccs_resolution_error`` and deferred to the
+    whole-file check, mirroring how Rust defers ``E0xxx`` codes to cargo. Runs
+    as a hard failure (``severity="error"``) so it's retryable.
+    """
+
+    name = "ccs_syntax"
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        if ctx.unit.language not in ("c", "cpp", "c++"):
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="not C/C++; syntax check skipped",
+                features={"ccs_syntax_checked": False},
+            )
+        if ctx.unit.marker_span is None:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="no marker span",
+                features={"ccs_syntax_checked": False},
+            )
+        if not ctx.candidate.resolved_text:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="empty resolved_text; syntax check skipped",
+                features={"ccs_syntax_checked": False},
+            )
+        cfg = ctx.config
+        # Splice + blank sibling markers so the parse reflects real structure
+        # even in a multi-hunk file (sibling marker blocks would corrupt gcc).
+        spliced = splice_resolution(
+            ctx.unit.original_worktree_text,
+            ctx.unit.marker_span,
+            ctx.candidate.resolved_text,
+        )
+        spliced = _blank_markers(spliced, ctx.unit.language)
+        # Brace-balance guard: a per-unit splice that fills a marker span inside
+        # a larger construct (e.g. a bare function body without the surrounding
+        # signature) produces structurally-incomplete code. Skip the compile
+        # (defer to Phase B whole-file) when braces are unbalanced.
+        if not _braces_balanced(spliced, ctx.unit.language):
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="spliced text has unbalanced braces; deferring to whole-file check",
+                features={"ccs_syntax_checked": False, "syntax_passed": True},
+            )
+        # Pick the compiler by language: C++ → g++/clang++, C → gcc/clang.
+        is_cpp = ctx.unit.language in ("cpp", "c++")
+        cc_default = "g++" if is_cpp else "gcc"
+        cc = _resolve_tool(getattr(cfg, "cxx_path" if is_cpp else "cc_path", cc_default))
+        if cc is None:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="C/C++ compiler not available; syntax not checked",
+                features={"ccs_syntax_checked": False, "syntax_passed": True},
+            )
+        std = getattr(cfg, "cpp_std" if is_cpp else "c_std", "c++17" if is_cpp else "c11")
+        suffix = ".cpp" if is_cpp else ".c"
+        try:
+            ok, msg = _compile_ccs(spliced, cc_path=cc, std=std, suffix=suffix)
+        except FileNotFoundError:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="C/C++ compiler vanished; syntax not checked",
+                features={"ccs_syntax_checked": False, "syntax_passed": True},
+            )
+        except Exception as exc:  # noqa: BLE001 - never crash resolution
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message=f"C/C++ syntax check error: {exc}",
+                features={"ccs_syntax_checked": False, "syntax_passed": True},
+            )
+        # Per-unit standalone gcc/clang can't resolve symbols from another
+        # translation unit or a header not pre-declared in the fragment — so a
+        # name-resolution error (undeclared identifier, no matching function) is
+        # NOT a syntax defect in the merge; it's an artifact of compiling out of
+        # context. Only surface true PARSE errors (missing semicolon, stray
+        # brace, unterminated string). Resolution errors fall through to Phase B
+        # (verify_file) which compiles the whole TU with full context.
+        if not ok and _is_ccs_resolution_error(msg):
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="C/C++ standalone-compile showed resolution/type errors (not a syntax defect); deferring to whole-file check",
+                features={"ccs_syntax_checked": True, "syntax_passed": True},
+            )
+        return VerificationCheckResult(
+            name=self.name,
+            passed=ok,
+            severity="error",
+            message=msg,
+            detail={"diagnostic": msg},
+            features={"ccs_syntax_checked": True, "syntax_passed": ok},
         )
 
 
@@ -3139,6 +3250,7 @@ class VerificationEngine:
         if getattr(config, "enable_per_unit_syntax_check", True):
             validators.append(PythonSyntaxValidator())
             validators.append(RustSyntaxValidator())
+            validators.append(CcsSyntaxValidator())
         # Extra validators (e.g. the opt-in VerifierModelValidator) are appended
         # so they run last — after the cheap structural checks. This keeps the
         # rank-order validation loop cheap for structurally-invalid candidates
