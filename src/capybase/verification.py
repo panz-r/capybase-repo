@@ -2645,6 +2645,50 @@ def reduce_cascade_errors(errors: list[str], *, max_root_causes: int = 3) -> lis
     return result[:max_root_causes] if len(result) > max_root_causes else result
 
 
+def _append_diagnostic_failure(
+    new_errors: list[str],
+    hard: list[VerificationFailure],
+    config: "ValidationConfig",
+    *,
+    validator: str,
+    message_prefix: str,
+    tool: str,
+    extra_detail: dict | None = None,
+    require_gate: bool = True,
+) -> None:
+    """Build a ``VerificationFailure`` from a diagnostic delta and append it.
+
+    Consolidates the three formerly-duplicated blocks in
+    ``_run_cargo_syntax_check`` / ``_run_cargo_manifest_check`` /
+    ``_run_lsp_diagnostics`` that each: reduced the cascade, truncated to 3
+    messages for the summary, and built the same ``detail`` shape. Computes
+    ``reduce_cascade_errors`` ONCE (the originals recomputed it twice).
+
+    No-op when ``new_errors`` is empty, or (when ``require_gate``) when
+    ``config.require_syntax_if_supported`` is False — matching the per-call-site
+    guards. NOT used by ``_run_clippy_check`` (which diverges structurally:
+    dynamic severity, ``findings`` detail key, routes through
+    ``VerificationCheckResult``).
+    """
+    if not new_errors:
+        return
+    if require_gate and not config.require_syntax_if_supported:
+        return
+    reduced = reduce_cascade_errors(new_errors)
+    msg = "; ".join(m[:80] for m in reduced[:3])
+    detail: dict = {"new_errors": reduced[:5], "tool": tool}
+    if extra_detail:
+        detail.update(extra_detail)
+    hard.append(
+        VerificationFailure(
+            validator=validator,
+            severity="error",
+            message=f"{message_prefix}: {len(new_errors)} new error(s): {msg}",
+            detail=detail,
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # Whole-file semantic checks (Python, stdlib ast): duplicate definitions and
 # unreachable code. These are the two "looks plausible, passes line/token
@@ -3478,20 +3522,10 @@ class VerificationEngine:
         features["syntax_passed"] = syntax_ok
         features["syntax_tool"] = "cargo"
         features["syntax_new_error_count"] = len(new_errors)
-        if new_errors and self.config.require_syntax_if_supported:
-            reduced = reduce_cascade_errors(new_errors)
-            msg = "; ".join(m[:80] for m in reduced[:3])
-            hard.append(
-                VerificationFailure(
-                    validator="syntax",
-                    severity="error",
-                    message=f"cargo check: {len(new_errors)} new error(s): {msg}",
-                    detail={
-                        "new_errors": reduce_cascade_errors(new_errors)[:5],
-                        "tool": "cargo",
-                    },
-                )
-            )
+        _append_diagnostic_failure(
+            new_errors, hard, self.config,
+            validator="syntax", message_prefix="cargo check", tool="cargo",
+        )
         return True
 
     def _run_cargo_manifest_check(
@@ -3573,21 +3607,11 @@ class VerificationEngine:
         features["syntax_passed"] = syntax_ok
         features["syntax_tool"] = "cargo"
         features["syntax_new_error_count"] = len(new_errors)
-        if new_errors and self.config.require_syntax_if_supported:
-            reduced = reduce_cascade_errors(new_errors)
-            msg = "; ".join(m[:80] for m in reduced[:3])
-            hard.append(
-                VerificationFailure(
-                    validator="syntax",
-                    severity="error",
-                    message=f"cargo check: {len(new_errors)} new error(s): {msg}",
-                    detail={
-                        "new_errors": reduce_cascade_errors(new_errors)[:5],
-                        "tool": "cargo",
-                        "manifest": True,
-                    },
-                )
-            )
+        _append_diagnostic_failure(
+            new_errors, hard, self.config,
+            validator="syntax", message_prefix="cargo check", tool="cargo",
+            extra_detail={"manifest": True},
+        )
         return True, syntax_ok
 
     def _run_clippy_check(
@@ -3906,20 +3930,11 @@ class VerificationEngine:
             suppress_codes=set(getattr(self.config, "rust_suppress_codes", []) or []),
         )
         features["lsp_new_error_count"] = len(new_errors)
-        if new_errors:
-            reduced = reduce_cascade_errors(new_errors)
-            msg = "; ".join(m[:80] for m in reduced[:3])
-            hard.append(
-                VerificationFailure(
-                    validator="lsp_diagnostics",
-                    severity="error",
-                    message=f"LSP introduced {len(new_errors)} new error(s): {msg}",
-                    detail={
-                        "new_errors": reduce_cascade_errors(new_errors)[:5],
-                        "tool": after.tool,
-                    },
-                )
-            )
+        _append_diagnostic_failure(
+            new_errors, hard, self.config,
+            validator="lsp_diagnostics", message_prefix="LSP introduced",
+            tool=after.tool, require_gate=False,
+        )
 
     def _run_shadow_tests(
         self,

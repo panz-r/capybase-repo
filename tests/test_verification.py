@@ -1363,3 +1363,95 @@ def test_exclusive_generic_passes():
     res = _engine().verify(unit, cand)
     assert res.passed
     assert res.features.get("exclusive_proof_class") == "GENERIC_EXCLUSIVE"
+
+
+# ---------------------------------------------------------------------------
+# _append_diagnostic_failure helper (dedup of cargo/manifest/lsp failure blocks)
+# ---------------------------------------------------------------------------
+
+
+def test_append_diagnostic_failure_builds_expected_shape():
+    """The consolidated helper must produce the same VerificationFailure shape
+    the three former duplicated blocks did: ``{prefix}: N new error(s): msg``
+    with ``detail={"new_errors": reduced[:5], "tool": T}``."""
+    from capybase.verification import _append_diagnostic_failure, VerificationFailure
+    cfg = ValidationConfig(require_syntax_if_supported=True)
+    hard: list[VerificationFailure] = []
+    errors = ["error[E0432]: unresolved import", "error[E0599]: borrow"]
+    _append_diagnostic_failure(
+        errors, hard, cfg,
+        validator="syntax", message_prefix="cargo check", tool="cargo",
+    )
+    assert len(hard) == 1
+    f = hard[0]
+    assert f.validator == "syntax"
+    assert f.severity == "error"
+    assert f.message.startswith("cargo check: 2 new error(s):")
+    assert f.detail["tool"] == "cargo"
+    assert len(f.detail["new_errors"]) <= 5
+
+
+def test_append_diagnostic_failure_extra_detail_merged():
+    """The manifest path passes ``extra_detail={"manifest": True}``; it must
+    land in the detail dict alongside the standard keys."""
+    from capybase.verification import _append_diagnostic_failure, VerificationFailure
+    cfg = ValidationConfig(require_syntax_if_supported=True)
+    hard: list[VerificationFailure] = []
+    _append_diagnostic_failure(
+        ["err1"], hard, cfg,
+        validator="syntax", message_prefix="cargo check", tool="cargo",
+        extra_detail={"manifest": True},
+    )
+    assert hard[0].detail["manifest"] is True
+    assert hard[0].detail["tool"] == "cargo"
+
+
+def test_append_diagnostic_failure_respects_gate():
+    """When ``require_gate=True`` and ``require_syntax_if_supported=False``,
+    no failure is appended (the cargo syntax/manifest paths are gated)."""
+    from capybase.verification import _append_diagnostic_failure, VerificationFailure
+    cfg = ValidationConfig(require_syntax_if_supported=False)
+    hard: list[VerificationFailure] = []
+    _append_diagnostic_failure(
+        ["err1"], hard, cfg,
+        validator="syntax", message_prefix="cargo check", tool="cargo",
+        require_gate=True,
+    )
+    assert hard == []
+
+
+def test_append_diagnostic_failure_no_gate_for_lsp():
+    """The LSP path passes ``require_gate=False`` — failures append regardless
+    of ``require_syntax_if_supported`` (matching the former ``if new_errors:``
+    guard)."""
+    from capybase.verification import _append_diagnostic_failure, VerificationFailure
+    cfg = ValidationConfig(require_syntax_if_supported=False)
+    hard: list[VerificationFailure] = []
+    _append_diagnostic_failure(
+        ["err1"], hard, cfg,
+        validator="lsp_diagnostics", message_prefix="LSP introduced",
+        tool="rust-analyzer", require_gate=False,
+    )
+    assert len(hard) == 1
+    assert hard[0].detail["tool"] == "rust-analyzer"
+
+
+def test_append_diagnostic_failure_calls_reduce_cascade_once(monkeypatch):
+    """Regression: the former duplicated blocks called ``reduce_cascade_errors``
+    TWICE per failure (once for the message truncation, once for the detail
+    dict). The consolidated helper computes it ONCE."""
+    import capybase.verification as vmod
+    calls = {"n": 0}
+    real = vmod.reduce_cascade_errors
+    def counting(errors, *, max_root_causes=3):
+        calls["n"] += 1
+        return real(errors, max_root_causes=max_root_causes)
+    monkeypatch.setattr(vmod, "reduce_cascade_errors", counting)
+    cfg = ValidationConfig(require_syntax_if_supported=True)
+    hard: list = []
+    # Call via the module so the helper's global lookup sees the monkeypatch.
+    vmod._append_diagnostic_failure(
+        ["e1", "e2", "e3", "e4"], hard, cfg,
+        validator="syntax", message_prefix="cargo check", tool="cargo",
+    )
+    assert calls["n"] == 1, f"expected 1 reduce_cascade_errors call, got {calls['n']}"
