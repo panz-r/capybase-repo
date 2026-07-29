@@ -4005,14 +4005,14 @@ class VerificationEngine:
         features.setdefault("duplicate_definition_count", 0)
         if language == "python":
             dupes = _py_duplicate_definitions(whole)
-        elif language == "rust":
+        elif language in ("rust", "c", "cpp", "c++"):
             try:
                 from capybase.adapters import structural
             except Exception:  # noqa: BLE001
                 return
-            if not structural.is_available("rust"):
+            if not structural.is_available(language):
                 return
-            dupes = structural.duplicate_definitions(whole, "rust")
+            dupes = structural.duplicate_definitions(whole, language)
         else:
             return
         if dupes is None:
@@ -4032,7 +4032,7 @@ class VerificationEngine:
                 baseline_dupes = _py_duplicate_definitions(baseline_text)
             else:
                 try:
-                    baseline_dupes = structural.duplicate_definitions(baseline_text, "rust")
+                    baseline_dupes = structural.duplicate_definitions(baseline_text, language)
                 except Exception:
                     baseline_dupes = None
             if baseline_dupes:

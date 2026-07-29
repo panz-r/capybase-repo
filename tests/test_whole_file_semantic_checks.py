@@ -35,6 +35,15 @@ def _rust_available() -> bool:
         return False
 
 
+def _cc_available() -> bool:
+    try:
+        from capybase.adapters import structural
+
+        return structural.is_available("cpp")
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _verify_file(whole: str, language: str = "python", path: str = "app.py"):
     """Run verify_file with the whole resolved file as a single whole-file span.
 
@@ -165,6 +174,44 @@ def test_rust_same_fn_in_different_impls_not_duplicate():
     )
     res = _verify_file(whole, language="rust", path="src/c.rs")
     assert [f for f in res.hard_failures if f.validator == "duplicate_definition"] == []
+
+
+# ---------------------------------------------------------------------------
+# Duplicate definitions (C/C++, via structural.duplicate_definitions)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    not _cc_available(), reason="abstract parser unavailable for c/cpp"
+)
+def test_c_duplicate_function_caught():
+    """Two C functions with the same name at file scope collide. This is the
+    safety net for entity-merge / insertion-union: if a merge concatenates both
+    sides' additions and a function name collides, the verifier catches it
+    (previously C/C++ hit the ``else: return`` no-op branch)."""
+    whole = (
+        "int compute(int n) { return n + 1; }\n\n"
+        "int compute(int n) { return n + 2; }\n"
+    )
+    res = _verify_file(whole, language="c", path="src/c.c")
+    dup = [f for f in res.hard_failures if f.validator == "duplicate_definition"]
+    assert len(dup) == 1
+    assert dup[0].detail["name"] == "compute"
+    assert res.features.get("duplicate_definition_checked") is True
+
+
+@pytest.mark.skipif(
+    not _cc_available(), reason="abstract parser unavailable for c/cpp"
+)
+def test_cpp_duplicate_class_caught():
+    """Two C++ classes with the same name collide."""
+    whole = (
+        "class Config {\npublic:\n    int x;\n};\n\n"
+        "class Config {\npublic:\n    int y;\n};\n"
+    )
+    res = _verify_file(whole, language="cpp", path="src/c.cpp")
+    dup = [f for f in res.hard_failures if f.validator == "duplicate_definition"]
+    assert len(dup) == 1
+    assert dup[0].detail["name"] == "Config"
 
 
 # ---------------------------------------------------------------------------

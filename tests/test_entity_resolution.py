@@ -132,6 +132,70 @@ def test_both_sides_add_distinct_rust_methods_merges():
 
 
 @needs_ts
+def test_both_sides_add_distinct_cpp_class_methods_merges():
+    """C++ analog: two sides each add a different method to one class. The
+    entity-merge gate now admits c/cpp (was python/rust only). For distinct
+    whole-line additions, insertion_union (which fires earlier in the dispatch)
+    resolves this; the merge succeeds with both methods present."""
+    base = (
+        "class Calc {\n"
+        "public:\n"
+        "    int base_val() { return 0; }\n"
+        "};"
+    )
+    cur = (
+        "class Calc {\n"
+        "public:\n"
+        "    int base_val() { return 0; }\n"
+        "    int add(int a, int b) { return a + b; }\n"
+        "};"
+    )
+    rep = (
+        "class Calc {\n"
+        "public:\n"
+        "    int base_val() { return 0; }\n"
+        "    int sub(int a, int b) { return a - b; }\n"
+        "};"
+    )
+    result = resolve_structurally(_unit(base, cur, rep, lang="cpp", path="calc.cpp"))
+    assert result.resolved, result.rule
+    assert "int add" in result.text   # current's addition
+    assert "int sub" in result.text   # replayed's addition
+    assert "base_val" in result.text  # base entity preserved
+
+
+@needs_ts
+def test_cpp_same_method_modified_by_both_declines():
+    """Both sides modify the SAME C++ method's body differently → genuine
+    intra-entity conflict → decline. This is the case where entity-merge's
+    same-vs-distinct-entity detection matters (insertion_union would also
+    decline since the base line is modified, but entity_disjoint is the rule
+    that classifies it correctly)."""
+    base = (
+        "class C {\n"
+        "public:\n"
+        "    int f(int a) { return a + 1; }\n"
+        "};"
+    )
+    cur = (
+        "class C {\n"
+        "public:\n"
+        "    int f(int a) { return a + 2; }\n"
+        "};"
+    )
+    rep = (
+        "class C {\n"
+        "public:\n"
+        "    int f(int a) { return a + 3; }\n"
+        "};"
+    )
+    # Both sides changed the same line of the same method — no rule can
+    # deterministically merge a same-line value disagreement. Unresolved.
+    result = resolve_structurally(_unit(base, cur, rep, lang="cpp", path="c.cpp"))
+    assert not result.resolved
+
+
+@needs_ts
 def test_same_entity_modified_by_both_declines():
     """Both sides modify the SAME method → genuine intra-entity conflict → decline."""
     base = "class C:\n    def f(self):\n        return 1"

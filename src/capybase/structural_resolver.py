@@ -1673,7 +1673,7 @@ def _prepare_entity_merge(unit: ConflictUnit) -> _EntityMergeCtx | None:
     except Exception:  # noqa: BLE001
         return None
     lang = unit.language
-    if lang not in ("python", "rust"):
+    if lang not in ("python", "rust", "c", "cpp", "c++"):
         return None
     meta = unit.structural_metadata
     enc_text = meta.get("enclosing_node_text")
