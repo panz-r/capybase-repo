@@ -29,11 +29,8 @@ Pure of I/O.
 
 from __future__ import annotations
 
-import re
-
 from capybase.import_union import (
     parse_use_leaves,
-    _find_use_lines,
     _render_group_member,
     _leaf_identity,
     _parse_visibility_and_attrs,

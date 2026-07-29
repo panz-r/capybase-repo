@@ -69,12 +69,10 @@ KIND_UNKNOWN = "unknown_block"
 #: ``"C"`` = declarative/data (not yet implemented).
 FAMILY_A = "A"
 FAMILY_B = "B"
-FAMILY_C = "C"
 
-#: Language string → family. Only ``python`` and ``rust`` are exposed as
-#: ``is_available`` in (to keep the existing skip-path tests green),
-#: but the families for the other Family-A languages are declared here so the
-#: dispatch is correct and language expansion is a one-line flip.
+#: Language string → family. ``detect_family`` consults this map; the
+#: grammar-free state machines support every Family-A (brace-delimited) and
+#: Family-B (indentation-delimited) language listed here.
 _LANG_FAMILY: dict[str, str] = {
     # Family B (indentation-delimited)
     "python": FAMILY_B,
@@ -102,15 +100,6 @@ _LANG_FAMILY: dict[str, str] = {
 
 #: File extension → language: now the single source of truth in
 #: ``language.EXTENSION_TO_LANGUAGE``. Re-exported above as ``_EXT_LANG``.
-
-#: Languages capybase advertises structural support for. Family A (brace-
-#: delimited: Rust, JS, TS, Go, Java, C/C++, C#, Kotlin, Swift, Scala, Dart,
-#: PHP) and Family B (indentation-delimited: Python) are all supported by the
-#: grammar-free state machines. Family C (declarative/data) is not yet
-#: implemented. ``detect_family`` knows the broader map; ``is_available``
-#: gates the public API (currently just Python and Rust, to keep the skip-path
-#: tests green — expanding it is a one-line flip).
-_SUPPORTED_LANGUAGES = frozenset(_LANG_FAMILY.keys())
 
 
 def detect_family(language: str | None, path: str | None = None) -> str | None:

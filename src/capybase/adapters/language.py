@@ -8,7 +8,7 @@ modules (the comment-prefix decision alone had three copies). This module gives
 that logic a single home so adding a language is a new adapter, not edits to the
 verifier/orchestrator.
 
-Scope — the PURE, low-risk behaviors first (this phase):
+Scope — the pure, low-risk behaviors the registry consolidates:
 - ``comment_prefix`` / ``comment_line_prefixes`` — the `//` vs `#` decision
   (collapses the three duplicated implementations).
 - ``source_extension`` — ``.py`` / ``.rs`` (used by structural symbol resolution).
@@ -17,13 +17,13 @@ Scope — the PURE, low-risk behaviors first (this phase):
   (Python), used by the structural resolver's trailer logic.
 - ``tree_sitter_language`` — deprecated; always returns ``None``. The abstract
   parser (:mod:`capybase.adapters.abstract_parser`) is the sole structural
-  backend. Retained on the Protocol for API compatibility.
+  backend. Retained on the Protocol for API compatibility (see
+  ``tests/test_language_adapter.py``).
 
 The I/O-heavy behaviors (syntax_check / cargo check / LSP / clippy / shadow
-tests) stay in their existing helpers for now — they're deeply interleaved with
-repo/path context and the diagnostic-delta machinery, so migrating them is a
-separate, behavior-preservation-gated phase. The registry is the seam they'll
-dispatch through when that migration lands.
+tests) stay in their existing helpers — they're deeply interleaved with
+repo/path context and the diagnostic-delta machinery, so they are not plumbed
+through the registry.
 
 A ``LanguageAdapterRegistry`` is keyed by the language string
 :func:`conflict_extractor.detect_language` produces. Unsupported languages get
@@ -353,14 +353,15 @@ class LanguageAdapterRegistry:
 
 
 # The process-wide default registry. Built-ins are registered at import; tests
-# and callers use :func:`adapter_for` for the common case. A future phase wires
-# the I/O-heavy behaviors (syntax_check / LSP / clippy) to dispatch through here.
+# and callers use :func:`adapter_for` for the common case. The I/O-heavy
+# behaviors (syntax_check / LSP / clippy) dispatch through their existing
+# helpers, not the registry.
 #
-# Fix #12: register adapters for every language the abstract parser supports.
-# Before this, only python/rust had adapters; every other parser-supported
-# language (JS/TS/Go/Java/C/C++/C#/Kotlin/Swift/Scala/Dart/PHP) fell through to
+# Adapters are registered for every language the abstract parser supports.
+# Registering only python/rust would leave every other parser-supported language
+# (JS/TS/Go/Java/C/C++/C#/Kotlin/Swift/Scala/Dart/PHP) falling through to
 # NullAdapter, whose comment_prefix is '#' — wrong for all brace languages,
-# which use '//'. This silently broke comment-line detection in consensus
+# which use '//'. That would silently break comment-line detection in consensus
 # ranking and context building, and definition-span symbol search.
 _REGISTRY = LanguageAdapterRegistry()
 _REGISTRY.register(PythonAdapter())

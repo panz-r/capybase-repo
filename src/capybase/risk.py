@@ -1,8 +1,8 @@
 """Risk policy: turn a VerificationResult into an accept/retry/escalate action.
 
-The MVP is a deterministic rules engine. The orchestrator consumes only the
-``action`` — never how it was derived — so a later calibrated classifier or
-conformal predictor producing the same ``RiskDecision`` shape drops in here.
+Implemented as a deterministic rules engine. The orchestrator consumes only the
+``action`` — never how it was derived — so a calibrated classifier or conformal
+predictor producing the same ``RiskDecision`` shape could drop in here.
 """
 
 from __future__ import annotations
@@ -53,10 +53,10 @@ class RiskEngine:
         """The effective critic retry budget, scaled by intent coverage.
 
         A low-coverage merge (the model dropped a whole side's worth of units)
-        is fundamentally wrong — the retry almost never converges, just loops
-        (the A/B's 30-min stall). A high-coverage merge that the critic flagged
-        is a subtle, fixable failure worth more retries. So scale the budget
-        DOWN for low coverage and keep it at the configured ceiling for high:
+        is fundamentally wrong — the retry almost never converges, just loops.
+        A high-coverage merge that the critic flagged is a subtle, fixable
+        failure worth more retries. So scale the budget DOWN for low coverage
+        and keep it at the configured ceiling for high:
 
           coverage >= 0.9  →  full budget
           0.5 <= coverage < 0.9  →  ceil/2 (rounded up)
@@ -161,14 +161,14 @@ class RiskEngine:
         # sibling hunk). Escalate immediately, preserving the candidate for
         # human review. no_op_repair bypasses the retry budget unconditionally.
         #
-        # Monotonic pass-state (V8 regression fix): suspicion is a *request to
-        # investigate a validator error*, and a candidate that passed ALL hard
-        # checks has no error to investigate. Gating on ``not result.passed``
-        # preserves the escape hatch's purpose (escalate a genuinely-failing
-        # candidate the model believes is misdiagnosed) while preventing a model
-        # assertion from overriding a proven-correct candidate. Flight-data
-        # audit (V7+V8, 286 cases): the flag fired 21 times, rescued a true
-        # false-positive zero times, over-rode a passing candidate 9 times.
+        # Monotonic pass-state: suspicion is a *request to investigate a
+        # validator error*, and a candidate that passed ALL hard checks has no
+        # error to investigate. Gating on ``not result.passed`` preserves the
+        # escape hatch's purpose (escalate a genuinely-failing candidate the
+        # model believes is misdiagnosed) while preventing a model assertion
+        # from overriding a proven-correct candidate. (The flag previously fired
+        # often, but flight-data audits showed it over-rode passing candidates
+        # far more often than it rescued a true false positive.)
         if failure_kind == "no_op_repair":
             return _escalate(result, [
                 "repair was a no-op (search == replace) — model sees nothing to fix",
@@ -320,7 +320,7 @@ class RiskEngine:
                 reasons=soft or ["dropped a base-referenced dependency"],
                 required_followups=soft,
             )
-        # Dropping a symbol a LATER source commit depends on (#idea 7): the
+        # Dropping a symbol a LATER source commit depends on: the
         # FutureObligationValidator flags this as a warning. Retry so the model
         # re-includes the symbol; escalate if it persists (same class as the
         # side-obligation + dependency drops above — "didn't preserve what the

@@ -1,24 +1,45 @@
 """Deterministic structural conflict resolution.
 
 A safe, LLM-free pre-resolver that runs BEFORE the model. It attempts to produce
-a correct merged text from base + current + replayed using four provably-safe
-rules — no heuristics that could introduce a wrong merge:
+a correct merged text from base + current + replayed using provably-safe rules.
+The early rules are exact (no guess); the later union/value rules use a
+deterministic 'newer' or ordered-union heuristic, but a wrong guess is still
+caught by the validation pipeline and falls through to the LLM — see the safety
+contract below. The complete dispatch order lives in :func:`resolve_structurally`;
+the rules, in firing order, are:
 
-1. **identical_sides** — current and replayed normalized-equal → emit that side.
-   (Survey: "both sides identical → delete the conflict".)
-2. **one_sided_change** — only one side diverged from base → take the changed
+1. **delete_side** — one side deleted and the other is empty/base → take the
+   surviving side (handles modify/delete).
+2. **identical_sides** — current and replayed normalized-equal → emit that side.
+3. **one_sided_change** — only one side diverged from base → take the changed
    side; the other conceded. Resolves a large fraction of real conflicts.
-3. **disjoint_edits** — both sides changed, but on NON-overlapping line ranges
+4. **disjoint_edits** — both sides changed, but on NON-overlapping line ranges
    within the hunk → merge both edits.
    No overlap means no semantic conflict at this granularity.
-4. **zealous_merge** — per-base-line 3-way merge ( zealous
-   refinement). Where git's coarse hunk groups adjacent edits into one conflict,
-   this aligns each side against base line-by-line and resolves every region
-   that is agreed (both made the same change) or one-sided (one side conceded a
-   sub-region the other touched). Returns None the moment it hits a genuine
-   two-sided disagreement or an ambiguous pure insertion. This is the rule that
-   catches the case ``disjoint_edits`` must refuse: two edits that *overlap*
-   in base-line span yet are still safe because one side matches base there.
+5. **zealous_merge** — per-base-line 3-way merge. Where git's coarse hunk
+   groups adjacent edits into one conflict, this aligns each side against base
+   line-by-line and resolves every region that is agreed (both made the same
+   change) or one-sided (one side conceded a sub-region the other touched).
+   Returns None the moment it hits a genuine two-sided disagreement or an
+   ambiguous pure insertion. This is the rule that catches the case
+   ``disjoint_edits`` must refuse: two edits that *overlap* in base-line span
+   yet are still safe because one side matches base there.
+6. **entity_disjoint** / **refactoring_aware_merge** — entity-level
+   counterparts of (4)/(5): partition the conflict by top-level entity and
+   merge disjoint entity changes; when an overlap is purely a rename-vs-body-
+   modify split, compose the renamer's header with the modifier's body.
+7. **token_disjoint** — line-level generalization of (4) for token-aligned
+   within-line edits.
+8. **text_value_resolution** — pure-prose value bumps (CHANGELOG headings,
+   release notes) where there are no braces/``=``; takes the
+   lexicographically-later token. Declines when one side is version-like and
+   the other is prose (a heading reorganization, not a bump).
+9. **dependency_version_resolution** — TOML ``name = "X.Y.Z"`` (incl. inline
+   tables and fenced TOML in Markdown) version-bump conflicts the prose rule's
+   brace gate excludes; takes the semver-greater version.
+10. **list_union / dict_union / insertion_union** — both sides append distinct
+    items/keys/lines at the same anchor; an opinionated deterministic ordering
+    (current-appends before replayed-appends) resolves them.
 
 Safety contract: every resolution this produces is STILL run through the full
 validation pipeline (markers/splice/AST/syntax) by the orchestrator before being
@@ -106,12 +127,13 @@ def _normalize(text: str) -> str:
 
 
 def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
-    """Attempt the three deterministic rules in priority order.
+    """Attempt the deterministic resolution rules in priority order.
 
     Returns the first that applies, else an unresolved result. The unit's sides
     are read from ``unit.current.text`` / ``unit.replayed.text`` / ``unit.base.text``
     (the diff3-refined sides are already preferred at extraction, so these are the
-    tightest available). No rule mutates the unit.
+    tightest available). No rule mutates the unit. See the module docstring for
+    the complete rule list and firing order.
     """
     current = unit.current.text or ""
     replayed = unit.replayed.text or ""
@@ -202,13 +224,13 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if merged is not None:
             return StructuralResolution(rule="token_disjoint", text=merged)
 
-        # Prose value-resolution (Issue 1 from the live realworld eval): both
-        # sides edited the SAME prose line differently (a version-string bump,
-        # a changelog header, a date). Every code-shaped rule above declines
-        # (no entities, same-line two-sided edit); the LLM struggles on these.
-        # Takes the lexicographically-later value (the 'newer version' heuristic).
-        # Conservative: fires only on non-code languages (markdown/text/yaml)
-        # AND small, single-value-diff conflicts.
+        # Prose value-resolution: both sides edited the SAME prose line
+        # differently (a version-string bump, a changelog header, a date). Every
+        # code-shaped rule above declines (no entities, same-line two-sided
+        # edit); the LLM struggles on these. Takes the lexicographically-later
+        # value (the 'newer version' heuristic). Conservative: fires only on
+        # non-code languages (markdown/text/yaml) AND small, single-value-diff
+        # conflicts.
         merged = _try_text_value_resolution(unit)
         if merged is not None:
             return StructuralResolution(rule="text_value_resolution", text=merged)
@@ -217,19 +239,17 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         # above. Fires on the brace-bearing `name = { version = "X" }` shape the
         # prose rule's gates exclude — dependency version literals in Cargo.toml
         # or a fenced-TOML block in a README. Takes the semver-greater version.
-        # The most common real-world case the prose rule declines: a README
-        # dependency-version bump inside a ```toml fence.
         merged = _try_dependency_version_resolution(unit)
         if merged is not None:
             return StructuralResolution(rule="dependency_version_resolution", text=merged)
 
-        # Rules 8-10: easy-merge unions. Every rule above DELIBERATELY declines
-        # pure insertions/appends (their relative order is ambiguous). These
-        # rules resolve the common "both sides appended distinct items" shapes
-        # with an opinionated, deterministic ordering (current-appends first,
-        # then replayed-appends). The merge is still validated before it's
-        # applied, so an ordering that produces invalid code falls through to
-        # the LLM — the policy can be opinionated without being unsafe.
+        # Easy-merge unions. Every rule above DELIBERATELY declines pure
+        # insertions/appends (their relative order is ambiguous). These rules
+        # resolve the common "both sides appended distinct items" shapes with an
+        # opinionated, deterministic ordering (current-appends first, then
+        # replayed-appends). The merge is still validated before it's applied,
+        # so an ordering that produces invalid code falls through to the LLM —
+        # the policy can be opinionated without being unsafe.
         merged = _try_list_union(base, current, replayed)
         if merged is not None:
             return StructuralResolution(rule="list_union", text=merged)
@@ -624,13 +644,14 @@ def _try_text_value_resolution(unit: ConflictUnit) -> str | None:
     current/replayed for the differing span (the winner). Declines (returns
     None) otherwise.
 
-    Issue 1 from the live realworld eval: ~19 of 39 Rust "escalations" were
-    CHANGELOG.md / release-notes prose conflicts (version-string bumps) that
-    every code-shaped rule declined and the LLM struggled on. These files are
-    classified as language='markdown' (or None for plain text), so the language
-    gate admits them while excluding real code (``x = 1`` in a .py file).
+    The motivating case: CHANGELOG.md / release-notes prose conflicts (version-
+    string bumps) that every code-shaped rule declines and the LLM struggles
+    on. These files are classified as language='markdown' (or None for plain
+    text), so the language gate admits them while excluding real code
+    (``x = 1`` in a .py file).
     """
     import re as _re
+    _is_version_like = lambda s: bool(_re.search(r"\d+\.\d+", s))
     # Language gate: only fire for non-code (prose/config) languages. A .py
     # assignment ``x = 1`` looks like a value bump to the tokenizer but IS code
     # — the language gate excludes it. Markdown/text/yaml/toml/None qualify.
@@ -685,16 +706,14 @@ def _try_text_value_resolution(unit: ConflictUnit) -> str | None:
             last_diff = i
     cur_span = " ".join(cur_toks[first_diff : last_diff + 1])
     rep_span = " ".join(rep_toks[first_diff : last_diff + 1])
-    # Version-vs-prose guard (axum-0001 regression): a CHANGELOG heading
-    # reorganization has a version-like token on one side ("0.12.6") and a prose
-    # token on the other ("Unreleased"). The correct merge keeps BOTH headings
-    # (a section reorganization), not a value pick. Without this guard the rule
-    # takes the lexicographically-later token — "Unreleased" (uppercase U > "0")
-    # — silently dropping the version section. A genuine version bump has
+    # Version-vs-prose guard: a CHANGELOG heading reorganization has a version-
+    # like token on one side ("0.12.6") and a prose token on the other
+    # ("Unreleased"). The correct merge keeps BOTH headings (a section
+    # reorganization), not a value pick. Without this guard the rule takes the
+    # lexicographically-later token — "Unreleased" (uppercase U > "0") —
+    # silently dropping the version section. A genuine version bump has
     # version-like tokens on BOTH sides (1.47.2 vs 1.43.4); a reorganization has
     # a version on one side and prose on the other. Decline the mixed case.
-    import re as _ver_re
-    _is_version_like = lambda s: bool(_ver_re.search(r"\d+\.\d+", s))
     if _is_version_like(cur_span) != _is_version_like(rep_span):
         return None  # one side is a version, the other is prose — reorg, not a bump
     winner_toks = rep_toks if rep_span > cur_span else cur_toks
@@ -708,10 +727,11 @@ def _semver_key(version: str) -> tuple:
 
     Parses dotted numeric components (``1.47.2`` → ``(1, 47, 2)``) so that
     ``1.10.0`` sorts AFTER ``1.9.0`` (raw lexicographic would order them wrong).
-    Non-numeric components compare as strings; a mixed/odd version falls back to
-    a ``(version,)`` tuple so it sorts deterministically (the caller still takes
-    the larger). Trailing non-numeric suffixes (``1.0.0-alpha``) are split off
-    and compared as strings after the numeric prefix, mirroring semver precedence.
+    A fully-numeric version returns ``(1, nums, suffix_key)`` where ``nums`` is
+    the tuple of numeric components and ``suffix_key`` orders pre-release
+    suffixes before the suffix-less version (semver precedence). A non-numeric
+    version falls back to ``(0, version, "")`` so it still sorts deterministically
+    (the caller takes the larger key).
     """
     import re as _re
     # Split off any pre-release/build suffix after the numeric core.
@@ -760,12 +780,8 @@ def _try_dependency_version_resolution(unit: ConflictUnit) -> str | None:
 
     When all conditions hold, the merge takes the side whose version literal is
     semver-greater (falling back to lexicographic for non-semver strings) and
-    returns it verbatim. Declines (returns None) otherwise.
-
-    Verified against the corpus: 56/56 tokio README version-bump cases match
-    this shape and resolve to ``expected_resolved`` under the semver-greater
-    rule. The rule is general (any dependency version literal), not a
-    corpus-specific string patch.
+    returns it verbatim. Declines (returns None) otherwise. The rule is
+    general — any dependency version literal, not a corpus-specific patch.
     """
     import re as _re
     # Language gate: identical to the prose rule. A real-code assignment
@@ -843,12 +859,10 @@ def _try_list_union(base: str, current: str, replayed: str) -> str | None:
     the two sides appended the SAME item; or either side touched base items.
     Handles a list that spans multiple lines (indentation preserved) or one line.
     """
-    import re
-
     b = _find_single_list(base)
     if b is None:
         return None
-    _, base_inner, base_open_off, base_close_off = b
+    _, base_inner = b[0], b[1]
     # Decline multi-line lists — the rebuild flattens to one line, destroying
     # formatting. (_try_dict_union already has this guard.)
     if "\n" in base_inner:
@@ -938,7 +952,7 @@ def _try_dict_union(base: str, current: str, replayed: str) -> str | None:
         return None
     if replayed[:rep[2]] != b_pre or replayed[rep[3]:] != b_suf:
         return None
-    return _rebuild_dict(base, b, merged)
+    return _rebuild_dict(base, merged)
 
 
 def _try_insertion_union(base: str, current: str, replayed: str) -> str | None:
@@ -1127,7 +1141,7 @@ def _appended_tail(base_items: list, side_items: list):
     return tail if tail else None  # no append → not our shape (let other rules)
 
 
-def _rebuild_dict(base: str, found, entries: list[str]) -> str:
+def _rebuild_dict(base: str, entries: list[str]) -> str:
     """Rebuild ``base``'s dict literal with the given ``entries`` (comma-joined)."""
     import re
 
@@ -1345,7 +1359,7 @@ def _change_regions(
 def _merge_disjoint_regions(
     base: list[str], cur: list[str], rep: list[str],
     cur_changed: set[int], rep_changed: set[int],
-) -> str | None:
+) -> str:
     """Reconstruct a merged text by applying each side's non-overlapping edits.
 
     Walks ``base`` line by line. For each base line:
@@ -1354,9 +1368,9 @@ def _merge_disjoint_regions(
     - elif it's the start of replayed's changed region → emit replayed's block;
     - else emit the base line unchanged.
     Because the changed-region sets are disjoint, the two substitutions never
-    collide. Returns the merged text, or None if reconstruction can't be done
-    unambiguously (e.g. a pure insertion with no base anchor — ambiguous about
-    ordering relative to the other side).
+    collide. Pure insertions (no base anchor) are handled by the caller
+    (``_try_disjoint_merge`` declines them via ``_has_pure_insertion`` before
+    calling this), so this function always returns a complete merged text.
     """
     # Build per-side opcode maps: base_start -> (base_end_exclusive, replacement_lines).
     cur_regions = _regions_against_base(base, cur)
@@ -1379,9 +1393,6 @@ def _merge_disjoint_regions(
         # Unchanged by either side → keep base line.
         out.append(base[i])
         i += 1
-    # Handle trailing pure insertions only if anchored at EOF on both — but a
-    # pure insertion (j2>j1 with i1==i2==len(base)) is ambiguous about ordering
-    # relative to the other side, so we deliberately drop/ignore it (None-safe).
     return "\n".join(out)
 
 
@@ -1425,14 +1436,6 @@ def _regions_against_base(base: list[str], other: list[str]) -> dict[int, tuple[
 # ---------------------------------------------------------------------------
 # Entity-level disjoint resolution (Weave/Aura)
 # ---------------------------------------------------------------------------
-
-# Minimum name-similarity ratio for two entity names to be considered a rename
-# (0.6 is conservative: it catches loadData→fetchData, load→fetch,
-# parse_thing→parse_item, but won't conflate unrelated short names. A rename
-# ALSO requires the body to match (normalized), so a coincidentally-similar
-# name with different content isn't misread as a rename. The threshold and
-# name-similarity now live canonically in abstract_parser
-# (RENAME_NAME_SIMILARITY_THRESHOLD / name_similarity).
 
 #: Function-declaration keywords that, when leading a header line, identify the
 #: enclosing node as a bare FUNCTION (not a class/impl container). Used by
@@ -1565,9 +1568,9 @@ def _strip_decl_header(body: str, lang: str | None = None) -> str:
         return body.split("\n", 1)[1]
     # Find the header boundary on a string-blanked copy (so ':'/'{' inside a
     # string in the header doesn't trigger a false split). Uses the canonical
-    # lexer so EVERY string form is handled (Rust raw, C++ raw, triple-quote) —
-    # the prior _STRING_LIT_RE-only version leaked raw-string content, so a
-    # ':' or '{' inside a raw string could false-trigger the header split.
+    # lexer so EVERY string form is handled (Rust raw, C++ raw, triple-quote);
+    # a naive regex-only blanker would leak raw-string content and let a ':'
+    # or '{' inside a raw string false-trigger the header split.
     from capybase.adapters.string_lexer import blank_strings
     blanked = blank_strings(body, lang, string_char=" ")
     if lang in (None, "python", "ruby"):

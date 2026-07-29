@@ -555,9 +555,6 @@ class PreservationHeuristicValidator:
                         "missing_lines": missing_lines,
                         "addition_lines": add_lines,
                         "deletion_lines": del_lines,
-                        "copied_current": copied_current,
-                        "copied_replayed": copied_replayed,
-                        "missing_lines": missing_lines,
                         "missing_count": len(additive_missing),
                         "copied_side": copied_label.lower(),
                         "conflict_type": conflict_type,
@@ -1936,52 +1933,6 @@ class CodeSmellValidator:
         )
 
 
-class SyntaxValidator:
-    """Deprecated per-unit syntax validator.
-
-    Historically this spliced the candidate into ``unit.original_worktree_text``
-    and compiled the result. That was structurally broken for multi-unit files:
-    the original still holds sibling units' raw marker blocks, so the "whole
-    file" being compiled was never the real merged file, and it could never
-    catch cross-unit errors. Whole-file syntax checking now lives in
-    :meth:`VerificationEngine.verify_file` (Phase B), which splices *all*
-    resolutions together first.
-
-    This class is retained only for backward compatibility with any
-    externally-constructed validator lists; it is NOT part of the default
-    engine anymore.
-    """
-
-    name = "syntax"
-
-    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
-        if ctx.unit.marker_span is None:
-            return VerificationCheckResult(
-                name=self.name, passed=True, message="no marker span", features={"syntax_checked": False}
-            )
-        whole = splice_resolution(
-            ctx.unit.original_worktree_text,
-            ctx.unit.marker_span,
-            ctx.candidate.resolved_text,
-        )
-        lang = ctx.unit.language
-        if lang == "python":
-            ok, msg = _compile_python(whole)
-            return VerificationCheckResult(
-                name=self.name,
-                passed=ok,
-                severity="error",
-                message=msg,
-                features={"syntax_checked": True, "syntax_passed": ok},
-            )
-        return VerificationCheckResult(
-            name=self.name,
-            passed=True,
-            message=f"syntax check not implemented for {lang}",
-            features={"syntax_checked": False, "syntax_passed": True},
-        )
-
-
 def _resolve_tool(name: str) -> str | None:
     """Resolve an executable name to a path via shutil.which, or None."""
     from shutil import which
@@ -1997,8 +1948,7 @@ def _resolve_tool(name: str) -> str | None:
 # emits WITHOUT an E0xxx code, e.g. ``error: expected `;`...``) are candidate
 # defects at the per-unit level. Semantic errors defer to Phase B (whole-file
 # cargo check) where the full crate context is available.
-import re as _re_for_rust
-_RUST_SEMANTIC_ERROR = _re_for_rust.compile(r"error\[E\d{4}\]")
+_RUST_SEMANTIC_ERROR = re.compile(r"error\[E\d{4}\]")
 
 
 def _is_rust_resolution_error(msg: str) -> bool:
@@ -2011,21 +1961,6 @@ def _is_rust_resolution_error(msg: str) -> bool:
     malformed ``format!`` macro reads ``error: expected`` with no code.
     """
     return bool(msg and _RUST_SEMANTIC_ERROR.search(msg))
-
-
-def _comment_markers_for(language: str | None) -> tuple[str, ...]:
-    """The line-comment marker(s) for ``language``.
-
-    Defaults to ``("#",)`` (Python/shell) for unknown languages. Brace languages
-    use ``("//",)``; PHP uses both ``//`` and ``#``. Rust ``#`` is an attribute
-    (NOT a comment), Python ``//`` is floor division — using the wrong marker
-    caused phantom brace imbalance (a ``//``/``#`` inside a string cut the
-    string open, exposing a ``{`` that counted as code).
-    """
-    if language == "php":
-        return ("//", "#")
-    from capybase.adapters.abstract_parser import _lang_is_family_a
-    return ("//",) if _lang_is_family_a(language) else ("#",)
 
 
 def _mask_strings_and_comments(text: str, language: str | None) -> str:
@@ -2056,7 +1991,7 @@ def _braces_balanced(text: str, language: str | None = None) -> bool:
     A per-unit splice that fills a marker span inside a larger construct (e.g.
     a bare ``Config { ... }`` initializer extracted without the surrounding
     ``impl``/``fn``) produces structurally-incomplete code that rustc rejects
-    with a spurious parse error (``error: missing \`struct\` for struct
+    with a spurious parse error (``error: missing `struct` for struct
     definition``) — a false positive, since the merge is correct in context.
     This guard skips the compile when the spliced text has unbalanced braces,
     deferring to Phase B (whole-file cargo) where the full context is available.
@@ -2216,14 +2151,13 @@ def _try_balance_braces(text: str, language: str | None = None) -> str | None:
 class RustSyntaxValidator:
     """Per-unit Rust syntax check (CEGIS loop hardening).
 
-    The deprecated :class:`SyntaxValidator` is Python-only and (historically)
-    structurally broken for multi-unit files. But Rust syntax errors that slip
-    past the structural validators — a malformed ``format!`` macro, a stray
-    brace — never reached the per-unit CEGIS loop: they only surfaced in Phase B
-    (``verify_file``), which runs AFTER all units resolve. A candidate with a
-    Rust syntax error could be accepted per-unit and rejected only later, or
-    (worse) rejected by the critic for an unrelated ``unattributed_code`` warning
-    with the syntax error never fed back as a diagnostic.
+    Rust syntax errors that slip past the structural validators — a malformed
+    ``format!`` macro, a stray brace — never reached the per-unit CEGIS loop:
+    they only surfaced in Phase B (``verify_file``), which runs AFTER all units
+    resolve. A candidate with a Rust syntax error could be accepted per-unit and
+    rejected only later, or (worse) rejected by the critic for an unrelated
+    ``unattributed_code`` warning with the syntax error never fed back as a
+    diagnostic.
 
     This validator splices the candidate into the worktree, BLANKS sibling
     conflict markers to comments (so the spliced file parses even in a multi-
@@ -2328,13 +2262,11 @@ class RustSyntaxValidator:
 class PythonSyntaxValidator:
     """Per-unit Python syntax check (CEGIS loop hardening).
 
-    The deprecated :class:`SyntaxValidator` was removed from the default engine
-    (its per-unit splicing was structurally broken for multi-unit files). But
-    that left Python syntax errors (an unclosed bracket, a bad indent) invisible
-    to the per-unit CEGIS loop — they only surfaced in Phase B (``verify_file``),
-    which runs AFTER all units resolve. A candidate with a Python syntax error
-    could be accepted per-unit and rejected only later, with the model never
-    seeing the diagnostic as targeted repair feedback.
+    Python syntax errors (an unclosed bracket, a bad indent) would otherwise be
+    invisible to the per-unit CEGIS loop — they only surfaced in Phase B
+    (``verify_file``), which runs AFTER all units resolve. A candidate with a
+    Python syntax error could be accepted per-unit and rejected only later,
+    with the model never seeing the diagnostic as targeted repair feedback.
 
     This validator splices the candidate into the worktree, BLANKS sibling
     conflict markers to comments (multi-unit-safe, same technique as
@@ -2392,37 +2324,6 @@ class PythonSyntaxValidator:
             message=msg,
             detail={"diagnostic": msg},
             features={"python_syntax_checked": True, "syntax_passed": ok},
-        )
-
-
-class WholeFileMarkerValidator:
-    """Deprecated per-unit whole-file marker validator.
-
-    Like ``SyntaxValidator``, this spliced into ``unit.original_worktree_text``
-    and was therefore unsatisfiable for any non-last unit in a multi-unit file
-    (sibling blocks' markers remained). Whole-file marker checking now lives in
-    :meth:`VerificationEngine.verify_file` (Phase B). Retained only for
-    backward compatibility with externally-constructed validator lists.
-    """
-
-    name = "whole_file_markers"
-
-    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
-        if ctx.unit.marker_span is None:
-            whole = ctx.unit.original_worktree_text
-        else:
-            whole = splice_resolution(
-                ctx.unit.original_worktree_text,
-                ctx.unit.marker_span,
-                ctx.candidate.resolved_text,
-            )
-        leaked = contains_markers(whole)
-        return VerificationCheckResult(
-            name=self.name,
-            passed=not leaked,
-            severity="error",
-            message="whole file still contains markers after splice" if leaked else "whole file clean",
-            features={"whole_file_markers_remaining": int(leaked)},
         )
 
 
@@ -2647,7 +2548,7 @@ def compute_diagnostic_delta(
             text drifted (e.g. a slightly different unresolved path introduced by
             the splice). This prevents a near-correct Rust merge from being
             rejected for crate-path errors that need the full dependency tree
-            (Issue 3 from the live realworld eval).
+            (a recurring false-positive class for fragment-level rustc).
         suppress_codes: optional set of error codes to drop ENTIRELY from the
             result, even if they're genuinely new. Used for the standalone-rustc
             / no-full-crate context where E0432/E0433 (crate-path resolution)
@@ -3482,10 +3383,10 @@ class VerificationEngine:
         passed = len(hard) == 0
         features["hard_failure_count"] = len(hard)
         features["warning_count"] = 0
-        # Unified no-worse-than-before rollup (#7): the total NEW diagnostics the
+        # Unified no-worse-than-before rollup: the total NEW diagnostics the
         # candidate introduced across every delta-aware check (syntax/lsp/clippy).
         # Each check records its own ``<check>_new_error_count``; this is the
-        # single number a future unattended-accept policy (#10) can gate on.
+        # single number an auto-accept policy could gate on.
         features["introduced_diagnostics"] = (
             int(features.get("syntax_new_error_count", 0) or 0)
             + int(features.get("lsp_new_error_count", 0) or 0)
@@ -3557,10 +3458,10 @@ class VerificationEngine:
             return False
         features["syntax_checked"] = True
         # New errors = after errors absent from the baseline, via the shared
-        # no-worse-than-before delta (#7). Pass the Diagnostics (not just
+        # no-worse-than-before delta. Pass the Diagnostics (not just
         # .message) so the delta can key on .code — a pre-existing E0432 in
         # baseline suppresses an E0432 in the candidate even if the message text
-        # drifted (Issue 3).
+        # drifted.
         #
         # IMPORTANT (E0433 phase-scoping): do NOT pass suppress_codes here. The
         # cargo path has FULL CRATE CONTEXT — crate-path errors (E0432/E0433)
@@ -3845,8 +3746,7 @@ class VerificationEngine:
         # and suppress any (kind, name) pair that already existed pre-conflict.
         # This prevents false-positives on real-world patterns like config
         # overrides or matplotlib fig reassignment that are legitimate in the
-        # original code (the live eval showed 5 sim=1.00 cases rejected for
-        # this reason — the oracle ITSELF has these "duplicates").
+        # original code (the oracle ITSELF can contain these "duplicates").
         baseline_keys: set[tuple[str, str]] = set()
         if original and contains_markers(original):
             baseline_text = _blank_markers(original, language or "python")
@@ -3998,8 +3898,8 @@ class VerificationEngine:
         features["lsp_checked"] = True
         features["lsp_error_count"] = after.error_count
         # New errors = after errors not present in baseline, via the shared
-        # no-worse-than-before delta (#7). Pass Diagnostics so code-keyed matching
-        # engages (Issue 3), and thread rust_suppress_codes.
+        # no-worse-than-before delta. Pass Diagnostics so code-keyed matching
+        # engages, and thread rust_suppress_codes.
         new_errors = compute_diagnostic_delta(
             list(baseline.errors),
             list(after.errors),

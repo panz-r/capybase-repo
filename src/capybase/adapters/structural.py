@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Protocol
 
 from capybase.conflict_model import RelatedSnippet
 
@@ -1843,20 +1843,6 @@ def _blank_fstring_preserving_interpolation(raw: str) -> str:
     return "".join(result)
 
 
-def _is_fstring_prefix(text: str, pos: int) -> bool:
-    """True if position ``pos`` is at an f-string prefix (``f"``, ``rf"``, etc.).
-
-    Checks the characters before a ``"`` or ``'`` at or near ``pos`` for an ``f``
-    prefix (optionally preceded by ``r``).
-    """
-    # Look back up to 2 chars for an f/r prefix.
-    if pos <= 0:
-        return False
-    p1 = text[pos - 1] if pos >= 1 else ""
-    p2 = text[pos - 2] if pos >= 2 else ""
-    return p1 == "f" or p2 in ("rf", "fr")
-
-
 
 def _find_definition_span(source: str, name: str, language: str) -> tuple[int, int] | None:
     """Find the line span of a definition of ``name`` in ``source``.
@@ -2033,8 +2019,9 @@ def is_available(language: str) -> bool:
     """True if a structural parser is available for ``language``.
 
     The abstract parser is available when ``language`` maps to a known language
-    family (``detect_family`` is non-None). In that is ``python`` and
-    ``rust``; broader coverage is.
+    family — i.e. ``detect_family(language)`` is non-None. This currently
+    covers every Family-A (brace-delimited) and Family-B (indentation-delimited)
+    language registered in ``abstract_parser._LANG_FAMILY``.
     """
     try:
         from capybase.adapters import abstract_parser

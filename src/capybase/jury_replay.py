@@ -141,7 +141,7 @@ def _reconstruct_packet(
 
     The frozen ``ledger`` artifact is frontier-only (resolved entries); but the
     shadow jury rebuilds a FULL ledger from base/current/replayed/resolved
-    (orchestrator ``_run_shadow_jury``), and the recorded verdicts cite evidence
+    (orchestrator ``_run_jury(mode='shadow')``), and the recorded verdicts cite evidence
     IDs (``SRC:base:LCx``, ``SRC:replayed:LCx``, ``CODE:fn:range``...) that only
     exist in the full ledger's source variants. So we rebuild the packet the way
     ``build_evidence_packet`` did during the live run: source-comment variants
@@ -169,7 +169,7 @@ def _reconstruct_packet(
 def _build_full_ledger(
     source_variants_path: Path | None, frozen_code: str, lang: str = "python",
 ) -> list:
-    """Rebuild the FULL comment ledger the way ``_run_shadow_jury`` does.
+    """Rebuild the FULL comment ledger the way the shadow-jury path does.
 
     Reads ``source_variants/*.json`` (base/current/replayed) + the frozen code
     (resolved) and calls :func:`build_comment_ledger`. This produces every
@@ -414,8 +414,8 @@ def replay_session(
         result.skip_reason = "empty jury_verdict dir"
         return result
 
-    # Load the frozen code + rebuild the FULL ledger (the way _run_shadow_jury
-    # did during the live run). The frozen ledger artifact is frontier-only
+    # Load the frozen code + rebuild the FULL ledger the way the shadow-jury
+    # path did during the live run. The frozen ledger artifact is frontier-only
     # (resolved entries); the jurors' packets were built from a full ledger
     # spanning base/current/replayed/resolved, so we rebuild it from
     # source_variants + frozen_code to faithfully resolve every evidence ref.

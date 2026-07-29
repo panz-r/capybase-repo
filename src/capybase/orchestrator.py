@@ -150,8 +150,8 @@ def _normalize_for_convergence(text: str, language: str | None) -> str:
     ``"1.28.1"`` → ``"1.29.0"`` is a genuine semantic change, not cosmetic
     variation. The original implementation blanked strings then sorted tokens
     into a bag, which erased version values AND destroyed line structure —
-    causing byte-identical candidates to be flagged as cosmetic cycling (the
-    tokio-0062/0080/0114 V7 regressions).
+    causing byte-identical candidates with different version values to be
+    flagged as cosmetic cycling.
     """
     try:
         from capybase.adapters.string_lexer import blank_strings_and_comments
@@ -637,8 +637,8 @@ def _attribute_whole_file_failure(
 
     for f in failures:
         line: int | None = None
-        # Fix #2b: prefer the structured line in detail (precise — set by the
-        # splice-coherence gate and the syntax check's diagnostic delta).
+        # Prefer the structured line in detail (precise — set by the splice-
+        # coherence gate and the syntax check's diagnostic delta).
         detail = getattr(f, "detail", {}) or {}
         if isinstance(detail.get("brace_imbalance_line"), int):
             line = detail["brace_imbalance_line"]
@@ -672,12 +672,12 @@ def _splice_context_snippet(
 
     Enriches the whole-file repair feedback so the model sees the actual brace
     mismatch in context, not just the raw cargo message. For a multi-hunk
-    conflict (Fix #1), the snippet is WIDENED to span the two adjacent units'
-    marker spans when the error line falls at or near a hunk junction — the
-    model couldn't see that unit A's ``}`` collided with unit B's structure
-    because a narrow ±5 window only showed one unit's context. Returns empty
-    string when no error line is available or the splice fails (the raw
-    failures still reach the model; this is additive).
+    conflict, the snippet is WIDENED to span the two adjacent units' marker
+    spans when the error line falls at or near a hunk junction — the model
+    couldn't see that unit A's ``}`` collided with unit B's structure because a
+    narrow ±5 window only showed one unit's context. Returns empty string when
+    no error line is available or the splice fails (the raw failures still
+    reach the model; this is additive).
     """
     # Find the error line from the failures' detail (same sources as attribution).
     line: int | None = None
@@ -712,11 +712,11 @@ def _splice_context_snippet(
     # Default window: ±5 lines around the error line.
     start = max(0, line - 6)
     end = min(len(lines), line + 5)
-    # Fix #1 — cross-hunk widening: when the error line falls at or near a hunk
-    # junction (between two units' marker spans), widen the window to span BOTH
-    # adjacent units so the model sees the splice boundary and both hunks'
-    # context. The brace imbalance in a multi-hunk conflict lives at the
-    # junction; a narrow window only shows one unit, hiding the collision.
+    # Cross-hunk widening: when the error line falls at or near a hunk junction
+    # (between two units' marker spans), widen the window to span BOTH adjacent
+    # units so the model sees the splice boundary and both hunks' context. The
+    # brace imbalance in a multi-hunk conflict lives at the junction; a narrow
+    # window only shows one unit, hiding the collision.
     # Compute each unit's post-splice line range (adjusting for line-count
     # shifts from units spliced above it in document order).
     if len(accepted) > 1:
@@ -780,9 +780,9 @@ def _try_deterministic_brace_repair(
 ) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
     """Attempt a deterministic brace-balance fix before invoking the LLM.
 
-    The recurring splice-junction brace imbalance (Fix #2) is a single-edit
-    fix away from correct: the model merges each hunk correctly in isolation,
-    but the spliced result has a stray or missing brace where the hunks meet.
+    The recurring splice-junction brace imbalance is a single-edit fix away
+    from correct: the model merges each hunk correctly in isolation, but the
+    spliced result has a stray or missing brace where the hunks meet.
     Re-prompting the model doesn't help (it can't see the junction), so we fix
     it directly when ``_try_balance_braces`` can balance the spliced buffer in
     one clean edit.
@@ -855,10 +855,9 @@ def _try_deterministic_prefix_dedup(
     """Strip a duplicated enclosing wrapper from resolved_text at the splice
     junction.
 
-    Phase 10: two V7 regressions (sea-orm-0012/0018) failed because the marker
-    span excludes the enclosing wrapper (e.g. ``use crate::{`` before the span
-    and ``};`` after). A correct resolved_text that re-includes the wrapper
-    produces a doubled prefix after splicing:
+    The marker span excludes the enclosing wrapper (e.g. ``use crate::{``
+    before the span and ``};`` after). A correct resolved_text that re-includes
+    the wrapper produces a doubled prefix after splicing:
 
         use crate::{                                      ← existing wrapper
         use crate::{error::*, ConnectionTrait, ...};      ← resolved (re-includes)
@@ -1129,8 +1128,9 @@ def _strip_boundary_echo(
         composition;
       - the per-unit pre-validation pass (``_apply_deterministic_closure``),
         which runs BEFORE per-unit syntax validation so a wrapping echo that
-        would cause a parse failure is caught before escalation (the
-        reachability gap that axum-0029 hit).
+        would cause a parse failure is caught before escalation (closing the
+        reachability gap where such echoes previously spun until the retry
+        budget exhausted and escalated).
     """
     from capybase.verification import _brace_imbalance_line
     from capybase.adapters.parsers import splice_resolution
@@ -2418,8 +2418,8 @@ class Orchestrator:
         # 15). It does NOT send the full file. For a large file with a small
         # conflict (e.g. a 1-line version bump in a 766-line file = 561 tokens
         # of conflict), the prompt sends ~67 lines, not 766. Measuring the full
-        # marker block (original_worktree_text) caused 6 borderline OVERSIZED
-        # escalations in V7 that the prompt could actually fit.
+        # marker block (original_worktree_text) instead caused borderline
+        # OVERSIZED escalations on prompts that actually fit.
         #
         # The prompt's fixed overhead (intro/contract/rules, ~200-400 tokens)
         # and all augmentation sections ARE trimmable by _fit_to_budget, so we
@@ -2979,9 +2979,8 @@ class Orchestrator:
                 # Use a low temperature for the keep/delete decision — it's a
                 # binary choice where determinism matters. A higher temperature
                 # caused the model to flip between keep_block and accept_deletion
-                # across runs (tokio-0098: V4 accept_deletion→sim=1.0, V5
-                # keep_block→sim=0.6). 0.1 is low enough for consistency without
-                # being fully greedy (which can get stuck on wrong answers).
+                # across runs. 0.1 is low enough for consistency without being
+                # fully greedy (which can get stuck on wrong answers).
                 temperature=0.1,
             )
         except Exception as exc:  # noqa: BLE001 - request failed → fall through
@@ -5137,19 +5136,18 @@ class Orchestrator:
             buffer = resolved_files[path]
             if self.config.validation.require_whole_file_validation and units:
                 wf_retries = 0
-                # Fix #3: separate whole-file repair budget. 0 mirrors the per-
-                # unit budget (legacy behavior); a higher value grants more
-                # repair cycles for multi-hunk conflicts where the deterministic
-                # brace repair (Fix #2) + enriched context (Fix #1) need a few
-                # shots to converge.
+                # Separate whole-file repair budget. 0 mirrors the per-unit
+                # budget (legacy behavior); a higher value grants more repair
+                # cycles for multi-hunk conflicts where the deterministic brace
+                # repair + enriched context need a few shots to converge.
                 wf_budget = self.config.policy.max_whole_file_repair_retries or self.config.policy.max_retries_per_unit
                 file_validation = None  # type: ignore[assignment]
-                # Causal attribution (V8b reviewer feedback): track the failure
-                # signature across whole-file repair iterations so each repair
-                # mechanism's EFFECT can be recorded — did it actually change the
-                # failure shape, or fire without clearing the primary failure?
-                # This distinguishes "fired" from "caused recovery" (the Fix A
-                # projection overestimate came from conflating the two).
+                # Causal attribution: track the failure signature across whole-
+                # file repair iterations so each repair mechanism's EFFECT can
+                # be recorded — did it actually change the failure shape, or
+                # fire without clearing the primary failure? This distinguishes
+                # "fired" from "caused recovery" (early projections conflated
+                # the two and overestimated a mechanism's impact).
                 prev_failure_sig = None
                 while True:
                     spans_and_texts = [
@@ -5175,10 +5173,9 @@ class Orchestrator:
                                 # success). Validate THAT text, not a re-splice
                                 # of the un-deduped spans — otherwise verify_file
                                 # discards the dedup and fails on the same
-                                # duplicates it just removed (V8 WHOLE_FILE_FAILED
-                                # bug: file_linker_dedup fired, verify_file still
-                                # failed). Pass whole_text so verify_file bypasses
-                                # its internal splice.
+                                # duplicates it just removed (the dedup-then-
+                                # fail-on-same-duplicates bug). Pass whole_text so
+                                # verify_file bypasses its internal splice.
                                 buffer = deduped
                                 self.journal.emit(
                                     "file_linker_dedup",
@@ -5931,22 +5928,6 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 — review bundle is advisory
             pass
 
-    def _run_shadow_jury(
-        self, path: str, outcome, units: list, language: str | None,
-        base_text: str, current_text: str, replayed_text: str,
-    ) -> None:
-        """SJ6 back-compat shim: run the jury in shadow mode (no merge effect).
-
-        Delegates to :meth:`_run_jury` with ``mode='shadow'``. Kept so any
-        external caller of the original method still works; new code should
-        call :meth:`_run_jury` directly with the mode.
-        """
-        self._run_jury(
-            path, outcome, units, language,
-            base_text, current_text, replayed_text, mode="shadow",
-        )
-
-
     def _resolve_comment_contract_conflicts(
         self, path: str, buffer: str, accepted: list, units: list,
         language: str | None, code_reopen_request: list,
@@ -6169,10 +6150,10 @@ class Orchestrator:
         attributed unit could not be re-resolved (it escalated).
         """
         fault_idx = _attribute_whole_file_failure(failures, [u for u, _ in accepted])
-        # Deterministic brace repair (Fix #2): before spending an LLM call on the
-        # recurring splice-junction brace imbalance, try to fix it directly. The
-        # live eval showed the model reproducing the same extra/missing brace at
-        # the hunk junction across 4 retries — a single-edit deterministic fix
+        # Deterministic brace repair: before spending an LLM call on the
+        # recurring splice-junction brace imbalance, try to fix it directly.
+        # The model often reproduces the same extra/missing brace at the hunk
+        # junction across repeated retries — a single-edit deterministic fix
         # resolves it instantly when the imbalance is a stray brace-only line or
         # a truncated unclosed block. The repaired buffer is back-projected onto
         # the fault unit's resolved_text so the splice + re-validate loop sees
@@ -6281,8 +6262,7 @@ class Orchestrator:
                         # verify_file's _has_whole_file_span guard handles the
                         # None span. Pre-fix this branch only fired for whole-file
                         # units (marker_span is None) and silently discarded the
-                        # dedup for the common marker-block case (V8
-                        # WHOLE_FILE_FAILED bug).
+                        # dedup for the common marker-block case.
                         unit_f, cand_f = accepted[fault_idx]
                         wf_unit = unit_f.model_copy(
                             update={"marker_span": None, "unit_kind": "whole_file"})
@@ -6301,12 +6281,12 @@ class Orchestrator:
             except Exception:  # noqa: BLE001
                 pass
         unit, _old_cand = accepted[fault_idx]
-        # Fix #3 — enriched feedback: build a splice-context snippet (the resolved
-        # file ±5 lines around the error) so PROMPT_REPAIR shows the model the
-        # actual brace mismatch in context, not just the raw cargo message. The
-        # model couldn't locate the error in the live eval (3 identical retries on
-        # "unexpected closing delimiter }"); the snippet gives it the surrounding
-        # code to find the extra/missing brace.
+        # Enriched feedback: build a splice-context snippet (the resolved file
+        # ±5 lines around the error) so PROMPT_REPAIR shows the model the actual
+        # brace mismatch in context, not just the raw cargo message. The model
+        # otherwise can't locate the error from the raw diagnostic alone and
+        # repeats the same retry; the snippet gives it the surrounding code to
+        # find the extra/missing brace.
         enriched_failures = list(failures)
         snippet = _splice_context_snippet(failures, original, accepted)
         if snippet:
@@ -6369,12 +6349,12 @@ class Orchestrator:
         # validation so a wrapping echo (the model re-states the enclosing
         # `use tower::{...};` block around the span) is caught before it causes a
         # parse failure and escalates. Without this, the whole-file-repair echo
-        # strip is unreachable for parse-echo cases (axum-0029): the candidate
-        # fails per-unit syntax, exhausts the retry budget, and escalates before
-        # the whole-file loop ever runs. Reuses the same _strip_boundary_echo
-        # core the whole-file path uses. Safe-by-construction (exact boundary
-        # echoes only, brace-checked); runs before the obligations gate below
-        # because a wrapping-echo candidate may have zero missing obligations.
+        # strip is unreachable for parse-echo cases: the candidate fails per-unit
+        # syntax, exhausts the retry budget, and escalates before the whole-file
+        # loop ever runs. Reuses the same _strip_boundary_echo core the whole-
+        # file path uses. Safe-by-construction (exact boundary echoes only,
+        # brace-checked); runs before the obligations gate below because a
+        # wrapping-echo candidate may have zero missing obligations.
         try:
             stripped = _strip_boundary_echo(
                 cand.resolved_text, unit.original_worktree_text,
@@ -7001,12 +6981,12 @@ class Orchestrator:
             # correctness defect. "Do not spend additional iterations asking the
             # same model to satisfy the same heuristic."
             #
-            # Phase 6 limited this to preservation_heuristic/STRUCTURAL_CODE,
-            # but V7 flight data showed the actual cycling blockers are
+            # Originally limited to preservation_heuristic/STRUCTURAL_CODE,
+            # but flight data showed the actual cycling blockers are
             # both_sides_represented and unclassified proof_class (the hatch
-            # fired 0 times across 143 cases). Phase 10 broadens the advisory
-            # set to the validators the risk layer treats as retry-able soft
-            # warnings.
+            # otherwise fired on a validator that rarely blocks). The advisory
+            # set now covers the validators the risk layer treats as retry-able
+            # soft warnings.
             conv_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
             if (conv_threshold > 0 and cand.resolved_text
                     and not validation.hard_failures
@@ -7142,13 +7122,13 @@ class Orchestrator:
                 path=unit.path,
                 unit_id=unit.unit_id,
             )
-            # No-progress guard (Fix C, V8 CASE_TIMEOUT): if the hard-failure
-            # SIGNATURE (multiset of (validator, normalized_message)) is unchanged
-            # across N consecutive attempts, the loop is producing zero new
-            # information — escalate. Keys on failure shape, not candidate hashes,
-            # so it catches the empty-output transport loop (random UUIDs defeat
-            # the hash backstops; the content-hash checks are also gated on non-
-            # empty resolved_text) AND genuine stuck-on-one-compiler-error cycling.
+            # No-progress guard: if the hard-failure SIGNATURE (multiset of
+            # (validator, normalized_message)) is unchanged across N consecutive
+            # attempts, the loop is producing zero new information — escalate.
+            # Keys on failure shape, not candidate hashes, so it catches the
+            # empty-output transport loop (random UUIDs defeat the hash
+            # backstops; the content-hash checks are also gated on non-empty
+            # resolved_text) AND genuine stuck-on-one-compiler-error cycling.
             # The message is normalized (line numbers → N) so the same error at a
             # shifted location still counts as no-progress; symbol names and error
             # kinds are preserved so a genuinely different error registers as
@@ -7207,9 +7187,9 @@ class Orchestrator:
             # lines sorted) has been seen ≥ cegis_convergence_threshold times,
             # the loop is cycling on the same essential output despite cosmetic
             # variation. Decoupled from the retry budget so it fires earlier than
-            # the exact-hash oscillation check above. Catches the live-eval
-            # sea-orm-0013 pattern (900s of slightly-different-but-equivalent
-            # candidates). Default threshold 2; 0 = disabled.
+            # the exact-hash oscillation check above — catches long runs of
+            # slightly-different-but-equivalent candidates. Default threshold 2;
+            # 0 = disabled.
             conv_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
             if conv_threshold > 0 and cand.resolved_text:
                 norm_count = outcome._seen_normalized_hashes.get(norm_hash, 0)
@@ -7309,10 +7289,10 @@ class Orchestrator:
             ):
                 # Technical/transport failures route on the retry_count budget
                 # (risk.py routes these failure kinds via retry_count < budget).
-                # Pre-fix these fell into the critic branch below because the
+                # These previously fell into the critic branch below because the
                 # critic also flags every empty/garbage candidate (critic_warning
                 # is not None), so retry_count never incremented and the loop
-                # spun until the wall budget — the V8 CASE_TIMEOUT bug.
+                # spun until the wall budget — the CASE_TIMEOUT spin bug.
                 retry_count += 1
             elif critic_warning is not None:
                 critic_retry_count += 1
@@ -8061,11 +8041,10 @@ def _repo_has_cargo(repo_root: Path) -> bool:
 
     True when the root OR any immediate top-level subdirectory contains a
     ``Cargo.toml``. The subdir check handles Cargo WORKSPACES, where each member
-    crate lives in its own subdirectory and there's no root manifest — the common
-    layout (di-rac-rebase-test: di-core/, divrr/, wasm-runner/). Only one level
-    deep is scanned: a workspace's member crates sit directly under the root, and
-    a deeper scan risks matching an unrelated vendored crate. Used by the
-    auto-substitution of ``cargo test`` for the default ``pytest`` test gate.
+    crate lives in its own subdirectory and there's no root manifest. Only one
+    level deep is scanned: a workspace's member crates sit directly under the
+    root, and a deeper scan risks matching an unrelated vendored crate. Used by
+    the auto-substitution of ``cargo test`` for the default ``pytest`` test gate.
     """
     if (repo_root / "Cargo.toml").is_file():
         return True

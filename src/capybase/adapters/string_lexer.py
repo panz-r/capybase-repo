@@ -584,12 +584,9 @@ def blank_raw_strings(text: str) -> str:
     Language-agnostic (raw strings are Rust/C++-specific; in other languages
     this is a no-op pass that the regular-string pass handles correctly).
     """
-    # Run the full scan but with only raw-string blanking active. We achieve
-    # "raw only" by blanking strings AND comments, then the caller re-runs its
-    # own regular-string pass. Simpler: just run the unified scanner with
-    # blank_strings=True for the raw forms and False for regular. The scanner
-    # doesn't distinguish — so we use the regex-based raw-only patterns from
-    # abstract_parser (kept as the fast path for this specific two-pass case).
+    # Raw-only blanking: the unified scanner doesn't separate raw from regular
+    # strings, so for the two-pass case we use the dedicated raw-string regexes
+    # (Rust r#"..."# and C++ R"DELIM(...)DELIM") directly.
     import re
     # C++ raw: R"DELIM(...)DELIM" (DELIM any run of non-paren/quote/backslash).
     cpp = re.compile(
