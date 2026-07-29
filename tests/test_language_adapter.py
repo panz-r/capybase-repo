@@ -651,3 +651,74 @@ def test_r39_find_definition_span_fallback_no_false_match_on_call():
     assert _find_definition_span("let a = 1; obj.method_nm()", "method_nm", "rust") is None
     # A genuine definition still matches (regression).
     assert _find_definition_span("fn real_fn() {", "real_fn", "rust") is not None
+
+
+# ---------------------------------------------------------------------------
+# Language catalog — single literal, derived views
+# ---------------------------------------------------------------------------
+
+
+def test_catalog_extension_map_matches_historical_literal():
+    """The derived EXTENSION_TO_LANGUAGE must equal the hand-maintained literal
+    it replaced — proves the catalog migration didn't drop or re-map an
+    extension. If this fails, a LanguageSpec entry's ``extensions`` is wrong."""
+    from capybase.adapters.language import EXTENSION_TO_LANGUAGE
+    historical = {
+        ".py": "python", ".rb": "ruby",
+        ".rs": "rust", ".js": "javascript", ".mjs": "javascript",
+        ".cjs": "javascript", ".jsx": "javascript", ".ts": "typescript",
+        ".tsx": "typescript", ".go": "go", ".java": "java",
+        ".c": "c", ".h": "c", ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp",
+        ".hpp": "cpp", ".hh": "cpp", ".cs": "csharp", ".kt": "kotlin",
+        ".kts": "kotlin", ".swift": "swift", ".scala": "scala",
+        ".dart": "dart", ".php": "php", ".sh": "shell", ".bash": "shell",
+        ".json": "json", ".yaml": "yaml", ".yml": "yaml", ".toml": "toml",
+        ".md": "markdown",
+    }
+    assert EXTENSION_TO_LANGUAGE == historical
+
+
+def test_catalog_alias_divergence_fixed():
+    """Regression: ``rs`` and ``golang`` aliases were in string_lexer's
+    Family-A set but NOT in abstract_parser's family map, so
+    ``detect_family('rs')`` returned None while ``_lang_uses_slash_comments('rs')``
+    returned True — the two predicates disagreed. The unified catalog derives
+    both views from one literal, so they now agree for every alias."""
+    from capybase.adapters import abstract_parser as ap
+    from capybase.adapters import string_lexer as sl
+    for alias in ("rs", "golang", "c++", "cs", "js", "ts", "jsx", "tsx"):
+        family = ap.detect_family(alias)
+        assert family == "A", f"detect_family({alias!r}) = {family!r}, expected 'A'"
+        assert ap._lang_is_family_a(alias) is True
+        assert sl._lang_uses_slash_comments(alias) is True
+
+
+def test_catalog_invariants_no_collision():
+    """The import-time invariant check rejects duplicate language_ids, alias
+    collisions, and extension collisions. Re-run the build to confirm it
+    succeeds on the current catalog (a malformed edit to _LANGUAGE_CATALOG
+    would raise at build time, failing this test)."""
+    from capybase.adapters.language import _DerivedViews, _LANGUAGE_CATALOG
+    # Must not raise.
+    views = _DerivedViews.build(_LANGUAGE_CATALOG)
+    assert views.extension_to_language
+    assert views.name_or_alias_to_family
+    assert views.family_a_langs
+    # Every family-A canonical name appears in the Family-A set.
+    for spec in _LANGUAGE_CATALOG:
+        if spec.family == "A":
+            assert spec.language_id in views.family_a_langs
+
+
+def test_catalog_alias_must_not_be_canonical_name():
+    """An alias must not shadow another language's canonical id — that would
+    make ``detect_family`` ambiguous. The build rejects this; confirm the
+    current catalog is clean."""
+    from capybase.adapters.language import _LANGUAGE_CATALOG
+    canonical_ids = {s.language_id for s in _LANGUAGE_CATALOG}
+    for spec in _LANGUAGE_CATALOG:
+        for alias in spec.aliases:
+            assert alias not in canonical_ids, (
+                f"alias {alias!r} of {spec.language_id!r} collides with a "
+                f"canonical language id"
+            )

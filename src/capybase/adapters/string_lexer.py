@@ -42,6 +42,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from capybase.adapters.language import _DERIVED as _LANG_DERIVED
+
 
 # ---------------------------------------------------------------------------
 # Language → comment-style dispatch
@@ -49,11 +51,10 @@ from dataclasses import dataclass
 
 #: Languages using ``//`` line comments and ``/* */`` block comments (Family A).
 #: Every other language defaults to ``#`` line comments (Family B: Python/Ruby).
-_FAMILY_A_LANGS: frozenset[str] = frozenset({
-    "rust", "rs", "javascript", "js", "typescript", "ts", "jsx", "tsx",
-    "go", "golang", "java", "c", "cpp", "c++", "csharp", "cs",
-    "kotlin", "swift", "scala", "dart", "php",
-})
+#: Derived from ``language._LANGUAGE_CATALOG`` (the single literal) so it stays
+#: in sync with ``abstract_parser._LANG_FAMILY`` — previously these were two
+#: independent sets that had drifted.
+_FAMILY_A_LANGS: frozenset[str] = _LANG_DERIVED.family_a_langs
 
 
 def _lang_uses_slash_comments(lang: str | None) -> bool:

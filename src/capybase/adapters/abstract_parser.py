@@ -44,10 +44,13 @@ from dataclasses import dataclass, field
 # the structural resolver, and ``semantic_diff`` — previously each had its own.
 from capybase.diff import char_ratio as _char_ratio
 
-# Single source of truth for extension → language. Aliased locally so
-# the family dispatch reads naturally; the authoritative map lives in
-# ``language.EXTENSION_TO_LANGUAGE``.
-from capybase.adapters.language import EXTENSION_TO_LANGUAGE as _EXT_LANG
+# Single source of truth for extension → language AND language → family.
+# Both are derived from ``language._LANGUAGE_CATALOG`` (one literal). Aliased
+# locally so the family dispatch reads naturally.
+from capybase.adapters.language import (
+    EXTENSION_TO_LANGUAGE as _EXT_LANG,
+    _DERIVED as _LANG_DERIVED,
+)
 
 # ---------------------------------------------------------------------------
 # Coarse unit-kind vocabulary
@@ -70,36 +73,12 @@ KIND_UNKNOWN = "unknown_block"
 FAMILY_A = "A"
 FAMILY_B = "B"
 
-#: Language string → family. ``detect_family`` consults this map; the
-#: grammar-free state machines support every Family-A (brace-delimited) and
-#: Family-B (indentation-delimited) language listed here.
-_LANG_FAMILY: dict[str, str] = {
-    # Family B (indentation-delimited)
-    "python": FAMILY_B,
-    # Family A (brace-delimited)
-    "rust": FAMILY_A,
-    "javascript": FAMILY_A,
-    "typescript": FAMILY_A,
-    "js": FAMILY_A,
-    "ts": FAMILY_A,
-    "jsx": FAMILY_A,
-    "tsx": FAMILY_A,
-    "go": FAMILY_A,
-    "java": FAMILY_A,
-    "c": FAMILY_A,
-    "cpp": FAMILY_A,
-    "c++": FAMILY_A,
-    "csharp": FAMILY_A,
-    "cs": FAMILY_A,
-    "kotlin": FAMILY_A,
-    "swift": FAMILY_A,
-    "scala": FAMILY_A,
-    "dart": FAMILY_A,
-    "php": FAMILY_A,
-}
-
-#: File extension → language: now the single source of truth in
-#: ``language.EXTENSION_TO_LANGUAGE``. Re-exported above as ``_EXT_LANG``.
+#: Language name OR alias → family. Derived from ``language._LANGUAGE_CATALOG``
+# (the single literal). Both canonical names (``rust``) and aliases (``rs``,
+# ``c++``, ``golang``) are keys so ``detect_family("rs")`` resolves the same as
+# ``detect_family("rust")`` — previously ``rs``/``golang`` were in the
+# string-lexer Family-A set but NOT here, so the two predicates disagreed.
+_LANG_FAMILY: dict[str, str] = _LANG_DERIVED.name_or_alias_to_family
 
 
 def detect_family(language: str | None, path: str | None = None) -> str | None:

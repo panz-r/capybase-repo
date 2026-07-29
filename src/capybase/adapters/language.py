@@ -33,55 +33,132 @@ unconditionally without a None-check.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
+# ---------------------------------------------------------------------------
+# Language catalog — the single literal source of truth
+# ---------------------------------------------------------------------------
+#
+# Every language capybase knows about lives here ONCE, as a ``LanguageSpec``.
+# The extension map (``EXTENSION_TO_LANGUAGE``), the family map
+# (``abstract_parser._LANG_FAMILY``), and the Family-A set
+# (``string_lexer._FAMILY_A_LANGS``) are all DERIVED from this catalog — they
+# used to be three hand-maintained literals that had drifted (``rs``/
+# ``golang`` aliases were in the string-lexer set but not the family map, so
+# ``detect_family("rs")`` returned None while ``_lang_uses_slash_comments("rs")``
+# returned True). Deriving from one literal makes that class of drift
+# impossible: adding a language is one entry here, and every view updates.
+#
+# ``family`` is ``"A"`` (brace-delimited, ``//`` comments) or ``"B"``
+# (indentation-delimited, ``#`` comments). ``None`` marks non-source languages
+# (text/config) that the extractor tags but the structural parser does not
+# handle — they have no family and never participate in brace/comment dispatch.
+
+@dataclass(frozen=True)
+class LanguageSpec:
+    language_id: str
+    family: str | None
+    aliases: frozenset[str] = field(default_factory=frozenset)
+    extensions: frozenset[str] = field(default_factory=frozenset)
+
+
+_LANGUAGE_CATALOG: tuple[LanguageSpec, ...] = (
+    # Family B (indentation-delimited, ``#`` comments)
+    LanguageSpec("python", "B", frozenset(), frozenset({".py"})),
+    LanguageSpec("ruby", "B", frozenset(), frozenset({".rb"})),
+    # Family A (brace-delimited, ``//`` comments)
+    LanguageSpec("rust", "A", frozenset({"rs"}), frozenset({".rs"})),
+    LanguageSpec(
+        "javascript", "A",
+        frozenset({"js", "jsx"}),
+        frozenset({".js", ".mjs", ".cjs", ".jsx"}),
+    ),
+    LanguageSpec(
+        "typescript", "A",
+        frozenset({"ts", "tsx"}),
+        frozenset({".ts", ".tsx"}),
+    ),
+    LanguageSpec("go", "A", frozenset({"golang"}), frozenset({".go"})),
+    LanguageSpec("java", "A", frozenset(), frozenset({".java"})),
+    LanguageSpec("c", "A", frozenset(), frozenset({".c", ".h"})),
+    LanguageSpec(
+        "cpp", "A", frozenset({"c++"}),
+        frozenset({".cpp", ".cc", ".cxx", ".hpp", ".hh"}),
+    ),
+    LanguageSpec("csharp", "A", frozenset({"cs"}), frozenset({".cs"})),
+    LanguageSpec("kotlin", "A", frozenset(), frozenset({".kt", ".kts"})),
+    LanguageSpec("swift", "A", frozenset(), frozenset({".swift"})),
+    LanguageSpec("scala", "A", frozenset(), frozenset({".scala"})),
+    LanguageSpec("dart", "A", frozenset(), frozenset({".dart"})),
+    LanguageSpec("php", "A", frozenset(), frozenset({".php"})),
+    # Non-source (text/config) — tagged by the extractor, not structurally parsed
+    LanguageSpec("shell", None, frozenset(), frozenset({".sh", ".bash"})),
+    LanguageSpec("json", None, frozenset(), frozenset({".json"})),
+    LanguageSpec("yaml", None, frozenset(), frozenset({".yaml", ".yml"})),
+    LanguageSpec("toml", None, frozenset(), frozenset({".toml"})),
+    LanguageSpec("markdown", None, frozenset(), frozenset({".md"})),
+)
+
+
+@dataclass(frozen=True)
+class _DerivedViews:
+    """Materialized lookup tables built once from ``_LANGUAGE_CATALOG``."""
+    extension_to_language: dict[str, str]
+    # language name OR alias → family. Includes both canonical names and aliases
+    # as keys so ``detect_family("rs")`` resolves the same as
+    # ``detect_family("rust")``.
+    name_or_alias_to_family: dict[str, str]
+    family_a_langs: frozenset[str]
+
+    @classmethod
+    def build(cls, catalog: tuple[LanguageSpec, ...]) -> "_DerivedViews":
+        ext: dict[str, str] = {}
+        family_map: dict[str, str] = {}
+        family_a: set[str] = set()
+        seen_aliases: set[str] = set()
+        seen_exts: set[str] = set()
+        for spec in catalog:
+            # Canonical name as a key in every view.
+            if spec.language_id in family_map:
+                raise ValueError(
+                    f"duplicate language_id {spec.language_id!r} in catalog"
+                )
+            if spec.family is not None:
+                family_map[spec.language_id] = spec.family
+                if spec.family == "A":
+                    family_a.add(spec.language_id)
+            # Aliases as additional keys.
+            for alias in spec.aliases:
+                if alias in seen_aliases or alias in family_map:
+                    raise ValueError(
+                        f"alias {alias!r} collides with another language or alias"
+                    )
+                seen_aliases.add(alias)
+                if spec.family is not None:
+                    family_map[alias] = spec.family
+                    if spec.family == "A":
+                        family_a.add(alias)
+            # Extensions.
+            for e in spec.extensions:
+                if e in seen_exts:
+                    raise ValueError(
+                        f"extension {e!r} claimed by two languages in catalog"
+                    )
+                seen_exts.add(e)
+                ext[e] = spec.language_id
+        return cls(ext, family_map, frozenset(family_a))
+
+
+_DERIVED = _DerivedViews.build(_LANGUAGE_CATALOG)
+
+
 #: The single source of truth for file-extension → language-name mapping.
-#: The union of the two previously-divergent maps (conflict_extractor._EXT_LANG
-#: and abstract_parser._EXT_LANG). Both ``conflict_extractor.detect_language``
-#: and the abstract parser's family dispatch read from this so a newly-added
-#: extension is recognized everywhere — previously the two maps disagreed (e.g.
-#: ``.cc``/``.kt``/``.swift`` were parser-known but extractor-unknown, and
-#: ``.rb``/``.sh``/``.json`` were extractor-known but parser-unknown).
-EXTENSION_TO_LANGUAGE: dict[str, str] = {
-    # Family B (indentation-delimited)
-    ".py": "python",
-    ".rb": "ruby",
-    # Family A (brace-delimited)
-    ".rs": "rust",
-    ".js": "javascript",
-    ".mjs": "javascript",
-    ".cjs": "javascript",
-    ".jsx": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".go": "go",
-    ".java": "java",
-    ".c": "c",
-    ".h": "c",
-    ".cpp": "cpp",
-    ".cc": "cpp",
-    ".cxx": "cpp",
-    ".hpp": "cpp",
-    ".hh": "cpp",
-    ".cs": "csharp",
-    ".kt": "kotlin",
-    ".kts": "kotlin",
-    ".swift": "swift",
-    ".scala": "scala",
-    ".dart": "dart",
-    ".php": "php",
-    # Non-source (text/config) — recognized by the extractor for language tagging
-    # but not structurally parseable (no family mapping in the abstract parser).
-    ".sh": "shell",
-    ".bash": "shell",
-    ".json": "json",
-    ".yaml": "yaml",
-    ".yml": "yaml",
-    ".toml": "toml",
-    ".md": "markdown",
-}
+#: Derived from ``_LANGUAGE_CATALOG``; previously a hand-maintained literal that
+#: could drift from the family maps. ``conflict_extractor.detect_language`` and
+#: the abstract parser's family dispatch both read this.
+EXTENSION_TO_LANGUAGE: dict[str, str] = _DERIVED.extension_to_language
 
 
 class LanguageAdapter(Protocol):
