@@ -862,7 +862,7 @@ def _try_list_union(base: str, current: str, replayed: str) -> str | None:
     b = _find_single_list(base)
     if b is None:
         return None
-    _, base_inner = b[0], b[1]
+    base_inner = b[0]
     # Decline multi-line lists — the rebuild flattens to one line, destroying
     # formatting. (_try_dict_union already has this guard.)
     if "\n" in base_inner:
@@ -874,8 +874,8 @@ def _try_list_union(base: str, current: str, replayed: str) -> str | None:
         return None
     # Each side must preserve base items verbatim (same order, no removal) and
     # differ only by appending. Compute the appended tail.
-    cur_items = _split_list_items(cur[1])
-    rep_items = _split_list_items(rep[1])
+    cur_items = _split_list_items(cur[0])
+    rep_items = _split_list_items(rep[0])
     cur_appended = _appended_tail(base_items, cur_items)
     rep_appended = _appended_tail(base_items, rep_items)
     if cur_appended is None or rep_appended is None:
@@ -889,10 +889,10 @@ def _try_list_union(base: str, current: str, replayed: str) -> str | None:
     # is invariant across all three sides. If a side changed the assignment
     # target, a comment, or other non-item structure, the merge would silently
     # drop that side's intent by inheriting the other side's surrounding text.
-    b_pre, b_suf = base[: b[2]], base[b[3]:]
-    if current[:cur[2]] != b_pre or current[cur[3]:] != b_suf:
+    b_pre, b_suf = base[: b[1]], base[b[2]:]
+    if current[:cur[1]] != b_pre or current[cur[2]:] != b_suf:
         return None
-    if replayed[:rep[2]] != b_pre or replayed[rep[3]:] != b_suf:
+    if replayed[:rep[1]] != b_pre or replayed[rep[2]:] != b_suf:
         return None
     return (
         b_pre
@@ -919,7 +919,7 @@ def _try_dict_union(base: str, current: str, replayed: str) -> str | None:
     b = _find_single_dict(base)
     if b is None:
         return None
-    base_inner = b[1]
+    base_inner = b[0]
     # Only inline (single-line) dicts: multi-line reconstruction would mangle
     # indentation. The base dict literal must not contain a newline.
     if "\n" in base_inner:
@@ -929,8 +929,8 @@ def _try_dict_union(base: str, current: str, replayed: str) -> str | None:
     rep = _find_single_dict(replayed)
     if cur is None or rep is None:
         return None
-    cur_entries = _split_dict_entries(cur[1])
-    rep_entries = _split_dict_entries(rep[1])
+    cur_entries = _split_dict_entries(cur[0])
+    rep_entries = _split_dict_entries(rep[0])
     # Each side must preserve base entries (same keys, same values, same order)
     # and differ only by appending new entries.
     cur_added = _appended_tail(base_entries, cur_entries)
@@ -947,10 +947,10 @@ def _try_dict_union(base: str, current: str, replayed: str) -> str | None:
         return None
     merged = base_entries + cur_added + rep_added
     # Verify surrounding text is invariant (same rationale as _try_list_union).
-    b_pre, b_suf = base[: b[2]], base[b[3]:]
-    if current[:cur[2]] != b_pre or current[cur[3]:] != b_suf:
+    b_pre, b_suf = base[: b[1]], base[b[2]:]
+    if current[:cur[1]] != b_pre or current[cur[2]:] != b_suf:
         return None
-    if replayed[:rep[2]] != b_pre or replayed[rep[3]:] != b_suf:
+    if replayed[:rep[1]] != b_pre or replayed[rep[2]:] != b_suf:
         return None
     return _rebuild_dict(base, merged)
 
@@ -1000,8 +1000,8 @@ def _try_insertion_union(base: str, current: str, replayed: str) -> str | None:
 
 
 def _find_single_list(text: str):
-    """The ``(before_unused, inner, open_offset, close_offset)`` of the SOLE
-    ``[...]`` list in text, or None.
+    """The ``(inner, open_offset, close_offset)`` of the SOLE ``[...]`` list in
+    text, or None.
 
     ``inner`` is the text between the brackets; ``open_offset``/``close_offset``
     are the char offsets of the ``[`` and ``]`` (so the caller can splice).
@@ -1031,7 +1031,7 @@ def _find_single_list(text: str):
         prev = text[open_off - 1]
         if prev.isalnum() or prev == "_" or prev in "])":
             return None
-    return (None, inner, open_off, close_off)
+    return (inner, open_off, close_off)
 
 
 def _split_list_items(inner: str) -> list[str]:
@@ -1082,7 +1082,7 @@ def _split_list_items(inner: str) -> list[str]:
 
 
 def _find_single_dict(text: str):
-    """The (before, inner, open_off, close_off) of the SOLE ``{...}`` dict in text.
+    """The ``(inner, open_off, close_off)`` of the SOLE ``{...}`` dict in text.
 
     Returns None if there's not exactly one brace-delimited dict. ``inner`` is
     the text between the braces. ``open_off`` / ``close_off`` are the byte
@@ -1096,7 +1096,7 @@ def _find_single_dict(text: str):
     inner = m.group(1)
     if "{" in inner or "}" in inner:
         return None
-    return (None, inner, m.start(), m.end())
+    return (inner, m.start(), m.end())
 
 
 def _split_dict_entries(inner: str) -> list[str]:
