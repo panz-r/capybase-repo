@@ -417,7 +417,7 @@ def process(
     for old in SCENARIO_DIR.glob(f"{dataset.id}-*.json"):
         old.unlink()
 
-    ext = {"rust": ".rs", "python": ".py"}.get(language)
+    ext = {"rust": ".rs", "python": ".py", "c": ".c", "cpp": ".cpp"}.get(language)
     written = 0
     for scenario in mine_rebase_scenarios(
         clone,
@@ -460,7 +460,8 @@ def main(argv: list[str] | None = None) -> int:
                    help=f"cap scenarios per repo (default {DEFAULT_MAX_SCENARIOS})")
     p.add_argument("--min-commits", type=int, default=DEFAULT_MIN_COMMITS,
                    help=f"min source-side commits to keep a scenario (default {DEFAULT_MIN_COMMITS})")
-    p.add_argument("--language", default="rust", choices=["rust", "python", "all"],
+    p.add_argument("--language", default="rust",
+                   choices=["rust", "python", "c", "cpp", "all"],
                    help="filter scenarios by conflict-file language (default rust)")
     p.add_argument("--list", action="store_true", help="list registered datasets and exit")
     p.add_argument("-v", "--verbose", action="store_true")

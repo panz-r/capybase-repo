@@ -219,6 +219,39 @@ DATASETS: dict[str, Dataset] = {
         # window; bump if the comment-overlap rate is too low.
         merge_limit=200,
     ),
+    # --- C corpus (mined from real C projects). The mining machinery is
+    # language-agnostic (classify_language already maps .c/.h -> "c"); these
+    # entries just register C-bearing repos. C++ will have its own corpus suite.
+    "redis-history": Dataset(
+        id="redis-history",
+        kind="git-history",
+        url="https://github.com/redis/redis.git",
+        extract_subdir="redis",
+        extractor="git_history",
+        license="BSD-3-Clause",
+        source_url="https://github.com/redis/redis",
+        merge_limit=200,
+    ),
+    "curl-history": Dataset(
+        id="curl-history",
+        kind="git-history",
+        url="https://github.com/curl/curl.git",
+        extract_subdir="curl",
+        extractor="git_history",
+        license="curl",
+        source_url="https://github.com/curl/curl",
+        merge_limit=200,
+    ),
+    "sqlite-history": Dataset(
+        id="sqlite-history",
+        kind="git-history",
+        url="https://github.com/sqlite/sqlite.git",
+        extract_subdir="sqlite",
+        extractor="git_history",
+        license="Public Domain",
+        source_url="https://github.com/sqlite/sqlite",
+        merge_limit=200,
+    ),
 }
 
 

@@ -204,6 +204,44 @@ def test_realworld_python_merge_verifier_verdict(case: RealWorldCase, tmp_path):
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c.id for c in CASES])
+def test_realworld_c_merge_gcc_verdict(case: RealWorldCase, tmp_path):
+    """C: does the gcc -fsyntax-only floor accept the human merge? (record honestly).
+
+    The always-on syntax floor for C (mirrors py_compile for Python). gcc runs
+    on the single file with no build-system context — the same standalone
+    limitation the Rust path documents for standalone rustc (can't resolve
+    cross-file symbols like ``#include`` from siblings). A user-supplied
+    build/test command against an active build tree is the future authentic
+    oracle (C builds are non-uniform — no single command works across
+    redis/curl/sqlite the way cargo does for Rust); that seam is deferred until
+    the corpus is mined and real C conflict shapes are known.
+
+    Asserts only that the gcc floor ENGAGED (``syntax_checked``); the compile
+    verdict is recorded, not asserted — a real-world merge that doesn't pass
+    standalone gcc (e.g. it needs sibling headers) is an honest signal, recorded
+    not failed.
+    """
+    if case.language != "c":
+        pytest.skip("C-only gcc verdict (other languages use their own floors)")
+    eng = VerificationEngine.default(ValidationConfig())
+    # M is the whole resolved file: verify it directly (no splicing).
+    res = eng.verify_file(
+        case.path, case.language, case.expected_resolved, [],
+        repo_root=str(tmp_path),
+    )
+    # The floor must have engaged. syntax_checked=False is an infra regression.
+    assert res.features.get("syntax_checked") is True, (
+        f"{case.id}: gcc floor did not engage (syntax_checked=False) — "
+        f"infrastructure regression. features={res.features}"
+    )
+    # Record the verdict honestly. A human merge that fails standalone gcc
+    # (needs sibling-file context) is expected and informative, not a failure.
+    if not res.passed:
+        msgs = [f.message[:80] for f in res.hard_failures[:2]]
+        print(f"  {case.id}: human merge did not pass gcc: {msgs}")
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c.id for c in CASES])
 def test_realworld_rust_merge_cargo_verdict(case: RealWorldCase):
     """Rust: does the crate at merge commit M compile? (record honestly).
 

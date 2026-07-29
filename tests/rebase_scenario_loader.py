@@ -41,6 +41,10 @@ _GIT_HISTORY_CLONE_SUBDIR = {
     "flask-history": "flask",
     "rayon-history": "rayon",
     "axum-history": "axum",
+    "ratatui-history": "ratatui",
+    "redis-history": "redis",
+    "curl-history": "curl",
+    "sqlite-history": "sqlite",
 }
 
 
