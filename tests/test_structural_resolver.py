@@ -956,3 +956,70 @@ def test_dependency_version_resolution_declines_on_multi_line():
         f"rule must not fire on oversized multi-line conflict; rule={r.rule}"
     )
 
+
+# ---------------------------------------------------------------------------
+# brace_union — single-line {...} additions (C/C++ enum variants, struct fields)
+# ---------------------------------------------------------------------------
+
+
+def test_brace_union_merges_distinct_enum_variants():
+    """The headline gap: both sides append a distinct variant to a single-line
+    enum. list_union matches only [...], dict_union needs key:value, insertion_union
+    needs whole lines — this shape fell through all three until brace_union."""
+    base = "enum Color { RED, GREEN, BLUE };"
+    cur = "enum Color { RED, GREEN, BLUE, YELLOW };"
+    rep = "enum Color { RED, GREEN, BLUE, PURPLE };"
+    r = resolve_structurally(_unit(base, cur, rep))
+    assert r.rule == "brace_union", r.rule
+    assert r.resolved
+    # Base items preserved, both appends present.
+    assert "RED" in r.text and "GREEN" in r.text and "BLUE" in r.text
+    assert "YELLOW" in r.text   # current's append
+    assert "PURPLE" in r.text   # replayed's append
+
+
+def test_brace_union_declines_shared_append():
+    """Both sides append the SAME variant → ambiguous; let identical/zealous
+    handle it, not brace_union (which would be a guess at dedup-vs-keep-both)."""
+    base = "enum E { A, B };"
+    cur = "enum E { A, B, C };"
+    rep = "enum E { A, B, C };"
+    r = resolve_structurally(_unit(base, cur, rep))
+    # identical_sides fires (both sides equal) — not brace_union.
+    assert r.rule != "brace_union"
+
+
+def test_brace_union_declines_multi_line():
+    """A {...} spanning multiple lines defers to insertion_union (line-granular,
+    preserves formatting). brace_union's rebuild flattens to one line, which
+    would destroy indentation."""
+    base = "enum E {\n    A,\n    B,\n};"
+    cur = "enum E {\n    A,\n    B,\n    C,\n};"
+    rep = "enum E {\n    A,\n    B,\n    D,\n};"
+    r = resolve_structurally(_unit(base, cur, rep))
+    # Multi-line: brace_union declines, insertion_union (or zealous) handles it.
+    assert r.rule != "brace_union"
+
+
+def test_brace_union_does_not_interfere_with_dict_union():
+    """A real dict {key: value} is handled by dict_union (the more-specific
+    keyed-entry rule), not brace_union. brace_union only fires when dict_union
+    declined (segments lack ':')."""
+    base = 'd = {"a": 1, "b": 2}'
+    cur = 'd = {"a": 1, "b": 2, "c": 3}'
+    rep = 'd = {"a": 1, "b": 2, "d": 4}'
+    r = resolve_structurally(_unit(base, cur, rep))
+    assert r.rule == "dict_union", r.rule
+    assert '"c": 3' in r.text
+    assert '"d": 4' in r.text
+
+
+def test_brace_union_declines_on_base_item_edit():
+    """A side that MODIFIED a base item (not just appended) → decline (the
+    change would be silently dropped by the append-only merge)."""
+    base = "enum E { A, B };"
+    cur = "enum E { A, X, B }; "  # modified B's position / changed an item
+    rep = "enum E { A, B, C };"
+    r = resolve_structurally(_unit(base, cur, rep))
+    assert r.rule != "brace_union"
+

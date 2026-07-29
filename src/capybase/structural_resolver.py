@@ -74,7 +74,7 @@ Rule = Literal[
     # same anchor. An opinionated, deterministic ordering (current-appends
     # before replayed-appends) resolves them; a wrong guess still fails the
     # validation pipeline and falls through to the LLM, so the policy is safe.
-    "list_union", "dict_union", "insertion_union",
+    "list_union", "dict_union", "brace_union", "insertion_union",
     # Value-resolution rules for prose/config conflicts the code-shaped rules
     # above decline. text_value_resolution handles pure-prose bumps (no
     # braces/=); dependency_version_resolution handles the TOML inline-table
@@ -256,6 +256,9 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         merged = _try_dict_union(base, current, replayed)
         if merged is not None:
             return StructuralResolution(rule="dict_union", text=merged)
+        merged = _try_brace_union(base, current, replayed)
+        if merged is not None:
+            return StructuralResolution(rule="brace_union", text=merged)
         merged = _try_insertion_union(base, current, replayed)
         if merged is not None:
             return StructuralResolution(rule="insertion_union", text=merged)
@@ -953,6 +956,59 @@ def _try_dict_union(base: str, current: str, replayed: str) -> str | None:
     if replayed[:rep[1]] != b_pre or replayed[rep[2]:] != b_suf:
         return None
     return _rebuild_dict(base, merged)
+
+
+def _try_brace_union(base: str, current: str, replayed: str) -> str | None:
+    """Merge two sides that each APPEND distinct items to a single ``{...}`` brace
+    list (C/C++ enum variants, struct field lists, initializer sets).
+
+    The ``{...}`` analog of :func:`_try_list_union` (which matches ``[...]``) and
+    the bare-comma analog of :func:`_try_dict_union` (which requires ``key:
+    value`` entries). Fires for shapes like ``enum X { A, B }`` where both sides
+    append a variant: list_union won't match (wrong brackets), dict_union
+    declines (no ``:`` in the segments), insertion_union needs whole lines. This
+    rule splits on top-level commas WITHOUT a ``:`` requirement, so enum variants
+    and bare struct-field lists qualify.
+
+    Declines (→ None) when: there's no single ``{...}``; a side changed non-item
+    structure; the two sides appended the SAME item; either side touched base
+    items; or the ``{...}`` spans multiple lines (the rebuild flattens to one
+    line, destroying formatting — multi-line shapes defer to insertion_union,
+    which is line-granular and preserves them).
+
+    Dispatches AFTER dict_union (the more-specific keyed-entry rule) so a real
+    dict ``{a: 1, b: 2}`` is handled by dict_union; brace_union only fires when
+    dict_union declined (segments lack ``:``).
+    """
+    b = _find_single_dict(base)
+    if b is None:
+        return None
+    base_inner = b[0]
+    if "\n" in base_inner:
+        return None  # multi-line → insertion_union territory
+    base_items = _split_list_items(base_inner)
+    cur = _find_single_dict(current)
+    rep = _find_single_dict(replayed)
+    if cur is None or rep is None:
+        return None
+    cur_items = _split_list_items(cur[0])
+    rep_items = _split_list_items(rep[0])
+    cur_appended = _appended_tail(base_items, cur_items)
+    rep_appended = _appended_tail(base_items, rep_items)
+    if cur_appended is None or rep_appended is None:
+        return None  # a side reordered/removed/edited base items
+    if set(cur_appended) & set(rep_appended):
+        return None  # shared addition → identical_sides/zealous territory
+    merged_items = base_items + cur_appended + rep_appended
+    # Surrounding text (prefix before ``{`` and suffix after ``}``) must be
+    # invariant — a side that changed the enum/struct name or a trailing comment
+    # would be silently dropped by inheriting the other side's surrounding text.
+    b_pre, b_suf = base[: b[1]], base[b[2]:]
+    if current[:cur[1]] != b_pre or current[cur[2]:] != b_suf:
+        return None
+    if replayed[:rep[1]] != b_pre or replayed[rep[2]:] != b_suf:
+        return None
+    return b_pre + "{" + ", ".join(merged_items) + "}" + b_suf
 
 
 def _try_insertion_union(base: str, current: str, replayed: str) -> str | None:
