@@ -278,6 +278,35 @@ CC_CONFLICTS: list[CConflict] = [
         notes="Return-type change + param added at different token positions.",
     ),
 
+    # --- A2. brace_union — single-line {...} additions (the gap-closing rule) ---
+
+    _conflict(
+        id="enum_single_line_union",
+        path="src/color.c",
+        language="c",
+        base=(
+            "enum Color { RED, GREEN, BLUE };\n"
+            "int main(void) { return RED; }\n"
+        ),
+        current=(
+            "enum Color { RED, GREEN, BLUE, PURPLE };\n"
+            "int main(void) { return RED; }\n"
+        ),
+        replayed=(
+            "enum Color { RED, GREEN, BLUE, YELLOW };\n"
+            "int main(void) { return RED; }\n"
+        ),
+        expected_resolved="enum Color { RED, GREEN, BLUE, PURPLE, YELLOW };",
+        broken_resolved="enum Color { RED, GREEN, BLUE, PURPLE, YELLOW",  # no ';'
+        taxonomy=("textual", "brace-union", "enum", "single-line"),
+        notes=(
+            "Both sides append a distinct variant to a single-line enum. "
+            "list_union matches only [...], dict_union needs key:value, "
+            "insertion_union needs whole lines — this shape fell through all "
+            "three until brace_union."
+        ),
+    ),
+
     # --- B. C-specific reject shapes the compile floor catches (gcc / c_std) ---
 
     _conflict(
