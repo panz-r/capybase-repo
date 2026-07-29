@@ -16,6 +16,7 @@ from capybase.verification import (
     ValidationConfig,
     VerificationEngine,
     _compile_ccs,
+    _is_ccs_resolution_error,
 )
 
 
@@ -92,3 +93,52 @@ def test_compile_ccs_missing_binary_raises_file_not_found():
         _compile_ccs("int main(void){return 0;}\n",
                      cc_path="definitely-not-a-real-compiler-xyz",
                      std="c11", suffix=".c")
+
+
+# ---------------------------------------------------------------------------
+# _is_ccs_resolution_error (semantic vs parse classification; no toolchain)
+# ---------------------------------------------------------------------------
+
+
+def test_is_ccs_resolution_error_classifies_semantic():
+    # Each semantic pattern → True (deferred to Phase B; not a per-unit defect).
+    semantic = [
+        "x.c:5:3: error: use of undeclared identifier 'foo'",
+        "x.cpp:10:5: error: 'bar' was not declared in this scope",
+        "x.c:3:2: error: 'T' has not been declared",
+        "x.cpp:8:3: error: no matching function for call to 'f'",
+        "x.cpp:9:3: error: cannot convert 'int' to 'char*'",
+        "x.c:4:8: error: invalid use of incomplete type 'struct S'",
+        "x.cpp:12:4: error: 'x' is not a member of 'Foo'",
+        "x.cpp:1:1: error: 'Bar' does not name a type",
+        "x.cpp:7:3: error: 'class Foo' has no member named 'baz'",
+        "x.cpp:1: undefined reference to `symbol'",
+    ]
+    for msg in semantic:
+        assert _is_ccs_resolution_error(msg), f"expected True for: {msg!r}"
+
+
+def test_is_ccs_resolution_error_surfaces_parse_errors():
+    # Parse errors don't match any semantic pattern → False (surfaced as defects).
+    parse = [
+        "x.c:5:3: error: expected ';' before '}' token",
+        "x.c:1:1: error: expected '=', ',', ';', 'asm' or '__attribute__'",
+        "x.c:2:5: error: stray '\\342' in program",
+        "x.c:3:1: error: unterminated string literal",
+        "x.c:4:8: error: missing terminating \" character",
+        "x.c:5:3: error: expected expression before '}' token",
+        "x.c:6:1: error: expected declaration specifiers or '...' before 'x'",
+    ]
+    for msg in parse:
+        assert not _is_ccs_resolution_error(msg), f"expected False for: {msg!r}"
+
+
+def test_is_ccs_resolution_error_empty_and_none():
+    assert not _is_ccs_resolution_error("")
+    assert not _is_ccs_resolution_error(None)  # type: ignore[arg-type]
+
+
+def test_is_ccs_resolution_error_case_insensitive():
+    # gcc/clang message case can vary by locale/version; matching is case-blind.
+    assert _is_ccs_resolution_error("Error: Use of Undeclared Identifier 'x'")
+    assert _is_ccs_resolution_error("X.C:1:1: ERROR: Cannot Convert 'int'")

@@ -1968,6 +1968,48 @@ def _is_rust_resolution_error(msg: str) -> bool:
     return bool(msg and _RUST_SEMANTIC_ERROR.search(msg))
 
 
+# C/C++ diagnostics that indicate a RESOLUTION / type problem, NOT a parse
+# defect. Standalone ``gcc``/``clang -fsyntax-only`` on a fragment can't resolve
+# symbols from another translation unit or a header not pre-declared in the
+# fragment, so it surfaces these as artifacts of compiling out of context — NOT
+# merge defects. Only PARSE errors (``expected ';'``, ``unexpected``, ``stray``,
+# ``unterminated``) are real defects at the per-unit level. Semantic errors defer
+# to Phase B (whole-file check) where the full translation-unit context is
+# available. gcc/clang have no tidy E-code scheme like rustc, so classify by
+# message-text prefixes (matched case-insensitively). The list is conservative —
+# a prefix not listed here is treated as a parse error (surfaced), erring toward
+# catching real defects over suppressing noise.
+_CCS_SEMANTIC_PATTERNS = (
+    "undeclared identifier",          # gcc/clang: use of undeclared identifier
+    "was not declared in this scope",  # g++ scope resolution
+    "has not been declared",          # g++ forward-decl-only
+    "no matching function",           # overload resolution (needs full TU)
+    "cannot convert",                 # type conversion (needs full decls)
+    "incomplete type",                # forward-declared, definition elsewhere
+    "is not a member of",             # struct member resolution
+    "does not name a type",           # typedef / class-name resolution
+    "no member named",                # struct field resolution
+    "undefined reference",            # linker-level (defensive; -fsyntax-only skips link)
+    "suggest an alternative",         # clang "did you mean?" (resolution, not parse)
+)
+_CCS_SEMANTIC_RE = re.compile(
+    "|".join(re.escape(p) for p in _CCS_SEMANTIC_PATTERNS), re.IGNORECASE
+)
+
+
+def _is_ccs_resolution_error(msg: str) -> bool:
+    """True when a gcc/clang diagnostic is semantic (resolution/type), not parse.
+
+    Per-unit standalone ``-fsyntax-only`` produces semantic errors (undeclared
+    identifiers, type mismatches, unresolved members) as artifacts of the
+    fragment lacking full translation-unit context. These are NOT candidate
+    defects. Only parse/syntax errors (``expected ';'``, ``stray '\\xxx'``,
+    ``unterminated``) are real defects at this level — they don't match any of
+    the semantic patterns and so return False (surfaced).
+    """
+    return bool(msg and _CCS_SEMANTIC_RE.search(msg))
+
+
 def _mask_strings_and_comments(text: str, language: str | None) -> str:
     """Mask string/char literals and strip line comments, language-aware.
 
