@@ -172,6 +172,20 @@ def test_cpp14_digit_separator_not_blanked():
     assert "1'000'000" in out  # digit separators preserved
 
 
+def test_c_char_literal_blanked():
+    # C char literal 'x' is a string-literal form, must be blanked.
+    src = "char c = 'x';"
+    out = blank_strings_and_comments(src, "c")
+    assert "'x'" not in out
+    assert "char c =" in out
+
+
+def test_cpp_char_literal_blanked():
+    src = "char c = 'x';"
+    out = blank_strings_and_comments(src, "cpp")
+    assert "'x'" not in out
+
+
 # ---------------------------------------------------------------------------
 # Comments
 # ---------------------------------------------------------------------------
@@ -190,6 +204,31 @@ def test_family_a_block_comment_blanked():
     out = blank_strings_and_comments(src, "rust")
     assert "block" not in out
     assert "1" in out
+
+
+def test_c_block_comment_blanked():
+    # Family-A block comments must be blanked for C — pinned (not assumed).
+    src = "int x = /* hidden */ 1;"
+    out = blank_strings_and_comments(src, "c")
+    assert "hidden" not in out
+    assert "int x =" in out
+    assert "1;" in out
+
+
+def test_cpp_block_comment_blanked():
+    src = "int x = /* hidden */ 1;"
+    out = blank_strings_and_comments(src, "cpp")
+    assert "hidden" not in out
+    assert "1;" in out
+
+
+def test_cpp_multiline_block_comment_blanked():
+    src = "int x = /* a\nmulti\nline\nblock */ 1;"
+    out = blank_strings_and_comments(src, "cpp")
+    assert "multi" not in out
+    assert "block" not in out
+    assert "1;" in out
+    assert len(out) == len(src)
 
 
 def test_family_b_hash_comment_blanked():
@@ -260,6 +299,29 @@ def test_length_preserved_on_complex_input():
     assert len(out) == len(src), (
         f"length changed: {len(src)} -> {len(out)}\n{src!r}\n{out!r}"
     )
+
+
+def test_length_preserved_on_complex_cpp_input():
+    # Every tricky C/C++ construct at once: block comment, C++ raw string, char
+    # literal, line comment, digit separator — all must be length-preserving.
+    # The raw-string delimiter is ``DL`` so the closer ``)DL"`` cannot appear in
+    # the body (a real C++ constraint: the delimiter must not occur in content).
+    src = (
+        'auto s = R"DL(raw { body } )DL";  /* block */\n'
+        "char c = 'x';\n"
+        "// line comment\n"
+        "int n = 1'000'000;\n"
+        "int w = 1;"
+    )
+    out = blank_strings_and_comments(src, "cpp")
+    assert len(out) == len(src), (
+        f"length changed: {len(src)} -> {len(out)}\n{src!r}\n{out!r}"
+    )
+    # Sanity: comment/string bodies are gone, code survives.
+    assert "raw" not in out
+    assert "block" not in out
+    assert "line comment" not in out
+    assert "int w = 1;" in out
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +416,11 @@ def test_structural_blank_comments_matches_canonical_lexer():
         ("let a = \"str\"; // comment\nlet b = 2;", "rust"),
         ("f\"{x}\" + \"plain\" # comment", "python"),
         ("plain text no comments here", "python"),
+        # C/C++ — pin the Family-A delegation (// and /* */) under c/cpp.
+        ("// slash comment\ncode", "c"),
+        ("/* block */ code", "cpp"),
+        ("/* multi\nline\nblock */ after", "c"),
+        ("int a = \"str\"; // comment\nint b = 2;", "cpp"),
     ]
     for text, lang in cases:
         preblanked = _blank_text_strings(text)  # strings gone, as at call sites
