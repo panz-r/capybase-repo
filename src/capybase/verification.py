@@ -3419,7 +3419,7 @@ class VerificationEngine:
         # The divergence line is recorded in detail for attribution + feedback.
         # Reported under the "syntax" validator name (it IS a syntax error) so
         # the existing test assertions and the risk/retry path treat it uniformly.
-        if language in ("rust", "python") and self.config.require_syntax_if_supported:
+        if language in ("rust", "python", "c", "cpp", "c++") and self.config.require_syntax_if_supported:
             imbalance_line = _brace_imbalance_line(whole, language)
             if imbalance_line is not None:
                 # Fix #1 — enrich the message with the brace delta so the model

@@ -70,10 +70,14 @@ def _lang_uses_slash_comments(lang: str | None) -> bool:
 
 #: Languages whose preprocessor splices ``\\`` + newline into a logical line.
 #: A ``\\`` immediately before a newline inside a ``//`` line comment continues
-#: the comment onto the next line. Only C/C++ here: Rust/Go/JS/TS do not splice
-#: and changing them would risk regressions for no benefit. Python's explicit
-#: line continuation (``\\``-newline) does not apply to ``#`` comments.
-_LINE_CONTINUATION_LANGS: frozenset[str] = frozenset({"c", "cpp", "c++", "h", "cc", "cxx", "hpp", "hh"})
+#: the comment onto the next line. Scoped to C/C++ only (the canonical IDs plus
+#: the ``c++`` alias): Rust/Go/JS/TS are also slash-comment (Family A) but do
+#: NOT splice, and changing them would risk regressions for no benefit. Python's
+#: explicit line continuation (``\\``-newline) does not apply to ``#`` comments.
+#: The set is language NAMES (matching ``_FAMILY_A_LANGS``'s membership model),
+#: NOT file extensions — ``detect_language`` canonicalizes ``.h``/``.cc`` etc.
+#: to ``c``/``cpp`` before any caller reaches the blanker.
+_LINE_CONTINUATION_LANGS: frozenset[str] = frozenset({"c", "cpp", "c++"})
 
 
 def _lang_splices_line_continuation(lang: str | None) -> bool:

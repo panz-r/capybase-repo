@@ -253,21 +253,16 @@ def test_ccs_syntax_validator_skips_when_compiler_absent(monkeypatch):
 
 def test_ccs_syntax_validator_skips_unbalanced_braces():
     # A splice that leaves braces unbalanced defers to Phase B (a per-unit
-    # fragment inside a larger construct is structurally incomplete).
-    import capybase.verification as vmod
-    # Force _resolve_tool to a sentinel so the only skip is the brace guard.
-    monkey = pytest.MonkeyPatch()
-    monkey.setattr(vmod, "_resolve_tool", lambda name: "/usr/bin/gcc")
-    try:
-        worktree = "void f() {\n<<<<<<< H\n    {\n=======\n    {\n>>>>>>> b\n}\n"
-        u = _unit(worktree=worktree, language="c", marker_span=(1, 3))
-        # resolved_text opens a brace but doesn't close it → unbalanced.
-        res = _verify(CcsSyntaxValidator(), u, _candidate("    g(); {\n"))
-        assert res.passed, res.message
-        assert res.features["ccs_syntax_checked"] is False
-        assert res.features["syntax_passed"] is True
-    finally:
-        monkey.undo()
+    # fragment inside a larger construct is structurally incomplete). The brace
+    # guard runs BEFORE tool resolution, so this needs no compiler — it tests
+    # that imbalance short-circuits to a pass regardless of gcc availability.
+    worktree = "void f() {\n<<<<<<< H\n    {\n=======\n    {\n>>>>>>> b\n}\n"
+    u = _unit(worktree=worktree, language="c", marker_span=(1, 3))
+    # resolved_text opens a brace but doesn't close it → unbalanced after splice.
+    res = _verify(CcsSyntaxValidator(), u, _candidate("    g(); {\n"))
+    assert res.passed, res.message
+    assert res.features["ccs_syntax_checked"] is False
+    assert res.features["syntax_passed"] is True
 
 
 @skip_no_gxx
@@ -407,3 +402,35 @@ def test_verify_file_c_disabled_when_require_syntax_off(tmp_path):
     assert res.passed  # no hard failure despite the broken merge
     assert res.features["syntax_checked"] is True
     assert res.features["syntax_passed"] is False
+
+
+@skip_no_gcc
+def test_verify_file_c_unbalanced_braces_get_rich_diagnostic(tmp_path):
+    # Consistency with rust: C/C++ is a brace language (Family A), so a splice
+    # that leaves braces unbalanced is caught by the fast brace-coherence gate
+    # (BEFORE the gcc run) with a line-specific diagnostic — not deferred to a
+    # generic gcc error. A merge that opens a brace but never closes it.
+    conflict = (
+        "int compute(int n) {\n"
+        "<<<<<<< H\n"
+        "    if (n > 0) {\n"
+        "        return n;\n"
+        "=======\n"
+        "    if (n > 0) {\n"
+        "        return n;\n"
+        ">>>>>>> b\n"
+        "}\n"
+    )
+    # resolved_text opens an inner brace but never closes it → unbalanced.
+    span = _span_of_markers(conflict)
+    eng = VerificationEngine.default(ValidationConfig())
+    res = eng.verify_file(
+        "src/cfg.c", "c", conflict, [(span, "    if (n > 0) {\n        return n;\n")],
+        repo_root=str(tmp_path),
+    )
+    assert not res.passed
+    brace_fails = [f for f in res.hard_failures if f.validator == "syntax"]
+    assert len(brace_fails) == 1
+    # The rich diagnostic names the brace delta, not a generic gcc error.
+    assert "unclosed" in brace_fails[0].message or "brace" in brace_fails[0].message
+    assert "brace_imbalance_line" in brace_fails[0].detail
