@@ -26,9 +26,8 @@ if TYPE_CHECKING:
     from capybase.config import StructuralConfig
 
 # Language inference from file extension. The single source of truth is
-# ``language.EXTENSION_TO_LANGUAGE`` ( previously this module carried a
-# divergent copy that disagreed with the abstract parser's map). Aliased here as
-# ``_EXT_LANG`` for backward compatibility with any internal/test references.
+# ``language.EXTENSION_TO_LANGUAGE``; aliased locally as ``_EXT_LANG`` so the
+# detect_language reads naturally.
 from capybase.adapters.language import EXTENSION_TO_LANGUAGE as _EXT_LANG
 
 
@@ -748,9 +747,11 @@ def _base_hunk_via_diff3(base: str, current: str, replayed: str) -> str | None:
 def _enclosing_symbol(worktree_text: str, block: MarkerBlock) -> str | None:
     """Best-effort enclosing symbol by Python indentation heuristics.
 
-    MVP-only signal for context/risk; structural merge replaces this later.
-    Looks upward for a ``def``/``class`` line whose indentation is strictly
-    less than the first non-empty conflict line.
+    A fallback signal used when the structural parser is unavailable; when
+    structural context IS enabled, ``_enrich_structural`` overwrites
+    ``unit.enclosing_symbol`` with the AST-resolved enclosing node. Looks
+    upward for a ``def``/``class`` line whose indentation is strictly less
+    than the first non-empty conflict line.
     """
     lines = worktree_text.split("\n")
     body_indent = _leading_indent(block.current_text.split("\n"))

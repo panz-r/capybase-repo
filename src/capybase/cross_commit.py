@@ -150,10 +150,6 @@ class DependencyBreak:
         )
 
 
-def _defined_names(defined: frozenset[tuple[str, str]]) -> set[str]:
-    return {name for _kind, name in defined}
-
-
 def build_commit_symbols(
     files: "dict[str, str]",
     *,

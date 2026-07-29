@@ -74,11 +74,6 @@ def _anchor_for_span(
     return ""
 
 
-def _line_of(text: str, offset: int) -> int:
-    """1-based line number for a byte offset."""
-    return text[:offset].count("\n") + 1
-
-
 def _token_jaccard(a: str, b: str) -> float:
     """Token-set Jaccard similarity (for comment correspondence)."""
     ta, tb = set(a.lower().split()), set(b.lower().split())
@@ -593,7 +588,6 @@ def apply_comment_plan(
 
     # Apply edits in DESCENDING start order (so earlier offsets aren't shifted).
     edits.sort(key=lambda e: e[0], reverse=True)
-    result_chars = list(resolved_text)
     # Apply from the end: replace [start:end] with the replacement.
     # Since we're working with a char list and offsets, splice from the end.
     result = resolved_text

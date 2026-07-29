@@ -1,10 +1,11 @@
 """Context building for the resolver.
 
-MVP: the conflict block, ±N surrounding lines, the file path, the inferred
-language, and a best-effort enclosing symbol. The ``ContextBundle`` shape is
-richer than this (related snippets, retrieved examples, structural view) so
-program slicing, RAG, and AST views can be added later without changing the
-resolver signature.
+Assembles the ``ContextBundle`` the resolver consumes: the conflict block, ±N
+surrounding lines, the file path, the inferred language, a best-effort
+enclosing symbol, and (when available) the structural/AST view, deferred-
+comment masking, RAG-retrieved examples, cross-file dependency slices, and
+session history. The bundle shape is richer than the core fields so additional
+context sources can be added without changing the resolver signature.
 """
 
 from __future__ import annotations

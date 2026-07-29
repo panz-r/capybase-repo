@@ -166,7 +166,7 @@ class CalibrationModel:
         z = self.intercept
         for w, x in zip(self.coefficients, vec):
             z += w * x
-        return _sigmoid(z)
+        return sigmoid(z)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -196,11 +196,6 @@ class CalibrationModel:
             return cls.from_dict(json.loads(p.read_text(encoding="utf-8")))
         except (json.JSONDecodeError, KeyError, ValueError):
             return None
-
-
-def _sigmoid(z: float) -> float:
-    """Numerically stable sigmoid. Delegates to :func:`capybase.stats.sigmoid`."""
-    return sigmoid(z)
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +272,7 @@ class ConformalRiskModel:
         z = self.intercept
         for w, x in zip(self.coefficients, vec):
             z += w * x
-        proba_fail = _sigmoid(z)
+        proba_fail = sigmoid(z)
         # Candidate nonconformity under the success hypothesis: high = the
         # model thinks it will fail = atypical/nonconforming.
         candidate_score = proba_fail  # = 1 - P(success)

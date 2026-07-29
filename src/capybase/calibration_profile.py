@@ -27,13 +27,10 @@ import json
 import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from capybase.config import ModelConfig
 from capybase.prompt_profile import DEFAULT_PROFILE, PromptProfile
-
-if TYPE_CHECKING:
-    pass
 
 
 @dataclass

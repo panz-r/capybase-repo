@@ -71,9 +71,6 @@ PROMPT_RETRY = "cegis_retry.v6"
 # Two-pass prompting (Step 2): intent extraction then code generation.
 PROMPT_INTENT = "intent.v1"
 PROMPT_CODE = "code_from_intent.v1"
-# PlanSearch: multi-plan sampling. Each candidate is tagged
-# code_from_intent.v1#plan{i} so offline eval can attribute outcomes per plan.
-PROMPT_PLAN = "plan_search.v1"
 # Targeted repair (Step 4): send back the broken candidate for surgical fixing.
 PROMPT_REPAIR = "cegis_repair.v2"
 # Block-capture (large modify/delete): the model picks keep/accept_deletion/
@@ -1088,7 +1085,6 @@ def _extract_signatures(text: str) -> list[str]:
     sees what kind of entity it is. Deduplicated, order-preserving. Empty for a
     block with no recognizable definitions (e.g. a config/data block).
     """
-    import re
 
     seen: set[str] = set()
     out: list[str] = []
@@ -1141,12 +1137,6 @@ def parse_block_capture_decision(raw: str) -> tuple[str, str]:
     return decision, str(data.get("reason", "") or "")
 
 
-# Variant tags are appended to the base prompt_version (e.g. "resolve_text_block.v5#v1")
-# so offline eval can attribute outcomes to the phrasing — the seed data for any
-# future prompt-optimization (AOZPT) work. "" = baseline (no suffix).
-PROMPT_VARIANT_TAGS: tuple[str, ...] = ("", "#v1", "#v2")
-
-
 def build_resolve_prompt_variants(
     unit: ConflictUnit,
     context: ContextBundle,
@@ -1155,8 +1145,8 @@ def build_resolve_prompt_variants(
 ) -> list[tuple[str, str]]:
     """Return up to ``k`` semantically-equivalent resolve prompts.
 
-    Each entry is ``(prompt_text, variant_suffix)`` where ``variant_suffix`` is
-    one of ``PROMPT_VARIANT_TAGS`` (``""`` for the baseline). The variants are
+    Each entry is ``(prompt_text, variant_suffix)`` where ``variant_suffix``
+    is ``""`` (baseline), ``#v1``, or ``#v2``. The variants are
     *deterministic transforms* of the baseline's parts (``_resolve_prompt_parts``),
     NOT hand-rewritten templates — so every variant carries the identical three
     sides, structural anchor, JSON contract block, and CRITICAL rules. Only the
@@ -1708,9 +1698,7 @@ def _render_failure(f: VerificationFailure) -> str:
 
 def _norm_ws(text: str) -> str:
     """Whitespace-normalized form for fuzzy SEARCH matching (minor drift)."""
-    import re as _re
-
-    return _re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def apply_search_replace(
@@ -2161,7 +2149,6 @@ def _deterministic_preservation(
     token-only signal with ratios reported as unavailable (represented as 1.0 so
     the token check alone can still drive ``unanimous``).
     """
-    import re
 
     def _toks(text: str) -> set[str]:
         # Blank comments and string literals before tokenizing, mirroring

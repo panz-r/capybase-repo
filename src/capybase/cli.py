@@ -536,7 +536,7 @@ def _run_calibrate_embeddings(
     resolved = resolve_profile_path(repo, profile_path)
     written = False
     prev_floor = 0.35
-    drift = None  # advisory drift-vs-baseline report ( 2 §7)
+    drift = None  # advisory drift-vs-baseline report
     if cal.ok:
         # Load the existing profile (preserving LLM-calibration knobs); a missing
         # profile is created fresh via from_dict (safe defaults for required

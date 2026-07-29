@@ -14,7 +14,6 @@ from capybase.config import ModelConfig
 from capybase.context_builder import ContextBuilder
 from capybase.resolution_engine import (
     PROMPT_CODE,
-    PROMPT_INTENT,
     ResolutionEngine,
     build_code_prompt,
     build_intent_prompt,

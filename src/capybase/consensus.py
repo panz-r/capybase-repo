@@ -94,10 +94,7 @@ def normalize(text: str, language: str | None = None) -> str:
     # Partition lines into "string-interior" vs "code" by tracking open
     # multi-line strings across the whole text. A line is string-interior if a
     # multi-line string was open coming into it. Uses the canonical char-scan
-    # (handles Rust raw hash-count, C++ raw, triple-quote, template literals
-    # uniformly) — replaces the bespoke _multi_string_open_count/_closes
-    # heuristics which (a) didn't handle C++ raw and (b) matched closers by a
-    # hash-count-blind regex (closing a 2-hash string on a 3-hash line).
+    # (handles Rust raw hash-count, C++ raw, triple-quote, template literals).
     interior = multiline_string_line_mask(text, language)
     out_lines: list[str] = []
     for idx, line in enumerate(text.split("\n")):
@@ -122,17 +119,6 @@ def normalize(text: str, language: str | None = None) -> str:
     # distinguishes a top-level statement from a method body.
     out = out.rstrip()
     return out
-
-
-# ---------------------------------------------------------------------------
-# Multi-line string interior detection now delegates to the canonical
-# adapters.string_lexer.multiline_string_line_mask (handles Rust raw hash-
-# count, C++ raw delimiters, Python triple-quotes, JS template literals
-# uniformly). The bespoke _multi_string_open_count / _multi_string_opens /
-# _multi_string_closes helpers were removed — they (a) didn't handle C++ raw
-# strings and (b) matched closers by a hash-count-blind regex (closing a 2-hash
-# string on a 3-hash line — the concrete bug #8 fixed by this delegation).
-# ---------------------------------------------------------------------------
 
 
 def _collapse_code_blank_runs(text: str, language: str | None = None) -> str:

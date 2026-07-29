@@ -427,19 +427,7 @@ class EnforcementRouter:
         if ctx.ledger_lineage_ids and claim.lineage_id not in ctx.ledger_lineage_ids:
             return (f"claim lineage {claim.lineage_id} not in session ledger "
                     f"(stale response from another case)")
-        # 8. Prompt/config version mismatch (a verdict produced under a
-        # different prompt/config than the one recorded for this session).
-        if c_verdict.juror and ctx.prompt_version and ctx.prompt_version != "jury-prompt-v1":
-            # The version is recorded on the context; the verdict itself doesn't
-            # carry it. A mismatch is detected by the orchestrator comparing the
-            # recorded prompt_version against the live one — surfaced here only
-            # when the context records an unexpected version. (Kept as an
-            # explicit gate so version-mismatch tests can exercise it.)
-            pass
-        # 9. The jury or aggregator raised an unexpected error is handled by the
-        # caller (the router never catches its own programming errors into
-        # accept). No-op here.
-        # 10. The chair's route is itself NOT accept — the chair already decided
+        # 8. The chair's route is itself NOT accept — the chair already decided
         # against acceptance (a blocking finding exists).
         if decision.route != "accept":
             return None  # not an accept candidate; the matrix handles it below
