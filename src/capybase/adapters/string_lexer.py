@@ -68,6 +68,27 @@ def _lang_uses_slash_comments(lang: str | None) -> bool:
     return (lang or "").strip().lower() in _FAMILY_A_LANGS
 
 
+#: Languages whose preprocessor splices ``\\`` + newline into a logical line.
+#: A ``\\`` immediately before a newline inside a ``//`` line comment continues
+#: the comment onto the next line. Only C/C++ here: Rust/Go/JS/TS do not splice
+#: and changing them would risk regressions for no benefit. Python's explicit
+#: line continuation (``\\``-newline) does not apply to ``#`` comments.
+_LINE_CONTINUATION_LANGS: frozenset[str] = frozenset({"c", "cpp", "c++", "h", "cc", "cxx", "hpp", "hh"})
+
+
+def _lang_splices_line_continuation(lang: str | None) -> bool:
+    """True when a ``\\`` immediately before a newline continues a line comment.
+
+    Scoped to C/C++: the C/C++ preprocessor splices ``\\`` + newline, so a
+    ``//`` comment ending in ``\\`` runs onto the next physical line. Without
+    this, braces inside such a continued comment would leak into brace-balance
+    on macro-heavy C/C++ — a silent correctness skew.
+    """
+    if lang is None:
+        return False
+    return (lang or "").strip().lower() in _LINE_CONTINUATION_LANGS
+
+
 # ---------------------------------------------------------------------------
 # String-prefix detection (Rust raw + C++ raw)
 # ---------------------------------------------------------------------------
@@ -222,6 +243,7 @@ def _blank_strings_and_comments_scan(
     preserve_fstring_interpolation: bool,
     string_char: str = "_",
     comment_char: str = " ",
+    line_continuation: bool = False,
 ) -> str:
     """The core char-scan. Produces blanked text, length-preserving.
 
@@ -236,9 +258,20 @@ def _blank_strings_and_comments_scan(
         ch = src[i]
         nxt = src[i + 1] if i + 1 < n else ""
 
-        # --- newline: emit as-is, close line comment ---
+        # --- newline: emit as-is, close line comment (unless continued) ---
         if ch == "\n":
             if st.in_line_comment:
+                # C/C++ preprocessor line-continuation: when the char just
+                # before this newline in the SOURCE was a backslash, the ``//``
+                # comment runs onto the next physical line. Inspect ``src``
+                # (not ``out`` — the backslash was already blanked to
+                # ``comment_char`` by the in-comment branch) and stay in the
+                # comment, blanking this newline too.
+                prev_src = src[i - 1] if i > 0 else ""
+                if line_continuation and prev_src == "\\":
+                    out.append(comment_char if blank_comments else ch)
+                    i += 1
+                    continue
                 st.in_line_comment = False
             out.append(ch)
             i += 1
@@ -546,6 +579,7 @@ def blank_strings_and_comments(
     # PHP uses BOTH ``//`` and ``#`` as line comments; every other language uses
     # exactly one style (Family A → ``//``, Family B → ``#``).
     hash_c = (not slash) or (lang or "").strip().lower() == "php"
+    line_cont = _lang_splices_line_continuation(lang)
     return _blank_strings_and_comments_scan(
         text,
         slash_comments=slash,
@@ -555,6 +589,7 @@ def blank_strings_and_comments(
         preserve_fstring_interpolation=preserve_fstring_interpolation,
         string_char=string_char,
         comment_char=comment_char,
+        line_continuation=line_cont,
     )
 
 

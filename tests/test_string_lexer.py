@@ -363,3 +363,84 @@ def test_structural_blank_comments_matches_canonical_lexer():
             f"_blank_comments divergence for [{lang}] {text!r}:\n"
             f"  structural: {delegated!r}\n  canonical:  {canonical!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# C/C++ line continuation (backslash-newline splices a ``//`` comment)
+# ---------------------------------------------------------------------------
+
+
+def test_c_line_continued_comment_continues_under_c():
+    # A ``//`` comment ending in ``\`` runs onto the next physical line in C/C++.
+    src = "int x = 1; // comment one \\\n still comment here \nint y = 2;\n"
+    out = blank_strings_and_comments(src, "c")
+    # The continued body must be blanked...
+    assert "still comment here" not in out
+    assert "comment one" not in out
+    # ...and code after the (real) newline survives.
+    assert "int y = 2;" in out
+    assert "int x = 1;" in out
+    # Length is preserved.
+    assert len(out) == len(src)
+
+
+def test_cpp_line_continued_comment_continues_under_cpp():
+    src = "int x = 1; // comment one \\\n leaked body \nint y = 2;\n"
+    out = blank_strings_and_comments(src, "cpp")
+    assert "leaked body" not in out
+    assert "int y = 2;" in out
+    assert len(out) == len(src)
+
+
+def test_c_line_continuation_chains_across_multiple_lines():
+    # Each trailing ``\`` extends the comment one more physical line.
+    src = "// a \\\n// b \\\n// c \nint x = 1;\n"
+    out = blank_strings_and_comments(src, "c")
+    # All three comment fragments blanked...
+    assert " a " not in out
+    assert " b " not in out
+    assert " c " not in out
+    # ...code after the final (un-continued) newline survives.
+    assert "int x = 1;" in out
+
+
+def test_line_continuation_does_not_apply_to_rust():
+    # Rust does NOT splice backslash-newline — the comment ends at the newline
+    # and the next line is ordinary code. This is the regression guard.
+    src = "// comment one \\\n code on next line\n"
+    out = blank_strings_and_comments(src, "rust")
+    assert "comment one" not in out
+    # The ``\`` itself was part of the comment (blanked), but the next line is
+    # real code and must survive unblanked.
+    assert "code on next line" in out
+
+
+def test_c_line_continuation_macro_braces_not_skewed():
+    # The motivating case: a ``//`` comment whose continued line contains braces
+    # would, without continuation handling, leak those braces into brace-balance.
+    src = (
+        "int before = 0;\n"
+        "// macro note: do { something } while(0) \\\n"
+        "   and more { braces } here \n"
+        "int after = 1;\n"
+    )
+    out = blank_strings_and_comments(src, "c")
+    # The continued comment's braces are gone...
+    assert "something" not in out
+    assert "braces" not in out
+    # ...so the only braces left are from real code (none here) — net zero.
+    assert out.count("{") == 0
+    assert out.count("}") == 0
+    assert "int before = 0;" in out
+    assert "int after = 1;" in out
+
+
+def test_line_continuation_backslash_inside_string_unaffected():
+    # A ``\`` before a newline INSIDE a string literal is a string escape, not a
+    # comment continuation — must not change string-blanking behavior.
+    src = 'char *s = "abc \\\n def"; // real comment\nint x = 1;\n'
+    out = blank_strings_and_comments(src, "c")
+    assert " def" not in out  # string body blanked
+    assert "real comment" not in out
+    assert "int x = 1;" in out
+    assert len(out) == len(src)
