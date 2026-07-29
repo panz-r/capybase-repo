@@ -3594,6 +3594,40 @@ class VerificationEngine:
                         )
                 features["syntax_checked"] = syntax_checked
                 features["syntax_passed"] = syntax_ok
+        elif language in ("c", "cpp", "c++"):
+            # C/C++ whole-file verification. Unlike Rust (crate-aware via cargo),
+            # C/C++ has no build-system-context concept at this layer — a single
+            # translation unit is self-contained for parse/syntax, so standalone
+            # ``gcc``/``g++ -fsyntax-only`` on the spliced file is correct. A
+            # missing compiler → "not checked" (never a false fail), mirroring the
+            # Rust standalone-rustc fallback. No semantic filter here: the whole
+            # file has full translation-unit context, so an undeclared identifier
+            # IS a real defect (mirrors how the cargo path doesn't suppress E0432
+            # because the crate context resolves them).
+            from capybase.adapters.lsp import _resolve
+            is_cpp = language in ("cpp", "c++")
+            cc = _resolve(self.config.cxx_path if is_cpp else self.config.cc_path)
+            if cc is not None:
+                syntax_checked = True
+                std = self.config.cpp_std if is_cpp else self.config.c_std
+                suffix = ".cpp" if is_cpp else ".c"
+                try:
+                    ok, msg = _compile_ccs(whole, cc_path=cc, std=std, suffix=suffix)
+                except FileNotFoundError:
+                    ok = True  # tool vanished between resolve & run → skip
+                    msg = "C/C++ compiler not available; syntax not checked"
+                syntax_ok = ok
+                if not ok and self.config.require_syntax_if_supported:
+                    hard.append(
+                        VerificationFailure(
+                            validator="syntax",
+                            severity="error",
+                            message=msg,
+                            detail={"std": std},
+                        )
+                    )
+            features["syntax_checked"] = syntax_checked
+            features["syntax_passed"] = syntax_ok
         elif language == "toml" and Path(path).name == "Cargo.toml":
             # A dependency/manifest conflict in Cargo.toml. ``detect_language``
             # classifies it as ``"toml"`` (not ``"rust"``), so it never reached

@@ -297,3 +297,113 @@ def test_ccs_syntax_validator_registered_in_default_engine():
     res = engine.verify(u, _candidate("    return n + 1\n"))
     assert not res.passed
     assert any(f.validator == "ccs_syntax" for f in res.hard_failures)
+
+
+# ---------------------------------------------------------------------------
+# verify_file C/C++ branch (Phase B whole-file compile gate)
+# ---------------------------------------------------------------------------
+
+# A self-contained C conflict: a function whose body is the conflict region.
+_C_FILE_CONFLICT = (
+    "int compute(int n) {\n"
+    "<<<<<<< H\n"
+    "    return n + 1;\n"
+    "=======\n"
+    "    return n + 2;\n"
+    ">>>>>>> b\n"
+    "}\n"
+)
+_C_FILE_CORRECT = "    return n + 1;"   # valid C
+_C_FILE_BROKEN = "    return n + 1"     # missing semicolon → parse error
+
+# A self-contained C++ conflict.
+_CPP_FILE_CONFLICT = (
+    "int compute(int n) {\n"
+    "<<<<<<< H\n"
+    "    return n + 1;\n"
+    "=======\n"
+    "    return n + 2;\n"
+    ">>>>>>> b\n"
+    "}\n"
+)
+_CPP_FILE_BROKEN = "    return n + 1"   # missing semicolon
+
+
+def _span_of_markers(original: str) -> tuple[int, int]:
+    """Return the (start, end) marker span of the only conflict block."""
+    lines = original.split("\n")
+    start = next(i for i, l in enumerate(lines) if l.startswith("<<<<<<<"))
+    end = next(i for i, l in enumerate(lines) if l.startswith(">>>>>>>"))
+    return (start, end)
+
+
+@skip_no_gcc
+def test_verify_file_c_accepts_compiling_merge(tmp_path):
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    eng = VerificationEngine.default(ValidationConfig())
+    res = eng.verify_file(
+        "src/cfg.c", "c", _C_FILE_CONFLICT, [(span, _C_FILE_CORRECT)],
+        repo_root=str(tmp_path),
+    )
+    assert res.passed, [f.message for f in res.hard_failures]
+    assert res.features["syntax_checked"] is True
+    assert res.features["syntax_passed"] is True
+
+
+@skip_no_gcc
+def test_verify_file_c_rejects_noncompiling_merge(tmp_path):
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    eng = VerificationEngine.default(ValidationConfig())
+    res = eng.verify_file(
+        "src/cfg.c", "c", _C_FILE_CONFLICT, [(span, _C_FILE_BROKEN)],
+        repo_root=str(tmp_path),
+    )
+    assert not res.passed
+    syntax_fails = [f for f in res.hard_failures if f.validator == "syntax"]
+    assert len(syntax_fails) == 1
+    assert "error" in syntax_fails[0].message
+
+
+@skip_no_gxx
+def test_verify_file_cpp_rejects_noncompiling_merge(tmp_path):
+    span = _span_of_markers(_CPP_FILE_CONFLICT)
+    eng = VerificationEngine.default(ValidationConfig())
+    res = eng.verify_file(
+        "src/cfg.cpp", "cpp", _CPP_FILE_CONFLICT, [(span, _CPP_FILE_BROKEN)],
+        repo_root=str(tmp_path),
+    )
+    assert not res.passed
+    assert any(f.validator == "syntax" for f in res.hard_failures)
+
+
+def test_verify_file_c_missing_compiler_is_not_checked(monkeypatch, tmp_path):
+    # The graceful-degrade contract: a missing compiler is NEVER a false fail.
+    # Not skip-gated — runs unconditionally via monkeypatch. Feeds BROKEN source
+    # and asserts the tool didn't run and no syntax failure was added.
+    import capybase.adapters.lsp as lsp_mod
+    monkeypatch.setattr(lsp_mod, "_resolve", lambda cmd: None)
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    eng = VerificationEngine.default(ValidationConfig())
+    res = eng.verify_file(
+        "src/cfg.c", "c", _C_FILE_CONFLICT, [(span, _C_FILE_BROKEN)],
+        repo_root=str(tmp_path),
+    )
+    assert res.features["syntax_checked"] is False
+    assert not any(f.validator == "syntax" for f in res.hard_failures)
+
+
+@skip_no_gcc
+def test_verify_file_c_disabled_when_require_syntax_off(tmp_path):
+    # With require_syntax_if_supported=False, a broken merge is NOT hard-failed
+    # (the check still runs and records syntax_passed=False, but no failure).
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    cfg = ValidationConfig()
+    cfg.require_syntax_if_supported = False
+    eng = VerificationEngine.default(cfg)
+    res = eng.verify_file(
+        "src/cfg.c", "c", _C_FILE_CONFLICT, [(span, _C_FILE_BROKEN)],
+        repo_root=str(tmp_path),
+    )
+    assert res.passed  # no hard failure despite the broken merge
+    assert res.features["syntax_checked"] is True
+    assert res.features["syntax_passed"] is False
