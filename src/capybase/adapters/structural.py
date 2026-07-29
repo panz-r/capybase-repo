@@ -1710,6 +1710,20 @@ def _blank_text_strings(text: str) -> str:
     model), then (2) blank remaining strings with ``_STRING_LIT_RE`` (handles
     triple-quotes, f-strings, escapes). F-string interpolations are restored
     post-blanking.
+
+    Why this is NOT a thin delegate to ``string_lexer.blank_strings``: the two
+    have intentional, tested semantic differences. This blanker (a) blanks the
+    ENTIRE string including its prefix (``r#"..."#`` → all spaces; ``b"..."`` →
+    all spaces), while the canonical lexer preserves prefixes as structural
+    markers; and (b) treats f-string escaped braces ``{{...}}`` as literal text
+    (blanked), while the canonical lexer preserves them. The token-set /
+    fingerprint callers (``BothSidesRepresentedValidator._token_set``,
+    ``resolution_engine._toks``, ``context_builder``, ``referenced_symbols``)
+    depend on this prefix-and-escaped-brace-blanking behavior — e.g.
+    ``referenced_symbols`` must NOT extract ``{{not_token}}`` as a symbol (see
+    ``test_r35_fstring_escaped_braces_not_extracted``). Only the comment blanker
+    (``_blank_comments``) delegates to the canonical lexer, because every call
+    site pre-blanks strings so the divergence never arises there.
     """
     from capybase.adapters.abstract_parser import (
         _STRING_LIT_RE, _blank_raw_strings,
@@ -1762,48 +1776,17 @@ def _blank_comments(text: str, language: str | None = None) -> str:
     """Blank comment regions (length-preserving) so identifiers inside comments
     don't pollute the reference set.
 
-    Handles line comments (``#`` for Python/Ruby/PHP, ``//`` for brace langs)
-    and block comments (``/* ... */`` for brace langs). Language-aware via the
-    canonical family classification (PHP supports both ``//`` and ``#``). Must
-    run AFTER :func:`_blank_text_strings` so a comment marker inside a string
-    isn't mistaken for a real comment.
+    Delegates to the canonical :func:`string_lexer.blank_comments` lexer. Every
+    call site runs :func:`_blank_text_strings` FIRST, so by the time this sees
+    the text all string literals are already blanked — there are no string-
+    internal comment markers to mis-handle, and the canonical lexer (which is
+    string-aware) agrees byte-for-byte with the former hand-rolled scan on such
+    input. Handles line comments (``#`` for Python/Ruby/PHP, ``//`` for brace
+    langs) and block comments (``/* ... */`` for brace langs); PHP uses both
+    ``//`` and ``#``.
     """
-    from capybase.adapters.abstract_parser import _lang_is_family_a
-    is_family_a = _lang_is_family_a(language)
-    slash_is_comment = is_family_a
-    hash_is_comment = (not is_family_a) or language == "php"
-    chars = list(text)
-    n = len(chars)
-    i = 0
-    while i < n:
-        # Line comment: ``//`` or ``#`` to end of line.
-        if slash_is_comment and i + 1 < n and chars[i] == "/" and chars[i + 1] == "/":
-            while i < n and chars[i] != "\n":
-                chars[i] = " "
-                i += 1
-            continue
-        if hash_is_comment and chars[i] == "#":
-            while i < n and chars[i] != "\n":
-                chars[i] = " "
-                i += 1
-            continue
-        # Block comment: ``/* ... */`` (brace langs).
-        if slash_is_comment and i + 1 < n and chars[i] == "/" and chars[i + 1] == "*":
-            chars[i] = " "
-            chars[i + 1] = " "
-            i += 2
-            while i < n and not (chars[i] == "*" and i + 1 < n and chars[i + 1] == "/"):
-                if chars[i] != "\n":
-                    chars[i] = " "
-                i += 1
-            if i < n:
-                chars[i] = " "      # '*'
-                if i + 1 < n:
-                    chars[i + 1] = " "  # '/'
-                i += 2
-            continue
-        i += 1
-    return "".join(chars)
+    from capybase.adapters.string_lexer import blank_comments
+    return blank_comments(text, language)
 
 
 def _blank_fstring_preserving_interpolation(raw: str) -> str:

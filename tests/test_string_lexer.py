@@ -316,3 +316,50 @@ def test_unterminated_block_comment_no_crash():
     out = blank_strings_and_comments(src, "rust")
     assert isinstance(out, str)
     assert len(out) == len(src)
+
+
+# ---------------------------------------------------------------------------
+# PHP comment-style bugfix + comment-blanker delegation parity
+# ---------------------------------------------------------------------------
+
+
+def test_php_blanks_both_hash_and_slash_comments():
+    """Regression: PHP uses BOTH ``//`` and ``#`` as line comments, but
+    ``blank_comments`` formerly treated PHP as slash-only (because
+    ``_lang_uses_slash_comments('php')`` is True), leaving ``#`` comments
+    unblanked. Both styles must now be blanked."""
+    src = "# php hash\n// php slash\ncode"
+    out = blank_comments(src, "php")
+    assert "#" not in out.split("\n")[0], f"hash comment not blanked: {out!r}"
+    assert "//" not in out.split("\n")[1], f"slash comment not blanked: {out!r}"
+    assert "code" in out.split("\n")[2]
+
+
+def test_structural_blank_comments_matches_canonical_lexer():
+    """``structural._blank_comments`` now delegates to ``string_lexer.blank_comments``.
+    Every call site runs ``_blank_text_strings`` FIRST (so strings are already
+    blanked when the comment blanker sees the text). Assert the two agree
+    byte-for-byte on post-string-blanked input across languages and comment
+    styles — proves the delegation preserves behavior."""
+    from capybase.adapters.structural import _blank_comments as struct_bc
+    from capybase.adapters.structural import _blank_text_strings
+    cases = [
+        ("# hash comment\ncode", "python"),
+        ("// slash comment\ncode", "rust"),
+        ("/* block */ code", "rust"),
+        ("/* multi\nline\nblock */ after", "rust"),
+        ("# php hash\n// php slash\ncode", "php"),
+        ("// has \"quote\" inside", "rust"),
+        ("# has \"quote\" inside", "python"),
+        ("let a = \"str\"; // comment\nlet b = 2;", "rust"),
+        ("f\"{x}\" + \"plain\" # comment", "python"),
+        ("plain text no comments here", "python"),
+    ]
+    for text, lang in cases:
+        preblanked = _blank_text_strings(text)  # strings gone, as at call sites
+        canonical = blank_comments(preblanked, lang)
+        delegated = struct_bc(preblanked, lang)
+        assert delegated == canonical, (
+            f"_blank_comments divergence for [{lang}] {text!r}:\n"
+            f"  structural: {delegated!r}\n  canonical:  {canonical!r}"
+        )

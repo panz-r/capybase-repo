@@ -543,7 +543,9 @@ def blank_strings_and_comments(
         The blanked text (same length as ``text``).
     """
     slash = _lang_uses_slash_comments(lang)
-    hash_c = not slash  # Family B uses # comments; Family A does not.
+    # PHP uses BOTH ``//`` and ``#`` as line comments; every other language uses
+    # exactly one style (Family A → ``//``, Family B → ``#``).
+    hash_c = (not slash) or (lang or "").strip().lower() == "php"
     return _blank_strings_and_comments_scan(
         text,
         slash_comments=slash,
