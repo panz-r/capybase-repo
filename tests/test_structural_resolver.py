@@ -1023,3 +1023,103 @@ def test_brace_union_declines_on_base_item_edit():
     r = resolve_structurally(_unit(base, cur, rep))
     assert r.rule != "brace_union"
 
+
+# ---------------------------------------------------------------------------
+# directive_union — C/C++ preprocessor directive dedup
+# ---------------------------------------------------------------------------
+
+
+def _c_unit(base: str, current: str, replayed: str, *, lang: str = "c",
+            path: str = "src/main.c") -> ConflictUnit:
+    def _side(label, text):
+        return ConflictSide(label=label, text=text)  # type: ignore[arg-type]
+
+    return ConflictUnit(
+        session_id="s", step_index=0, path=path, unit_id="u", language=lang,
+        base=_side("BASE", base),
+        current=_side("CURRENT_UPSTREAM_SIDE", current),
+        replayed=_side("REPLAYED_COMMIT_SIDE", replayed),
+        original_worktree_text=base,
+    )
+
+
+def test_directive_union_dedupes_identical_include():
+    """When both sides add the SAME #include but each ALSO adds a distinct one,
+    the sides are NOT identical (so identical_sides declines) and the shared
+    directive overlaps (so insertion_union declines). directive_union collapses
+    the shared directive to one copy while keeping each side's distinct add."""
+    base = "#include <stdio.h>\nint main(void) { return 0; }"
+    cur = "#include <stdio.h>\n#include <shared.h>\n#include <cur_only.h>\nint main(void) { return 0; }"
+    rep = "#include <stdio.h>\n#include <shared.h>\n#include <rep_only.h>\nint main(void) { return 0; }"
+    r = resolve_structurally(_c_unit(base, cur, rep))
+    assert r.rule == "directive_union", r.rule
+    assert r.resolved
+    # The shared #include appears exactly ONCE (deduped, not twice).
+    assert r.text.count("#include <shared.h>") == 1
+    # Each side's distinct directive is present.
+    assert "#include <cur_only.h>" in r.text
+    assert "#include <rep_only.h>" in r.text
+    # Base content preserved.
+    assert "#include <stdio.h>" in r.text
+    assert "int main(void) { return 0; }" in r.text
+
+
+def test_directive_union_merges_distinct_and_shared_directives():
+    """Mixed: one shared directive + each side's distinct directive. Shared
+    deduped to one; distinct kept (current's before replayed's)."""
+    base = "#include <stdio.h>\nint main(void) { return 0; }"
+    cur = "#include <stdio.h>\n#include <shared.h>\n#include <cur_only.h>\nint main(void) { return 0; }"
+    rep = "#include <stdio.h>\n#include <shared.h>\n#include <rep_only.h>\nint main(void) { return 0; }"
+    r = resolve_structurally(_c_unit(base, cur, rep))
+    assert r.rule == "directive_union", r.rule
+    assert r.text.count("#include <shared.h>") == 1   # deduped
+    assert "#include <cur_only.h>" in r.text           # current's distinct
+    assert "#include <rep_only.h>" in r.text           # replayed's distinct
+
+
+def test_directive_union_handles_define_too():
+    """#define directives are also additive and dedup-eligible. Mixed shape
+    (shared + distinct) so identical_sides doesn't fire first. The body stays
+    identical to base (pure insertion of defines only)."""
+    base = "#define BASE 1\nint main(void) { return 0; }"
+    cur = "#define BASE 1\n#define SHARED 2\n#define CUR 3\nint main(void) { return 0; }"
+    rep = "#define BASE 1\n#define SHARED 2\n#define REP 4\nint main(void) { return 0; }"
+    r = resolve_structurally(_c_unit(base, cur, rep))
+    assert r.rule == "directive_union", r.rule
+    assert r.text.count("#define SHARED 2") == 1
+    assert "#define CUR 3" in r.text
+    assert "#define REP 4" in r.text
+
+
+def test_directive_union_declines_non_directive_additions():
+    """If a side added a non-directive line (e.g. a function), this is
+    insertion_union's territory (it handles the disjoint case) — directive_union
+    declines so it doesn't second-guess a rule that already ran."""
+    base = "#include <stdio.h>\n"
+    cur = "#include <stdio.h>\nint foo(void) { return 1; }\n"
+    rep = "#include <stdio.h>\nint bar(void) { return 2; }\n"
+    r = resolve_structurally(_c_unit(base, cur, rep))
+    # Non-directive additions → insertion_union already resolved (distinct lines).
+    assert r.rule != "directive_union"
+
+
+def test_directive_union_declines_non_cc_language():
+    """directive_union is C/C++ only — other languages have no # directives."""
+    base = "x = 1"
+    cur = "x = 1\n# python comment"
+    rep = "x = 1\n# python comment"
+    r = resolve_structurally(_unit(base, cur, rep))  # default path f.py, no lang
+    assert r.rule != "directive_union"
+
+
+def test_directive_union_ignores_conditional_directives():
+    """#ifdef/#endif form a conditional TREE — directive_union deliberately does
+    NOT touch them (would need tree parsing). Only additive directives qualify."""
+    base = "#include <stdio.h>\nint main(void) { return 0; }"
+    cur = "#include <stdio.h>\n#ifdef FEATURE\nint enabled(void) { return 1; }\n#endif\nint main(void) { return 0; }"
+    rep = "#include <stdio.h>\n#ifdef FEATURE\nint enabled(void) { return 1; }\n#endif\nint main(void) { return 0; }"
+    r = resolve_structurally(_c_unit(base, cur, rep))
+    # The #ifdef block contains non-directive lines (the function) → not a pure
+    # directive addition → directive_union declines.
+    assert r.rule != "directive_union"
+

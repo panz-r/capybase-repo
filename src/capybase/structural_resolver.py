@@ -75,6 +75,10 @@ Rule = Literal[
     # before replayed-appends) resolves them; a wrong guess still fails the
     # validation pipeline and falls through to the LLM, so the policy is safe.
     "list_union", "dict_union", "brace_union", "insertion_union",
+    # C/C++ preprocessor directive dedup: when both sides add the SAME #include/
+    # #define, insertion_union declines (shared addition). directive_union
+    # collapses the duplicate to one copy. C/C++ only.
+    "directive_union",
     # Value-resolution rules for prose/config conflicts the code-shaped rules
     # above decline. text_value_resolution handles pure-prose bumps (no
     # braces/=); dependency_version_resolution handles the TOML inline-table
@@ -262,6 +266,9 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         merged = _try_insertion_union(base, current, replayed)
         if merged is not None:
             return StructuralResolution(rule="insertion_union", text=merged)
+        merged = _try_directive_union(unit)
+        if merged is not None:
+            return StructuralResolution(rule="directive_union", text=merged)
 
     return StructuralResolution(rule=None, text=None)
 
@@ -1049,6 +1056,94 @@ def _try_insertion_union(base: str, current: str, replayed: str) -> str | None:
         out.append(bl)
     out.extend(cur_ins.get(len(base_lines), []))
     out.extend(rep_ins.get(len(base_lines), []))
+    return "\n".join(out)
+
+
+# C/C++ preprocessor directives eligible for directive_union. Only the ADDITIVE
+# directives (#include, #define, #pragma, #undef) — NOT conditional directives
+# (#ifdef/#if/#else/#endif), which form a tree structure that needs parsing.
+_DIRECTIVE_RE = __import__("re").compile(
+    r"^\s*#\s*(include|define|pragma|undef)\b"
+)
+
+
+def _is_directive_line(line: str) -> bool:
+    return bool(_DIRECTIVE_RE.match(line))
+
+
+def _try_directive_union(unit) -> str | None:
+    """Merge C/C++ preprocessor directive additions that insertion_union declined.
+
+    The one gap ``_try_insertion_union`` (which fires earlier in the dispatch)
+    leaves: when both sides add the IDENTICAL directive line (e.g. both add
+    ``#include <newheader.h>``), insertion_union treats the shared addition as
+    ambiguous and declines (its disjoint-set check). This rule closes that gap
+    with DEDUPLICATION — identical directive additions collapse to one copy.
+
+    Strictly additive: fires only when each side is a pure insertion of
+    ``#include``/``#define``/``#pragma``/``#undef`` lines against base (no base
+    line modified or deleted), exactly like insertion_union's preconditions. The
+    difference is only in how OVERLAPPING additions are handled: insertion_union
+    declines on overlap; directive_union dedupes (a shared ``#include`` is
+    unambiguous — keep one copy, not two).
+
+    NOT in scope: ``#ifdef``/``#if``/``#else``/``#endif`` (conditional structure
+    — needs tree parsing); include sorting/reordering (the feedback warns
+    include order can be semantic; this rule preserves base order, current's
+    distinct directives before replayed's). C/C++ only — other languages have no
+    ``#`` directives.
+    """
+    lang = unit.language
+    if lang not in ("c", "cpp", "c++"):
+        return None
+    base = unit.base.text or ""
+    current = unit.current.text or ""
+    replayed = unit.replayed.text or ""
+    base_lines = base.split("\n")
+    cur_ins = _pure_insertion_runs(base_lines, current.split("\n"))
+    rep_ins = _pure_insertion_runs(base_lines, replayed.split("\n"))
+    if cur_ins is None or rep_ins is None:
+        return None  # a side modified/deleted a base line
+    # Only fire when the added lines are ALL directives (otherwise this is a
+    # mixed add that insertion_union already handled or declined for good reason).
+    cur_flat = [ln for run in cur_ins.values() for ln in run]
+    rep_flat = [ln for run in rep_ins.values() for ln in run]
+    if not cur_flat or not rep_flat:
+        return None  # nothing added on a side → not the directive-add shape
+    if not all(_is_directive_line(ln) for ln in cur_flat + rep_flat):
+        return None  # non-directive additions → insertion_union's territory
+    # Dedupe: a directive both sides added collapses to one copy. Distinct
+    # directives from each side are kept (current's before replayed's).
+    cur_set = set(cur_flat)
+    rep_set = set(rep_flat)
+    shared = cur_set & rep_set
+    if not shared:
+        return None  # no overlap → insertion_union already resolved the disjoint case
+    cur_distinct = [ln for ln in cur_flat if ln not in shared]
+    rep_distinct = [ln for ln in rep_flat if ln not in shared]
+    # Shared directives (deduped to one copy each), then current's distinct,
+    # then replayed's distinct.
+    deduped_shared = list(dict.fromkeys(cur_flat))  # first-seen order, deduped
+    # Walk base, emitting the directive block at the shared anchor(s). Since all
+    # additions are directives and they overlap, emit a single deduped block at
+    # the lowest insertion anchor (the common case: both added after the same
+    # base #include). current's distinct first, then shared (once), then
+    # replayed's distinct — matches insertion_union's current-before-replayed
+    # ordering with shared collapsed.
+    out: list[str] = []
+    emitted = False
+    min_anchor = min(min(cur_ins), min(rep_ins))
+    for i, bl in enumerate(base_lines):
+        if i == min_anchor and not emitted:
+            out.extend(cur_distinct)
+            out.extend(deduped_shared)
+            out.extend(rep_distinct)
+            emitted = True
+        out.append(bl)
+    if not emitted:  # additions were all trailing
+        out.extend(cur_distinct)
+        out.extend(deduped_shared)
+        out.extend(rep_distinct)
     return "\n".join(out)
 
 
