@@ -14,7 +14,7 @@ calibration A/B-selects): union-combines, Rust syntax (struct fields + impl
 methods), multi-hunk same-file, import/dependency combine, duplicate-symbol
 tension, semantically-incompatible same-line edits, and modify/delete
 keeper-wins. NOTE: this corpus is broad on conflict *shape* but not yet
-statistically robust — ``probe_mechanisms`` refuses to A/B-select expensive
+statistically robust — ``probe_two_phase`` refuses to A/B-select expensive
 mechanisms below a minimum corpus size (see ``_MIN_CORPUS_FOR_MECHANISM_SELECTION``),
 so a too-small corpus leaves mechanisms off rather than flipping them on noise.
 The orchestrator-level mechanisms (structural resolution, block-capture) are NOT

@@ -85,36 +85,14 @@ def _token_jaccard(a: str, b: str) -> float:
 
 def _comment_referenced_identifiers(comment_text: str) -> list[str]:
     """Identifier-shaped tokens mentioned in a comment (for the STALE check +
-    the §3 referenced_identifiers ledger field). Reuses the same shape heuristic
-    as comment_verifiers._looks_like_symbol so we don't double-define it."""
-    import re
-    ident_re = re.compile(r"[A-Za-z_][A-Za-z0-9_]{1,}")
+    the referenced_identifiers ledger field).
 
-    def _looks_like_symbol(tok: str) -> bool:
-        n = len(tok)
-        if n < 4:
-            return False
-        has_under = "_" in tok
-        upper = sum(1 for c in tok if c.isupper())
-        lower = sum(1 for c in tok if c.islower())
-        digits = sum(1 for c in tok if c.isdigit())
-        if has_under and tok.isupper():
-            return True
-        if has_under and lower > 0:
-            return True
-        if not has_under and upper >= 2 and lower >= 1:
-            return True
-        if not has_under and tok.isupper() and upper >= 4 and digits == 0:
-            return True
-        return False
-
-    stripped = comment_text.lstrip()
-    for prefix in ("///", "//!", "//", "/*", "*/", "#!", "#=", "#", '"""', "'''", "*"):
-        if stripped.startswith(prefix):
-            stripped = stripped[len(prefix):].lstrip()
-            break
-    return sorted({m.group(0) for m in ident_re.finditer(stripped)
-                   if _looks_like_symbol(m.group(0))})
+    Delegates to :func:`comment_verifiers._comment_identifiers` (the single
+    implementation of the identifier-shape heuristic) so the two modules can't
+    drift. Returns a sorted list rather than a set for deterministic ordering.
+    """
+    from capybase.comment_verifiers import _comment_identifiers
+    return sorted(_comment_identifiers(comment_text))
 
 
 def _entity_for_anchor(

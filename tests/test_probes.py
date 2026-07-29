@@ -440,8 +440,6 @@ def test_run_calibration_uses_tuned_budget_for_capability_probes():
 
 
 # ---------------------------------------------------------------------------
-# probe_mechanisms — empirical A/B selection on the blessed corpus
-# ---------------------------------------------------------------------------
 
 
 def _json_text(resolved: str) -> str:
@@ -480,18 +478,6 @@ class CorpusAwareClient:
         )
 
 
-def test_probe_mechanisms_correct_baseline_leaves_all_off():
-    """When the model already resolves everything correctly at samples=1,
-    multi-sampling and mechanisms don't strictly improve → all stay off."""
-    from capybase.probes import probe_mechanisms
-
-    client = CorpusAwareClient()  # always correct, regardless of mechanism
-    base = ModelConfig(model="vibethink")
-    result, choices = probe_mechanisms(client, base, base_cfg=base)
-    # Baseline is already perfect; no mechanism beats it strictly.
-    assert choices.samples == 1
-    assert not choices.two_pass
-    assert not choices.enable_self_consistency
 
 
 class SingleSampleWrongClient(CorpusAwareClient):
@@ -516,84 +502,16 @@ class SingleSampleWrongClient(CorpusAwareClient):
                            raw={"_accumulated": {"finish_reason": "stop"}})
 
 
-def test_probe_mechanisms_enables_multi_sampling_when_it_helps():
-    """When multi-sampling resolves the corpus correctly but single-sample
-    fails, the samples count must be raised above 1. (Which exact sub-mechanism
-    flips on is engine-temperature-dependent and not asserted here — the core
-    invariant is that the probe detects multi-sampling helps and raises N.)"""
-    from capybase.probes import probe_mechanisms
-
-    client = SingleSampleWrongClient()
-    base = ModelConfig(model="vibethink")
-    result, choices = probe_mechanisms(client, base, base_cfg=base)
-    assert choices.samples > 1, f"expected multi-sampling enabled, got {result.detail}"
-    assert "beats 1" in result.detail
 
 
-def test_probe_mechanisms_degrades_gracefully_on_eval_error():
-    """If the mechanism eval itself raises, probe_mechanisms must not abort — it
-    returns all-off choices and an ok=False result."""
-    from capybase.probes import probe_mechanisms
-
-    class BoomClient(CorpusAwareClient):
-        def complete(self, *a, **k):
-            raise RuntimeError("eval exploded")
-
-    client = BoomClient()
-    base = ModelConfig(model="vibethink")
-    result, choices = probe_mechanisms(client, base, base_cfg=base)
-    assert not result.ok
-    assert choices.samples == 1
-    assert "off" in result.detail.lower() or "failed" in result.detail.lower()
 
 
-# ---------------------------------------------------------------------------
-# Min-corpus gate: below the floor, probe_mechanisms refuses to A/B-select and
-# leaves all mechanisms off (a too-small corpus can't support a confident
-# one-case correctness difference). Regression guard: as the corpus grows past
-# the floor, selection re-enables automatically.
-# ---------------------------------------------------------------------------
 
 
-def test_probe_mechanisms_refuses_to_select_below_min_corpus(monkeypatch):
-    """With the corpus shrunk below _MIN_CORPUS_FOR_MECHANISM_SELECTION, the
-    probe must leave all mechanisms off and report the refusal — never guess."""
-    from capybase import probes
-    from capybase import calibration_corpus
-    from capybase.probes import probe_mechanisms
-
-    # Shrink the corpus the probe reads below the floor (keep the first 3).
-    small = calibration_corpus.CALIBRATION_CONFLICTS[:3]
-    monkeypatch.setattr(calibration_corpus, "CALIBRATION_CONFLICTS", small)
-    monkeypatch.setattr(probes, "_MIN_CORPUS_FOR_MECHANISM_SELECTION", 15)
-
-    client = CorpusAwareClient()
-    base = ModelConfig(model="vibethink")
-    result, choices = probe_mechanisms(client, base, base_cfg=base)
-    assert choices.samples == 1
-    assert not choices.two_pass
-    assert not choices.enable_self_consistency
-    assert "too small" in result.detail
 
 
-def test_probe_mechanisms_selects_at_or_above_min_corpus():
-    """At the floor the gate passes and the probe runs its normal A/B (here the
-    always-correct client leaves everything off — selection ran, just found no
-    improvement)."""
-    from capybase.probes import _MIN_CORPUS_FOR_MECHANISM_SELECTION, probe_mechanisms
-    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
-
-    # The shipped corpus must be at/above the floor so selection is active.
-    assert len(CALIBRATION_CONFLICTS) >= _MIN_CORPUS_FOR_MECHANISM_SELECTION
-    client = CorpusAwareClient()
-    base = ModelConfig(model="vibethink")
-    result, choices = probe_mechanisms(client, base, base_cfg=base)
-    # The gate did NOT fire (no "too small" refusal).
-    assert "too small" not in result.detail
 
 
-# ---------------------------------------------------------------------------
-# probe_prompt_profile — empirical A/B of the prompt-rendering profile
 # ---------------------------------------------------------------------------
 
 
@@ -620,69 +538,12 @@ class _LayoutSensitiveClient(CorpusAwareClient):
         )
 
 
-def test_probe_prompt_profile_selects_markdown_when_it_scores_higher():
-    """When markdown_code strictly beats the default on the corpus, it's kept."""
-    from capybase.probes import probe_prompt_profile
-    import capybase.prompt_profile as pp
-
-    pp.set_active_profile(None)
-    client = _LayoutSensitiveClient()  # correct only under markdown_code
-    base = ModelConfig(model="vibethink")
-    result, winner = probe_prompt_profile(client, base, base_cfg=base)
-    assert winner.output_layout is pp.OutputLayout.MARKDOWN_CODE
-    assert result.ok is True
-    pp.set_active_profile(None)
 
 
-def test_probe_prompt_profile_returns_default_when_no_improvement():
-    """When markdown_code doesn't improve (both correct, or both wrong), default wins."""
-    from capybase.probes import probe_prompt_profile
-    import capybase.prompt_profile as pp
-
-    pp.set_active_profile(None)
-    client = CorpusAwareClient()  # always correct regardless of layout
-    base = ModelConfig(model="vibethink")
-    result, winner = probe_prompt_profile(client, base, base_cfg=base)
-    assert winner == pp.DEFAULT_PROFILE
-    assert result.ok is False  # no layout beat the default
-    pp.set_active_profile(None)
 
 
-def test_probe_prompt_profile_preserves_existing_on_small_corpus(monkeypatch):
-    """Below the min-corpus floor, the probe refuses and returns `existing`."""
-    from capybase import probes
-    from capybase.probes import probe_prompt_profile
-    import capybase.prompt_profile as pp
-
-    monkeypatch.setattr(probes, "_MIN_CORPUS_FOR_MECHANISM_SELECTION", 10**9)
-    existing = pp.PromptProfile(output_layout=pp.OutputLayout.MARKDOWN_CODE)
-    client = CorpusAwareClient()
-    base = ModelConfig(model="vibethink")
-    result, winner = probe_prompt_profile(
-        client, base, base_cfg=base, existing=existing)
-    assert winner is existing  # preserved, not clobbered by the default
-    assert "too small" in result.detail
 
 
-def test_probe_prompt_profile_baseline_error_returns_default(monkeypatch):
-    """When the baseline eval raises, the probe degrades to the default."""
-    from capybase.probes import probe_prompt_profile
-    import capybase.prompt_profile as pp
-
-    pp.set_active_profile(None)
-
-    def _boom(*a, **kw):
-        raise RuntimeError("eval exploded")
-
-    # Patch the eval primitive to raise.
-    import capybase.probes as _probes_mod
-    monkeypatch.setattr(_probes_mod, "_evaluate_mechanism_setting", _boom)
-    client = CorpusAwareClient()
-    base = ModelConfig(model="vibethink")
-    result, winner = probe_prompt_profile(client, base, base_cfg=base)
-    assert winner == pp.DEFAULT_PROFILE
-    assert "baseline eval failed" in result.detail
-    pp.set_active_profile(None)
 
 
 def test_run_calibration_writes_prompt_section():
@@ -1248,35 +1109,6 @@ def test_task_families_exist():
     assert len(cfg_conflicts) == len(ALL_CONFLICTS_BY_TASK["config_merge"])
 
 
-def test_task_overrides_profile_round_trip():
-    """TaskOverridesProfile round-trips through to_dict/from_dict."""
-    from capybase.calibration_profile import ModelProfile, TaskOverridesProfile
-
-    mp = ModelProfile(
-        model="m", max_tokens=4096,
-        task_overrides=TaskOverridesProfile(overrides={
-            "config_merge": {"samples": 3, "prompt_profile": {"output_layout": "markdown_code"}},
-        }),
-    )
-    d = mp.to_dict()
-    mp2 = ModelProfile.from_dict(d)
-    assert mp2 == mp
-    assert mp2.task_overrides.get("config_merge")["samples"] == 3
-
-
-def test_task_overrides_missing_is_empty():
-    """A profile without task_overrides loads with empty overrides (backward compat)."""
-    from capybase.calibration_profile import ModelProfile
-    mp = ModelProfile.from_dict({"model": "x", "max_tokens": 4096})
-    assert mp.task_overrides.overrides == {}
-    assert mp.task_overrides.get("config_merge") is None
-
-
-# ---------------------------------------------------------------------------
-# self_consistency as a DOE factor (feedback §3.2) + SafetyProfile (§2.1)
-# ---------------------------------------------------------------------------
-
-
 def test_self_consistency_factor_forced():
     """--enable-factor enable_self_consistency adds it to the screening."""
     from capybase.probes import _two_phase_factors, _apply_design_point
@@ -1300,14 +1132,12 @@ def test_safety_profile_round_trip():
     """SafetyProfile round-trips through to_dict/from_dict."""
     from capybase.calibration_profile import ModelProfile, SafetyProfile
     mp = ModelProfile(model="m", max_tokens=4096,
-                      safety=SafetyProfile(max_retries_per_unit=5,
-                                           escalation_on_parse_failure=False))
+                      safety=SafetyProfile(max_retries_per_unit=5))
     d = mp.to_dict()
     assert d["safety"]["max_retries_per_unit"] == 5
     mp2 = ModelProfile.from_dict(d)
     assert mp2 == mp
     assert mp2.safety.max_retries_per_unit == 5
-    assert mp2.safety.escalation_on_parse_failure is False
 
 
 def test_safety_profile_missing_is_default():

@@ -742,13 +742,13 @@ def probe_capabilities_detailed(
 
 
 # ---------------------------------------------------------------------------
-# Mechanism calibration: empirically A/B-select resolution strategies
+# Mechanism + profile settings: the knobs probe_two_phase A/B-selects
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class MechanismChoices:
-    """The generation-mechanism settings selected by :func:`probe_mechanisms`.
+    """The generation-mechanism settings selected by :func:`probe_two_phase`.
 
     Mirrors the ModelConfig fields they overlay. All default to current built-in
     behavior (samples=1, everything off); a field is only non-default if
@@ -846,231 +846,11 @@ _MECHANISM_EVAL_SAMPLES = 3
 
 # Minimum corpus size below which mechanism A/B selection is refused. With a
 # small corpus a single noisy case can flip a mechanism on/off (n_correct is an
-# integer in [0, len(corpus)]), so below this floor ``probe_mechanisms`` leaves
+# integer in [0, len(corpus)]), so below this floor ``probe_two_phase`` leaves
 # ALL multi-sample mechanisms off (samples=1) and records why — it does not
 # guess. Bumping the corpus past this floor re-enables selection automatically.
 _MIN_CORPUS_FOR_MECHANISM_SELECTION = 15
 
-
-def probe_mechanisms(
-    client: Any, model_cfg: ModelConfig, *, base_cfg: ModelConfig
-) -> tuple[ProbeResult, MechanismChoices]:
-    """Empirically A/B-select resolution mechanisms on the blessed corpus.
-
-    Strategy (independent A/B per mechanism — bounded cost, no combinatorial
-    explosion): first decide whether multi-sampling helps at all (N=3 vs N=1 on
-    correctness); if it does, set ``samples=3`` and A/B each mechanism ON vs OFF
-    at that N, keeping ON only when it strictly beats OFF. If multi-sampling
-    doesn't help, all multi-sample mechanisms stay off and ``samples=1``.
-
-    Every eval resolves the full corpus; a mechanism that errors during its eval
-    is treated as "off" (graceful — never aborts calibration). Returns the
-    winning choices + a ProbeResult summarizing the decisions.
-
-    Below ``_MIN_CORPUS_FOR_MECHANISM_SELECTION`` the corpus is too small to
-    A/B-select confidently (a single noisy case can flip a mechanism on/off), so
-    all mechanisms are left off (samples=1) and the refusal is recorded — it
-    never guesses.
-    """
-    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
-
-    choices = MechanismChoices()
-    decisions: list[str] = []
-
-    if len(CALIBRATION_CONFLICTS) < _MIN_CORPUS_FOR_MECHANISM_SELECTION:
-        # Too few cases to trust a one-case correctness difference. Leave every
-        # multi-sample mechanism off and report the refusal so the user knows
-        # selection was skipped for this reason (not that nothing helped).
-        n = len(CALIBRATION_CONFLICTS)
-        decisions.append(
-            f"corpus too small for confident selection ({n} < "
-            f"{_MIN_CORPUS_FOR_MECHANISM_SELECTION} min); leaving all mechanisms off"
-        )
-        return (
-            ProbeResult(
-                "mechanisms", ok=False,
-                detail="; ".join(decisions),
-            ),
-            choices,
-        )
-
-    # Base resolution config: all mechanisms off, samples=1.
-    off_base = base_cfg.model_copy(update={
-        "samples": 1, "two_pass": False, "plan_search": False,
-        "prompt_variants": False, "diverse_sampling": False,
-        "enable_self_consistency": False,
-    })
-    try:
-        baseline_1 = _evaluate_mechanism_setting(client, off_base)
-    except Exception as exc:  # noqa: BLE001 - mechanisms are optional; don't abort
-        return (
-            ProbeResult("mechanisms", ok=False,
-                        detail=f"baseline eval failed ({exc}); leaving all mechanisms off"),
-            choices,
-        )
-
-    # --- Does multi-sampling help? (N=3 vs N=1) ---
-    multi_base = off_base.model_copy(update={"samples": _MECHANISM_EVAL_SAMPLES})
-    try:
-        baseline_multi = _evaluate_mechanism_setting(client, multi_base)
-    except Exception:  # noqa: BLE001 - multi-sampling unavailable
-        baseline_multi = baseline_1  # treat as no better
-
-    if _compare_quality(baseline_multi, baseline_1) > 0:
-        choices.samples = _MECHANISM_EVAL_SAMPLES
-        working_cfg = multi_base
-        decisions.append(f"samples={_MECHANISM_EVAL_SAMPLES} beats 1 "
-                         f"({baseline_multi.n_correct}>{baseline_1.n_correct} correct)")
-    else:
-        choices.samples = 1
-        working_cfg = off_base
-        decisions.append(f"samples=1 ({baseline_1.n_correct} correct); "
-                         f"multi-sampling didn't help ({baseline_multi.n_correct})")
-
-    # --- A/B each mechanism independently at the chosen sample count ---
-    for field, _default in _CANDIDATE_MECHANISMS:
-        on_cfg = working_cfg.model_copy(update={field: True})
-        try:
-            on_score = _evaluate_mechanism_setting(client, on_cfg)
-            off_score = _evaluate_mechanism_setting(client, working_cfg)
-        except Exception as exc:  # noqa: BLE001 - a broken mechanism stays off
-            decisions.append(f"{field}: off (eval error)")
-            continue
-        # Enable ONLY on a correctness-or-proxy improvement — NOT on latency
-        # alone. Latency is noisy (especially for near-instant error paths) and
-        # must never flip a mechanism on by itself; it's a pure tiebreaker for
-        # genuinely equal-quality settings. This avoids the spurious "0->0
-        # correct, improved" enable when both paths error equally.
-        quality_cmp = _compare_quality(on_score, off_score)
-        if quality_cmp > 0:
-            setattr(choices, field, True)
-            working_cfg = on_cfg  # carry the winner forward (mild interaction benefit)
-            decisions.append(f"{field}: ON (improved {off_score.n_correct}->"
-                             f"{on_score.n_correct} correct, proxy {off_score.proxy_sum:.0f}->"
-                             f"{on_score.proxy_sum:.0f})")
-        else:
-            decisions.append(f"{field}: off (no improvement; {on_score.n_correct} vs "
-                             f"{off_score.n_correct} correct)")
-
-    detail = "; ".join(decisions)
-    any_on = (choices.samples > 1 or any(
-        getattr(choices, f) for f, _ in _CANDIDATE_MECHANISMS
-    ))
-    return ProbeResult("mechanisms", ok=any_on, detail=detail), choices
-
-
-# ---------------------------------------------------------------------------
-# Prompt-rendering profile A/B (calibrate)
-# ---------------------------------------------------------------------------
-
-
-def probe_prompt_profile(
-    client: Any,
-    model_cfg: ModelConfig,
-    *,
-    base_cfg: ModelConfig,
-    existing: "PromptProfile | None" = None,
-) -> tuple[ProbeResult, "PromptProfile"]:
-    """Empirically A/B-select the prompt-rendering profile on the blessed corpus.
-
-    Compares the default (v6 JSON) layout against the markdown-code layout (and,
-    if markdown-code wins, the top-heavy instruction position against the
-    winner), keeping whichever scores higher on the corpus. Mirrors
-    :func:`probe_mechanisms`'s independent-A/B strategy and its caution on small
-    corpora: below :data:`_MIN_CORPUS_FOR_MECHANISM_SELECTION` the probe refuses
-    and returns the ``existing`` profile (or DEFAULT) unchanged, so a hand-tuned
-    profile survives a recalibrate on a small corpus.
-
-    Each candidate layout is evaluated by resolving the whole corpus under it
-    (the active prompt profile is a process global, so we ``set_active_profile``
-    before each eval). Returns ``(ProbeResult, winning PromptProfile)``.
-    """
-    from capybase.calibration_corpus import CALIBRATION_CONFLICTS
-    from capybase.prompt_profile import (
-        DEFAULT_PROFILE, InstructionPosition, OutputLayout,
-        PromptProfile, set_active_profile,
-    )
-
-    decisions: list[str] = []
-    winner: PromptProfile = existing if existing is not None else DEFAULT_PROFILE
-
-    if len(CALIBRATION_CONFLICTS) < _MIN_CORPUS_FOR_MECHANISM_SELECTION:
-        # Too few cases to trust a correctness difference — preserve the
-        # existing profile (or default) and record the refusal.
-        n = len(CALIBRATION_CONFLICTS)
-        decisions.append(
-            f"corpus too small for prompt-profile selection ({n} < "
-            f"{_MIN_CORPUS_FOR_MECHANISM_SELECTION} min); keeping existing profile"
-        )
-        return (
-            ProbeResult("prompt_profile", ok=False, detail="; ".join(decisions)),
-            winner,
-        )
-
-    # Baseline: the default (v6 JSON) layout.
-    try:
-        set_active_profile(DEFAULT_PROFILE)
-        baseline = _evaluate_mechanism_setting(client, base_cfg)
-    except Exception as exc:  # noqa: BLE001 - prompt profile is optional
-        decisions.append(f"baseline eval failed ({exc}); keeping default profile")
-        return (
-            ProbeResult("prompt_profile", ok=False, detail="; ".join(decisions)),
-            winner,
-        )
-
-    # Candidate 1: markdown-code layout.
-    md_profile = PromptProfile(output_layout=OutputLayout.MARKDOWN_CODE)
-    try:
-        set_active_profile(md_profile)
-        md_score = _evaluate_mechanism_setting(client, base_cfg)
-    except Exception as exc:  # noqa: BLE001 - a broken candidate stays off
-        decisions.append(f"markdown_code: off (eval error: {exc})")
-        md_score = baseline  # treat as no better
-
-    if _compare_quality(md_score, baseline) > 0:
-        winner = md_profile
-        decisions.append(
-            f"markdown_code: ON (improved {baseline.n_correct}->"
-            f"{md_score.n_correct} correct, proxy {baseline.proxy_sum:.0f}->"
-            f"{md_score.proxy_sum:.0f})"
-        )
-        # Candidate 2 (only if markdown won): top-heavy position. A model that
-        # benefits from the raw-code layout may also benefit from rules-first
-        # ordering; A/B it against the markdown winner.
-        top_profile = PromptProfile(
-            output_layout=OutputLayout.MARKDOWN_CODE,
-            instruction_position=InstructionPosition.TOP_HEAVY,
-        )
-        try:
-            set_active_profile(top_profile)
-            top_score = _evaluate_mechanism_setting(client, base_cfg)
-        except Exception as exc:  # noqa: BLE001
-            decisions.append(f"top_heavy: off (eval error: {exc})")
-            top_score = md_score
-        if _compare_quality(top_score, md_score) > 0:
-            winner = top_profile
-            decisions.append(
-                f"top_heavy: ON (improved {md_score.n_correct}->"
-                f"{top_score.n_correct} correct)"
-            )
-        else:
-            decisions.append(
-                f"top_heavy: off (no improvement; {top_score.n_correct} vs "
-                f"{md_score.n_correct} correct)"
-            )
-    else:
-        decisions.append(
-            f"markdown_code: off (no improvement; {md_score.n_correct} vs "
-            f"{baseline.n_correct} correct)"
-        )
-
-    # Restore the winner as the active profile so any downstream probe (and the
-    # caller's profile construction) sees it.
-    set_active_profile(winner if winner != DEFAULT_PROFILE else None)
-    return (
-        ProbeResult("prompt_profile", ok=(winner != DEFAULT_PROFILE), detail="; ".join(decisions)),
-        winner,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1187,7 +967,7 @@ def _two_phase_factors(
 
 
 def _apply_design_point(
-    base_cfg: ModelConfig, point, *, n_reps: int = 1
+    base_cfg: ModelConfig, point
 ) -> tuple[ModelConfig, "PromptProfile"]:
     """Encode a DesignPoint's levels onto a (ModelConfig, PromptProfile).
 
@@ -1463,7 +1243,7 @@ def probe_two_phase(
         return full_corpus[:k]
 
     def _eval_point(point, *, epoch: int) -> Any:
-        cfg, _prof = _apply_design_point(model_cfg, point, n_reps=n_reps)
+        cfg, _prof = _apply_design_point(model_cfg, point)
         subset = _corpus_for(epoch)
 
         def resolve_one(conflict, context, c):
@@ -1636,7 +1416,7 @@ def probe_two_phase(
                 levels={f.name: f.low for f in factors},
             )
             existing_subset = full_corpus[:best_score.total]
-            _apply_design_point(model_cfg, existing_point, n_reps=n_reps)
+            _apply_design_point(model_cfg, existing_point)
 
             def _resolve_existing(conflict, context, c):
                 w, lat = _resolve_under_config(client, c, conflict, context)

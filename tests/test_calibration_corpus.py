@@ -44,7 +44,7 @@ def test_corpus_covers_both_languages():
 
 
 def test_corpus_at_or_above_mechanism_selection_floor():
-    """The corpus must be large enough for probe_mechanisms to A/B-select
+    """The corpus must be large enough for probe_two_phase to A/B-select
     (below the floor it refuses and leaves mechanisms off)."""
     from capybase.probes import _MIN_CORPUS_FOR_MECHANISM_SELECTION
 

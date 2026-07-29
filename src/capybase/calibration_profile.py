@@ -133,27 +133,6 @@ class PromptProfileSection:
 
 
 @dataclass
-class TaskOverridesProfile:
-    """Per-task-family profile overrides (feedback §4 task families).
-
-    Holds a ``{task_type → {samples: int, prompt_profile: dict}}`` mapping. When
-    the orchestrator resolves a conflict whose ``task_type`` matches a key here,
-    it applies the override's ``samples`` + ``PromptProfile`` instead of the
-    global profile. Falls back to the global profile when no override exists
-    (the common case). Advisory — ``problems()`` always returns ``[]``.
-    """
-
-    overrides: dict[str, dict[str, Any]] = field(default_factory=dict)
-
-    def problems(self) -> list[str]:
-        return []
-
-    def get(self, task_type: str) -> dict[str, Any] | None:
-        """The override for ``task_type``, or None when no override exists."""
-        return self.overrides.get(task_type)
-
-
-@dataclass
 class SafetyProfile:
     """Safety / escalation policy calibration (feedback §2.1).
 
@@ -168,7 +147,6 @@ class SafetyProfile:
     max_critic_retries_per_unit: int = 0   # 0 = mirror max_retries (RiskEngine convention)
     max_recovery_retries_per_unit: int = 1
     critic_confidence_escalate_threshold: float = 0.8
-    escalation_on_parse_failure: bool = True
 
     def problems(self) -> list[str]:
         return []  # advisory; a bad value degrades to the default
@@ -181,7 +159,6 @@ class SafetyProfile:
             and self.max_critic_retries_per_unit == 0
             and self.max_recovery_retries_per_unit == 1
             and self.critic_confidence_escalate_threshold == 0.8
-            and self.escalation_on_parse_failure is True
         )
 
 
@@ -214,7 +191,6 @@ class ModelProfile:
         quality: QualityProfile | None = None,
         retrieval: RetrievalProfile | None = None,
         prompt: PromptProfileSection | None = None,
-        task_overrides: TaskOverridesProfile | None = None,
         safety: SafetyProfile | None = None,
         probed_at: str = "",
         capybase_version: str = "",
@@ -256,7 +232,6 @@ class ModelProfile:
             fusion_method=fusion_method,
         )
         self.prompt = prompt if prompt is not None else PromptProfileSection()
-        self.task_overrides = task_overrides if task_overrides is not None else TaskOverridesProfile()
         self.safety = safety if safety is not None else SafetyProfile()
         self.probed_at = probed_at
         self.capybase_version = capybase_version
@@ -279,7 +254,6 @@ class ModelProfile:
             and self.quality == other.quality
             and self.retrieval == other.retrieval
             and self.prompt == other.prompt
-            and self.task_overrides == other.task_overrides
             and self.safety == other.safety
             and self.probed_at == other.probed_at
             and self.capybase_version == other.capybase_version
@@ -384,7 +358,6 @@ class ModelProfile:
             "quality": qual,
             "retrieval": ret,
             "prompt": self.prompt.profile.to_dict(),
-            "task_overrides": asdict(self.task_overrides),
             "safety": asdict(self.safety),
             # Flat keys (legacy) — mirror the sections for backward compat.
             **{k: v for k, v in cap.items()},
@@ -404,7 +377,6 @@ class ModelProfile:
             *self.quality.problems(),
             *self.retrieval.problems(),
             *self.prompt.problems(),
-            *self.task_overrides.problems(),
             *self.safety.problems(),
         ]
 
@@ -464,14 +436,6 @@ class ModelProfile:
                 prompt_section = PromptProfileSection(profile=PromptProfile.from_dict(raw_prompt))
             except Exception:  # noqa: BLE001 - graceful absence
                 pass
-        # The task_overrides section: a nested dict {task_type → {samples, ...}}.
-        # Graceful-absence: a missing/corrupt section → empty overrides.
-        task_overrides_section = TaskOverridesProfile()
-        raw_to = d.get("task_overrides")
-        if isinstance(raw_to, dict):
-            overrides = raw_to.get("overrides")
-            if isinstance(overrides, dict):
-                task_overrides_section = TaskOverridesProfile(overrides=overrides)
         # The safety section: retry budgets + escalation thresholds.
         # Graceful-absence: a missing/corrupt section → defaults.
         safety_section = SafetyProfile()
@@ -483,7 +447,6 @@ class ModelProfile:
                     max_critic_retries_per_unit=int(raw_safety.get("max_critic_retries_per_unit", 0)),
                     max_recovery_retries_per_unit=int(raw_safety.get("max_recovery_retries_per_unit", 1)),
                     critic_confidence_escalate_threshold=float(raw_safety.get("critic_confidence_escalate_threshold", 0.8)),
-                    escalation_on_parse_failure=bool(raw_safety.get("escalation_on_parse_failure", True)),
                 )
             except (TypeError, ValueError):  # noqa: BLE001 - graceful absence
                 pass
@@ -493,7 +456,6 @@ class ModelProfile:
             quality=qual,
             retrieval=ret,
             prompt=prompt_section,
-            task_overrides=task_overrides_section,
             safety=safety_section,
             probed_at=str(d.get("probed_at", "")),
             capybase_version=str(d.get("capybase_version", "")),

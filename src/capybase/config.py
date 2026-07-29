@@ -502,12 +502,6 @@ class ValidationConfig(BaseModel):
     # no-op for unsupported languages / when the structural parser is unavailable.
     enable_cross_commit_guardian: bool = True
     cross_commit_policy: Literal["warn", "stop"] = "warn"
-    # Structural parser backend.
-    # Deprecated: the grammar-free abstract parser
-    # (capybase.adapters.abstract_parser) is the sole structural backend. This
-    # field is retained for config-file backward compatibility (it parsed from
-    # capybase.toml) but has no effect — the tree-sitter backend was removed.
-    parser_backend: Literal["abstract", "tree_sitter"] = "abstract"
     # Intent evolution trace: a deterministic post-rebase audit
     # that, for an entity touched across ≥2 commits, checks the final merge
     # matches the entity's LAST source-branch evolution (its most recent body).
@@ -516,8 +510,7 @@ class ValidationConfig(BaseModel):
     # per-commit validator sees. Purely advisory (observability/assurance, never
     # blocks): prior findings the retry would be too expensive for multi-commit
     # chains, so this produces a report rather than a gate. Degrades to a no-op
-    # when the structural parser is unavailable. ``evolution_policy`` is reserved for a
-    # future "stop" mode; currently always advisory.
+    # when the structural parser is unavailable.
     enable_evolution_audit: bool = True
     # Session-level coverage SLO: aggregate the per-unit intent
     # preservation coverage across the whole rebase window into one ratio
@@ -560,9 +553,6 @@ class FutureConfig(BaseModel):
     enable_self_consistency: bool = False
     enable_rag: bool = False
     enable_structural_context: bool = False
-    # Now wired AND default-on in [validation] (opt-out); mirrored here for the
-    # [future] seam documentation. See ValidationConfig.enable_verifier_model.
-    enable_verifier_model: bool = True
     enable_mutation_testing: bool = False
     # Deterministic structural pre-resolution: BEFORE the
     # LLM, attempt a model-free resolution from base+sides via provably-safe
@@ -724,20 +714,17 @@ class FutureConfig(BaseModel):
     # repeated counterexample, the case routes to ``human_review``. 0 disables
     # jury-driven re-opening entirely (counterexamples route to human_review).
     jury_comment_cegis_budget: int = 2
-    # Eligibility allowlists for the enforcement canary. The jury runs in
+    # Eligibility allowlist for the enforcement canary. The jury runs in
     # ``enforce`` ONLY when the conflict's language is in
-    # ``jury_eligible_languages`` (the orchestrator-enforceable gate — the
-    # orchestrator knows the file's language but not its dataset origin) AND
-    # (when set via the live harness) the dataset is in
-    # ``jury_eligible_datasets``. Everything else stays in shadow/off regardless
-    # of ``jury_mode``. Empty list = that check is inert (all eligible).
+    # ``jury_eligible_languages`` — the orchestrator-enforceable gate (it knows
+    # the file's language but not its dataset origin). Everything else stays in
+    # shadow/off regardless of ``jury_mode``.
     #
     # The default ``["python"]`` restricts enforce to the validated envelope
     # (the shadow corpus is Python-only). Expand only after a target language
     # has its own shadow run + golden replay.
     jury_eligible_languages: list[str] = Field(
         default_factory=lambda: ["python"])
-    jury_eligible_datasets: list[str] = Field(default_factory=list)
     # Whether an enforce-mode ``human_review`` outcome BLOCKS the merge (returns
     # None → the file keeps its frozen code + a review bundle is written, the
     # rebase stops for that file) or is advisory (records + writes a bundle but

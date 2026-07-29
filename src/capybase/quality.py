@@ -16,7 +16,7 @@ semantically wrong, so they never override correctness.
 Scoring is a lexicographic tuple ``(correctness_count, proxy_sum, -latency)``
 so "more correct" always wins, with proxies then latency breaking ties. This
 gives a stable, non-noisy ordering for the A/B comparisons in
-``probe_mechanisms``.
+``probe_two_phase``.
 """
 
 from __future__ import annotations
@@ -204,7 +204,7 @@ def evaluate_setting(
 ) -> SettingScore:
     """Resolve every corpus conflict under ``model_cfg`` and aggregate.
 
-    ``resolve_one`` is injected by the caller (probe_mechanisms): it takes a
+    ``resolve_one`` is injected by the caller (probe_two_phase): it takes a
     conflict, its context, and a ModelConfig, and returns
     ``(candidate, verification_or_None, latency_ms)``. This keeps the quality
     module independent of the ResolutionEngine/client plumbing — the caller
