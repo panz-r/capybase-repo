@@ -475,3 +475,83 @@ def test_verify_file_c_unbalanced_braces_get_rich_diagnostic(tmp_path):
     # The rich diagnostic names the brace delta, not a generic gcc error.
     assert "unclosed" in brace_fails[0].message or "brace" in brace_fails[0].message
     assert "brace_imbalance_line" in brace_fails[0].detail
+
+
+# ---------------------------------------------------------------------------
+# verify_file C branch: user-supplied build command (cc_build_command)
+# ---------------------------------------------------------------------------
+
+
+@skip_no_gcc
+def test_verify_file_c_build_command_passes(tmp_path):
+    """When cc_build_command is set, verify_file runs it (not standalone gcc).
+    A trivial passing command (true) → syntax_passed=True."""
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    cfg = ValidationConfig()
+    cfg.cc_build_command = "true"  # always succeeds
+    eng = VerificationEngine.default(cfg)
+    res = eng.verify_file(
+        "src/cfg.c", "c", _C_FILE_CONFLICT, [(span, _C_FILE_CORRECT)],
+        repo_root=str(tmp_path),
+    )
+    assert res.passed, [f.message for f in res.hard_failures]
+    assert res.features["syntax_checked"] is True
+    assert res.features["syntax_passed"] is True
+
+
+@skip_no_gcc
+def test_verify_file_c_build_command_fails(tmp_path):
+    """A failing build command (false) → syntax_passed=False, hard failure."""
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    cfg = ValidationConfig()
+    cfg.cc_build_command = "false"  # always fails
+    eng = VerificationEngine.default(cfg)
+    res = eng.verify_file(
+        "src/cfg.c", "c", _C_FILE_CONFLICT, [(span, _C_FILE_CORRECT)],
+        repo_root=str(tmp_path),
+    )
+    assert not res.passed
+    assert res.features["syntax_checked"] is True
+    assert res.features["syntax_passed"] is False
+    syntax_fails = [f for f in res.hard_failures if f.validator == "syntax"]
+    assert len(syntax_fails) == 1
+
+
+@skip_no_gcc
+def test_verify_file_c_build_command_restores_file(tmp_path):
+    """The save/write/restore dance: after the build check, the file on disk is
+    restored to its pre-check state (verify_file runs before the orchestrator
+    writes the final buffer)."""
+    # Write the conflict file to the repo so there's something to save/restore.
+    (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+    conflict_path = tmp_path / "src" / "cfg.c"
+    conflict_path.write_text(_C_FILE_CONFLICT)
+    original_on_disk = conflict_path.read_text()
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    cfg = ValidationConfig()
+    cfg.cc_build_command = "true"
+    eng = VerificationEngine.default(cfg)
+    eng.verify_file(
+        "src/cfg.c", "c", _C_FILE_CONFLICT, [(span, _C_FILE_CORRECT)],
+        repo_root=str(tmp_path),
+    )
+    # The file on disk must be unchanged after the check (restored).
+    assert conflict_path.read_text() == original_on_disk, (
+        "verify_file must restore the file after the build check"
+    )
+
+
+@skip_no_gcc
+def test_verify_file_c_build_command_empty_falls_back_to_gcc(tmp_path):
+    """When cc_build_command is empty (the default), verify_file falls back to
+    standalone gcc -fsyntax-only (the existing behavior, unchanged)."""
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    cfg = ValidationConfig()
+    assert cfg.cc_build_command == ""  # default
+    eng = VerificationEngine.default(cfg)
+    res = eng.verify_file(
+        "src/cfg.c", "c", _C_FILE_CONFLICT, [(span, _C_FILE_CORRECT)],
+        repo_root=str(tmp_path),
+    )
+    assert res.features["syntax_checked"] is True
+    assert res.passed  # valid C compiles under standalone gcc

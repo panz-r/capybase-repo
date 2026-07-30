@@ -1697,9 +1697,17 @@ class Orchestrator:
             )
         except Exception:  # noqa: BLE001 — advisory; never break orchestrator init
             pass
-        self.verification = VerificationEngine.default(
-            ValidationConfig.from_dict(config.validation.model_dump())
-        )
+        _val_cfg = ValidationConfig.from_dict(config.validation.model_dump())
+        # Propagate the user-supplied build command (tests.pre_continue) for
+        # C/C++ whole-file verification. When set, verify_file's C branch runs
+        # the real build (make/cmake) in the repo dir instead of standalone gcc
+        # — the authoritative oracle that resolves sibling #include headers.
+        # The live-eval driver sets tests.pre_continue from C_BUILD_COMMANDS;
+        # production rebase runs set it via [tests] pre_continue in capybase.toml.
+        _pre = getattr(config.tests, "pre_continue", None)
+        if _pre and _pre.strip() not in ("", "true", "pytest"):
+            _val_cfg.cc_build_command = _pre
+        self.verification = VerificationEngine.default(_val_cfg)
         # Verifier-model critic: when enabled (the default —
         # opt-out), register an LLM judge that checks the resolution preserves
         # both sides' semantic intent — the failure mode the syntactic

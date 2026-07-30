@@ -111,6 +111,13 @@ class ValidationConfig:
     cxx_path: str = "g++"
     c_std: str = "c11"
     cpp_std: str = "c++17"
+    # When set, the whole-file C/C++ verify_file branch runs this build command
+    # in the repo dir (save/write/restore the resolved file) instead of
+    # standalone gcc -fsyntax-only. The authoritative oracle for real-world C
+    # (resolves sibling #include headers standalone gcc can't). Empty (default)
+    # = standalone gcc (the existing behavior). Set by the orchestrator from
+    # tests.pre_continue, or by the live-eval driver from C_BUILD_COMMANDS.
+    cc_build_command: str = ""
     # Clippy lint check (mirrors config.ValidationConfig; the live flags).
     enable_clippy: bool = False
     clippy_severity: str = "warning"
@@ -3604,37 +3611,93 @@ class VerificationEngine:
                 features["syntax_checked"] = syntax_checked
                 features["syntax_passed"] = syntax_ok
         elif language in ("c", "cpp", "c++"):
-            # C/C++ whole-file verification. Unlike Rust (crate-aware via cargo),
-            # C/C++ has no build-system-context concept at this layer — a single
-            # translation unit is self-contained for parse/syntax, so standalone
-            # ``gcc``/``g++ -fsyntax-only`` on the spliced file is correct. A
-            # missing compiler → "not checked" (never a false fail), mirroring the
-            # Rust standalone-rustc fallback. No semantic filter here: the whole
-            # file has full translation-unit context, so an undeclared identifier
-            # IS a real defect (mirrors how the cargo path doesn't suppress E0432
-            # because the crate context resolves them).
-            from capybase.adapters.lsp import _resolve
-            is_cpp = language in ("cpp", "c++")
-            cc = _resolve(self.config.cxx_path if is_cpp else self.config.cc_path)
-            if cc is not None:
-                syntax_checked = True
-                std = self.config.cpp_std if is_cpp else self.config.c_std
-                suffix = ".cpp" if is_cpp else ".c"
+            # C/C++ whole-file verification. Two paths:
+            #
+            # 1. When a user-supplied build command (``cc_build_command``) is
+            #    configured: write the resolved file to its real path in the repo
+            #    and run the build (make/cmake) there — the authentic whole-tree
+            #    oracle. This resolves sibling ``#include`` headers standalone
+            #    gcc can't (``server.h``, ``sqliteInt.h``), which the live-eval
+            #    proved is the only honest signal for real-world C. Mirrors the
+            #    cargo/clippy save-write-restore dance.
+            # 2. Fallback (no build command, e.g. loose files / no build system):
+            #    standalone ``gcc``/``g++ -fsyntax-only`` on the spliced file. A
+            #    missing compiler → "not checked" (never a false fail).
+            #
+            # No semantic filter here: the whole file has full translation-unit
+            # context (in either path), so an undeclared identifier IS a real
+            # defect (mirrors how the cargo path doesn't suppress E0432).
+            build_cmd = getattr(self.config, "cc_build_command", "") or ""
+            if build_cmd:
+                import subprocess as _sp_build
+                target_path = Path(repo_root) / path
+                saved = target_path.read_bytes() if target_path.exists() else None
+                msg = ""
                 try:
-                    ok, msg = _compile_ccs(whole, cc_path=cc, std=std, suffix=suffix)
-                except FileNotFoundError:
-                    ok = True  # tool vanished between resolve & run → skip
-                    msg = "C/C++ compiler not available; syntax not checked"
-                syntax_ok = ok
-                if not ok and self.config.require_syntax_if_supported:
+                    target_path.parent.mkdir(parents=True, exist_ok=True)
+                    target_path.write_text(whole, encoding="utf-8")
+                    syntax_checked = True
+                    try:
+                        proc = _sp_build.run(
+                            build_cmd, shell=True, cwd=str(repo_root),
+                            capture_output=True, text=True, timeout=300,
+                        )
+                        syntax_ok = proc.returncode == 0
+                        if not syntax_ok:
+                            err_lines = (proc.stderr or "").strip().splitlines()
+                            msg = next(
+                                (ln for ln in err_lines if "error" in ln.lower()),
+                                err_lines[0] if err_lines else "build failed",
+                            )
+                    except _sp_build.TimeoutExpired:
+                        syntax_ok = False
+                        msg = f"build timed out (300s): {build_cmd}"
+                    except FileNotFoundError as exc:
+                        # Build tool absent → skip (never a false fail), mirroring
+                        # the gcc-absent path below.
+                        syntax_ok = True
+                        msg = f"build command not available: {exc}"
+                finally:
+                    # Restore the pre-check worktree state immediately; the
+                    # orchestrator writes the final buffer later iff validation
+                    # passes. Mirrors _run_clippy_check's restore dance.
+                    if saved is not None:
+                        target_path.write_bytes(saved)
+                    elif target_path.exists():
+                        target_path.unlink(missing_ok=True)
+                if not syntax_ok and self.config.require_syntax_if_supported:
                     hard.append(
                         VerificationFailure(
                             validator="syntax",
                             severity="error",
-                            message=msg,
-                            detail={"std": std},
+                            message=msg or "build failed",
+                            detail={"build_cmd": build_cmd},
                         )
                     )
+            else:
+                # Fallback: standalone gcc/g++ -fsyntax-only (the original path).
+                from capybase.adapters.lsp import _resolve as _resolve_cc
+                is_cpp = language in ("cpp", "c++")
+                cc = _resolve_cc(self.config.cxx_path if is_cpp else self.config.cc_path)
+                if cc is not None:
+                    syntax_checked = True
+                    std = self.config.cpp_std if is_cpp else self.config.c_std
+                    suffix = ".cpp" if is_cpp else ".c"
+                    try:
+                        ok, msg = _compile_ccs(whole, cc_path=cc, std=std, suffix=suffix)
+                    except FileNotFoundError:
+                        ok = True  # tool vanished between resolve & run → skip
+                        msg = "C/C++ compiler not available; syntax not checked"
+                    syntax_ok = ok
+                    if not ok and self.config.require_syntax_if_supported:
+                        hard.append(
+                            VerificationFailure(
+                                validator="syntax",
+                                severity="error",
+                                message=msg,
+                                detail={"std": std},
+                            )
+                        )
             features["syntax_checked"] = syntax_checked
             features["syntax_passed"] = syntax_ok
         elif language == "toml" and Path(path).name == "Cargo.toml":

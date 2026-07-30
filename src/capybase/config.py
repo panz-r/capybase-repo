@@ -400,6 +400,13 @@ class ValidationConfig(BaseModel):
     cxx_path: str = "g++"
     c_std: str = "c11"
     cpp_std: str = "c++17"
+    # When set, the whole-file C/C++ verify_file branch runs this build command
+    # in the repo dir (save/write/restore the resolved file) instead of
+    # standalone gcc -fsyntax-only. The authoritative oracle for real-world C
+    # (resolves sibling #include headers standalone gcc can't). Empty (default)
+    # = standalone gcc (the existing behavior). The orchestrator propagates
+    # ``tests.pre_continue`` here automatically for C/C++ languages.
+    cc_build_command: str = ""
     # Clippy lint check (cargo clippy) for Rust: a quality check that runs in
     # Phase B on the fully-spliced file and flags clippy findings the merge
     # INTRODUCES (compared to a pre-conflict baseline, so a repo's pre-existing
