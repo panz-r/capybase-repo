@@ -916,6 +916,7 @@ def test_run_escalates_when_whole_file_invalid(multi_unit_conflicted_repo):
     # same dropped-content pattern and reroute to a retry before Phase B.
     cfg.validation.reject_if_drops_a_side = False
     cfg.validation.reject_if_drops_referenced_symbol = False
+    cfg.future.enable_structural_resolver = False  # exercise the LLM/Phase-B path
     engine = ResolutionEngine(cfg.model, client=FakeClient([bad, bad]))
     orch = Orchestrator(
         cfg, repo=str(repo), resolution_engine=engine,
@@ -950,9 +951,11 @@ def test_whole_file_repair_recovers_and_accepts(multi_unit_conflicted_repo):
         _make_resolved_payload(flags_broken),
         _make_resolved_payload(flags_good),
     ])
-    engine = ResolutionEngine(_config(repo).model, client=client)
+    cfg = _config(repo)
+    cfg.future.enable_structural_resolver = False  # exercise the LLM/Phase-B path
+    engine = ResolutionEngine(cfg.model, client=client)
     orch = Orchestrator(
-        _config(repo), repo=str(repo), resolution_engine=engine,
+        cfg, repo=str(repo), resolution_engine=engine,
         out=lambda *_a, **_k: None,
     )
     result = orch.run()

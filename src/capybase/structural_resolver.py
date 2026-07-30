@@ -134,14 +134,29 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
     """Attempt the deterministic resolution rules in priority order.
 
     Returns the first that applies, else an unresolved result. The unit's sides
-    are read from ``unit.current.text`` / ``unit.replayed.text`` / ``unit.base.text``
-    (the diff3-refined sides are already preferred at extraction, so these are the
-    tightest available). No rule mutates the unit. See the module docstring for
-    the complete rule list and firing order.
+    are read from ``unit.current.text`` / ``unit.replayed.text`` / ``unit.base.text``,
+    preferring the diff3-refined sides (the tight conflict hunk) when available —
+    the rules are designed for hunks, not whole files. Without refinement (e.g.
+    a whole-file conflict with no diff3 pass), the raw sides are used. No rule
+    mutates the unit. See the module docstring for the complete rule list and
+    firing order.
     """
-    current = unit.current.text or ""
-    replayed = unit.replayed.text or ""
-    base = unit.base.text or ""
+    # Prefer diff3-refined sides when available. The conflict extractor runs
+    # git merge-file --diff3 to produce the tightest conflict boundaries (the
+    # lines git actually marked as conflicting, without the non-conflicting
+    # context the worktree markers sometimes include). The rules are designed
+    # for hunks — insertion_union, zealous_merge, disjoint_edits all key on
+    # line-level diff opcodes, and a whole-file diff is dominated by `replace`
+    # opcodes that make their preconditions fail. The refined hunk gives them
+    # the clean `insert` opcodes they expect. Same pattern as
+    # _try_dependency_version_resolution (which already prefers refined sides).
+    refined = unit.refined_sides
+    if refined is not None:
+        current, base, replayed = refined  # (current, base, replayed)
+    else:
+        current = unit.current.text or ""
+        replayed = unit.replayed.text or ""
+        base = unit.base.text or ""
 
     # Rule 1: modify/delete — one side deliberately deleted the block and the
     # other side did NOT add anything that the deletion would clobber. The safe
