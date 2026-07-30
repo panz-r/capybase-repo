@@ -255,6 +255,7 @@ def test_branch_intent_built_from_real_source_commits(scenario: RebaseScenarioCa
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=[s.id for s in SCENARIOS])
+@pytest.mark.serial_build
 def test_scenario_source_tip_compiles_rust(scenario: RebaseScenarioCase):
     """The real crate compiles at the scenario's source tip (Rust only).
 
@@ -273,6 +274,7 @@ def test_scenario_source_tip_compiles_rust(scenario: RebaseScenarioCase):
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=[s.id for s in SCENARIOS])
+@pytest.mark.serial_build
 def test_scenario_source_tip_builds_c(scenario: RebaseScenarioCase):
     """The real C tree builds at the scenario's source tip (C only).
 

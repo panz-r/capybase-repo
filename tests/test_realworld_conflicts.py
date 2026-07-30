@@ -246,6 +246,7 @@ def test_realworld_c_merge_gcc_verdict(case: RealWorldCase, tmp_path):
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c.id for c in CASES])
+@pytest.mark.serial_build
 def test_realworld_c_merge_build_verdict(case: RealWorldCase):
     """C: does the user-supplied build command accept the human merge at M?
     (record honestly).
@@ -285,6 +286,7 @@ def test_realworld_c_merge_build_verdict(case: RealWorldCase):
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c.id for c in CASES])
+@pytest.mark.serial_build
 def test_realworld_rust_merge_cargo_verdict(case: RealWorldCase):
     """Rust: does the crate at merge commit M compile? (record honestly).
 

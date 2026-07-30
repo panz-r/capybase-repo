@@ -16,6 +16,43 @@ import pytest
 from capybase.git_backend import GitBackend
 
 
+def pytest_configure(config):
+    """Register the ``serial_build`` marker.
+
+    Build-verdict tests (C ``make``/``configure``, Rust ``cargo check`` in a
+    worktree) are memory-heavy: each runs a real compiler against a full repo
+    tree in a disposable worktree. Running them in parallel across xdist workers
+    multiplies peak memory and risks OOM kills. The marker is a no-op when xdist
+    is absent (the default — the suite runs serially); when xdist is active with
+    more than one worker, ``pytest_collection_modifyitems`` below groups all
+    ``serial_build`` tests onto a single worker so they run one at a time.
+    """
+    config.addinivalue_line(
+        "markers",
+        "serial_build: run on a single xdist worker (memory-heavy real builds; "
+        "parallel worktrees risk OOM). No-op without xdist.",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Force ``serial_build`` tests onto one xdist worker when xdist is active.
+
+    Detects xdist by the ``numprocesses`` option (only present when ``-n`` is
+    passed). When more than one worker is in use, assigns every ``serial_build``
+    test to worker ``gw0`` via the ``xdist_group`` marker. This caps build
+    concurrency at 1 regardless of ``-n`` — the safe choice for memory-heavy C
+    builds, at the cost of wall time. Without xdist this is a no-op.
+    """
+    numprocesses = getattr(config.option, "numprocesses", None)
+    if not numprocesses or numprocesses <= 1:
+        return  # serial run (default), or xdist explicitly at 1 — already safe
+    serial = [it for it in items if it.get_closest_marker("serial_build")]
+    if not serial:
+        return
+    for item in serial:
+        item.add_marker(pytest.mark.xdist_group("serial_build"))
+
+
 def git(repo: Path, *args: str, input_text: str | None = None, check: bool = True) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["GIT_AUTHOR_NAME"] = env["GIT_COMMITTER_NAME"] = "tester"
