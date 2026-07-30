@@ -86,6 +86,7 @@ def test_whole_file_escalation_presents_menu_and_edit_resolves(repo, monkeypatch
     ctx = _multi_unit_repo(repo)
     cfg = _config(ctx["repo"])
     cfg.validation.require_whole_file_validation = True
+    cfg.future.enable_structural_resolver = False  # exercise the LLM/Phase-B path
     engine = ResolutionEngine(cfg.model, client=WholeFileFailingClient())
 
     # Scripted stdin: menu choice "2" (edit), then the edit-hook fixes the file.
@@ -174,6 +175,7 @@ def test_whole_file_edit_restores_raw_conflict_markers(repo, monkeypatch):
     ctx = _multi_unit_repo(repo)
     cfg = _config(ctx["repo"])
     cfg.validation.require_whole_file_validation = True
+    cfg.future.enable_structural_resolver = False  # exercise the LLM/Phase-B path
     engine = ResolutionEngine(cfg.model, client=WholeFileFailingClient())
 
     restored_text = {"s": ""}
@@ -241,6 +243,7 @@ def test_second_escalation_also_reaches_interactive_fallback(repo, monkeypatch):
     ctx = _multi_unit_repo(repo)
     cfg = _config(ctx["repo"])
     cfg.validation.require_whole_file_validation = True
+    cfg.future.enable_structural_resolver = False  # exercise the LLM/Phase-B path
     engine = ResolutionEngine(cfg.model, client=WholeFileFailingClient())
 
     # Track how many times the menu was presented (each interactive_resolve call).

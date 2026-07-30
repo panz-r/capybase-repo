@@ -124,8 +124,10 @@ def test_rust_rebase_rejects_noncompiling_merge(rust_conflicted_repo):
         _config(repo).model,
         client=CyclingClient([_payload(r_new_broken), _payload(r_label)]),
     )
+    cfg = _config(repo)
+    cfg.future.enable_structural_resolver = False  # exercise the LLM/Phase-B path
     orch = Orchestrator(
-        _config(repo), repo=str(repo), resolution_engine=engine,
+        cfg, repo=str(repo), resolution_engine=engine,
         out=lambda *_a, **_k: None,
     )
     result = orch.run()
