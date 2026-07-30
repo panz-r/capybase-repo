@@ -980,6 +980,54 @@ def test_whole_file_repair_recovers_and_accepts(multi_unit_conflicted_repo):
     )
 
 
+def test_deterministic_repair_after_budget_exhaustion(repo):
+    """The cheap deterministic repairs (brace balance) must get a final attempt
+    after the LLM whole-file-repair budget is exhausted. Surfaced in the C
+    live-eval (redis pubsub.c): the model dropped one closing brace; the
+    deterministic brace repair fixes it, but the budget broke before it ran.
+
+    Here the LLM budget is 0 (no in-loop repair), so the only shot at recovery
+    is the final deterministic-only attempt. The candidate has a trivial unclosed
+    brace that _try_balance_braces closes deterministically."""
+    base = "def f():\n    return 'hello'\n"
+    (repo / "app.py").write_text(base)
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
+    git(repo, "branch", "feat"); git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text("def f():\n    return 'howdy'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "replayed")
+    git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text("def f():\n    return 'hi'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "upstream")
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected conflict"
+
+    cfg = _config(repo)
+    cfg.policy.max_whole_file_repair_retries = 0  # exhaust budget immediately
+    # A candidate with an extra unclosed brace — the deterministic brace repair
+    # can close it, but the LLM repair path never runs (budget 0).
+    payload = _make_resolved_payload("    return 'hi' + 'howdy'\n    if True {\n")
+    engine = ResolutionEngine(cfg.model, client=CyclingClient([payload]))
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    # The deterministic brace repair should have closed the brace on the final
+    # attempt. The case may still escalate (the candidate is wrong beyond the
+    # brace), but the KEY assertion is that the deterministic repair RAN after
+    # budget exhaustion — recorded in the journal.
+    journal = orch.paths.journal.read_text(encoding="utf-8")
+    has_det_repair = (
+        "deterministic_brace_repair" in journal
+        or "boundary_echo_strip" in journal
+    )
+    assert has_det_repair, (
+        "a deterministic repair must run after budget exhaustion; "
+        f"journal has no deterministic-repair event. reason: {result.reason}"
+    )
+
+
 def test_file_linker_dedup_survives_whole_file_validation(repo, tmp_path):
     """V8 WHOLE_FILE_FAILED regression (axum-history-0020 shape): the model's
     per-unit resolution re-states a `use` import that already exists just

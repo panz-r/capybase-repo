@@ -5271,7 +5271,33 @@ class Orchestrator:
                         break
                     accepted = accepted_opt
                 if file_validation is None or not file_validation.passed:
-                    result.escalated = True
+                    # Final deterministic repair attempt. The cheap O(n) repairs
+                    # (brace balance, prefix dedup, boundary echo, import dedup)
+                    # live inside _whole_file_repair, which the budget gate above
+                    # (wf_retries >= wf_budget) starves when LLM retries consume
+                    # the budget. Give them a final shot on the last-failed
+                    # buffer — they're deterministic and the result is re-validated.
+                    # Surfaced in the C live-eval (redis pubsub.c): the model
+                    # dropped one closing brace; the deterministic brace repair
+                    # fixes it, but the budget broke before it could run.
+                    if file_validation is not None and accepted:
+                        det = self._whole_file_repair(
+                            path, accepted, original,
+                            file_validation.hard_failures,
+                            deterministic_only=True,
+                        )
+                        if det is not None:
+                            accepted = det
+                            _spans = [
+                                (u.marker_span, c.resolved_text)
+                                for u, c in accepted
+                            ]
+                            file_validation = self.verification.verify_file(
+                                path, language, original, _spans,
+                                repo_root=str(self.git.repo),
+                            )
+                    if file_validation is None or not file_validation.passed:
+                        result.escalated = True
                     if file_validation is None:
                         result.reason = (
                             f"whole-file repair could not re-resolve a unit in {path}"
@@ -6153,6 +6179,8 @@ class Orchestrator:
         accepted: list[tuple[ConflictUnit, CandidateResolution]],
         original: str,
         failures: list,
+        *,
+        deterministic_only: bool = False,
     ) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
         """Re-resolve the unit most likely at fault for a whole-file failure.
 
@@ -6296,6 +6324,13 @@ class Orchestrator:
                         return result
             except Exception:  # noqa: BLE001
                 pass
+        # deterministic_only: skip the LLM re-resolve. Used for the final
+        # repair attempt after the LLM budget is exhausted — the cheap O(n)
+        # deterministic repairs above may still close the case (a recurring
+        # splice-junction brace imbalance the LLM keeps re-introducing). None
+        # of the deterministic repairs fired → no deterministic fix available.
+        if deterministic_only:
+            return None
         unit, _old_cand = accepted[fault_idx]
         # Enriched feedback: build a splice-context snippet (the resolved file
         # ±5 lines around the error) so PROMPT_REPAIR shows the model the actual
