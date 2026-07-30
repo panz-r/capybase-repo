@@ -1257,10 +1257,16 @@ def _try_boundary_echo_strip(
         if not getattr(result, "passed", False):
             return None
 
-    # Back-project as a whole-file unit (same pattern as brace_repair/prefix_dedup):
-    # the deterministic strip produced a complete corrected file region.
-    wf_unit = unit.model_copy(update={"marker_span": None, "unit_kind": "whole_file"})
-    result = [(wf_unit, trial_cand)]
+    # Keep the unit's marker_span: the echo strip is a CANDIDATE transformation
+    # (removing echoed boundary lines from resolved_text), NOT a whole-file
+    # replacement. Unlike brace_repair (which composes the full spliced file and
+    # thus produces a complete buffer), the stripped resolved_text is still a
+    # FRAGMENT that must be spliced into the original file context. Converting to
+    # whole_file would write the fragment as the entire file (the check-vs-write
+    # mismatch that corrupted sqlite-history-0001: a 282-byte fragment written as
+    # an 11K-char file). The splice composes the stripped text with the
+    # surrounding original context correctly when marker_span is preserved.
+    result = [(unit, trial_cand)]
     diagnostics = {"mechanism": "boundary_echo_strip", **diag}
     return result, diagnostics
 

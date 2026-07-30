@@ -709,3 +709,38 @@ def test_strip_boundary_echo_declines_on_clean_candidate():
     resolved = "    util::{BoxCloneService, MapErrLayer},"
     assert _strip_boundary_echo(resolved, worktree, (1, 5), "rust") is None
 
+
+def test_boundary_echo_strip_keeps_marker_span_not_whole_file():
+    """Regression guard (sqlite-history-0001): the stripped candidate is a
+    FRAGMENT, not a complete file. Converting to whole_file wrote the fragment
+    as the entire file (282 bytes for an 11K-char file). The unit must keep its
+    marker_span so the splice composes the stripped text with the surrounding
+    original file context."""
+    from capybase.orchestrator import _try_boundary_echo_strip
+    worktree = (
+        "fn execute() {\n"               # line 0 — context BEFORE
+        "<<<<<<< HEAD\n"                  # line 1
+        "    old_call();\n"               # line 2 (current)
+        "=======\n"                       # line 3
+        "    new_call();\n"               # line 4 (replayed)
+        ">>>>>>> feat\n"                  # line 5
+        "}\n"                             # line 6 — context AFTER
+    )
+    unit = _unit(worktree=worktree, marker_span=(1, 5), uid="u:1")
+    # The model re-stated the enclosing fn header + its closing brace.
+    cand = _cand("u:1", "fn execute() {\n    new_call();\n}")
+    accepted = [(unit, cand)]
+    result = _try_boundary_echo_strip([], worktree, accepted, 0)
+    assert result is not None
+    det, diag = result
+    u, c = det[0]
+    # The unit must KEEP its marker_span (NOT converted to whole_file/None).
+    # A whole_file conversion would write the stripped fragment as the entire
+    # file, discarding the surrounding original context.
+    assert u.marker_span == (1, 5), (
+        f"marker_span must be preserved (not whole_file); got {u.marker_span}"
+    )
+    assert u.unit_kind != "whole_file", (
+        f"unit_kind must not be whole_file; got {u.unit_kind}"
+    )
+
