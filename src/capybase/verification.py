@@ -1992,6 +1992,15 @@ _CCS_SEMANTIC_PATTERNS = (
     "no member named",                # struct field resolution
     "undefined reference",            # linker-level (defensive; -fsyntax-only skips link)
     "suggest an alternative",         # clang "did you mean?" (resolution, not parse)
+    # Missing project-internal headers (#include "server.h", "sqliteInt.h") —
+    # standalone -fsyntax-only has no -I flags and runs in /tmp, so any sibling
+    # header is unresolved. The C analog of "undeclared identifier": an artifact
+    # of compiling a fragment out of translation-unit context, NOT a parse
+    # defect. Surfaced in the C live-eval (redis pubsub.c, sqlite mutex_w32.c)
+    # as false-positive hard failures that escalated sim-0.99 merges. The
+    # whole-file build command (make) is the authoritative oracle for these.
+    "fatal error",                    # gcc: "fatal error: X.h: No such file..."
+    "no such file or directory",      # trailing detail of the same diagnostic
 )
 _CCS_SEMANTIC_RE = re.compile(
     "|".join(re.escape(p) for p in _CCS_SEMANTIC_PATTERNS), re.IGNORECASE

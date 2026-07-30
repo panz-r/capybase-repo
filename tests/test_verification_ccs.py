@@ -122,9 +122,50 @@ def test_is_ccs_resolution_error_classifies_semantic():
         "x.cpp:1:1: error: 'Bar' does not name a type",
         "x.cpp:7:3: error: 'class Foo' has no member named 'baz'",
         "x.cpp:1: undefined reference to `symbol'",
+        # Missing project-internal headers — standalone gcc has no -I flags, so
+        # any sibling #include is unresolved. The C analog of "undeclared
+        # identifier": an artifact of compiling out of TU context. Surfaced in
+        # the C live-eval (redis server.h, sqlite sqliteInt.h) as false-positive
+        # hard failures that escalated sim-0.99 merges.
+        "src/pubsub.c:30:10: fatal error: server.h: No such file or directory",
+        "x.c:14:10: fatal error: sqliteInt.h: No such file or directory",
     ]
     for msg in semantic:
         assert _is_ccs_resolution_error(msg), f"expected True for: {msg!r}"
+
+
+def test_ccs_syntax_validator_defers_missing_header():
+    """A C fragment that #includes a project-internal header (server.h,
+    sqliteInt.h) must NOT hard-fail the per-unit CcsSyntaxValidator — the header
+    is unresolved only because standalone gcc has no -I flags. The whole-file
+    build command (make) is the authoritative oracle for these. Regression guard
+    for the C live-eval escalations (redis pubsub.c, sqlite mutex_w32.c)."""
+    import capybase.verification as vmod
+    # Force _resolve_tool to a sentinel so the gcc path engages (not the
+    # absent-compiler skip). The missing-header error then defers via the
+    # semantic filter.
+    monkey = pytest.MonkeyPatch()
+    monkey.setattr(vmod, "_resolve_tool", lambda name: "/usr/bin/gcc")
+    try:
+        worktree = (
+            "int compute(int n) {\n"
+            "<<<<<<< H\n"
+            "    return n + 1;\n"
+            "=======\n"
+            "    return n + 2;\n"
+            ">>>>>>> b\n"
+            "}\n"
+        )
+        u = _unit(worktree=worktree, language="c", marker_span=(1, 3))
+        # resolved_text is valid C, but standalone gcc will fail on the (absent)
+        # sibling header. The semantic filter must defer it → passed=True.
+        res = _verify(CcsSyntaxValidator(), u,
+                      _candidate('#include "server.h"\n    return n + 1;\n'))
+        assert res.passed, res.message  # deferred, not failed
+        assert res.features["ccs_syntax_checked"] is True
+        assert res.features["syntax_passed"] is True
+    finally:
+        monkey.undo()
 
 
 def test_is_ccs_resolution_error_surfaces_parse_errors():
