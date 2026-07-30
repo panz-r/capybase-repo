@@ -46,7 +46,7 @@ _GIT_HISTORY_CLONE_SUBDIR = {
     "axum-history": "axum",
     "ratatui-history": "ratatui",
     "redis-history": "redis",
-    "postgres-history": "postgres",
+    "jsonc-history": "json-c",
     "sqlite-history": "sqlite",
 }
 

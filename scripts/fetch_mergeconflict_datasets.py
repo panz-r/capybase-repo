@@ -236,15 +236,15 @@ DATASETS: dict[str, Dataset] = {
         source_url="https://github.com/redis/redis",
         merge_limit=2000,
     ),
-    "postgres-history": Dataset(
-        id="postgres-history",
+    "jsonc-history": Dataset(
+        id="jsonc-history",
         kind="git-history",
-        url="https://github.com/postgres/postgres.git",
-        extract_subdir="postgres",
+        url="https://github.com/json-c/json-c.git",
+        extract_subdir="json-c",
         extractor="git_history",
-        license="PostgreSQL License",
-        source_url="https://github.com/postgres/postgres",
-        merge_limit=2000,
+        license="MIT",
+        source_url="https://github.com/json-c/json-c",
+        merge_limit=360,  # json-c has ~360 total merge commits; mine them all
     ),
     "sqlite-history": Dataset(
         id="sqlite-history",
