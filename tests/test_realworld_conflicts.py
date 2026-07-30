@@ -60,6 +60,10 @@ from tests._realworld_cargo import (
     cargo_check_at_worktree,
     cleanup_orphan_worktrees,
 )
+from tests._realworld_build import (
+    C_BUILD_COMMANDS,
+    run_command_at_worktree,
+)
 from tests.realworld_loader import (
     RealWorldCase,
     git_history_repo_path,
@@ -239,6 +243,45 @@ def test_realworld_c_merge_gcc_verdict(case: RealWorldCase, tmp_path):
     if not res.passed:
         msgs = [f.message[:80] for f in res.hard_failures[:2]]
         print(f"  {case.id}: human merge did not pass gcc: {msgs}")
+
+
+@pytest.mark.parametrize("case", CASES, ids=[c.id for c in CASES])
+def test_realworld_c_merge_build_verdict(case: RealWorldCase):
+    """C: does the user-supplied build command accept the human merge at M?
+    (record honestly).
+
+    The authentic whole-tree oracle — runs the real build (``make``/``cmake``/
+    ``configure``) in a disposable worktree checked out at the merge commit M,
+    mirroring ``cargo check`` for Rust. This resolves the standalone-gcc
+    limitation: ``#include`` of project-internal headers (``server.h``,
+    ``sqliteInt.h``) fails under single-file gcc but succeeds in the full tree.
+
+    The build command is **user-supplied** (per dataset, via
+    ``C_BUILD_COMMANDS``); C builds are non-uniform — no auto-discovery. Skips
+    when no command is registered for the dataset, the clone is absent, or the
+    case has no ``merge_sha`` (archive datasets).
+
+    Asserts only that the build ENGAGED (``ran``); the compile verdict is
+    recorded, not asserted — a real-world merge that doesn't build on this
+    machine (missing build deps, platform-specific code) is an honest signal.
+    """
+    if case.language != "c":
+        pytest.skip("C-only build verdict (other languages use their own oracles)")
+    cmd = C_BUILD_COMMANDS.get(case.dataset)
+    if not cmd:
+        pytest.skip(f"no build command registered for {case.dataset}")
+    if not case.merge_sha:
+        pytest.skip(f"{case.id}: no merge_sha (archive dataset)")
+    clone = git_history_repo_path(case.dataset)
+    if not (clone / ".git").exists():
+        pytest.skip(f"clone not present for {case.dataset} (run the fetch script)")
+    verdict = run_command_at_worktree(clone, case.merge_sha, cmd, timeout=600)
+    assert verdict.ran, (
+        f"{case.id}: build did not run (worktree/command failure): {verdict.errors}"
+    )
+    if not verdict.compiled:
+        print(f"  {case.id}: human merge did not build ({cmd}): "
+              f"{verdict.errors[:2]}")
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c.id for c in CASES])

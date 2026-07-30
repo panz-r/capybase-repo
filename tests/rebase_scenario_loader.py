@@ -86,6 +86,10 @@ class RebaseScenarioCase:
             return "python"
         if p.endswith(".rs"):
             return "rust"
+        if p.endswith((".c", ".h")):
+            return "c"
+        if p.endswith((".cpp", ".hpp", ".cc", ".hh", ".cxx")):
+            return "cpp"
         return "unknown"
 
 

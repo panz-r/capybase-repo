@@ -42,6 +42,10 @@ from tests._realworld_cargo import (
     cargo_check_at_worktree,
     cleanup_orphan_worktrees,
 )
+from tests._realworld_build import (
+    C_BUILD_COMMANDS,
+    run_command_at_worktree,
+)
 from tests.conftest import git
 from tests.rebase_scenario_loader import (
     RebaseScenarioCase,
@@ -266,3 +270,31 @@ def test_scenario_source_tip_compiles_rust(scenario: RebaseScenarioCase):
                                       timeout=DEFAULT_TIMEOUT)
     # Only assert the infrastructure ran; record (don't assert) the compile result.
     assert verdict.ran, f"cargo check did not run for {scenario.id}"
+
+
+@pytest.mark.parametrize("scenario", SCENARIOS, ids=[s.id for s in SCENARIOS])
+def test_scenario_source_tip_builds_c(scenario: RebaseScenarioCase):
+    """The real C tree builds at the scenario's source tip (C only).
+
+    The user-supplied build command (per dataset, via ``C_BUILD_COMMANDS``) runs
+    in a disposable worktree at the source tip — the authentic whole-tree oracle
+    for C, mirroring ``cargo check`` for Rust. Resolves the standalone-gcc
+    limitation (``#include`` of project headers fails single-file). Skips when no
+    command is registered for the dataset or the clone is absent.
+
+    Asserts only the infrastructure invariant (the build ran); the compile
+    verdict is recorded, not asserted — a real source tip may not build on this
+    machine (missing deps, platform code)."""
+    if scenario.language != "c":
+        pytest.skip("non-c scenario")
+    cmd = C_BUILD_COMMANDS.get(scenario.dataset)
+    if not cmd:
+        pytest.skip(f"no build command registered for {scenario.dataset}")
+    clone = _clone_or_skip(scenario)
+    verdict = run_command_at_worktree(
+        clone, scenario.source_tip_oid, cmd, timeout=DEFAULT_TIMEOUT,
+    )
+    assert verdict.ran, f"build did not run for {scenario.id}: {verdict.errors}"
+    if not verdict.compiled:
+        print(f"  {scenario.id}: source tip did not build ({cmd}): "
+              f"{verdict.errors[:2]}")
