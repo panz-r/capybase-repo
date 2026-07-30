@@ -540,10 +540,16 @@ def _git(repo: Path, *args: str, binary: bool = False) -> subprocess.CompletedPr
 
     ``check=False``: callers interpret per-command exit codes (e.g. merge-tree
     exits 1 on conflict, which is the success case here).
+
+    Uses ``errors="replace"`` in text mode so non-UTF-8 bytes in git output
+    (binary blobs, non-UTF-8 encodings in old history) don't crash the miner
+    with UnicodeDecodeError. Surfaced mining sqlite's deep history: a binary
+    blob caused 'utf-8' codec to fail on byte 0xf8.
     """
     return subprocess.run(
         ["git", "-C", str(repo), *args],
         capture_output=True, text=not binary,
+        **({} if binary else {"errors": "replace"}),
     )
 
 
