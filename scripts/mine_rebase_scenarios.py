@@ -66,8 +66,14 @@ SCENARIO_DIR = REPO_ROOT / "extracted-testdata" / "rebase-scenarios"
 
 #: Only consider merge commits whose replayed side has this many commits.
 #: Lower = more scenarios but noisier (1-commit branches aren't "multi-commit").
+#: For C runs, pass --min-commits 1 to admit single-commit PR rebases (C projects
+#: often merge single-commit feature branches).
 DEFAULT_MIN_COMMITS = 2
 #: Cap scenarios per repo (each drives a real rebase in a worktree — expensive).
+#: NOTE: the cap counts ALL yielded scenarios BEFORE the language filter, so
+#: mixed-language repos under-harvest the target language. For C runs on
+#: mixed-language repos (e.g. sqlite, which has Python test harness), pass
+#: --max-scenarios 100+ to leave headroom for the filter to drop non-C scenarios.
 DEFAULT_MAX_SCENARIOS = 40
 
 

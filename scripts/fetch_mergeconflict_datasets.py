@@ -222,6 +222,10 @@ DATASETS: dict[str, Dataset] = {
     # --- C corpus (mined from real C projects). The mining machinery is
     # language-agnostic (classify_language already maps .c/.h -> "c"); these
     # entries just register C-bearing repos. C++ will have its own corpus suite.
+    # merge_limit=2000: the default 200 scans only recent history, which is
+    # biased toward CI/config/build merges. C projects have decades of
+    # merge-commit-rich feature-branch history; the deeper scan taps core-C
+    # conflicts (3-5x yield increase vs 200).
     "redis-history": Dataset(
         id="redis-history",
         kind="git-history",
@@ -230,17 +234,17 @@ DATASETS: dict[str, Dataset] = {
         extractor="git_history",
         license="BSD-3-Clause",
         source_url="https://github.com/redis/redis",
-        merge_limit=200,
+        merge_limit=2000,
     ),
-    "curl-history": Dataset(
-        id="curl-history",
+    "postgres-history": Dataset(
+        id="postgres-history",
         kind="git-history",
-        url="https://github.com/curl/curl.git",
-        extract_subdir="curl",
+        url="https://github.com/postgres/postgres.git",
+        extract_subdir="postgres",
         extractor="git_history",
-        license="curl",
-        source_url="https://github.com/curl/curl",
-        merge_limit=200,
+        license="PostgreSQL License",
+        source_url="https://github.com/postgres/postgres",
+        merge_limit=2000,
     ),
     "sqlite-history": Dataset(
         id="sqlite-history",
@@ -250,7 +254,7 @@ DATASETS: dict[str, Dataset] = {
         extractor="git_history",
         license="Public Domain",
         source_url="https://github.com/sqlite/sqlite",
-        merge_limit=200,
+        merge_limit=2000,
     ),
 }
 
@@ -378,6 +382,9 @@ _EXT_LANG = {
     ".js": "javascript", ".ts": "typescript", ".go": "go", ".c": "c",
     ".cpp": "cpp", ".h": "c", ".hpp": "cpp", ".cs": "csharp", ".rb": "ruby",
     ".scala": "scala", ".kt": "kotlin", ".swift": "swift", ".m": "objc",
+    # C++ extensions (Google style + others). Mostly relevant for the future
+    # C++ corpus; pure-C repos use .c/.h exclusively.
+    ".cc": "cpp", ".cxx": "cpp", ".hh": "cpp",
 }
 
 
@@ -599,17 +606,23 @@ def iter_git_history_conflicts(root: Path, *, merge_limit: int = 200):
         if not base:
             continue  # no common ancestor (unrelated histories)
         for path in _conflicted_files(root, p1, p2):
-            # Only modify/modify: all three of base/P1/P2 must have the file.
+            # Reconstruct the file on all sides. modify/modify: all three of
+            # base/P1/P2 have the file. add/add: base lacks the file (o is None)
+            # but both sides added it — a legitimate conflict shape the resolver
+            # handles (entity_disjoint). Admit add/add with base="" so
+            # build_markers produces the conflict block. Still skip delete/delete
+            # and one-sided add/delete (a side or the merge result is missing).
             o = _show_blob(root, base, path)
             a = _show_blob(root, p1, path)
             b = _show_blob(root, p2, path)
             merged = _show_blob(root, m, path)
-            if o is None or a is None or b is None or merged is None:
-                continue  # add/delete/modify — skip for round 1
+            if a is None or b is None or merged is None:
+                continue  # delete/delete or one-sided add/delete — no 3-way text
+            base_text = o if o is not None else ""  # add/add: empty base
             lang = classify_language(merged, hint_path=path)
             yield ConflictTuple(
                 folder=root,
-                base=o, current=a, replayed=b, merged=merged,
+                base=base_text, current=a, replayed=b, merged=merged,
                 language=lang,
                 merge_sha=m,
                 conflict_path=path,

@@ -55,8 +55,8 @@ from tests._realworld_cargo import cleanup_orphan_worktrees
 # verdict (the gcc syntax floor still runs).
 C_BUILD_COMMANDS: dict[str, str] = {
     "redis-history": "make -j4",
+    "postgres-history": "./configure && make -j4",
     "sqlite-history": "./configure && make -j4",
-    # curl-history: mined 0 cases (squash workflow); no command needed.
 }
 
 # Build timeout. C builds at a specific commit can be slow (a full sqlite
