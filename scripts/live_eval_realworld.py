@@ -58,8 +58,20 @@ from capybase.adapters.llm_openai import OpenAICompatibleClient  # noqa: E402
 from capybase.config import Config  # noqa: E402
 from capybase.orchestrator import Orchestrator  # noqa: E402
 from capybase.resolution_engine import ResolutionEngine  # noqa: E402
+from tests._realworld_build import C_BUILD_COMMANDS  # noqa: E402
 
 TESTDATA = Path(__file__).resolve().parent.parent / "extracted-testdata" / "realworld"
+
+# The configure/prepare step that must run ONCE before the in-loop ``make`` gate,
+# because the production TestRunner uses shlex.split (no shell ``&&``). Re-running
+# configure in _materialize_conflict (after git archive extracts the tree) means
+# the in-loop pre_continue is a single ``make`` command. Empty = no prepare needed
+# (redis ships a ready Makefile). Add entries as new C repos enter the corpus.
+C_PREPARE_COMMANDS: dict[str, str] = {
+    "redis-history": "",
+    "sqlite-history": "./configure",
+    # curl-history: 0 mined cases (squash workflow).
+}
 
 
 @dataclass
@@ -247,6 +259,20 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
             except Exception:  # noqa: BLE001 — best-effort; fall back to single-file
                 pass
 
+        # For C cases: run the build-prepare step (e.g. ./configure) once after
+        # the tree is extracted, so the in-loop `make` gate works with the
+        # no-shell production TestRunner (shlex.split can't handle `&&`). A
+        # failed prepare is best-effort — the in-loop gate reports it honestly.
+        if case.language == "c":
+            prepare = C_PREPARE_COMMANDS.get(case.dataset, "")
+            if prepare:
+                try:
+                    import subprocess as _sp
+                    _sp.run(prepare, shell=True, cwd=str(repo),
+                            capture_output=True, timeout=180)
+                except Exception:  # noqa: BLE001 — best-effort
+                    pass
+
     # Write the conflict file at its real path in all three versions.
     # (Overlays on top of the extracted tree.)
     (repo / case.path).parent.mkdir(parents=True, exist_ok=True)
@@ -311,6 +337,13 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # - Rust without crate: 'true' (brace-balance is the only gate).
     if case.language == "python":
         cfg.tests.pre_continue = f"python3 -m py_compile {case.path}"
+    elif case.language == "c":
+        # The in-loop whole-tree gate. configure already ran in
+        # _materialize_conflict (so this is a single `make` command that works
+        # with the no-shell TestRunner). Empty = no build command for this
+        # dataset → the CcsSyntaxValidator (gcc -fsyntax-only) still gates
+        # per-unit; brace-balance is the only whole-file check.
+        cfg.tests.pre_continue = C_BUILD_COMMANDS.get(case.dataset, "") or "true"
     else:
         cfg.tests.pre_continue = "true"
     cfg.tests.final = cfg.tests.pre_continue
@@ -390,6 +423,28 @@ def _py_compiles(text: str) -> bool:
         except Exception: pass
 
 
+def _c_builds(repo: Path, case: Case) -> bool | None:
+    """Run the C build command against the materialized temp repo tree.
+
+    The orchestrator already wrote the resolved file into ``repo`` (which holds
+    the full extracted tree + the prepare step from _materialize_conflict), so a
+    real ``make`` compiles against the model's actual output and sibling files.
+    Returns None when no build command is registered (caller falls back to
+    brace-balance). Uses ``shell=True`` — the build command may chain, and this
+    is a post-hoc harness check, not the production no-shell TestRunner.
+    """
+    import subprocess as _sp
+    cmd = C_BUILD_COMMANDS.get(case.dataset, "")
+    if not cmd:
+        return None
+    try:
+        proc = _sp.run(cmd, shell=True, cwd=str(repo),
+                       capture_output=True, text=True, timeout=300)
+        return proc.returncode == 0
+    except Exception:  # noqa: BLE001 — best-effort; treat as "couldn't check"
+        return None
+
+
 def _token_jaccard(a: str, b: str) -> float:
     ta, tb = set(a.split()), set(b.split())
     if not ta and not tb: return 1.0
@@ -452,6 +507,12 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         # Read the resolved file.
         final = repo / case.path
         content = final.read_text() if final.exists() else ""
+        # C post-hoc compile check must run WHILE the repo tree is on disk (the
+        # finally below removes it). python/rust checks operate on the content
+        # string alone, so they run after cleanup; the C build needs the tree.
+        c_builds_result: bool | None = None
+        if case.language == "c" and content:
+            c_builds_result = _c_builds(repo, case)
     finally:
         # D3: when the main thread owns the temp dir, it cleans up after the
         # worker returns or times out. When we own it, clean up here.
@@ -462,6 +523,12 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
     res.marker_free = not _contains_markers(content) if content else False
     if case.language == "python":
         res.compiles = _py_compiles(content) if content else False
+    elif case.language == "c":
+        # Use the build verdict captured before cleanup; fall back to brace-
+        # balance if the build couldn't run (no command registered or no tree).
+        res.compiles = c_builds_result if c_builds_result is not None else (
+            _brace_balanced(content, case.language) if content else False
+        )
     else:
         res.compiles = _brace_balanced(content, case.language) if content else False
     res.matches_oracle = _token_jaccard(content, case.expected_resolved) if content else 0.0
@@ -471,7 +538,7 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
-    ap.add_argument("--lang", choices=("rust", "python"), default=None)
+    ap.add_argument("--lang", choices=("rust", "python", "c"), default=None)
     ap.add_argument("--case", action="append", default=None, metavar="CASE_ID",
                     help="Select a specific case id (repeatable). Enables targeted "
                          "single-case reruns in seconds instead of a full 5-hour run. "
