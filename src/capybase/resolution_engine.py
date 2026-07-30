@@ -3066,6 +3066,15 @@ def _failed_candidate(
     *,
     failure_kind: str = "request_failed",
 ) -> CandidateResolution:
+    # Transport errors (HTTP 400/500, connection refused, timeout) are
+    # infrastructure failures, NOT model decisions. Setting needs_human=True on
+    # them misclassifies a prompt-size/endpoint failure as a model refusal,
+    # polluting the no-progress/recovery paths. Only genuine model-side failures
+    # (parse_failed, truncated, empty output) flag needs_human — those reflect
+    # the model's actual (in)ability. Surfaced in the C live-eval
+    # (sqlite-history-0005): a 148KB prompt hit HTTP 400, classified as
+    # needs_human instead of a transport error.
+    _is_transport = failure_kind in ("request_failed",)
     return CandidateResolution(
         candidate_id=f"{unit.unit_id}:{uuid.uuid4().hex[:6]}",
         unit_id=unit.unit_id,
@@ -3073,7 +3082,7 @@ def _failed_candidate(
         prompt_version=prompt_version,
         resolved_text="",
         explanation=reason,
-        needs_human=True,
+        needs_human=not _is_transport,
         raw_response=raw,
         parse_warnings=warnings or [reason],
         failure_kind=failure_kind,

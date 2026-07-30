@@ -56,9 +56,15 @@ def test_propose_handles_bad_json():
 
 
 def test_propose_handles_request_error():
+    """A transport error (HTTP 400, connection refused, RuntimeError) is an
+    infrastructure failure, NOT a model decision. It must NOT set needs_human —
+    that misclassifies a prompt-size/endpoint failure as a model refusal.
+    Surfaced in the C live-eval (sqlite-history-0005): a 148KB prompt hit HTTP
+    400, classified as needs_human instead of a transport error."""
     engine = ResolutionEngine(_cfg(), client=FakeClient([RuntimeError("boom")]))
     cands = engine.propose(_unit(), ContextBuilder().build(_unit()))
-    assert cands[0].needs_human is True
+    assert cands[0].needs_human is False  # transport error, not a model refusal
+    assert cands[0].failure_kind == "request_failed"
 
 
 def test_retry_prompt_uses_failures():

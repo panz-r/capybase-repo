@@ -6804,6 +6804,37 @@ class Orchestrator:
                 else:
                     pv = PROMPT_RESOLVE
                     prompt = build_resolve_prompt(unit, context)
+                # Post-construction oversized check: the pre-construction guard
+                # (_llm_oversized_for_window) measures only the windowed marker
+                # block, assuming augmentation is trimmable. But the obligations
+                # block is budget-PROTECTED (folded into sides_text), so a prompt
+                # with whole-file sides + obligations can blow the window without
+                # the pre-guard catching it. Measure the ACTUAL prompt size here
+                # and escalate as "oversized" before burning an HTTP-400 round-
+                # trip. Surfaced in the C live-eval (sqlite-history-0005): a
+                # 148KB prompt (37K tokens vs 8K window) hit HTTP 400.
+                # Threshold: only fire when the prompt exceeds the window AND is
+                # large in absolute terms (>10K tokens). This catches the
+                # whole-file-sides blowup (37K tokens) without pre-empting
+                # legitimately-tight prompts (a few hundred tokens over a small
+                # window may still produce usable output — the model decides).
+                _window = int(getattr(self.config.model, "context_window", 0) or 0)
+                if _window > 0:
+                    _prompt_t = estimate_tokens(prompt)
+                    if _prompt_t > _window and _prompt_t > 10000:
+                        self.journal.emit(
+                            "llm_skipped_oversized_prompt",
+                            {"prompt_tokens": _prompt_t, "window": _window,
+                             "prompt_chars": len(prompt)},
+                            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                        )
+                        outcome.escalated = True
+                        outcome.retry_count = retry_count
+                        outcome.reason = (
+                            f"oversized prompt: {_prompt_t}t > {_window}t window "
+                            f"(obligations/sides exceeded the context window)"
+                        )
+                        return outcome
                 self.journal.store_prompt(unit.unit_id, retry_count, prompt)
             self.journal.emit(
                 "context_built",
