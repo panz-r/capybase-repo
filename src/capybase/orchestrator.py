@@ -7144,27 +7144,40 @@ class Orchestrator:
             np_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
             if np_threshold > 0:
                 sig = _hard_failure_signature(validation.hard_failures)
-                outcome._recent_hard_failure_sigs.append(sig)
-                recent = outcome._recent_hard_failure_sigs[-np_threshold:]
-                if len(recent) >= np_threshold and len(set(recent)) == 1:
-                    validators = sorted({v for v, _ in sig}) or ["(none)"]
-                    self.journal.emit(
-                        "candidate_rejected",
-                        {"candidate_id": cand.candidate_id,
-                         "action": "escalate", "via": "no_progress",
-                         "reason": (f"identical hard-failure signature across "
-                                    f"{len(recent)} attempts ({validators})"),
-                         "retry_count": retry_count},
-                        step_index=self.step, path=unit.path, unit_id=unit.unit_id,
-                    )
-                    outcome.escalated = True
-                    outcome.retry_count = retry_count
-                    outcome.reason = (
-                        f"no hard-failure progress: identical signature across "
-                        f"{len(recent)} attempts ({validators})"
-                        + _obligation_suffix(unit, cand)
-                    )
-                    return outcome
+                # A needs_human refusal produces a non-empty signature
+                # (needs_human + non_empty_resolution). The no-progress guard
+                # would fire on two identical refusals BEFORE the recovery-retry
+                # path (later in this iteration) can give the model a reframed
+                # second chance. needs_human cases have their own budget
+                # (max_recovery_retries_per_unit); exclude them from the
+                # convergence guard so the recovery path — designed for exactly
+                # these "the model gave up prematurely" cases — gets to run.
+                # The guard still catches genuine compiler-error cycling (its
+                # primary purpose): those signatures contain syntax/structural
+                # validators, not needs_human.
+                has_needs_human = any(v == "needs_human" for v, _ in sig)
+                if not has_needs_human:
+                    outcome._recent_hard_failure_sigs.append(sig)
+                    recent = outcome._recent_hard_failure_sigs[-np_threshold:]
+                    if len(recent) >= np_threshold and len(set(recent)) == 1:
+                        validators = sorted({v for v, _ in sig}) or ["(none)"]
+                        self.journal.emit(
+                            "candidate_rejected",
+                            {"candidate_id": cand.candidate_id,
+                             "action": "escalate", "via": "no_progress",
+                             "reason": (f"identical hard-failure signature across "
+                                        f"{len(recent)} attempts ({validators})"),
+                             "retry_count": retry_count},
+                            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                        )
+                        outcome.escalated = True
+                        outcome.retry_count = retry_count
+                        outcome.reason = (
+                            f"no hard-failure progress: identical signature across "
+                            f"{len(recent)} attempts ({validators})"
+                            + _obligation_suffix(unit, cand)
+                        )
+                        return outcome
             # Oscillation backstop (CEGIS resilience): if the SAME resolved_text
             # has been seen more times than the retry budget allows, the model is
             # cycling — escalate instead of wasting more tokens. This fires only

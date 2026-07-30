@@ -595,6 +595,51 @@ def test_no_progress_guard_does_not_fire_when_signature_changes(repo):
     )
 
 
+def test_no_progress_guard_excludes_needs_human_signatures(repo):
+    """The no-progress convergence guard must NOT fire on needs_human refusals.
+
+    A needs_human refusal produces a non-empty hard-failure signature
+    (needs_human + non_empty_resolution). Without the exclusion, two identical
+    refusals trigger the guard BEFORE the recovery-retry path can give the model
+    a reframed second chance. needs_human cases have their own budget
+    (max_recovery_retries_per_unit); the convergence guard — built for compiler-
+    error cycling — should defer to that path.
+
+    Surfaced in the C live-eval (sqlite fts3_expr.c): the model self-reported
+    needs_human twice; the guard fired at attempt 2, pre-empting the recovery
+    retry that was configured (max_recovery_retries_per_unit=2)."""
+    base = "def f():\n    return 'hello'\n"
+    (repo / "app.py").write_text(base)
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
+    git(repo, "branch", "feat"); git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text("def f():\n    return 'howdy'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "replayed")
+    git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text("def f():\n    return 'hi'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "upstream")
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected conflict"
+
+    cfg = _config(repo)
+    cfg.policy.cegis_convergence_threshold = 2
+    cfg.policy.max_retries_per_unit = 50        # large, so only the guard/budget limits
+    cfg.policy.max_recovery_retries_per_unit = 0  # exhaust recovery fast → escalate via budget
+    # needs_human=true payload, repeated (CyclingClient repeats the last).
+    payload = json.dumps({"resolved_text": "", "needs_human": True})
+    engine = ResolutionEngine(cfg.model, client=CyclingClient([payload]))
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert result.escalated  # still escalates (recovery budget exhausted)
+    # But NOT via the no-progress guard — needs_human signatures are excluded.
+    assert "no hard-failure progress" not in (result.reason or ""), (
+        f"guard must not fire on needs_human signatures, got: {result.reason}"
+    )
+
+
 def test_run_escalates_on_needs_human(conflicted_repo):
     repo = conflicted_repo["repo"]
     payload = json.dumps({"resolved_text": "    return 1", "needs_human": True})
