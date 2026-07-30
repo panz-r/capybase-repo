@@ -6860,7 +6860,7 @@ class Orchestrator:
             if self.config.routing.enabled:
                 from capybase.classifier import classify
 
-                classification = classify(unit)
+                classification = classify(unit, config=self.config)
                 difficulty = classification.difficulty
                 self.journal.emit(
                     "difficulty_classified",

@@ -91,7 +91,20 @@ def classify(unit: "object", config: "object | None" = None) -> ConflictClassifi
     severity = str(feats.get("severity") or "medium")
     merge_kind = str(feats.get("merge_kind") or "both_modify")
     modify_delete = bool(feats.get("modify_delete"))
-    det_mergeable = _deterministically_mergeable(unit)
+    det_mergeable = False
+    # Only probe deterministic-mergeability when the structural resolver is
+    # enabled. When the resolver is disabled (e.g. tests exercising the LLM
+    # path), the probe would still fire (via resolve_structurally) and classify
+    # the unit as trivial, routing it to the cheap path and starving the
+    # samples_complex allocation the test expects.
+    _resolver_on = True
+    if config is not None:
+        _future = getattr(config, "future", None)
+        if _future is not None:
+            _val = getattr(_future, "enable_structural_resolver", True)
+            _resolver_on = bool(getattr(_val, "real", _val))
+    if _resolver_on:
+        det_mergeable = _deterministically_mergeable(unit)
     # Operation-signature counts (ConGra §3.3): per-entity change-type counts
     # over the BASE→REPLAYED diff. A pure-rename signature is the refactoring-
     # aware rule's domain (a likely deterministic resolve); heavy multi-entity
