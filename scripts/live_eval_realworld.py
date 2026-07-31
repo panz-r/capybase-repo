@@ -535,6 +535,92 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
     return res
 
 
+def _print_census(results_path: str) -> None:
+    """Print a failure census report from an existing results JSON.
+
+    Classifies each escalated case by root diagnostic category using
+    ``_classify_ccs_parse_error`` and pattern matching on the reason string.
+    The reviewer feedback's Stage A recommendation: don't build more rules
+    blindly — classify the actual failures first. Makes every future run
+    self-documenting.
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+    from capybase.verification import _classify_ccs_parse_error
+    from collections import Counter
+
+    results = json.loads(Path(results_path).read_text())
+    cases = results if isinstance(results, list) else results.get("cases", [])
+
+    def classify(r: dict) -> str:
+        reason = r.get("reason", "")
+        terminal = r.get("terminal_reason", "")
+        if not r.get("escalated"):
+            return "RESOLVED"
+        # Try gcc parse-error classification first
+        cat = _classify_ccs_parse_error(reason)
+        if cat:
+            return cat
+        # Infrastructure / build-system categories
+        if "build is not a directory" in reason or "cmake" in reason.lower():
+            return "build_system_config"
+        if "collect2" in reason or "ld returned" in reason:
+            return "linker_error"
+        if "lemon.c" in reason or "tool/" in reason:
+            return "pre_existing_tool_error"
+        if "could not re-resolve" in reason:
+            return "repair_loop_exhausted"
+        if "splice coherence" in reason or "brace" in reason.lower():
+            return "brace_imbalance"
+        if "oversized prompt" in reason or terminal == "OVERSIZED":
+            return "oversized_prompt"
+        if "no hard-failure progress" in reason or terminal == "CARGO_NO_PROGRESS":
+            return "no_progress_loop"
+        if "GitError" in reason or terminal == "OTHER":
+            return "git_state_error"
+        if "needs_human" in reason.lower() or terminal == "MODEL_NEEDS_HUMAN":
+            return "model_needs_human"
+        if "undeclared" in reason or "unknown type" in reason:
+            return "semantic_resolution"
+        if "incomplete type" in reason:
+            return "semantic_incomplete_type"
+        return "unclassified"
+
+    cats = Counter()
+    details: dict[str, list[tuple[str, str]]] = {}
+    for c in cases:
+        cat = classify(c)
+        cats[cat] += 1
+        details.setdefault(cat, []).append((c.get("id", "?"), c.get("reason", "")[:120]))
+
+    total = len(cases)
+    escalated = sum(1 for c in cases if c.get("escalated"))
+    resolved = total - escalated
+
+    print("=" * 64)
+    print("FAILURE CENSUS REPORT")
+    print("=" * 64)
+    print(f"Total cases:      {total}")
+    print(f"Resolved:         {resolved}")
+    print(f"Escalated:        {escalated}")
+    print()
+    print("Escalation root-diagnostic distribution:")
+    for cat, count in cats.most_common():
+        if cat == "RESOLVED":
+            continue
+        pct = 100 * count / max(escalated, 1)
+        print(f"  {cat:35} {count:3d} ({pct:.0f}%)")
+        for id, reason in details[cat][:2]:
+            print(f"    {id:30} {reason[:90]}")
+        if len(details[cat]) > 2:
+            print(f"    ... ({len(details[cat]) - 2} more)")
+    print()
+    # Near-miss analysis
+    near = [c for c in cases if c.get("escalated") and c.get("matches_oracle", 0) >= 0.95]
+    print(f"Near-misses (sim >= 0.95): {len(near)} of {escalated} escalations")
+    print(f"  (these are the highest-ROI repair targets)")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
@@ -556,7 +642,15 @@ def main():
                     help="Directory to copy per-case orchestrator session artifacts into "
                          "(FR2a flight recorder). Produces <dir>/flights/<case_id>/<session_id>/ "
                          "and <dir>/manifest.json. Required for shadow-jury replay.")
+    ap.add_argument("--census", default=None,
+                    help="Print a failure census report from an existing results JSON and exit. "
+                         "Classifies each escalated case by root diagnostic category. Example: "
+                         "--census /tmp/capybase-live/c-live-full-corpus.json")
     args = ap.parse_args()
+
+    if args.census:
+        _print_census(args.census)
+        return
 
     # Shared cargo registry cache so dependencies are fetched once and reused
     # across cases (the per-case temp repo is destroyed, but the cache persists).
