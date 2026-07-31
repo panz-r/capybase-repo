@@ -798,6 +798,54 @@ def _entity_name_from_signature(signature: str | None) -> str | None:
     return name or None
 
 
+# The context window (lines before/after the marker span) for the windowed
+# refined fallback. Wide enough to include the enclosing function/struct/enum
+# for most C code, bounded enough to stay well under the context window.
+_REFINE_FALLBACK_CONTEXT_LINES = 30
+
+
+def _window_refined_fallback(
+    units: list[ConflictUnit],
+    base_text: str,
+    current_text: str,
+    replayed_text: str,
+) -> None:
+    """Window the stage blobs around each unit's marker span as a refined fallback.
+
+    When diff3 block-count matching fails, the prompt would otherwise carry
+    ``unit.base.text`` = the entire merge-base file (shared across all units).
+    This records a windowed ``diff3_refined`` for each unit so the prompt
+    builder sees a bounded local context instead. The windowing is advisory
+    (splicing still uses ``marker_span`` / ``original_worktree_text``).
+
+    Uses ``_REFINE_FALLBACK_CONTEXT_LINES`` lines before/after the marker span.
+    The current/replayed sides are the marker-block fragments (already narrow);
+    only the base needs windowing. But we record all three for consistency.
+    """
+    ctx = _REFINE_FALLBACK_CONTEXT_LINES
+    base_lines = base_text.split("\n")
+    cur_lines_full = current_text.split("\n")
+    rep_lines_full = replayed_text.split("\n")
+    for unit in units:
+        span = unit.marker_span
+        if span is None:
+            continue
+        # Already has refined sides from a prior pass — don't overwrite.
+        if "diff3_refined" in unit.structural_metadata:
+            continue
+        start, end = span
+        lo = max(0, start - ctx)
+        hi = min(len(base_lines) - 1, end + ctx)
+        w_base = "\n".join(base_lines[lo : hi + 1])
+        w_cur = "\n".join(cur_lines_full[lo : hi + 1])
+        w_rep = "\n".join(rep_lines_full[lo : hi + 1])
+        unit.structural_metadata["diff3_refined"] = {
+            "current": w_cur,
+            "base": w_base,
+            "replayed": w_rep,
+        }
+
+
 def _refine_with_diff3(
     units: list[ConflictUnit],
     base_text: str,
@@ -849,8 +897,14 @@ def _refine_with_diff3(
             diff_algorithm,
         )
     if not blocks or len(blocks) != len(units):
-        # Only refine when diff3 produces exactly the same number of conflict
-        # blocks as the worktree — otherwise the correspondence is ambiguous.
+        # diff3 block count mismatch — can't safely associate blocks to units.
+        # Fall back to a per-unit windowed view of the stage blobs so the
+        # prompt doesn't carry the whole-file base (which blows the context
+        # window for large multi-hunk files). This is the fix for OVERSIZED
+        # escalations: the base is shared across all units as the entire
+        # merge-base file; windowing it to ±30 lines around the marker span
+        # gives the model local context without the whole file.
+        _window_refined_fallback(units, base_text, current_text, replayed_text)
         return
     for unit, block in zip(units, blocks):
         # Only record if diff3 produced a tighter view (shorter sides).

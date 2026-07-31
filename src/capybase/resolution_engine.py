@@ -79,6 +79,14 @@ PROMPT_REPAIR = "cegis_repair.v2"
 PROMPT_BLOCK_CAPTURE = "block_capture.v1"
 
 
+#: If the base side exceeds this many characters (~1000 tokens), window it to
+#: a local context around the marker span. This prevents the whole-file base
+#: (shared across all units in a multi-hunk file) from blowing the context
+#: window when diff3 refinement is unavailable.
+_SIDES_MAX_CHARS = 4000
+_SIDES_CONTEXT_LINES = 30
+
+
 def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
     """Return the conflict sides to show in the prompt.
 
@@ -87,6 +95,13 @@ def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
     that the worktree markers still wrap are stripped. Falls back to the raw
     marker sides when no refinement is recorded. Returns
     ``(current, base, replayed)``.
+
+    **Base windowing safety net:** when no refinement is available and the
+    base exceeds ``_SIDES_MAX_CHARS``, window it to ``_SIDES_CONTEXT_LINES``
+    lines around the marker span. This prevents the whole-file base from
+    blowing the context window (the root cause of OVERSIZED escalations on
+    large multi-hunk files). The conflict is local; the model needs the base
+    of the conflict region, not the entire merge-base file.
 
     When ``mask_deferred_comments`` is enabled (the default, set by the
     orchestrator from ``StructuralConfig.mask_deferred_comments``), DEFERRED
@@ -99,7 +114,19 @@ def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
     if refined is not None:
         cur, base, rep = refined
     else:
-        cur, base, rep = unit.current.text, unit.base.text, unit.replayed.text
+        cur = unit.current.text or ""
+        base = unit.base.text or ""
+        rep = unit.replayed.text or ""
+        # Safety net: window an oversized base to local context. The
+        # extraction-side fix (_window_refined_fallback) should have already
+        # populated refined sides; this catches cases where it didn't (e.g.
+        # marker_span is None, or the fallback was skipped).
+        if unit.marker_span is not None and len(base) > _SIDES_MAX_CHARS:
+            lines = base.split("\n")
+            start, end = unit.marker_span
+            lo = max(0, start - _SIDES_CONTEXT_LINES)
+            hi = min(len(lines) - 1, end + _SIDES_CONTEXT_LINES)
+            base = "\n".join(lines[lo : hi + 1])
     if _MASK_DEFERRED_COMMENTS:
         cur, base, rep = _mask_sides_deferred(unit, cur, base, rep)
     return cur, base, rep
