@@ -2162,6 +2162,72 @@ def _strip_strings_comments(text: str, language: str | None = None) -> list[str]
     return _mask_strings_and_comments(text, language).split("\n")
 
 
+# Preprocessor directive patterns for C/C++.
+_PP_OPEN_RE = re.compile(r"^\s*#\s*(if|ifdef|ifndef)\b")
+_PP_ELSE_RE = re.compile(r"^\s*#\s*(else|elif)\b")
+_PP_CLOSE_RE = re.compile(r"^\s*#\s*endif\b")
+
+
+def _preprocessor_imbalance_line(text: str) -> int | None:
+    """The 0-based line where ``#if/#endif`` nesting first diverges, or None.
+
+    A push-down automaton over C/C++ preprocessor directives: ``#if``,
+    ``#ifdef``, ``#ifndef`` push; ``#endif`` pops. Returns the line of the
+    FIRST ``#endif`` that makes the stack go negative (extra close), or the
+    LAST line if the stack ends non-empty (unclosed ``#if``). ``#else`` /
+    ``#elif`` without a matching ``#if`` is also an error.
+
+    Strings/comments are masked first (so a ``#if`` inside a string literal
+    doesn't count). Recognizes ``#`` only at the first non-whitespace position
+    on a line (the C preprocessor rule). Handles ``\\`` line continuations
+    (splices continued lines before scanning).
+
+    This catches merge artifacts (missing ``#endif``, broken ``#ifdef`` guard)
+    that build-pass can't detect when the region is platform-guarded (e.g.
+    ``#ifdef SQLITE_MUTEX_W32`` stripped on Linux, hiding conflict markers
+    inside the region).
+    """
+    if not text:
+        return None
+    # Mask strings/comments so directives inside them don't count.
+    masked = _mask_strings_and_comments(text, "c")
+    # Splice line continuations: join lines ending with `\` into logical lines.
+    # Track the original line number of the first physical line in each splice.
+    logical_lines: list[tuple[int, str]] = []
+    pending = ""
+    pending_line = 0
+    for line_no, line in enumerate(masked.split("\n")):
+        if pending:
+            pending += line
+        else:
+            pending_line = line_no
+            pending = line
+        if pending.endswith("\\"):
+            pending = pending[:-1]
+            continue
+        logical_lines.append((pending_line, pending))
+        pending = ""
+    if pending:
+        logical_lines.append((pending_line, pending))
+
+    depth = 0
+    last_line = 0
+    for orig_line, line in logical_lines:
+        last_line = orig_line
+        if _PP_OPEN_RE.match(line):
+            depth += 1
+        elif _PP_ELSE_RE.match(line):
+            if depth <= 0:
+                return orig_line  # #else/#elif without matching #if
+        elif _PP_CLOSE_RE.match(line):
+            depth -= 1
+            if depth < 0:
+                return orig_line  # extra #endif
+    if depth != 0:
+        return last_line  # unclosed #if/#ifdef/#ifndef
+    return None
+
+
 def _try_balance_braces(text: str, language: str | None = None) -> str | None:
     """Deterministically repair a single brace imbalance, or return None.
 
@@ -3550,6 +3616,33 @@ class VerificationEngine:
                 # Skip the expensive cargo/py_compile cycle — the brace mismatch
                 # already explains the failure; the repair feedback is richer when
                 # it points at the divergence line directly.
+                features["syntax_checked"] = True
+                features["syntax_passed"] = False
+                features["hard_failure_count"] = len(hard)
+                features["warning_count"] = 0
+                return VerificationResult(
+                    candidate_id=file_id, unit_id=file_id, passed=False,
+                    hard_failures=hard, features=features,
+                )
+
+        # Preprocessor balance check for C/C++: catches missing #endif, broken
+        # #ifdef guards, and #else without matching #if. Build-pass can't detect
+        # these when the region is platform-guarded (e.g. #ifdef SQLITE_MUTEX_W32
+        # stripped on Linux, hiding conflict markers inside the region).
+        if language in ("c", "cpp", "c++") and self.config.require_syntax_if_supported:
+            pp_line = _preprocessor_imbalance_line(whole)
+            if pp_line is not None:
+                hard.append(
+                    VerificationFailure(
+                        validator="syntax",
+                        severity="error",
+                        message=(
+                            f"splice coherence: unbalanced preprocessor directives "
+                            f"at line {pp_line + 1} (missing #endif or extra #endif)"
+                        ),
+                        detail={"preprocessor_imbalance_line": pp_line + 1},
+                    )
+                )
                 features["syntax_checked"] = True
                 features["syntax_passed"] = False
                 features["hard_failure_count"] = len(hard)
