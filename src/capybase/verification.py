@@ -2228,6 +2228,84 @@ def _preprocessor_imbalance_line(text: str) -> int | None:
     return None
 
 
+def _structural_validate(
+    text: str, language: str | None = None,
+) -> list[VerificationFailure]:
+    """Cheap O(n) structural validator — runs BEFORE the expensive build gate.
+
+    Catches defects in milliseconds that the build gate would take seconds to
+    discover, AND catches defects the build gate CAN'T see (preprocessor
+    imbalance inside platform-guarded regions, conflict markers in inactive
+    ``#ifdef`` branches).
+
+    Returns a list of ``VerificationFailure`` (empty if structurally valid).
+    Each failure has ``validator="structural"`` and a ``detail`` dict with the
+    defect type and line number.
+
+    Checks (all three reviewer feedbacks' "hard checks" list):
+    - Conflict markers remaining anywhere (``<<<<<<<`` etc.)
+    - Brace imbalance (``{}`` after string/comment masking)
+    - Preprocessor imbalance (``#if``/``#endif`` nesting)
+    - Parenthesis/bracket imbalance (lightweight scan after masking)
+
+    The validator is advisory: callers decide whether to treat its findings as
+    hard failures (skip the build) or as repair feedback (feed to the
+    deterministic repair beam before building).
+    """
+    if not text:
+        return []
+    failures: list[VerificationFailure] = []
+
+    # 1. Conflict markers — any marker anywhere is a hard failure, regardless
+    # of whether the build passes (markers inside #ifdef can be hidden).
+    if contains_markers(text):
+        failures.append(VerificationFailure(
+            validator="structural", severity="error",
+            message="conflict markers remaining in the resolved file",
+            detail={"defect": "conflict_markers"},
+        ))
+
+    # 2. Brace imbalance.
+    brace_line = _brace_imbalance_line(text, language)
+    if brace_line is not None:
+        failures.append(VerificationFailure(
+            validator="structural", severity="error",
+            message=f"brace imbalance detected at line {brace_line + 1}",
+            detail={"defect": "brace_imbalance", "line": brace_line + 1},
+        ))
+
+    # 3. Preprocessor imbalance (C/C++ only).
+    if language in ("c", "cpp", "c++"):
+        pp_line = _preprocessor_imbalance_line(text)
+        if pp_line is not None:
+            failures.append(VerificationFailure(
+                validator="structural", severity="error",
+                message=f"preprocessor directive imbalance at line {pp_line + 1}",
+                detail={"defect": "preprocessor_imbalance", "line": pp_line + 1},
+            ))
+
+    # 4. Parenthesis/bracket imbalance (lightweight — only for C/C++ where
+    # unbalanced parens are common model defects).
+    if language in ("c", "cpp", "c++"):
+        masked = _mask_strings_and_comments(text, language)
+        paren_d = masked.count("(") - masked.count(")")
+        bracket_d = masked.count("[") - masked.count("]")
+        if paren_d != 0:
+            failures.append(VerificationFailure(
+                validator="structural", severity="error",
+                message=f"parenthesis imbalance: {abs(paren_d)} {'missing' if paren_d > 0 else 'extra'} ')'",
+                detail={"defect": "paren_imbalance", "delta": paren_d},
+            ))
+        if bracket_d != 0:
+            failures.append(VerificationFailure(
+                validator="structural", severity="error",
+                message=f"bracket imbalance: {abs(bracket_d)} {'missing' if bracket_d > 0 else 'extra'} ']'",
+                detail={"defect": "bracket_imbalance", "delta": bracket_d},
+            ))
+
+    return failures
+
+
 def _try_balance_braces(text: str, language: str | None = None) -> str | None:
     """Deterministically repair a single brace imbalance, or return None.
 
