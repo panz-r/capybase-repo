@@ -317,6 +317,14 @@ def _side_intent_block(unit: ConflictUnit) -> str:
        what each side's edit IS. Grounds the model in the diff-derived
        obligations rather than just the raw side text.
 
+    **Base localization for obligations:** when no diff3 refinement is
+    available and the base is oversized, ``extract_obligations`` would diff
+    the whole-file base against the narrow hunk sides, producing garbage
+    obligations ("removed: everything except these 3 lines"). This function
+    computes obligations using the same localized base that ``_prompt_sides``
+    uses — the anchor-based localized base — so the obligation diff is
+    meaningful and bounded.
+
     Returns "" when neither is available (un-enriched unit, no obligations), so
     the prompt is unchanged. Pure; reads only metadata + the side texts.
     """
@@ -325,12 +333,22 @@ def _side_intent_block(unit: ConflictUnit) -> str:
     summary = md.get("summary")
     if summary:
         parts.append(f"Conflict shape (what each side did vs BASE):\n{summary}")
-    # Obligation contract: derive per-side load-bearing edits. Wrapped so a
-    # failure degrades to "no block" (the prompt must never crash on obligations).
+    # Obligation contract: derive per-side load-bearing edits. Use the
+    # _prompt_sides result (which localizes the base) so the obligation diff
+    # is meaningful for multi-hunk files. Wrapped so a failure degrades to
+    # "no block" (the prompt must never crash on obligations).
     try:
         from capybase.obligations import extract_obligations, render_obligation_block
+        from capybase.obligations import Obligations as _Obligations
+        from capybase.obligations import _side_obligations
 
-        parts.append(render_obligation_block(extract_obligations(unit)).rstrip("\n"))
+        # Get the localized sides (same logic as _prompt_sides).
+        cur, base, rep = _prompt_sides(unit)
+        obligations = _Obligations(
+            current=_side_obligations(base, cur),
+            replayed=_side_obligations(base, rep),
+        )
+        parts.append(render_obligation_block(obligations).rstrip("\n"))
     except Exception:  # noqa: BLE001 - obligations are advisory, never break the prompt
         pass
     parts = [p for p in parts if p]

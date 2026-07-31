@@ -259,19 +259,18 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
             except Exception:  # noqa: BLE001 — best-effort; fall back to single-file
                 pass
 
-        # For C cases: run the build-prepare step (e.g. ./configure) once after
-        # the tree is extracted, so the in-loop `make` gate works with the
-        # no-shell production TestRunner (shlex.split can't handle `&&`). A
-        # failed prepare is best-effort — the in-loop gate reports it honestly.
-        if case.language == "c":
-            prepare = C_PREPARE_COMMANDS.get(case.dataset, "")
-            if prepare:
-                try:
-                    import subprocess as _sp
-                    _sp.run(prepare, shell=True, cwd=str(repo),
-                            capture_output=True, timeout=180)
-                except Exception:  # noqa: BLE001 — best-effort
-                    pass
+        # For C cases: run the build-prepare step (e.g. ./configure) AFTER the
+        # rebase, not before. The rebase creates commits that don't touch the
+        # untracked build dir, but git checkout during rebase CAN leave the
+        # tree in a state where cmake's cached paths are stale. Running prepare
+        # after the rebase ensures the build dir is fresh on the final
+        # conflicted state that the orchestrator will resolve.
+        # NOTE: the prepare runs inside _materialize_conflict which is called
+        # BEFORE the orchestrator. The orchestrator's rebase is done here;
+        # the prepare is deferred to after it via a flag the caller checks.
+        # Actually, _materialize_conflict IS the function that sets up the
+        # rebase, so the prepare needs to run at the END of this function
+        # (after the rebase at line 295). Moved below.
 
     # Write the conflict file at its real path in all three versions.
     # (Overlays on top of the extracted tree.)
@@ -302,6 +301,21 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
         raise _NoConflictError(
             f"git rebase resolved cleanly (no conflict) for {case.id}"
         )
+
+    # For C cases: run the build-prepare step AFTER the rebase, so the build
+    # dir is fresh on the final conflicted state. The rebase's git checkouts
+    # don't destroy untracked files (build/), but cmake's cached paths may be
+    # stale after the checkout operations. Running prepare here ensures the
+    # orchestrator's verify_file build gate finds a valid build dir.
+    if case.language == "c":
+        prepare = C_PREPARE_COMMANDS.get(case.dataset, "")
+        if prepare:
+            try:
+                import subprocess as _sp
+                _sp.run(prepare, shell=True, cwd=str(repo),
+                        capture_output=True, timeout=180)
+            except Exception:  # noqa: BLE001 — best-effort
+                pass
 
 
 def _config_for(case: Case, *, has_crate: bool = False) -> Config:
