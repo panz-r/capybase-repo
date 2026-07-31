@@ -58,6 +58,9 @@ ResolutionProvenance = Literal[
 PROVENANCE_VALUES: tuple[str, ...] = (
     "deterministic_structural",
     "deterministic_brace_repair",
+    "deterministic_cc_repair",
+    "deterministic_side_consistency_repair",
+    "deterministic_side_consensus_repair",
     "exact_history_reuse",
     "combination_search",
     "test_gated_side",
@@ -76,6 +79,9 @@ LEGACY_PROVENANCE = ""
 PROVENANCE_LABELS: dict[str, str] = {
     "deterministic_structural": "deterministic structural",
     "deterministic_brace_repair": "deterministic brace repair",
+    "deterministic_cc_repair": "deterministic cc repair (gcc-diagnostic)",
+    "deterministic_side_consistency_repair": "deterministic side-consistency repair",
+    "deterministic_side_consensus_repair": "deterministic side-consensus repair",
     "combination_search": "combination search",
     "test_gated_side": "test-gated side pick",
     "block_capture": "block-capture (keep/delete)",

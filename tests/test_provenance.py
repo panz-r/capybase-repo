@@ -41,6 +41,9 @@ def test_provenance_values_match_spec():
     assert PROVENANCE_VALUES == (
         "deterministic_structural",
         "deterministic_brace_repair",
+        "deterministic_cc_repair",
+        "deterministic_side_consistency_repair",
+        "deterministic_side_consensus_repair",
         "exact_history_reuse",
         "combination_search",
         "test_gated_side",
