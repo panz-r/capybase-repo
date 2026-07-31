@@ -1008,6 +1008,130 @@ def _try_deterministic_cc_repair(
     return [(wf_unit, wf_cand)]
 
 
+def _try_side_consistency_repair(
+    failures: list,
+    original: str,
+    accepted: list[tuple[ConflictUnit, CandidateResolution]],
+    fault_idx: int,
+) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+    """Repair model candidates by restoring dropped common lines and deleting
+    invented lines, using the merge itself as a structural prior.
+
+    A valid merge candidate should usually be explainable as: lines from base,
+    lines from ours, lines from theirs, plus a small number of novel
+    reconciliation lines. When the model drops a line common to both sides
+    (e.g. a closing brace, a return statement, a function call) or invents a
+    line not in any side, that's a structural defect this repair targets.
+
+    Two repair actions:
+    1. **Common-line restore:** lines present in BOTH current AND replayed
+       (agreed by both sides) but missing from the spliced candidate. Reinsert
+       near the error line.
+    2. **Novel-line delete:** lines in the spliced candidate but not in ANY
+       side (base/current/replayed). The model invented them. Delete near the
+       error line.
+
+    Every inserted line comes from base/current/replayed (provenance-backed).
+    Each hypothesis is validated via ``_braces_balanced``.
+
+    C/C++ only: the side-consistency heuristic is designed for the structural
+    defect profile of C weak-model output (dropped braces, invented bridge
+    lines). For Python/Rust, deleting "novel" lines can remove legitimate
+    reconciliation code the model produced.
+
+    Returns a replacement ``accepted`` list (same whole-file-unit pattern as
+    the other deterministic repairs), or ``None`` to defer to the LLM.
+    """
+    from capybase.verification import (
+        _braces_balanced,
+        _parse_cc_error_line,
+    )
+    from capybase.conflict_model import CandidateResolution
+
+    if fault_idx < 0 or fault_idx >= len(accepted):
+        return None
+    unit, _old_cand = accepted[fault_idx]
+    _lang = unit.language
+    # Gate on C/C++: the side-consistency heuristic (novel-line delete,
+    # common-line restore) is designed for the structural defect profile of
+    # C weak-model output. For Python/Rust, deleting "novel" lines can
+    # remove legitimate reconciliation code the model produced.
+    if _lang not in ("c", "cpp", "c++"):
+        return None
+
+    try:
+        spliced = _resolved_buffer(original, accepted)
+    except Exception:  # noqa: BLE001
+        return None
+
+    # Parse the error line from the first failure (for targeting).
+    error_line = None
+    for f in failures:
+        error_line = _parse_cc_error_line(getattr(f, "message", "") or "")
+        if error_line is not None:
+            break
+
+    # Gather the side texts. For a whole-file unit, use the original file sides.
+    # For a marker-block unit, use the unit's three sides.
+    base_lines = set((unit.base.text or "").split("\n"))
+    cur_lines = set((unit.current.text or "").split("\n"))
+    rep_lines = set((unit.replayed.text or "").split("\n"))
+    all_side_lines = base_lines | cur_lines | rep_lines
+    # Lines common to both sides (agreed edits).
+    common_lines = cur_lines & rep_lines
+
+    spliced_lines = spliced.split("\n")
+    spliced_set = set(spliced_lines)
+
+    repaired = None
+
+    # 1. Common-line restore: lines both sides have but the candidate dropped.
+    missing_common = [l for l in common_lines if l.strip() and l not in spliced_set]
+    if missing_common and error_line:
+        target_idx = error_line - 1  # 0-based
+        # Try inserting each missing common line just before the error line.
+        # Only try ONE line at a time (conservative — multi-line insert is risky).
+        line = missing_common[0]
+        if 0 <= target_idx < len(spliced_lines):
+            trial = list(spliced_lines)
+            trial.insert(target_idx, line)
+            candidate_text = "\n".join(trial)
+            if _braces_balanced(candidate_text, _lang):
+                repaired = candidate_text
+
+    # 2. Novel-line delete: lines in the candidate not in ANY side, near the error.
+    if repaired is None and error_line:
+        target_idx = error_line - 1
+        window = range(max(0, target_idx - 3), min(len(spliced_lines), target_idx + 4))
+        for i in window:
+            line = spliced_lines[i]
+            if line.strip() and line not in all_side_lines:
+                # This line is invented by the model. Try deleting it.
+                trial = list(spliced_lines)
+                del trial[i]
+                candidate_text = "\n".join(trial)
+                if _braces_balanced(candidate_text, _lang):
+                    repaired = candidate_text
+                    break
+
+    if repaired is None:
+        return None
+
+    # Return as a whole-file unit (same pattern as brace/cc repair).
+    wf_unit = unit.model_copy(update={"marker_span": None, "unit_kind": "whole_file"})
+    wf_cand = CandidateResolution(
+        candidate_id=(getattr(_old_cand, "candidate_id", unit.unit_id) or unit.unit_id) + ":sidefix",
+        unit_id=unit.unit_id,
+        model_name=getattr(_old_cand, "model_name", "deterministic") or "deterministic",
+        resolved_text=repaired,
+        prompt_version="deterministic_side_consistency_repair",
+        provenance="deterministic_side_consistency_repair",
+        self_reported_confidence=0.8,
+        explanation="deterministic side-consistency repair (common-line restore or novel-line delete)",
+    )
+    return [(wf_unit, wf_cand)]
+
+
 def _try_deterministic_prefix_dedup(
     failures: list,
     original: str,
@@ -6510,6 +6634,27 @@ class Orchestrator:
                     "passed": True,
                     "whole_file_repair_for": unit_new.unit_id,
                     "deterministic_cc_repair": True,
+                },
+                step_index=self.step,
+                path=path,
+                unit_id=unit_new.unit_id,
+            )
+            return det
+        # Side-consistency repair: restore common lines the model dropped, delete
+        # invented lines. Uses the merge itself as a structural prior — every
+        # inserted line comes from base/current/replayed (provenance-backed).
+        det = _try_side_consistency_repair(
+            failures, original, accepted, fault_idx,
+        )
+        if det is not None:
+            unit_new, cand_new = det[0]
+            self.journal.emit(
+                "candidate_validated",
+                {
+                    "candidate_id": cand_new.candidate_id,
+                    "passed": True,
+                    "whole_file_repair_for": unit_new.unit_id,
+                    "deterministic_side_consistency_repair": True,
                 },
                 step_index=self.step,
                 path=path,
