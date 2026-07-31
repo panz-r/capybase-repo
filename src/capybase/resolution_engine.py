@@ -79,12 +79,114 @@ PROMPT_REPAIR = "cegis_repair.v2"
 PROMPT_BLOCK_CAPTURE = "block_capture.v1"
 
 
-#: If the base side exceeds this many characters (~1000 tokens), window it to
-#: a local context around the marker span. This prevents the whole-file base
-#: (shared across all units in a multi-hunk file) from blowing the context
-#: window when diff3 refinement is unavailable.
+#: If the base side exceeds this many characters (~1000 tokens), localize it
+#: to the conflict region using anchor-based matching. This prevents the
+#: whole-file base (shared across all units in a multi-hunk file) from blowing
+#: the context window when diff3 refinement is unavailable.
 _SIDES_MAX_CHARS = 4000
-_SIDES_CONTEXT_LINES = 30
+_ANCHOR_LINES = 8  # lines of context to use as anchors before/after the marker
+_BASE_CONTEXT_LINES = 15  # extra context lines around the anchored base region
+
+
+def _localize_base_anchored(
+    base_text: str,
+    worktree_text: str,
+    marker_span: tuple[int, int],
+) -> str | None:
+    """Localize a large base file to the conflict region using context anchors.
+
+    ``marker_span`` is in worktree coordinates, NOT base-file coordinates.
+    The base and worktree may have diverged (insertions/deletions before the
+    conflict), so line-number slicing would select the wrong region. Instead,
+    use the lines immediately before/after the conflict marker as anchors to
+    find the corresponding region in the base file.
+
+    Returns the localized base text, or None when unique anchors cannot be
+    found (caller omits the base explicitly rather than showing a wrong region).
+    """
+    if not base_text or marker_span is None:
+        return None
+    wt_lines = worktree_text.split("\n")
+    base_lines = base_text.split("\n")
+    start, end = marker_span
+
+    # Extract anchor lines from the worktree: K non-empty lines immediately
+    # before the marker block, and K immediately after.
+    before_anchor: list[str] = []
+    for i in range(start - 1, max(start - 1 - _ANCHOR_LINES * 2, -1), -1):
+        if 0 <= i < len(wt_lines):
+            line = wt_lines[i].rstrip()
+            if line and not line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
+                before_anchor.insert(0, line)
+            if len(before_anchor) >= _ANCHOR_LINES:
+                break
+
+    after_anchor: list[str] = []
+    for i in range(end + 1, min(end + 1 + _ANCHOR_LINES * 2, len(wt_lines))):
+        if 0 <= i < len(wt_lines):
+            line = wt_lines[i].rstrip()
+            if line and not line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
+                after_anchor.append(line)
+            if len(after_anchor) >= _ANCHOR_LINES:
+                break
+
+    if not before_anchor and not after_anchor:
+        return None
+
+    # Search for the before-anchor sequence in the base.
+    before_str = "\n".join(before_anchor)
+    after_str = "\n".join(after_anchor)
+
+    # Find unique matches.
+    base_text_normalized = "\n".join(l.rstrip() for l in base_lines)
+    before_matches = []
+    pos = 0
+    while True:
+        idx = base_text_normalized.find(before_str, pos)
+        if idx == -1:
+            break
+        before_matches.append(idx)
+        pos = idx + 1
+
+    after_matches = []
+    if after_str:
+        pos = 0
+        while True:
+            idx = base_text_normalized.find(after_str, pos)
+            if idx == -1:
+                break
+            after_matches.append(idx)
+            pos = idx + 1
+
+    # Require unique before-anchor match; after-anchor is best-effort.
+    if len(before_matches) != 1:
+        return None
+
+    # Determine the base region: from the end of the before-anchor to the
+    # start of the after-anchor (or ± context lines if no after-anchor).
+    before_end = before_matches[0] + len(before_str)
+    if after_matches:
+        # Find the closest after-match that comes after before_end.
+        valid_after = [m for m in after_matches if m > before_end]
+        if not valid_after:
+            return None
+        after_start = valid_after[0]
+        region = base_text_normalized[before_end:after_start]
+        # Include some anchor context.
+        pre_context = before_str
+        post_context = after_str
+    else:
+        # No after-anchor: use ±_BASE_CONTEXT_LINES around the before-anchor end.
+        # Convert char offset to line number.
+        before_end_line = base_text_normalized[:before_end].count("\n")
+        lo = max(0, before_end_line - _BASE_CONTEXT_LINES)
+        hi = min(len(base_lines) - 1, before_end_line + _BASE_CONTEXT_LINES)
+        region = "\n".join(base_lines[lo : hi + 1])
+        return region if region.strip() else None
+
+    # Build the localized base with anchors.
+    result = f"{pre_context}\n{region}\n{post_context}"
+    return result if result.strip() else None
 
 
 def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
@@ -96,12 +198,13 @@ def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
     marker sides when no refinement is recorded. Returns
     ``(current, base, replayed)``.
 
-    **Base windowing safety net:** when no refinement is available and the
-    base exceeds ``_SIDES_MAX_CHARS``, window it to ``_SIDES_CONTEXT_LINES``
-    lines around the marker span. This prevents the whole-file base from
-    blowing the context window (the root cause of OVERSIZED escalations on
-    large multi-hunk files). The conflict is local; the model needs the base
-    of the conflict region, not the entire merge-base file.
+    **Base localization safety net:** when no refinement is available and the
+    base exceeds ``_SIDES_MAX_CHARS``, localize it to the conflict region using
+    anchor-based matching (the lines immediately before/after the conflict
+    marker in the worktree are used as anchors to find the corresponding base
+    region). This prevents the whole-file base from blowing the context window.
+    If unique anchors cannot be found, the base is omitted (set to a short
+    explanatory note) rather than showing a wrong region.
 
     When ``mask_deferred_comments`` is enabled (the default, set by the
     orchestrator from ``StructuralConfig.mask_deferred_comments``), DEFERRED
@@ -117,16 +220,21 @@ def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
         cur = unit.current.text or ""
         base = unit.base.text or ""
         rep = unit.replayed.text or ""
-        # Safety net: window an oversized base to local context. The
-        # extraction-side fix (_window_refined_fallback) should have already
-        # populated refined sides; this catches cases where it didn't (e.g.
-        # marker_span is None, or the fallback was skipped).
+        # Safety net: localize an oversized base to the conflict region using
+        # anchor-based matching. marker_span is in worktree coordinates, so
+        # we can't slice the base by line number — the base and worktree may
+        # have diverged. Use context anchors instead.
         if unit.marker_span is not None and len(base) > _SIDES_MAX_CHARS:
-            lines = base.split("\n")
-            start, end = unit.marker_span
-            lo = max(0, start - _SIDES_CONTEXT_LINES)
-            hi = min(len(lines) - 1, end + _SIDES_CONTEXT_LINES)
-            base = "\n".join(lines[lo : hi + 1])
+            localized = _localize_base_anchored(
+                base, unit.original_worktree_text or "", unit.marker_span,
+            )
+            if localized is not None:
+                base = localized
+            else:
+                # Omit the base explicitly rather than showing a wrong region
+                # or sending the whole file. This is NOT an add/add (empty base)
+                # — the base exists but couldn't be safely localized.
+                base = "(base file too large for local context; omitted — resolve from current/replayed sides)"
     if _MASK_DEFERRED_COMMENTS:
         cur, base, rep = _mask_sides_deferred(unit, cur, base, rep)
     return cur, base, rep
