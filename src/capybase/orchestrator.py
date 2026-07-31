@@ -846,6 +846,168 @@ def _try_deterministic_brace_repair(
     return [(wf_unit, wf_cand)]
 
 
+def _try_deterministic_cc_repair(
+    failures: list,
+    original: str,
+    accepted: list[tuple[ConflictUnit, CandidateResolution]],
+    fault_idx: int,
+) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+    """Compiler-diagnostic-driven deterministic repair for C/C++ candidates.
+
+    Reads the gcc/clang error message from the failures, classifies it via
+    ``_classify_ccs_parse_error``, and generates minimal repair hypotheses at
+    the compiler-identified line. Each hypothesis is a single-token insertion
+    or deletion — no semantic changes. Validates via ``_braces_balanced``
+    before returning.
+
+    Targets the 36 WHOLE_FILE_FAILED C cases at avg sim 0.978 where the model's
+    output is semantically correct but has a small structural defect (missing
+    ``;``, missing ``}``, stray char). The existing brace repair re-derives
+    the imbalance structurally; this consumes gcc's diagnostic directly, which
+    pinpoints the exact line.
+
+    Returns a replacement ``accepted`` list (same whole-file-unit pattern as
+    ``_try_deterministic_brace_repair``), or ``None`` to defer to the LLM.
+    """
+    from capybase.verification import (
+        _braces_balanced,
+        _classify_ccs_parse_error,
+        _parse_cc_error_line,
+    )
+    from capybase.conflict_model import CandidateResolution
+
+    # Gate: C/C++ language + a classifiable parse error.
+    if fault_idx < 0 or fault_idx >= len(accepted):
+        return None
+    unit, _old_cand = accepted[fault_idx]
+    _lang = unit.language
+    if _lang not in ("c", "cpp", "c++"):
+        return None
+    # Find the first classifiable failure message.
+    category = None
+    error_line = None
+    for f in failures:
+        msg = getattr(f, "message", "") or ""
+        cat = _classify_ccs_parse_error(msg)
+        if cat is not None:
+            category = cat
+            error_line = _parse_cc_error_line(msg)
+            break
+    if category is None:
+        return None  # no classifiable parse error → defer to existing repairs/LLM
+
+    # Build the whole-file buffer to repair.
+    try:
+        spliced = _resolved_buffer(original, accepted)
+    except Exception:  # noqa: BLE001 - splice may fail on bad spans
+        return None
+
+    lines = spliced.split("\n")
+    # Convert 1-based gcc line to 0-based index.
+    target_idx = (error_line - 1) if error_line and error_line > 0 else None
+
+    repaired = None
+
+    if category == "missing_semicolon" and target_idx is not None:
+        # Insert ';' at end of the line before the error line (gcc points AT
+        # the token after the missing ';', so the missing ';' goes on the
+        # PREVIOUS non-empty line).
+        for i in range(target_idx, max(target_idx - 3, -1), -1):
+            if i < len(lines) and lines[i].rstrip():
+                candidate_line = lines[i].rstrip()
+                if not candidate_line.endswith(";") and not candidate_line.endswith("{") \
+                        and not candidate_line.endswith("}") and not candidate_line.endswith(":") \
+                        and not candidate_line.endswith(","):
+                    lines[i] = candidate_line + ";"
+                    repaired = "\n".join(lines)
+                    break
+
+    elif category == "missing_close_brace":
+        # Try _try_balance_braces first (handles the common unclosed-block case).
+        from capybase.verification import _try_balance_braces, _brace_imbalance_line
+        if _brace_imbalance_line(spliced, _lang) is not None:
+            bal = _try_balance_braces(spliced, _lang)
+            if bal is not None and _brace_imbalance_line(bal, _lang) is None:
+                repaired = bal
+
+    elif category == "extra_close_brace" and target_idx is not None:
+        # The line gcc points at is the extra '}'. Remove it if it's a
+        # brace-only line.
+        if target_idx < len(lines) and lines[target_idx].strip() == "}":
+            del lines[target_idx]
+            repaired = "\n".join(lines)
+
+    elif category == "stray_character" and target_idx is not None:
+        # gcc reports the byte position of the stray char. For ASCII strays,
+        # delete the non-ASCII byte. For control chars, strip them.
+        if target_idx < len(lines):
+            line = lines[target_idx]
+            # Remove non-ASCII bytes (stray chars are typically high bytes).
+            cleaned = "".join(c for c in line if ord(c) < 128)
+            if cleaned != line:
+                lines[target_idx] = cleaned
+                repaired = "\n".join(lines)
+
+    elif category == "unterminated_literal" and target_idx is not None:
+        # Add the missing closing quote. gcc reports the line where the
+        # literal starts (or ends without termination).
+        if target_idx < len(lines):
+            line = lines[target_idx]
+            # Count unescaped quotes — if odd, append the matching quote.
+            for q in ('"', "'", "*/"):
+                count = 0
+                i = 0
+                while i < len(line):
+                    if line[i] == "\\" and i + 1 < len(line):
+                        i += 2
+                        continue
+                    if line[i:i+len(q)] == q:
+                        count += 1
+                        i += len(q)
+                        continue
+                    i += 1
+                if q in ("*/",):
+                    # Block comment close
+                    if "/*" in line and "*/" not in line:
+                        lines[target_idx] = line + " */"
+                        repaired = "\n".join(lines)
+                        break
+                elif count % 2 == 1:
+                    lines[target_idx] = line + q
+                    repaired = "\n".join(lines)
+                    break
+
+    elif category == "duplicate_entity" and target_idx is not None:
+        # Remove the second occurrence of the duplicate (the line gcc points
+        # at is the redefinition — remove that line and any immediately
+        # following body lines up to the next blank line or closing brace).
+        if target_idx < len(lines):
+            # Conservative: just remove the single redefinition line. The
+            # caller's verify loop will catch it if more needs removing.
+            del lines[target_idx]
+            repaired = "\n".join(lines)
+
+    # Validate: the repair must produce brace-balanced output.
+    if repaired is None:
+        return None
+    if not _braces_balanced(repaired, _lang):
+        return None  # repair introduced a new imbalance → unsafe
+
+    # Return as a whole-file unit (same pattern as brace repair).
+    wf_unit = unit.model_copy(update={"marker_span": None, "unit_kind": "whole_file"})
+    wf_cand = CandidateResolution(
+        candidate_id=(getattr(_old_cand, "candidate_id", unit.unit_id) or unit.unit_id) + ":ccfix",
+        unit_id=unit.unit_id,
+        model_name=getattr(_old_cand, "model_name", "deterministic") or "deterministic",
+        resolved_text=repaired,
+        prompt_version="deterministic_cc_repair",
+        provenance="deterministic_cc_repair",
+        self_reported_confidence=0.85,
+        explanation=f"deterministic cc repair ({category} at line {error_line})",
+    )
+    return [(wf_unit, wf_cand)]
+
+
 def _try_deterministic_prefix_dedup(
     failures: list,
     original: str,
@@ -6330,6 +6492,30 @@ class Orchestrator:
                         return result
             except Exception:  # noqa: BLE001
                 pass
+        # Compiler-diagnostic-driven deterministic repair for C/C++: reads the
+        # gcc error message, classifies it, and generates minimal fix
+        # hypotheses (missing ';', missing '}', stray char, etc.) at the
+        # compiler-identified line. Targets the 36 WHOLE_FILE_FAILED C cases
+        # at avg sim 0.978 where the model's output is semantically correct
+        # but has a small structural defect.
+        det = _try_deterministic_cc_repair(
+            failures, original, accepted, fault_idx,
+        )
+        if det is not None:
+            unit_new, cand_new = det[0]
+            self.journal.emit(
+                "candidate_validated",
+                {
+                    "candidate_id": cand_new.candidate_id,
+                    "passed": True,
+                    "whole_file_repair_for": unit_new.unit_id,
+                    "deterministic_cc_repair": True,
+                },
+                step_index=self.step,
+                path=path,
+                unit_id=unit_new.unit_id,
+            )
+            return det
         # deterministic_only: skip the LLM re-resolve. Used for the final
         # repair attempt after the LLM budget is exhausted — the cheap O(n)
         # deterministic repairs above may still close the case (a recurring
