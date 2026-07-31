@@ -2014,6 +2014,60 @@ _CCS_SEMANTIC_RE = re.compile(
 )
 
 
+# GCC/clang parse-error categories that a deterministic repair beam can target.
+# Each maps a substring of the gcc error message to a category that determines
+# the repair action. Validated against gcc 14's output format. Used by the
+# compiler-diagnostic-driven repair beam in orchestrator._try_deterministic_cc_repair.
+_CCS_PARSE_ERROR_CATEGORIES: dict[str, str] = {
+    # Order matters: longer/more-specific patterns first.
+    # Patterns use the SEMANTIC content of gcc's message (not the quote chars,
+    # which gcc emits as curly '…' quotes). We match case-insensitively on
+    # the message text, stripping/normalizing quotes.
+    "expected declaration or statement at end of input": "missing_close_brace",
+    "expected } at end of input": "missing_close_brace",
+    "expected ; before": "missing_semicolon",
+    "expected ;": "missing_semicolon",
+    "expected identifier or ( before }": "extra_close_brace",
+    "expected identifier or (": "extra_close_brace",
+    "stray": "stray_character",
+    "unterminated": "unterminated_literal",
+    "missing terminating": "unterminated_literal",
+    "expected )": "missing_close_paren",
+    "expected ]": "missing_close_bracket",
+    "redefinition of": "duplicate_entity",
+    "duplicate definition": "duplicate_entity",
+    "expected expression": "expected_expression",
+}
+
+
+def _classify_ccs_parse_error(msg: str) -> str | None:
+    """Classify a gcc/clang parse error message into a repair-actionable category.
+
+    Returns a category string (e.g. ``"missing_semicolon"``) when the message
+    matches a known parse-error pattern, or ``None`` when it doesn't classify
+    (semantic errors, unknown shapes). Used by the deterministic repair beam
+    to select the appropriate repair action.
+
+    Strips ALL quote characters (gcc wraps tokens in curly/single/double
+    quotes) before case-insensitive substring matching against
+    ``_CCS_PARSE_ERROR_CATEGORIES``, with longer patterns checked first.
+    """
+    if not msg:
+        return None
+    # Strip all quote-like chars so patterns match token content directly.
+    normalized = msg.translate(str.maketrans({
+        "\u2018": " ", "\u2019": " ", "\u201c": " ", "\u201d": " ",
+        "'": " ", '"': " ",
+    })).lower()
+    # Collapse double spaces from the stripping.
+    while "  " in normalized:
+        normalized = normalized.replace("  ", " ")
+    for pattern, category in _CCS_PARSE_ERROR_CATEGORIES.items():
+        if pattern.lower() in normalized:
+            return category
+    return None
+
+
 def _is_ccs_resolution_error(msg: str) -> bool:
     """True when a gcc/clang diagnostic is semantic (resolution/type), not parse.
 
@@ -3147,6 +3201,28 @@ def _compile_ccs(
         return False, f"cc timed out after {timeout:g}s"
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+
+_CC_ERROR_LINE_RE = re.compile(r":(\d+):\d+:\s*(?:error|warning):")
+
+
+def _parse_cc_error_line(msg: str) -> int | None:
+    """Extract the 1-based line number from a gcc/clang error message.
+
+    gcc format: ``file:line:col: error: msg`` → returns ``line`` as int.
+    Returns None when the message doesn't match (e.g. ``cc failed`` with no
+    position info). Used by the deterministic repair beam to target fixes.
+    """
+    if not msg:
+        return None
+    m = _CC_ERROR_LINE_RE.search(msg)
+    if m:
+        return int(m.group(1))
+    # Fallback: "line N" pattern (used by the brace-coherence gate's message)
+    m2 = re.search(r"line\s+(\d+)", msg)
+    if m2:
+        return int(m2.group(1))
+    return None
 
 
 # The Rust editions rustc accepts for ``--edition``. 2024 stabilized in Rust
