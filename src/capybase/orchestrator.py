@@ -1132,6 +1132,213 @@ def _try_side_consistency_repair(
     return [(wf_unit, wf_cand)]
 
 
+# ---------------------------------------------------------------------------
+# Structural signature: delimiter deltas + terminal-token patterns
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _StructuralSignature:
+    """Shallow structural properties of a text span, after string/comment masking.
+
+    Used by side-consensus repair: when both sides agree on a structural
+    property but the candidate disagrees, that's a high-confidence repair signal.
+    """
+    brace_delta: int       # { count - } count
+    paren_delta: int       # ( count - ) count
+    bracket_delta: int     # [ count - ] count
+    trailing_semicolons: int   # lines ending with ; (code lines only)
+    trailing_backslashes: int  # lines ending with \ (macro continuations)
+    line_count: int
+
+
+def _structural_signature(text: str, lang: str | None = None) -> _StructuralSignature:
+    """Compute the structural signature of ``text``.
+
+    Masks strings/comments first (so delimiters inside them don't count), then
+    counts delimiter deltas and terminal-token patterns. O(n) scan.
+    """
+    from capybase.verification import _mask_strings_and_comments
+    masked = _mask_strings_and_comments(text, lang or "c")
+    brace_d = 0
+    paren_d = 0
+    bracket_d = 0
+    semis = 0
+    backslashes = 0
+    lines = masked.split("\n")
+    for line in lines:
+        stripped = line.rstrip()
+        for ch in stripped:
+            if ch == "{":
+                brace_d += 1
+            elif ch == "}":
+                brace_d -= 1
+            elif ch == "(":
+                paren_d += 1
+            elif ch == ")":
+                paren_d -= 1
+            elif ch == "[":
+                bracket_d += 1
+            elif ch == "]":
+                bracket_d -= 1
+        if stripped.endswith(";"):
+            semis += 1
+        if stripped.endswith("\\"):
+            backslashes += 1
+    return _StructuralSignature(
+        brace_delta=brace_d, paren_delta=paren_d, bracket_delta=bracket_d,
+        trailing_semicolons=semis, trailing_backslashes=backslashes,
+        line_count=len(lines),
+    )
+
+
+def _try_side_consensus_repair(
+    failures: list,
+    original: str,
+    accepted: list[tuple[ConflictUnit, CandidateResolution]],
+    fault_idx: int,
+) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+    """Repair candidates using side-consensus structural evidence.
+
+    When both ``current`` and ``replayed`` sides agree on a structural property
+    (brace delta, trailing semicolons, macro continuations) but the candidate
+    disagrees, that's a high-confidence repair signal. The consensus is a
+    structural prior from the merge itself — not a guess.
+
+    Repair hypotheses (each validated by ``_braces_balanced``):
+    - Both sides have ``brace_delta = -1`` (one more ``}``), candidate has
+      ``0`` → candidate dropped a closing brace. Append ``}``.
+    - Both sides have ``brace_delta = +1``, candidate has ``0`` → candidate
+      dropped an opening brace (rare).
+    - Both sides have N trailing semicolons, candidate has N-1 → the candidate
+      dropped a ``;`` on a line where both sides have one.
+    - Both sides have N trailing backslashes, candidate has N-1 → the candidate
+      broke a macro continuation.
+
+    Every inserted token is traceable to the side consensus (provenance-backed).
+    C/C++ only: the consensus heuristic is designed for C structural defects.
+
+    Returns a replacement ``accepted`` list, or ``None`` to defer to the LLM.
+    """
+    from capybase.verification import _braces_balanced
+    from capybase.conflict_model import CandidateResolution
+
+    if fault_idx < 0 or fault_idx >= len(accepted):
+        return None
+    unit, _old_cand = accepted[fault_idx]
+    _lang = unit.language
+    if _lang not in ("c", "cpp", "c++"):
+        return None
+
+    try:
+        spliced = _resolved_buffer(original, accepted)
+    except Exception:  # noqa: BLE001
+        return None
+
+    cur_sig = _structural_signature(unit.current.text or "", _lang)
+    rep_sig = _structural_signature(unit.replayed.text or "", _lang)
+    cand_sig = _structural_signature(spliced, _lang)
+
+    repaired = None
+    reason = ""
+
+    # Brace consensus: both sides agree on brace_delta, candidate disagrees.
+    if cur_sig.brace_delta == rep_sig.brace_delta and cand_sig.brace_delta != cur_sig.brace_delta:
+        delta_diff = cur_sig.brace_delta - cand_sig.brace_delta
+        if delta_diff > 0:
+            # Candidate has fewer closing braces than both sides → append }
+            repaired = spliced.rstrip("\n") + "\n" + "}" * delta_diff
+            reason = f"brace consensus: both sides have delta={cur_sig.brace_delta}, candidate has {cand_sig.brace_delta}; appended {delta_diff} '}}'"
+        elif delta_diff < 0:
+            # Candidate has extra closing braces → try removing from the end
+            lines = spliced.split("\n")
+            to_remove = abs(delta_diff)
+            removed = 0
+            for i in range(len(lines) - 1, -1, -1):
+                if removed >= to_remove:
+                    break
+                if lines[i].strip() == "}":
+                    del lines[i]
+                    removed += 1
+            if removed == to_remove:
+                repaired = "\n".join(lines)
+                reason = f"brace consensus: removed {removed} extra '}}'"
+
+    # Semicolon consensus: both sides have N trailing semicolons, candidate has fewer.
+    if repaired is None and cur_sig.trailing_semicolons == rep_sig.trailing_semicolons \
+            and cand_sig.trailing_semicolons < cur_sig.trailing_semicolons:
+        # Find the line in the candidate that's missing a semicolon where both
+        # sides have one. Compare line-by-line (rough but catches the common case).
+        cur_lines = (unit.current.text or "").split("\n")
+        rep_lines = (unit.replayed.text or "").split("\n")
+        cand_lines = spliced.split("\n")
+        # For each candidate line, check if a corresponding side line ends with ;
+        # but the candidate doesn't.
+        for i, cline in enumerate(cand_lines):
+            c_stripped = cline.rstrip()
+            if c_stripped and not c_stripped.endswith(";"):
+                # Check if any side line at a similar position ends with ;
+                for side_lines in (cur_lines, rep_lines):
+                    for j in range(max(0, i - 2), min(len(side_lines), i + 3)):
+                        s_stripped = side_lines[j].rstrip()
+                        # Same content except for the trailing semicolon?
+                        if s_stripped.endswith(";") and s_stripped[:-1].rstrip() == c_stripped:
+                            cand_lines[i] = c_stripped + ";"
+                            candidate_text = "\n".join(cand_lines)
+                            if _braces_balanced(candidate_text, _lang):
+                                repaired = candidate_text
+                                reason = f"semicolon consensus: line {i+1} missing ';' that both sides have"
+                                break
+                    if repaired:
+                        break
+                if repaired:
+                    break
+
+    # Macro continuation consensus: both sides have N trailing backslashes,
+    # candidate has fewer → the candidate broke a multi-line macro.
+    if repaired is None and cur_sig.trailing_backslashes == rep_sig.trailing_backslashes \
+            and cand_sig.trailing_backslashes < cur_sig.trailing_backslashes:
+        # Find the candidate line that should end with \ but doesn't.
+        cand_lines = spliced.split("\n")
+        cur_lines = (unit.current.text or "").split("\n")
+        rep_lines = (unit.replayed.text or "").split("\n")
+        for i, cline in enumerate(cand_lines):
+            c_stripped = cline.rstrip()
+            if c_stripped and not c_stripped.endswith("\\"):
+                for side_lines in (cur_lines, rep_lines):
+                    for j in range(max(0, i - 2), min(len(side_lines), i + 3)):
+                        s_stripped = side_lines[j].rstrip()
+                        if s_stripped.endswith("\\") and s_stripped[:-1].rstrip() == c_stripped:
+                            cand_lines[i] = c_stripped + "\\"
+                            candidate_text = "\n".join(cand_lines)
+                            if _braces_balanced(candidate_text, _lang):
+                                repaired = candidate_text
+                                reason = f"backslash consensus: line {i+1} missing macro continuation"
+                                break
+                    if repaired:
+                        break
+                if repaired:
+                    break
+
+    if repaired is None:
+        return None
+    if not _braces_balanced(repaired, _lang):
+        return None
+
+    wf_unit = unit.model_copy(update={"marker_span": None, "unit_kind": "whole_file"})
+    wf_cand = CandidateResolution(
+        candidate_id=(getattr(_old_cand, "candidate_id", unit.unit_id) or unit.unit_id) + ":consensus",
+        unit_id=unit.unit_id,
+        model_name=getattr(_old_cand, "model_name", "deterministic") or "deterministic",
+        resolved_text=repaired,
+        prompt_version="deterministic_side_consensus_repair",
+        provenance="deterministic_side_consensus_repair",
+        self_reported_confidence=0.85,
+        explanation=f"deterministic side-consensus repair ({reason})",
+    )
+    return [(wf_unit, wf_cand)]
+
+
 def _try_deterministic_prefix_dedup(
     failures: list,
     original: str,
@@ -6655,6 +6862,27 @@ class Orchestrator:
                     "passed": True,
                     "whole_file_repair_for": unit_new.unit_id,
                     "deterministic_side_consistency_repair": True,
+                },
+                step_index=self.step,
+                path=path,
+                unit_id=unit_new.unit_id,
+            )
+            return det
+        # Side-consensus repair: when both sides agree on a structural property
+        # (brace delta, trailing semicolons, macro continuations) but the
+        # candidate disagrees, the consensus is a high-confidence repair signal.
+        det = _try_side_consensus_repair(
+            failures, original, accepted, fault_idx,
+        )
+        if det is not None:
+            unit_new, cand_new = det[0]
+            self.journal.emit(
+                "candidate_validated",
+                {
+                    "candidate_id": cand_new.candidate_id,
+                    "passed": True,
+                    "whole_file_repair_for": unit_new.unit_id,
+                    "deterministic_side_consensus_repair": True,
                 },
                 step_index=self.step,
                 path=path,
