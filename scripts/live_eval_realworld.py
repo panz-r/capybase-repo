@@ -69,7 +69,7 @@ TESTDATA = Path(__file__).resolve().parent.parent / "extracted-testdata" / "real
 # (redis ships a ready Makefile). Add entries as new C repos enter the corpus.
 C_PREPARE_COMMANDS: dict[str, str] = {
     "redis-history": "",
-    "jsonc-history": "mkdir -p build && cd build && cmake ..",
+    "jsonc-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
     "sqlite-history": "./configure",
 }
 
