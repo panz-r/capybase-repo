@@ -7484,7 +7484,22 @@ class Orchestrator:
                     prompt = build_recovery_prompt(unit, context, failures)
                 elif failures and prev_candidate and prev_candidate.resolved_text:
                     pv = PROMPT_REPAIR
-                    prompt = build_repair_prompt(unit, context, prev_candidate, failures, attempt=retry_count)
+                    # Build prior-attempt summaries for failed-patch memory.
+                    # Each summary is one line: the failure validator + message.
+                    prior_summaries = []
+                    for prev_attempt in outcome.attempts:
+                        # The outcome's attempts list carries the candidates that
+                        # were tried. We need the VALIDATION that rejected them.
+                        # The candidate's parse_warnings/explanation carry the
+                        # failure info.
+                        if prev_attempt is prev_candidate:
+                            continue
+                        summary_parts = []
+                        for f in failures:
+                            summary_parts.append(f"{f.validator}: {f.message[:60]}")
+                        if summary_parts:
+                            prior_summaries.append("; ".join(summary_parts[:2]))
+                    prompt = build_repair_prompt(unit, context, prev_candidate, failures, attempt=retry_count, prior_attempt_summaries=prior_summaries or None)
                 elif failures:
                     pv = PROMPT_RETRY
                     prompt = build_retry_prompt(unit, context, failures)

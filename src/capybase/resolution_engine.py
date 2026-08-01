@@ -1672,6 +1672,8 @@ def build_repair_prompt(
     failures: Iterable[VerificationFailure],
     budget: TokenBudget | None = None,
     attempt: int = 0,
+    *,
+    prior_attempt_summaries: list[str] | None = None,
 ) -> str:
     """Targeted repair: send the broken candidate back for surgical fixing.
 
@@ -1742,6 +1744,18 @@ def build_repair_prompt(
         for c in context.high_trust_constraints:
             lines.append(f"- {c}")
         reveal_block = "\n".join(lines) + "\n\n"
+    # Failed-patch memory: on attempt > 0, include a brief summary of what
+    # was already tried and why it failed. This prevents the model from
+    # reproducing the same fix that already didn't work (CARGO_NO_PROGRESS).
+    # Research: DrRepair found that "memory of prior failed patches"
+    # significantly improves repair convergence.
+    if prior_attempt_summaries and attempt > 0:
+        prior_lines = ["PRIOR FAILED ATTEMPTS (do NOT repeat these fixes):"]
+        for i, summary in enumerate(prior_attempt_summaries[-3:], 1):
+            prior_lines.append(f"  {i}. {summary}")
+        prior_attempts_block = "\n".join(prior_lines) + "\n\n"
+    else:
+        prior_attempts_block = ""
     # Self-correction plan step: force the model to reason about
     # WHY each failure happened and WHAT it will change BEFORE emitting the fix,
     # in the same response (no extra round-trip). The A/B showed the model
@@ -1777,7 +1791,7 @@ error points to a line/symbol that is clearly ABSENT from your snippet above
 (e.g. a missing `;` or unbalanced bracket at a location not in your code), the
 error is likely from the surrounding file context, not your code.
 
-{repair_anchor}{reveal_block}FIRST, reason about the fix: for each failure above, state in one short sentence
+{prior_attempts_block}{repair_anchor}{reveal_block}FIRST, reason about the fix: for each failure above, state in one short sentence
 WHY it happened and the specific edit you will make. Only AFTER you have a
 concrete plan, emit the correction.
 
