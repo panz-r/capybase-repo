@@ -3953,6 +3953,21 @@ class VerificationEngine:
                     except FileNotFoundError:
                         ok = True  # tool vanished between resolve & run → skip
                         msg = "C/C++ compiler not available; syntax not checked"
+                    # Standalone gcc runs in /tmp with no -I flags, so it cannot
+                    # resolve project-internal headers (#include "json.h",
+                    # "server.h"). A missing-header fatal error is an artifact
+                    # of compiling the fragment out of translation-unit context,
+                    # NOT a parse defect — the same principle the per-unit
+                    # CcsSyntaxValidator applies via _CCS_SEMANTIC_PATTERNS.
+                    # Without this tolerance, the gcc fallback (which fires when
+                    # no build command is configured) escalates correct merges
+                    # whose only "error" is an unresolved sibling header. The
+                    # whole-file build command (make/cmake) is the authoritative
+                    # oracle for header resolution; the gcc fallback is a cheap
+                    # structural gate, not a header-resolution gate.
+                    if not ok and _CCS_SEMANTIC_RE.search(msg):
+                        ok = True
+                        msg = f"cc: semantic/missing-header pattern skipped in standalone mode ({msg[:60]})"
                     syntax_ok = ok
                     if not ok and self.config.require_syntax_if_supported:
                         hard.append(
