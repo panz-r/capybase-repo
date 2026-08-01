@@ -181,12 +181,83 @@ def _localize_base_anchored(
         before_end_line = base_text_normalized[:before_end].count("\n")
         lo = max(0, before_end_line - _BASE_CONTEXT_LINES)
         hi = min(len(base_lines) - 1, before_end_line + _BASE_CONTEXT_LINES)
+        # Expand to structural boundaries: don't cut through comments,
+        # strings, #ifdef blocks, or mid-statement. Walk outward from lo/hi
+        # to the nearest safe boundary.
+        lo, hi = _expand_to_safe_boundary(base_lines, lo, hi)
         region = "\n".join(base_lines[lo : hi + 1])
         return region if region.strip() else None
 
     # Build the localized base with anchors.
     result = f"{pre_context}\n{region}\n{post_context}"
     return result if result.strip() else None
+
+
+def _expand_to_safe_boundary(
+    lines: list[str], lo: int, hi: int,
+) -> tuple[int, int]:
+    """Expand window boundaries to safe C structural boundaries.
+
+    Avoids cutting the window mid-comment, mid-string, mid-#ifdef, or
+    mid-macro-continuation. Walks outward from lo/hi to the nearest
+    safe boundary: blank line, closing brace, opening brace at column 0,
+    preprocessor directive, or function signature.
+    """
+    # Safe boundary indicators (a line that STARTS a new structural unit).
+    safe_starts = ("#", "typedef", "struct", "enum", "union", "class",
+                   "static ", "extern ", "int ", "void ", "char ", "double ",
+                   "float ", "long ", "short ", "unsigned ", "const ",
+                   "#define", "#include", "#ifdef", "#ifndef", "#if ", "#endif",
+                   "#else", "#elif", "#pragma")
+
+    # Expand lo upward (find a safe start).
+    for i in range(lo, max(lo - 10, -1), -1):
+        if i < 0:
+            return 0, hi
+        stripped = lines[i].strip() if i < len(lines) else ""
+        # Blank line is always safe.
+        if not stripped:
+            return i, hi
+        # Line that starts a structural unit is safe.
+        if any(stripped.startswith(s) for s in safe_starts):
+            return i, hi
+        # Backslash continuation: the line above ends with \, so this line
+        # is part of a macro. Keep expanding.
+        if i > 0 and lines[i - 1].rstrip().endswith("\\"):
+            continue
+        # Closing brace at column 0 is safe (end of function/struct).
+        if lines[i].startswith("}"):
+            return i, hi
+
+    return max(0, lo), _expand_hi_to_safe_boundary(lines, hi)
+
+
+def _expand_hi_to_safe_boundary(
+    lines: list[str], hi: int,
+) -> int:
+    """Expand the hi window boundary downward to a safe C structural boundary.
+
+    Symmetric to the lo expansion in _expand_to_safe_boundary: avoids cutting
+    mid-comment, mid-string, mid-macro, or mid-statement.
+    """
+    safe_starts = ("#", "typedef", "struct", "enum", "union", "class",
+                   "static ", "extern ", "int ", "void ", "char ", "double ",
+                   "float ", "long ", "short ", "unsigned ", "const ",
+                   "#define", "#include", "#ifdef", "#ifndef", "#if ", "#endif",
+                   "#else", "#elif", "#pragma")
+    for i in range(hi, min(hi + 10, len(lines))):
+        if i >= len(lines):
+            return min(hi, len(lines) - 1)
+        stripped = lines[i].strip()
+        if not stripped:
+            return i
+        if any(stripped.startswith(s) for s in safe_starts):
+            return i
+        if i + 1 < len(lines) and lines[i].rstrip().endswith("\\"):
+            continue
+        if stripped == "}":
+            return i + 1  # include the closing brace
+    return hi
 
 
 def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
