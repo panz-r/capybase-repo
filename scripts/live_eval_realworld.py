@@ -67,11 +67,21 @@ TESTDATA = Path(__file__).resolve().parent.parent / "extracted-testdata" / "real
 # configure in _materialize_conflict (after git archive extracts the tree) means
 # the in-loop pre_continue is a single ``make`` command. Empty = no prepare needed
 # (redis ships a ready Makefile). Add entries as new C repos enter the corpus.
+#
+# IMPORTANT: json-c and other C repos changed build systems across their history
+# (older commits used autotools/configure.ac, newer use cmake). The per-dataset
+# default here is the PREFERRED prepare for the majority commit; the materializer
+# probes the extracted tree and adapts (cmake → autotools fallback) per case.
 C_PREPARE_COMMANDS: dict[str, str] = {
     "redis-history": "",
     "jsonc-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
     "sqlite-history": "./configure",
 }
+
+# Per-case build-command cache: populated by _materialize_conflict after it
+# probes the extracted tree's build system. _config_for reads from here so the
+# in-loop build gate matches whatever prepare actually ran. Keyed by case.id.
+_DETECTED_BUILD_CMD: dict[str, str] = {}
 
 
 @dataclass
@@ -224,6 +234,51 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     return p
 
 
+def _resolve_c_build(repo: Path, dataset: str, default_prepare: str) -> tuple[str, str]:
+    """Probe the extracted tree's build system and return (prepare_cmd, build_cmd).
+
+    C repos change build systems across their history (json-c moved from
+    autotools to cmake). The per-dataset ``default_prepare`` is preferred, but
+    when its prerequisite is absent we fall back to a working alternative so
+    the build gate isn't a false rejector of correct resolutions.
+
+    Returns (prepare, build) command strings. ``prepare`` runs once in
+    _materialize_conflict; ``build`` is the in-loop gate command. Both use
+    ``shell=True``.
+
+    Detection order:
+      1. cmake  — CMakeLists.txt present → cmake -B build ... / cmake --build build
+      2. autotools — configure.ac or Makefile.am present → autoreconf+configure / make
+      3. pre-configured — a ``configure`` script exists → ./configure / make
+      4. ready — a Makefile exists (redis) → (no prepare) / make
+      5. unknown → (no prepare) / true (brace-balance + gcc -fsyntax-only only)
+    """
+    has_cmake = (repo / "CMakeLists.txt").exists()
+    has_autotools = (repo / "configure.ac").exists() or (repo / "Makefile.am").exists()
+    has_configure = (repo / "configure").exists() and (repo / "configure").stat().st_mode & 0o111
+    has_makefile = (repo / "Makefile").exists()
+
+    if has_cmake:
+        # Default prepare is cmake; use it. Build with cmake --build.
+        if default_prepare and "cmake" in default_prepare:
+            return default_prepare, "cmake --build build"
+        return ("cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+                "cmake --build build")
+    if has_autotools:
+        # Generate configure from configure.ac, then run it. The full chain
+        # is best-effort (autoreconf may be missing on some hosts).
+        return ("autoreconf -fi >/dev/null 2>&1; ./configure >/dev/null 2>&1",
+                "make -j4")
+    if has_configure:
+        return ("./configure >/dev/null 2>&1", "make -j4")
+    if has_makefile:
+        return ("", "make -j4")
+    # Unknown build system — no whole-tree gate. The CcsSyntaxValidator
+    # (gcc -fsyntax-only) still gates per-unit; brace-balance is the only
+    # whole-file check. This is honest (we can't build what we can't detect).
+    return ("", "true")
+
+
 def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None = None) -> None:
     """Build a git history that produces the case's conflict markers on disk.
 
@@ -307,15 +362,33 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
     # don't destroy untracked files (build/), but cmake's cached paths may be
     # stale after the checkout operations. Running prepare here ensures the
     # orchestrator's verify_file build gate finds a valid build dir.
+    #
+    # The prepare command is ADAPTIVE: C repos change build systems across
+    # their history (json-c moved from autotools to cmake). The per-dataset
+    # default is preferred, but we probe the extracted tree and fall back when
+    # the default's prerequisite is absent (e.g. no CMakeLists.txt → autotools).
+    # The detected build command is stashed in _DETECTED_BUILD_CMD so _config_for
+    # can set the matching in-loop gate.
     if case.language == "c":
-        prepare = C_PREPARE_COMMANDS.get(case.dataset, "")
+        default_prepare = C_PREPARE_COMMANDS.get(case.dataset, "")
+        prepare, build_cmd = _resolve_c_build(repo, case.dataset, default_prepare)
+        prepare_ok = True
         if prepare:
             try:
                 import subprocess as _sp
-                _sp.run(prepare, shell=True, cwd=str(repo),
-                        capture_output=True, timeout=180)
+                proc = _sp.run(prepare, shell=True, cwd=str(repo),
+                               capture_output=True, timeout=180)
+                prepare_ok = proc.returncode == 0
             except Exception:  # noqa: BLE001 — best-effort
-                pass
+                prepare_ok = False
+        # If prepare failed (missing autotools macros, no compiler, etc.),
+        # don't saddle the build gate with a command that can't work — it
+        # would reject every resolution, even perfect ones. Fall back to
+        # ``true`` so the per-unit gcc -fsyntax-only gate (CcsSyntaxValidator)
+        # is the only compile check. This is honest: we can't whole-tree-build
+        # a tree whose build system we can't complete, but the per-unit syntax
+        # gate still catches structural defects.
+        _DETECTED_BUILD_CMD[case.id] = build_cmd if prepare_ok else "true"
 
 
 def _config_for(case: Case, *, has_crate: bool = False) -> Config:
@@ -352,12 +425,14 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     if case.language == "python":
         cfg.tests.pre_continue = f"python3 -m py_compile {case.path}"
     elif case.language == "c":
-        # The in-loop whole-tree gate. configure already ran in
-        # _materialize_conflict (so this is a single `make` command that works
-        # with the no-shell TestRunner). Empty = no build command for this
-        # dataset → the CcsSyntaxValidator (gcc -fsyntax-only) still gates
-        # per-unit; brace-balance is the only whole-file check.
-        cfg.tests.pre_continue = C_BUILD_COMMANDS.get(case.dataset, "") or "true"
+        # The in-loop whole-tree gate. The build command is matched to whatever
+        # prepare actually ran in _materialize_conflict (stored in
+        # _DETECTED_BUILD_CMD). This handles C repos that changed build systems
+        # across their history (cmake → autotools fallback). Falls back to the
+        # per-dataset default from C_BUILD_COMMANDS, then "true".
+        cfg.tests.pre_continue = (_DETECTED_BUILD_CMD.get(case.id)
+                                  or C_BUILD_COMMANDS.get(case.dataset, "")
+                                  or "true")
     else:
         cfg.tests.pre_continue = "true"
     cfg.tests.final = cfg.tests.pre_continue
