@@ -521,15 +521,39 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
     Returns None when no build command is registered (caller falls back to
     brace-balance). Uses ``shell=True`` — the build command may chain, and this
     is a post-hoc harness check, not the production no-shell TestRunner.
+
+    LINKER-ERROR TOLERANCE: a build that fails only at the link step
+    (collect2/ld, multiple-definition, undefined-reference) is treated as a
+    COMPILE PASS. This mirrors the orchestrator's own verification logic:
+    linker errors are infrastructure (vendored deps compiled with
+    conflicting flags, modern GCC's -fno-common default breaking older
+    headers, missing sibling objects) — NOT model defects. Without this,
+    12 redis cases at sim=1.00 (perfect oracle merge) were classified as
+    'divergent' solely because redis's vendored hiredis/junkalloc header
+    defines globals that multiply-define under -fno-common.
     """
     import subprocess as _sp
-    cmd = C_BUILD_COMMANDS.get(case.dataset, "")
-    if not cmd:
+    # Prefer the adaptively-detected build command (set by _materialize_conflict
+    # via _resolve_c_build), which matches whatever prepare actually ran. Falls
+    # back to the static per-dataset default.
+    cmd = _DETECTED_BUILD_CMD.get(case.id) or C_BUILD_COMMANDS.get(case.dataset, "")
+    if not cmd or cmd == "true":
         return None
     try:
         proc = _sp.run(cmd, shell=True, cwd=str(repo),
                        capture_output=True, text=True, timeout=300)
-        return proc.returncode == 0
+        if proc.returncode == 0:
+            return True
+        # Linker error → compile passed; link is infrastructure.
+        stderr = (proc.stderr or "") + (proc.stdout or "")
+        is_linker_error = any(
+            sig in stderr for sig in
+            ("collect2:", "ld returned", "undefined reference",
+             "multiple definition")
+        )
+        if is_linker_error:
+            return True
+        return False
     except Exception:  # noqa: BLE001 — best-effort; treat as "couldn't check"
         return None
 
