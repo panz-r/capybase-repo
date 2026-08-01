@@ -67,11 +67,12 @@ def _ctx(
 
 def test_no_budget_passes_everything_through():
     ctx = _ctx(few_shot=2, deps=2, anchor=True, siblings=True)
-    anchor, siblings, deps_b, shot, primary, hist, obls, trims = _fit_to_budget(
+    anchor, siblings, deps_b, shot, primary, hist, obls, trims, _sk = _fit_to_budget(
         budget=None,
         intro="i", contract="c", rules="r",
         sides_text="sides", structural_anchor="A", siblings_block="S",
         deps="D", few_shot="F", primary_text="P", history="H", obligations="O",
+        unit=_unit(),
     )
     assert (anchor, siblings, deps_b, shot, primary, hist, obls) == ("A", "S", "D", "F", "P", "H", "O")
     assert trims == []
@@ -80,11 +81,12 @@ def test_no_budget_passes_everything_through():
 def test_disabled_budget_is_noop():
     ctx = _ctx(few_shot=2, deps=2)
     # budget total=0 → disabled
-    anchor, siblings, deps_b, shot, primary, hist, obls, trims = _fit_to_budget(
+    anchor, siblings, deps_b, shot, primary, hist, obls, trims, _sk = _fit_to_budget(
         budget=TokenBudget(total=0),
         intro="i", contract="c", rules="r",
         sides_text="sides", structural_anchor="A", siblings_block="S",
         deps="D", few_shot="F", primary_text="P", history="H", obligations="O",
+        unit=_unit(),
     )
     assert (anchor, siblings, deps_b, shot, primary, hist, obls) == ("A", "S", "D", "F", "P", "H", "O")
     assert trims == []
@@ -206,7 +208,7 @@ def test_obligations_survive_when_history_dropped():
     # A tight budget that forces history to drop but leaves obligations.
     # Use _fit_to_budget directly for precise control. Make history large enough
     # (~500 chars ≈ 125 tokens) to exceed the small augmentation budget.
-    anchor, siblings, deps_b, shot, primary, hist, obls, trims = _fit_to_budget(
+    anchor, siblings, deps_b, shot, primary, hist, obls, trims, _sk = _fit_to_budget(
         budget=TokenBudget(total=200, reserved_for_completion=100),
         intro="i", contract="c", rules="r",
         sides_text="sides",
@@ -214,6 +216,7 @@ def test_obligations_survive_when_history_dropped():
         deps="", few_shot="", primary_text="",
         history="H" * 500,  # ~125 tokens — exceeds the ~97 available
         obligations="Future obligations:\n  - keep parse_config\n",
+        unit=_unit(),
     )
     # History was dropped (lowest priority).
     sections = [t["section"] for t in trims]
@@ -226,7 +229,7 @@ def test_obligations_dropped_last_after_structural():
     """Obligations are the LAST augmentation dropped — after anchor, siblings,
     deps, few-shot, primary_text, and history. A very tight budget drops all of
     those but keeps obligations until they too must go."""
-    anchor, siblings, deps_b, shot, primary, hist, obls, trims = _fit_to_budget(
+    anchor, siblings, deps_b, shot, primary, hist, obls, trims, _sk = _fit_to_budget(
         budget=TokenBudget(total=150, reserved_for_completion=100),
         intro="i", contract="c", rules="r",
         sides_text="sides",
@@ -234,6 +237,7 @@ def test_obligations_dropped_last_after_structural():
         deps="D" * 50, few_shot="F" * 50, primary_text="P" * 50,
         history="H" * 50,
         obligations="OBLIG: keep parse\n",
+        unit=_unit(),
     )
     sections = [t["section"] for t in trims]
     # History is dropped before obligations.

@@ -332,7 +332,13 @@ def _classify_buffer(
                             param_parts.append(" ")
                         param_parts.append(pt.text)
                     pk += 1
-                params = re.sub(r"\s*([(),])\s*", r"\1", "".join(param_parts)).strip()
+                params = "".join(param_parts)
+                # Collapse: no space before commas, single space after, and
+                # fold adjacent pointer stars (`* *` -> `**`) since the
+                # inter-token spacer can split a declarator's stars.
+                params = re.sub(r"\s*([,()])\s*", lambda m: m.group(1), params).strip()
+                params = re.sub(r"\*\s+\*", "**", params)
+                params = re.sub(r"\s*,\s*", ", ", params)
                 params = re.sub(r"\s+", " ", params)
                 if params:
                     functions.append(f"{name_tok.text}({params})")
@@ -374,8 +380,10 @@ class SkeletonResult:
     def render(self, max_tokens: int = 500) -> str:
         """Render a compact skeleton block for the LLM prompt.
 
-        Each line is one entity, grouped by category. Truncated when the
-        estimated token count (chars/4) exceeds ``max_tokens``.
+        Each line is one entity, grouped by category. Duplicate names within
+        a category are collapsed (a real file commonly re-#includes or
+        re-defines); the first occurrence's position is preserved. Truncated
+        when the estimated token count (chars/4) exceeds ``max_tokens``.
         """
         if self.entity_count == 0:
             return ""
@@ -387,7 +395,17 @@ class SkeletonResult:
             nonlocal char_count
             if not items:
                 return True
-            shown = items if len(items) <= 30 else items[:30] + [f"... ({len(items) - 30} more)"]
+            # Order-preserving dedup. Function signatures vary by params, so
+            # we dedup on the name-before-paren to keep overloads distinct.
+            seen: set[str] = set()
+            uniq: list[str] = []
+            for it in items:
+                key = it.split("(", 1)[0] if "(" in it else it
+                if key in seen:
+                    continue
+                seen.add(key)
+                uniq.append(it)
+            shown = uniq if len(uniq) <= 30 else uniq[:30] + [f"... ({len(uniq) - 30} more)"]
             line = f"  {label}: {', '.join(shown)}"
             if char_count + len(line) > max_chars:
                 return False

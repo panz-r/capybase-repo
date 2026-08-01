@@ -866,9 +866,10 @@ def _fit_to_budget(
     deps: str,
     few_shot: str,
     primary_text: str,
+    unit: ConflictUnit,
     history: str = "",
     obligations: str = "",
-) -> tuple[str, str, str, str, str, str, str, list[dict]]:
+) -> tuple[str, str, str, str, str, str, str, list[dict], str]:
     """Trim the prompt's AUGMENTATION sections to fit ``budget``, protecting the
     essential conflict sides + the JSON contract.
 
@@ -891,14 +892,42 @@ def _fit_to_budget(
     (few-shot, surrounding code). Small local models are sensitive to prompt
     noise, so the highest-value signal stays longest.
 
-    Returns ``(anchor, siblings, deps, few_shot, primary_text, history, obligations, trims)``.
-    When ``budget`` is None/disabled, all sections pass through unchanged.
+    Returns ``(anchor, siblings, deps, few_shot, primary_text, history,
+    obligations, trims, skeleton_block)``. The ``skeleton_block`` is the file
+    skeleton (global entity names) for oversized C/C++ files, or ``""`` for
+    small files / other languages / when extraction fails. It is protected
+    through the trim cascade — it is the highest-value augmentation when the
+    file is oversized because it gives the model global awareness the
+    windowed base cannot provide, and it is itself bounded to ~400 tokens.
+    When ``budget`` is None/disabled, all other sections pass through
+    unchanged.
     """
     trims: list[dict] = []
+    # Compute the file skeleton for oversized files (entity names the model
+    # can't see from the windowed base). Only computed when the base was
+    # localized (the file is large enough that the model needs global context).
+    # This is the "file skeleton block" from the reviewer + research feedback:
+    # gives the model global entity awareness (~300-500 tokens) without the
+    # whole file. Computed once per unit; cached in structural_metadata.
+    _skeleton_block = ""
+    _orig_text = unit.original_worktree_text or unit.base.text or ""
+    if _orig_text and len(_orig_text) > _SIDES_MAX_CHARS and unit.language in ("c", "cpp", "c++"):
+        cached_skeleton = unit.structural_metadata.get("_c_skeleton_rendered")
+        if cached_skeleton is not None:
+            _skeleton_block = cached_skeleton
+        else:
+            try:
+                from capybase.adapters.c_skeleton import extract_skeleton
+                skeleton = extract_skeleton(_orig_text)
+                _skeleton_block = skeleton.render(max_tokens=400)
+                unit.structural_metadata["_c_skeleton_rendered"] = _skeleton_block
+            except Exception:  # noqa: BLE001 — skeleton is advisory
+                _skeleton_block = ""
+
     # No budget / disabled → unbounded (current behavior).
     if budget is None or not budget.enabled:
         return (structural_anchor, siblings_block, deps, few_shot,
-                primary_text, history, obligations, trims)
+                primary_text, history, obligations, trims, _skeleton_block)
 
     # System message is a fixed ~12 tokens; account for it once.
     system_tokens = 12
@@ -907,7 +936,10 @@ def _fit_to_budget(
     available_for_augmentation = budget.available - overhead - essential
 
     # If the essential content alone blows the window, drop ALL augmentations
-    # and flag it. The sides still go (protect-the-conflict policy).
+    # and flag it. The sides still go (protect-the-conflict policy). The
+    # skeleton block (global entity names) is preserved even here — it is the
+    # single most valuable augmentation when the file is oversized, and it is
+    # itself bounded to ~400 tokens by render(max_tokens=400).
     if available_for_augmentation <= 0:
         if structural_anchor or siblings_block or deps or few_shot or primary_text:
             trims.append({
@@ -915,10 +947,10 @@ def _fit_to_budget(
                 "detail": (
                     f"essential content ({essential}t) + overhead ({overhead}t) "
                     f"already meets/exceeds window {budget.total}t; dropped all "
-                    f"augmentation sections (sides protected)"
+                    f"augmentation sections (sides + skeleton protected)"
                 ),
             })
-        return "", "", "", "", "", "", "", trims
+        return "", "", "", "", "", "", "", trims, _skeleton_block
 
     # Otherwise fit the augmentations in. We measure the running token total of
     # the augmentation sections and trim lowest-value-first until it fits.
@@ -972,7 +1004,7 @@ def _fit_to_budget(
         obls = ""
         trims.append({"section": "obligations", "detail": "dropped future obligations + branch intent"})
 
-    return anchor, siblings, dep_block, shot, primary, hist, obls, trims
+    return anchor, siblings, dep_block, shot, primary, hist, obls, trims, _skeleton_block
 
 
 def _resolve_prompt_parts(
@@ -1128,7 +1160,7 @@ def _resolve_prompt_parts(
     sides_text = (
         f"{struct_ctx}{side_intent}{semantic_change}{value_resolution}{_sides}"
     )
-    anchor_t, siblings_t, deps_t, few_shot_t, primary_t, history_t, obls_t, trims = _fit_to_budget(
+    anchor_t, siblings_t, deps_t, few_shot_t, primary_t, history_t, obls_t, trims, skeleton_block = _fit_to_budget(
         budget=budget,
         intro=intro,
         contract=contract,
@@ -1141,12 +1173,15 @@ def _resolve_prompt_parts(
         primary_text=context.primary_text,
         history=history,
         obligations=obligations,
+        unit=unit,
     )
     # The non-instruction sections (anchor, siblings, deps, obligations, history,
     # few-shot, three sides, context) form one contiguous block that variants keep
     # together. Obligations render early (high priority) so the model sees them.
+    # The skeleton block (global entity names for oversized files) is prepended
+    # so the model has global awareness before the local conflict.
     data_block = (
-        f"{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{struct_ctx}{side_intent}{semantic_change}{value_resolution}"
+        f"{skeleton_block}{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{struct_ctx}{side_intent}{semantic_change}{value_resolution}"
         f"{_sides}"
         f"Surrounding file context:\n{primary_t}\n\n"
     )
