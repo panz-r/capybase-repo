@@ -725,7 +725,16 @@ def main():
         # Maps dataset name → external-datasets clone dir. Enables cargo check.
         crate_source = None
         if case.merge_sha:
-            clone_name = case.dataset.replace("-history", "") if case.dataset else ""
+            # Map dataset name → external-datasets clone dir. The convention is
+            # dataset.replace("-history",""), but some repos use a dash the
+            # dataset name omits (jsonc-history → external-datasets/json-c/).
+            # The CLONE_OVERRIDES table covers those exceptions; everything else
+            # follows the standard convention (redis, sqlite, tokio, ...).
+            _CLONE_OVERRIDES = {"jsonc-history": "json-c"}
+            clone_name = _CLONE_OVERRIDES.get(
+                case.dataset,
+                case.dataset.replace("-history", "") if case.dataset else "",
+            )
             clone_path = Path(__file__).resolve().parent.parent / "external-datasets" / clone_name
             if clone_path.is_dir():
                 crate_source = clone_path
