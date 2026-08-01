@@ -3132,6 +3132,123 @@ class Orchestrator:
         validation = self.verification.verify(unit, cand)
         self.journal.emit(
             "structurally_resolved",
+            {"candidate_id": cand.candidate_id, "rule": result.rule,
+             "passed": validation.passed},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        if not validation.passed:
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="structural",
+                candidate=cand, validation=validation,
+                decision="skip", reason="failed validation",
+            )
+            return None
+        if self._strictness_blocks_pre_llm(unit, cand, validation, "structural"):
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="structural",
+                candidate=cand, validation=validation,
+                decision="skip", reason="strictness declined",
+            )
+            return None
+        outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+        outcome.accepted = cand
+        self.journal.emit(
+            "candidate_accepted",
+            {"candidate_id": cand.candidate_id, "via": "structural"},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        return outcome
+
+    def _try_source_candidate_portfolio(
+        self, unit: ConflictUnit,
+    ) -> UnitOutcome | None:
+        """Generate candidates from exact source lines and validate each.
+
+        Research (DeepMerge, MergeBERT) shows 87% of merge resolutions contain
+        only lines from the input sides. Generating candidates from source
+        material avoids the weak model's most common defect: dropping
+        delimiters during generation. When a source composition compiles,
+        it's a valid merge with zero LLM calls.
+
+        Candidates (each from exact source lines):
+        - current_only: take the upstream side verbatim
+        - replayed_only: take the replayed side verbatim
+        - current_then_replayed: concat both (insertion-union order)
+        - replayed_then_current: concat both (reversed order)
+        - shared_once_plus_distinct: shared lines once + each side's unique lines
+
+        Each is validated via the full per-unit pipeline. If exactly one passes,
+        accept it. If multiple pass, accept the first (the portfolio is ordered
+        by likely-correctness). If none pass, return None (fall through to LLM).
+        """
+        cur = unit.current.text or ""
+        rep = unit.replayed.text or ""
+        if not cur.strip() and not rep.strip():
+            return None
+
+        # Build the candidate portfolio. Each is (id, text, provenance_suffix).
+        cur_lines = [l for l in cur.split("\n") if l.strip()]
+        rep_lines = [l for l in rep.split("\n") if l.strip()]
+        shared = [l for l in cur_lines if l in rep_lines]
+        cur_only = [l for l in cur_lines if l not in set(rep_lines)]
+        rep_only = [l for l in rep_lines if l not in set(cur_lines)]
+
+        # Each candidate is validated. The first that passes is accepted.
+        # Provenance strings are literals (registered in provenance.py).
+        candidates_to_try: list[tuple[str, str, str]] = [
+            ("current_only", cur, "deterministic_source_current_only"),
+            ("replayed_only", rep, "deterministic_source_replayed_only"),
+            ("current_then_replayed", cur.rstrip() + "\n" + rep, "deterministic_source_cur_rep"),
+            ("replayed_then_current", rep.rstrip() + "\n" + cur, "deterministic_source_rep_cur"),
+        ]
+        if shared and (cur_only or rep_only):
+            composed = "\n".join(shared + cur_only + rep_only)
+            candidates_to_try.append(("shared_plus_distinct", composed, "deterministic_source_shared"))
+
+        # Build per-candidate provenance dict with literal values so the
+        # provenance static scanner sees them.
+        _PROV_MAP = {
+            "current_only": "deterministic_source_current_only",
+            "replayed_only": "deterministic_source_replayed_only",
+            "current_then_replayed": "deterministic_source_cur_rep",
+            "replayed_then_current": "deterministic_source_rep_cur",
+            "shared_plus_distinct": "deterministic_source_shared",
+        }
+        for cand_id, text, _unused in candidates_to_try:
+            cand = CandidateResolution(
+                candidate_id=f"{unit.unit_id}:{cand_id}",
+                unit_id=unit.unit_id,
+                model_name="source_portfolio",
+                prompt_version=f"source_portfolio.{cand_id}",
+                resolved_text=text,
+                explanation=f"source-derived candidate ({cand_id})",
+                provenance=_PROV_MAP.get(cand_id, "plain_llm"),
+            )
+            validation = self.verification.verify(unit, cand)
+            if validation.passed:
+                if self._strictness_blocks_pre_llm(unit, cand, validation, "source_portfolio"):
+                    continue  # strictness declined; try next candidate
+                self.journal.emit(
+                    "source_portfolio_accepted",
+                    {"candidate_id": cand.candidate_id, "variant": cand_id},
+                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                )
+                outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+                outcome.accepted = cand
+                return outcome
+        return None  # no source candidate passed; fall through to LLM
+        cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:structural",
+            unit_id=unit.unit_id,
+            model_name="structural",
+            prompt_version=f"structural.{result.rule}",
+            resolved_text=result.text,
+            explanation=f"deterministic resolution via {result.rule} rule",
+            provenance="deterministic_structural",
+        )
+        validation = self.verification.verify(unit, cand)
+        self.journal.emit(
+            "structurally_resolved",
             {
                 "candidate_id": cand.candidate_id,
                 "rule": result.rule,
@@ -7261,6 +7378,17 @@ class Orchestrator:
             early = self._try_block_capture(unit)
             if early is not None:
                 return early  # accepted via block-capture; LLM loop skipped
+
+        # Source-derived candidate portfolio: BEFORE the LLM, try a small set
+        # of candidates assembled from exact source lines (current-only,
+        # replayed-only, both concatenated, etc.). Research shows 87% of
+        # merge resolutions contain only lines from the input sides. When a
+        # source composition compiles, it's a valid merge — no generation
+        # artifacts (dropped braces, missing semicolons). Zero LLM calls.
+        if failures is None and getattr(self.config.future, "enable_source_portfolio", True):
+            early = self._try_source_candidate_portfolio(unit)
+            if early is not None:
+                return early
 
         # LLM size guard: if the essential conflict content
         # alone exceeds the model's context window, the LLM call is doomed (the

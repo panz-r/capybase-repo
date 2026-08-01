@@ -69,6 +69,9 @@ def _config(tmp_path: Path, *, tests_required: bool = True, pre_continue: str | 
     # compile would false-fail on them. Disable here — the validators have their
     # own dedicated tests with complete code.
     cfg.validation.enable_per_unit_syntax_check = False
+    # The source portfolio pre-empts the LLM on simple conflicts; tests that
+    # exercise the LLM path need it off (same rationale as per-unit syntax).
+    cfg.future.enable_source_portfolio = False
     # Write artifacts under the repo's .rebase-agent (cwd of the repo).
     return cfg
 
@@ -916,7 +919,7 @@ def test_run_escalates_when_whole_file_invalid(multi_unit_conflicted_repo):
     # same dropped-content pattern and reroute to a retry before Phase B.
     cfg.validation.reject_if_drops_a_side = False
     cfg.validation.reject_if_drops_referenced_symbol = False
-    cfg.future.enable_structural_resolver = False  # exercise the LLM/Phase-B path
+    cfg.future.enable_structural_resolver = False
     engine = ResolutionEngine(cfg.model, client=FakeClient([bad, bad]))
     orch = Orchestrator(
         cfg, repo=str(repo), resolution_engine=engine,
@@ -952,7 +955,7 @@ def test_whole_file_repair_recovers_and_accepts(multi_unit_conflicted_repo):
         _make_resolved_payload(flags_good),
     ])
     cfg = _config(repo)
-    cfg.future.enable_structural_resolver = False  # exercise the LLM/Phase-B path
+    cfg.future.enable_structural_resolver = False
     engine = ResolutionEngine(cfg.model, client=client)
     orch = Orchestrator(
         cfg, repo=str(repo), resolution_engine=engine,
@@ -1785,7 +1788,7 @@ def test_simple_routing_uses_one_sample_even_when_samples_is_three(conflicted_re
     repo = conflicted_repo["repo"]
     cfg = _config(repo)
     cfg.routing.enabled = True  # classify difficulty
-    cfg.future.enable_structural_resolver = False  # reach the LLM path
+    cfg.future.enable_structural_resolver = False
     cfg.future.enable_combination_search = False  # isolate the simple LLM path
     cfg.future.enable_block_capture = False
     cfg.model.samples = 3  # the value that must NOT leak into the simple path

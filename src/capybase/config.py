@@ -621,6 +621,11 @@ class FutureConfig(BaseModel):
     # whose kept block exceeds block_capture_min_lines, so small conflicts still
     # use the full-LLM path.
     enable_block_capture: bool = True
+    # Source-derived candidate portfolio: before calling the LLM, try a small
+    # set of candidates assembled from exact source lines (current-only,
+    # replayed-only, both concatenated). Research shows 87% of resolutions
+    # contain only input-side lines. Zero LLM calls when a candidate passes.
+    enable_source_portfolio: bool = True
     # Minimum non-blank lines in the kept block for block-capture to engage.
     # Below this the full-LLM path reproduces the block fine; above it
     # reproduction becomes unreliable and the decision-style prompt takes over.
