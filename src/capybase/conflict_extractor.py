@@ -849,6 +849,26 @@ def _refine_with_diff3(
             diff_algorithm,
         )
     if not blocks or len(blocks) != len(units):
+        # Multi-diff portfolio: try alternative diff algorithms before giving
+        # up. Different algorithms (patience, minimal, myers) produce different
+        # block alignments; patience in particular avoids poor alignments caused
+        # by unimportant matching lines (braces from different functions). This
+        # is the fix for cases where histogram fails to align blocks, leaving
+        # _prompt_sides with the whole-file base (the root cause of OVERSIZED).
+        for alt_algo in ("patience", "minimal", "myers"):
+            if alt_algo == diff_algorithm:
+                continue
+            try:
+                alt_blocks = merge_file_diff3(
+                    base_text, current_text, replayed_text,
+                    diff_algorithm=alt_algo,
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            if alt_blocks and len(alt_blocks) == len(units):
+                blocks = alt_blocks
+                break
+    if not blocks or len(blocks) != len(units):
         # diff3 block count mismatch — can't safely associate blocks to units.
         # Do NOT pollute diff3_refined with a windowed approximation — that
         # field has a strong semantic meaning (true diff3 refinement) and
