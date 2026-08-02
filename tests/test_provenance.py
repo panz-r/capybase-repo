@@ -50,6 +50,7 @@ def test_provenance_values_match_spec():
         "deterministic_source_cur_rep",
         "deterministic_source_rep_cur",
         "deterministic_source_shared",
+        "deterministic_source_union",
         "exact_history_reuse",
         "combination_search",
         "test_gated_side",

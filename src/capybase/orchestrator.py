@@ -3342,6 +3342,36 @@ class Orchestrator:
             composed = "\n".join(shared + cur_only + rep_only)
             candidates_to_try.append(("shared_plus_distinct", composed, "deterministic_source_shared"))
 
+        # git merge-file --union: git's own union merge of the three sides.
+        # Handles disjoint append conflicts that our concatenation heuristics
+        # might miss. Duplicates it produces are cleaned up by the
+        # directive_union rule and the deduplicate_imports repair step.
+        try:
+            import tempfile as _tf_union
+            import subprocess as _sp_union
+            with _tf_union.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as _bf:
+                _bf.write(base); _base_path = _bf.name
+            with _tf_union.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as _cf:
+                _cf.write(cur); _cur_path = _cf.name
+            with _tf_union.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as _rf:
+                _rf.write(rep); _rep_path = _rf.name
+            try:
+                _proc = _sp_union.run(
+                    ["git", "merge-file", "-p", "--union",
+                     _cur_path, _base_path, _rep_path],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if _proc.returncode in (0, 1) and _proc.stdout:
+                    candidates_to_try.append(
+                        ("git_union", _proc.stdout, "deterministic_source_union")
+                    )
+            finally:
+                from pathlib import Path as _Pf
+                for _p in (_base_path, _cur_path, _rep_path):
+                    _Pf(_p).unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001 — union candidate is advisory
+            pass
+
         # Build per-candidate provenance dict with literal values so the
         # provenance static scanner sees them.
         _PROV_MAP = {
@@ -3350,6 +3380,7 @@ class Orchestrator:
             "current_then_replayed": "deterministic_source_cur_rep",
             "replayed_then_current": "deterministic_source_rep_cur",
             "shared_plus_distinct": "deterministic_source_shared",
+            "git_union": "deterministic_source_union",
         }
         for cand_id, text, _unused in candidates_to_try:
             cand = CandidateResolution(
