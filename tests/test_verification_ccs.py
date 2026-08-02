@@ -16,6 +16,8 @@ from capybase.verification import (
     VerificationEngine,
     _compile_ccs,
     _is_ccs_resolution_error,
+    _parse_cc_error_location,
+    _is_cc_werror_warning,
     VerificationContext,
     CcsSyntaxValidator,
 )
@@ -555,3 +557,154 @@ def test_verify_file_c_build_command_empty_falls_back_to_gcc(tmp_path):
     )
     assert res.features["syntax_checked"] is True
     assert res.passed  # valid C compiles under standalone gcc
+
+
+# ---------------------------------------------------------------------------
+# Error localization: _parse_cc_error_location + _is_cc_werror_warning
+# ---------------------------------------------------------------------------
+
+def test_parse_cc_error_location_sibling_file():
+    """A gcc error in a sibling file (tool/lemon.c) returns the sibling stem."""
+    stem, line = _parse_cc_error_location(
+        "tool/lemon.c:753:6: error: conflicting types for 'FindRulePrecedences'"
+    )
+    assert stem == "lemon"
+    assert line == 753
+
+
+def test_parse_cc_error_location_conflict_file():
+    """A gcc error in the conflict file (src/delete.c) returns its stem."""
+    stem, line = _parse_cc_error_location(
+        "src/delete.c:42:3: error: expected ';' before '}' token"
+    )
+    assert stem == "delete"
+    assert line == 42
+
+
+def test_parse_cc_error_location_unparseable():
+    """Non-gcc error lines (e.g. cmake errors) return (None, None)."""
+    stem, line = _parse_cc_error_location(
+        "Error: build is not a directory"
+    )
+    assert stem is None
+    assert line is None
+
+
+def test_parse_cc_error_location_header_file():
+    """Header file errors parse correctly."""
+    stem, line = _parse_cc_error_location(
+        "json_object.h:15:5: error: unknown type name 'foo'"
+    )
+    assert stem == "json_object"
+    assert line == 15
+
+
+def test_is_cc_werror_warning_promoted():
+    """-Werror=... tags are detected as warning promotions."""
+    assert _is_cc_werror_warning(
+        "error: 'calloc' sizes specified with sizeof... [-Werror=calloc-transposed-args]"
+    )
+    assert _is_cc_werror_warning(
+        "error: right-hand operand of comma... [-Werror=unused-value]"
+    )
+    assert _is_cc_werror_warning(
+        "error: passing argument 3... [-Werror=incompatible-pointer-types]"
+    )
+
+
+def test_is_cc_werror_warning_real_error():
+    """Real errors (no -Werror tag) are NOT classified as warnings."""
+    assert not _is_cc_werror_warning(
+        "error: expected ';' before '}' token"
+    )
+    assert not _is_cc_werror_warning(
+        "src/delete.c:42:3: error: conflicting types for 'foo'"
+    )
+
+
+def test_is_cc_werror_warning_plain_warning():
+    """Plain -W warnings (no -Werror=) are NOT classified as error promotions."""
+    assert not _is_cc_werror_warning(
+        "warning: unused variable 'x' [-Wunused-variable]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Build-gate error localization: sibling-file errors pass, conflict-file
+# errors fail. Uses shell commands that emit gcc-style error output.
+# ---------------------------------------------------------------------------
+
+def test_build_gate_sibling_file_error_passes(tmp_path):
+    """A build that fails ONLY on a sibling file (tool/lemon.c) should PASS —
+    the merge didn't touch lemon.c, so the error is pre-existing infrastructure."""
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    # Emit a gcc-style sibling error to stderr, exit 1.
+    cfg = ValidationConfig()
+    cfg.cc_build_command = (
+        'echo "tool/lemon.c:753:6: error: conflicting types for '
+        "'FindRulePrecedences'\" >&2; false"
+    )
+    eng = VerificationEngine.default(cfg)
+    res = eng.verify_file(
+        "src/delete.c", "c", _C_FILE_CONFLICT, [(span, _C_FILE_CORRECT)],
+        repo_root=str(tmp_path),
+    )
+    # The conflict file is delete.c; lemon.c is a sibling → compile-pass.
+    assert res.features["syntax_checked"] is True
+    assert res.features["syntax_passed"] is True
+    assert res.passed
+
+
+def test_build_gate_conflict_file_error_fails(tmp_path):
+    """A build that fails on the CONFLICT file (src/delete.c) should FAIL —
+    genuine error in the merged code."""
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    cfg = ValidationConfig()
+    cfg.cc_build_command = (
+        'echo "src/delete.c:42:3: error: expected \';\' before \'}\' token" >&2; false'
+    )
+    eng = VerificationEngine.default(cfg)
+    res = eng.verify_file(
+        "src/delete.c", "c", _C_FILE_CONFLICT, [(span, _C_FILE_CORRECT)],
+        repo_root=str(tmp_path),
+    )
+    assert res.features["syntax_checked"] is True
+    assert res.features["syntax_passed"] is False
+    assert not res.passed
+
+
+def test_build_gate_werror_warning_passes(tmp_path):
+    """A build that fails ONLY on -Werror warnings should PASS — the code
+    compiled successfully but triggered a strictness flag."""
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    cfg = ValidationConfig()
+    cfg.cc_build_command = (
+        'echo "arraylist.c:36:43: error: \'calloc\' sizes specified... '
+        '[-Werror=calloc-transposed-args]" >&2; false'
+    )
+    eng = VerificationEngine.default(cfg)
+    res = eng.verify_file(
+        "json_object.c", "c", _C_FILE_CONFLICT, [(span, _C_FILE_CORRECT)],
+        repo_root=str(tmp_path),
+    )
+    assert res.features["syntax_checked"] is True
+    assert res.features["syntax_passed"] is True
+    assert res.passed
+
+
+def test_build_gate_mixed_sibling_and_conflict_fails(tmp_path):
+    """When BOTH sibling and conflict-file errors exist, the conflict-file
+    error takes precedence → FAIL (conservative: never pass a real defect)."""
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    cfg = ValidationConfig()
+    cfg.cc_build_command = (
+        'echo "tool/lemon.c:753:6: error: conflicting types" >&2; '
+        'echo "src/delete.c:42:3: error: expected \';\'" >&2; false'
+    )
+    eng = VerificationEngine.default(cfg)
+    res = eng.verify_file(
+        "src/delete.c", "c", _C_FILE_CONFLICT, [(span, _C_FILE_CORRECT)],
+        repo_root=str(tmp_path),
+    )
+    assert res.features["syntax_passed"] is False
+    assert not res.passed

@@ -3349,6 +3349,21 @@ def _compile_ccs(
 
 _CC_ERROR_LINE_RE = re.compile(r":(\d+):\d+:\s*(?:error|warning):")
 
+# Captures the file path BEFORE the ``:line:col:`` position. gcc/clang emit
+# ``file:line:col: error: msg`` where ``file`` is a relative or absolute path
+# (e.g. ``src/delete.c``, ``tool/lemon.c``, ``/tmp/tmpXXX.c``). This regex
+# captures the file component so the build gate can determine whether an error
+# is in the conflict file or a sibling file the merge didn't touch.
+_CC_ERROR_FILE_RE = re.compile(r"([^\s:][^\s:]*?)\.([chp]+)(?:\+\+)?:\d+:\d+:\s*(?:error|warning):", re.IGNORECASE)
+
+# Detects gcc/clang -Werror warning promotions: ``error: ... [-Werror=category]``.
+# These are warnings promoted to errors by -Werror, NOT real compile failures.
+# The trailing ``[-Werror=...]`` tag is the ONLY syntactic signal that
+# distinguishes them from genuine errors (gcc emits ``error:`` for both).
+# Match ONLY ``-Werror=`` (the promotion tag); plain ``-Wfoo`` warnings don't
+# carry ``error:`` so they never reach this check.
+_CC_WERROR_TAG_RE = re.compile(r"\[-Werror[=+][\w.-]+\]")
+
 
 def _parse_cc_error_line(msg: str) -> int | None:
     """Extract the 1-based line number from a gcc/clang error message.
@@ -3367,6 +3382,43 @@ def _parse_cc_error_line(msg: str) -> int | None:
     if m2:
         return int(m2.group(1))
     return None
+
+
+def _parse_cc_error_location(msg: str) -> tuple[str | None, int | None]:
+    """Extract ``(file_stem, line)`` from a gcc/clang diagnostic.
+
+    gcc format: ``file:line:col: error: msg``. Returns the file's stem (the
+    basename without extension, e.g. ``"lemon"`` from ``tool/lemon.c:753:...``)
+    so callers can compare it against the conflict file's stem. Returns
+    ``(None, None)`` when the message has no parseable file:line:col: prefix.
+
+    Used by the build gate's error localization: a gcc error in ``tool/lemon.c``
+    while resolving ``src/delete.c`` is a sibling-file issue, not a merge defect.
+    """
+    if not msg:
+        return (None, None)
+    m = _CC_ERROR_FILE_RE.search(msg)
+    if m:
+        file_path = m.group(1) + "." + m.group(2)
+        stem = Path(file_path).stem
+        line_m = re.search(r":(\d+):\d+:", msg[m.start():])
+        line = int(line_m.group(1)) if line_m else None
+        return (stem, line)
+    return (None, None)
+
+
+def _is_cc_werror_warning(msg: str) -> bool:
+    """True when a gcc error line is a -Werror warning promotion.
+
+    gcc emits ``error: ...`` for -Werror promotions, indistinguishable from
+    real errors except for the trailing ``[-Werror=category]`` tag. Examples:
+    ``error: 'calloc' sizes... [-Werror=calloc-transposed-args]``
+    ``error: right-hand operand of comma... [-Werror=unused-value]``
+
+    These are warnings the project's build flags promoted to errors — the code
+    compiled successfully but triggered a strictness flag. Not a merge defect.
+    """
+    return bool(_CC_WERROR_TAG_RE.search(msg))
 
 
 # The Rust editions rustc accepts for ``--edition``. 2024 stabilized in Rust
@@ -3910,10 +3962,67 @@ class VerificationEngine:
                                 syntax_ok = True  # compile passed; link is infra
                                 msg = "build: linker error (not a model defect; compile succeeded)"
                             else:
-                                msg = next(
-                                    (ln for ln in err_lines if "error" in ln.lower()),
-                                    err_lines[0] if err_lines else "build failed",
-                                )
+                                # Error localization (research §9): classify each
+                                # gcc error line by WHERE it occurs. A whole-tree
+                                # build (make/cmake) compiles many translation
+                                # units; a pre-existing error in a SIBLING file
+                                # (tool/lemon.c, deps/hiredis.c) is NOT caused by
+                                # the merge and must not reject a correct resolution.
+                                # Similarly, -Werror warning promotions (strict
+                                # flags turning warnings into errors) are not real
+                                # compile failures. Only a genuine error IN the
+                                # conflict file is a model defect.
+                                conflict_stem = Path(path).stem
+                                real_errors = []      # in conflict file, real
+                                sibling_errors = []   # in other files, infra
+                                werror_lines = []     # -Werror promotions, infra
+                                for ln in err_lines:
+                                    if "error" not in ln.lower():
+                                        continue
+                                    # -Werror warning promotion?
+                                    if _is_cc_werror_warning(ln):
+                                        werror_lines.append(ln)
+                                        continue
+                                    file_stem, _ = _parse_cc_error_location(ln)
+                                    if file_stem is not None and file_stem != conflict_stem:
+                                        sibling_errors.append(ln)
+                                    else:
+                                        # file_stem == conflict_stem (real defect),
+                                        # OR file_stem is None (unparseable —
+                                        # conservative: treat as real error so
+                                        # we never silently pass a defect).
+                                        real_errors.append(ln)
+                                if real_errors:
+                                    # Genuine error in the conflict file → hard fail.
+                                    msg = real_errors[0]
+                                elif sibling_errors or werror_lines:
+                                    # All errors are in sibling files or -Werror
+                                    # promotions → the merge compiled fine; the
+                                    # build failure is pre-existing infrastructure.
+                                    syntax_ok = True
+                                    parts = []
+                                    if sibling_errors:
+                                        sib = sibling_errors[0]
+                                        sib_stem, _ = _parse_cc_error_location(sib)
+                                        parts.append(
+                                            f"sibling-file error in {sib_stem or '?'}"
+                                            f" (not the resolved file {conflict_stem})"
+                                        )
+                                    if werror_lines:
+                                        parts.append(
+                                            f"{len(werror_lines)} -Werror warning(s)"
+                                        )
+                                    msg = (
+                                        "build: infrastructure failure, not a merge "
+                                        f"defect ({'; '.join(parts)})"
+                                    )
+                                else:
+                                    # No parseable error lines at all — fall back
+                                    # to the first error-containing line.
+                                    msg = next(
+                                        (ln for ln in err_lines if "error" in ln.lower()),
+                                        err_lines[0] if err_lines else "build failed",
+                                    )
                     except _sp_build.TimeoutExpired:
                         syntax_ok = False
                         msg = f"build timed out (300s): {build_cmd}"
