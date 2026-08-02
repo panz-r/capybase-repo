@@ -2558,6 +2558,27 @@ class CcsSyntaxValidator:
                 message="not C/C++; syntax check skipped",
                 features={"ccs_syntax_checked": False},
             )
+        # Header files (.h/.hpp/.hh/.hxx) are never compiled standalone in
+        # real projects — they're always #included from a .c file that provides
+        # the type definitions, macros, and prototypes the header references.
+        # Standalone gcc -fsyntax-only on a header reports false-positive
+        # "unknown type name" errors for project-internal types (u8, BtCursor,
+        # sqlite3_vfs) defined in sibling headers (sqliteInt.h etc.) that aren't
+        # visible when compiling in isolation. The model can't fix these (the
+        # type definition isn't in the fragment), so the CEGIS loop exhausts its
+        # retry budget and escalates — rejecting correct merges (sim >= 0.98).
+        # Skip the per-unit CCS gate for headers; Phase B's whole-file build
+        # (make/cmake) compiles the .c files that include the header in full
+        # project context — the only honest check for a header file.
+        _path = ctx.unit.path or ""
+        if _path.endswith((".h", ".hpp", ".hh", ".hxx", ".H")):
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="header file; per-unit standalone compile skipped "
+                        "(headers are never compiled in isolation — Phase B "
+                        "whole-file build is the authoritative check)",
+                features={"ccs_syntax_checked": False, "syntax_passed": True},
+            )
         if ctx.unit.marker_span is None:
             return VerificationCheckResult(
                 name=self.name, passed=True,

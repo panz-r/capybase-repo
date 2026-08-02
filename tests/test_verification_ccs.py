@@ -802,3 +802,61 @@ def test_verify_file_gcc_fallback_werror_passes(tmp_path, monkeypatch):
         assert res.passed
     finally:
         ver._compile_ccs = original
+
+
+# ---------------------------------------------------------------------------
+# Header files skip the per-unit CCS gate
+# ---------------------------------------------------------------------------
+
+@skip_no_gcc
+def test_ccs_syntax_validator_skips_header_files():
+    """Header files (.h/.hpp) skip the per-unit CCS gate entirely. Headers
+    are never compiled standalone — they're always #included from a .c file
+    that provides type definitions. Standalone gcc reports false-positive
+    'unknown type name' errors for project-internal types."""
+    from capybase.verification import CcsSyntaxValidator, VerificationContext
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="src/vdbe.h", language="c",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="typedef struct Foo Foo;"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="typedef struct Foo Foo;"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="typedef struct Foo Foo;"),
+        original_worktree_text="typedef struct Foo Foo;",
+        marker_span=(0, 1),
+    )
+    cand = CandidateResolution(
+        candidate_id="c1", unit_id="u", model_name="m",
+        prompt_version="v", resolved_text="typedef struct Foo Foo;",
+    )
+    cfg = ValidationConfig()
+    ctx = VerificationContext(unit=unit, candidate=cand, config=cfg)
+    validator = CcsSyntaxValidator()
+    result = validator.verify(ctx)
+    assert result.passed
+    assert result.features.get("ccs_syntax_checked") is False
+    assert "header file" in result.message.lower()
+
+
+@skip_no_gcc
+def test_ccs_syntax_validator_does_not_skip_c_files():
+    """C source files (.c) DO get the per-unit CCS gate — only headers skip."""
+    from capybase.verification import CcsSyntaxValidator, VerificationContext
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="src/foo.c", language="c",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="int x = 1;\n"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="int x = 1;\n"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="int x = 1;\n"),
+        original_worktree_text="int x = 1;\n",
+        marker_span=(0, 1),
+    )
+    cand = CandidateResolution(
+        candidate_id="c1", unit_id="u", model_name="m",
+        prompt_version="v", resolved_text="int x = 1;",
+    )
+    cfg = ValidationConfig()
+    ctx = VerificationContext(unit=unit, candidate=cand, config=cfg)
+    validator = CcsSyntaxValidator()
+    result = validator.verify(ctx)
+    # .c files ARE checked (ccs_syntax_checked=True).
+    assert result.features.get("ccs_syntax_checked") is True
