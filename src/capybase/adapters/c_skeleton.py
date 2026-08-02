@@ -130,6 +130,12 @@ def _extract_skeleton_from_tokens(tokens: list[_Token]) -> "SkeletonResult":
     # inside are scanned at depth 0 (where they belong). The design document
     # (§8.10) calls this out: "Do not let it confuse function name extraction."
     extern_c_depth = 0  # >0 means we're inside an extern "C" { ... } scope
+    # Pending typedef: when we see `typedef struct Foo {`, the typedef alias
+    # comes AFTER the body (} Foo;). The scanner splits this across the {
+    # boundary: the pre-{ buffer is classified as a struct, and the post-}
+    # buffer (} Foo ;) would be classified as a global variable. This flag
+    # remembers that the next post-} declaration at depth 0 is a typedef alias.
+    pending_typedef = False
     # Declaration buffer: list of (token, all_tokens_index) at depth 0.
     buf: list[tuple[_Token, int]] = []
 
@@ -177,6 +183,12 @@ def _extract_skeleton_from_tokens(tokens: list[_Token]) -> "SkeletonResult":
                     i += 1
                     continue
             if brace_depth == 0 and paren_depth == 0 and bracket_depth == 0:
+                # Check if this is a typedef struct/union/enum { — the alias
+                # comes after the body (} Alias;). Remember so the post-body
+                # buffer classifies the alias as a typedef, not a global.
+                buf_idents = [t for t, _ in buf if t.kind == "ident"]
+                if buf_idents and buf_idents[0].text == "typedef":
+                    pending_typedef = True
                 _classify_buffer(buf, tokens, "{",
                                  functions, structs, typedefs, globals_)
                 buf = []
@@ -191,6 +203,10 @@ def _extract_skeleton_from_tokens(tokens: list[_Token]) -> "SkeletonResult":
                 i += 1
                 continue
             brace_depth = max(0, brace_depth - 1)
+            # When closing a struct/union/enum body at depth 0, the next
+            # declaration buffer (} Alias;) is the typedef alias if we had
+            # a pending typedef. The } itself isn't added to the buffer;
+            # the alias ident and ; will be accumulated next.
             i += 1
             continue
 
@@ -229,9 +245,22 @@ def _extract_skeleton_from_tokens(tokens: list[_Token]) -> "SkeletonResult":
         if tok.text == ";":
             if brace_depth == 0 and paren_depth == 0 and bracket_depth == 0:
                 buf.append((tok, i))
-                _classify_buffer(buf, tokens, ";",
-                                 functions, structs, typedefs, globals_)
-                buf = []
+                # If we have a pending typedef (from typedef struct Foo { ... }),
+                # the post-body buffer (} Alias;) should classify the alias as
+                # a typedef, not a global variable. Extract the alias directly.
+                if pending_typedef:
+                    buf_idents = [t for t, _ in buf if t.kind == "ident"
+                                  and t.text not in _C_TYPE_KEYWORDS]
+                    if buf_idents:
+                        alias = buf_idents[-1].text
+                        if alias not in typedefs:
+                            typedefs.append(alias)
+                    pending_typedef = False
+                    buf = []
+                else:
+                    _classify_buffer(buf, tokens, ";",
+                                     functions, structs, typedefs, globals_)
+                    buf = []
             i += 1
             continue
 
@@ -324,12 +353,16 @@ def _classify_buffer(
         name = idents[-1].text if idents[-1].text not in _C_TYPE_KEYWORDS else None
         if name:
             typedefs.append(name)
-        # Also check for struct/union/enum tag inside.
+        # Also record the struct/union/enum tag if present (typedef struct
+        # Foo { ... } Foo; — both the tag 'Foo' and the alias 'Foo' are
+        # useful for the model's context). Don't suppress on tag == name:
+        # the pending-typedef handler captures the alias separately, and the
+        # struct tag is valuable even when it matches the typedef alias.
         for j, t in enumerate(idents):
             if t.text in ("struct", "union", "enum"):
                 if j + 1 < len(idents) and idents[j + 1].text not in _C_TYPE_KEYWORDS:
                     tag = idents[j + 1].text
-                    if tag not in structs and tag != name:
+                    if tag not in structs:
                         structs.append(tag)
                 break
         return
