@@ -122,6 +122,12 @@ def test_is_ccs_resolution_error_classifies_semantic():
         "x.c:4:8: error: invalid use of incomplete type 'struct S'",
         "x.cpp:12:4: error: 'x' is not a member of 'Foo'",
         "x.cpp:1:1: error: 'Bar' does not name a type",
+        # gcc wording for undefined typedef (project-internal type defined in a
+        # sibling header standalone gcc can't see). The gcc analog of clang's
+        # "does not name a type". Surfaced in the C live-eval (sqlite vdbe.h,
+        # btree.h, vdbeInt.h referencing u8, BtCursor, sqlite3_vfs).
+        "src/vdbe.h:42:3: error: unknown type name 'u8'",
+        "src/vdbeInt.h:64:3: error: unknown type name 'BtCursor'",
         "x.cpp:7:3: error: 'class Foo' has no member named 'baz'",
         "x.cpp:1: undefined reference to `symbol'",
         # Missing project-internal headers — standalone gcc has no -I flags, so
@@ -708,3 +714,28 @@ def test_build_gate_mixed_sibling_and_conflict_fails(tmp_path):
     )
     assert res.features["syntax_passed"] is False
     assert not res.passed
+
+
+# ---------------------------------------------------------------------------
+# _compile_ccs include_paths: header files can resolve sibling includes
+# ---------------------------------------------------------------------------
+
+@skip_no_gcc
+def test_compile_ccs_include_paths_resolves_sibling_header(tmp_path):
+    """When include_paths are provided, gcc can resolve #include of a sibling
+    header in that directory. Without the path, it fails with 'No such file'."""
+    # Create a sibling header that defines a type.
+    sibling = tmp_path / "mytypes.h"
+    sibling.write_text("typedef int my_type;\n")
+    # Source that includes the sibling header.
+    src = '#include "mytypes.h"\nmy_type x = 0;\n'
+    # Without include_paths: gcc can't find mytypes.h → fatal error.
+    ok_no_ip, msg_no_ip = _compile_ccs(src, cc_path=GCC, std="c11", suffix=".c")
+    assert not ok_no_ip
+    assert "No such file" in msg_no_ip or "fatal error" in msg_no_ip
+    # With include_paths pointing at the dir containing mytypes.h: resolves.
+    ok_ip, msg_ip = _compile_ccs(
+        src, cc_path=GCC, std="c11", suffix=".c",
+        include_paths=[str(tmp_path)],
+    )
+    assert ok_ip, f"expected compile success with include_paths, got: {msg_ip}"

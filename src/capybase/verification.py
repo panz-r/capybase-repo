@@ -1995,7 +1995,14 @@ _CCS_SEMANTIC_PATTERNS = (
     "cannot convert",                 # type conversion (needs full decls)
     "incomplete type",                # forward-declared, definition elsewhere
     "is not a member of",             # struct member resolution
-    "does not name a type",           # typedef / class-name resolution
+    "does not name a type",           # typedef / class-name resolution (clang)
+    "unknown type name",              # gcc: "unknown type name 'u8'" — undefined
+                                     # typedef (project-internal type defined in a
+                                     # sibling header standalone gcc can't see). The
+                                     # gcc wording for what clang calls "does not
+                                     # name a type". Surfaced in the C live-eval
+                                     # (sqlite vdbe.h, btree.h, vdbeInt.h referencing
+                                     # u8, sqlite3_vfs, BtCursor from sqliteInt.h).
     "no member named",                # struct field resolution
     "undefined reference",            # linker-level (defensive; -fsyntax-only skips link)
     "suggest an alternative",         # clang "did you mean?" (resolution, not parse)
@@ -3289,6 +3296,7 @@ def _compile_rust(
 def _compile_ccs(
     source: str, *, cc_path: str = "gcc", std: str = "c11", suffix: str = ".c",
     timeout: float = 30.0,
+    include_paths: list[str] | None = None,
 ) -> tuple[bool, str]:
     """Syntax/parse-check C/C++ source via ``gcc``/``clang`` ``-fsyntax-only``.
 
@@ -3297,6 +3305,14 @@ def _compile_ccs(
     object file (``-fsyntax-only`` runs the front end only, no codegen, no link).
     ``-std=`` selects the language standard. Returns ``(True, "cc ok")`` on
     success or ``(False, first_error_line)`` on failure.
+
+    ``include_paths`` (when provided) adds ``-I`` flags so gcc can resolve
+    project-internal headers (``sqliteInt.h``, ``server.h``) that define the
+    types a header file under resolution references. Without these, standalone
+    gcc reports "unknown type name 'u8'" for any project-internal typedef —
+    a false positive that escalates correct header merges (research §5:
+    anchored local context). Only adds search paths; never removes the ability
+    to detect real errors.
 
     Unlike ``rustc`` (whose error lines start with ``error``), gcc/clang prefix
     diagnostics with ``file:line:col:``, so the first line CONTAINING
@@ -3319,8 +3335,17 @@ def _compile_ccs(
         tf.write(source)
         tmp_path = tf.name
     try:
+        cmd = [cc_path, "-fsyntax-only", f"-std={std}"]
+        # Add include search paths so header files can resolve sibling includes
+        # (e.g. #include "sqliteInt.h" defining u8, BtCursor). Each path becomes
+        # a -I flag. Paths that don't exist are silently skipped by gcc, so no
+        # validation needed here.
+        if include_paths:
+            for ip in include_paths:
+                cmd.append(f"-I{ip}")
+        cmd.append(tmp_path)
         proc = subprocess.run(
-            [cc_path, "-fsyntax-only", f"-std={std}", tmp_path],
+            cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -4057,8 +4082,25 @@ class VerificationEngine:
                     syntax_checked = True
                     std = self.config.cpp_std if is_cpp else self.config.c_std
                     suffix = ".cpp" if is_cpp else ".c"
+                    # Header files (#include "sibling.h") need -I paths to
+                    # resolve project-internal type definitions (u8, BtCursor,
+                    # sqlite3_vfs defined in sqliteInt.h etc.). Pass the repo
+                    # root and the conflict file's directory as include paths so
+                    # standalone gcc can resolve sibling includes it otherwise
+                    # can't (research §5: anchored local context). For .c/.cpp
+                    # files this is harmless (gcc adds search paths, never
+                    # removes error-detection capability).
+                    _include_paths = []
+                    if repo_root:
+                        _include_paths.append(str(repo_root))
+                        file_dir = (Path(repo_root) / path).parent
+                        if str(file_dir) != str(repo_root):
+                            _include_paths.append(str(file_dir))
                     try:
-                        ok, msg = _compile_ccs(whole, cc_path=cc, std=std, suffix=suffix)
+                        ok, msg = _compile_ccs(
+                            whole, cc_path=cc, std=std, suffix=suffix,
+                            include_paths=_include_paths or None,
+                        )
                     except FileNotFoundError:
                         ok = True  # tool vanished between resolve & run → skip
                         msg = "C/C++ compiler not available; syntax not checked"
