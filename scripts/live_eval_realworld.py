@@ -544,14 +544,43 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
                        capture_output=True, text=True, timeout=300)
         if proc.returncode == 0:
             return True
-        # Linker error → compile passed; link is infrastructure.
         stderr = (proc.stderr or "") + (proc.stdout or "")
+        err_lines = stderr.splitlines()
+        # Linker error → compile passed; link is infrastructure.
         is_linker_error = any(
             sig in stderr for sig in
             ("collect2:", "ld returned", "undefined reference",
              "multiple definition")
         )
         if is_linker_error:
+            return True
+        # Sibling-file error → the error is in a file the merge didn't touch.
+        # Mirrors the verification engine's error-localization logic: parse the
+        # gcc file:line:col: prefix and compare against the conflict file stem.
+        # A whole-tree build (make) compiles many TUs; a pre-existing error in
+        # tool/lemon.c or deps/hiredis.c is NOT a merge defect.
+        from pathlib import Path as _P
+        import re as _re
+        conflict_stem = _P(case.path).stem
+        _file_re = _re.compile(r"([^\s:][^\s:]*?)\.([chp]+)(?:\+\+)?:\d+:\d+:\s*(?:error|warning):", _re.IGNORECASE)
+        has_conflict_file_error = False
+        for ln in err_lines:
+            if "error" not in ln.lower():
+                continue
+            # Skip make/cmake driver lines.
+            if (ln.startswith("make[") or ln.startswith("make:")
+                    or "CMake Error" in ln or ln.startswith("ninja:")
+                    or "Error 1" in ln or "Error 2" in ln):
+                continue
+            m = _file_re.search(ln)
+            if m:
+                stem = _P(m.group(1) + "." + m.group(2)).stem
+                if stem == conflict_stem:
+                    has_conflict_file_error = True
+                    break
+        if not has_conflict_file_error:
+            # All errors are in sibling files, -Werror, or build-driver lines →
+            # the merge compiled fine; build failure is pre-existing infrastructure.
             return True
         return False
     except Exception:  # noqa: BLE001 — best-effort; treat as "couldn't check"
