@@ -5896,10 +5896,30 @@ class Orchestrator:
                     # Surfaced in the C live-eval (redis pubsub.c): the model
                     # dropped one closing brace; the deterministic brace repair
                     # fixes it, but the budget broke before it could run.
-                    if file_validation is not None and accepted:
+                    #
+                    # This also runs on Exit A (file_validation is None): when the
+                    # LLM re-resolve escalated, the deterministic repairs were
+                    # previously skipped entirely. But splice-junction defects
+                    # (a dropped brace, a duplicated boundary line) are exactly
+                    # what the deterministic beam is for — the LLM re-resolve
+                    # failed not because the defect is hard, but because
+                    # attribution pointed at the wrong unit. The deterministic
+                    # beam operates on the spliced buffer directly, so it doesn't
+                    # depend on correct fault attribution. 6 of 7 repair-failed
+                    # cases in the v3 C corpus were at sim >= 0.95 (model output
+                    # correct) — the deterministic pass may close them.
+                    if accepted:
+                        # When file_validation is None (Exit A), there are no
+                        # fresh hard_failures to feed; use the last-known
+                        # failures from the repair loop's seed, or empty.
+                        _repair_failures = (
+                            file_validation.hard_failures
+                            if file_validation is not None
+                            else []
+                        )
                         det = self._whole_file_repair(
                             path, accepted, original,
-                            file_validation.hard_failures,
+                            _repair_failures,
                             deterministic_only=True,
                         )
                         if det is not None:
