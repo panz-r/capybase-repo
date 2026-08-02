@@ -455,9 +455,20 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # slow first cargo check (dependency fetch) from eating the model's retry
     # budget. The v3 run lost 5 cases to the old 240s budget (all sim >= 0.92).
     cfg.policy.max_wall_time_per_unit_seconds = 360
-    # Grant more whole-file repair cycles for complex cases where the model
-    # produces near-correct output that fails the cross-hunk validation.
-    cfg.policy.max_whole_file_repair_retries = 2
+    # File-level wall deadline: an outer cap on total resolution + repair time
+    # per file. The whole-file repair loop creates nested _resolve_unit calls,
+    # each with a fresh 360s per-unit budget — without this cap, 2 repair
+    # iterations × ~5 model calls × ~100s = ~1000s, blowing the 900s case
+    # timeout. 600s gives each file a generous shot while leaving 300s headroom
+    # for materialization + build preparation under the case cap.
+    cfg.policy.max_wall_time_per_file_seconds = 600
+    # Whole-file repair retries: 1 (down from 2). For a ~100s/generation model,
+    # 2 repair iterations × nested _resolve_unit is too generous — the first
+    # repair attempt is the most likely to converge; subsequent retries on the
+    # same conflict rarely produce a better result (the convergence detector
+    # already catches identical failures). Combined with the file-level
+    # deadline, this ensures cases complete within the timeout.
+    cfg.policy.max_whole_file_repair_retries = 1
     # Suppress Rust crate-path errors (E0432/E0433) in the diagnostic delta —
     # these are undecidable standalone (need the full crate's dependency tree)
     # and cause false-positive rejections of near-correct Rust merges (5 cases
