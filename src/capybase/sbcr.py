@@ -168,6 +168,40 @@ def fitness(candidate: list[str], ours: list[str], theirs: list[str]) -> float:
 # ---------------------------------------------------------------------------
 
 
+def _group_into_blocks(lines: list[str]) -> list[list[str]]:
+    """Split lines into logical blocks for block-aware interleaving.
+
+    A block boundary occurs at:
+    - Blank lines
+    - Preprocessor directives at column 0 (``#include``, ``#define``, etc.)
+    - Indentation drops of ≥2 spaces relative to the previous non-blank line
+
+    Lines within a block stay together during interleaving — the combination
+    search never breaks a block across an insertion boundary. This reduces
+    the search space and prevents syntactically nonsensical splices (e.g.,
+    splitting an if/for/while block).
+    """
+    if not lines:
+        return []
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    prev_indent = -1
+    for line in lines:
+        is_blank = not line.strip()
+        is_pp = line.lstrip().startswith("#") and (not line or line[0] == "#")
+        indent = len(line) - len(line.lstrip())
+        # Start a new block at boundaries.
+        if current and (is_blank or is_pp or (indent < prev_indent - 1 and indent >= 0)):
+            blocks.append(current)
+            current = []
+        current.append(line)
+        if not is_blank:
+            prev_indent = indent
+    if current:
+        blocks.append(current)
+    return blocks
+
+
 def _interleavings(ours: list[str], theirs: list[str]) -> Iterator[list[str]]:
     """Yield every order-preserving interleaving of ``ours`` and ``theirs``.
 
@@ -416,9 +450,9 @@ def resolve_by_combination_search(
             text=None, fitness=0.0,
             skip_reason="modification conflict (non-empty base)",
         )
-    ours = (unit.current.text or "").splitlines()
-    theirs = (unit.replayed.text or "").splitlines()
-    if not ours and not theirs:
+    ours_raw = (unit.current.text or "").splitlines()
+    theirs_raw = (unit.replayed.text or "").splitlines()
+    if not ours_raw and not theirs_raw:
         return CombinationResolution(
             text=None, fitness=0.0, skip_reason="both sides empty",
         )
@@ -426,10 +460,21 @@ def resolve_by_combination_search(
     # is the other side verbatim — that's a one-sided resolution the structural
     # resolver already handles (and the LLM would too). SBCR adds no value, so
     # decline rather than echo a side back.
-    if not ours or not theirs:
+    if not ours_raw or not theirs_raw:
         return CombinationResolution(
             text=None, fitness=0.0, skip_reason="one side empty",
         )
+
+    # Block-aware grouping: split each side into logical blocks (delimited by
+    # blank lines, indentation drops, or preprocessor directives). The
+    # interleaving then operates on BLOCKS, not individual lines — all lines
+    # within a block stay together and in order. This reduces the search space
+    # and prevents syntactically nonsensical splices (e.g., splitting an if
+    # block across an insertion boundary).
+    ours_blocks = _group_into_blocks(ours_raw)
+    theirs_blocks = _group_into_blocks(theirs_raw)
+    ours = [line for block in ours_blocks for line in block]
+    theirs = [line for block in theirs_blocks for line in block]
 
     space = _interleaving_count(len(ours), len(theirs))
     if space == 0:
