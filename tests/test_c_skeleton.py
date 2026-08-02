@@ -96,6 +96,59 @@ int g(void) { return 1; }
     assert "g" in names
 
 
+def test_extern_c_block_does_not_swallow_declarations():
+    """C headers wrap their API in `extern "C" { ... }` for C++ interop.
+    The `{` opens a brace that would normally swallow ALL function declarations
+    inside (the scanner enters brace_depth=1 and skips everything). The
+    extractor must detect this pattern and skip the brace so declarations
+    inside are scanned at depth 0."""
+    src = '''\
+#ifndef HEADER_H
+#define HEADER_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+int foo_init(const char *name);
+void foo_cleanup(void);
+extern struct Foo *foo_create(int type);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+'''
+    sk = extract_skeleton(src)
+    # All three function declarations inside extern "C" must be captured.
+    names = {f.split("(", 1)[0] for f in sk.functions}
+    assert "foo_init" in names, f"foo_init missing; got: {names}"
+    assert "foo_cleanup" in names, f"foo_cleanup missing; got: {names}"
+    assert "foo_create" in names, f"foo_create missing; got: {names}"
+
+
+def test_extern_c_does_not_break_normal_function_definitions():
+    """A function definition (with body) after an extern "C" block should
+    still be classified correctly — the extern-C brace skip must not
+    desynchronize the depth tracker for subsequent real braces."""
+    src = '''\
+extern "C" {
+
+int api_func(int x);
+
+}
+
+static int helper(int y) {
+    return y + 1;
+}
+'''
+    sk = extract_skeleton(src)
+    names = {f.split("(", 1)[0] for f in sk.functions}
+    assert "api_func" in names
+    assert "helper" in names
+
+
 def test_line_continuation_joined():
     src = """\
 #define LONG_MACRO(x) \\

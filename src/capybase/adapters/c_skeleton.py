@@ -123,7 +123,13 @@ def _extract_skeleton_from_tokens(tokens: list[_Token]) -> "SkeletonResult":
     brace_depth = 0
     paren_depth = 0
     bracket_depth = 0
-
+    # extern "C" { ... } tracking: C headers wrap their API in this block for
+    # C++ interop. The { opens a brace that swallows ALL function declarations
+    # inside — the scanner enters brace_depth=1 and skips everything until the
+    # matching }. We detect the pattern and skip both braces so the declarations
+    # inside are scanned at depth 0 (where they belong). The design document
+    # (§8.10) calls this out: "Do not let it confuse function name extraction."
+    extern_c_depth = 0  # >0 means we're inside an extern "C" { ... } scope
     # Declaration buffer: list of (token, all_tokens_index) at depth 0.
     buf: list[tuple[_Token, int]] = []
 
@@ -145,6 +151,31 @@ def _extract_skeleton_from_tokens(tokens: list[_Token]) -> "SkeletonResult":
 
         # Punctuation token.
         if tok.text == "{":
+            # Detect extern "C" { (or extern "C++" {): C headers wrap their
+            # API in this for C++ interop. If the buffer ends with the extern
+            # "C" pattern, skip this brace so declarations inside are scanned
+            # at depth 0. The matching } is skipped via extern_c_depth below.
+            # Note: the tokenizer masks string contents to '"', so "C" becomes
+            # just a '"' punct token — the pattern is: extern (ident) + " (punct).
+            if (
+                brace_depth == 0
+                and extern_c_depth == 0
+                and paren_depth == 0
+                and bracket_depth == 0
+                and len(buf) >= 2
+            ):
+                # Last two tokens in buffer: 'extern' (ident) + '"' (punct, masked string).
+                last_tok = buf[-1][0]
+                prev_tok = buf[-2][0]
+                if (
+                    last_tok.kind == "punct" and last_tok.text == '"'
+                    and prev_tok.kind == "ident" and prev_tok.text == "extern"
+                ):
+                    # This is extern "C" { — skip the brace, don't enter depth.
+                    extern_c_depth = 1
+                    buf = []  # discard the extern "C" tokens
+                    i += 1
+                    continue
             if brace_depth == 0 and paren_depth == 0 and bracket_depth == 0:
                 _classify_buffer(buf, tokens, "{",
                                  functions, structs, typedefs, globals_)
@@ -154,6 +185,11 @@ def _extract_skeleton_from_tokens(tokens: list[_Token]) -> "SkeletonResult":
             continue
 
         if tok.text == "}":
+            # If we're in an extern "C" scope and this closes it, skip the brace.
+            if extern_c_depth > 0 and brace_depth == 0:
+                extern_c_depth = 0
+                i += 1
+                continue
             brace_depth = max(0, brace_depth - 1)
             i += 1
             continue
