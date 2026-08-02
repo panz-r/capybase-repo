@@ -835,6 +835,11 @@ def main():
                    if not (r.escalated or (r.marker_free and r.compiles and r.matches_oracle >= 0.80)))
     t_start = time.time()
     skipped = 0
+    # Temp dirs for timed-out cases are deferred: the daemon worker thread may
+    # still be accessing them when the main thread moves on. Destroying them
+    # immediately causes GitError/FileNotFoundError crashes (the race that
+    # produced the infra_crash bucket in v3). Cleaned up at the end of the run.
+    deferred_cleanup: list[str] = []
     for i, case in enumerate(cases, 1):
         if case.id in done_ids:
             skipped += 1
@@ -879,17 +884,24 @@ def main():
         th = threading.Thread(target=_worker, daemon=True)
         th.start()
         th.join(timeout=args.case_timeout or None)
-        # D3: clean up the temp dir from the main thread regardless of whether
-        # the worker finished or was abandoned.
-        shutil.rmtree(case_td, ignore_errors=True)
+        # D3: clean up the temp dir from the main thread. BUT only when the
+        # worker has actually finished — if the thread is still alive (timeout),
+        # destroying its temp dir causes a race: the daemon thread tries to
+        # access .rebase-agent/sessions/ or run git, and crashes with
+        # GitError/FileNotFoundError because the directory is gone. Defer
+        # cleanup to the end of the run for timed-out cases.
         if th.is_alive():
             # The worker is still in an LLM/CEGIS loop — abandon it (daemon) and
-            # record an escalate. The next case starts fresh.
+            # record an escalate. The next case starts fresh. DON'T destroy the
+            # temp dir yet — the daemon thread may still be writing to it.
+            deferred_cleanup.append(case_td)
             print(f"\n      [TIMEOUT after {args.case_timeout}s — moving on]", end="")
             r = CaseResult(id=case.id, language=case.language, dataset=case.dataset,
                            escalated=True,
                            reason=f"case timeout after {args.case_timeout}s (endless CEGIS retries)")
         else:
+            # Worker finished — safe to clean up the temp dir now.
+            shutil.rmtree(case_td, ignore_errors=True)
             r = result_holder[0] if result_holder else CaseResult(
                 id=case.id, language=case.language, dataset=case.dataset,
                 escalated=True, reason="worker produced no result")
@@ -940,6 +952,12 @@ def main():
                 "escalated": r.escalated, "reason": r.reason[:200],
             })
             manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    # Clean up deferred temp dirs from timed-out cases. By now all daemon
+    # threads have either finished or been killed on process exit, so it's
+    # safe to destroy their temp dirs.
+    for td in deferred_cleanup:
+        shutil.rmtree(td, ignore_errors=True)
 
     elapsed = time.time() - t_start
     print("\n" + "=" * 64)
