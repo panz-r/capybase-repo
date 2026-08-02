@@ -252,6 +252,14 @@ class PolicyConfig(BaseModel):
     # 0 = disabled (retry-count budgets alone govern; the legacy behavior).
     # Sits ABOVE the per-retry budgets: it's the outermost deadline.
     max_wall_time_per_unit_seconds: float = 0.0
+    # Outer cap on total resolution+repair time per FILE (across all units and
+    # all whole-file repair iterations). When set, threads a monotonic deadline
+    # through _whole_file_repair → _resolve_unit so nested repair calls respect
+    # the cumulative elapsed time, not just their own fresh per-unit budget.
+    # Without this, the whole-file repair loop can create nested _resolve_unit
+    # calls each with a fresh max_wall_time_per_unit_seconds budget, causing the
+    # real wall clock to explode past any case-level timeout. 0 = disabled.
+    max_wall_time_per_file_seconds: float = 0.0
     allow_skip: bool = False
     allow_delete_conflicted_file: bool = False
     stage_only_validated_paths: bool = True

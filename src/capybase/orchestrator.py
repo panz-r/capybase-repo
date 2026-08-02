@@ -5773,6 +5773,18 @@ class Orchestrator:
                 # cycles for multi-hunk conflicts where the deterministic brace
                 # repair + enriched context need a few shots to converge.
                 wf_budget = self.config.policy.max_whole_file_repair_retries or self.config.policy.max_retries_per_unit
+                # File-level wall deadline: an outer cap on total resolution +
+                # repair time per file. When set, threads a monotonic deadline
+                # through _whole_file_repair → _resolve_unit so nested repair
+                # calls respect cumulative elapsed time. Prevents the budget
+                # explosion where each repair iteration gets a fresh per-unit
+                # budget (2 iterations × 360s = 720s+ of model time alone).
+                import time as _ftime
+                _file_wall_budget = self.config.policy.max_wall_time_per_file_seconds
+                _file_wall_deadline = (
+                    _ftime.monotonic() + _file_wall_budget
+                    if _file_wall_budget > 0 else None
+                )
                 file_validation = None  # type: ignore[assignment]
                 # Causal attribution: track the failure signature across whole-
                 # file repair iterations so each repair mechanism's EFFECT can
@@ -5878,7 +5890,8 @@ class Orchestrator:
                     )
                     accepted_opt: list[tuple[ConflictUnit, CandidateResolution]] | None = (
                         self._whole_file_repair(
-                            path, accepted, original, file_validation.hard_failures
+                            path, accepted, original, file_validation.hard_failures,
+                            wall_deadline=_file_wall_deadline,
                         )
                     )
                     if accepted_opt is None:
@@ -5921,6 +5934,7 @@ class Orchestrator:
                             path, accepted, original,
                             _repair_failures,
                             deterministic_only=True,
+                            wall_deadline=_file_wall_deadline,
                         )
                         if det is not None:
                             accepted = det
@@ -6817,6 +6831,7 @@ class Orchestrator:
         failures: list,
         *,
         deterministic_only: bool = False,
+        wall_deadline: float | None = None,
     ) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
         """Re-resolve the unit most likely at fault for a whole-file failure.
 
@@ -7059,6 +7074,7 @@ class Orchestrator:
         ) else None
         outcome = self._resolve_unit(
             unit, seed_failures=enriched_failures, seed_candidate=seed_cand,
+            wall_deadline=wall_deadline,
         )
         _persist_unit_hashes(self, outcome)  # D1: per-step convergence
         self.journal.emit(
@@ -7249,6 +7265,7 @@ class Orchestrator:
     def _resolve_unit(
         self, unit: ConflictUnit, *, seed_failures: list | None = None,
         seed_candidate: "CandidateResolution | None" = None,
+        wall_deadline: float | None = None,
     ) -> UnitOutcome:
         outcome = UnitOutcome(unit=unit)
         # D1: inherit per-step convergence hashes so _whole_file_repair's
@@ -7444,6 +7461,33 @@ class Orchestrator:
             # The "at least one attempt" guard uses EITHER counter: critic-driven
             # retries increment critic_retry_count, not retry_count, so checking
             # only retry_count would let an all-critic retry loop run forever.
+            # File-level wall deadline (outermost cap): when set by the Phase 2
+            # loop via _whole_file_repair, bounds the TOTAL time across all units
+            # and all repair iterations for this file. Prevents the nested-
+            # _resolve_unit budget explosion where each repair retry gets a fresh
+            # per-unit budget. Unlike the per-unit budget, this includes ALL wall
+            # clock (no verify-time exclusion) — it's a real-time deadline.
+            if (
+                wall_deadline is not None
+                and _time.monotonic() >= wall_deadline
+                and (retry_count > 0 or critic_retry_count > 0)
+            ):
+                outcome.escalated = True
+                outcome.retry_count = retry_count
+                outcome.reason = (
+                    f"file-level wall deadline reached "
+                    f"({_time.monotonic() - unit_start:.0f}s in this unit) "
+                    f"after {retry_count} attempt(s)"
+                )
+                self.journal.emit(
+                    "candidate_rejected",
+                    {"candidate_id": cand.candidate_id,
+                     "action": "escalate", "via": "file_wall_deadline",
+                     "wall_seconds": round(_time.monotonic() - unit_start, 1),
+                     "retry_count": retry_count},
+                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                )
+                return outcome
             if (
                 wall_budget > 0.0
                 and (_time.monotonic() - unit_start - _verify_time_accumulated) >= wall_budget

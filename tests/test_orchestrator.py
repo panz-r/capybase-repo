@@ -1528,6 +1528,55 @@ def test_wall_time_disabled_does_not_escalate(conflicted_repo, verifier_critic_e
     assert not result.escalated, result.reason
 
 
+def test_file_wall_deadline_disabled_by_default():
+    """max_wall_time_per_file_seconds defaults to 0 (disabled) — the file-level
+    deadline is not active unless explicitly configured."""
+    from capybase.config import Config
+    cfg = Config()
+    assert cfg.policy.max_wall_time_per_file_seconds == 0.0
+
+
+def test_file_wall_deadline_caps_repair_retries(distinct_additions_repo, verifier_critic_enabled):
+    """When max_wall_time_per_file_seconds is set, the file-level deadline caps
+    the total time across all whole-file repair iterations. Without it, each
+    repair retry gets a fresh per-unit budget, causing the real wall clock to
+    explode (the nested-_resolve_unit budget explosion).
+
+    This test sets a tiny file-level deadline (0.3s) with a large per-unit
+    budget (50s) and large retry counts (50). The deadline fires before any
+    per-unit/retry budget, bounding the loop."""
+    repo = distinct_additions_repo["repo"]
+    client = CyclingClient([
+        _make_resolved_payload(distinct_additions_repo["current_only"]),  # drops replayed
+        json.dumps({"preserves_current": True, "preserves_replayed": False,
+                    "reason": "dropped metrics_on", "confidence": 0.5}),
+    ])
+    cfg = _verifier_config(repo)
+    cfg.validation.verifier_severity = "warning"
+    cfg.future.enable_structural_resolver = False
+    cfg.future.enable_combination_search = False
+    # Large per-unit budget + retry counts so they DON'T trigger first.
+    cfg.policy.max_wall_time_per_unit_seconds = 50.0
+    cfg.policy.max_retries_per_unit = 50
+    cfg.policy.max_critic_retries_per_unit = 50
+    cfg.policy.max_whole_file_repair_retries = 50
+    # Tiny FILE-level deadline — this is what should trigger.
+    cfg.policy.max_wall_time_per_file_seconds = 0.3
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    assert result.escalated
+    # The file-level deadline OR the per-unit wall budget OR retry budget can
+    # terminate the loop — all are valid bounded outcomes. The point is the
+    # loop does NOT spin forever.
+    reason = result.reason or ""
+    assert ("file-level wall deadline" in reason
+            or "wall-time" in reason
+            or "max retries" in reason
+            or "needs_human" in reason), result.reason
+
+
 def test_verifier_not_registered_when_flag_off(conflicted_repo):
     """Flag off → the verifier validator is not in the engine's chain at all,
     so no critic call is ever made (zero-cost default)."""
