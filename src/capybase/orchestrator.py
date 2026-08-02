@@ -1145,6 +1145,61 @@ def _try_deterministic_cc_repair(
     return [(wf_unit, wf_cand)]
 
 
+def _find_lcs_insertion_point(
+    candidate_lines: list[str],
+    missing_line: str,
+    base_lines: list[str],
+    error_line: int | None,
+) -> int | None:
+    """Find the best position to re-insert a dropped common line.
+
+    Uses 2-line context matching: find where the missing line appears in the
+    base, take its ±2 surrounding lines as context, and find the position in
+    the candidate where that context best matches. Falls back to the error
+    line, then to the first position where the preceding line matches.
+    """
+    # Find the missing line's position in the base.
+    base_positions = [i for i, l in enumerate(base_lines) if l == missing_line]
+    if not base_positions:
+        # Not in base — use the error line as fallback.
+        return (error_line - 1) if error_line else None
+
+    base_pos = base_positions[0]
+    # Extract 2 lines of context from the base around the missing line.
+    ctx_before = base_lines[max(0, base_pos - 2):base_pos]
+    ctx_after = base_lines[base_pos + 1:base_pos + 3]
+
+    # Score each position in the candidate by how well the surrounding
+    # context matches the base context. Higher score = better match.
+    best_pos = None
+    best_score = -1
+    for i in range(len(candidate_lines) + 1):
+        score = 0
+        # Check lines before position i.
+        for j, ctx_line in enumerate(reversed(ctx_before)):
+            idx = i - 1 - j
+            if 0 <= idx < len(candidate_lines) and candidate_lines[idx] == ctx_line:
+                score += 1
+            else:
+                break
+        # Check lines after position i.
+        for j, ctx_line in enumerate(ctx_after):
+            idx = i + j
+            if 0 <= idx < len(candidate_lines) and candidate_lines[idx] == ctx_line:
+                score += 1
+            else:
+                break
+        if score > best_score:
+            best_score = score
+            best_pos = i
+
+    # Only accept if we found at least 1 matching context line.
+    if best_score > 0:
+        return best_pos
+    # Fall back to the error line.
+    return (error_line - 1) if error_line else None
+
+
 def _try_side_consistency_repair(
     failures: list,
     original: str,
@@ -1223,18 +1278,25 @@ def _try_side_consistency_repair(
     repaired = None
 
     # 1. Common-line restore: lines both sides have but the candidate dropped.
+    # Enhanced with LCS-based context matching: for each missing common line,
+    # find the optimal re-insertion point by matching 2 lines of surrounding
+    # context from the base, rather than blindly inserting at the error line.
     missing_common = [l for l in common_lines if l.strip() and l not in spliced_set]
-    if missing_common and error_line:
-        target_idx = error_line - 1  # 0-based
-        # Try inserting each missing common line just before the error line.
-        # Only try ONE line at a time (conservative — multi-line insert is risky).
-        line = missing_common[0]
-        if 0 <= target_idx < len(spliced_lines):
-            trial = list(spliced_lines)
-            trial.insert(target_idx, line)
-            candidate_text = "\n".join(trial)
-            if _braces_balanced(candidate_text, _lang):
-                repaired = candidate_text
+    if missing_common:
+        for line in missing_common[:3]:  # try up to 3 missing lines
+            # Find the best insertion point using 2-line context matching.
+            # Look for the line in the base to get its surrounding context.
+            base_text_lines = (unit.base.text or "").split("\n")
+            best_pos = _find_lcs_insertion_point(
+                spliced_lines, line, base_text_lines, error_line
+            )
+            if best_pos is not None and 0 <= best_pos <= len(spliced_lines):
+                trial = list(spliced_lines)
+                trial.insert(best_pos, line)
+                candidate_text = "\n".join(trial)
+                if _braces_balanced(candidate_text, _lang):
+                    repaired = candidate_text
+                    break
 
     # 2. Novel-line delete: lines in the candidate not in ANY side, near the error.
     if repaired is None and error_line:
