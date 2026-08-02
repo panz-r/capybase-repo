@@ -846,6 +846,143 @@ def _try_deterministic_brace_repair(
     return [(wf_unit, wf_cand)]
 
 
+# Regex to parse gcc's -fdiagnostics-parseable-fixits output format:
+#   fix-it:"<file>":{<start_line>:<start_col>-<end_line>:<end_col>}:"<text>"
+# gcc uses 1-based line and column numbers. Zero-width ranges ({L:C-L:C})
+# are insertions; non-zero ranges are replacements; empty text is a deletion.
+import re as _fixit_re_mod
+_FIXIT_RE = _fixit_re_mod.compile(
+    r'fix-it:"[^"]+":\{(\d+):(\d+)-(\d+):(\d+)\}:"(.*)"'
+)
+
+
+def _try_gcc_fixit_repair(
+    failures: list,
+    original: str,
+    accepted: list[tuple[ConflictUnit, CandidateResolution]],
+    fault_idx: int,
+) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+    """Apply gcc's own structured fix-it hints to the whole-file buffer.
+
+    When gcc compiles with ``-fdiagnostics-parseable-fixits``, it emits
+    ``fix-it:`` lines containing exact insert/replace/delete ranges. This
+    subsumes the hand-coded regex patterns in ``_try_deterministic_cc_repair``
+    — gcc covers more error types (missing tokens, wrong punctuation, type
+    mismatches that affect parse, etc.) with surgical precision.
+
+    Runs BEFORE the regex-based cc repair as a higher-fidelity first attempt.
+    Safety: the full validation pipeline (both-sides-represented, intent
+    coverage, Phase B re-verify) still runs on the repaired buffer.
+    """
+    if fault_idx < 0 or fault_idx >= len(accepted):
+        return None
+    unit, _old_cand = accepted[fault_idx]
+    lang = unit.language or ""
+    if lang not in ("c", "cpp", "c++"):
+        return None
+
+    # Only run when there's a compile failure with a parse error. Check the
+    # failure messages for a gcc error line — if there's no error, there's
+    # nothing to fix.
+    has_cc_error = any(
+        "error:" in (getattr(f, "message", "") or "").lower()
+        for f in failures
+    )
+    if not has_cc_error:
+        return None
+
+    # Resolve the gcc binary path (same resolver as CcsSyntaxValidator).
+    from capybase.adapters.lsp import _resolve as _resolve_cc
+    is_cpp = lang in ("cpp", "c++")
+    cc = _resolve_cc("g++" if is_cpp else "gcc")
+    if cc is None:
+        return None  # no compiler → can't get fix-its
+
+    spliced = _resolved_buffer(original, accepted)
+    if not spliced:
+        return None
+
+    std = "c++17" if is_cpp else "c11"
+    suffix = ".cpp" if is_cpp else ".c"
+    import tempfile
+    import subprocess as _sp_fixit
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=suffix, delete=False, encoding="utf-8"
+    ) as tf:
+        tf.write(spliced)
+        tmp_path = tf.name
+    try:
+        proc = _sp_fixit.run(
+            [cc, "-fsyntax-only", f"-std={std}",
+             "-fdiagnostics-parseable-fixits", tmp_path],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:  # noqa: BLE001 — fix-it is advisory
+        from pathlib import Path as _P
+        _P(tmp_path).unlink(missing_ok=True)
+        return None
+
+    stderr = proc.stderr or ""
+    from pathlib import Path as _P
+    _P(tmp_path).unlink(missing_ok=True)
+
+    if proc.returncode == 0:
+        return None  # already compiles — no fix needed
+
+    # Parse fix-it lines from stderr.
+    fixits = []
+    for m in _FIXIT_RE.finditer(stderr):
+        sl, sc, el, ec, text = (
+            int(m.group(1)), int(m.group(2)),
+            int(m.group(3)), int(m.group(4)),
+            m.group(5),
+        )
+        fixits.append((sl, sc, el, ec, text))
+
+    if not fixits:
+        return None  # gcc didn't suggest any fix-its
+
+    # Apply fix-its in REVERSE order (bottom-up) so line numbers don't shift.
+    lines = spliced.split("\n")
+    for sl, sc, el, ec, text in sorted(fixits, key=lambda f: (-f[0], -f[1])):
+        if sl < 1 or sl > len(lines):
+            continue
+        line_idx = sl - 1
+        line = lines[line_idx]
+        # Column is 1-based; convert to 0-based slice indices.
+        col_start = max(0, sc - 1)
+        # If the fix-it spans multiple lines, only apply single-line fixes
+        # (multi-line fix-its are rare and complex to apply safely).
+        if sl != el:
+            continue
+        col_end = max(0, ec - 1)
+        # Apply: replace [col_start:col_end] with text, or insert at col_start.
+        new_line = line[:col_start] + text + line[col_end:]
+        lines[line_idx] = new_line
+
+    repaired = "\n".join(lines)
+    if repaired == spliced:
+        return None  # no change — fix-its were no-ops
+
+    # Brace-balance safety check (same as _try_deterministic_cc_repair).
+    if not _braces_balanced(repaired, lang):
+        return None
+
+    wf_unit = unit.model_copy(update={
+        "marker_span": None, "unit_kind": "whole_file",
+    })
+    wf_cand = CandidateResolution(
+        candidate_id=(_old_cand.candidate_id if _old_cand else "cc") + ":gccfixit",
+        unit_id=unit.unit_id,
+        model_name="gcc-fixit",
+        prompt_version="gcc_fixit.v1",
+        resolved_text=repaired,
+        provenance="deterministic_gcc_fixit",
+        self_reported_confidence=0.85,
+    )
+    return [(wf_unit, wf_cand)]
+
+
 def _try_deterministic_cc_repair(
     failures: list,
     original: str,
@@ -6978,6 +7115,29 @@ class Orchestrator:
                         return result
             except Exception:  # noqa: BLE001
                 pass
+        # gcc fix-it hints: apply the compiler's own structured repair
+        # suggestions (-fdiagnostics-parseable-fixits). Subsumes the regex-
+        # based cc repair below — gcc covers more error types with surgical
+        # precision. Runs first; falls through to the regex beam if gcc
+        # doesn't suggest any fix-its.
+        det = _try_gcc_fixit_repair(
+            failures, original, accepted, fault_idx,
+        )
+        if det is not None:
+            unit_new, cand_new = det[0]
+            self.journal.emit(
+                "candidate_validated",
+                {
+                    "candidate_id": cand_new.candidate_id,
+                    "passed": True,
+                    "whole_file_repair_for": unit_new.unit_id,
+                    "deterministic_gcc_fixit": True,
+                },
+                step_index=self.step,
+                path=path,
+                unit_id=unit_new.unit_id,
+            )
+            return det
         # Compiler-diagnostic-driven deterministic repair for C/C++: reads the
         # gcc error message, classifies it, and generates minimal fix
         # hypotheses (missing ';', missing '}', stray char, etc.) at the
