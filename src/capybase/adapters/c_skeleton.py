@@ -303,7 +303,24 @@ def _classify_buffer(
 
     # Check for typedef.
     if idents[0].text == "typedef":
-        # Last identifier before the terminator is the typedef alias.
+        # Function-pointer typedef: typedef T (*name)(...);
+        # The name is inside the (*name) group — it's NOT in the buffer's
+        # idents list (the scanner strips tokens inside parens). Scan the raw
+        # token stream for the (*ident) pattern within this declaration's range.
+        buf_start_idx = buf[0][1] if buf else 0
+        buf_end_idx = buf[-1][1] if buf else 0
+        for k in range(buf_start_idx, min(buf_end_idx + 1, len(all_tokens) - 3)):
+            if (all_tokens[k].kind == "punct" and all_tokens[k].text == "("
+                    and all_tokens[k + 1].kind == "punct"
+                    and all_tokens[k + 1].text == "*"
+                    and all_tokens[k + 2].kind == "ident"
+                    and all_tokens[k + 3].kind == "punct"
+                    and all_tokens[k + 3].text == ")"):
+                fp_name = all_tokens[k + 2].text
+                if fp_name not in typedefs:
+                    typedefs.append(fp_name)
+                return
+        # Simple typedef: last identifier before the terminator is the alias.
         name = idents[-1].text if idents[-1].text not in _C_TYPE_KEYWORDS else None
         if name:
             typedefs.append(name)

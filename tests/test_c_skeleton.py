@@ -61,6 +61,25 @@ enum Color { RED, GREEN, BLUE };
     assert "Color" in sk.structs
 
 
+def test_function_pointer_typedef_classified_as_typedef():
+    """Function-pointer typedefs (typedef T (*name)(...);) must be classified
+    as typedefs, not functions. The name is inside the (*name) group, which
+    the scanner doesn't accumulate in the buffer — detect from raw tokens."""
+    src = """\
+typedef int (*compare_fn)(const void *, const void *);
+typedef void (*callback_t)(int event, void *data);
+typedef struct sqlite3 sqlite3;
+"""
+    sk = extract_skeleton(src)
+    assert "compare_fn" in sk.typedefs, f"compare_fn missing; got {sk.typedefs}"
+    assert "callback_t" in sk.typedefs, f"callback_t missing; got {sk.typedefs}"
+    assert "sqlite3" in sk.typedefs
+    # Must NOT be classified as functions.
+    func_names = {f.split("(", 1)[0] for f in sk.functions}
+    assert "compare_fn" not in func_names
+    assert "callback_t" not in func_names
+
+
 def test_function_like_macro_recorded():
     src = """\
 #define MAX(a,b) ((a)>(b)?(a):(b))
