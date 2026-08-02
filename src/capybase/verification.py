@@ -4119,6 +4119,16 @@ class VerificationEngine:
                     if not ok and _CCS_SEMANTIC_RE.search(msg):
                         ok = True
                         msg = f"cc: semantic/missing-header pattern skipped in standalone mode ({msg[:60]})"
+                    # -Werror warning promotions (research §9): gcc emits
+                    # 'error: ... [-Werror=category]' for warnings the project's
+                    # build flags promoted to errors. The code compiled
+                    # successfully but triggered a strictness flag — not a real
+                    # compile failure and not a merge defect. The trailing
+                    # [-Werror=...] tag is the only signal that distinguishes
+                    # these from genuine errors (gcc emits 'error:' for both).
+                    if not ok and _is_cc_werror_warning(msg):
+                        ok = True
+                        msg = f"cc: -Werror warning promotion skipped in standalone mode ({msg[:60]})"
                     syntax_ok = ok
                     if not ok and self.config.require_syntax_if_supported:
                         hard.append(

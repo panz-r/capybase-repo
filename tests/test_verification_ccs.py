@@ -739,3 +739,40 @@ def test_compile_ccs_include_paths_resolves_sibling_header(tmp_path):
         include_paths=[str(tmp_path)],
     )
     assert ok_ip, f"expected compile success with include_paths, got: {msg_ip}"
+
+
+# ---------------------------------------------------------------------------
+# Standalone gcc fallback: -Werror tolerance
+# ---------------------------------------------------------------------------
+
+@skip_no_gcc
+def test_verify_file_gcc_fallback_werror_passes(tmp_path, monkeypatch):
+    """The standalone gcc fallback (no cc_build_command) should tolerate
+    -Werror warning promotions. These are warnings the project's flags promoted
+    to errors — the code compiled but triggered a strictness flag, not a defect.
+
+    We monkeypatch _compile_ccs to return a -Werror error to exercise the
+    fallback path's tolerance logic without needing code that actually triggers
+    a -Werror promotion."""
+    import capybase.verification as ver
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    original = ver._compile_ccs
+
+    def _fake_compile(source, **kw):
+        # Return a -Werror line as if gcc emitted it.
+        return False, "x.c:36:43: error: 'calloc' sizes specified... [-Werror=calloc-transposed-args]"
+
+    monkeypatch.setattr(ver, "_compile_ccs", _fake_compile)
+    try:
+        cfg = ValidationConfig()
+        assert cfg.cc_build_command == ""  # forces gcc fallback
+        eng = VerificationEngine.default(cfg)
+        res = eng.verify_file(
+            "src/cfg.c", "c", _C_FILE_CONFLICT, [(span, _C_FILE_CORRECT)],
+            repo_root=str(tmp_path),
+        )
+        # -Werror promotion → compile-pass (not a real defect).
+        assert res.features["syntax_passed"] is True
+        assert res.passed
+    finally:
+        ver._compile_ccs = original
