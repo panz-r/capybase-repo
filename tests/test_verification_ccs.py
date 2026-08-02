@@ -716,6 +716,32 @@ def test_build_gate_mixed_sibling_and_conflict_fails(tmp_path):
     assert not res.passed
 
 
+def test_build_gate_sibling_error_with_make_driver_line_passes(tmp_path):
+    """When stderr has both a sibling gcc error AND a make-driver summary line
+    (``make[2]: *** [Makefile:89: hiredis.o] Error 1``), the driver line must
+    NOT be attributed to the conflict file. The gcc line classifies it as a
+    sibling error → compile-pass.
+
+    This is the redis hiredis va_arg pattern: deps/hiredis.c has a pre-existing
+    error, make reports it via a driver line + the gcc line, but the conflict
+    file (src/aof.c) is fine."""
+    span = _span_of_markers(_C_FILE_CONFLICT)
+    cfg = ValidationConfig()
+    cfg.cc_build_command = (
+        'echo "hiredis.c:700:31: error: second argument to \'va_arg\' is of incomplete type \'void\'" >&2; '
+        'echo "make[2]: *** [Makefile:89: hiredis.o] Error 1" >&2; false'
+    )
+    eng = VerificationEngine.default(cfg)
+    res = eng.verify_file(
+        "src/aof.c", "c", _C_FILE_CONFLICT, [(span, _C_FILE_CORRECT)],
+        repo_root=str(tmp_path),
+    )
+    # hiredis.c is a sibling of aof.c → compile-pass.
+    assert res.features["syntax_checked"] is True
+    assert res.features["syntax_passed"] is True
+    assert res.passed
+
+
 # ---------------------------------------------------------------------------
 # _compile_ccs include_paths: header files can resolve sibling includes
 # ---------------------------------------------------------------------------

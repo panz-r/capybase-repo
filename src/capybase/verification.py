@@ -4001,8 +4001,32 @@ class VerificationEngine:
                                 real_errors = []      # in conflict file, real
                                 sibling_errors = []   # in other files, infra
                                 werror_lines = []     # -Werror promotions, infra
+                                # make/cmake driver lines: ``make[2]: ***``,
+                                # ``CMake Error``, ``ninja: error``. These are
+                                # build-system summaries, not gcc diagnostics —
+                                # they don't carry a file:line:col: location and
+                                # shouldn't be attributed to the conflict file.
+                                # The actual gcc error line(s) appear separately
+                                # and ARE classified below.
+                                _is_build_driver_line = (
+                                    lambda ln: (
+                                        ln.startswith("make[")
+                                        or ln.startswith("make:")
+                                        or "CMake Error" in ln
+                                        or ln.startswith("ninja:")
+                                        or ln.startswith("*** ")
+                                        or "Error 1" in ln
+                                        or "Error 2" in ln
+                                    )
+                                )
                                 for ln in err_lines:
                                     if "error" not in ln.lower():
+                                        continue
+                                    # Skip make/cmake/ninja driver summary lines
+                                    # — they reference build targets, not source
+                                    # files. The gcc diagnostic lines are what
+                                    # carry the file:line:col: location.
+                                    if _is_build_driver_line(ln):
                                         continue
                                     # -Werror warning promotion?
                                     if _is_cc_werror_warning(ln):
@@ -4011,12 +4035,15 @@ class VerificationEngine:
                                     file_stem, _ = _parse_cc_error_location(ln)
                                     if file_stem is not None and file_stem != conflict_stem:
                                         sibling_errors.append(ln)
-                                    else:
-                                        # file_stem == conflict_stem (real defect),
-                                        # OR file_stem is None (unparseable —
-                                        # conservative: treat as real error so
-                                        # we never silently pass a defect).
+                                    elif file_stem == conflict_stem:
+                                        # Positively identified as in the conflict
+                                        # file → genuine defect.
                                         real_errors.append(ln)
+                                    # else: file_stem is None (unparseable gcc
+                                    # line) — don't classify yet; we may find a
+                                    # parseable line later. If ALL error lines
+                                    # are unparseable, we fall through to the
+                                    # conservative fallback below.
                                 if real_errors:
                                     # Genuine error in the conflict file → hard fail.
                                     msg = real_errors[0]
