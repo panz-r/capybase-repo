@@ -535,6 +535,111 @@ def _structural_context_block(unit: ConflictUnit, *, attempt: int = 0) -> str:
         return ""
 
 
+def _function_local_context(unit: ConflictUnit) -> str:
+    """Extract the enclosing function signature and ±3 lines around the conflict.
+
+    For C/C++ files, scans the worktree text to find which function the
+    conflict marker falls inside (using brace-depth tracking), then extracts:
+    - The function signature line
+    - Up to 3 lines immediately before the conflict marker
+    - Up to 3 lines immediately after the conflict marker
+
+    This gives the model local scope awareness (parameter types, local
+    variable declarations, control flow) that the file-level skeleton can't
+    provide. Costs ~100 tokens for a 400-token conflict.
+
+    Returns "" when the conflict is not inside a function (e.g., file-level
+    declarations, struct definitions) or when the enclosing function can't
+    be determined.
+    """
+    if unit.language not in ("c", "cpp", "c++"):
+        return ""
+    if unit.marker_span is None:
+        return ""
+    text = unit.original_worktree_text or unit.base.text or ""
+    if not text:
+        return ""
+    lines = text.split("\n")
+    start_line, end_line = unit.marker_span
+    # 0-based conflict region
+    conflict_start = max(0, start_line)
+    conflict_end = min(len(lines), end_line + 1)
+
+    # Walk backward from the conflict start to find the enclosing function
+    # signature: a line at brace_depth 0 that looks like a function definition
+    # (ident followed by ( and then {).
+    brace_depth = 0
+    func_sig_line = None
+    # Count braces from the conflict start backward to find depth-0
+    for i in range(conflict_start - 1, -1, -1):
+        line = lines[i] if i < len(lines) else ""
+        # Count braces in this line (rough — strings masked by stripping)
+        stripped = line
+        for ch in stripped:
+            if ch == '{':
+                brace_depth += 1
+            elif ch == '}':
+                brace_depth -= 1
+        if brace_depth <= 0:
+            # We're at or above depth 0 — this might be the function signature
+            # or a line before it. Check if this line or a nearby line looks
+            # like a function definition.
+            stripped_line = line.strip()
+            if '(' in stripped_line and not stripped_line.startswith('#'):
+                # Check if it looks like a function signature
+                # (has identifier before ( and doesn't end with ;)
+                if not stripped_line.endswith(';') and not stripped_line.startswith('//'):
+                    func_sig_line = i
+                    break
+            # Also check a few lines before for multi-line signatures
+            for j in range(i - 1, max(i - 4, -1), -1):
+                if j < 0:
+                    break
+                prev = lines[j].strip()
+                if '(' in prev and not prev.startswith('#') and not prev.endswith(';'):
+                    func_sig_line = j
+                    break
+            if func_sig_line is not None:
+                break
+
+    if func_sig_line is None:
+        return ""
+
+    # Extract context: signature + pre-conflict lines + post-conflict lines
+    sig_text = lines[func_sig_line].strip() if func_sig_line < len(lines) else ""
+    # Collect multi-line signature (up to the opening brace)
+    sig_lines = [sig_text]
+    for j in range(func_sig_line + 1, min(func_sig_line + 5, conflict_start)):
+        line = lines[j].strip() if j < len(lines) else ""
+        if not line:
+            break
+        sig_lines.append(line)
+        if '{' in line:
+            break
+
+    # Pre-conflict context: up to 3 lines before the marker
+    pre_start = max(func_sig_line + 1, conflict_start - 3)
+    pre_lines = [lines[i].rstrip() for i in range(pre_start, conflict_start)
+                 if i < len(lines)]
+
+    # Post-conflict context: up to 3 lines after the marker
+    post_end = min(len(lines), conflict_end + 3)
+    post_lines = [lines[i].rstrip() for i in range(conflict_end, post_end)
+                  if i < len(lines)]
+
+    parts = []
+    parts.append(f"Enclosing function: {' '.join(sig_lines)[:200]}")
+    if pre_lines:
+        parts.append("Local context before conflict:")
+        parts.extend(f"  {l}" for l in pre_lines if l.strip())
+    parts.append("  <<conflict region>>")
+    if post_lines:
+        parts.append("Local context after conflict:")
+        parts.extend(f"  {l}" for l in post_lines if l.strip())
+
+    return "\n".join(parts) + "\n\n"
+
+
 def _semantic_change_block(unit: ConflictUnit) -> str:
     """A compact 'what each side changed at the ENTITY level' annotation.
 
@@ -1134,6 +1239,10 @@ def _resolve_prompt_parts(
     # and which units must survive the merge. Directly addresses the "dropped
     # replayed side" failure: the model sees unit boundaries explicitly.
     struct_ctx = _structural_context_block(unit)
+    # Function-local context: enclosing function signature + ±3 lines around
+    # the conflict. Gives the model local scope awareness (parameter types,
+    # variable declarations) that the file-level skeleton can't provide.
+    func_ctx = _function_local_context(unit)
     # ConflictSummaryMode (feedback §3.1): gate which context blocks surface.
     # FULL = today (all blocks); INTENT_ONLY = just side_intent; NONE = strip all.
     # Reduces context density for models that drown in structural detail.
@@ -1181,7 +1290,7 @@ def _resolve_prompt_parts(
     # The skeleton block (global entity names for oversized files) is prepended
     # so the model has global awareness before the local conflict.
     data_block = (
-        f"{skeleton_block}{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{struct_ctx}{side_intent}{semantic_change}{value_resolution}"
+        f"{skeleton_block}{func_ctx}{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{struct_ctx}{side_intent}{semantic_change}{value_resolution}"
         f"{_sides}"
         f"Surrounding file context:\n{primary_t}\n\n"
     )
