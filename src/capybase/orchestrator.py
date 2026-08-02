@@ -5680,7 +5680,18 @@ class Orchestrator:
         self._step_convergence_hashes: dict[str, dict[str, int]] = {}
 
         # ---- Phase 1: resolve + write all files (no staging, no cargo) ----
+        import time as _p1time
+        _file_wall_budget = self.config.policy.max_wall_time_per_file_seconds
         for path, units in result.units_by_path.items():
+            # File-level wall deadline: computed at the START of each file's
+            # processing (Phase 1 + Phase 2 combined). Bounds total resolution
+            # + repair time per file, preventing the nested-retry budget
+            # explosion. Threaded through _resolve_unit (Phase 1) and
+            # _whole_file_repair (Phase 2) so both respect the same deadline.
+            _file_wall_deadline = (
+                _p1time.monotonic() + _file_wall_budget
+                if _file_wall_budget > 0 else None
+            )
             # Resolve ALL units in the file before splicing anything. We must
             # not write a partially-resolved file: if a later unit escalates,
             # the file (with some blocks still marker-laden) would be staged
@@ -5689,7 +5700,7 @@ class Orchestrator:
             accepted: list[tuple[ConflictUnit, CandidateResolution]] = []
             escalated_unit: UnitOutcome | None = None
             for unit in units:
-                outcome = self._resolve_unit(unit)
+                outcome = self._resolve_unit(unit, wall_deadline=_file_wall_deadline)
                 _persist_unit_hashes(self, outcome)  # D1: per-step convergence
                 result.outcomes.append(outcome)
                 if outcome.accepted is None:
@@ -5773,18 +5784,10 @@ class Orchestrator:
                 # cycles for multi-hunk conflicts where the deterministic brace
                 # repair + enriched context need a few shots to converge.
                 wf_budget = self.config.policy.max_whole_file_repair_retries or self.config.policy.max_retries_per_unit
-                # File-level wall deadline: an outer cap on total resolution +
-                # repair time per file. When set, threads a monotonic deadline
-                # through _whole_file_repair → _resolve_unit so nested repair
-                # calls respect cumulative elapsed time. Prevents the budget
-                # explosion where each repair iteration gets a fresh per-unit
-                # budget (2 iterations × 360s = 720s+ of model time alone).
-                import time as _ftime
-                _file_wall_budget = self.config.policy.max_wall_time_per_file_seconds
-                _file_wall_deadline = (
-                    _ftime.monotonic() + _file_wall_budget
-                    if _file_wall_budget > 0 else None
-                )
+                # _file_wall_deadline is computed at the start of this file's
+                # processing (Phase 1) and carried through Phase 2. It bounds
+                # total resolution + repair time per file, preventing the
+                # nested-retry budget explosion.
                 file_validation = None  # type: ignore[assignment]
                 # Causal attribution: track the failure signature across whole-
                 # file repair iterations so each repair mechanism's EFFECT can
