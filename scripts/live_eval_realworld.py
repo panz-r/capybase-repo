@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -375,6 +376,28 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
         prepare, build_cmd = _resolve_c_build(repo, case.dataset, default_prepare)
         prepare_ok = True
         _cache_hit = False  # default: no prepare cache (redis has no prepare)
+
+        # Fix sqlite's tool/lemon.c: the parser generator has K&R-style
+        # forward declarations (void FuncName();) that conflict with the
+        # definitions (void FuncName(struct lemon *)) under C11+. This
+        # prevents lemon from compiling on modern GCC, which blocks the
+        # entire sqlite build (lemon generates parse.h, opcodes.h, etc.).
+        # Patch the 6 conflicting declarations with proper prototypes.
+        _lemon_path = repo / "tool" / "lemon.c"
+        if _lemon_path.exists():
+            _lemon_src = _lemon_path.read_text()
+            if re.search(r'^void\s+\w+\s*\(\s*\)\s*;', _lemon_src, re.MULTILINE):
+                _func_defs = {}
+                for m in re.finditer(r'^(void\s+(\w+)\s*\(([^)]{0,200})\))', _lemon_src, re.MULTILINE):
+                    _func_defs[m.group(2)] = m.group(3)
+                _fixed = _lemon_src
+                for m in re.finditer(r'^(void\s+(\w+)\s*\(\s*\)\s*;)', _lemon_src, re.MULTILINE):
+                    _fn = m.group(2)
+                    if _fn in _func_defs:
+                        _fixed = _fixed.replace(m.group(1), f'void {_fn}({_func_defs[_fn]});')
+                if _fixed != _lemon_src:
+                    _lemon_path.write_text(_fixed)
+
         if prepare:
             # Cache the configured tree across cases sharing the same
             # merge_sha. The prepare step (./configure, cmake) is
