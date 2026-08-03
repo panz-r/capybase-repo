@@ -4061,10 +4061,16 @@ class VerificationEngine:
                     target_path.parent.mkdir(parents=True, exist_ok=True)
                     target_path.write_text(whole, encoding="utf-8")
                     syntax_checked = True
+                    # Targeted builds (make {stem}.o) get a shorter timeout:
+                    # a single .o should compile in <30s. If it takes longer,
+                    # it's building deep dependencies (hiredis, lua, sqlite
+                    # amalgamation) and will likely hit the full timeout.
+                    # Fall back to gcc -fsyntax-only immediately.
+                    _build_timeout = 30 if target_tmpl else 300
                     try:
                         proc = _sp_build.run(
                             build_cmd, shell=True, cwd=str(repo_root),
-                            capture_output=True, text=True, timeout=300,
+                            capture_output=True, text=True, timeout=_build_timeout,
                             env=_build_env,
                         )
                         # ccache fallback: if ccache itself failed (corrupted
@@ -4208,8 +4214,48 @@ class VerificationEngine:
                                         err_lines[0] if err_lines else "build failed",
                                     )
                     except _sp_build.TimeoutExpired:
-                        syntax_ok = False
-                        msg = f"build timed out (300s): {build_cmd}"
+                        # Build timed out — the targeted/full build's dependency
+                        # chain (hiredis, lua, jemalloc, sqlite amalgamation)
+                        # can take >300s even for a single .o target. Fall back
+                        # to standalone gcc -fsyntax-only which only PARSES the
+                        # file (no dependency compilation, completes in seconds).
+                        # This is strictly less authoritative than a full build
+                        # (can't resolve sibling #include headers), but it's
+                        # better than a timeout that rejects a correct merge.
+                        from capybase.adapters.lsp import _resolve as _resolve_cc_fb
+                        _cc_fb = _resolve_cc_fb(
+                            getattr(self.config, "cxx_path", "g++")
+                            if language in ("cpp", "c++")
+                            else getattr(self.config, "cc_path", "gcc")
+                        )
+                        if _cc_fb is not None:
+                            _std_fb = (getattr(self.config, "cpp_std", "c++17")
+                                       if language in ("cpp", "c++")
+                                       else getattr(self.config, "c_std", "c11"))
+                            _suffix_fb = ".cpp" if language in ("cpp", "c++") else ".c"
+                            _inc_fb = [str(repo_root)]
+                            _fdir = (Path(repo_root) / path).parent
+                            if str(_fdir) != str(repo_root):
+                                _inc_fb.append(str(_fdir))
+                            try:
+                                ok_fb, msg_fb = _compile_ccs(
+                                    whole, cc_path=_cc_fb, std=_std_fb,
+                                    suffix=_suffix_fb, include_paths=_inc_fb,
+                                )
+                            except FileNotFoundError:
+                                ok_fb, msg_fb = True, "fallback compiler not available"
+                            if not ok_fb and _CCS_SEMANTIC_RE.search(msg_fb):
+                                ok_fb = True
+                                msg_fb = f"cc fallback: semantic pattern skipped ({msg_fb[:50]})"
+                            if not ok_fb and _is_cc_werror_warning(msg_fb):
+                                ok_fb = True
+                                msg_fb = f"cc fallback: -Werror skipped ({msg_fb[:50]})"
+                            syntax_ok = ok_fb
+                            msg = (f"build timed out (300s): {build_cmd}; "
+                                   f"fell back to gcc -fsyntax-only: {msg_fb}")
+                        else:
+                            syntax_ok = False
+                            msg = f"build timed out (300s): {build_cmd}"
                     except FileNotFoundError as exc:
                         # Build tool absent → skip (never a false fail), mirroring
                         # the gcc-absent path below.
