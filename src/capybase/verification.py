@@ -16,6 +16,8 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import re
+import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 import ast
@@ -3393,6 +3395,69 @@ def _compile_ccs(
         Path(tmp_path).unlink(missing_ok=True)
 
 
+# ---------------------------------------------------------------------------
+# ccache: transparent compiler cache for C/C++ builds
+# ---------------------------------------------------------------------------
+
+_ccache_available: bool | None = None
+
+
+def _ccache_enabled() -> bool:
+    """True when ccache is installed and should be used.
+
+    Cached after first check. ccache speeds up repeated builds by serving
+    unchanged translation units from cache — critical for the CEGIS repair
+    loop where verify_file recompiles the same tree with a one-line change.
+    """
+    global _ccache_available
+    if _ccache_available is None:
+        _ccache_available = shutil.which("ccache") is not None
+    return _ccache_available
+
+
+def _ccache_env() -> dict[str, str]:
+    """Build an environment dict with ccache wired in, or the base env if absent.
+
+    Sets CC=ccache gcc / CXX=ccache g++ and a PATH shim so Makefiles that
+    hardcode 'gcc' (ignoring $(CC)) also get cached. The shim scripts are
+    created once and reused.
+    """
+    env = os.environ.copy()
+    if not _ccache_enabled():
+        return env
+    env.setdefault("CCACHE_DIR", "/var/tmp/capybase-ccache")
+    env.setdefault("CC", "ccache gcc")
+    env.setdefault("CXX", "ccache g++")
+    # PATH shim: some Makefiles call gcc/g++ directly instead of $(CC).
+    shim_dir = Path("/var/tmp/capybase-ccache-shim")
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    gcc_shim = shim_dir / "gcc"
+    gxx_shim = shim_dir / "g++"
+    if not gcc_shim.exists():
+        gcc_shim.write_text("#!/bin/sh\nexec ccache gcc \"$@\"\n")
+        gcc_shim.chmod(0o755)
+    if not gxx_shim.exists():
+        gxx_shim.write_text("#!/bin/sh\nexec ccache g++ \"$@\"\n")
+        gxx_shim.chmod(0o755)
+    if str(shim_dir) not in env.get("PATH", ""):
+        env["PATH"] = f"{shim_dir}:{env.get('PATH', '')}"
+    return env
+
+
+# ccache can fail on some repos (incompatible flags, corrupted cache, version
+# mismatch). When it does, the error is distinct from normal compile errors.
+_CCACHE_FAILURE_PATTERNS = (
+    "ccache: error:",
+    "ccache: internal error",
+    "FAILED: ccache",
+)
+
+
+def _is_ccache_failure(stderr: str) -> bool:
+    """True when the build failure is caused by ccache itself, not the code."""
+    return any(p in stderr for p in _CCACHE_FAILURE_PATTERNS)
+
+
 _CC_ERROR_LINE_RE = re.compile(r":(\d+):\d+:\s*(?:error|warning):")
 
 # Captures the file path BEFORE the ``:line:col:`` position. gcc/clang emit
@@ -3991,6 +4056,7 @@ class VerificationEngine:
                 target_path = Path(repo_root) / path
                 saved = target_path.read_bytes() if target_path.exists() else None
                 msg = ""
+                _build_env = _ccache_env()
                 try:
                     target_path.parent.mkdir(parents=True, exist_ok=True)
                     target_path.write_text(whole, encoding="utf-8")
@@ -3999,7 +4065,22 @@ class VerificationEngine:
                         proc = _sp_build.run(
                             build_cmd, shell=True, cwd=str(repo_root),
                             capture_output=True, text=True, timeout=300,
+                            env=_build_env,
                         )
+                        # ccache fallback: if ccache itself failed (corrupted
+                        # cache, version mismatch, incompatible flags), retry
+                        # without ccache so the build isn't blocked by a
+                        # tooling issue. This prevents ccache from introducing
+                        # a new failure category.
+                        if (
+                            proc.returncode != 0
+                            and _ccache_enabled()
+                            and _is_ccache_failure((proc.stderr or "") + (proc.stdout or ""))
+                        ):
+                            proc = _sp_build.run(
+                                build_cmd, shell=True, cwd=str(repo_root),
+                                capture_output=True, text=True, timeout=300,
+                            )
                         # Targeted-build fallback: if the Makefile doesn't have
                         # a rule for this target (e.g. cmake projects), retry
                         # with the full build command.
@@ -4014,6 +4095,7 @@ class VerificationEngine:
                             proc = _sp_build.run(
                                 _full_cmd, shell=True, cwd=str(repo_root),
                                 capture_output=True, text=True, timeout=300,
+                                env=_build_env,
                             )
                             build_cmd = _full_cmd  # for the journal/detail
                         syntax_ok = proc.returncode == 0

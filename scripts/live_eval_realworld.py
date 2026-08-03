@@ -878,38 +878,10 @@ def main():
     # across cases (the per-case temp repo is destroyed, but the cache persists).
     # This is essential for full-crate materialization to be practical.
     os.environ.setdefault("CARGO_HOME", "/var/tmp/capybase-cargo-cache")
-
-    # ccache: intercept gcc/g++ calls so unchanged translation units are served
-    # from cache across CEGIS iterations and across cases sharing the same
-    # merge commit. Each verify_file call rewrites the resolved file and re-runs
-    # make; without ccache, ALL object files recompile from scratch every time.
-    # With ccache, only the modified TU recompiles; the rest are instant cache
-    # hits. This is the single biggest build-latency win for sqlite (54s → ~2s
-    # on repeat builds of the same tree).
-    import shutil as _shutil_cc
-    if _shutil_cc.which("ccache"):
-        os.environ.setdefault("CCACHE_DIR", "/var/tmp/capybase-ccache")
-        os.environ.setdefault("CC", "ccache gcc")
-        os.environ.setdefault("CXX", "ccache g++")
-        # Also set in a way that Makefiles that hardcode 'gcc' will pick up:
-        # some Makefiles ignore CC and call gcc directly. The PATH shim below
-        # catches those by putting a ccache-wrapping gcc script first.
-        _ccache_shim_dir = Path("/var/tmp/capybase-ccache-shim")
-        _ccache_shim_dir.mkdir(parents=True, exist_ok=True)
-        _gcc_shim = _ccache_shim_dir / "gcc"
-        _gxx_shim = _ccache_shim_dir / "g++"
-        if not _gcc_shim.exists():
-            _gcc_shim.write_text("#!/bin/sh\nexec ccache gcc \"$@\"\n")
-            _gcc_shim.chmod(0o755)
-        if not _gxx_shim.exists():
-            _gxx_shim.write_text("#!/bin/sh\nexec ccache g++ \"$@\"\n")
-            _gxx_shim.chmod(0o755)
-        _current_path = os.environ.get("PATH", "")
-        if str(_ccache_shim_dir) not in _current_path:
-            os.environ["PATH"] = f"{_ccache_shim_dir}:{_current_path}"
-        print("ccache: enabled (CC=ccache gcc, PATH shim for hardcoded gcc)")
-    else:
-        print("ccache: not found, skipping")
+    # ccache is handled by capybase's verification module (_ccache_env /
+    # _ccache_enabled in verification.py) — it detects ccache at runtime,
+    # wires it into build commands transparently, and falls back to plain
+    # gcc if ccache fails or is absent. No harness-level setup needed.
 
     flights_dir = Path(args.preserve_flights) if args.preserve_flights else None
     if flights_dir is not None:
