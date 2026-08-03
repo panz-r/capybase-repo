@@ -267,13 +267,15 @@ def _resolve_c_build(repo: Path, dataset: str, default_prepare: str) -> tuple[st
         return ("cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
                 "cmake --build build")
     if has_autotools:
-        # Generate configure from configure.ac, run it, then build to generate
-        # derived headers (parse.h, opcodes.h, sqlite3.h for sqlite). The full
-        # chain is best-effort (autoreconf may be missing on some hosts).
-        return ("autoreconf -fi >/dev/null 2>&1; ./configure >/dev/null 2>&1; make -j4 >/dev/null 2>&1",
+        # Generate configure from configure.ac, run it, then build derived
+        # headers only (not the full project — that takes too long for the
+        # case budget). The headers (parse.h, opcodes.h, sqlite3.h, etc.)
+        # are needed for gcc -fsyntax-only verification. The build_cmd stays
+        # "make -j4" so verify_file can do targeted builds (.lo/.o).
+        return ("autoreconf -fi >/dev/null 2>&1; ./configure >/dev/null 2>&1",
                 "make -j4")
     if has_configure:
-        return ("./configure >/dev/null 2>&1; make -j4 >/dev/null 2>&1",
+        return ("./configure >/dev/null 2>&1",
                 "make -j4")
     if has_makefile:
         return ("", "make -j4")
@@ -459,6 +461,33 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
         # a tree whose build system we can't complete, but the per-unit syntax
         # gate still catches structural defects.
         _DETECTED_BUILD_CMD[case.id] = build_cmd if prepare_ok else "true"
+        # Generate sqlite's derived headers (parse.h, opcodes.h, sqlite3.h,
+        # keywordhash.h) after configure. These are needed by gcc -fsyntax-only
+        # for per-file verification. They require the lemon parser generator
+        # (tool/lemon.c, already patched) + mkkeywordhash + mkopcodeh. Building
+        # just these targets (not the full project) is ~15-20s vs 75s for make.
+        # Skip if the build cache was a hit (headers already present).
+        if (
+            prepare_ok
+            and not _cache_hit
+            and (repo / "tool" / "lemon.c").exists()
+            and (repo / "Makefile").exists()
+        ):
+            try:
+                import subprocess as _sp_hdr
+                # Build lemon, then the derived headers. These are the
+                # prerequisite targets for compiling any sqlite source file.
+                _sp_hdr.run(
+                    "make lemon sqlite3.h >/dev/null 2>&1 && "
+                    "make parse.h >/dev/null 2>&1 && "
+                    "make keywordhash.h >/dev/null 2>&1 && "
+                    "make opcodes.h >/dev/null 2>&1",
+                    shell=True, cwd=str(repo),
+                    capture_output=True, timeout=120,
+                    env=_ccache_env() if _ccache_enabled() else None,
+                )
+            except Exception:  # noqa: BLE001 — header generation is advisory
+                pass
 
 
 def _config_for(case: Case, *, has_crate: bool = False) -> Config:
