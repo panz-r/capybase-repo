@@ -59,6 +59,7 @@ from capybase.config import Config  # noqa: E402
 from capybase.orchestrator import Orchestrator  # noqa: E402
 from capybase.resolution_engine import ResolutionEngine  # noqa: E402
 from tests._realworld_build import C_BUILD_COMMANDS  # noqa: E402
+from capybase.verification import _ccache_enabled, _ccache_env  # noqa: E402
 
 TESTDATA = Path(__file__).resolve().parent.parent / "extracted-testdata" / "realworld"
 
@@ -433,18 +434,6 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
         # a tree whose build system we can't complete, but the per-unit syntax
         # gate still catches structural defects.
         _DETECTED_BUILD_CMD[case.id] = build_cmd if prepare_ok else "true"
-        # Warm the ccache: do an initial full build now (during prepare, before
-        # the orchestrator runs) so the first verify_file call gets cache hits
-        # for all unchanged TUs. This trades ~54s of prepare-time build for
-        # ~2s per subsequent verify_file call. Only on first prepare (cache
-        # miss); cache-restored cases already have a warm ccache.
-        if prepare_ok and build_cmd and build_cmd != "true" and not _cache_hit:
-            try:
-                import subprocess as _sp_warm
-                _sp_warm.run(build_cmd, shell=True, cwd=str(repo),
-                             capture_output=True, timeout=180)
-            except Exception:  # noqa: BLE001 — warming is advisory
-                pass
 
 
 def _config_for(case: Case, *, has_crate: bool = False) -> Config:
