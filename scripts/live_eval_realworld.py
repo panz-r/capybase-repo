@@ -77,7 +77,7 @@ TESTDATA = Path(__file__).resolve().parent.parent / "extracted-testdata" / "real
 C_PREPARE_COMMANDS: dict[str, str] = {
     "redis-history": "",
     "jsonc-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
-    "sqlite-history": "./configure",
+    "sqlite-history": "./configure && make -j4",
 }
 
 # Per-case build-command cache: populated by _materialize_conflict after it
