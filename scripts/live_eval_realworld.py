@@ -379,7 +379,6 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
         default_prepare = C_PREPARE_COMMANDS.get(case.dataset, "")
         prepare, build_cmd = _resolve_c_build(repo, case.dataset, default_prepare)
         prepare_ok = True
-        _cache_hit = False  # default: no prepare cache (redis has no prepare)
 
         # Fix sqlite's tool/lemon.c: the parser generator has K&R-style
         # forward declarations (void FuncName();) that conflict with the
@@ -403,56 +402,18 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
                     _lemon_path.write_text(_fixed)
 
         if prepare:
-            # Cache the configured tree across cases sharing the same
-            # merge_sha. The prepare step (./configure, cmake) is
-            # deterministic for a given source tree — running it N times
-            # for N cases with the same commit is pure waste. Cache the
-            # build artifacts (Makefile, config.status, build/) keyed by
-            # (merge_sha, prepare_cmd) and restore them on repeat cases.
-            import hashlib as _hl
-            _cache_key = _hl.sha256(
-                f"{case.merge_sha}:{prepare}".encode()
-            ).hexdigest()[:16]
-            _cache_dir = Path("/var/tmp/capybase-build-cache")
-            _cache_tar = _cache_dir / f"{_cache_key}.tar"
-            _cache_hit = _cache_tar.exists()
-            if _cache_hit:
-                # Restore cached build artifacts.
-                try:
-                    import subprocess as _sp_tar
-                    _sp_tar.run(
-                        ["tar", "xf", str(_cache_tar), "-C", str(repo)],
-                        capture_output=True, timeout=30,
-                    )
-                    prepare_ok = True  # cache hit
-                except Exception:  # noqa: BLE001
-                    prepare_ok = False
-            else:
-                try:
-                    import subprocess as _sp
-                    proc = _sp.run(prepare, shell=True, cwd=str(repo),
-                                   capture_output=True, timeout=180)
-                    prepare_ok = proc.returncode == 0
-                    # Cache the build artifacts on success.
-                    if prepare_ok:
-                        _cache_dir.mkdir(parents=True, exist_ok=True)
-                        # Determine which artifacts to cache based on the
-                        # build system.
-                        _artifacts = []
-                        for _pat in ("Makefile", "config.status", "config.h",
-                                      "config.log", "build", "src/Makefile"):
-                            _ap = repo / _pat
-                            if _ap.exists():
-                                _artifacts.append(_pat)
-                        if _artifacts:
-                            import subprocess as _sp_tar2
-                            _sp_tar2.run(
-                                ["tar", "cf", str(_cache_tar)]
-                                + [str(repo / a) for a in _artifacts],
-                                capture_output=True, timeout=30,
-                            )
-                except Exception:  # noqa: BLE001 — best-effort
-                    prepare_ok = False
+            # Run the prepare step (configure/cmake). The prepare is
+            # deterministic per source tree but takes ~30s; we accept this
+            # overhead per case rather than caching, because cached Makefiles
+            # contain absolute paths (TOP=/var/tmp/capy-rw-OLD/r) that break
+            # when restored into a different temp dir.
+            try:
+                import subprocess as _sp
+                proc = _sp.run(prepare, shell=True, cwd=str(repo),
+                               capture_output=True, timeout=180)
+                prepare_ok = proc.returncode == 0
+            except Exception:  # noqa: BLE001 — best-effort
+                prepare_ok = False
         # If prepare failed (missing autotools macros, no compiler, etc.),
         # don't saddle the build gate with a command that can't work — it
         # would reject every resolution, even perfect ones. Fall back to
@@ -469,7 +430,6 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
         # Skip if the build cache was a hit (headers already present).
         if (
             prepare_ok
-            and not _cache_hit
             and (repo / "tool" / "lemon.c").exists()
             and (repo / "Makefile").exists()
         ):
