@@ -4045,7 +4045,10 @@ class VerificationEngine:
             # cases where the full build blows the case timeout. Falls back
             # to the full build if the target rule doesn't exist.
             target_tmpl = getattr(self.config, "cc_build_target_template", "") or ""
-            if target_tmpl:
+            # Don't use build-target narrowing for header files — headers
+            # aren't compiled to objects (make vdbe.lo has no rule for vdbe.h).
+            # The full build or gcc fallback handles headers correctly.
+            if target_tmpl and not path.endswith((".h", ".hpp", ".hh", ".hxx")):
                 _stem = Path(path).stem
                 try:
                     build_cmd = target_tmpl.format(stem=_stem)
