@@ -3408,6 +3408,7 @@ class Orchestrator:
         # Handles disjoint append conflicts that our concatenation heuristics
         # might miss. Duplicates it produces are cleaned up by the
         # directive_union rule and the deduplicate_imports repair step.
+        base = unit.base.text or ""
         try:
             import tempfile as _tf_union
             import subprocess as _sp_union
