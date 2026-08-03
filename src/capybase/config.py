@@ -415,6 +415,14 @@ class ValidationConfig(BaseModel):
     # = standalone gcc (the existing behavior). The orchestrator propagates
     # ``tests.pre_continue`` here automatically for C/C++ languages.
     cc_build_command: str = ""
+    # Build-target narrowing template for C/C++ per-file verification. When
+    # set, verify_file formats this with the conflict file's stem and runs
+    # the resulting command instead of the full cc_build_command. This
+    # compiles ONLY the conflict file's translation unit (e.g. ``make
+    # {stem}.o``), cutting build verification from ~54s (full make) to ~2-5s
+    # (single object). Falls back to the full build if the target rule
+    # doesn't exist. Empty (default) = use cc_build_command verbatim.
+    cc_build_target_template: str = ""
     # Clippy lint check (cargo clippy) for Rust: a quality check that runs in
     # Phase B on the fully-spliced file and flags clippy findings the merge
     # INTRODUCES (compared to a pre-conflict baseline, so a repo's pre-existing

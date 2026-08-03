@@ -437,6 +437,20 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
         cfg.tests.pre_continue = "true"
     cfg.tests.final = cfg.tests.pre_continue
     cfg.tests.required = False  # harness judges; don't double-gate
+    # Build-target narrowing: for sqlite and redis, compile only the conflict
+    # file's translation unit instead of the full project. sqlite's Makefile
+    # has per-object rules (delete.o:, update.o:, etc.) and redis has a %.o
+    # pattern rule. This cuts build verification from ~54s (full make) to
+    # ~2-5s (single object). Falls back to full build if no target rule.
+    # json-c uses cmake (awkward per-object targets); leave empty.
+    _C_BUILD_TARGETS = {
+        "sqlite-history": "make {stem}.o",
+        "redis-history": "make {stem}.o",
+    }
+    if case.language == "c":
+        _target = _C_BUILD_TARGETS.get(case.dataset, "")
+        if _target:
+            cfg.validation.cc_build_target_template = _target
     cfg.future.enable_structural_resolver = True
     cfg.future.enable_combination_search = True
     cfg.policy.max_retries_per_unit = 2  # cap CEGIS retries for throughput

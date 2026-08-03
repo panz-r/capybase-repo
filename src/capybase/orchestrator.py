@@ -2405,6 +2405,11 @@ class Orchestrator:
         _pre = getattr(config.tests, "pre_continue", None)
         if _pre and _pre.strip() not in ("", "true", "pytest"):
             _val_cfg.cc_build_command = _pre
+        # Propagate the build-target narrowing template (if configured) so
+        # verify_file compiles only the conflict file's translation unit.
+        _target_tmpl = getattr(config.validation, "cc_build_target_template", "")
+        if _target_tmpl:
+            _val_cfg.cc_build_target_template = _target_tmpl
         self.verification = VerificationEngine.default(_val_cfg)
         # Verifier-model critic: when enabled (the default —
         # opt-out), register an LLM judge that checks the resolution preserves

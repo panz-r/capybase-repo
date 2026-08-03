@@ -3973,6 +3973,19 @@ class VerificationEngine:
             # context (in either path), so an undeclared identifier IS a real
             # defect (mirrors how the cargo path doesn't suppress E0432).
             build_cmd = getattr(self.config, "cc_build_command", "") or ""
+            # Build-target narrowing: if a target template is configured,
+            # compile ONLY the conflict file's translation unit instead of
+            # the full project build. This cuts build verification from ~54s
+            # (full make) to ~2-5s (single object), critical for sqlite
+            # cases where the full build blows the case timeout. Falls back
+            # to the full build if the target rule doesn't exist.
+            target_tmpl = getattr(self.config, "cc_build_target_template", "") or ""
+            if target_tmpl:
+                _stem = Path(path).stem
+                try:
+                    build_cmd = target_tmpl.format(stem=_stem)
+                except (KeyError, IndexError):
+                    pass  # malformed template; use full build_cmd
             if build_cmd:
                 import subprocess as _sp_build
                 target_path = Path(repo_root) / path
@@ -3987,6 +4000,22 @@ class VerificationEngine:
                             build_cmd, shell=True, cwd=str(repo_root),
                             capture_output=True, text=True, timeout=300,
                         )
+                        # Targeted-build fallback: if the Makefile doesn't have
+                        # a rule for this target (e.g. cmake projects), retry
+                        # with the full build command.
+                        _full_cmd = getattr(self.config, "cc_build_command", "") or ""
+                        if (
+                            proc.returncode != 0
+                            and target_tmpl
+                            and _full_cmd
+                            and _full_cmd != build_cmd
+                            and "No rule to make target" in (proc.stderr or "")
+                        ):
+                            proc = _sp_build.run(
+                                _full_cmd, shell=True, cwd=str(repo_root),
+                                capture_output=True, text=True, timeout=300,
+                            )
+                            build_cmd = _full_cmd  # for the journal/detail
                         syntax_ok = proc.returncode == 0
                         if not syntax_ok:
                             stderr = (proc.stderr or "").strip()
