@@ -373,6 +373,7 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
         default_prepare = C_PREPARE_COMMANDS.get(case.dataset, "")
         prepare, build_cmd = _resolve_c_build(repo, case.dataset, default_prepare)
         prepare_ok = True
+        _cache_hit = False  # default: no prepare cache (redis has no prepare)
         if prepare:
             # Cache the configured tree across cases sharing the same
             # merge_sha. The prepare step (./configure, cmake) is
