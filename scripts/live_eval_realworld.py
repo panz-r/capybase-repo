@@ -542,6 +542,11 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # already catches identical failures). Combined with the file-level
     # deadline, this ensures cases complete within the timeout.
     cfg.policy.max_whole_file_repair_retries = 1
+    # Tiered Phase 2 verification: bound the whole-file repair loop to 200s
+    # wall time with at most 1 model re-resolve. This replaces the
+    # multi-iteration CEGIS loop that could run 3-6 × (100s model + 75s
+    # build) = 525-1050s, blowing the 900s case timeout for sqlite.
+    cfg.policy.max_whole_file_repair_seconds = 200
     # Suppress Rust crate-path errors (E0432/E0433) in the diagnostic delta —
     # these are undecidable standalone (need the full crate's dependency tree)
     # and cause false-positive rejections of near-correct Rust merges (5 cases
