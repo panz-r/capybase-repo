@@ -7579,6 +7579,16 @@ class Orchestrator:
         import time as _time
         unit_start = _time.monotonic()
         wall_budget = self.config.policy.max_wall_time_per_unit_seconds
+        # Header file Phase 1 CEGIS cap: headers skip the per-unit gcc gate
+        # (no standalone compilation), so CEGIS retries are blind — the model
+        # produces output, nothing validates it at the compile level, and it
+        # retries on advisory warnings only. Cap to 1 model call (retry_count
+        # max = 0) so a header unit doesn't burn 180s in blind CEGIS retries.
+        # The structural resolver and source portfolio still run (pre-LLM).
+        # The whole-file build in Phase 2 is the header's true verifier.
+        _unit_path = unit.path or ""
+        _is_header = _unit_path.endswith((".h", ".hpp", ".hh", ".hxx", ".H"))
+        _header_max_retries = 0 if _is_header else self.config.policy.max_retries_per_unit
         # Track time spent in verification (cargo check, rustc, tests) so it
         # can be excluded from the wall-time budget. The budget is meant to
         # cap MODEL/CEGIS loop iterations, not compilation time — a slow
@@ -8143,6 +8153,22 @@ class Orchestrator:
                         decision="accept", reason=outcome.reason,
                     )
                     return outcome
+
+            # Header file CEGIS cap: headers have no per-unit compile gate,
+            # so retries are blind. If we've used our 1 allowed model call
+            # for a header, escalate instead of retrying.
+            if _is_header and retry_count >= _header_max_retries and retry_count > 0:
+                outcome.escalated = True
+                outcome.retry_count = retry_count
+                outcome.reason = (
+                    f"header file CEGIS cap reached ({_header_max_retries} "
+                    f"retry budget for headers; per-unit gcc gate is skipped)"
+                )
+                self._record_resolution_attempt(
+                    outcome, mechanism="llm",
+                    decision="escalate", reason=outcome.reason,
+                )
+                return outcome
 
             decision = self.risk.decide(
                 validation,
