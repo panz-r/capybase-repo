@@ -662,8 +662,14 @@ def _attribute_whole_file_failure(
             start, end = u.marker_span
             if start + 1 <= line <= end + 1:
                 return i
-    # No line attribution possible → default to the last unit.
-    return len(units) - 1
+    # No line attribution possible → return -1 so the caller can escalate
+    # instead of blindly retrying the last unit. The old default (last unit)
+    # wasted model calls on cross-unit errors that no single unit can fix.
+    # When the tiered-verification time budget is NOT set (legacy mode),
+    # callers map -1 back to the last-unit heuristic for backward compat.
+    return -1
+
+
 def _splice_context_snippet(
     failures: list, original: str,
     accepted: list[tuple[ConflictUnit, CandidateResolution]],
@@ -6020,6 +6026,16 @@ class Orchestrator:
                 # cycles for multi-hunk conflicts where the deterministic brace
                 # repair + enriched context need a few shots to converge.
                 wf_budget = self.config.policy.max_whole_file_repair_retries or self.config.policy.max_retries_per_unit
+                # Tiered verification time budget (design v2): when set, Phase 2
+                # runs at most 1 verify_file + deterministic beam + 1 model
+                # re-resolve + 1 final verify_file, bounded by this wall-time
+                # cap. This replaces the multi-iteration CEGIS loop that could
+                # run 3-6 × (100s model + 75s build) = 525-1050s, blowing the
+                # case timeout. 0 = disabled (use iteration-count loop).
+                import time as _p2time
+                _phase2_budget = self.config.policy.max_whole_file_repair_seconds
+                _phase2_start = _p2time.monotonic()
+                _phase2_model_used = False
                 # _file_wall_deadline is computed at the start of this file's
                 # processing (Phase 1) and carried through Phase 2. It bounds
                 # total resolution + repair time per file, preventing the
@@ -6111,11 +6127,23 @@ class Orchestrator:
                             step_index=self.step, path=path,
                         )
                     prev_failure_sig = cur_sig
-                    if file_validation.passed or wf_retries >= wf_budget:
+                    if file_validation.passed:
                         break
+                    # Tiered verification: check time budget before retrying.
+                    if _phase2_budget > 0:
+                        _elapsed_p2 = _p2time.monotonic() - _phase2_start
+                        if _elapsed_p2 >= _phase2_budget:
+                            break  # time budget exhausted
+                        if _phase2_model_used:
+                            break  # only 1 model re-resolve allowed in tiered mode
+                    else:
+                        if wf_retries >= wf_budget:
+                            break
                     # Attribute the failure to a unit and re-resolve it with the
                     # file-level failures as concrete repair feedback.
                     wf_retries += 1
+                    if _phase2_budget > 0:
+                        _phase2_model_used = True
                     self.journal.emit(
                         "whole_file_repair",
                         {
@@ -7084,6 +7112,22 @@ class Orchestrator:
         attributed unit could not be re-resolved (it escalated).
         """
         fault_idx = _attribute_whole_file_failure(failures, [u for u, _ in accepted])
+        # Smart blame (tiered verification): when no unit's span contains the
+        # error line AND we're in tiered mode (time budget active), skip the
+        # model re-resolve — it can't fix a cross-unit error. The deterministic
+        # beam still runs (it operates on the whole-file buffer). In legacy
+        # mode (no time budget), fall back to the last-unit heuristic so
+        # existing behavior is preserved.
+        _tiered_active = self.config.policy.max_whole_file_repair_seconds > 0
+        if fault_idx < 0:
+            fault_idx = max(0, len(accepted) - 1)
+            if not deterministic_only and _tiered_active:
+                self.journal.emit(
+                    "whole_file_repair_skipped",
+                    {"reason": "fault attribution: error outside all unit spans (tiered mode)"},
+                    step_index=self.step, path=path,
+                )
+                return None
         # Deterministic brace repair: before spending an LLM call on the
         # recurring splice-junction brace imbalance, try to fix it directly.
         # The model often reproduces the same extra/missing brace at the hunk

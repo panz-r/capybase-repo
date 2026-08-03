@@ -260,6 +260,13 @@ class PolicyConfig(BaseModel):
     # calls each with a fresh max_wall_time_per_unit_seconds budget, causing the
     # real wall clock to explode past any case-level timeout. 0 = disabled.
     max_wall_time_per_file_seconds: float = 0.0
+    # Strict time budget for Phase 2 whole-file repair (verify_file + CEGIS
+    # repair loop). When set, Phase 2 runs at most: 1 verify_file + deterministic
+    # repair beam + at most 1 model re-resolve + 1 final verify_file. The time
+    # budget caps the total Phase 2 wall time regardless of how the iterations
+    # split. 0 = disabled (use the existing iteration-count-based loop).
+    # Design: tiered verification for oversized C files (design v2).
+    max_whole_file_repair_seconds: float = 0.0
     allow_skip: bool = False
     allow_delete_conflicted_file: bool = False
     stage_only_validated_paths: bool = True
