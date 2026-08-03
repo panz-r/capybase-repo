@@ -386,7 +386,8 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
             ).hexdigest()[:16]
             _cache_dir = Path("/var/tmp/capybase-build-cache")
             _cache_tar = _cache_dir / f"{_cache_key}.tar"
-            if _cache_tar.exists():
+            _cache_hit = _cache_tar.exists()
+            if _cache_hit:
                 # Restore cached build artifacts.
                 try:
                     import subprocess as _sp_tar
@@ -431,6 +432,18 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
         # a tree whose build system we can't complete, but the per-unit syntax
         # gate still catches structural defects.
         _DETECTED_BUILD_CMD[case.id] = build_cmd if prepare_ok else "true"
+        # Warm the ccache: do an initial full build now (during prepare, before
+        # the orchestrator runs) so the first verify_file call gets cache hits
+        # for all unchanged TUs. This trades ~54s of prepare-time build for
+        # ~2s per subsequent verify_file call. Only on first prepare (cache
+        # miss); cache-restored cases already have a warm ccache.
+        if prepare_ok and build_cmd and build_cmd != "true" and not _cache_hit:
+            try:
+                import subprocess as _sp_warm
+                _sp_warm.run(build_cmd, shell=True, cwd=str(repo),
+                             capture_output=True, timeout=180)
+            except Exception:  # noqa: BLE001 — warming is advisory
+                pass
 
 
 def _config_for(case: Case, *, has_crate: bool = False) -> Config:
@@ -865,6 +878,38 @@ def main():
     # across cases (the per-case temp repo is destroyed, but the cache persists).
     # This is essential for full-crate materialization to be practical.
     os.environ.setdefault("CARGO_HOME", "/var/tmp/capybase-cargo-cache")
+
+    # ccache: intercept gcc/g++ calls so unchanged translation units are served
+    # from cache across CEGIS iterations and across cases sharing the same
+    # merge commit. Each verify_file call rewrites the resolved file and re-runs
+    # make; without ccache, ALL object files recompile from scratch every time.
+    # With ccache, only the modified TU recompiles; the rest are instant cache
+    # hits. This is the single biggest build-latency win for sqlite (54s → ~2s
+    # on repeat builds of the same tree).
+    import shutil as _shutil_cc
+    if _shutil_cc.which("ccache"):
+        os.environ.setdefault("CCACHE_DIR", "/var/tmp/capybase-ccache")
+        os.environ.setdefault("CC", "ccache gcc")
+        os.environ.setdefault("CXX", "ccache g++")
+        # Also set in a way that Makefiles that hardcode 'gcc' will pick up:
+        # some Makefiles ignore CC and call gcc directly. The PATH shim below
+        # catches those by putting a ccache-wrapping gcc script first.
+        _ccache_shim_dir = Path("/var/tmp/capybase-ccache-shim")
+        _ccache_shim_dir.mkdir(parents=True, exist_ok=True)
+        _gcc_shim = _ccache_shim_dir / "gcc"
+        _gxx_shim = _ccache_shim_dir / "g++"
+        if not _gcc_shim.exists():
+            _gcc_shim.write_text("#!/bin/sh\nexec ccache gcc \"$@\"\n")
+            _gcc_shim.chmod(0o755)
+        if not _gxx_shim.exists():
+            _gxx_shim.write_text("#!/bin/sh\nexec ccache g++ \"$@\"\n")
+            _gxx_shim.chmod(0o755)
+        _current_path = os.environ.get("PATH", "")
+        if str(_ccache_shim_dir) not in _current_path:
+            os.environ["PATH"] = f"{_ccache_shim_dir}:{_current_path}"
+        print("ccache: enabled (CC=ccache gcc, PATH shim for hardcoded gcc)")
+    else:
+        print("ccache: not found, skipping")
 
     flights_dir = Path(args.preserve_flights) if args.preserve_flights else None
     if flights_dir is not None:
