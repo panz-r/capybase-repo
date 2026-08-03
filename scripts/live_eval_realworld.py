@@ -514,7 +514,7 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # ~2-5s (single object). Falls back to full build if no target rule.
     # json-c uses cmake (awkward per-object targets); leave empty.
     _C_BUILD_TARGETS = {
-        "sqlite-history": "make {stem}.o",
+        "sqlite-history": "make {stem}.lo",
         "redis-history": "make {stem}.o",
     }
     if case.language == "c":
