@@ -79,7 +79,6 @@ C_PREPARE_COMMANDS: dict[str, str] = {
     "jsonc-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
     "sqlite-history": "./configure && make -j4",
     "nlohmann-json-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
-    "fmtlib-fmt-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
     "clickhouse-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
 }
 

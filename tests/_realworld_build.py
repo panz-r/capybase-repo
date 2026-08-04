@@ -58,7 +58,6 @@ C_BUILD_COMMANDS: dict[str, str] = {
     "jsonc-history": "cmake --build build",
     "sqlite-history": "./configure && make -j4",
     "nlohmann-json-history": "cmake --build build",
-    "fmtlib-fmt-history": "cmake --build build",
     "clickhouse-history": "cmake --build build",
 }
 
