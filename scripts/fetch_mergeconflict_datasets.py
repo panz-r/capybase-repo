@@ -256,6 +256,37 @@ DATASETS: dict[str, Dataset] = {
         source_url="https://github.com/sqlite/sqlite",
         merge_limit=2000,
     ),
+    # --- C++ repos ---
+    "nlohmann-json-history": Dataset(
+        id="nlohmann-json-history",
+        kind="git-history",
+        url="https://github.com/nlohmann/json.git",
+        extract_subdir="nlohmann-json",
+        extractor="git_history",
+        license="MIT",
+        source_url="https://github.com/nlohmann/json",
+        merge_limit=500,
+    ),
+    "fmtlib-fmt-history": Dataset(
+        id="fmtlib-fmt-history",
+        kind="git-history",
+        url="https://github.com/fmtlib/fmt.git",
+        extract_subdir="fmtlib-fmt",
+        extractor="git_history",
+        license="MIT",
+        source_url="https://github.com/fmtlib/fmt",
+        merge_limit=500,
+    ),
+    "clickhouse-history": Dataset(
+        id="clickhouse-history",
+        kind="git-history",
+        url="https://github.com/ClickHouse/ClickHouse.git",
+        extract_subdir="clickhouse",
+        extractor="git_history",
+        license="Apache-2.0",
+        source_url="https://github.com/ClickHouse/ClickHouse",
+        merge_limit=2000,
+    ),
 }
 
 

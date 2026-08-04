@@ -57,6 +57,9 @@ C_BUILD_COMMANDS: dict[str, str] = {
     "redis-history": "make -j4",
     "jsonc-history": "cmake --build build",
     "sqlite-history": "./configure && make -j4",
+    "nlohmann-json-history": "cmake --build build",
+    "fmtlib-fmt-history": "cmake --build build",
+    "clickhouse-history": "cmake --build build",
 }
 
 # Build timeout. C builds at a specific commit can be slow (a full sqlite

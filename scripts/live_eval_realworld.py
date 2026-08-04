@@ -78,6 +78,9 @@ C_PREPARE_COMMANDS: dict[str, str] = {
     "redis-history": "",
     "jsonc-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
     "sqlite-history": "./configure && make -j4",
+    "nlohmann-json-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+    "fmtlib-fmt-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+    "clickhouse-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
 }
 
 # Per-case build-command cache: populated by _materialize_conflict after it
@@ -381,7 +384,7 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
     # the default's prerequisite is absent (e.g. no CMakeLists.txt → autotools).
     # The detected build command is stashed in _DETECTED_BUILD_CMD so _config_for
     # can set the matching in-loop gate.
-    if case.language == "c":
+    if case.language in ("c", "cpp", "c++"):
         default_prepare = C_PREPARE_COMMANDS.get(case.dataset, "")
         prepare, build_cmd = _resolve_c_build(repo, case.dataset, default_prepare)
         prepare_ok = True
@@ -489,7 +492,7 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # - Rust without crate: 'true' (brace-balance is the only gate).
     if case.language == "python":
         cfg.tests.pre_continue = f"python3 -m py_compile {case.path}"
-    elif case.language == "c":
+    elif case.language in ("c", "cpp", "c++"):
         # The in-loop whole-tree gate. The build command is matched to whatever
         # prepare actually ran in _materialize_conflict (stored in
         # _DETECTED_BUILD_CMD). This handles C repos that changed build systems
@@ -512,7 +515,7 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
         "sqlite-history": "make {stem}.lo",
         "redis-history": "make {stem}.o",
     }
-    if case.language == "c":
+    if case.language in ("c", "cpp", "c++"):
         _target = _C_BUILD_TARGETS.get(case.dataset, "")
         if _target:
             cfg.validation.cc_build_target_template = _target
@@ -748,7 +751,7 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         # finally below removes it). python/rust checks operate on the content
         # string alone, so they run after cleanup; the C build needs the tree.
         c_builds_result: bool | None = None
-        if case.language == "c" and content:
+        if case.language in ("c", "cpp", "c++") and content:
             c_builds_result = _c_builds(repo, case)
     finally:
         # D3: when the main thread owns the temp dir, it cleans up after the
@@ -760,7 +763,7 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
     res.marker_free = not _contains_markers(content) if content else False
     if case.language == "python":
         res.compiles = _py_compiles(content) if content else False
-    elif case.language == "c":
+    elif case.language in ("c", "cpp", "c++"):
         # Use the build verdict captured before cleanup; fall back to brace-
         # balance if the build couldn't run (no command registered or no tree).
         res.compiles = c_builds_result if c_builds_result is not None else (
@@ -861,7 +864,7 @@ def _print_census(results_path: str) -> None:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
-    ap.add_argument("--lang", choices=("rust", "python", "c"), default=None)
+    ap.add_argument("--lang", choices=("rust", "python", "c", "cpp", "c++"), default=None)
     ap.add_argument("--case", action="append", default=None, metavar="CASE_ID",
                     help="Select a specific case id (repeatable). Enables targeted "
                          "single-case reruns in seconds instead of a full 5-hour run. "
@@ -1068,7 +1071,7 @@ def main():
     print(f"ESCALATE:   {escalate_ct}")
     print(f"ORACLE_DIVERGENT: {wrong_ct}  (sim < 0.80 or marker/brace failure)")
     print(f"wall:       {elapsed:.0f}s ({elapsed/60:.1f}m) [this run only]")
-    for lang in ("python", "rust"):
+    for lang in ("python", "rust", "c", "cpp"):
         sub = [r for r in results if r.language == lang]
         if not sub: continue
         p = sum(1 for r in sub if not r.escalated and r.marker_free and r.compiles and r.matches_oracle >= 0.95)
