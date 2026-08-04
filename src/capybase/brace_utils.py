@@ -19,84 +19,16 @@ def _mask_strings_and_comments(text: str, language: str | None = None) -> str:
     This lets a brace-depth scan ignore brackets that appear inside strings or
     comments. Language-aware: Rust uses ``//`` and ``/* */``; Python uses ``#``
     and triple-quotes. Falls back to C-family comment syntax.
+
+    Thin delegate to the canonical ``adapters.string_lexer.blank_strings_and_comments``.
+    The prior hand-rolled char scanner was abandoned upstream (it leaked raw-
+    string content, corrupting the brace count when a raw string contained
+    ``{``/``}``); ``string_lexer`` handles every string form correctly.
+    ``string_char=" "`` preserves this function's historical space-replacement
+    output so callers' behavior is byte-identical.
     """
-    result: list[str] = list(text)
-    i = 0
-    n = len(text)
-    is_rust = language in ("rust", "toml")
-    is_python = language == "python"
-    while i < n:
-        ch = text[i]
-        # Line comments
-        if is_python and ch == "#":
-            while i < n and text[i] != "\n":
-                result[i] = " "
-                i += 1
-            continue
-        if ch == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
-                result[i] = " "
-                i += 1
-            continue
-        # Block comments
-        if ch == "/" and i + 1 < n and text[i + 1] == "*":
-            result[i] = " "
-            result[i + 1] = " "
-            i += 2
-            while i < n:
-                if text[i] == "*" and i + 1 < n and text[i + 1] == "/":
-                    result[i] = " "
-                    result[i + 1] = " "
-                    i += 2
-                    break
-                if text[i] != "\n":
-                    result[i] = " "
-                i += 1
-            continue
-        # Rust doc comments (/// and //!)
-        if is_rust and ch == "/" and i + 1 < n and text[i + 1] == "/":
-            while i < n and text[i] != "\n":
-                result[i] = " "
-                i += 1
-            continue
-        # String literals
-        if ch == '"':
-            result[i] = " "
-            i += 1
-            # Handle raw strings r"..." or r#"..."#
-            while i < n and text[i] != '"' and text[i] != "\n":
-                if text[i] == "\\" and i + 1 < n:
-                    result[i] = " "
-                    result[i + 1] = " "
-                    i += 2
-                    continue
-                result[i] = " "
-                i += 1
-            if i < n and text[i] == '"':
-                result[i] = " "
-                i += 1
-            continue
-        # Char literals
-        if ch == "'":
-            # Don't confuse with lifetime labels ('a) — only mask if it looks
-            # like a char literal: 'x' or '\x' within 3 chars.
-            if i + 2 < n and text[i + 2] == "'":
-                result[i] = " "
-                result[i + 1] = " "
-                result[i + 2] = " "
-                i += 3
-                continue
-            if i + 3 < n and text[i + 1] == "\\" and text[i + 3] == "'":
-                result[i] = " "
-                result[i + 1] = " "
-                result[i + 2] = " "
-                result[i + 3] = " "
-                i += 4
-                continue
-            i += 1
-            continue
-        i += 1
-    return "".join(result)
+    from capybase.adapters.string_lexer import blank_strings_and_comments
+    return blank_strings_and_comments(text, language, string_char=" ")
 
 
 def find_closing_brace(

@@ -458,24 +458,13 @@ def _enclosing_name(unit: ConflictUnit) -> str | None:
     """The bare name of the enclosing definition (e.g. ``greet`` from ``def greet():``).
 
     Used to avoid re-slicing the very block already shown as ``primary_text``.
+
+    Thin delegate to the shared ``structural.declaration_name`` (consolidated
+    with conflict_extractor._entity_name_from_signature so the two cannot drift).
     """
+    from capybase.adapters.structural import declaration_name
     sig = unit.structural_metadata.get("enclosing_node_signature") or unit.enclosing_symbol
-    if not sig:
-        return None
-    s = sig.strip()
-    # Strip a leading keyword (def/class/async def/fn/struct/enum/trait/mod/...).
-    for kw in ("async def", "def", "class", "fn", "struct", "enum", "trait", "mod"):
-        if s.startswith(kw + " "):
-            s = s[len(kw) + 1 :]
-            break
-    # Take the token up to the first separator.
-    name = ""
-    for ch in s:
-        if ch.isalnum() or ch == "_":
-            name += ch
-        else:
-            break
-    return name or None
+    return declaration_name(sig)
 
 
 def _unit_region_kind(unit: ConflictUnit) -> str | None:

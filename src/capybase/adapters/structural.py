@@ -134,6 +134,40 @@ def _unit_to_entity(unit) -> Entity:
 # ---------------------------------------------------------------------------
 
 
+_DECL_KEYWORDS = (
+    "async def", "def", "class", "fn", "struct", "enum", "trait", "mod",
+)
+
+
+def declaration_name(signature: str | None) -> str | None:
+    """Bare identifier from a declaration signature header.
+
+    Turns ``def save(self, v):`` / ``fn load(&self) -> T`` / ``class C:`` into
+    just ``save`` / ``load`` / ``C``. Strips a leading declaration keyword
+    (language-agnostic set: def/class/fn/struct/enum/trait/mod/async def), then
+    takes the identifier token up to the first non-word character. Returns
+    ``None`` when the signature is empty or yields no name.
+
+    Shared by the conflict extractor (sibling exclusion) and the context
+    builder (avoid re-slicing the primary block). Previously each module had a
+    verbatim copy of this logic; consolidated here so they cannot drift.
+    """
+    if not signature:
+        return None
+    s = signature.strip()
+    for kw in _DECL_KEYWORDS:
+        if s.startswith(kw + " "):
+            s = s[len(kw) + 1 :]
+            break
+    name = ""
+    for ch in s:
+        if ch.isalnum() or ch == "_":
+            name += ch
+        else:
+            break
+    return name or None
+
+
 def enclosing_node(
     source: str, span: tuple[int, int], language: str
 ) -> NodeInfo | None:

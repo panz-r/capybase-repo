@@ -1246,21 +1246,12 @@ def _entity_name_from_signature(signature: str | None) -> str | None:
     Turns a signature header (``def save(self, v):`` / ``fn load(&self) -> T`` /
     ``class C:``) into just ``save`` / ``load`` / ``C`` so the sibling list
     doesn't re-show the very entity being resolved.
+
+    Thin delegate to the shared ``structural.declaration_name`` (consolidated
+    with context_builder._enclosing_name so the two cannot drift).
     """
-    if not signature:
-        return None
-    s = signature.strip()
-    for kw in ("async def", "def", "class", "fn", "struct", "enum", "trait", "mod"):
-        if s.startswith(kw + " "):
-            s = s[len(kw) + 1 :]
-            break
-    name = ""
-    for ch in s:
-        if ch.isalnum() or ch == "_":
-            name += ch
-        else:
-            break
-    return name or None
+    from capybase.adapters.structural import declaration_name
+    return declaration_name(signature)
 
 
 def _refine_with_diff3(
@@ -1420,15 +1411,19 @@ def _blocks_cost(blocks: list | None) -> int:
     )
 
 
-def _blank_markers(text: str) -> str:
-    """Replace conflict-marker lines with comments so the parser can parse."""
-    out = []
-    for line in text.split("\n"):
-        if line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
-            out.append("# conflict-marker")
-        else:
-            out.append(line)
-    return "\n".join(out)
+def _blank_markers(text: str, language: str | None = None) -> str:
+    """Replace conflict-marker blocks with comments so the parser can parse.
+
+    Thin delegate to the canonical ``verification._blank_markers`` (language-
+    aware: uses ``//`` for Rust, ``#`` otherwise, and comments out the second
+    side's body to avoid duplicate-definition false errors in multi-hunk
+    files). The prior local copy was a stale bug: it always used ``#`` and left
+    both sides as live code, causing false-positive syntax rejections.
+    Imported lazily to avoid a top-level import cycle
+    (verification → conflict_extractor is lazy already).
+    """
+    from capybase.verification import _blank_markers as _canonical
+    return _canonical(text, language)
 
 
 def _enrich_structural(
@@ -1503,7 +1498,7 @@ def _enrich_structural(
         # also blanked) should match. Using BASE directly would never match
         # because BASE has no markers at all, so its node structure differs
         # from the marker-blanked worktree at every conflict position.
-        blanked_worktree = _blank_markers(worktree_text)
+        blanked_worktree = _blank_markers(worktree_text, lang)
         fp_outside, _ = structural.fingerprint_region(
             blanked_worktree, lang, unit.marker_span
         )
