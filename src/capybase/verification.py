@@ -18,10 +18,11 @@ import tempfile
 import re
 import os
 import shutil
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 import ast
-from typing import Protocol, runtime_checkable
+from typing import Iterator, Protocol, runtime_checkable
 
 from capybase.adapters.parsers import (
     contains_markers,
@@ -2538,7 +2539,124 @@ def _try_balance_preprocessor(text: str) -> str | None:
     return None
 
 
-class RustSyntaxValidator:
+class _StandaloneSyntaxValidator:
+    """Base for per-unit standalone-compile syntax validators (CEGIS hardening).
+
+    The three language validators (Rust / C-C++ / Python) share the same 6-step
+    skeleton: language guard → marker-span guard → empty-text guard → splice +
+    blank sibling markers → (optional) brace-balance guard → resolve tool →
+    compile in try/except → (optional) resolution-error filter → result. This
+    base centralizes that control flow; each subclass overrides the language-
+    specific hooks. Previously each validator copied the boilerplate verbatim
+    (~70 lines each), drifting on exception handling and result construction.
+
+    Hooks a subclass MUST override:
+      ``_languages``   — the set of languages this validator handles.
+      ``_feature_key`` — the features-dict key (e.g. ``"rust_syntax_checked"``).
+
+    Hooks a subclass MAY override:
+      ``_skip_before_compile(ctx)``  — extra pre-compile skip (C's header-skip).
+      ``_check_braces``              — whether to run the brace-balance guard.
+      ``_resolve_compiler(cfg)``     — tool path or None (None → skip).
+      ``_compile(spliced, cfg)``     — the (ok, msg) compile call.
+      ``_is_resolution_error(msg)``  — filter for context-dependent errors.
+    """
+
+    _languages: tuple[str, ...] = ()
+    _feature_key: str = ""
+    _check_braces: bool = False
+
+    def _skip_before_compile(self, ctx: VerificationContext) -> VerificationCheckResult | None:
+        return None
+
+    def _resolve_compiler(self, cfg: object) -> str | None:
+        raise NotImplementedError
+
+    def _compile(self, spliced: str, tool: str, cfg: object) -> tuple[bool, str]:
+        raise NotImplementedError
+
+    def _is_resolution_error(self, msg: str) -> bool:
+        return False
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        fk = self._feature_key
+        if ctx.unit.language not in self._languages:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message=f"not {self._lang_label()}; syntax check skipped",
+                features={fk: False},
+            )
+        skip = self._skip_before_compile(ctx)
+        if skip is not None:
+            return skip
+        if ctx.unit.marker_span is None:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="no marker span",
+                features={fk: False},
+            )
+        if not ctx.candidate.resolved_text:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="empty resolved_text; syntax check skipped",
+                features={fk: False},
+            )
+        spliced = splice_resolution(
+            ctx.unit.original_worktree_text,
+            ctx.unit.marker_span,
+            ctx.candidate.resolved_text,
+        )
+        spliced = _blank_markers(spliced, ctx.unit.language)
+        if self._check_braces and not _braces_balanced(spliced, ctx.unit.language):
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message="spliced text has unbalanced braces; deferring to whole-file check",
+                features={fk: False, "syntax_passed": True},
+            )
+        tool = self._resolve_compiler(ctx.config)
+        if tool is None:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message=f"{self._lang_label()} compiler not available; syntax not checked",
+                features={fk: False, "syntax_passed": True},
+            )
+        try:
+            ok, msg = self._compile(spliced, tool, ctx.config)
+        except FileNotFoundError:
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message=f"{self._lang_label()} compiler vanished; syntax not checked",
+                features={fk: False, "syntax_passed": True},
+            )
+        except Exception as exc:  # noqa: BLE001 - never crash resolution
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message=f"{self._lang_label()} syntax check error: {exc}",
+                features={fk: False, "syntax_passed": True},
+            )
+        if not ok and self._is_resolution_error(msg):
+            return VerificationCheckResult(
+                name=self.name, passed=True,
+                message=(
+                    f"{self._lang_label()} standalone-compile showed resolution/type "
+                    f"errors (not a syntax defect); deferring to whole-file check"
+                ),
+                features={fk: True, "syntax_passed": True},
+            )
+        return VerificationCheckResult(
+            name=self.name,
+            passed=ok,
+            severity="error",
+            message=msg,
+            detail={"diagnostic": msg},
+            features={fk: True, "syntax_passed": ok},
+        )
+
+    def _lang_label(self) -> str:
+        return self.name.replace("_syntax", "")
+
+
+class RustSyntaxValidator(_StandaloneSyntaxValidator):
     """Per-unit Rust syntax check (CEGIS loop hardening).
 
     Rust syntax errors that slip past the structural validators — a malformed
@@ -2562,94 +2680,22 @@ class RustSyntaxValidator:
     """
 
     name = "rust_syntax"
+    _languages = ("rust",)
+    _feature_key = "rust_syntax_checked"
+    _check_braces = True
 
-    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
-        if ctx.unit.language != "rust":
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="not rust; syntax check skipped",
-                features={"rust_syntax_checked": False},
-            )
-        if ctx.unit.marker_span is None:
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="no marker span",
-                features={"rust_syntax_checked": False},
-            )
-        if not ctx.candidate.resolved_text:
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="empty resolved_text; syntax check skipped",
-                features={"rust_syntax_checked": False},
-            )
-        cfg = ctx.config
-        # Splice + blank sibling markers so the parse reflects real structure
-        # even in a multi-hunk file (sibling marker blocks would corrupt rustc).
-        spliced = splice_resolution(
-            ctx.unit.original_worktree_text,
-            ctx.unit.marker_span,
-            ctx.candidate.resolved_text,
-        )
-        spliced = _blank_markers(spliced, "rust")
-        # Brace-balance guard: a per-unit splice that fills a marker span inside
-        # a larger construct (e.g. a bare struct initializer without the
-        # surrounding impl/fn) produces structurally-incomplete code that rustc
-        # rejects with a spurious parse error. Skip the compile (defer to Phase B
-        # whole-file cargo) when the spliced text has unbalanced braces.
-        if not _braces_balanced(spliced, ctx.unit.language):
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="spliced text has unbalanced braces; deferring to whole-file check",
-                features={"rust_syntax_checked": False, "syntax_passed": True},
-            )
-        rustc = _resolve_tool(getattr(cfg, "rustc_path", "rustc"))
-        if rustc is None:
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="rustc not available; syntax not checked",
-                features={"rust_syntax_checked": False, "syntax_passed": True},
-            )
+    def _resolve_compiler(self, cfg: object) -> str | None:
+        return _resolve_tool(getattr(cfg, "rustc_path", "rustc"))
+
+    def _compile(self, spliced: str, tool: str, cfg: object) -> tuple[bool, str]:
         edition = getattr(cfg, "rust_edition", "") or "2021"
-        try:
-            ok, msg = _compile_rust(spliced, rustc_path=rustc, edition=edition)
-        except FileNotFoundError:
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="rustc vanished; syntax not checked",
-                features={"rust_syntax_checked": False, "syntax_passed": True},
-            )
-        except Exception as exc:  # noqa: BLE001 - never crash resolution
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message=f"rust syntax check error: {exc}",
-                features={"rust_syntax_checked": False, "syntax_passed": True},
-            )
-        # Per-unit standalone rustc can't resolve crate dependencies (types from
-        # other modules, ``use`` imports) — it only has the single spliced file.
-        # So a name-resolution error (E0433/E0425 "unresolved name/module") is NOT
-        # a syntax defect in the merge; it's an artifact of compiling a fragment
-        # out of crate context. Only surface true PARSE/syntax errors (the
-        # malformed ``format!`` macro, a stray brace) — those are the candidate's
-        # defect, and they read as "error: expected ..."/"error: unexpected ...".
-        # Resolution errors fall through to Phase B (verify_file) which compiles
-        # the whole crate via cargo with full context.
-        if not ok and _is_rust_resolution_error(msg):
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message=f"rust standalone-compile showed unresolved names (not a syntax defect); deferring to whole-file cargo check",
-                features={"rust_syntax_checked": True, "syntax_passed": True},
-            )
-        return VerificationCheckResult(
-            name=self.name,
-            passed=ok,
-            severity="error",
-            message=msg,
-            detail={"diagnostic": msg},
-            features={"rust_syntax_checked": True, "syntax_passed": ok},
-        )
+        return _compile_rust(spliced, rustc_path=tool, edition=edition)
+
+    def _is_resolution_error(self, msg: str) -> bool:
+        return _is_rust_resolution_error(msg)
 
 
-class CcsSyntaxValidator:
+class CcsSyntaxValidator(_StandaloneSyntaxValidator):
     """Per-unit C/C++ syntax check (CEGIS loop hardening).
 
     The C/C++ analog of ``RustSyntaxValidator``: catches parse-level syntax
@@ -2661,36 +2707,25 @@ class CcsSyntaxValidator:
     ``_compile_ccs`` (``gcc``/``g++ -fsyntax-only``).
 
     C/C++-only (``c``/``cpp``/``c++``); no-op (passes) for other languages.
-    Skips when the compiler is absent or the marker span is unknown. Defer to
-    Phase B when braces are unbalanced (a per-unit splice filling a span inside
-    a larger construct is structurally incomplete). Semantic errors (undeclared
-    identifiers, type mismatches — anything needing full translation-unit
-    context) are filtered via ``_is_ccs_resolution_error`` and deferred to the
-    whole-file check, mirroring how Rust defers ``E0xxx`` codes to cargo. Runs
-    as a hard failure (``severity="error"``) so it's retryable.
+    Skips header files (never compiled standalone) and when the compiler is
+    absent or the marker span is unknown. Defer to Phase B when braces are
+    unbalanced. Semantic errors (undeclared identifiers, type mismatches) are
+    filtered via ``_is_ccs_resolution_error`` and deferred to the whole-file
+    check, mirroring how Rust defers ``E0xxx`` codes to cargo.
     """
 
     name = "ccs_syntax"
+    _languages = ("c", "cpp", "c++")
+    _feature_key = "ccs_syntax_checked"
+    _check_braces = True
 
-    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
-        if ctx.unit.language not in ("c", "cpp", "c++"):
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="not C/C++; syntax check skipped",
-                features={"ccs_syntax_checked": False},
-            )
-        # Header files (.h/.hpp/.hh/.hxx) are never compiled standalone in
-        # real projects — they're always #included from a .c file that provides
-        # the type definitions, macros, and prototypes the header references.
-        # Standalone gcc -fsyntax-only on a header reports false-positive
-        # "unknown type name" errors for project-internal types (u8, BtCursor,
-        # sqlite3_vfs) defined in sibling headers (sqliteInt.h etc.) that aren't
-        # visible when compiling in isolation. The model can't fix these (the
-        # type definition isn't in the fragment), so the CEGIS loop exhausts its
-        # retry budget and escalates — rejecting correct merges (sim >= 0.98).
-        # Skip the per-unit CCS gate for headers; Phase B's whole-file build
-        # (make/cmake) compiles the .c files that include the header in full
-        # project context — the only honest check for a header file.
+    def _skip_before_compile(self, ctx: VerificationContext) -> VerificationCheckResult | None:
+        # Header files are never compiled standalone in real projects — they're
+        # always #included from a .c file providing the types/macros/prototypes
+        # the header references. Standalone gcc -fsyntax-only on a header reports
+        # false-positive "unknown type name" errors for project-internal types
+        # defined in sibling headers. Skip; Phase B's whole-file build is the
+        # only honest check for a header.
         _path = ctx.unit.path or ""
         if _path.endswith((".h", ".hpp", ".hh", ".hxx", ".H")):
             return VerificationCheckResult(
@@ -2698,89 +2733,36 @@ class CcsSyntaxValidator:
                 message="header file; per-unit standalone compile skipped "
                         "(headers are never compiled in isolation — Phase B "
                         "whole-file build is the authoritative check)",
-                features={"ccs_syntax_checked": False, "syntax_passed": True},
+                features={self._feature_key: False, "syntax_passed": True},
             )
-        if ctx.unit.marker_span is None:
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="no marker span",
-                features={"ccs_syntax_checked": False},
-            )
-        if not ctx.candidate.resolved_text:
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="empty resolved_text; syntax check skipped",
-                features={"ccs_syntax_checked": False},
-            )
-        cfg = ctx.config
-        # Splice + blank sibling markers so the parse reflects real structure
-        # even in a multi-hunk file (sibling marker blocks would corrupt gcc).
-        spliced = splice_resolution(
-            ctx.unit.original_worktree_text,
-            ctx.unit.marker_span,
-            ctx.candidate.resolved_text,
-        )
-        spliced = _blank_markers(spliced, ctx.unit.language)
-        # Brace-balance guard: a per-unit splice that fills a marker span inside
-        # a larger construct (e.g. a bare function body without the surrounding
-        # signature) produces structurally-incomplete code. Skip the compile
-        # (defer to Phase B whole-file) when braces are unbalanced.
-        if not _braces_balanced(spliced, ctx.unit.language):
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="spliced text has unbalanced braces; deferring to whole-file check",
-                features={"ccs_syntax_checked": False, "syntax_passed": True},
-            )
-        # Pick the compiler by language: C++ → g++/clang++, C → gcc/clang.
-        is_cpp = ctx.unit.language in ("cpp", "c++")
+        return None
+
+    def _resolve_compiler(self, cfg: object) -> str | None:
+        is_cpp = self._is_cpp  # set in _compile via the ctx language
         cc_default = "g++" if is_cpp else "gcc"
-        cc = _resolve_tool(getattr(cfg, "cxx_path" if is_cpp else "cc_path", cc_default))
-        if cc is None:
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="C/C++ compiler not available; syntax not checked",
-                features={"ccs_syntax_checked": False, "syntax_passed": True},
-            )
+        return _resolve_tool(getattr(cfg, "cxx_path" if is_cpp else "cc_path", cc_default))
+
+    @property
+    def _is_cpp(self) -> bool:
+        # Resolved per-call in verify via the language; default False (C).
+        return getattr(self, "_lang_is_cpp", False)
+
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        # Stash whether this unit is C++ so _resolve_compiler picks g++/cpp_std.
+        self._lang_is_cpp = ctx.unit.language in ("cpp", "c++")
+        return super().verify(ctx)
+
+    def _compile(self, spliced: str, tool: str, cfg: object) -> tuple[bool, str]:
+        is_cpp = self._is_cpp
         std = getattr(cfg, "cpp_std" if is_cpp else "c_std", "c++17" if is_cpp else "c11")
         suffix = ".cpp" if is_cpp else ".c"
-        try:
-            ok, msg = _compile_ccs(spliced, cc_path=cc, std=std, suffix=suffix)
-        except FileNotFoundError:
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="C/C++ compiler vanished; syntax not checked",
-                features={"ccs_syntax_checked": False, "syntax_passed": True},
-            )
-        except Exception as exc:  # noqa: BLE001 - never crash resolution
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message=f"C/C++ syntax check error: {exc}",
-                features={"ccs_syntax_checked": False, "syntax_passed": True},
-            )
-        # Per-unit standalone gcc/clang can't resolve symbols from another
-        # translation unit or a header not pre-declared in the fragment — so a
-        # name-resolution error (undeclared identifier, no matching function) is
-        # NOT a syntax defect in the merge; it's an artifact of compiling out of
-        # context. Only surface true PARSE errors (missing semicolon, stray
-        # brace, unterminated string). Resolution errors fall through to Phase B
-        # (verify_file) which compiles the whole TU with full context.
-        if not ok and _is_ccs_resolution_error(msg):
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="C/C++ standalone-compile showed resolution/type errors (not a syntax defect); deferring to whole-file check",
-                features={"ccs_syntax_checked": True, "syntax_passed": True},
-            )
-        return VerificationCheckResult(
-            name=self.name,
-            passed=ok,
-            severity="error",
-            message=msg,
-            detail={"diagnostic": msg},
-            features={"ccs_syntax_checked": True, "syntax_passed": ok},
-        )
+        return _compile_ccs(spliced, cc_path=tool, std=std, suffix=suffix)
+
+    def _is_resolution_error(self, msg: str) -> bool:
+        return _is_ccs_resolution_error(msg)
 
 
-class PythonSyntaxValidator:
+class PythonSyntaxValidator(_StandaloneSyntaxValidator):
     """Per-unit Python syntax check (CEGIS loop hardening).
 
     Python syntax errors (an unclosed bracket, a bad indent) would otherwise be
@@ -2793,8 +2775,9 @@ class PythonSyntaxValidator:
     conflict markers to comments (multi-unit-safe, same technique as
     ``AstPreservationValidator``), and runs ``_compile_python`` (``py_compile``).
     Python has no separate type-resolution phase, so a fragment compiles cleanly
-    in isolation when it's syntactically valid — no crate-context problem. The
-    diagnostic becomes a ``VerificationFailure`` that seeds PROMPT_REPAIR.
+    in isolation when it's syntactically valid — no crate-context problem, and
+    no resolution-error filter is needed (unlike Rust/C). The diagnostic becomes
+    a ``VerificationFailure`` that seeds PROMPT_REPAIR.
 
     Python-only; no-op (passes) for other languages. Skips when the marker span
     is unknown or resolved_text is empty. Runs as a hard failure
@@ -2802,50 +2785,16 @@ class PythonSyntaxValidator:
     """
 
     name = "python_syntax"
+    _languages = ("python",)
+    _feature_key = "python_syntax_checked"
 
-    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
-        if ctx.unit.language != "python":
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="not python; syntax check skipped",
-                features={"python_syntax_checked": False},
-            )
-        if ctx.unit.marker_span is None:
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="no marker span",
-                features={"python_syntax_checked": False},
-            )
-        if not ctx.candidate.resolved_text:
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="empty resolved_text; syntax check skipped",
-                features={"python_syntax_checked": False},
-            )
-        # Splice + blank sibling markers so the parse reflects real structure
-        # even in a multi-hunk file (sibling marker blocks would corrupt the parse).
-        spliced = splice_resolution(
-            ctx.unit.original_worktree_text,
-            ctx.unit.marker_span,
-            ctx.candidate.resolved_text,
-        )
-        spliced = _blank_markers(spliced, "python")
-        try:
-            ok, msg = _compile_python(spliced)
-        except Exception as exc:  # noqa: BLE001 - never crash resolution
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message=f"python syntax check error: {exc}",
-                features={"python_syntax_checked": False, "syntax_passed": True},
-            )
-        return VerificationCheckResult(
-            name=self.name,
-            passed=ok,
-            severity="error",
-            message=msg,
-            detail={"diagnostic": msg},
-            features={"python_syntax_checked": True, "syntax_passed": ok},
-        )
+    def _resolve_compiler(self, cfg: object) -> str | None:
+        # py_compile is always available (stdlib); return a sentinel so the base
+        # class's "tool not available" skip never fires.
+        return "python3"
+
+    def _compile(self, spliced: str, tool: str, cfg: object) -> tuple[bool, str]:
+        return _compile_python(spliced)
 
 
 class AstPreservationValidator:
@@ -4660,17 +4609,9 @@ class VerificationEngine:
             cargo_path=self.config.cargo_path,
             rust_analyzer_path=self.config.rust_analyzer_path,
         )
-        target_path = Path(repo_root) / path
-        saved = target_path.read_bytes() if target_path.exists() else None
         # After state: write the resolved manifest, run cargo check.
-        try:
-            target_path.write_text(whole, encoding="utf-8")
+        with temp_worktree_file(repo_root, path, whole):
             after = runner._check_cargo(whole, path, repo_root)
-        finally:
-            if saved is not None:
-                target_path.write_bytes(saved)
-            elif target_path.exists():
-                target_path.unlink(missing_ok=True)
         if not after.checked:
             # cargo absent / failed → not checked (never a false fail).
             features["syntax_checked"] = False
@@ -4679,16 +4620,9 @@ class VerificationEngine:
         # Baseline: marker-blanked original (one side kept so it's valid TOML),
         # cargo-checked, then restored. TOML comments use ``#``, which is the
         # default blanking prefix.
-        try:
-            target_path.write_text(
-                _blank_markers_one_side(original), encoding="utf-8"
-            )
-            baseline = runner._check_cargo(_blank_markers_one_side(original), path, repo_root)
-        finally:
-            if saved is not None:
-                target_path.write_bytes(saved)
-            elif target_path.exists():
-                target_path.unlink(missing_ok=True)
+        _baseline_src = _blank_markers_one_side(original)
+        with temp_worktree_file(repo_root, path, _baseline_src):
+            baseline = runner._check_cargo(_baseline_src, path, repo_root)
         features["syntax_checked"] = True
         # Phase-scoped: cargo manifest check has full crate context — do NOT
         # pass suppress_codes (E0432/E0433 are decidable here, unlike the
@@ -4747,38 +4681,21 @@ class VerificationEngine:
         # NOT yet on disk (verify_file runs before the orchestrator writes) —
         # so we write it temporarily for the "after" run, then the blanked
         # original for the baseline, then restore whatever was on disk.
-        target_path = Path(repo_root) / path
-        saved = target_path.read_bytes() if target_path.exists() else None
-        try:
-            # After state: write the resolved file, run clippy.
-            target_path.write_text(whole, encoding="utf-8")
+        # After state: write the resolved file, run clippy.
+        with temp_worktree_file(repo_root, path, whole):
             after = lsp_mod.run_clippy(
                 repo_root, cargo_path=self.config.cargo_path
             )
-        finally:
-            # Restore the pre-check worktree state immediately; the orchestrator
-            # writes the final buffer later iff validation passes.
-            if saved is not None:
-                target_path.write_bytes(saved)
-            elif target_path.exists():
-                # saved was None (file didn't exist) → remove what we created.
-                target_path.unlink(missing_ok=True)
         if not after.checked:
             features["clippy_checked"] = False
             return
         features["clippy_checked"] = True
         # Baseline: temporarily write the marker-blanked (one-side) original,
         # run clippy, then restore the saved worktree state.
-        try:
-            target_path.write_text(_blank_markers_one_side(original, "rust"), encoding="utf-8")
+        with temp_worktree_file(repo_root, path, _blank_markers_one_side(original, "rust")):
             baseline = lsp_mod.run_clippy(
                 repo_root, cargo_path=self.config.cargo_path
             )
-        finally:
-            if saved is not None:
-                target_path.write_bytes(saved)
-            elif target_path.exists():
-                target_path.unlink(missing_ok=True)
         baseline_diags = list(baseline.diagnostics) if baseline.checked else []
         new_findings = compute_diagnostic_delta(
             baseline_diags, list(after.diagnostics),
@@ -5205,6 +5122,33 @@ def _blank_markers(text: str, language: str | None = None) -> str:
             continue
         out.append(line)
     return "\n".join(out)
+
+
+@contextmanager
+def temp_worktree_file(repo_root: str, path: str, text: str) -> Iterator[Path]:
+    """Temporarily write ``text`` to ``repo_root/path``, restoring the original after.
+
+    The save/write/restore idiom for whole-file verification: the resolved file
+    (``whole``) is in memory (verify_file runs before the orchestrator writes),
+    so to run cargo/clippy/gcc against it we write it to the worktree, run the
+    tool, then restore the pre-check bytes. Previously this 8-line try/finally
+    was copy-pasted at 4+ sites (cargo manifest, clippy after+baseline, C build);
+    this context manager centralizes it so the restore is never skipped on an
+    exception (a missed restore would leave a corrupt file for the next case).
+
+    If the file did not exist before, it is removed on exit (we created it).
+    Yields the ``Path`` of the written file.
+    """
+    target = Path(repo_root) / path
+    saved = target.read_bytes() if target.exists() else None
+    try:
+        target.write_text(text, encoding="utf-8")
+        yield target
+    finally:
+        if saved is not None:
+            target.write_bytes(saved)
+        elif target.exists():
+            target.unlink(missing_ok=True)
 
 
 def _top_level_identities(text: str, language: str | None) -> str | None:
