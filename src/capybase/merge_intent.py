@@ -36,6 +36,7 @@ from typing import Literal
 from capybase.diff import line_matcher
 
 SideKind = Literal["unchanged", "added", "deleted", "modified"]
+DeletionStability = Literal["stable", "transient", "absent"]
 
 # Direction summary kinds. ``modify_delete`` is the dangerous ambiguous case:
 # one side deleted base content while the other kept/changed it — exactly the
@@ -311,3 +312,80 @@ def detect_resurrection(
             )
     findings.sort(key=lambda b: (b.block_line_count, b.coverage), reverse=True)
     return findings
+
+
+# ---------------------------------------------------------------------------
+# Deletion stability (bounded history-walk verification)
+# ---------------------------------------------------------------------------
+
+
+def classify_deletion_stability(
+    block_lines: list[str],
+    blob_sequence: list[str],
+    *,
+    min_coverage: float = 0.85,
+) -> DeletionStability:
+    """Classify whether a deleted block's removal was permanent on its branch.
+
+    Takes the deleted block's lines and the **sequence of blob texts** along one
+    branch (oldest→newest, from merge-base to tip), and determines whether the
+    block's deletion was:
+
+    - **``stable``** — the block was present in early blobs, removed in a later
+      blob, and ABSENT in every subsequent blob up to the tip. This is a
+      deliberate cleanup: the content was removed and never came back on this
+      branch. A stable deletion reappearing in the merge result is a real
+      resurrection.
+    - **``transient``** — the block was removed at some point but REAPPEARS in
+      a later blob on the same branch. The removal was not permanent — the
+      content was re-added (a revert, a re-introduction, or a divergent edit).
+      A transient removal reappearing in the merge result is NOT a resurrection.
+    - **``absent``** — the block was never present in any blob in the sequence.
+      This means the deletion predates the merge-base (the block was already
+      gone at the branch point), so its absence in the branch tip is not a
+      cleanup decision within the merged window.
+
+    Uses :func:`_coverage_against` (the same line-coverage metric
+    :func:`detect_resurrection` uses) to check block presence at each commit.
+    Pure function; no git, no I/O.
+
+    ``blob_sequence`` is the per-commit blob texts for the path along the
+    branch, oldest first. An empty sequence returns ``"absent"``.
+    """
+    if not blob_sequence or not block_lines:
+        return "absent"
+
+    # Check block presence at each commit in the sequence.
+    # present[i] = True if the block's lines appear in blob_sequence[i].
+    present = [
+        _coverage_against(block_lines, blob.splitlines()) >= min_coverage
+        for blob in blob_sequence
+    ]
+
+    # If the block was never present in the sequence, it's "absent" (the
+    # deletion predates the merge-base window).
+    if not any(present):
+        return "absent"
+
+    # If the block is present at the tip, it was never permanently deleted in
+    # this window → not a resurrection scenario → "transient".
+    if present[-1]:
+        return "transient"
+
+    # Walk oldest→newest looking for a present→absent→present transition.
+    # If the block disappears and then reappears at ANY later point, the
+    # deletion was transient (the content was re-introduced). This catches both
+    # the simple "deleted then re-added" and the "deleted, re-added, deleted
+    # again" patterns — in both, there's a present→absent→present transition.
+    seen_absent = False
+    for is_present in present:
+        if not is_present:
+            seen_absent = True
+        elif seen_absent:
+            # Block reappeared after being absent → transient.
+            return "transient"
+
+    # The block was present in early commits, then went absent and never
+    # reappeared → stable (deliberate permanent deletion).
+    return "stable"
+

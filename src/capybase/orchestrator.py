@@ -5349,8 +5349,10 @@ class Orchestrator:
                 base_oid=mb,
                 onto_oid=onto_oid,
                 result_oid=result_oid,
+                replayed_oid=start_oid,
                 min_block_lines=cfg.resurrection_min_block_lines,
                 min_coverage=cfg.resurrection_min_similarity,
+                history_depth=cfg.resurrection_history_depth,
                 exclude_paths=set(getattr(self, "_explicitly_kept_paths", set())),
             )
         except Exception as exc:  # noqa: BLE001 - advisory, never break the rebase

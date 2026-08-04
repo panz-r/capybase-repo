@@ -533,6 +533,14 @@ class ValidationConfig(BaseModel):
     # (1.0 = whole block returned; 0.85 default tolerates minor edits). Higher =
     # fewer false positives but may miss a partially-resurrected block.
     resurrection_min_similarity: float = 0.85
+    # Bounded history-walk depth for deletion-stability verification. When a
+    # candidate resurrection is found, capybase walks the deleting branch's
+    # commit history (base..tip) to verify the deletion was stable (removed
+    # and never re-added). This distinguishes deliberate cleanup deletions
+    # from transient absences, reducing false positives. The depth bounds the
+    # number of commits examined (default 50 covers most active branches).
+    # Set to 0 to disable the history walk and use the old 3-way-only check.
+    resurrection_history_depth: int = 50
     # Cross-commit dependency guardian: a deterministic post-rebase
     # audit that catches cross-window dependency breaks the per-commit validators
     # miss (e.g. commit A renames ``foo``→``bar``, a later commit B still calls

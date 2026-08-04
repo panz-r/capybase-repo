@@ -622,6 +622,50 @@ class GitBackend:
             res.stdout, str
         ) else res.stdout
 
+    def blob_sequence(
+        self, base_oid: str, tip_oid: str, path: str, *, max_depth: int = 50,
+    ) -> list[str]:
+        """Per-commit blob texts for ``path`` along ``base_oid..tip_oid`` (oldest→newest).
+
+        Walks the commits that touched ``path`` in the bounded range, fetching
+        the blob at each. Used by the history-aware resurrection scan to verify
+        a deletion was stable (content removed and never re-added on the same
+        branch). Returns texts in oldest→newest order; the first is the
+        base blob, the last is the tip blob. An absent blob at a commit (file
+        deleted at that point) is represented as an empty string.
+
+        Bounded by ``max_depth`` (default 50 commits). Never raises — git errors
+        return an empty list (advisory; the scan degrades to the old 3-way check).
+        """
+        try:
+            # Prepend the base blob so the sequence starts with the merge-base
+            # state (where the deleted content is still present). The rev-list
+            # base_oid..tip_oid excludes base_oid itself.
+            sequence: list[str] = []
+            base_raw = self.blob_at(base_oid, path)
+            if base_raw is not None:
+                sequence.append(base_raw.decode("utf-8", errors="replace"))
+            else:
+                sequence.append("")
+            out = self._run_ok(
+                [
+                    "log", "--format=%H", "--reverse",
+                    f"--max-count={max_depth}",
+                    f"{base_oid}..{tip_oid}", "--", path,
+                ],
+                what="git log (blob sequence)",
+            ).strip()
+            if out:
+                for sha in out.splitlines():
+                    raw = self.blob_at(sha, path)
+                    if raw is None:
+                        sequence.append("")  # file absent at this commit
+                    else:
+                        sequence.append(raw.decode("utf-8", errors="replace"))
+            return sequence
+        except Exception:  # noqa: BLE001 - advisory; never break the rebase
+            return []
+
     # ------------------------------------------------------------------ rebase state
 
     def rebase_onto_oid(self) -> str | None:

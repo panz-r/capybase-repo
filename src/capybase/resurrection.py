@@ -25,7 +25,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from capybase.merge_intent import ResurrectedBlock, detect_resurrection
+from capybase.merge_intent import (
+    ResurrectedBlock,
+    classify_deletion_stability,
+    detect_resurrection,
+)
 
 if TYPE_CHECKING:
     from capybase.git_backend import GitBackend
@@ -58,67 +62,104 @@ def scan_resurrections(
     base_oid: str,
     onto_oid: str,
     result_oid: str,
+    replayed_oid: str | None = None,
     min_block_lines: int = 3,
     min_coverage: float = 0.85,
+    history_depth: int = 50,
     exclude_paths: set[str] | None = None,
 ) -> list[ResurrectionFinding]:
-    """Find content ``onto`` deleted (vs ``base_oid``) that ``result`` resurrected.
+    """Find content either side deleted (vs ``base_oid``) that ``result`` resurrected.
 
     This is the end-of-rebase scan. ``base_oid`` is the merge-base of the
     original branch and ``onto`` (the common ancestor — before either side
-    diverged). ``onto_oid`` is the upstream tip (the deletion intent lives in
-    ``base_oid..onto_oid``). ``result_oid`` is the post-rebase HEAD.
+    diverged). ``onto_oid`` is the upstream tip. ``result_oid`` is the
+    post-rebase HEAD. ``replayed_oid`` (optional) is the original branch tip —
+    when provided, BOTH sides' deletions are checked (the replayed branch may
+    have its own cleanups the merge could undo).
 
-    For each path ``onto`` changed since the merge-base (deleted OR modified — a
-    cleanup can delete a block *within* a file, not just a whole file), we fetch
-    the base/onto/result blobs and run the pure :func:`detect_resurrection`. The
-    block-level detection (not just whole-file) is what catches the
-    edit_file.rs-style case: the file still exists, but a block the upstream
-    removed came back.
+    For each path a branch changed since the merge-base (deleted OR modified —
+    a cleanup can delete a block *within* a file, not just a whole file), we
+    fetch the base/side/result blobs and run the pure
+    :func:`detect_resurrection` to find candidate resurrected blocks. Then,
+    when ``history_depth > 0``, each candidate is verified against the deleting
+    branch's bounded commit history via :func:`classify_deletion_stability`:
+    only **stable** deletions (removed and never re-added on that branch) are
+    flagged. Transient absences (deleted then re-added) are filtered out,
+    reducing false positives.
 
     ``exclude_paths`` are paths the caller ALREADY reviewed and deliberately
     kept — typically a modify/delete conflict resolved via block-capture's
-    ``keep_block``. Such a keep IS the deliberate resurrection of content
-    upstream deleted; it was judged explicitly (not silently), so flagging it
-    here would double-report an already-reviewed decision. Pass those paths to
-    suppress the silent-resurrection finding for them.
+    ``keep_block``.
 
     Returns one :class:`ResurrectionFinding` per path with a hit, sorted by
-    resurrected-line count (largest first). Empty when ``onto`` changed nothing
-    or none of the deletions came back — the common, safe case. Never raises:
-    git errors are swallowed (advisory detection must not break a rebase).
+    resurrected-line count (largest first). Empty when nothing was deleted or
+    none of the deletions came back — the common, safe case. Never raises.
     """
-    # The paths to inspect = paths onto CHANGED since the merge-base. A cleanup
-    # can be a whole-file deletion OR an intra-file block deletion; both express
-    # a deletion intent the pure detect_resurrection can find at block level.
     excluded = exclude_paths or set()
-    candidate_paths = _changed_paths(git, base_oid, onto_oid)
     findings: list[ResurrectionFinding] = []
-    for path in candidate_paths:
-        if path in excluded:
-            continue
-        base_blob = _blob_text(git, base_oid, path)
-        onto_blob = _blob_text(git, onto_oid, path)
-        result_blob = _blob_text(git, result_oid, path)
-        if base_blob is None or result_blob is None:
-            continue  # can't be a resurrection of base content if base/result absent
-        # onto_blob may be None (whole-file deletion) or present (block deletion
-        # within a still-existing file). detect_resurrection takes onto's text;
-        # a None blob means the file was wholly removed → empty "ours" text.
-        blocks = detect_resurrection(
-            base_blob,
-            onto_blob or "",  # onto's content (empty if the whole file was removed)
-            result_blob,
-            min_block_lines=min_block_lines,
-            min_coverage=min_coverage,
-        )
-        if blocks:
-            subject = _deleting_commit_subject(git, base_oid, onto_oid, path)
-            findings.append(
-                ResurrectionFinding(
-                    path=path, deleting_commit=subject, blocks=blocks
-                )
+
+    # Check both sides: onto (upstream) and replayed (feature branch).
+    sides: list[tuple[str, str]] = [(onto_oid, "onto")]
+    if replayed_oid and replayed_oid != onto_oid:
+        sides.append((replayed_oid, "replayed"))
+
+    for side_oid, side_label in sides:
+        candidate_paths = _changed_paths(git, base_oid, side_oid)
+        for path in candidate_paths:
+            if path in excluded:
+                continue
+            base_blob = _blob_text(git, base_oid, path)
+            side_blob = _blob_text(git, side_oid, path)
+            result_blob = _blob_text(git, result_oid, path)
+            if base_blob is None or result_blob is None:
+                continue
+            candidates = detect_resurrection(
+                base_blob,
+                side_blob or "",
+                result_blob,
+                min_block_lines=min_block_lines,
+                min_coverage=min_coverage,
             )
+            if not candidates:
+                continue
+            # History-walk stability verification: for each candidate block,
+            # check whether the deletion was stable on this branch.
+            blob_seq = None
+            if history_depth > 0 and candidates:
+                blob_seq = git.blob_sequence(
+                    base_oid, side_oid, path, max_depth=history_depth,
+                )
+            stable_blocks: list[ResurrectedBlock] = []
+            for blk in candidates:
+                block_lines = blk.text.splitlines()
+                if blob_seq:
+                    stability = classify_deletion_stability(
+                        block_lines, blob_seq, min_coverage=min_coverage,
+                    )
+                else:
+                    stability = "stable"  # no history available; can't refine
+                if stability == "stable":
+                    # Enrich the block with stability info for the journal.
+                    enriched = ResurrectedBlock(
+                        text=blk.text,
+                        base_span=blk.base_span,
+                        coverage=blk.coverage,
+                        result_line_count=blk.result_line_count,
+                        block_line_count=blk.block_line_count,
+                        extra={
+                            **blk.extra,
+                            "stability": stability,
+                            "deleting_side": side_label,
+                        },
+                    )
+                    stable_blocks.append(enriched)
+            if stable_blocks:
+                subject = _deleting_commit_subject(git, base_oid, side_oid, path)
+                findings.append(
+                    ResurrectionFinding(
+                        path=path, deleting_commit=subject, blocks=stable_blocks
+                    )
+                )
     findings.sort(key=lambda f: f.resurrected_line_count, reverse=True)
     return findings
 
@@ -129,25 +170,30 @@ def scan_step(
     step_oid: str,
     base_oid: str,
     onto_oid: str,
+    replayed_oid: str | None = None,
     min_block_lines: int = 3,
     min_coverage: float = 0.85,
+    history_depth: int = 50,
     exclude_paths: set[str] | None = None,
 ) -> list[ResurrectionFinding]:
     """Per-step resurrection scan: did replaying one commit resurrect a deletion?
 
     Scoped to a single replayed commit (``step_oid``), this checks whether that
     commit's result (the tree after the step was applied) brought back content
-    ``onto`` deleted. ``base_oid`` is the merge-base bounding the window. Runs
-    on the same deletion-paths logic as :func:`scan_resurrections` but with the
-    step's tree as the ``result``. Returns findings sorted largest-first.
+    either side deleted. ``base_oid`` is the merge-base bounding the window.
+    Runs on the same deletion-paths + stability logic as
+    :func:`scan_resurrections` but with the step's tree as the ``result``.
+    Returns findings sorted largest-first.
     """
     return scan_resurrections(
         git,
         base_oid=base_oid,
         onto_oid=onto_oid,
         result_oid=step_oid,
+        replayed_oid=replayed_oid,
         min_block_lines=min_block_lines,
         min_coverage=min_coverage,
+        history_depth=history_depth,
         exclude_paths=exclude_paths,
     )
 
