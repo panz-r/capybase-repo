@@ -1124,7 +1124,10 @@ def _fit_to_budget(
             _skeleton_block = cached_skeleton
         else:
             try:
-                from capybase.adapters.c_skeleton import extract_skeleton
+                if unit.language == "c":
+                    from capybase.adapters.c_skeleton import extract_skeleton
+                else:
+                    from capybase.adapters.cpp_skeleton import extract_skeleton
                 skeleton = extract_skeleton(_orig_text)
                 _skeleton_block = skeleton.render(max_tokens=400)
                 unit.structural_metadata["_c_skeleton_rendered"] = _skeleton_block
