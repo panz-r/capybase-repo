@@ -14,6 +14,7 @@ Prompt versions::
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -64,6 +65,8 @@ from capybase.conflict_model import (
     estimate_tokens,
 )
 from capybase.config import ModelConfig
+
+_log = logging.getLogger("capybase.resolution")
 from capybase.consensus import ConsensusReport, rank_by_consensus
 
 PROMPT_RESOLVE = "resolve_text_block.v6"
@@ -549,11 +552,21 @@ def _function_local_context(unit: ConflictUnit) -> str:
     provide. Costs ~100 tokens for a 400-token conflict.
 
     Returns "" when the conflict is not inside a function (e.g., file-level
-    declarations, struct definitions) or when the enclosing function can't
-    be determined.
+    declarations, struct definitions) or when the enclosing function can't be
+    determined.
+
+    **Sub-units (entity-split):** when ``structural_metadata["parent_unit_id"]``
+    is present the ``marker_span`` is a proportional slot, NOT the content's
+    physical location, so the worktree walk would land on marker scaffolding
+    instead of the real enclosing function. For sub-units we derive the
+    signature from the side text directly (the side text IS the entity the
+    sub-unit resolves), which is content-aligned by construction.
     """
     if unit.language not in ("c", "cpp", "c++"):
         return ""
+    # Entity-split sub-units: derive context from the side text, not marker_span.
+    if unit.structural_metadata.get("parent_unit_id"):
+        return _sub_unit_function_context(unit)
     if unit.marker_span is None:
         return ""
     text = unit.original_worktree_text or unit.base.text or ""
@@ -638,6 +651,95 @@ def _function_local_context(unit: ConflictUnit) -> str:
         parts.extend(f"  {l}" for l in post_lines if l.strip())
 
     return "\n".join(parts) + "\n\n"
+
+
+def _sub_unit_function_context(unit: ConflictUnit) -> str:
+    """Function-local context for an entity-split sub-unit, derived from its sides.
+
+    The sub-unit's ``marker_span`` is a proportional slot, so the normal
+    worktree walk cannot locate the real enclosing function. Instead we read
+    the signature from the side text: a sub-unit split at an entity boundary
+    resolves exactly one entity, whose definition IS the side text. We pick the
+    non-empty side, find its signature line (an identifier with ``(`` that does
+    not end in ``;``), and render it with a few lines of leading body context.
+
+    For purely-additive sub-units (one side empty, the other a new function),
+    the non-empty side's signature is the function being added — exactly the
+    scope the model needs. Returns "" when no signature can be found (e.g. a
+    struct/global/typedef sub-unit, or an empty pair).
+    """
+    cur = unit.current.text or ""
+    rep = unit.replayed.text or ""
+    side = cur if len(cur) >= len(rep) else rep
+    if not side or not side.strip():
+        return ""
+    side_lines = side.split("\n")
+    # Find the first line that looks like a function definition: has '(' and
+    # doesn't end with ';' (a declaration) or start with '#' (a directive).
+    sig_idx = None
+    for i, ln in enumerate(side_lines):
+        s = ln.strip()
+        if not s or s.startswith("#") or s.startswith("//") or s.startswith("/*"):
+            continue
+        if "(" in s and not s.endswith(";"):
+            sig_idx = i
+            break
+    if sig_idx is None:
+        return ""
+    # Collect the signature (possibly multi-line, up to the opening brace).
+    sig_lines: list[str] = [side_lines[sig_idx].rstrip()]
+    for j in range(sig_idx + 1, min(sig_idx + 5, len(side_lines))):
+        ln = side_lines[j].rstrip()
+        if not ln:
+            break
+        sig_lines.append(ln)
+        if "{" in ln:
+            break
+    # A few lines of body immediately after the signature, as local context.
+    body_end = min(len(side_lines), sig_idx + len(sig_lines) + 3)
+    body_start = sig_idx + len(sig_lines)
+    body_lines = [
+        side_lines[k].rstrip() for k in range(body_start, body_end)
+        if k < len(side_lines) and side_lines[k].strip()
+    ]
+    parts = [f"Enclosing function: {' '.join(sig_lines)[:200]}"]
+    if body_lines:
+        parts.append("Local context in this entity:")
+        parts.extend(f"  {l}" for l in body_lines[:3])
+    return "\n".join(parts) + "\n\n"
+
+
+def _sibling_resolutions_block(unit: ConflictUnit, *, max_tokens: int = 300) -> str:
+    """The one-way Shared Resolution Context (SRC) for entity-split sub-units.
+
+    When a marker block was split into per-entity sub-units, the orchestrator's
+    Phase 1 loop records each earlier sibling's accepted resolution in
+    ``unit.structural_metadata["sibling_resolutions"]`` (a list of resolved-text
+    strings, in document order). This renders a compact, token-bounded "Already
+    resolved in this block" block so a later sub-unit stays consistent with the
+    symbols/types its upstream siblings introduced (e.g. don't re-declare a
+    struct that the previous fragment already added).
+
+    Returns "" when there are no sibling resolutions (non-split units, or the
+    first sub-unit). Kept small by design: the addressable cases are append-
+    disjoint, so the SRC guards against cross-unit symbol drift rather than
+    carrying full prior text.
+    """
+    siblings = unit.structural_metadata.get("sibling_resolutions") or []
+    if not siblings:
+        return ""
+    # Join then bound to ~max_tokens chars (4 chars/token heuristic, matching the
+    # skeleton block's budgeting). Truncate the tail so the most recent (closest
+    # upstream) siblings are kept; they are the most likely to be referenced.
+    max_chars = max_tokens * 4
+    rendered = "\n".join(s.rstrip() for s in siblings if s and s.strip())
+    if len(rendered) > max_chars:
+        rendered = "…(earlier resolutions truncated)…\n" + rendered[-max_chars:]
+    return (
+        "Already resolved in this conflict block (be consistent with these; "
+        "do not re-declare symbols they introduced):\n"
+        f"{rendered}\n\n"
+    )
 
 
 def _semantic_change_block(unit: ConflictUnit) -> str:
@@ -1243,6 +1345,9 @@ def _resolve_prompt_parts(
     # the conflict. Gives the model local scope awareness (parameter types,
     # variable declarations) that the file-level skeleton can't provide.
     func_ctx = _function_local_context(unit)
+    # Shared Resolution Context: when this unit is an entity-split sub-unit, the
+    # resolved text of upstream sibling sub-units (fed by the orchestrator).
+    src_block = _sibling_resolutions_block(unit)
     # ConflictSummaryMode (feedback §3.1): gate which context blocks surface.
     # FULL = today (all blocks); INTENT_ONLY = just side_intent; NONE = strip all.
     # Reduces context density for models that drown in structural detail.
@@ -1290,7 +1395,7 @@ def _resolve_prompt_parts(
     # The skeleton block (global entity names for oversized files) is prepended
     # so the model has global awareness before the local conflict.
     data_block = (
-        f"{skeleton_block}{func_ctx}{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{struct_ctx}{side_intent}{semantic_change}{value_resolution}"
+        f"{skeleton_block}{func_ctx}{src_block}{obls_t}{anchor_t}{siblings_t}{deps_t}{history_t}{few_shot_t}{struct_ctx}{side_intent}{semantic_change}{value_resolution}"
         f"{_sides}"
         f"Surrounding file context:\n{primary_t}\n\n"
     )
@@ -2917,6 +3022,18 @@ class ResolutionEngine:
             parts = _resolve_prompt_parts(unit, context, budget=self.token_budget)
             prompt_trims = parts["trims"]
             prompt = outline_prompt
+        # Prompt-size diagnostic (oversized-splitting Problem 3): surface the
+        # actual byte/token cost of the prompt the model receives, so the eval
+        # can tell whether a rejected-by-guard case would have fit the window
+        # (guard is a false proxy) or genuinely needs splitting. ~4 chars/token.
+        _log.debug(
+            "prompt_size unit=%s version=%s chars=%d tokens~=%d parent=%s",
+            unit.unit_id,
+            prompt_version,
+            len(prompt),
+            len(prompt) // 4,
+            unit.structural_metadata.get("parent_unit_id") or "-",
+        )
         candidates: list[CandidateResolution] = []
         n = max(1, self.config.samples if n_samples is None else n_samples)
         # Prompt-variant sampling: on a FRESH resolve only (retries/

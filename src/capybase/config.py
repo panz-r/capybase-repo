@@ -653,6 +653,31 @@ class FutureConfig(BaseModel):
     # Below this the full-LLM path reproduces the block fine; above it
     # reproduction becomes unreliable and the decision-style prompt takes over.
     block_capture_min_lines: int = 50
+    # Entity-boundary sub-conflict splitting (C/C++): when a single marker block
+    # on an oversized file spans multiple top-level entities (functions, structs,
+    # globals), split it into one sub-conflict per entity. Each sub-unit becomes
+    # a small, self-contained prompt that fits the model window, where the whole-
+    # file prompt would blow it (98/133 sqlite cases are rejected today by the
+    # 48K-char guard for exactly this reason). The sub-spans partition the parent
+    # marker_span exactly, so the existing multi-hunk splice layer reassembles
+    # them with no change. Sibling resolutions are fed forward one-way into each
+    # later sub-unit's prompt. Splitting happens at unit construction (extractor),
+    # so every downstream stage (Phase 1 loop, prompt builder, per-unit verify,
+    # splice, Phase 2 blame) treats sub-units uniformly.
+    #
+    # Always-on and ADAPTIVE (like the history-aware features): there is no
+    # master on/off flag. Splitting fires only where its own data says it is
+    # appropriate — a splittable language, a marker block whose region exceeds
+    # ``entity_split_min_lines``, and >1 top-level entity inside it. The two
+    # knobs below tune where that line is drawn, not whether splitting exists.
+    # Only split a marker block whose region exceeds this many lines. Below it the
+    # whole-block prompt is already small and splitting just adds overhead.
+    entity_split_min_lines: int = 40
+    # Minimum sub-region size (lines) to emit as its own sub-unit. Prevents
+    # shredding a 45-line block into one-line slivers at dense entity boundaries
+    # (e.g. a block of typedefs). Sub-regions smaller than this are merged into
+    # the preceding sub-unit.
+    entity_split_min_sub_lines: int = 8
     # Deferred Comment Reconciliation: after the code-resolution pass produces
     # test-passing code, a second CEGIS pass reconciles comments. Comments are
     # classified (machine/legal/generated/doctest vs deferred-prose), deferred

@@ -23,7 +23,7 @@ from capybase.git_backend import (
 )
 
 if TYPE_CHECKING:
-    from capybase.config import StructuralConfig
+    from capybase.config import FutureConfig, StructuralConfig
 
 # Language inference from file extension. The single source of truth is
 # ``language.EXTENSION_TO_LANGUAGE``; aliased locally as ``_EXT_LANG`` so the
@@ -66,9 +66,11 @@ class ConflictExtractor:
         git: GitBackend,
         *,
         structural_config: "StructuralConfig | None" = None,
+        future_config: "FutureConfig | None" = None,
     ) -> None:
         self.git = git
         self.structural_config = structural_config
+        self.future_config = future_config
 
     def extract_file_units(
         self,
@@ -148,6 +150,15 @@ class ConflictExtractor:
                     risk_tags=[],
                 )
             )
+        # Entity-boundary splitting: expand each oversized marker-block unit
+        # that spans multiple top-level C/C++ entities into one sub-unit per
+        # entity. The sub-spans partition the parent marker_span exactly, so the
+        # existing multi-hunk splice reassembles them unchanged. Runs BEFORE the
+        # enrichment passes (provenance, sibling metadata, structural, diff3,
+        # severity, features, merge-direction) so every sub-unit is enriched as a
+        # first-class unit. A no-op (returns [unit]) when disabled, the language
+        # has no abstract parser, or the block doesn't span >1 entity.
+        units = self._split_units(units)
         # Per-side provenance: attribute each side's blob to the
         # commit that introduced it. Advisory — never blocks resolution. The blob
         # OIDs come from the unmerged index (set above); this just enriches them.
@@ -256,6 +267,39 @@ class ConflictExtractor:
                 }
             except Exception:  # noqa: BLE001 - classification is advisory
                 pass
+
+    # ------------------------------------------------------------------
+    # Entity-boundary splitting (see docs/oversized-splitting-design-v3.md)
+    # ------------------------------------------------------------------
+
+    # Languages whose abstract parser yields reliable top-level entity spans
+    # for splitting. The design targets C/C++ (Family A); the abstract parser
+    # already returns function/struct/field spans at parse_confidence 1.0.
+    _SPLITTABLE_LANGS = frozenset({"c", "cpp", "c++"})
+
+    def _split_units(self, units: list[ConflictUnit]) -> list[ConflictUnit]:
+        """Expand oversized multi-entity units into per-entity sub-units.
+
+        Always-on but adaptive: for each marker-block unit it attempts to split
+        at top-level entity boundaries; units that can't or shouldn't split are
+        returned unchanged. The decision to fire lives in ``_split_unit_at_entities``
+        (splittable language, region above ``entity_split_min_lines``, >1 entity),
+        not behind a master flag. Whole-file units (``marker_span is None``) are
+        never split — there is no marker span to partition.
+        """
+        fut = self.future_config
+        out: list[ConflictUnit] = []
+        for u in units:
+            if u.marker_span is None or u.language not in self._SPLITTABLE_LANGS:
+                out.append(u)
+                continue
+            subs = _split_unit_at_entities(
+                u,
+                min_region_lines=fut.entity_split_min_lines if fut else 40,
+                min_sub_lines=fut.entity_split_min_sub_lines if fut else 8,
+            )
+            out.extend(subs)
+        return out
 
     def _extract_whole_file_units(
         self,
@@ -410,6 +454,427 @@ def _blob_provenance(git: object, blob_oid: str | None) -> dict:
         return {"sha": "", "subject": ""}
     sha, subject = git.last_touch_blob(blob_oid)  # type: ignore[attr-defined]
     return {"sha": sha, "subject": subject}
+
+
+# ----------------------------------------------------------------------
+# Entity-boundary sub-conflict splitting
+# ----------------------------------------------------------------------
+#
+# Splits one oversized marker-block unit that spans multiple top-level C/C++
+# entities into one sub-unit per entity. The sub-spans partition the parent
+# ``marker_span`` exactly (non-overlapping, reverse-sortable for splice), so
+# the existing multi-hunk splice reassembles them with no change.
+#
+# Entity boundaries come from the grammar-free abstract parser
+# (``adapters.abstract_parser.parse_file``), which returns top-level entity
+# spans for C at parse_confidence 1.0. A split point is an entity start line
+# STRICTLY inside the marker block (not the block's own first line). We never
+# split inside the marker scaffolding (the ``<<<<<<<`` / ``=======`` /
+# ``>>>>>>>`` lines) — split points are content lines.
+
+def _side_entity_split_points(side_text: str, language: str) -> list[int]:
+    """Content-line offsets (0-based) at which a top-level entity starts in ``side_text``.
+
+    Parses ONE conflict side in isolation so the abstract parser sees real code
+    rather than duplicated conflict sides. Returns entity-start line offsets
+    strictly greater than 0 (the first entity at offset 0 is never a split point
+    — it is the leading fragment's first line). Empty when parsing is unavailable
+    or no interior entity boundary exists.
+    """
+    if not side_text or not side_text.strip():
+        return []
+    try:
+        from capybase.adapters import abstract_parser
+    except Exception:  # noqa: BLE001
+        return []
+    ir = abstract_parser.parse_file(side_text, language=language)
+    if ir is None or ir.parse_confidence == 0.0:
+        return []
+    points = sorted({u.span[0] for u in ir.units if u.span[0] > 0})
+    # Preprocessor safety (C/C++): never split inside an #if/#ifdef/#ifndef
+    # block. A split point there strands the #if in one sub-unit and its #endif
+    # in another, so the splice reassembly produces an unbalanced preprocessor
+    # tree (observed on sqlite-0040: a cross-sub-unit #endif imbalance the
+    # Phase 2 repair couldn't attribute). Drop any split point whose line sits
+    # at a non-zero conditional depth; the splitter then either splits at the
+    # remaining safe boundaries or declines (resolves as one block).
+    if language in ("c", "cpp", "c++") and points:
+        points = _drop_points_inside_preprocessor_conditional(side_text, points)
+    return points
+
+
+def _drop_points_inside_preprocessor_conditional(
+    side_text: str, points: list[int]
+) -> list[int]:
+    """Filter ``points`` to those at C preprocessor conditional depth 0.
+
+    Tracks ``#if`` / ``#ifdef`` / ``#ifndef`` (depth +1) against ``#endif``
+    (depth -1); ``#else`` / ``#elif`` do not change depth. A split point at a
+    line where depth > 0 would divide an ``#if`` from its matching ``#endif``,
+    so it is removed. ``points`` are 0-based content-line offsets into
+    ``side_text``. Best-effort: an unbalanced ``#if``/``#endif`` count in the
+    fragment text leaves the tail at non-zero depth, which conservatively drops
+    later points (safe — the splitter then declines rather than mis-splitting).
+    """
+    lines = side_text.split("\n")
+    n = len(lines)
+    depth_at_line: list[int] = [0] * n
+    depth = 0
+    for i, raw in enumerate(lines):
+        stripped = raw.strip()
+        if stripped.startswith("#"):
+            directive = stripped[1:].lstrip().split(None, 1)[0] if stripped[1:].lstrip() else ""
+            if directive in ("if", "ifdef", "ifndef"):
+                depth_at_line[i] = depth  # the #if line itself is at current depth
+                depth += 1
+                continue
+            if directive == "endif":
+                depth = max(0, depth - 1)
+        depth_at_line[i] = depth
+    return [p for p in points if p < n and depth_at_line[p] == 0]
+
+
+
+
+def _build_sub_unit(
+    parent: ConflictUnit,
+    sub_index: int,
+    sub_span: tuple[int, int],
+    cur_text: str,
+    rep_text: str,
+    base_text: str,
+    n_subs: int,
+) -> ConflictUnit:
+    """Construct one sub-``ConflictUnit`` from a partitioned span + sliced sides."""
+    return ConflictUnit(
+        session_id=parent.session_id,
+        step_index=parent.step_index,
+        path=parent.path,
+        language=parent.language,
+        conflict_type=parent.conflict_type,
+        unit_id=f"{parent.unit_id}#s{sub_index}",
+        unit_kind=parent.unit_kind,
+        base=ConflictSide(
+            label=parent.base.label, text=base_text, blob_oid=parent.base.blob_oid
+        ),
+        current=ConflictSide(
+            label=parent.current.label, text=cur_text, blob_oid=parent.current.blob_oid
+        ),
+        replayed=ConflictSide(
+            label=parent.replayed.label,
+            text=rep_text,
+            blob_oid=parent.replayed.blob_oid,
+        ),
+        original_worktree_text=parent.original_worktree_text,
+        marker_span=sub_span,
+        enclosing_symbol=parent.enclosing_symbol,
+        risk_tags=list(parent.risk_tags),
+        severity=parent.severity,
+        # Traceability + the SRC seam the prompt builder reads. parent_unit_id
+        # groups the siblings; sub_unit_index orders them top-to-bottom so the
+        # orchestrator's Phase 1 loop can feed resolved text forward.
+        structural_metadata={
+            "parent_unit_id": parent.unit_id,
+            "sub_unit_index": sub_index,
+            "sub_unit_count": n_subs,
+        },
+    )
+
+
+def _split_unit_at_entities(
+    unit: ConflictUnit,
+    *,
+    min_region_lines: int,
+    min_sub_lines: int,
+) -> list[ConflictUnit]:
+    """Split ``unit`` at top-level entity boundaries, or ``[unit]`` if not viable.
+
+    Model
+    -----
+    The marker block's two side texts (current, replayed) each contain the same
+    logical entities (func_a, func_b, ...) but at *different* absolute line
+    offsets within their own text. So entity boundaries are found by parsing
+    each side IN ISOLATION. The marker block's worktree line range
+    ``[start, end]`` is partitioned into N sub-spans (the "slots" the splice
+    writes into); each side is sliced into N fragments at its own entity
+    boundaries, and the i-th fragment of each side becomes the i-th sub-unit's
+    sides. Because both sides carry the same entity order, the fragments align.
+
+    The sub-spans are sized proportionally to the CURRENT side's fragment sizes
+    so a sub-unit's worktree slot roughly matches the content it resolves. The
+    splice only uses ``(marker_span, resolved_text)`` — the side texts are for
+    the prompt — so exact slot/content alignment is not required for splice
+    correctness, only non-overlapping partition of ``[start, end]``.
+
+    Returns ``[unit]`` (unchanged) when: the region is below
+    ``min_region_lines``, no interior entity boundary exists, fewer than 2 viable
+    fragments remain, or any defensive check fails. Best-effort; never blocks
+    resolution.
+    """
+    try:
+        start, end = unit.marker_span  # type: ignore[misc]
+    except (TypeError, ValueError):
+        return [unit]
+    region_lines = end - start + 1
+    if region_lines < min_region_lines:
+        return [unit]
+
+    worktree = unit.original_worktree_text
+    wt_lines = worktree.split("\n")
+    if start < 0 or end >= len(wt_lines) or start > end:
+        return [unit]
+
+    lang = unit.language or ""
+    cur_text = unit.current.text or ""
+    rep_text = unit.replayed.text or ""
+
+    # Find entity boundaries on each side independently.
+    cur_pts = _side_entity_split_points(cur_text, lang)
+    rep_pts = _side_entity_split_points(rep_text, lang)
+
+    # A side "carries structure" when it has interior entity boundaries we can
+    # split on. The side WITH structure drives the fragment count; the other is
+    # sliced to match (empty when it has no entities — the lopsided-add case
+    # where one side added N functions and the other is a stale comment/deletion).
+    cur_has_struct = bool(cur_pts)
+    rep_has_struct = bool(rep_pts)
+
+    if cur_has_struct and rep_has_struct:
+        # Symmetric conflict: both sides carry the entities. They must agree on
+        # the entity count for the fragments to align — a mismatch means the two
+        # sides genuinely disagree on structure (a rename, an add/remove), and
+        # splitting would mis-align the sides. Decline; resolve as one block.
+        if len(rep_pts) != len(cur_pts):
+            return [unit]
+        cur_frags = _fragment_at_points(cur_text, cur_pts)
+        rep_frags = _fragment_at_points(rep_text, rep_pts)
+    elif cur_has_struct and not rep_has_struct:
+        # Lopsided add: current carries the entities, replayed does not. Split
+        # CURRENT at its entity boundaries; replayed is the single fragment it
+        # already is, broadcast across the same fragment count.
+        cur_frags = _fragment_at_points(cur_text, cur_pts)
+        rep_frags = _broadcast_fragment(rep_text, len(cur_frags))
+    elif rep_has_struct and not cur_has_struct:
+        # Lopsided add (mirror): replayed carries the entities. Split REPLAYED;
+        # current is broadcast across the same count.
+        rep_frags = _fragment_at_points(rep_text, rep_pts)
+        cur_frags = _broadcast_fragment(cur_text, len(rep_frags))
+    else:
+        # Neither side has interior entity boundaries — nothing useful to split.
+        return [unit]
+
+    # Defensive parity: fragments must align in count.
+    if len(cur_frags) != len(rep_frags) or len(cur_frags) < 2:
+        return [unit]
+
+    # Drop fragments smaller than min_sub_lines on BOTH sides (a fragment that
+    # is tiny in both sides carries no real content). Merge such a fragment into
+    # its predecessor. Build the keep-mask over the fragment list.
+    keep = _merge_tiny_fragments(cur_frags, rep_frags, min_sub_lines)
+    if sum(keep) < 2:
+        return [unit]
+    # Re-extract the kept fragments (merging absorbed ones' text).
+    cur_kept, rep_kept = _apply_keep(cur_frags, rep_frags, keep)
+
+    n_subs = len(cur_kept)
+    if n_subs < 2:
+        return [unit]
+
+    # Partition the worktree line range [start, end] into n_subs contiguous,
+    # non-overlapping sub-spans sized proportionally to the NON-EMPTY side's kept
+    # fragment line counts. This is the splice contract: the sub-spans must
+    # cover [start, end] exactly with no gaps or overlaps.
+    weights = [
+        max(len(c.split("\n")), len(r.split("\n"))) for c, r in zip(cur_kept, rep_kept)
+    ]
+    sub_spans = _proportional_sub_spans(start, end, weights)
+
+    # The base side: the parent's base is usually the WHOLE merge-base file, not
+    # a hunk. Inheriting it verbatim breaks the deterministic cascade — a sub-
+    # unit with empty current + one replayed function would look like a
+    # base-vs-replayed conflict against a 300K-char base and be declined by the
+    # structural resolver (which then forces a model call the reviewers expected
+    # to be free). So we do NOT inherit the whole-file base. Instead:
+    #   - If the parent base has the SAME entity count at its own boundaries, we
+    #     fragment it in parallel (a true 3-way modify at the entity level).
+    #   - Otherwise the sub-unit base is empty — a pure add/add at the entity
+    #     level, which the structural resolver's one-sided rule resolves with
+    #     zero model calls (exactly the "free" resolution the design intends).
+    base_kept = _fragment_base(unit.base.text or "", lang, n_subs, cur_pts, rep_pts,
+                               cur_has_struct, rep_has_struct)
+
+    sub_units: list[ConflictUnit] = []
+    for k in range(n_subs):
+        sub_units.append(
+            _build_sub_unit(
+                unit, k, sub_spans[k], cur_kept[k], rep_kept[k], base_kept[k], n_subs
+            )
+        )
+    return sub_units
+
+
+def _fragment_base(
+    base_text: str,
+    language: str,
+    n_subs: int,
+    cur_pts: list[int],
+    rep_pts: list[int],
+    cur_has_struct: bool,
+    rep_has_struct: bool,
+) -> list[str]:
+    """Derive each sub-unit's base text for correct 3-way vs add/add semantics.
+
+    The parent base is usually the whole merge-base file. Inheriting it verbatim
+    makes a one-sided-addition sub-unit look like a base-vs-side conflict and
+    defeats the deterministic cascade. Instead:
+
+    * When the conflict is SYMMETRIC (both sides carry the same entities) AND
+      the base also has the same entity count, fragment the base in parallel so
+      each sub-unit is a true 3-way modify at the entity level.
+    * Otherwise (lopsided add, or base entity count disagrees) return ``n_subs``
+      empty strings — each sub-unit is a pure add/add at the entity level, which
+      the structural resolver's one-sided rule resolves with zero model calls.
+
+    The whole-file base remains accessible via ``original_worktree_text`` for
+    the prompt builder's anchor-based localization if ever needed.
+    """
+    if not base_text or not base_text.strip():
+        return [""] * n_subs
+    # Only attempt parallel base fragmentation for symmetric conflicts.
+    if not (cur_has_struct and rep_has_struct):
+        return [""] * n_subs
+    base_pts = _side_entity_split_points(base_text, language)
+    # Require the base to agree on entity count with the sides; else the base
+    # is structurally different (e.g. the entities are new) -> treat as add/add.
+    if len(base_pts) != len(cur_pts) or len(base_pts) + 1 != n_subs:
+        return [""] * n_subs
+    frags = _fragment_at_points(base_text, base_pts)
+    # Defensive length guard.
+    if len(frags) != n_subs:
+        return [""] * n_subs
+    return frags
+
+
+def _fragment_at_points(text: str, points: list[int]) -> list[str]:
+    """Split ``text`` into fragments at the given 0-based content line offsets.
+
+    ``points`` are the interior start lines; fragment i covers the lines from
+    the previous point (or 0) up to the line before the next point (or EOF).
+    """
+    if not text:
+        return [""]
+    lines = text.split("\n")
+    bounds = [0] + [p for p in points if 0 < p < len(lines)] + [len(lines)]
+    frags: list[str] = []
+    for i in range(len(bounds) - 1):
+        lo, hi = bounds[i], bounds[i + 1]
+        frags.append("\n".join(lines[lo:hi]))
+    return frags
+
+
+def _broadcast_fragment(text: str, n: int) -> list[str]:
+    """Place ``text`` in the FIRST of ``n`` aligned fragments; the rest are empty.
+
+    Used in the lopsided-add case: the no-structure side (e.g. a stale comment
+    or a deletion marker) precedes the first entity the other side added, so its
+    entire content belongs to the leading fragment. The remaining fragments map
+    to entities this side does not carry, so they are empty. If ``n <= 0``,
+    returns ``[""]``.
+    """
+    if n <= 0:
+        return [""]
+    return [text or ""] + [""] * (n - 1)
+
+
+def _merge_tiny_fragments(
+    cur_frags: list[str], rep_frags: list[str], min_sub_lines: int
+) -> list[bool]:
+    """Return a keep-mask merging fragments tiny in BOTH sides into predecessors.
+
+    A fragment is "tiny" when BOTH its current and replayed versions have fewer
+    than ``min_sub_lines`` non-blank lines. Such a fragment is absorbed into the
+    preceding kept fragment. The first fragment is always kept.
+    """
+    def _nblank(s: str) -> int:
+        return sum(1 for ln in s.split("\n") if ln.strip())
+
+    keep = [True] * len(cur_frags)
+    for i in range(1, len(cur_frags)):
+        if _nblank(cur_frags[i]) < min_sub_lines and _nblank(rep_frags[i]) < min_sub_lines:
+            keep[i] = False  # absorb into predecessor
+    return keep
+
+
+def _apply_keep(
+    cur_frags: list[str], rep_frags: list[str], keep: list[bool]
+) -> tuple[list[str], list[str]]:
+    """Apply a keep-mask, concatenating absorbed fragments into their predecessor."""
+    cur_out: list[str] = []
+    rep_out: list[str] = []
+    for i, k in enumerate(keep):
+        if k:
+            cur_out.append(cur_frags[i])
+            rep_out.append(rep_frags[i])
+        else:
+            # absorb into the last kept
+            cur_out[-1] = cur_out[-1] + "\n" + cur_frags[i] if cur_out else cur_frags[i]
+            rep_out[-1] = rep_out[-1] + "\n" + rep_frags[i] if rep_out else rep_frags[i]
+    return cur_out, rep_out
+
+
+def _proportional_sub_spans(
+    block_start: int, block_end: int, weights: list[int]
+) -> list[tuple[int, int]]:
+    """Partition ``[block_start, block_end]`` into contiguous sub-spans by weight.
+
+    ``weights[i]`` sizes the i-th sub-span (line count). Weights <= 0 are
+    treated as 1 so every sub-span is at least one line. The spans tile the
+    block exactly with no gaps or overlaps (any remainder from integer rounding
+    goes into the last span).
+    """
+    total = block_end - block_start + 1
+    n = len(weights)
+    w = [max(1, x) for x in weights]
+    wsum = sum(w)
+    spans: list[tuple[int, int]] = []
+    cursor = block_start
+    for i, wi in enumerate(w):
+        if i == n - 1:
+            lo, hi = cursor, block_end
+        else:
+            size = max(1, round(total * wi / wsum))
+            hi = min(block_end, cursor + size - 1)
+            lo = cursor
+        spans.append((lo, hi))
+        cursor = hi + 1
+    # Defensive: if rounding pushed cursor past block_end, clamp earlier spans.
+    # Re-walk to guarantee exact tiling.
+    spans2: list[tuple[int, int]] = []
+    c = block_start
+    for i in range(n):
+        if i == n - 1:
+            spans2.append((c, block_end))
+        else:
+            hi = spans[i][1]
+            if hi >= block_end:
+                # collapse the rest into remaining; but we want exactly n spans.
+                hi = c
+            spans2.append((c, hi))
+            c = hi + 1
+    # Final guarantee: force exact contiguous tiling regardless of rounding.
+    fixed: list[tuple[int, int]] = []
+    c = block_start
+    for i in range(n):
+        if i == n - 1:
+            fixed.append((c, block_end)); break
+        # size from original proportional intent, clamped to leave room
+        size = max(1, spans2[i][1] - spans2[i][0] + 1)
+        size = min(size, block_end - c - (n - 1 - i) + 1)
+        fixed.append((c, c + size - 1))
+        c = c + size
+    return fixed
+
+
 
 
 def compute_severity(unit: "ConflictUnit") -> str:
