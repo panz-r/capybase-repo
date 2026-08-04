@@ -642,6 +642,8 @@ def _attribute_whole_file_failure(
         detail = getattr(f, "detail", {}) or {}
         if isinstance(detail.get("brace_imbalance_line"), int):
             line = detail["brace_imbalance_line"]
+        elif isinstance(detail.get("preprocessor_imbalance_line"), int):
+            line = detail["preprocessor_imbalance_line"]
         elif isinstance(detail.get("lines"), list) and detail["lines"]:
             line = detail["lines"][0]
         # Fall back to regex on the message (Python SyntaxError "line N").
@@ -691,6 +693,9 @@ def _splice_context_snippet(
         detail = getattr(f, "detail", {}) or {}
         if isinstance(detail.get("brace_imbalance_line"), int):
             line = detail["brace_imbalance_line"]
+            break
+        elif isinstance(detail.get("preprocessor_imbalance_line"), int):
+            line = detail["preprocessor_imbalance_line"]
             break
         elif isinstance(detail.get("lines"), list) and detail["lines"]:
             line = detail["lines"][0]
@@ -771,6 +776,46 @@ def _splice_context_snippet(
                     start = min(start, max(0, prev_start - 1))
                     end = max(end, min(len(lines), sp_end + 2))
                     break
+    # Preprocessor widening: when the failure is a #if/#endif imbalance, widen
+    # the window to the ENCLOSING conditional region. The cross-unit imbalance
+    # has its matching directive outside the ±5 default window (often upstream
+    # of the marker block), so the model can't see the #if/#endif pair that
+    # must balance. Scan outward from the error line to the nearest depth-0
+    # boundary on each side.
+    _is_pp = any(
+        isinstance((getattr(f, "detail", {}) or {}).get("preprocessor_imbalance_line"), int)
+        for f in failures
+    )
+    if _is_pp and len(lines) > 0:
+        err0 = line - 1
+        # Scan backward from the error line to the nearest line that returns
+        # preprocessor depth to 0 (the enclosing #if, or file start).
+        depth = 0
+        scan = min(err0, len(lines) - 1)
+        for i in range(scan, -1, -1):
+            s = lines[i].strip()
+            if s.startswith("#"):
+                d = s[1:].lstrip().split(None, 1)[0] if s[1:].lstrip() else ""
+                if d in ("endif", "else", "elif"):
+                    depth += 1
+                elif d in ("if", "ifdef", "ifndef"):
+                    depth -= 1
+                    if depth <= 0:
+                        start = min(start, max(0, i - 1))
+                        break
+        # Scan forward to the nearest #endif that closes the open conditional.
+        depth = 0
+        for i in range(min(err0, len(lines) - 1), len(lines)):
+            s = lines[i].strip()
+            if s.startswith("#"):
+                d = s[1:].lstrip().split(None, 1)[0] if s[1:].lstrip() else ""
+                if d in ("if", "ifdef", "ifndef"):
+                    depth += 1
+                elif d == "endif":
+                    if depth <= 0:
+                        end = max(end, min(len(lines), i + 2))
+                        break
+                    depth -= 1
     numbered = []
     for i in range(start, end):
         marker = " >>>" if (i + 1) == line else "    "
@@ -848,6 +893,71 @@ def _try_deterministic_brace_repair(
         provenance="deterministic_brace_repair",
         self_reported_confidence=0.9,
         explanation="deterministic brace-balance repair (splice junction)",
+    )
+    return [(wf_unit, wf_cand)]
+
+
+def _try_deterministic_preprocessor_repair(
+    failures: list,
+    original: str,
+    accepted: list[tuple[ConflictUnit, CandidateResolution]],
+    fault_idx: int,
+) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+    """Attempt a deterministic ``#if/#endif`` balance fix before the LLM.
+
+    The entity-splitting + splice pipeline can leave a whole-file preprocessor
+    imbalance that no single sub-unit owns — e.g. a conflict region sliced mid-
+    file that opens an ``#if`` without its ``#endif`` (the match is upstream of
+    the marker block). Re-prompting the model may not help (it sees one unit at
+    a time and can't reach the upstream directive), so we fix it directly when
+    ``_try_balance_preprocessor`` can balance the spliced buffer in one clean
+    edit (remove a stray bare ``#endif``, or append a missing ``#endif``).
+
+    Mirrors :func:`_try_deterministic_brace_repair`. Returns a replacement
+    ``accepted`` list (the fault unit becomes a whole-file unit carrying the
+    repaired buffer as its resolved_text), or ``None`` to defer to the LLM path.
+    Conservative: acts only on C/C++ and when one edit fully balances, and the
+    repaired buffer is re-validated for preprocessor balance before use.
+    """
+    from capybase.verification import (
+        _preprocessor_imbalance_line, _try_balance_preprocessor,
+    )
+    from capybase.conflict_model import CandidateResolution
+
+    # Only engage on a preprocessor-coherence failure shape.
+    is_pp_failure = any(
+        "preprocessor" in (getattr(f, "message", "") or "").lower()
+        for f in failures
+    )
+    if not is_pp_failure:
+        return None
+    if fault_idx < 0 or fault_idx >= len(accepted):
+        return None
+    _lang = accepted[fault_idx][0].language if 0 <= fault_idx < len(accepted) else None
+    if _lang not in ("c", "cpp", "c++"):
+        return None
+    unit, _old_cand = accepted[fault_idx]
+    try:
+        spliced = _resolved_buffer(original, accepted)
+    except Exception:  # noqa: BLE001 - splice may fail on bad spans
+        return None
+    if _preprocessor_imbalance_line(spliced) is None:
+        return None  # not actually a preprocessor imbalance
+    repaired = _try_balance_preprocessor(spliced)
+    if repaired is None:
+        return None  # couldn't balance in one edit → defer to LLM
+    if _preprocessor_imbalance_line(repaired) is not None:
+        return None  # safety re-check (shouldn't happen, but never trust)
+    wf_unit = unit.model_copy(update={"marker_span": None, "unit_kind": "whole_file"})
+    wf_cand = CandidateResolution(
+        candidate_id=(getattr(_old_cand, "candidate_id", unit.unit_id) or unit.unit_id) + ":ppfix",
+        unit_id=unit.unit_id,
+        model_name=getattr(_old_cand, "model_name", "deterministic") or "deterministic",
+        resolved_text=repaired,
+        prompt_version="deterministic_preprocessor_repair",
+        provenance="deterministic_preprocessor_repair",
+        self_reported_confidence=0.9,
+        explanation="deterministic #if/#endif balance repair (cross-unit splice)",
     )
     return [(wf_unit, wf_cand)]
 
@@ -2294,7 +2404,7 @@ class Orchestrator:
         config = _apply_model_profile(config, self.git.repo, self.journal)
         self.config = config
         self.extractor = ConflictExtractor(
-            self.git, structural_config=config.structural
+            self.git, structural_config=config.structural, future_config=config.future
         )
         # Memory: experience store + retriever for RAG few-shot. Built lazily
         # from config; both are None when [memory] is disabled, so the context
@@ -5941,13 +6051,28 @@ class Orchestrator:
             # pairs and splice them in one offset-correct batch at the end.
             accepted: list[tuple[ConflictUnit, CandidateResolution]] = []
             escalated_unit: UnitOutcome | None = None
+            # SRC accumulator: parent_unit_id -> list of accepted resolved-text
+            # from earlier sibling sub-units, in document order. Fed one-way into
+            # each later sub-unit's prompt so entity-split siblings stay
+            # consistent (see _sibling_resolutions_block in resolution_engine).
+            _sibling_resolved: dict[str, list[str]] = {}
             for unit in units:
+                _parent = unit.structural_metadata.get("parent_unit_id")
+                if _parent and _parent in _sibling_resolved:
+                    unit.structural_metadata["sibling_resolutions"] = list(
+                        _sibling_resolved[_parent]
+                    )
                 outcome = self._resolve_unit(unit, wall_deadline=_file_wall_deadline)
                 _persist_unit_hashes(self, outcome)  # D1: per-step convergence
                 result.outcomes.append(outcome)
                 if outcome.accepted is None:
                     escalated_unit = outcome
                     break
+                # Feed this resolution forward to later siblings in the same group.
+                if _parent:
+                    _sibling_resolved.setdefault(_parent, []).append(
+                        outcome.accepted.resolved_text
+                    )
                 accepted.append((unit, outcome.accepted))
             if escalated_unit is not None:
                 result.escalated = True
@@ -6048,6 +6173,12 @@ class Orchestrator:
                 # "fired" from "caused recovery" (early projections conflated
                 # the two and overestimated a mechanism's impact).
                 prev_failure_sig = None
+                # Track whether the prior deterministic repair left the failure
+                # UNCHANGED. When so, the next _whole_file_repair call skips its
+                # deterministic beam (skip_deterministic=True) so it proceeds to
+                # the model/Layer-3 path instead of re-firing the same idempotent
+                # repair until the time budget expires.
+                _det_unchanged = False
                 while True:
                     spans_and_texts = [
                         (unit.marker_span, cand.resolved_text) for unit, cand in accepted
@@ -6126,6 +6257,11 @@ class Orchestrator:
                             {"effect": effect, "wf_retry": wf_retries},
                             step_index=self.step, path=path,
                         )
+                        # Track whether the prior deterministic repair made no
+                        # progress, so the next iteration skips the beam.
+                        _det_unchanged = (
+                            not _phase2_model_used and effect == "UNCHANGED"
+                        )
                     prev_failure_sig = cur_sig
                     if file_validation.passed:
                         break
@@ -6142,8 +6278,6 @@ class Orchestrator:
                     # Attribute the failure to a unit and re-resolve it with the
                     # file-level failures as concrete repair feedback.
                     wf_retries += 1
-                    if _phase2_budget > 0:
-                        _phase2_model_used = True
                     self.journal.emit(
                         "whole_file_repair",
                         {
@@ -6159,6 +6293,7 @@ class Orchestrator:
                         self._whole_file_repair(
                             path, accepted, original, file_validation.hard_failures,
                             wall_deadline=_file_wall_deadline,
+                            skip_deterministic=_det_unchanged,
                         )
                     )
                     if accepted_opt is None:
@@ -6166,6 +6301,21 @@ class Orchestrator:
                         file_validation = None  # type: ignore[assignment]
                         break
                     accepted = accepted_opt
+                    # Tiered budget: only count a MODEL re-resolve against the
+                    # single-model-call budget. A deterministic repair (brace/
+                    # preprocessor/side-consistency/etc.) returns a candidate
+                    # whose provenance starts with "deterministic" — it cost no
+                    # model calls, so it must NOT consume the tiered slot.
+                    # Without this guard, a deterministic repair that fires but
+                    # doesn't fix the failure would burn the slot and the loop
+                    # exits before the LLM/Layer-3 path ever runs.
+                    if _phase2_budget > 0:
+                        _used_model = any(
+                            not str(getattr(c, "provenance", "") or "").startswith("deterministic")
+                            for _u, c in accepted
+                        )
+                        if _used_model:
+                            _phase2_model_used = True
                 if file_validation is None or not file_validation.passed:
                     # Final deterministic repair attempt. The cheap O(n) repairs
                     # (brace balance, prefix dedup, boundary echo, import dedup)
@@ -7099,6 +7249,7 @@ class Orchestrator:
         *,
         deterministic_only: bool = False,
         wall_deadline: float | None = None,
+        skip_deterministic: bool = False,
     ) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
         """Re-resolve the unit most likely at fault for a whole-file failure.
 
@@ -7118,235 +7269,309 @@ class Orchestrator:
         # beam still runs (it operates on the whole-file buffer). In legacy
         # mode (no time budget), fall back to the last-unit heuristic so
         # existing behavior is preserved.
+        #
+        # EXCEPTION: a preprocessor (#if/#endif) imbalance on a conflict region
+        # sliced mid-file has its matching directive upstream of the marker, so
+        # the imbalance line falls in no span but the NEAREST preceding unit is
+        # the one whose resolution most plausibly caused it. Attribute to that
+        # unit (with a widened context snippet that includes the enclosing
+        # conditional) rather than skipping — the model CAN fix it when it sees
+        # the conditional context.
         _tiered_active = self.config.policy.max_whole_file_repair_seconds > 0
         if fault_idx < 0:
             fault_idx = max(0, len(accepted) - 1)
-            if not deterministic_only and _tiered_active:
+            _is_pp_failure = any(
+                "preprocessor" in (getattr(f, "message", "") or "").lower()
+                for f in failures
+            )
+            if not _is_pp_failure and not deterministic_only and _tiered_active:
                 self.journal.emit(
                     "whole_file_repair_skipped",
                     {"reason": "fault attribution: error outside all unit spans (tiered mode)"},
                     step_index=self.step, path=path,
                 )
                 return None
-        # Deterministic brace repair: before spending an LLM call on the
-        # recurring splice-junction brace imbalance, try to fix it directly.
-        # The model often reproduces the same extra/missing brace at the hunk
-        # junction across repeated retries — a single-edit deterministic fix
-        # resolves it instantly when the imbalance is a stray brace-only line or
-        # a truncated unclosed block. The repaired buffer is back-projected onto
-        # the fault unit's resolved_text so the splice + re-validate loop sees
-        # the fix. Conservative: acts only when one edit fully balances, and
-        # only when the back-projection is unambiguous; otherwise falls through
-        # to the LLM repair path below.
-        det = _try_deterministic_brace_repair(
-            failures, original, accepted, fault_idx
-        )
-        if det is not None:
-            unit_new, cand_new = det[0]
-            self.journal.emit(
-                "candidate_validated",
-                {
-                    "candidate_id": cand_new.candidate_id,
-                    "passed": True,
-                    "whole_file_repair_for": unit_new.unit_id,
-                    "deterministic_brace_repair": True,
-                },
-                step_index=self.step,
-                path=path,
-                unit_id=unit_new.unit_id,
-            )
-            return det
-        # Deterministic prefix/suffix dedup repair (Phase 10): when the cargo
-        # error is "expected identifier, found keyword `use`" (or similar), the
-        # marker span excluded the enclosing wrapper (e.g. ``use crate::{``) and
-        # the splice doubled it. Strip the consecutive duplicate statement line.
-        det = _try_deterministic_prefix_dedup(
-            failures, original, accepted, fault_idx
-        )
-        if det is not None:
-            unit_new, cand_new = det[0]
-            self.journal.emit(
-                "candidate_validated",
-                {
-                    "candidate_id": cand_new.candidate_id,
-                    "passed": True,
-                    "whole_file_repair_for": unit_new.unit_id,
-                    "deterministic_prefix_dedup": True,
-                },
-                step_index=self.step,
-                path=path,
-                unit_id=unit_new.unit_id,
-            )
-            return det
-        # Boundary-echo strip (the generalization of prefix_dedup): when the
-        # candidate's resolved_text begins/ends with a run of lines that already
-        # exist immediately outside the marker span, the splice duplicates them.
-        # prefix_dedup handles the statement-keyword + cargo-signature sub-case;
-        # this catches any line-sequence echo at the boundary (a duplicated
-        # multi-line use block, function header, or closing-brace run). Safe by
-        # construction: removes only exact boundary echoes, brace-checked, and
-        # the caller's whole-file loop re-validates (same contract as prefix_dedup).
-        det = _try_boundary_echo_strip(
-            failures, original, accepted, fault_idx
-        )
-        if det is not None:
-            det_list, diag = det
-            unit_new, cand_new = det_list[0]
-            self.journal.emit(
-                "candidate_validated",
-                {
-                    "candidate_id": cand_new.candidate_id,
-                    "passed": True,
-                    "whole_file_repair_for": unit_new.unit_id,
-                    "boundary_echo_strip": True,
-                    "variant": diag.get("variant"),
-                    "left_overlap": diag.get("left_overlap"),
-                    "right_overlap": diag.get("right_overlap"),
-                },
-                step_index=self.step,
-                path=path,
-                unit_id=unit_new.unit_id,
-            )
-            return det_list
-        # Deterministic import dedup repair (Phase 9): before spending an LLM
-        # call, try the file_linker's deduplicate_imports on the spliced
-        # buffer. This catches duplicate imports that survived the pre-validation
-        # pass (e.g. cross-file references or partial-group collisions the
-        # file_linker didn't catch on the first pass because the error
-        # messages guide a more targeted second dedup attempt). Mirrors how
-        # _try_deterministic_brace_repair works for braces above.
-        if getattr(self.config.future, "enable_file_linker", True):
-            try:
-                from capybase.file_linker import deduplicate_imports
-                spliced = _resolved_buffer(original, accepted)
-                # Check if any failure message mentions duplicate/import
-                has_import_error = any(
-                    "import" in (getattr(f, "message", "") or "").lower()
-                    or "defined more than once" in (getattr(f, "message", "") or "").lower()
-                    or "module_stmt" in (getattr(f, "detail", {}) or {}).get("message", "").lower()
-                    for f in failures
-                )
-                if has_import_error:
-                    deduped, dedup_count = deduplicate_imports(spliced)
-                    if dedup_count > 0:
-                        # The dedup produced a complete, correct file. Represent
-                        # it as a whole-file unit carrying the deduped buffer —
-                        # the same pattern as _try_deterministic_brace_repair.
-                        # Back-projection onto individual units' resolved_text is
-                        # fragile (the duplicate import often lives in the
-                        # original text adjacent to the span, not inside it), and
-                        # a whole-file unit is the honest representation:
-                        # _resolved_buffer returns its resolved_text verbatim and
-                        # verify_file's _has_whole_file_span guard handles the
-                        # None span. Pre-fix this branch only fired for whole-file
-                        # units (marker_span is None) and silently discarded the
-                        # dedup for the common marker-block case.
-                        unit_f, cand_f = accepted[fault_idx]
-                        wf_unit = unit_f.model_copy(
-                            update={"marker_span": None, "unit_kind": "whole_file"})
-                        new_cand = cand_f.model_copy(
-                            update={"resolved_text": deduped,
-                                    "provenance": (cand_f.provenance or "plain_llm") + "+file_linker"})
-                        result = [(wf_unit, new_cand)]
+            if _is_pp_failure:
+                # Nearest-preceding-unit attribution for the cross-unit
+                # preprocessor case. The error line sits in the gap between
+                # spans (or after the last span); the unit whose span ends
+                # closest before it is the one whose resolution opened the
+                # conditional. Falls back to the last-unit heuristic above
+                # when no preceding unit exists.
+                pp_line = None
+                for f in failures:
+                    d = getattr(f, "detail", {}) or {}
+                    if isinstance(d.get("preprocessor_imbalance_line"), int):
+                        pp_line = d["preprocessor_imbalance_line"]
+                        break
+                if pp_line is not None:
+                    best_idx = -1
+                    best_end = -1
+                    for i, (u, _) in enumerate(accepted):
+                        if u.marker_span is None:
+                            continue
+                        # marker_span is 0-based [start, end]; error line is 1-based.
+                        _s, e = u.marker_span
+                        if e + 1 <= pp_line and e + 1 > best_end:
+                            best_end = e + 1
+                            best_idx = i
+                    if best_idx >= 0:
+                        fault_idx = best_idx
                         self.journal.emit(
-                            "file_linker_repair",
-                            {"duplicates_removed": dedup_count,
-                             "candidate_id": new_cand.candidate_id},
+                            "candidate_validated",
+                            {
+                                "fault_attribution": "nearest_preceding_unit",
+                                "preprocessor_imbalance_line": pp_line,
+                                "attributed_unit_index": fault_idx,
+                            },
                             step_index=self.step, path=path,
-                            unit_id=unit_f.unit_id,
                         )
-                        return result
-            except Exception:  # noqa: BLE001
-                pass
-        # gcc fix-it hints: apply the compiler's own structured repair
-        # suggestions (-fdiagnostics-parseable-fixits). Subsumes the regex-
-        # based cc repair below — gcc covers more error types with surgical
-        # precision. Runs first; falls through to the regex beam if gcc
-        # doesn't suggest any fix-its.
-        det = _try_gcc_fixit_repair(
-            failures, original, accepted, fault_idx,
-        )
-        if det is not None:
-            unit_new, cand_new = det[0]
-            self.journal.emit(
-                "candidate_validated",
-                {
-                    "candidate_id": cand_new.candidate_id,
-                    "passed": True,
-                    "whole_file_repair_for": unit_new.unit_id,
-                    "deterministic_gcc_fixit": True,
-                },
-                step_index=self.step,
-                path=path,
-                unit_id=unit_new.unit_id,
+        if not skip_deterministic:
+            # Deterministic brace repair: before spending an LLM call on the
+            # recurring splice-junction brace imbalance, try to fix it directly.
+            # The model often reproduces the same extra/missing brace at the hunk
+            # junction across repeated retries — a single-edit deterministic fix
+            # resolves it instantly when the imbalance is a stray brace-only line or
+            # a truncated unclosed block. The repaired buffer is back-projected onto
+            # the fault unit's resolved_text so the splice + re-validate loop sees
+            # the fix. Conservative: acts only when one edit fully balances, and
+            # only when the back-projection is unambiguous; otherwise falls through
+            # to the LLM repair path below.
+            det = _try_deterministic_brace_repair(
+                failures, original, accepted, fault_idx
             )
-            return det
-        # Compiler-diagnostic-driven deterministic repair for C/C++: reads the
-        # gcc error message, classifies it, and generates minimal fix
-        # hypotheses (missing ';', missing '}', stray char, etc.) at the
-        # compiler-identified line. Targets the 36 WHOLE_FILE_FAILED C cases
-        # at avg sim 0.978 where the model's output is semantically correct
-        # but has a small structural defect.
-        det = _try_deterministic_cc_repair(
-            failures, original, accepted, fault_idx,
-        )
-        if det is not None:
-            unit_new, cand_new = det[0]
-            self.journal.emit(
-                "candidate_validated",
-                {
-                    "candidate_id": cand_new.candidate_id,
-                    "passed": True,
-                    "whole_file_repair_for": unit_new.unit_id,
-                    "deterministic_cc_repair": True,
-                },
-                step_index=self.step,
-                path=path,
-                unit_id=unit_new.unit_id,
+            if det is not None:
+                unit_new, cand_new = det[0]
+                self.journal.emit(
+                    "candidate_validated",
+                    {
+                        "candidate_id": cand_new.candidate_id,
+                        "passed": True,
+                        "whole_file_repair_for": unit_new.unit_id,
+                        "deterministic_brace_repair": True,
+                    },
+                    step_index=self.step,
+                    path=path,
+                    unit_id=unit_new.unit_id,
+                )
+                return det
+            # Deterministic #if/#endif balance repair: the entity-splitting + splice
+            # pipeline can leave a whole-file preprocessor imbalance that no single
+            # sub-unit owns (a conflict region sliced mid-file). Try a single-edit
+            # deterministic fix (remove a stray bare #endif, append a missing #endif)
+            # before spending an LLM call — the model often can't reach the upstream
+            # directive from a unit-scoped view. Conservative: acts only on C/C++ and
+            # when one edit fully balances. Same whole-file-unit contract as brace
+            # repair above.
+            det = _try_deterministic_preprocessor_repair(
+                failures, original, accepted, fault_idx
             )
-            return det
-        # Side-consistency repair: restore common lines the model dropped, delete
-        # invented lines. Uses the merge itself as a structural prior — every
-        # inserted line comes from base/current/replayed (provenance-backed).
-        det = _try_side_consistency_repair(
-            failures, original, accepted, fault_idx,
-        )
-        if det is not None:
-            unit_new, cand_new = det[0]
-            self.journal.emit(
-                "candidate_validated",
-                {
-                    "candidate_id": cand_new.candidate_id,
-                    "passed": True,
-                    "whole_file_repair_for": unit_new.unit_id,
-                    "deterministic_side_consistency_repair": True,
-                },
-                step_index=self.step,
-                path=path,
-                unit_id=unit_new.unit_id,
+            if det is not None:
+                unit_new, cand_new = det[0]
+                self.journal.emit(
+                    "candidate_validated",
+                    {
+                        "candidate_id": cand_new.candidate_id,
+                        "passed": True,
+                        "whole_file_repair_for": unit_new.unit_id,
+                        "deterministic_preprocessor_repair": True,
+                    },
+                    step_index=self.step,
+                    path=path,
+                    unit_id=unit_new.unit_id,
+                )
+                return det
+            # Deterministic prefix/suffix dedup repair (Phase 10): when the cargo
+            # error is "expected identifier, found keyword `use`" (or similar), the
+            # marker span excluded the enclosing wrapper (e.g. ``use crate::{``) and
+            # the splice doubled it. Strip the consecutive duplicate statement line.
+            det = _try_deterministic_prefix_dedup(
+                failures, original, accepted, fault_idx
             )
-            return det
-        # Side-consensus repair: when both sides agree on a structural property
-        # (brace delta, trailing semicolons, macro continuations) but the
-        # candidate disagrees, the consensus is a high-confidence repair signal.
-        det = _try_side_consensus_repair(
-            failures, original, accepted, fault_idx,
-        )
-        if det is not None:
-            unit_new, cand_new = det[0]
-            self.journal.emit(
-                "candidate_validated",
-                {
-                    "candidate_id": cand_new.candidate_id,
-                    "passed": True,
-                    "whole_file_repair_for": unit_new.unit_id,
-                    "deterministic_side_consensus_repair": True,
-                },
-                step_index=self.step,
-                path=path,
-                unit_id=unit_new.unit_id,
+            if det is not None:
+                unit_new, cand_new = det[0]
+                self.journal.emit(
+                    "candidate_validated",
+                    {
+                        "candidate_id": cand_new.candidate_id,
+                        "passed": True,
+                        "whole_file_repair_for": unit_new.unit_id,
+                        "deterministic_prefix_dedup": True,
+                    },
+                    step_index=self.step,
+                    path=path,
+                    unit_id=unit_new.unit_id,
+                )
+                return det
+            # Boundary-echo strip (the generalization of prefix_dedup): when the
+            # candidate's resolved_text begins/ends with a run of lines that already
+            # exist immediately outside the marker span, the splice duplicates them.
+            # prefix_dedup handles the statement-keyword + cargo-signature sub-case;
+            # this catches any line-sequence echo at the boundary (a duplicated
+            # multi-line use block, function header, or closing-brace run). Safe by
+            # construction: removes only exact boundary echoes, brace-checked, and
+            # the caller's whole-file loop re-validates (same contract as prefix_dedup).
+            det = _try_boundary_echo_strip(
+                failures, original, accepted, fault_idx
             )
-            return det
+            if det is not None:
+                det_list, diag = det
+                unit_new, cand_new = det_list[0]
+                self.journal.emit(
+                    "candidate_validated",
+                    {
+                        "candidate_id": cand_new.candidate_id,
+                        "passed": True,
+                        "whole_file_repair_for": unit_new.unit_id,
+                        "boundary_echo_strip": True,
+                        "variant": diag.get("variant"),
+                        "left_overlap": diag.get("left_overlap"),
+                        "right_overlap": diag.get("right_overlap"),
+                    },
+                    step_index=self.step,
+                    path=path,
+                    unit_id=unit_new.unit_id,
+                )
+                return det_list
+            # Deterministic import dedup repair (Phase 9): before spending an LLM
+            # call, try the file_linker's deduplicate_imports on the spliced
+            # buffer. This catches duplicate imports that survived the pre-validation
+            # pass (e.g. cross-file references or partial-group collisions the
+            # file_linker didn't catch on the first pass because the error
+            # messages guide a more targeted second dedup attempt). Mirrors how
+            # _try_deterministic_brace_repair works for braces above.
+            if getattr(self.config.future, "enable_file_linker", True):
+                try:
+                    from capybase.file_linker import deduplicate_imports
+                    spliced = _resolved_buffer(original, accepted)
+                    # Check if any failure message mentions duplicate/import
+                    has_import_error = any(
+                        "import" in (getattr(f, "message", "") or "").lower()
+                        or "defined more than once" in (getattr(f, "message", "") or "").lower()
+                        or "module_stmt" in (getattr(f, "detail", {}) or {}).get("message", "").lower()
+                        for f in failures
+                    )
+                    if has_import_error:
+                        deduped, dedup_count = deduplicate_imports(spliced)
+                        if dedup_count > 0:
+                            # The dedup produced a complete, correct file. Represent
+                            # it as a whole-file unit carrying the deduped buffer —
+                            # the same pattern as _try_deterministic_brace_repair.
+                            # Back-projection onto individual units' resolved_text is
+                            # fragile (the duplicate import often lives in the
+                            # original text adjacent to the span, not inside it), and
+                            # a whole-file unit is the honest representation:
+                            # _resolved_buffer returns its resolved_text verbatim and
+                            # verify_file's _has_whole_file_span guard handles the
+                            # None span. Pre-fix this branch only fired for whole-file
+                            # units (marker_span is None) and silently discarded the
+                            # dedup for the common marker-block case.
+                            unit_f, cand_f = accepted[fault_idx]
+                            wf_unit = unit_f.model_copy(
+                                update={"marker_span": None, "unit_kind": "whole_file"})
+                            new_cand = cand_f.model_copy(
+                                update={"resolved_text": deduped,
+                                        "provenance": (cand_f.provenance or "plain_llm") + "+file_linker"})
+                            result = [(wf_unit, new_cand)]
+                            self.journal.emit(
+                                "file_linker_repair",
+                                {"duplicates_removed": dedup_count,
+                                 "candidate_id": new_cand.candidate_id},
+                                step_index=self.step, path=path,
+                                unit_id=unit_f.unit_id,
+                            )
+                            return result
+                except Exception:  # noqa: BLE001
+                    pass
+            # gcc fix-it hints: apply the compiler's own structured repair
+            # suggestions (-fdiagnostics-parseable-fixits). Subsumes the regex-
+            # based cc repair below — gcc covers more error types with surgical
+            # precision. Runs first; falls through to the regex beam if gcc
+            # doesn't suggest any fix-its.
+            det = _try_gcc_fixit_repair(
+                failures, original, accepted, fault_idx,
+            )
+            if det is not None:
+                unit_new, cand_new = det[0]
+                self.journal.emit(
+                    "candidate_validated",
+                    {
+                        "candidate_id": cand_new.candidate_id,
+                        "passed": True,
+                        "whole_file_repair_for": unit_new.unit_id,
+                        "deterministic_gcc_fixit": True,
+                    },
+                    step_index=self.step,
+                    path=path,
+                    unit_id=unit_new.unit_id,
+                )
+                return det
+            # Compiler-diagnostic-driven deterministic repair for C/C++: reads the
+            # gcc error message, classifies it, and generates minimal fix
+            # hypotheses (missing ';', missing '}', stray char, etc.) at the
+            # compiler-identified line. Targets the 36 WHOLE_FILE_FAILED C cases
+            # at avg sim 0.978 where the model's output is semantically correct
+            # but has a small structural defect.
+            det = _try_deterministic_cc_repair(
+                failures, original, accepted, fault_idx,
+            )
+            if det is not None:
+                unit_new, cand_new = det[0]
+                self.journal.emit(
+                    "candidate_validated",
+                    {
+                        "candidate_id": cand_new.candidate_id,
+                        "passed": True,
+                        "whole_file_repair_for": unit_new.unit_id,
+                        "deterministic_cc_repair": True,
+                    },
+                    step_index=self.step,
+                    path=path,
+                    unit_id=unit_new.unit_id,
+                )
+                return det
+            # Side-consistency repair: restore common lines the model dropped, delete
+            # invented lines. Uses the merge itself as a structural prior — every
+            # inserted line comes from base/current/replayed (provenance-backed).
+            det = _try_side_consistency_repair(
+                failures, original, accepted, fault_idx,
+            )
+            if det is not None:
+                unit_new, cand_new = det[0]
+                self.journal.emit(
+                    "candidate_validated",
+                    {
+                        "candidate_id": cand_new.candidate_id,
+                        "passed": True,
+                        "whole_file_repair_for": unit_new.unit_id,
+                        "deterministic_side_consistency_repair": True,
+                    },
+                    step_index=self.step,
+                    path=path,
+                    unit_id=unit_new.unit_id,
+                )
+                return det
+            # Side-consensus repair: when both sides agree on a structural property
+            # (brace delta, trailing semicolons, macro continuations) but the
+            # candidate disagrees, the consensus is a high-confidence repair signal.
+            det = _try_side_consensus_repair(
+                failures, original, accepted, fault_idx,
+            )
+            if det is not None:
+                unit_new, cand_new = det[0]
+                self.journal.emit(
+                    "candidate_validated",
+                    {
+                        "candidate_id": cand_new.candidate_id,
+                        "passed": True,
+                        "whole_file_repair_for": unit_new.unit_id,
+                        "deterministic_side_consensus_repair": True,
+                    },
+                    step_index=self.step,
+                    path=path,
+                    unit_id=unit_new.unit_id,
+                )
+                return det
         # deterministic_only: skip the LLM re-resolve. Used for the final
         # repair attempt after the LLM budget is exhausted — the cheap O(n)
         # deterministic repairs above may still close the case (a recurring
@@ -7395,7 +7620,57 @@ class Orchestrator:
             unit_id=unit.unit_id,
         )
         if outcome.accepted is None:
-            return None
+            # Layer 3 (last resort): whole-file model resolution for a cross-unit
+            # preprocessor imbalance. The unit-scoped re-resolve above couldn't
+            # fix it (the matching #if/#endif is outside the unit's view). As a
+            # final fallback before escalating, synthesize a whole-file unit
+            # carrying the spliced buffer + the preprocessor diagnostic, and
+            # resolve THAT — the model sees the full #if/#endif tree and can
+            # balance the conditional. This consumes the tiered budget's single
+            # model-call slot (same budget, no extra cost beyond it). Skipped for
+            # non-preprocessor failures (those genuinely can't be whole-file-
+            # repaired when the file is oversized — that's why we split it).
+            # Also skipped in deterministic_only mode (no model calls allowed).
+            if deterministic_only:
+                return None
+            _is_pp = any(
+                "preprocessor" in (getattr(f, "message", "") or "").lower()
+                for f in failures
+            )
+            if not _is_pp:
+                return None
+            try:
+                spliced = _resolved_buffer(original, accepted)
+            except Exception:  # noqa: BLE001
+                return None
+            wf_unit = unit.model_copy(
+                update={"marker_span": None, "unit_kind": "whole_file"}
+            )
+            wf_outcome = self._resolve_unit(
+                wf_unit,
+                seed_failures=enriched_failures,
+                seed_candidate=None,
+                wall_deadline=wall_deadline,
+            )
+            _persist_unit_hashes(self, wf_outcome)
+            self.journal.emit(
+                "candidate_validated",
+                {
+                    "candidate_id": (
+                        wf_outcome.accepted.candidate_id
+                        if wf_outcome.accepted else "none"
+                    ),
+                    "passed": wf_outcome.accepted is not None,
+                    "whole_file_repair_for": wf_unit.unit_id,
+                    "whole_file_model_resolution": True,
+                },
+                step_index=self.step,
+                path=path,
+                unit_id=wf_unit.unit_id,
+            )
+            if wf_outcome.accepted is None:
+                return None
+            return [(wf_unit, wf_outcome.accepted)]
         accepted[fault_idx] = (unit, outcome.accepted)
         return accepted
 

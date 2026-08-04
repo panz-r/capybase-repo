@@ -2419,6 +2419,125 @@ def _try_balance_braces(text: str, language: str | None = None) -> str | None:
     return None
 
 
+def _try_balance_preprocessor(text: str) -> str | None:
+    r"""Deterministically repair a single C preprocessor ``#if/#endif`` imbalance.
+
+    The entity-splitting + splice pipeline can produce a whole-file
+    ``#endif`` imbalance that no single sub-unit owns — e.g. when a conflict
+    region is a mid-file slice that opens an ``#if`` without its ``#endif``
+    (the matching directive sits upstream of the marker block). The coherence
+    gate (:func:`_preprocessor_imbalance_line`) flags it; this function is the
+    cheap deterministic fallback before the LLM repair path. Mirrors
+    :func:`_try_balance_braces` for the preprocessor case.
+
+    Conservative by design — acts ONLY when a single edit fully balances, and
+    re-validates with :func:`_preprocessor_imbalance_line` before returning.
+    Two cases:
+
+    * **depth goes negative** (extra ``#endif``): the line where depth first
+      dips below 0 carries a stray close. If that line is a *directive-only*
+      line (whitespace + ``#endif``, possibly a trailing comment), drop it.
+      Otherwise return None — removing code would corrupt structure.
+    * **depth ends positive** (unclosed ``#if``): append the deficit of
+      ``#endif`` at the end of the text. This closes a truncated construct
+      (the slice case where the region's ``#if`` was left open).
+
+    Returns ``None`` when the imbalance is ambiguous (the error is structural,
+    e.g. a directive that shares a line with code, or multiple separate
+    stray directives the PDA can't unambiguously resolve) so the caller falls
+    through to the LLM repair path. Strings/comments are masked first so a
+    directive inside a string isn't counted or touched.
+    """
+    if not text:
+        return None
+    # Reuse the PDA to classify the imbalance, but walk the masked physical
+    # lines directly (not the logical-line view) so edits map to real lines.
+    masked = _mask_strings_and_comments(text, "c")
+    physical = masked.split("\n")
+
+    # Walk depth to find the divergence line and the final deficit. Walk the
+    # WHOLE text (don't break at the first negative) so the final depth reflects
+    # the true deficit — the same rationale as _try_balance_braces.
+    depth = 0
+    neg_line: int | None = None
+    for line_no, line in enumerate(physical):
+        if _PP_OPEN_RE.match(line):
+            depth += 1
+        elif _PP_CLOSE_RE.match(line):
+            depth -= 1
+            if depth < 0 and neg_line is None:
+                neg_line = line_no
+        # #else/#elif without #if is an error the PDA flags, but it's not
+        # fixable by a single add/remove — defer to the LLM.
+
+    lines = text.split("\n")
+
+    if neg_line is not None:
+        # Truncated-slice guard: if the negative-depth #endif is at or near the
+        # END of the file (only blanks/whitespace after it), the text is a mid-
+        # file slice missing the content that would have rebalanced the count.
+        # Removing this trailing #endif balances the depth count but is
+        # semantically WRONG — the real fix is the missing content the model
+        # must generate (observed on sqlite-0040: the current side had 143
+        # directives vs the oracle's 240). Defer to the LLM path rather than
+        # producing a depth-balanced-but-wrong file. A stray #endif with real
+        # content (code or directives) after it IS the removable case.
+        has_content_after = any(
+            physical[j].strip() != ""
+            for j in range(neg_line + 1, len(physical))
+        )
+        if not has_content_after:
+            return None  # truncated slice → defer to the model
+        # Extra #endif(s): depth dipped below zero. Collect ALL consecutive
+        # directive-only #endif lines from the divergence point onward,
+        # removing only enough to bring depth back to zero. Conservative: if
+        # the divergence line carries real code (not a bare #endif), bail.
+        to_remove: list[int] = []
+        deficit = abs(depth) if depth < 0 else 1  # how many stray #endif to drop
+        i = neg_line
+        while i < len(lines) and deficit > 0:
+            raw = lines[i]
+            m = _mask_strings_and_comments(raw, "c")
+            stripped = m.strip()
+            # A bare #endif line: optional leading ws, #endif, optional comment.
+            if _PP_CLOSE_RE.match(stripped) or _PP_CLOSE_RE.match(raw.strip()):
+                to_remove.append(i)
+                deficit -= 1
+            elif stripped == "":
+                i += 1  # skip blank lines between stray directives
+                continue
+            else:
+                break  # hit real code → stop collecting stray directives
+            i += 1
+        if not to_remove or deficit > 0:
+            return None  # couldn't collect enough bare #endif lines
+        candidate = [l for j, l in enumerate(lines) if j not in set(to_remove)]
+        result = "\n".join(candidate)
+        if _preprocessor_imbalance_line(result) is None:
+            return result
+        return None
+
+    if depth > 0:
+        # Unclosed #if(s): append the deficit of #endif at the end of the text.
+        # This closes a truncated construct — the common slice case where the
+        # region's #if was left open because its #endif is downstream of the
+        # marker block. Append at EOF (not mid-file) to avoid splitting a line.
+        suffix = "\n".join(["#endif"] * depth)
+        # Drop trailing blank lines before appending so the #endif lands after
+        # real content, then add a single trailing newline for tidiness.
+        rstrip_end = len(lines)
+        while rstrip_end > 0 and lines[rstrip_end - 1].strip() == "":
+            rstrip_end -= 1
+        candidate = lines[:rstrip_end] + [suffix]
+        result = "\n".join(candidate)
+        if _preprocessor_imbalance_line(result) is None:
+            return result
+        return None
+
+    # Already balanced.
+    return None
+
+
 class RustSyntaxValidator:
     """Per-unit Rust syntax check (CEGIS loop hardening).
 

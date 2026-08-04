@@ -215,7 +215,13 @@ def load_cases(
         if case_ids and c.id not in case_ids:
             continue
         # Skip pathologically huge conflicts (>48K chars ≈ blow context window).
-        if len(c.marker_original) > 48 * 1024:
+        # Entity splitting is always-on and adaptively breaks oversized multi-
+        # entity marker blocks into per-entity sub-units whose prompts fit the
+        # window, so for those cases the guard is a false proxy — lift it via
+        # CAPYBASE_SKIP_SIZE_GUARD=1. (Cases it can't help — a single oversized
+        # entity, or an un-splittable language — still need the guard.)
+        _skip_guard = os.environ.get("CAPYBASE_SKIP_SIZE_GUARD", "") == "1"
+        if not _skip_guard and len(c.marker_original) > 48 * 1024:
             continue
         cases.append(c)
         if limit and len(cases) >= limit:
