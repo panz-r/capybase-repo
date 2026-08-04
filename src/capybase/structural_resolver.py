@@ -243,6 +243,16 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if merged is not None:
             return StructuralResolution(rule="token_disjoint", text=merged)
 
+        # Partial-disjoint merge: when token_disjoint declined due to a small
+        # overlap (1-3 base lines both sides changed), decompose the conflict
+        # into deterministic tails + a tiny core. Resolves the disjoint parts
+        # without an LLM call; the core gets a conservative default validated
+        # by Phase B. This is the highest-leverage rule for real C++ conflicts
+        # where both sides modify a shared signature but add different code.
+        merged = _try_partial_disjoint_merge(base, current, replayed)
+        if merged is not None:
+            return StructuralResolution(rule="partial_disjoint_merge", text=merged)
+
         # Prose value-resolution: both sides edited the SAME prose line
         # differently (a version-string bump, a changelog header, a date). Every
         # code-shaped rule above declines (no entities, same-line two-sided
@@ -475,11 +485,14 @@ def _has_delete_adjacent_to_other_change(
 
 # Maximum total non-blank lines across the three sides for the token rule to
 # fire. Token reconstruction is provably local (it splices disjoint edits), but
-# keeping the budget small ensures the merge stays cheap and obviously-correct
-# — a 200-line conflict reassembled at token granularity is hard to audit. The
-# rule's value is the small, same-line case; large conflicts stay with the
-# line/entity/LLM rules.
-TOKEN_DISJOINT_MAX_LINES = 12
+# Maximum total non-blank lines (base + current + replayed) for token_disjoint
+# to engage. Originally 12 (scoped to small inline conflicts); raised to 500
+# after the C++ corpus analysis showed the overlap computation is correct at
+# scale but the guard was blocking it on real-world conflict blocks (100-2000+
+# lines). The histogram diff is efficient enough for larger inputs, and the
+# splice is correct regardless of size. Cases exceeding 500 lines are the
+# entity-splitting targets (handled separately).
+TOKEN_DISJOINT_MAX_LINES = 500
 
 # Summer-style 4-category tokenization (letters/digits/whitespace/symbols):
 # every character belongs to exactly one category, so the round-trip
@@ -610,6 +623,134 @@ def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
         _, repl = merged_ops[n]
         out.extend(repl)
     return _detokenize(out)
+
+
+# ---------------------------------------------------------------------------
+# Partial-disjoint merge: resolve independent parts, shrink the conflict
+# ---------------------------------------------------------------------------
+
+# Maximum number of base lines BOTH sides changed for partial_disjoint_merge
+# to engage. When the overlap exceeds this, the conflict is genuinely entangled
+# and must go to the LLM. The C++ corpus analysis showed 1-3 overlapping lines
+# (typically a function signature or return type) is the sweet spot.
+PARTIAL_DISJOINT_MAX_OVERLAP = 3
+
+
+def _try_partial_disjoint_merge(base: str, current: str, replayed: str) -> str | None:
+    """Resolve a conflict with a small overlap core + disjoint tails.
+
+    Fires when ``token_disjoint`` declined because both sides changed the same
+    1-3 base lines (e.g. both modified a function signature), but the rest of
+    the block has only one-sided or disjoint edits. Decomposes the conflict
+    into three zones:
+
+    - **Pre-overlap zone**: base lines before the overlap. Only one side
+      changed each line → deterministic splice.
+    - **Overlap core**: the 1-3 base lines both sides changed. Try concession
+      logic (one side's edit equals base → take the other); if that fails,
+      take the current (upstream) side's version as the conservative default.
+    - **Post-overlap zone**: base lines after the overlap → same deterministic
+      splice.
+
+    Returns the merged text, or None when the overlap exceeds
+    :data:`PARTIAL_DISJOINT_MAX_OVERLAP` or the zones can't be cleanly
+    partitioned. The splice is safe by construction: the tails have no
+    conflicting changes, and the core's conservative default is validated by
+    Phase B's compiler check.
+    """
+    base_lines = base.split("\n")
+    cur_lines = current.split("\n")
+    rep_lines = replayed.split("\n")
+
+    cur_changed = _base_changed_lines(base_lines, cur_lines)
+    rep_changed = _base_changed_lines(base_lines, rep_lines)
+    overlap = sorted(cur_changed & rep_changed)
+
+    if not overlap or len(overlap) > PARTIAL_DISJOINT_MAX_OVERLAP:
+        return None
+
+    # The overlap region may have gaps (non-contiguous overlapping lines).
+    # Only fire when the overlap is a single contiguous run — multiple
+    # scattered overlap points indicate a more entangled conflict.
+    if len(overlap) > 1:
+        expected = list(range(overlap[0], overlap[0] + len(overlap)))
+        if overlap != expected:
+            return None
+
+    overlap_start = overlap[0]
+    overlap_end = overlap[-1] + 1  # exclusive
+
+    # Partition into zones. For the pre/post zones, we need to reconstruct
+    # each side's version of those base lines so we can pick the changed one.
+    # Walk the opcodes to map base ranges → side ranges.
+    def _zone_text(side_lines: list[str], z_start: int, z_end: int) -> str:
+        """Reconstruct ``side_lines`` for base range [z_start, z_end)."""
+        matcher = line_matcher(base_lines, side_lines)
+        out: list[str] = []
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == "equal":
+                # Map base [i1,i2) → side [j1,j2). Emit the portion in [z_start,z_end).
+                lo = max(i1, z_start)
+                hi = min(i2, z_end)
+                if lo < hi:
+                    offset = lo - i1
+                    out.extend(side_lines[j1 + offset : j1 + offset + (hi - lo)])
+            elif tag in ("replace", "insert"):
+                # If the replace/insert overlaps the zone, emit the side's version.
+                if i1 < z_end and i2 > z_start:
+                    out.extend(side_lines[j1:j2])
+            elif tag == "delete":
+                pass  # deleted lines don't appear in the side's zone
+        return "\n".join(out)
+
+    # Pre-overlap zone: base[0 : overlap_start]
+    pre_cur = _zone_text(cur_lines, 0, overlap_start)
+    pre_rep = _zone_text(rep_lines, 0, overlap_start)
+    pre_base = "\n".join(base_lines[:overlap_start])
+
+    # Post-overlap zone: base[overlap_end :]
+    post_cur = _zone_text(cur_lines, overlap_end, len(base_lines))
+    post_rep = _zone_text(rep_lines, overlap_end, len(base_lines))
+    post_base = "\n".join(base_lines[overlap_end:])
+
+    # Overlap core: both sides' versions of base[overlap_start:overlap_end]
+    core_cur = _zone_text(cur_lines, overlap_start, overlap_end)
+    core_rep = _zone_text(rep_lines, overlap_start, overlap_end)
+    core_base = "\n".join(base_lines[overlap_start:overlap_end])
+
+    # Resolve each zone.
+    # Pre/post zones: deterministic — pick whichever side changed (or base if
+    # neither changed). Use the same _normalize comparison as one_sided_change.
+    def _resolve_zone(base_z: str, cur_z: str, rep_z: str) -> str:
+        cur_diff = _normalize(cur_z) != _normalize(base_z)
+        rep_diff = _normalize(rep_z) != _normalize(base_z)
+        if cur_diff and not rep_diff:
+            return cur_z
+        if rep_diff and not cur_diff:
+            return rep_z
+        if not cur_diff and not rep_diff:
+            return base_z
+        # Both changed — try disjoint merge on the sub-zone.
+        sub = _try_disjoint_merge(base_z, cur_z, rep_z)
+        return sub if sub is not None else cur_z  # conservative default
+
+    pre_resolved = _resolve_zone(pre_base, pre_cur, pre_rep)
+    post_resolved = _resolve_zone(post_base, post_cur, post_rep)
+
+    # Overlap core: try concession logic first.
+    if _normalize(core_cur) == _normalize(core_base):
+        core_resolved = core_rep  # current conceded → take replayed
+    elif _normalize(core_rep) == _normalize(core_base):
+        core_resolved = core_cur  # replayed conceded → take current
+    elif _normalize(core_cur) == _normalize(core_rep):
+        core_resolved = core_cur  # agreed → take either
+    else:
+        core_resolved = core_cur  # genuine conflict → conservative: take upstream
+
+    # Assemble the full resolution.
+    parts = [p for p in [pre_resolved, core_resolved, post_resolved] if p]
+    return "\n".join(parts)
+
 
 
 # ---------------------------------------------------------------------------

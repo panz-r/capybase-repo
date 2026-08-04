@@ -122,6 +122,16 @@ def scan_resurrections(
             )
             if not candidates:
                 continue
+            # Convergent-add filter: if the candidate block's content also
+            # appears in the OTHER side's blob, both sides independently added
+            # it — it's a convergent addition, not a resurrection of deleted
+            # content. Skip it (both sides having the same content means the
+            # merge result legitimately includes it).
+            other_oid = replayed_oid if side_label == "onto" else onto_oid
+            other_blob = _blob_text(git, other_oid, path) if other_oid else None
+            other_lines = set(
+                ln for ln in (other_blob or "").splitlines() if ln.strip()
+            )
             # History-walk stability verification: for each candidate block,
             # check whether the deletion was stable on this branch.
             blob_seq = None
@@ -132,6 +142,14 @@ def scan_resurrections(
             stable_blocks: list[ResurrectedBlock] = []
             for blk in candidates:
                 block_lines = blk.text.splitlines()
+                # Convergent-add check: if the majority of the block's non-blank
+                # lines appear in the other side's blob, both sides independently
+                # added the same content — not a resurrection.
+                block_nonblank = [ln for ln in block_lines if ln.strip()]
+                if block_nonblank and other_lines:
+                    in_other = sum(1 for ln in block_nonblank if ln in other_lines)
+                    if in_other >= len(block_nonblank) * 0.5:
+                        continue  # convergent addition, not a resurrection
                 if blob_seq:
                     stability = classify_deletion_stability(
                         block_lines, blob_seq, min_coverage=min_coverage,
