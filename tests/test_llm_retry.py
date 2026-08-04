@@ -2,9 +2,13 @@
 
 The retry sits BELOW the application-level CEGIS re-prompt loop: a single
 generation gets up to ``retry_attempts`` transport retries on transient failures
-(connection reset, socket timeout, HTTP 5xx, the stalled-connection hard-deadline
-RuntimeError), then CEGIS takes over. It must NOT retry on HTTP 4xx (caller
-errors) or the "unexpected response shape" error (a retry fails identically).
+(connection reset, socket timeout, HTTP 5xx, timed-out reads), then CEGIS takes
+over. It must NOT retry on HTTP 4xx (caller errors), the "unexpected response
+shape" error (a retry fails identically), or the hard-deadline stall — when the
+model itself stalled for the full generation budget on this exact prompt, a
+retry on the same prompt stalls again, so retrying just burns
+``generation_timeout_seconds`` per attempt (3 x 240s = 720s in the eval config)
+and stacks toward the case timeout.
 """
 
 from __future__ import annotations
@@ -37,7 +41,6 @@ def _runtime(cause: BaseException | None, msg: str = "LLM request failed: x") ->
     _runtime(urllib.error.URLError("refused")),                     # connection
     _runtime(socket.timeout("timed out")),                          # socket timeout
     _runtime(None, "LLM request failed: socket read timed out after 600s"),
-    _runtime(None, "LLM request exceeded hard deadline (180s); aborting stalled connection"),
 ])
 def test_is_retryable_transient(exc):
     assert _is_retryable(exc) is True
@@ -48,6 +51,9 @@ def test_is_retryable_transient(exc):
     _runtime(urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)),
     _runtime(urllib.error.HTTPError("u", 422, "Unprocessable", {}, None)),
     _runtime(None, "unexpected LLM response shape: KeyError('choices')"),  # malformed
+    # Hard-deadline stall: the model itself stalled for the full generation
+    # budget on this prompt — retrying the same prompt stalls again.
+    _runtime(None, "LLM request exceeded hard deadline (180s); aborting stalled connection"),
 ])
 def test_is_not_retryable(exc):
     assert _is_retryable(exc) is False
@@ -93,6 +99,23 @@ def test_no_retry_on_non_retryable():
     def fn():
         calls["n"] += 1
         raise _runtime(None, "unexpected LLM response shape: boom")
+
+    with pytest.raises(RuntimeError):
+        _with_retry(fn, attempts=3, base_delay=1.0, max_delay=5.0)
+    assert calls["n"] == 1  # immediate raise, no retries
+
+
+def test_no_retry_on_hard_deadline_stall():
+    """A hard-deadline stall (model stalled the full budget on this prompt) must
+    NOT be retried — the same prompt stalls again, so each retry just burns
+    another generation_timeout_seconds. Fail fast after exactly one attempt."""
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        raise _runtime(
+            None, "LLM request exceeded hard deadline (240s); aborting stalled connection"
+        )
 
     with pytest.raises(RuntimeError):
         _with_retry(fn, attempts=3, base_delay=1.0, max_delay=5.0)

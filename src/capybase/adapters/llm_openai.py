@@ -31,9 +31,11 @@ def _is_retryable(exc: BaseException) -> bool:
 
     Retryable (transient): connection errors, socket timeouts, HTTP 5xx (server
     errors / overloaded / gateway timeouts), and the adapter's own
-    stalled-connection / timed-out RuntimeErrors. NOT retryable: HTTP 4xx
-    (caller errors — a retry fails identically), and the "unexpected response
-    shape" RuntimeError (malformed non-error response — not a transport fault).
+    timed-out-read RuntimeErrors. NOT retryable: HTTP 4xx (caller errors — a
+    retry fails identically), the "unexpected response shape" RuntimeError
+    (malformed non-error response — not a transport fault), and the
+    "exceeded hard deadline" RuntimeError (the model itself stalled for the full
+    generation budget on this prompt — retrying the same prompt stalls again).
     """
     # Inspect the cause chain: the worker wraps the original network exception
     # in a RuntimeError via `raise RuntimeError(...) from got`, so the real
@@ -56,16 +58,22 @@ def _is_retryable(exc: BaseException) -> bool:
 
     # Fall back to the adapter's own RuntimeError classification. The worker
     # raises these for stalled connections and timed-out reads (retryable) but
-    # also for malformed responses (not retryable).
+    # also for malformed responses and hard-deadline stalls (not retryable).
     if isinstance(exc, RuntimeError):
         msg = str(exc).lower()
         if "unexpected llm response shape" in msg:
             return False  # malformed non-error response — a retry won't help
-        if (
-            "request failed" in msg
-            or "exceeded hard deadline" in msg
-            or "timed out" in msg
-        ):
+        # A hard-deadline stall ("exceeded hard deadline") is the ONE timeout
+        # case that must NOT be retried: it means the model itself stalled for
+        # the full generation_timeout_seconds on this exact prompt. Retrying the
+        # same prompt will almost certainly stall the same way, so each retry
+        # just burns another generation_timeout_seconds (3 x 240s = 720s in the
+        # eval config) and stacks toward the case timeout, leaving abandoned
+        # daemon threads holding streaming connections. Fail fast here and let
+        # the orchestrator's wall-budget / recovery paths handle it cleanly.
+        if "exceeded hard deadline" in msg:
+            return False
+        if "request failed" in msg or "timed out" in msg:
             return True
     return False
 
