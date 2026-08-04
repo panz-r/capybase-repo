@@ -80,6 +80,32 @@ def char_ratio(a: str, b: str) -> float:
     return _char_ratio_py(a, b)
 
 
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two equal-length float vectors.
+
+    Returns 0.0 for zero vectors, empty inputs, or length mismatch. The
+    canonical vector-similarity helper — shared by the structural entity-match
+    tier, the memory embedding retriever, and the orchestrator's critic scorer.
+    Previously each of the three had its own copy; the retriever's lacked the
+    length-mismatch guard the other two had (a latent bug on unequal-length
+    vectors).
+    """
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = 0.0
+    na = 0.0
+    nb = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        na += x * x
+        nb += y * y
+    if na <= 0.0 or nb <= 0.0:
+        return 0.0
+    import math
+
+    return dot / (math.sqrt(na) * math.sqrt(nb))
+
+
 def _char_ratio_py(a: str, b: str) -> float:
     """Pure-Python fallback for :func:`char_ratio`: O(n·m) LCS DP.
 

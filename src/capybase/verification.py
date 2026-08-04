@@ -1654,26 +1654,12 @@ def _extract_policy_facts(text: str, language: str | None) -> PolicyFacts:
 def _safe_parse_fragment(text: str):
     """Parse ``text`` as a Python module, tolerating splice-fragment scope.
 
-    Tries (1) the text as-is, then (2) wrapped in a dummy function body (so
-    bare ``return``/indented fragments parse). Returns the ast.Module, or None
-    if neither parse succeeds (genuinely malformed — the gate degrades to empty
-    facts rather than crashing).
+    Thin delegate to the canonical ``value_resolution._safe_parse_fragment``
+    with ``unwrap=False`` (the policy-fact extractor recurses via
+    ``NodeVisitor.generic_visit``, so the wrapper module is returned as-is).
     """
-    try:
-        return ast.parse(text)
-    except (SyntaxError, ValueError):
-        pass
-    # Wrap in a function body: dedent first so the fragment's indentation aligns
-    # to one level under `def _f():`. This makes a bare `return` or
-    # leading-space fragment a valid function body.
-    import textwrap
-
-    dedented = textwrap.dedent(text)
-    wrapped = "def __bcf_policy_fragment__():\n" + textwrap.indent(dedented, "    ")
-    try:
-        return ast.parse(wrapped)
-    except (SyntaxError, ValueError):
-        return None
+    from capybase.value_resolution import _safe_parse_fragment as _canonical
+    return _canonical(text, unwrap=False)
 
 
 class PolicyGateValidator:

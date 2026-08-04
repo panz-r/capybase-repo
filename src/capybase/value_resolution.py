@@ -56,14 +56,20 @@ class ValueResolution:
 # ---------------------------------------------------------------------------
 
 
-def _safe_parse_fragment(text: str) -> ast.Module | None:
+def _safe_parse_fragment(text: str, *, unwrap: bool = True) -> ast.Module | None:
     """Parse a (possibly-indented) Python fragment into a module.
 
     Tries the text directly, then wraps it in a dummy ``def`` body (after
-    dedent) so a bare ``return`` or leading-whitespace fragment parses — and
-    UNWRAPS the dummy def so the returned module's statements are the
-    fragment's statements (not a wrapper ``FunctionDef``). Returns ``None`` for
-    genuinely malformed input (never raises).
+    dedent) so a bare ``return`` or leading-whitespace fragment parses. Returns
+    ``None`` for genuinely malformed input (never raises).
+
+    When ``unwrap`` is True (default), the dummy def is lifted out: the
+    returned module's statements are the fragment's real statements (not a
+    wrapper ``FunctionDef``). When False, the wrapper module is returned as-is
+    so a ``NodeVisitor.generic_visit`` recursion finds nested constructs at any
+    depth. The canonical implementation — shared by value_resolution (unwrap)
+    and verification's policy-fact extractor (no unwrap). Previously each module
+    had its own copy of this logic.
     """
     if not text or not text.strip():
         return None
@@ -72,11 +78,13 @@ def _safe_parse_fragment(text: str) -> ast.Module | None:
     except (SyntaxError, ValueError):
         pass
     dedented = textwrap.dedent(text)
-    wrapped = "def __vr_fragment__():\n" + textwrap.indent(dedented, "    ")
+    wrapped = "def __py_fragment__():\n" + textwrap.indent(dedented, "    ")
     try:
         mod = ast.parse(wrapped)
     except (SyntaxError, ValueError):
         return None
+    if not unwrap:
+        return mod
     # Unwrap: the dummy def is the only top-level statement; lift its body into
     # a module so callers see the fragment's real statements.
     if mod.body and isinstance(mod.body[0], ast.FunctionDef):

@@ -320,17 +320,12 @@ class LexicalRetriever:
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
-    """Cosine similarity of two equal-length vectors. Returns 0 for zero vectors."""
-    dot = 0.0
-    na = 0.0
-    nb = 0.0
-    for x, y in zip(a, b):
-        dot += x * y
-        na += x * x
-        nb += y * y
-    if na <= 0.0 or nb <= 0.0:
-        return 0.0
-    return dot / (math.sqrt(na) * math.sqrt(nb))
+    """Cosine similarity of two equal-length vectors. Returns 0 for zero vectors.
+
+    Thin delegate to the canonical ``diff.cosine_similarity``.
+    """
+    from capybase.diff import cosine_similarity
+    return cosine_similarity(a, b)
 
 
 def _cal_score(calibration: "object | None", raw: float) -> float:

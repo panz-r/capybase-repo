@@ -469,21 +469,14 @@ def _dedupe_critic_warnings(
 
 
 def _critic_cosine(a: list[float], b: list[float]) -> float:
-    """Cosine similarity of two equal-length vectors (local; never imports)."""
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = 0.0
-    na = 0.0
-    nb = 0.0
-    for x, y in zip(a, b):
-        dot += x * y
-        na += x * x
-        nb += y * y
-    if na <= 0.0 or nb <= 0.0:
-        return 0.0
-    import math
+    """Cosine similarity of two equal-length vectors.
 
-    return dot / (math.sqrt(na) * math.sqrt(nb))
+    Thin delegate to the canonical ``diff.cosine_similarity``. (The prior
+    "local; never imports" rationale was stale — the orchestrator already
+    lazy-imports from memory.retriever and elsewhere.)
+    """
+    from capybase.diff import cosine_similarity
+    return cosine_similarity(a, b)
 
 
 def _dropped_units_for(

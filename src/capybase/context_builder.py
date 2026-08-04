@@ -473,30 +473,21 @@ def _unit_region_kind(unit: ConflictUnit) -> str | None:
     Reads it from the structural metadata (already computed at extraction time)
     so we don't re-run the region-key assembler in the hot path. None when the
     kind isn't known; the retriever treats None as "no same-kind signal".
+
+    Delegates to ``history._coarse_kind`` (the canonical 12-entry node-type map
+    + signature-prefix fallback). Previously this inlined a stale 5-entry
+    subset that was missing ``enum_item``/``trait_item``/``decorated_definition``
+    and didn't handle ``async fn``/``pub fn`` in the fallback.
     """
+    from capybase.history import _coarse_kind
     sv = unit.structural_metadata
-    node_type = sv.get("enclosing_node_type") if sv else None
-    if node_type:
-        # The same coarse mapping history._coarse_kind uses.
-        _MAP = {
-            "function_definition": "function", "function_item": "function",
-            "method_definition": "function",
-            "class_definition": "class", "struct_item": "class",
-            "impl_item": "impl",
-        }
-        if node_type in _MAP:
-            return _MAP[node_type]
-    sig = sv.get("enclosing_node_signature") if sv else None
-    if sig:
-        s = sig.strip()
-        for kw, kind in (
-            ("async def", "function"), ("def", "function"), ("fn", "function"),
-            ("class", "class"), ("struct", "class"), ("impl", "impl"),
-            ("enum", "class"), ("trait", "class"),
-        ):
-            if s.startswith(kw + " "):
-                return kind
-    return None
+    if not sv:
+        return None
+    kind = _coarse_kind(
+        sv.get("enclosing_node_type"),
+        sv.get("enclosing_node_signature"),
+    )
+    return None if kind == "unknown" else kind
 
 
 def _unit_conflict_shape(unit: ConflictUnit) -> str | None:

@@ -152,6 +152,26 @@ def _classify_trust(comment_text: str, stripped: str, cls: CommentClass) -> str:
     return "normal"
 
 
+_COMMENT_PREFIXES = ("///", "//!", "//", "/*", "*/", "#!", "#=", "#", '"""', "'''", "*")
+
+
+def _strip_comment_prefix(comment_text: str) -> str:
+    """Strip a leading comment marker (``//``, ``#``, ``/*``, ``///``, etc.).
+
+    Returns the comment body (lstripped). The prefix list covers every comment
+    style across the supported languages: ``//`` and ``/* */`` for Family A,
+    ``#`` for Python/Ruby, ``///`` and ``//!`` for Rust doc comments, the
+    triple-quote forms for Python docstrings, and ``*`` for block-comment
+    continuation lines. Shared by classify_comment and classify_comment_trust
+    so the two cannot drift.
+    """
+    stripped = comment_text.lstrip()
+    for prefix in _COMMENT_PREFIXES:
+        if stripped.startswith(prefix):
+            return stripped[len(prefix):].lstrip()
+    return stripped
+
+
 def classify_comment(comment_text: str, lang: str | None = None) -> CommentClass:
     """Classify a single comment's text into a :class:`CommentClass`.
 
@@ -160,12 +180,7 @@ def classify_comment(comment_text: str, lang: str | None = None) -> CommentClass
     → DOCTEST → DEFERRED fallback).
     """
     # Strip leading comment markers for cleaner pattern matching.
-    stripped = comment_text.lstrip()
-    # Remove leading //, /*, #, ///, //!, #= etc.
-    for prefix in ("///", "//!", "//", "/*", "*/", "#!", "#=", "#", '"""', "'''", "*"):
-        if stripped.startswith(prefix):
-            stripped = stripped[len(prefix):].lstrip()
-            break
+    stripped = _strip_comment_prefix(comment_text)
 
     # MACHINE — directives/suppressions (check first: a #pragma that mentions
     # "copyright" is still MACHINE, not LEGAL).
@@ -212,11 +227,7 @@ def classify_comment_trust(
     ``"normal"`` — they're preserved verbatim and don't participate in reveal.
     """
     cls = classify_comment(comment_text, lang)
-    stripped = comment_text.lstrip()
-    for prefix in ("///", "//!", "//", "/*", "*/", "#!", "#=", "#", '"""', "'''", "*"):
-        if stripped.startswith(prefix):
-            stripped = stripped[len(prefix):].lstrip()
-            break
+    stripped = _strip_comment_prefix(comment_text)
     trust = _classify_trust(comment_text, stripped, cls)
     return cls, trust
 
