@@ -3496,11 +3496,44 @@ class Orchestrator:
         result back into the candidate's resolved_text by replacing the
         core_cur section.
 
+        The core unit inherits the parent's structural_metadata (enclosing
+        function/class, node type/signature) and gets a padded worktree with
+        ±3 lines of resolved tail context so the LLM can see the surrounding
+        brace structure. Without this, the LLM resolves the core blind to its
+        enclosing scope and introduces brace imbalances.
+
         Returns the patched resolved_text, or None if the core couldn't be
         resolved (the conservative default — core_cur — remains in place).
         """
         try:
             from capybase.conflict_model import ConflictUnit as CU, ConflictSide
+
+            # Extract ±3 lines of surrounding context from the resolved candidate
+            # text so the LLM sees the braces/scope around the core.
+            resolved_lines = (cand.resolved_text or "").split("\n")
+            core_lines = core_cur.split("\n")
+            core_start_in_resolved = -1
+            if core_cur in (cand.resolved_text or ""):
+                # Find the core's position in the resolved text.
+                pre_text = (cand.resolved_text or "").split(core_cur, 1)[0]
+                core_start_in_resolved = pre_text.count("\n")
+
+            # Build a padded worktree: 3 lines before + core + 3 lines after.
+            pad_before: list[str] = []
+            pad_after: list[str] = []
+            if core_start_in_resolved >= 0:
+                pad_before = resolved_lines[max(0, core_start_in_resolved - 3):core_start_in_resolved]
+                after_start = core_start_in_resolved + len(core_lines)
+                pad_after = resolved_lines[after_start:after_start + 3]
+
+            padded_text = "\n".join(pad_before + core_lines + pad_after)
+            padded_core_start = len(pad_before)
+            padded_core_end = padded_core_start + len(core_lines) - 1
+
+            # Inherit the parent's structural metadata so the LLM sees the
+            # enclosing function/class and the structural anchor renders.
+            core_meta = dict(unit.structural_metadata)
+            core_meta["deferred_core_context"] = "\n".join(pad_before + pad_after)
 
             core_unit = CU(
                 session_id=unit.session_id,
@@ -3513,15 +3546,24 @@ class Orchestrator:
                 base=ConflictSide(label="BASE", text=core_base),
                 current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=core_cur),
                 replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=core_rep),
-                original_worktree_text=core_cur,
-                marker_span=unit.marker_span,
+                original_worktree_text=padded_text,
+                marker_span=(padded_core_start, padded_core_end),
                 enclosing_symbol=unit.enclosing_symbol,
                 risk_tags=list(unit.risk_tags),
                 severity=unit.severity,
+                structural_metadata=core_meta,
             )
             outcome = self._resolve_unit(core_unit)
             if outcome.accepted is not None and outcome.accepted.resolved_text:
                 core_resolved = outcome.accepted.resolved_text
+                # Brace-delta safety check: if the resolved core has a
+                # significantly different brace balance than the base core,
+                # the LLM likely introduced or dropped a brace. Try to fix it.
+                from capybase.verification import _brace_imbalance_line, _try_balance_braces
+                if _brace_imbalance_line(core_resolved, unit.language) is not None:
+                    repaired = _try_balance_braces(core_resolved, unit.language)
+                    if repaired is not None and _brace_imbalance_line(repaired, unit.language) is None:
+                        core_resolved = repaired
                 # Patch: replace core_cur in the resolved text with core_resolved.
                 if core_cur in cand.resolved_text:
                     return cand.resolved_text.replace(core_cur, core_resolved, 1)

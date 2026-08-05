@@ -287,6 +287,12 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         merged = _try_insertion_union(base, current, replayed)
         if merged is not None:
             return StructuralResolution(rule="insertion_union", text=merged)
+        # Convergent-addition merge: when both sides independently added the
+        # same content (overlapping adds), keep one copy + append unique extras.
+        # Covers the both_add shape where additions overlap but aren't disjoint.
+        merged = _try_convergent_addition_merge(base, current, replayed)
+        if merged is not None:
+            return StructuralResolution(rule="convergent_addition_merge", text=merged)
         merged = _try_directive_union(unit)
         if merged is not None:
             return StructuralResolution(rule="directive_union", text=merged)
@@ -1334,6 +1340,63 @@ def _try_directive_union(unit) -> str | None:
         out.extend(cur_distinct)
         out.extend(deduped_shared)
         out.extend(rep_distinct)
+    return "\n".join(out)
+
+
+def _try_convergent_addition_merge(base: str, current: str, replayed: str) -> str | None:
+    """Merge when both sides added the same (or nearly the same) content.
+
+    When both sides independently added identical lines relative to base, the
+    correct merge is to keep one copy and append any unique extras from each
+    side. This is the ``both_add`` shape where the additions overlap (shared
+    lines) but aren't fully disjoint.
+
+    Returns None when the sides aren't pure additions (either side modified or
+    deleted base lines), or when the additions don't share enough content to be
+    considered convergent (≥50% of the smaller side's additions are shared).
+    """
+    base_lines = base.split("\n")
+    cur_lines = current.split("\n")
+    rep_lines = replayed.split("\n")
+    cur_ins = _pure_insertion_runs(base_lines, cur_lines)
+    rep_ins = _pure_insertion_runs(base_lines, rep_lines)
+    if cur_ins is None or rep_ins is None:
+        return None  # a side modified/deleted base lines
+    cur_flat = [ln for run in cur_ins.values() for ln in run if ln.strip()]
+    rep_flat = [ln for run in rep_ins.values() for ln in run if ln.strip()]
+    if not cur_flat or not rep_flat:
+        return None
+    cur_set = set(cur_flat)
+    rep_set = set(rep_flat)
+    shared = cur_set & rep_set
+    smaller = min(len(cur_set), len(rep_set))
+    if smaller == 0 or len(shared) < smaller * 0.5:
+        return None  # not convergent enough
+    # Build the merge: walk base, at each anchor emit current's additions first,
+    # then any replayed additions not already emitted by current.
+    emitted_added: set[str] = set()
+    out: list[str] = []
+    for i, bl in enumerate(base_lines):
+        if i in cur_ins:
+            for ln in cur_ins[i]:
+                out.append(ln)
+                if ln.strip():
+                    emitted_added.add(ln)
+        if i in rep_ins:
+            for ln in rep_ins[i]:
+                if ln.strip() and ln in emitted_added:
+                    continue  # already emitted by current
+                out.append(ln)
+        out.append(bl)
+    # Trailing insertions.
+    for ln in cur_ins.get(len(base_lines), []):
+        out.append(ln)
+        if ln.strip():
+            emitted_added.add(ln)
+    for ln in rep_ins.get(len(base_lines), []):
+        if ln.strip() and ln in emitted_added:
+            continue
+        out.append(ln)
     return "\n".join(out)
 
 

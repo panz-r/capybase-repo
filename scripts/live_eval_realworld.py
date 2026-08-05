@@ -429,6 +429,12 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
         # is the only compile check. This is honest: we can't whole-tree-build
         # a tree whose build system we can't complete, but the per-unit syntax
         # gate still catches structural defects.
+        # Also verify the build directory exists when using cmake — a missing
+        # build/ dir causes a 900s timeout (cmake --build on a non-existent
+        # directory hangs or fails repeatedly inside the orchestrator loop).
+        if prepare_ok and "cmake --build" in build_cmd:
+            if not (repo / "build").is_dir():
+                prepare_ok = False
         _DETECTED_BUILD_CMD[case.id] = build_cmd if prepare_ok else "true"
         # Generate sqlite's derived headers (parse.h, opcodes.h, sqlite3.h,
         # keywordhash.h) after configure. These are needed by gcc -fsyntax-only
