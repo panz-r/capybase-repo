@@ -3556,20 +3556,22 @@ class Orchestrator:
             outcome = self._resolve_unit(core_unit)
             if outcome.accepted is not None and outcome.accepted.resolved_text:
                 core_resolved = outcome.accepted.resolved_text
-                # Brace-delta safety check: if the resolved core has a
-                # significantly different brace balance than the base core,
-                # the LLM likely introduced or dropped a brace. Try to fix it.
-                from capybase.verification import _brace_imbalance_line, _try_balance_braces
-                if _brace_imbalance_line(core_resolved, unit.language) is not None:
-                    repaired = _try_balance_braces(core_resolved, unit.language)
-                    if repaired is not None and _brace_imbalance_line(repaired, unit.language) is None:
-                        core_resolved = repaired
                 # Patch: replace core_cur in the resolved text with core_resolved.
                 if core_cur in cand.resolved_text:
-                    return cand.resolved_text.replace(core_cur, core_resolved, 1)
-                # Fallback: the core text may have been normalized; append the
-                # resolved core (less precise but still correct).
-                return cand.resolved_text + "\n" + core_resolved
+                    patched = cand.resolved_text.replace(core_cur, core_resolved, 1)
+                else:
+                    # Fallback: the core text may have been normalized; append the
+                    # resolved core (less precise but still correct).
+                    patched = cand.resolved_text + "\n" + core_resolved
+                # Brace-delta safety check: check the PATCHED text (core in
+                # context), not the isolated core — a 1-3 line core naturally
+                # has unbalanced braces in isolation (e.g. ``if (x) {``).
+                from capybase.verification import _brace_imbalance_line, _try_balance_braces
+                if _brace_imbalance_line(patched, unit.language) is not None:
+                    repaired = _try_balance_braces(patched, unit.language)
+                    if repaired is not None and _brace_imbalance_line(repaired, unit.language) is None:
+                        return repaired
+                return patched
             return None
         except Exception:  # noqa: BLE001 — mini-conflict is advisory
             return None
