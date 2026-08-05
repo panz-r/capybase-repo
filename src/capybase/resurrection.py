@@ -148,7 +148,7 @@ def scan_resurrections(
                 block_nonblank = [ln for ln in block_lines if ln.strip()]
                 if block_nonblank and other_lines:
                     in_other = sum(1 for ln in block_nonblank if ln in other_lines)
-                    if in_other >= len(block_nonblank) * 0.5:
+                    if in_other >= len(block_nonblank) * 0.8:
                         continue  # convergent addition, not a resurrection
                 if blob_seq:
                     stability = classify_deletion_stability(

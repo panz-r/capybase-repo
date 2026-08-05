@@ -96,10 +96,16 @@ class StructuralResolution:
     LLM). When non-None, ``rule`` names which safe rule produced it (for
     auditing/journaling) and ``text`` is the block-interior resolved text, in the
     same shape an LLM candidate's ``resolved_text`` takes (it splices identically).
+
+    ``deferred_core`` carries a mini-conflict's 3-way texts (base, current,
+    replayed) when ``partial_disjoint_merge`` resolved the deterministic tails
+    but couldn't resolve the overlap core. The orchestrator feeds ONLY the core
+    to the LLM (a tiny prompt) and patches the result back into the resolved text.
     """
 
     rule: Rule | None
     text: str | None
+    deferred_core: tuple[str, str, str] | None = None
 
     @property
     def resolved(self) -> bool:
@@ -295,6 +301,10 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         # specific rules (insertion_union, token_disjoint, etc.) get priority.
         merged = _try_partial_disjoint_merge(base, current, replayed)
         if merged is not None:
+            if isinstance(merged, StructuralResolution):
+                # The deferred-core path returns a StructuralResolution directly
+                # (with deferred_core set). Pass it through without re-wrapping.
+                return merged
             return StructuralResolution(rule="partial_disjoint_merge", text=merged)
 
     return StructuralResolution(rule=None, text=None)
@@ -739,7 +749,7 @@ def _try_partial_disjoint_merge(base: str, current: str, replayed: str) -> str |
     pre_resolved = _resolve_zone(pre_base, pre_cur, pre_rep)
     post_resolved = _resolve_zone(post_base, post_cur, post_rep)
 
-    # Overlap core: try concession logic first.
+    # Overlap core: try concession logic first (normalize-based).
     if _normalize(core_cur) == _normalize(core_base):
         core_resolved = core_rep  # current conceded → take replayed
     elif _normalize(core_rep) == _normalize(core_base):
@@ -747,11 +757,29 @@ def _try_partial_disjoint_merge(base: str, current: str, replayed: str) -> str |
     elif _normalize(core_cur) == _normalize(core_rep):
         core_resolved = core_cur  # agreed → take either
     else:
-        # Genuine two-sided conflict in the core (both sides changed the same
-        # lines to DIFFERENT values, neither conceded). We cannot
-        # deterministically pick one side — that would silently drop the
-        # other side's intent. Decline; let the LLM handle it.
-        return None
+        # Concession logic failed. Try zealous_merge on the core — it handles
+        # the per-line agreed/conceded case at exact-equality granularity,
+        # catching multi-line cores where SOME lines agreed and others didn't.
+        zealous = _try_zealous_merge(core_base, core_cur, core_rep)
+        if zealous is not None:
+            core_resolved = zealous
+        else:
+            # Genuine two-sided conflict in the core. We can't resolve it
+            # deterministically. Only emit a deferred_core when the
+            # deterministic tails have real content — otherwise the whole
+            # conflict is the core and there's nothing to decompose (the
+            # rule would just be picking one side, silently dropping the
+            # other's intent). Require at least one non-empty tail zone.
+            has_tails = bool(pre_resolved.strip()) or bool(post_resolved.strip())
+            if not has_tails:
+                return None  # no decomposition value; defer to the LLM
+            core_resolved = core_cur  # conservative default; patched by LLM
+            parts = [p for p in [pre_resolved, core_resolved, post_resolved] if p]
+            return StructuralResolution(
+                rule="partial_disjoint_merge",
+                text="\n".join(parts),
+                deferred_core=(core_base, core_cur, core_rep),
+            )
 
     # Assemble the full resolution.
     parts = [p for p in [pre_resolved, core_resolved, post_resolved] if p]

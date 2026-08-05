@@ -55,15 +55,15 @@ def _brackets_balanced(s: str) -> bool:
 def deduplicate_imports(
     text: str, language: str | None = None,
 ) -> tuple[str, int]:
-    """Remove duplicate ``use`` statements from the full file text.
+    """Remove duplicate import/include statements from the full file text.
 
     Returns ``(deduplicated_text, duplicates_removed)``. Never raises —
     on any parse failure returns ``(text, 0)``.
 
     Args:
         text: the full spliced file text.
-        language: the file language (for future per-language behavior).
-            Currently only processes Rust ``use`` statements.
+        language: the file language. Processes Rust ``use`` statements and
+            C/C++ ``#include`` directives.
 
     Returns:
         ``(deduplicated_text, count)`` where count is the number of
@@ -71,7 +71,14 @@ def deduplicate_imports(
     """
     if not text or not text.strip():
         return text, 0
-    # Only process Rust use statements.
+
+    # C/C++ #include dedup: exact-line duplicate removal (preserve first
+    # occurrence, don't reorder). Simpler than Rust use-tree parsing —
+    # #include is always a single line with no tree structure.
+    if language in ("c", "cpp", "c++"):
+        return _deduplicate_cpp_includes(text)
+
+    # Rust use-statement dedup (tree-aware).
     if language and language not in ("rust", "toml", None):
         return text, 0
 
@@ -161,6 +168,44 @@ def deduplicate_imports(
         return result, removed_count
 
     except Exception:  # noqa: BLE001 — never break the assembly
+        return text, 0
+
+
+def _deduplicate_cpp_includes(text: str) -> tuple[str, int]:
+    """Remove exact-duplicate ``#include`` directives from C/C++ source.
+
+    Preserves the FIRST occurrence of each ``#include`` line and removes
+    subsequent exact duplicates. Does NOT reorder, normalize, or merge
+    includes — only exact matches are removed. This is safe because an
+    identical ``#include`` at a later position is provably redundant (the
+    header is already in the translation unit). The whole-file build gate
+    validates the result.
+
+    Returns ``(deduplicated_text, count)``.
+    """
+    import re
+    try:
+        lines = text.splitlines(keepends=True)
+        seen: set[str] = set()
+        removed_count = 0
+        result_lines: list[str] = []
+        for ln in lines:
+            stripped = ln.strip()
+            # Match #include <...> or #include "..." (exact directive).
+            m = re.match(r"^#\s*include\s+[<\"].+[>\"]\s*$", stripped)
+            if m:
+                # Normalize whitespace for the dedup key so
+                # #include <vector> and #  include <vector> match.
+                normalized = re.sub(r"\s+", " ", stripped)
+                if normalized in seen:
+                    removed_count += 1
+                    continue  # exact duplicate — skip
+                seen.add(normalized)
+            result_lines.append(ln)
+        if removed_count == 0:
+            return text, 0
+        return "".join(result_lines), removed_count
+    except Exception:  # noqa: BLE001
         return text, 0
 
 

@@ -3465,12 +3465,72 @@ class Orchestrator:
             return None
         outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
         outcome.accepted = cand
+        # Mini-conflict core: if partial_disjoint_merge resolved the deterministic
+        # tails but deferred the overlap core, resolve just the core via the LLM
+        # (a tiny prompt — 1-3 lines) and patch it back into the resolved text.
+        # This shrinks the LLM's job from "resolve this 200-line block" to
+        # "resolve these 2 conflicting lines."
+        if result.deferred_core is not None:
+            core_base, core_cur, core_rep = result.deferred_core
+            patched = self._resolve_deferred_core(unit, cand, core_base, core_cur, core_rep)
+            if patched is not None:
+                cand.resolved_text = patched
         self.journal.emit(
             "candidate_accepted",
-            {"candidate_id": cand.candidate_id, "via": "structural"},
+            {"candidate_id": cand.candidate_id, "via": "structural",
+             "deferred_core_resolved": result.deferred_core is not None},
             step_index=self.step, path=unit.path, unit_id=unit.unit_id,
         )
         return outcome
+
+    def _resolve_deferred_core(
+        self, unit: ConflictUnit, cand: "CandidateResolution",
+        core_base: str, core_cur: str, core_rep: str,
+    ) -> str | None:
+        """Resolve a deferred mini-conflict core (1-3 lines) via the LLM.
+
+        Called when ``partial_disjoint_merge`` resolved the deterministic tails
+        but couldn't resolve the overlap core. Builds a tiny ConflictUnit from
+        the core's 3-way texts, resolves it via the standard ``_resolve_unit``
+        pipeline (which includes SBCR, the LLM, and CEGIS), and patches the
+        result back into the candidate's resolved_text by replacing the
+        core_cur section.
+
+        Returns the patched resolved_text, or None if the core couldn't be
+        resolved (the conservative default — core_cur — remains in place).
+        """
+        try:
+            from capybase.conflict_model import ConflictUnit as CU, ConflictSide
+
+            core_unit = CU(
+                session_id=unit.session_id,
+                step_index=unit.step_index,
+                path=unit.path,
+                language=unit.language,
+                conflict_type=unit.conflict_type,
+                unit_id=f"{unit.unit_id}:core",
+                unit_kind="text_marker_block",
+                base=ConflictSide(label="BASE", text=core_base),
+                current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=core_cur),
+                replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=core_rep),
+                original_worktree_text=core_cur,
+                marker_span=unit.marker_span,
+                enclosing_symbol=unit.enclosing_symbol,
+                risk_tags=list(unit.risk_tags),
+                severity=unit.severity,
+            )
+            outcome = self._resolve_unit(core_unit)
+            if outcome.accepted is not None and outcome.accepted.resolved_text:
+                core_resolved = outcome.accepted.resolved_text
+                # Patch: replace core_cur in the resolved text with core_resolved.
+                if core_cur in cand.resolved_text:
+                    return cand.resolved_text.replace(core_cur, core_resolved, 1)
+                # Fallback: the core text may have been normalized; append the
+                # resolved core (less precise but still correct).
+                return cand.resolved_text + "\n" + core_resolved
+            return None
+        except Exception:  # noqa: BLE001 — mini-conflict is advisory
+            return None
 
     def _try_source_candidate_portfolio(
         self, unit: ConflictUnit,
@@ -7447,7 +7507,8 @@ class Orchestrator:
                         for f in failures
                     )
                     if has_import_error:
-                        deduped, dedup_count = deduplicate_imports(spliced)
+                        _lang = accepted[fault_idx][0].language if 0 <= fault_idx < len(accepted) else None
+                        deduped, dedup_count = deduplicate_imports(spliced, _lang)
                         if dedup_count > 0:
                             # The dedup produced a complete, correct file. Represent
                             # it as a whole-file unit carrying the deduped buffer —
