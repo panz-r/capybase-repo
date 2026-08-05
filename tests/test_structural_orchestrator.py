@@ -67,10 +67,34 @@ def _make_disjoint_conflict(repo: Path) -> Path:
 
 
 def _make_real_conflict(repo: Path) -> Path:
-    """A genuine both-sides-change conflict (NOT structurally resolvable)."""
-    base = "def f():\n    return 1\n"
-    upstream = "def f():\n    return 2\n"
-    replayed = "def f():\n    return 3\n"
+    """A genuine both-sides-change conflict (NOT structurally resolvable).
+
+    Both sides change the SAME 5 base lines to DIFFERENT values — a large
+    overlap (>3 lines) that exceeds partial_disjoint_merge's threshold.
+    token_disjoint and disjoint_edits also decline (shared base lines/tokens).
+    The model MUST handle this.
+    """
+    base = (
+        "A = 1\n"
+        "B = 2\n"
+        "C = 3\n"
+        "D = 4\n"
+        "E = 5\n"
+    )
+    upstream = (
+        "A = 10\n"
+        "B = 20\n"
+        "C = 30\n"
+        "D = 40\n"
+        "E = 50\n"
+    )
+    replayed = (
+        "A = 100\n"
+        "B = 200\n"
+        "C = 300\n"
+        "D = 400\n"
+        "E = 500\n"
+    )
     (repo / "app.py").write_text(base)
     git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
     git(repo, "branch", "feat")
@@ -144,7 +168,13 @@ def test_disjoint_conflict_resolves_without_llm(repo: Path):
 
 
 def test_structural_resolution_disabled_falls_through_to_model(repo: Path):
-    """When the toggle is off, even a disjoint conflict hits the model."""
+    """When the toggle is off, the structural resolver does NOT run.
+
+    The source portfolio (a separate deterministic mechanism) may still
+    resolve simple conflicts without the model. To verify the structural
+    resolver specifically is disabled, we check that no ``structurally_resolved``
+    journal event is emitted — the source portfolio uses a different event.
+    """
     _make_disjoint_conflict(repo)
     payload = json.dumps({"resolved_text": "A = 2\nB = 2", "self_reported_confidence": 0.8})
     client = CallCountingClient(payload)
@@ -155,8 +185,9 @@ def test_structural_resolution_disabled_falls_through_to_model(repo: Path):
                         out=lambda *_a, **_k: None)
     result = orch.run()
     assert not result.escalated, result.reason
-    # The model WAS called this time.
-    assert client.calls > 0
+    # The structural resolver was NOT invoked (no structurally_resolved event).
+    events = [e for e in orch.journal.read_events() if e.event_type == "structurally_resolved"]
+    assert not events, "structural resolver should be disabled"
 
 
 # ---------------------------------------------------------------------------
@@ -165,19 +196,27 @@ def test_structural_resolution_disabled_falls_through_to_model(repo: Path):
 
 
 def test_real_conflict_falls_through_to_model(repo: Path):
+    """A genuinely entangled conflict (>3 overlapping lines) that no deterministic
+    rule can handle. The structural resolver and partial_disjoint_merge both
+    decline. With the source portfolio disabled, the model MUST be called."""
     _make_real_conflict(repo)
-    payload = json.dumps({"resolved_text": "    return 2 + 3", "self_reported_confidence": 0.8})
+    payload = json.dumps({"resolved_text": "A = 10\nB = 200\nC = 30\nD = 400\nE = 50", "self_reported_confidence": 0.8})
     client = CallCountingClient(payload)
     engine = ResolutionEngine(_config(repo).model, client=client)
-    orch = Orchestrator(_config(repo), repo=str(repo), resolution_engine=engine,
+    cfg = _config(repo)
+    cfg.future.enable_source_portfolio = False  # isolate the structural→model path
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
                         out=lambda *_a, **_k: None)
     result = orch.run()
     assert not result.escalated, result.reason
-    # Structural resolver declined (real conflict) → model was called.
-    assert client.calls > 0
-    # No structurally_resolved event (it declined before journaling an accept).
+    # Structural resolver declined (real conflict) → no structurally_resolved event.
     events = [e for e in orch.journal.read_events() if e.event_type == "structurally_resolved"]
     assert not events
+    # The model WAS called.
+    assert client.calls > 0, (
+        f"expected model call for entangled conflict; got {client.calls}. "
+        f"Events: {[e.event_type for e in orch.journal.read_events()]}"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -243,16 +243,6 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if merged is not None:
             return StructuralResolution(rule="token_disjoint", text=merged)
 
-        # Partial-disjoint merge: when token_disjoint declined due to a small
-        # overlap (1-3 base lines both sides changed), decompose the conflict
-        # into deterministic tails + a tiny core. Resolves the disjoint parts
-        # without an LLM call; the core gets a conservative default validated
-        # by Phase B. This is the highest-leverage rule for real C++ conflicts
-        # where both sides modify a shared signature but add different code.
-        merged = _try_partial_disjoint_merge(base, current, replayed)
-        if merged is not None:
-            return StructuralResolution(rule="partial_disjoint_merge", text=merged)
-
         # Prose value-resolution: both sides edited the SAME prose line
         # differently (a version-string bump, a changelog header, a date). Every
         # code-shaped rule above declines (no entities, same-line two-sided
@@ -294,6 +284,18 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         merged = _try_directive_union(unit)
         if merged is not None:
             return StructuralResolution(rule="directive_union", text=merged)
+
+        # Partial-disjoint merge (last-resort deterministic): when ALL rules
+        # above declined due to a small overlap (1-3 base lines both sides
+        # changed), decompose the conflict into deterministic tails + a tiny
+        # core. The disjoint tails resolve without an LLM call; the core gets
+        # a conservative default validated by Phase B. This is the
+        # highest-leverage rule for real C++ conflicts where both sides modify
+        # a shared signature but add different code. Runs LAST so the more
+        # specific rules (insertion_union, token_disjoint, etc.) get priority.
+        merged = _try_partial_disjoint_merge(base, current, replayed)
+        if merged is not None:
+            return StructuralResolution(rule="partial_disjoint_merge", text=merged)
 
     return StructuralResolution(rule=None, text=None)
 
