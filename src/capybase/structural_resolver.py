@@ -1373,26 +1373,31 @@ def _try_convergent_addition_merge(base: str, current: str, replayed: str) -> st
     if smaller == 0 or len(shared) < smaller * 0.5:
         return None  # not convergent enough
     # Build the merge: walk base, at each anchor emit current's additions first,
-    # then any replayed additions not already emitted by current.
+    # then any replayed additions not already emitted. Both sides check
+    # emitted_added so shared content at different anchors is deduplicated.
     emitted_added: set[str] = set()
     out: list[str] = []
     for i, bl in enumerate(base_lines):
         if i in cur_ins:
             for ln in cur_ins[i]:
+                if ln.strip() and ln in emitted_added:
+                    continue
                 out.append(ln)
                 if ln.strip():
                     emitted_added.add(ln)
         if i in rep_ins:
             for ln in rep_ins[i]:
                 if ln.strip() and ln in emitted_added:
-                    continue  # already emitted by current
+                    continue
                 out.append(ln)
+                if ln.strip():
+                    emitted_added.add(ln)
         out.append(bl)
     # Trailing insertions.
     for ln in cur_ins.get(len(base_lines), []):
+        if ln.strip() and ln in emitted_added:
+            continue
         out.append(ln)
-        if ln.strip():
-            emitted_added.add(ln)
     for ln in rep_ins.get(len(base_lines), []):
         if ln.strip() and ln in emitted_added:
             continue
