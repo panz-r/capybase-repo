@@ -2377,6 +2377,22 @@ def _try_balance_braces(text: str, language: str | None = None) -> str | None:
             else:
                 break  # hit real code → stop collecting stray braces
         if not to_remove or deficit > 0:
+            # Fallback: the extra } may be glued to the end of a code line
+            # (e.g. ``return foo();}``) rather than on its own brace-only line.
+            # Try removing ONE trailing } from the divergence line itself.
+            # Conservative: only the last } on the line, only when deficit==1,
+            # and the result is re-validated.
+            if deficit == 1 and neg_line < len(lines):
+                raw = lines[neg_line]
+                # Find the last } in the raw line.
+                last_brace = raw.rfind("}")
+                if last_brace >= 0:
+                    patched = raw[:last_brace] + raw[last_brace + 1:]
+                    candidate = list(lines)
+                    candidate[neg_line] = patched
+                    result = "\n".join(candidate)
+                    if _brace_imbalance_line(result, language) is None:
+                        return result
             return None  # couldn't collect enough stray brace-only lines
         candidate = [l for i, l in enumerate(lines) if i not in set(to_remove)]
         result = "\n".join(candidate)

@@ -166,6 +166,34 @@ def test_det_repair_defers_on_structural_error():
 
 
 # ---------------------------------------------------------------------------
+# _try_balance_braces: trailing-} fallback (splice artifact on code line)
+# ---------------------------------------------------------------------------
+
+
+def test_balance_removes_trailing_brace_from_code_line():
+    """When the extra } is glued to the end of a code line (e.g. ``int x = 1;}``),
+    _try_balance_braces should remove it. This is the splice-junction case where
+    the LLM's deferred-core resolution accidentally appends a }."""
+    from capybase.verification import _brace_imbalance_line, _try_balance_braces
+    text = (
+        "void foo() {\n"
+        "    return 0;\n"
+        "}\n"
+        "int x = 1;}\n"  # code + extra } glued on
+        "void bar() {\n"
+        "    return 1;\n"
+        "}\n"
+    )
+    imb = _brace_imbalance_line(text)
+    assert imb is not None, "should detect imbalance"
+    repaired = _try_balance_braces(text)
+    assert repaired is not None, "should fix trailing-} on code line"
+    assert _brace_imbalance_line(repaired) is None, "repaired should be balanced"
+    assert "int x = 1;}" not in repaired  # the trailing } was removed
+    assert "int x = 1;" in repaired       # the code line is preserved
+
+
+# ---------------------------------------------------------------------------
 # _splice_context_snippet: cross-hunk widening (Fix #1)
 # ---------------------------------------------------------------------------
 
