@@ -941,6 +941,15 @@ def main():
     # immediately causes GitError/FileNotFoundError crashes (the race that
     # produced the infra_crash bucket in v3). Cleaned up at the end of the run.
     deferred_cleanup: list[str] = []
+
+    # Register an atexit handler so temp dirs are cleaned up even if the run is
+    # killed (Ctrl-C, OOM, crash). Without this, killed runs leak their capy-rw-*
+    # dirs in /var/tmp (observed: 90 leaked dirs = 6.7G after multiple runs).
+    import atexit
+    def _cleanup_eval_temp_dirs():
+        for td in deferred_cleanup:
+            shutil.rmtree(td, ignore_errors=True)
+    atexit.register(_cleanup_eval_temp_dirs)
     for i, case in enumerate(cases, 1):
         if case.id in done_ids:
             skipped += 1

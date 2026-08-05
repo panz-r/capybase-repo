@@ -162,19 +162,16 @@ def test_repo_root_resolves_relative_globs(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_enabled_for_table_gates_validator():
+def test_enabled_for_table_gates_validator(tmp_path):
     """When reject_if_drops_referenced_symbol is False, the warning is suppressed."""
-    import tempfile
-
-    tmp = tempfile.mkdtemp()
-    open(os.path.join(tmp, "validators.py"), "w").write("def validate(x):\n    return x\n")
+    (tmp_path / "validators.py").write_text("def validate(x):\n    return x\n")
     unit = _unit("validate(data)\n", "validate(data)\n", "validate(data)\n")
     unit.structural_metadata["conflict_features"] = {"hunk_size": 3}
 
     from capybase.verification import VerificationEngine
 
     engine = VerificationEngine(
-        [DependencyPreservationValidator(slice_search_globs=[os.path.join(tmp, "*.py")])],
+        [DependencyPreservationValidator(slice_search_globs=[str(tmp_path / "*.py")])],
         ValidationConfig(reject_if_drops_referenced_symbol=False),
     )
     result = engine.verify(unit, CandidateResolution(
