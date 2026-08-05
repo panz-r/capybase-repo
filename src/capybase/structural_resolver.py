@@ -645,7 +645,7 @@ def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
 # to engage. When the overlap exceeds this, the conflict is genuinely entangled
 # and must go to the LLM. The C++ corpus analysis showed 1-3 overlapping lines
 # (typically a function signature or return type) is the sweet spot.
-PARTIAL_DISJOINT_MAX_OVERLAP = 3
+PARTIAL_DISJOINT_MAX_OVERLAP = 5
 
 
 def _try_partial_disjoint_merge(base: str, current: str, replayed: str) -> str | None:

@@ -7318,6 +7318,35 @@ class Orchestrator:
         attributed unit could not be re-resolved (it escalated).
         """
         fault_idx = _attribute_whole_file_failure(failures, [u for u, _ in accepted])
+
+        # Deterministic brace repair: run BEFORE the attribution gate. The brace
+        # repair operates on the whole-file spliced buffer — it doesn't need
+        # fault attribution to a specific unit. The #1 cause of whole-file
+        # repair escalations on C++ is a splice-boundary brace imbalance whose
+        # attributed line falls outside all unit spans. Without this early run,
+        # the tiered attribution gate returns None before the brace repair gets
+        # a chance to fix it. Conservative: acts only when one edit fully
+        # balances the braces.
+        if not deterministic_only:
+            det = _try_deterministic_brace_repair(
+                failures, original, accepted, max(0, fault_idx)
+            )
+            if det is not None:
+                unit_new, cand_new = det[0]
+                self.journal.emit(
+                    "candidate_validated",
+                    {
+                        "candidate_id": cand_new.candidate_id,
+                        "passed": True,
+                        "whole_file_repair_for": unit_new.unit_id,
+                        "deterministic_brace_repair": True,
+                    },
+                    step_index=self.step,
+                    path=path,
+                    unit_id=unit_new.unit_id,
+                )
+                return det
+
         # Smart blame (tiered verification): when no unit's span contains the
         # error line AND we're in tiered mode (time budget active), skip the
         # model re-resolve — it can't fix a cross-unit error. The deterministic
@@ -7382,34 +7411,6 @@ class Orchestrator:
                             step_index=self.step, path=path,
                         )
         if not skip_deterministic:
-            # Deterministic brace repair: before spending an LLM call on the
-            # recurring splice-junction brace imbalance, try to fix it directly.
-            # The model often reproduces the same extra/missing brace at the hunk
-            # junction across repeated retries — a single-edit deterministic fix
-            # resolves it instantly when the imbalance is a stray brace-only line or
-            # a truncated unclosed block. The repaired buffer is back-projected onto
-            # the fault unit's resolved_text so the splice + re-validate loop sees
-            # the fix. Conservative: acts only when one edit fully balances, and
-            # only when the back-projection is unambiguous; otherwise falls through
-            # to the LLM repair path below.
-            det = _try_deterministic_brace_repair(
-                failures, original, accepted, fault_idx
-            )
-            if det is not None:
-                unit_new, cand_new = det[0]
-                self.journal.emit(
-                    "candidate_validated",
-                    {
-                        "candidate_id": cand_new.candidate_id,
-                        "passed": True,
-                        "whole_file_repair_for": unit_new.unit_id,
-                        "deterministic_brace_repair": True,
-                    },
-                    step_index=self.step,
-                    path=path,
-                    unit_id=unit_new.unit_id,
-                )
-                return det
             # Deterministic #if/#endif balance repair: the entity-splitting + splice
             # pipeline can leave a whole-file preprocessor imbalance that no single
             # sub-unit owns (a conflict region sliced mid-file). Try a single-edit
