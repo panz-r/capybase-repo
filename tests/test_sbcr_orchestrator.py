@@ -121,7 +121,12 @@ def test_both_sides_add_resolves_via_sbcr_without_llm(repo: Path):
 
 
 def test_combination_search_disabled_falls_through_to_model(repo: Path):
-    """When the gate is off, even a resolvable both-sides-add hits the model."""
+    """When the gate is off, the SBCR combination search does NOT run.
+
+    The source portfolio (a separate deterministic mechanism) may still
+    resolve simple conflicts without the model. To isolate the SBCR path,
+    we disable both combination search AND the source portfolio, then
+    verify the model IS called."""
     _make_both_add_imports(repo)
     payload = json.dumps({"resolved_text": "import sys\nimport json",
                           "self_reported_confidence": 0.8})
@@ -129,11 +134,16 @@ def test_combination_search_disabled_falls_through_to_model(repo: Path):
     engine = ResolutionEngine(_config(repo).model, client=client)
     cfg = _config(repo)
     cfg.future.enable_combination_search = False
+    cfg.future.enable_source_portfolio = False
     orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
                         out=lambda *_a, **_k: None)
     result = orch.run()
     assert not result.escalated, result.reason
-    # The model WAS called this time.
+    # No combination_resolved event (SBCR was disabled).
+    sbcr_events = [e for e in orch.journal.read_events()
+                   if e.event_type == "combination_resolved"]
+    assert not sbcr_events
+    # The model WAS called (no deterministic mechanism intercepted).
     assert client.calls > 0
 
 
@@ -155,11 +165,17 @@ def test_contradictory_conflict_declined_falls_to_model(repo: Path):
                           "self_reported_confidence": 0.8})
     client = CallCountingClient(payload)
     engine = ResolutionEngine(_config(repo).model, client=client)
-    orch = Orchestrator(_config(repo), repo=str(repo), resolution_engine=engine,
+    cfg = _config(repo)
+    cfg.future.enable_source_portfolio = False  # isolate SBCR→model path
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
                         out=lambda *_a, **_k: None)
     result = orch.run()
     assert not result.escalated, result.reason
-    # SBCR declined (modification conflict) → the model handled it.
+    # No combination_resolved event: SBCR declined before proposing (scope guard).
+    sbcr_events = [e for e in orch.journal.read_events()
+                   if e.event_type == "combination_resolved"]
+    assert not sbcr_events
+    # The model WAS called (SBCR declined, source portfolio disabled).
     assert client.calls > 0
     # No combination_resolved event: SBCR declined before proposing (scope guard).
     sbcr_events = [e for e in orch.journal.read_events()
@@ -204,6 +220,7 @@ def test_balanced_conflict_diverts_to_llm_when_threshold_high(repo: Path):
     cfg.routing.enabled = True
     # balance of a 1+1 conflict is 1.0; set threshold above it to force diversion.
     cfg.routing.min_balance_for_sbcr_accept = 1.5
+    cfg.future.enable_source_portfolio = False  # isolate SBCR→model path
     engine = ResolutionEngine(cfg.model, client=client)
     orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
                         out=lambda *_a, **_k: None)

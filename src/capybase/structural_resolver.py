@@ -747,7 +747,11 @@ def _try_partial_disjoint_merge(base: str, current: str, replayed: str) -> str |
     elif _normalize(core_cur) == _normalize(core_rep):
         core_resolved = core_cur  # agreed → take either
     else:
-        core_resolved = core_cur  # genuine conflict → conservative: take upstream
+        # Genuine two-sided conflict in the core (both sides changed the same
+        # lines to DIFFERENT values, neither conceded). We cannot
+        # deterministically pick one side — that would silently drop the
+        # other side's intent. Decline; let the LLM handle it.
+        return None
 
     # Assemble the full resolution.
     parts = [p for p in [pre_resolved, core_resolved, post_resolved] if p]
