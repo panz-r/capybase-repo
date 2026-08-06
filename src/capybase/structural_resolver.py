@@ -1399,6 +1399,8 @@ def _try_convergent_addition_merge(base: str, current: str, replayed: str) -> st
         if ln.strip() and ln in emitted_added:
             continue
         out.append(ln)
+        if ln.strip():
+            emitted_added.add(ln)
     for ln in rep_ins.get(len(base_lines), []):
         if ln.strip() and ln in emitted_added:
             continue

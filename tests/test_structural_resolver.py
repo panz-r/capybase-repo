@@ -1247,3 +1247,39 @@ def test_refined_sides_enable_zealous_on_large_files():
     # token — that's correct.)
     assert not r.resolved  # genuine two-sided conflict on x =
 
+
+# ---------------------------------------------------------------------------
+# convergent_addition_merge: dedup correctness (regression tests)
+# ---------------------------------------------------------------------------
+
+from capybase.structural_resolver import _try_convergent_addition_merge
+
+
+def test_convergent_addition_merge_dedupes_trailing_shared_lines():
+    """Regression: when both sides add the SAME lines as trailing insertions
+    (after the last base line, with no trailing newline in base), the shared
+    lines must appear exactly once. An earlier version of the trailing-loop
+    dedup omitted recording cur's trailing lines into emitted_added, so rep's
+    trailing loop emitted them again."""
+    base = "int a;\nint b"  # no trailing newline -> trailing anchor = len(base_lines)
+    cur = "int a;\nint b\n#define SH1\n#define SH2\n#define CURX"
+    rep = "int a;\nint b\n#define SH1\n#define SH2\n#define REPX"
+    result = _try_convergent_addition_merge(base, cur, rep)
+    assert result is not None
+    assert result.count("#define SH1") == 1
+    assert result.count("#define SH2") == 1
+    assert result.count("#define CURX") == 1
+    assert result.count("#define REPX") == 1
+
+
+def test_convergent_addition_merge_dedupes_cross_anchor_shared():
+    """Shared content added at different anchors by each side is deduped: cur
+    adds SH at an interior anchor, rep adds SH as trailing — SH appears once."""
+    base = "int a;\nint b"
+    cur = "int a;\n#define SH1\n#define SH2\n#define CURX\nint b"
+    rep = "int a;\nint b\n#define SH1\n#define SH2\n#define REPX"
+    result = _try_convergent_addition_merge(base, cur, rep)
+    assert result is not None
+    assert result.count("#define SH1") == 1
+    assert result.count("#define SH2") == 1
+

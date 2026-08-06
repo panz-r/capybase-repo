@@ -3563,7 +3563,14 @@ class Orchestrator:
                 severity=unit.severity,
                 structural_metadata=core_meta,
             )
+            # _resolve_unit resets self._unit_verify_time to 0.0 at entry. The
+            # core's verify time should still be excluded from the OUTER unit's
+            # wall budget, so capture the parent's total first, then fold the
+            # core's verify time back in after the recursive call returns.
+            _outer_verify_time = getattr(self, "_unit_verify_time", 0.0)
             outcome = self._resolve_unit(core_unit)
+            _core_verify_time = getattr(self, "_unit_verify_time", 0.0)
+            self._unit_verify_time = _outer_verify_time + _core_verify_time
             if outcome.accepted is not None and outcome.accepted.resolved_text:
                 core_resolved = outcome.accepted.resolved_text
                 # Patch: replace core_cur in the resolved text with core_resolved.
