@@ -1044,51 +1044,68 @@ def _c_unit(base: str, current: str, replayed: str, *, lang: str = "c",
 
 
 def test_directive_union_dedupes_identical_include():
-    """When both sides add the SAME #include but each ALSO adds a distinct one,
-    the sides are NOT identical (so identical_sides declines) and the shared
-    directive overlaps (so insertion_union declines). directive_union collapses
-    the shared directive to one copy while keeping each side's distinct add."""
+    """When both sides add the SAME #include but each ALSO adds distinct ones,
+    directive_union collapses the shared directive to one copy while keeping
+    each side's distinct adds.
+
+    Uses LOW-overlap additions (1 shared of 3 per side) so the
+    convergent_addition_merge rule — which fires earlier in the cascade and
+    requires >=50% shared — declines, leaving directive_union to handle the
+    directive-only case. This is directive_union's remaining niche after
+    convergent_addition_merge subsumed the high-overlap territory.
+    """
     base = "#include <stdio.h>\nint main(void) { return 0; }"
-    cur = "#include <stdio.h>\n#include <shared.h>\n#include <cur_only.h>\nint main(void) { return 0; }"
-    rep = "#include <stdio.h>\n#include <shared.h>\n#include <rep_only.h>\nint main(void) { return 0; }"
+    cur = ("#include <stdio.h>\n#include <shared.h>\n#include <cur_a.h>\n"
+           "#include <cur_b.h>\nint main(void) { return 0; }")
+    rep = ("#include <stdio.h>\n#include <shared.h>\n#include <rep_a.h>\n"
+           "#include <rep_b.h>\nint main(void) { return 0; }")
     r = resolve_structurally(_c_unit(base, cur, rep))
     assert r.rule == "directive_union", r.rule
     assert r.resolved
     # The shared #include appears exactly ONCE (deduped, not twice).
     assert r.text.count("#include <shared.h>") == 1
-    # Each side's distinct directive is present.
-    assert "#include <cur_only.h>" in r.text
-    assert "#include <rep_only.h>" in r.text
+    # Each side's distinct directives appear exactly once (not duplicated).
+    assert r.text.count("#include <cur_a.h>") == 1
+    assert r.text.count("#include <cur_b.h>") == 1
+    assert r.text.count("#include <rep_a.h>") == 1
+    assert r.text.count("#include <rep_b.h>") == 1
     # Base content preserved.
     assert "#include <stdio.h>" in r.text
     assert "int main(void) { return 0; }" in r.text
 
 
 def test_directive_union_merges_distinct_and_shared_directives():
-    """Mixed: one shared directive + each side's distinct directive. Shared
-    deduped to one; distinct kept (current's before replayed's)."""
+    """LOW-overlap: one shared directive + several distinct per side. Shared
+    deduped to one; distinct kept, current's before replayed's. The shared
+    directive is not duplicated alongside the distinct ones (regression check
+    for a bug where cur_distinct was emitted inside the shared block)."""
     base = "#include <stdio.h>\nint main(void) { return 0; }"
-    cur = "#include <stdio.h>\n#include <shared.h>\n#include <cur_only.h>\nint main(void) { return 0; }"
-    rep = "#include <stdio.h>\n#include <shared.h>\n#include <rep_only.h>\nint main(void) { return 0; }"
+    cur = ("#include <stdio.h>\n#include <shared.h>\n#include <cur_a.h>\n"
+           "#include <cur_b.h>\nint main(void) { return 0; }")
+    rep = ("#include <stdio.h>\n#include <shared.h>\n#include <rep_a.h>\n"
+           "#include <rep_b.h>\nint main(void) { return 0; }")
     r = resolve_structurally(_c_unit(base, cur, rep))
     assert r.rule == "directive_union", r.rule
     assert r.text.count("#include <shared.h>") == 1   # deduped
-    assert "#include <cur_only.h>" in r.text           # current's distinct
-    assert "#include <rep_only.h>" in r.text           # replayed's distinct
+    assert r.text.count("#include <cur_a.h>") == 1    # current distinct, once
+    assert r.text.count("#include <rep_a.h>") == 1    # replayed distinct, once
 
 
 def test_directive_union_handles_define_too():
-    """#define directives are also additive and dedup-eligible. Mixed shape
-    (shared + distinct) so identical_sides doesn't fire first. The body stays
-    identical to base (pure insertion of defines only)."""
+    """#define directives are also additive and dedup-eligible. LOW-overlap
+    shape (1 shared of 3 per side) so convergent_addition_merge declines and
+    directive_union handles it. The body stays identical to base (pure
+    insertion of defines only)."""
     base = "#define BASE 1\nint main(void) { return 0; }"
-    cur = "#define BASE 1\n#define SHARED 2\n#define CUR 3\nint main(void) { return 0; }"
-    rep = "#define BASE 1\n#define SHARED 2\n#define REP 4\nint main(void) { return 0; }"
+    cur = ("#define BASE 1\n#define SHARED 2\n#define CUR 3\n#define CUR2 4\n"
+           "int main(void) { return 0; }")
+    rep = ("#define BASE 1\n#define SHARED 2\n#define REP 4\n#define REP2 5\n"
+           "int main(void) { return 0; }")
     r = resolve_structurally(_c_unit(base, cur, rep))
     assert r.rule == "directive_union", r.rule
     assert r.text.count("#define SHARED 2") == 1
-    assert "#define CUR 3" in r.text
-    assert "#define REP 4" in r.text
+    assert r.text.count("#define CUR 3") == 1
+    assert r.text.count("#define REP 4") == 1
 
 
 def test_directive_union_declines_non_directive_additions():

@@ -3696,57 +3696,6 @@ class Orchestrator:
                 outcome.accepted = cand
                 return outcome
         return None  # no source candidate passed; fall through to LLM
-        cand = CandidateResolution(
-            candidate_id=f"{unit.unit_id}:structural",
-            unit_id=unit.unit_id,
-            model_name="structural",
-            prompt_version=f"structural.{result.rule}",
-            resolved_text=result.text,
-            explanation=f"deterministic resolution via {result.rule} rule",
-            provenance="deterministic_structural",
-        )
-        _vt0b = _vt.monotonic()
-        validation = self.verification.verify(unit, cand, fast_verify=True)
-        if hasattr(self, "_unit_verify_time"):
-            self._unit_verify_time += _vt.monotonic() - _vt0b
-        self.journal.emit(
-            "structurally_resolved",
-            {
-                "candidate_id": cand.candidate_id,
-                "rule": result.rule,
-                "passed": validation.passed,
-            },
-            step_index=self.step,
-            path=unit.path,
-            unit_id=unit.unit_id,
-        )
-        if not validation.passed:
-            # The deterministic guess failed validation — discard and let the
-            # model handle it. This is the safety net: structural resolution can
-            # only help, never apply an invalid merge.
-            self._record_resolution_attempt(
-                UnitOutcome(unit=unit), mechanism="structural",
-                candidate=cand, validation=validation,
-                decision="skip", reason="failed validation",
-            )
-            return None
-        if self._strictness_blocks_pre_llm(unit, cand, validation, "structural"):
-            self._record_resolution_attempt(
-                UnitOutcome(unit=unit), mechanism="structural",
-                candidate=cand, validation=validation,
-                decision="skip", reason="strictness declined",
-            )
-            return None  # strict mode declines to auto-accept; fall through to LLM
-        outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
-        outcome.accepted = cand
-        self.journal.emit(
-            "candidate_accepted",
-            {"candidate_id": cand.candidate_id, "via": "structural"},
-            step_index=self.step,
-            path=unit.path,
-            unit_id=unit.unit_id,
-        )
-        return outcome
 
     def _try_combination_search(self, unit: ConflictUnit) -> UnitOutcome | None:
         """Attempt a search-based combination resolution; accept only if it

@@ -1317,9 +1317,10 @@ def _try_directive_union(unit) -> str | None:
         return None  # no overlap → insertion_union already resolved the disjoint case
     cur_distinct = [ln for ln in cur_flat if ln not in shared]
     rep_distinct = [ln for ln in rep_flat if ln not in shared]
-    # Shared directives (deduped to one copy each), then current's distinct,
-    # then replayed's distinct.
-    deduped_shared = list(dict.fromkeys(cur_flat))  # first-seen order, deduped
+    # The SHARED directives only, deduped and in current's first-seen order.
+    # (Previously this was ``dict.fromkeys(cur_flat)`` — ALL of current's
+    # directives, which made cur_distinct get emitted a second time.)
+    shared_ordered = [ln for ln in dict.fromkeys(cur_flat) if ln in shared]
     # Walk base, emitting the directive block at the shared anchor(s). Since all
     # additions are directives and they overlap, emit a single deduped block at
     # the lowest insertion anchor (the common case: both added after the same
@@ -1332,13 +1333,13 @@ def _try_directive_union(unit) -> str | None:
     for i, bl in enumerate(base_lines):
         if i == min_anchor and not emitted:
             out.extend(cur_distinct)
-            out.extend(deduped_shared)
+            out.extend(shared_ordered)
             out.extend(rep_distinct)
             emitted = True
         out.append(bl)
     if not emitted:  # additions were all trailing
         out.extend(cur_distinct)
-        out.extend(deduped_shared)
+        out.extend(shared_ordered)
         out.extend(rep_distinct)
     return "\n".join(out)
 
