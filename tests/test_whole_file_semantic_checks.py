@@ -214,6 +214,57 @@ def test_cpp_duplicate_class_caught():
     assert dup[0].detail["name"] == "Config"
 
 
+@pytest.mark.skipif(
+    not _cc_available(), reason="abstract parser unavailable for c/cpp"
+)
+def test_c_forward_decl_plus_definition_not_flagged():
+    """A forward declaration (``;``-terminated, no body) followed by the real
+    definition (``{``-bodied) is the normal C/C++ header pattern and must NOT be
+    flagged as a duplicate. Regression: the validator previously keyed on
+    ``(kind, name)`` alone, treating decl+def as a collision."""
+    whole = (
+        "int compute(int n);\n\n"
+        "int compute(int n) { return n + 1; }\n"
+    )
+    res = _verify_file(whole, language="c", path="src/c.c")
+    dup = [f for f in res.hard_failures if f.validator == "duplicate_definition"]
+    assert len(dup) == 0, f"decl+def should not be flagged: {dup}"
+
+
+@pytest.mark.skipif(
+    not _cc_available(), reason="abstract parser unavailable for c/cpp"
+)
+def test_c_definition_then_forward_decl_not_flagged():
+    """The reverse order (definition first, then a forward declaration) must
+    also pass. Regression for an asymmetry: the parser's top-level dedup
+    happened to suppress this order but not decl-then-def."""
+    whole = (
+        "int compute(int n) { return n + 1; }\n\n"
+        "int compute(int n);\n"
+    )
+    res = _verify_file(whole, language="c", path="src/c.c")
+    dup = [f for f in res.hard_failures if f.validator == "duplicate_definition"]
+    assert len(dup) == 0, f"def+decl should not be flagged: {dup}"
+
+
+@pytest.mark.skipif(
+    not _cc_available(), reason="abstract parser unavailable for c/cpp"
+)
+def test_c_two_real_definitions_still_caught():
+    """Two real definitions (both ``{``-bodied) of the same function are still
+    flagged — the decl/def exemption only applies when at most one is a
+    definition."""
+    whole = (
+        "int compute(int n);\n\n"
+        "int compute(int n) { return n + 1; }\n\n"
+        "int compute(int n) { return n + 2; }\n"
+    )
+    res = _verify_file(whole, language="c", path="src/c.c")
+    dup = [f for f in res.hard_failures if f.validator == "duplicate_definition"]
+    assert len(dup) == 1
+    assert dup[0].detail["name"] == "compute"
+
+
 # ---------------------------------------------------------------------------
 # Unreachable code (Python)
 # ---------------------------------------------------------------------------

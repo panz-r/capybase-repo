@@ -311,7 +311,12 @@ def duplicate_definitions(
     findings: list[tuple[str, str, list[int]]] = []
 
     def scan_scope(units: list) -> None:
-        seen: dict[tuple[str, str], list[int]] = {}
+        # Track (kind, name) -> list of (line, is_definition).
+        # is_definition distinguishes a real definition (has a ``{`` body) from
+        # a forward declaration (``;``-terminated, no body). A declaration +
+        # definition of the same name is the normal C/C++ header pattern and is
+        # NOT a duplicate; only 2+ real definitions collide.
+        seen: dict[tuple[str, str], list[tuple[int, bool]]] = {}
         for u in units:
             # Container-scope units (impl/mod/namespace) are scopes, NOT entities
             # — they don't collide with a same-named struct/trait at this level,
@@ -319,11 +324,21 @@ def duplicate_definitions(
             if u.is_container_scope or not u.name:
                 continue
             key = (u.kind, u.name)
+            # A definition has a brace-delimited body; a declaration ends with
+            # ``;`` and has no ``{``. (Rust has no forward declarations, so
+            # every unit with a name is a definition — the distinction is
+            # C/C++-specific and harmless for Rust.)
+            body_stripped = (u.body or "").strip()
+            is_def = "{" in body_stripped
             # 1-based start row for repair attribution.
-            seen.setdefault(key, []).append(u.span[0] + 1)
-        for (kind, name), rows in seen.items():
-            if len(rows) > 1:
-                findings.append((kind, name, sorted(rows)))
+            seen.setdefault(key, []).append((u.span[0] + 1, is_def))
+        for (kind, name), occurrences in seen.items():
+            # Only flag when there are 2+ real DEFINITIONS. A single definition
+            # alongside any number of forward declarations is legitimate.
+            defs = [row for row, is_def in occurrences if is_def]
+            if len(defs) > 1:
+                rows = sorted(row for row, _ in occurrences)
+                findings.append((kind, name, rows))
         # Recurse into each child's children (nested scopes) separately — a
         # container-scope's children are a distinct scope.
         for u in units:
