@@ -69,6 +69,11 @@ Rule = Literal[
     # DECLINED on overlap, but the overlap is entirely a clean rename-vs-body-
     # modify partition, compose the renamer's header with the modifier's body.
     "refactoring_aware_merge",
+    # Mechanical re-application: when one side's edits are purely small token
+    # substitutions (API rename, lint) and the other side rewrote the region
+    # wholesale, take the rewriter's text and re-apply the mechanical
+    # substitutions onto it (where the anchors survive).
+    "mechanical_reapply_merge",
     # Easy-merge union rules (the gap every prior rule declines): both sides
     # append distinct items to a collection, or insert distinct lines at the
     # same anchor. An opinionated, deterministic ordering (current-appends
@@ -252,6 +257,15 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         merged = _try_token_disjoint(base, current, replayed)
         if merged is not None:
             return StructuralResolution(rule="token_disjoint", text=merged)
+
+        # Mechanical re-application: when token_disjoint DECLINED because the
+        # spans overlap, but one side's changes are purely small mechanical
+        # substitutions (API rename, operator keyword lint) and the other side
+        # is a wholesale rewrite, take the rewriter's text and re-apply the
+        # mechanical substitutions where the base-token anchors survive.
+        merged = _try_mechanical_reapply_merge(base, current, replayed)
+        if merged is not None:
+            return StructuralResolution(rule="mechanical_reapply_merge", text=merged)
 
         # Prose value-resolution: both sides edited the SAME prose line
         # differently (a version-string bump, a changelog header, a date). Every
@@ -645,6 +659,151 @@ def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
         _, repl = merged_ops[n]
         out.extend(repl)
     return _detokenize(out)
+
+
+# ---------------------------------------------------------------------------
+# Mechanical re-application: rewrite-vs-rename interleave
+# ---------------------------------------------------------------------------
+
+#: Max token-change-ops for a side to be classified as "mechanical".
+_MECHANICAL_MAX_OPS = 20
+#: Each mechanical op replaces at most this many base tokens / replacement tokens.
+_MECHANICAL_MAX_OP_SIZE = 4
+#: Max base lines a mechanical side may change (beyond this = semantic rewrite).
+_MECHANICAL_MAX_LINES = 3
+
+
+def _base_changed_line_count(base: str, side: str) -> int:
+    """Number of base lines that differ from ``side`` (non-equal opcodes)."""
+    matcher = line_matcher(base.split("\n"), side.split("\n"))
+    changed = 0
+    for tag, i1, i2, _j1, _j2 in matcher.get_opcodes():
+        if tag != "equal":
+            changed += max(i2 - i1, 1)
+    return changed
+
+
+def _is_mechanical_side(
+    ops: list[tuple[int, int, list[str]]],
+    base_tok_count: int,
+    base: str,
+    side: str,
+) -> bool:
+    """True when a side's changes are purely small, sparse substitutions.
+
+    A mechanical side makes only small, local swaps (API rename,
+    operator-keyword lint). Three conditions:
+    1. Each token op is small: ≤ ``_MECHANICAL_MAX_OP_SIZE`` base/replacement tokens.
+    2. The total changed base tokens are a SMALL FRACTION of the base (≤25%).
+    3. The side changes FEW base lines (≤ ``_MECHANICAL_MAX_LINES``). A semantic
+       rewrite changes many lines even when each token-level op is small
+       (renaming identifiers across a function). This line-level check is what
+       distinguishes "rename one keyword" (mechanical) from "rewrite a function
+       body with new identifiers" (semantic).
+    """
+    if not ops or len(ops) > _MECHANICAL_MAX_OPS:
+        return False
+    changed_base_toks = 0
+    for i1, i2, repl in ops:
+        span = i2 - i1
+        if span > _MECHANICAL_MAX_OP_SIZE:
+            return False
+        if len(repl) > _MECHANICAL_MAX_OP_SIZE:
+            return False
+        changed_base_toks += span
+    # Sparse: the mechanical edits touch at most 25% of base tokens.
+    if base_tok_count > 0 and changed_base_toks > base_tok_count * 0.25:
+        return False
+    # Few changed lines: a mechanical edit touches a handful of base lines,
+    # not a multi-line rewrite.
+    changed_lines = _base_changed_line_count(base, side)
+    if changed_lines > _MECHANICAL_MAX_LINES:
+        return False
+    return True
+
+
+def _try_mechanical_reapply_merge(
+    base: str, current: str, replayed: str,
+) -> str | None:
+    """Merge a wholesale rewrite with a set of small mechanical substitutions.
+
+    ``token_disjoint`` declines when the two sides' changed base-token spans
+    overlap. But when one side is a large rewrite (semantic change) and the
+    other made only small mechanical substitutions (API rename, lint), the
+    correct merge is: take the rewriter's text, then re-apply the mechanical
+    substitutions where their base-token anchors survived the rewrite.
+
+    Detection: classify each side via ``_is_mechanical_side``. Require exactly
+    one mechanical + one semantic side; decline when both are mechanical
+    (token_disjoint should've handled) or both semantic (genuine conflict).
+
+    Merge: walk the mechanical side's ops against base. For each, check whether
+    the semantic side's replacement for that base region still contains the
+    original base tokens (the anchor survives). If yes, apply the substitution
+    onto the semantic text; if no (the rewrite removed those tokens), skip.
+    """
+    bt = _tokenize(base)
+    ct = _tokenize(current)
+    rt = _tokenize(replayed)
+    cur_ops = _token_change_ops(bt, ct)
+    rep_ops = _token_change_ops(bt, rt)
+    if not cur_ops or not rep_ops:
+        return None
+    # Decline delete-side conflicts (one side empty): a deletion is not a
+    # mechanical substitution, and the empty side produces a degenerate merge.
+    if not current.strip() or not replayed.strip():
+        return None
+
+    cur_mech = _is_mechanical_side(cur_ops, len(bt), base, current)
+    rep_mech = _is_mechanical_side(rep_ops, len(bt), base, replayed)
+    # Require exactly one mechanical side.
+    if cur_mech == rep_mech:
+        return None
+
+    if cur_mech:
+        mech_ops, sem_text = cur_ops, replayed
+    else:
+        mech_ops, sem_text = rep_ops, current
+
+    # Build the semantic side's token sequence. We'll apply mechanical subs
+    # onto it. The semantic side may have completely different tokens, so we
+    # search for the mechanical op's BASE anchor tokens within the semantic
+    # text's token stream.
+    sem_toks = _tokenize(sem_text)
+
+    # For each mechanical op, try to locate the base anchor tokens (bt[i1:i2])
+    # within sem_toks. If found, replace them with the op's replacement tokens.
+    applied = list(sem_toks)  # mutable copy
+    for i1, i2, repl in mech_ops:
+        anchor = bt[i1:i2]
+        if not anchor:
+            continue
+        # Search for the anchor in the (current state of) applied tokens.
+        idx = _find_subsequence(applied, anchor)
+        if idx < 0:
+            continue  # anchor not found — the rewrite removed it; skip this op
+        applied[idx:idx + len(anchor)] = repl
+
+    result = _detokenize(applied)
+    # Note: when no substitutions could be applied (the semantic rewrite
+    # subsumed all the mechanical anchors), result == sem_text. That's still a
+    # valid merge — the rewrite already handled those spots. Returning it is
+    # correct: the mechanical edits are redundant, not conflicting. The
+    # validation pipeline will catch any real defect.
+    return result
+
+
+def _find_subsequence(haystack: list[str], needle: list[str]) -> int:
+    """Index of the first occurrence of ``needle`` in ``haystack``, or -1."""
+    if not needle:
+        return 0
+    n, m = len(haystack), len(needle)
+    if m > n:
+        return -1
+    for i in range(n - m + 1):
+        if haystack[i:i + m] == needle:
+            return i
+    return -1
 
 
 # ---------------------------------------------------------------------------

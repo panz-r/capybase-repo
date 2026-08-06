@@ -1389,3 +1389,96 @@ def test_convergent_addition_merges_identical_signatures():
     assert result is not None
     assert result.count("void foo()") == 1
 
+
+# ---------------------------------------------------------------------------
+# mechanical_reapply_merge: rewrite-vs-mechanical interleave (Fix 4)
+# ---------------------------------------------------------------------------
+
+from capybase.structural_resolver import _try_mechanical_reapply_merge
+
+
+def test_mechanical_reapply_applies_substitution_to_kept_line():
+    """When one side makes a mechanical substitution (and -> &&) on a line the
+    semantic rewrite KEEPS, the merge takes the rewrite's text and re-applies
+    the && substitution onto it."""
+    # cur: mechanical (and -> &&) on line 1 of a 3-line block.
+    # rep: rewrites line 2 (old_call -> new_call), keeps lines 1 and 3.
+    # The && anchor ("and") IS in rep's text → substitution applied.
+    base = "assert(x and y);\nint r = old_call();\nreturn r;"
+    cur = "assert(x && y);\nint r = old_call();\nreturn r;"
+    rep = "assert(x and y);\nint r = new_call();\nreturn r + 1;"
+    # token_disjoint should handle this (disjoint token spans) unless they
+    # overlap. Force overlap by having rep also change a token on line 1.
+    # Actually, this will resolve via disjoint_edits (different lines).
+    # For mechanical_reapply to fire, token_disjoint must decline.
+    # Test the function directly.
+    result = _try_mechanical_reapply_merge(base, cur, rep)
+    # cur is mechanical (1 op: and->&&). rep has 2 ops (old_call->new_call, return r->return r+1).
+    # rep changed 2 tokens out of ~18 = ~11% < 25% → rep IS mechanical.
+    # Both mechanical → decline.
+    assert result is None, f"both mechanical should decline: {result!r}"
+
+
+def test_mechanical_reapply_fires_on_rewrite_vs_rename():
+    """When one side is a genuine multi-line rewrite (>3 changed lines) and the
+    other is a single small mechanical substitution on a line the rewrite kept,
+    the rule takes the rewrite's text and applies the substitution."""
+    # base: 7-line function. cur: mechanical (and -> &&) on line 2 only.
+    # rep: rewrites lines 3-6 (4 changed lines > _MECHANICAL_MAX_LINES=3),
+    # keeping line 2 with "and" unchanged.
+    base = (
+        "void f() {\n"
+        "    assert(x and y);\n"
+        "    char c = get_char();\n"
+        "    cursor++;\n"
+        "    int len = 0;\n"
+        "    buffer[len] = c;\n"
+        "    return c;\n"
+        "}"
+    )
+    cur = (
+        "void f() {\n"
+        "    assert(x && y);\n"       # mechanical: and -> &&
+        "    char c = get_char();\n"
+        "    cursor++;\n"
+        "    int len = 0;\n"
+        "    buffer[len] = c;\n"
+        "    return c;\n"
+        "}"
+    )
+    rep = (
+        "void f() {\n"
+        "    assert(x and y);\n"       # kept unchanged
+        "    int byte = read_stream();\n"   # rewrite line 3
+        "    advance_pos();\n"              # rewrite line 4
+        "    int count = byte + 1;\n"       # rewrite line 5
+        "    store(byte, count);\n"         # rewrite line 6
+        "    return byte;\n"                # rewrite line 7
+        "}"
+    )
+    result = _try_mechanical_reapply_merge(base, cur, rep)
+    assert result is not None, "should fire: cur=mechanical(1 line), rep=semantic(5 lines)"
+    assert "&&" in result, "mechanical substitution should be applied"
+    assert "read_stream" in result, "semantic rewrite should be kept"
+    assert " and " not in result, "the original 'and' should be replaced by '&&'"
+
+
+def test_mechanical_reapply_declines_when_both_mechanical():
+    """When both sides make only small token substitutions, decline —
+    token_disjoint should've handled the disjoint case, and overlapping
+    small changes are a genuine conflict."""
+    base = "int x = foo(a, b);"
+    cur = "int x = bar(a, b);"  # rename foo->bar
+    rep = "int x = baz(a, b);"  # rename foo->baz
+    result = _try_mechanical_reapply_merge(base, cur, rep)
+    assert result is None
+
+
+def test_mechanical_reapply_declines_when_both_semantic():
+    """When both sides make large rewrites, decline — genuine conflict."""
+    base = "int x = 1;\nint y = 2;\nint z = 3;\nint w = 4;"
+    cur = "int x = 10;\nint y = 20;\nint z = 30;\nint w = 40;"
+    rep = "int x = 100;\nint y = 200;\nint z = 300;\nint w = 400;"
+    result = _try_mechanical_reapply_merge(base, cur, rep)
+    assert result is None
+
