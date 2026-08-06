@@ -345,3 +345,89 @@ def test_scan_stable_deletion_still_flagged_with_history():
         # The block should carry stability info.
         assert any(b.extra.get("stability") == "stable" for b in f.blocks)
 
+
+def test_scan_finds_resurrection_with_replayed_oid_unchanged():
+    """Regression: when ``replayed_oid`` is passed AND the replayed branch
+    merely carried the deleted content forward unchanged from base, the
+    convergent-add filter must NOT suppress the finding.
+
+    The orchestrator always passes ``replayed_oid``. A resurrection's block
+    came from base, so it also appears verbatim in any side that didn't edit
+    it. An earlier version of the convergent-add filter compared the block
+    against the other side's FULL blob — which matched (the replayed side
+    still had ``dead()`` because it never removed it) and wrongly classified
+    every genuine resurrection as a "convergent addition". The fix compares
+    against lines the other side ADDED relative to base, not its full blob.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        rp = Path(d)
+        git(rp, "init", "-q", "-b", "main")
+        ctx = _build_resurrection_repo(rp)
+        g = GitBackend(rp)
+        # replayed_oid == base_oid: the replayed branch never touched the file,
+        # so its blob is identical to base (dead() present, carried forward).
+        findings = scan_resurrections(
+            g,
+            base_oid=ctx["base_oid"],
+            onto_oid=ctx["onto_oid"],
+            result_oid=ctx["result_oid"],
+            replayed_oid=ctx["base_oid"],
+            history_depth=50,
+        )
+        assert len(findings) == 1, (
+            "resurrection must be flagged even when the replayed side carried "
+            f"the content forward unchanged; got {len(findings)}"
+        )
+        assert findings[0].path == "app.py"
+
+
+def test_scan_filters_genuine_convergent_addition():
+    """When both sides INDEPENDENTLY ADD the same new block (relative to base),
+    the result legitimately includes it — that's a convergent addition, not a
+    resurrection, and must NOT be flagged. This is the case the convergent-add
+    filter exists to suppress (and must keep suppressing after the fix that
+    scoped it to added-lines only)."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        rp = Path(d)
+        git(rp, "init", "-q", "-b", "main")
+        base = "def useful():\n    return 1\n\n"
+        (rp / "app.py").write_text(base)
+        git(rp, "add", "app.py")
+        git(rp, "commit", "-q", "-m", "base")
+        base_oid = git(rp, "rev-parse", "HEAD").stdout.strip()
+
+        new_block = (
+            "def shared_new():\n    alpha()\n    beta()\n    gamma()\n\n"
+        )
+        # onto: ADDS shared_new()
+        git(rp, "branch", "feat")
+        (rp / "app.py").write_text(base + new_block)
+        git(rp, "add", "app.py")
+        git(rp, "commit", "-q", "-m", "main: add shared_new")
+        onto_oid = git(rp, "rev-parse", "HEAD").stdout.strip()
+        # replayed: ALSO adds shared_new() (independently)
+        git(rp, "checkout", "-q", "feat")
+        (rp / "app.py").write_text(base + new_block)
+        git(rp, "add", "app.py")
+        git(rp, "commit", "-q", "-m", "result: also adds shared_new")
+        result_oid = git(rp, "rev-parse", "HEAD").stdout.strip()
+
+        g = GitBackend(rp)
+        findings = scan_resurrections(
+            g,
+            base_oid=base_oid,
+            onto_oid=onto_oid,
+            result_oid=result_oid,
+            replayed_oid=base_oid,
+            min_block_lines=3,
+            history_depth=50,
+        )
+        assert findings == [], (
+            "convergent addition (both sides added the same new block) must "
+            f"not be flagged; got {len(findings)}"
+        )
+

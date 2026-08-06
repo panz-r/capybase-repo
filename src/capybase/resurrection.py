@@ -122,16 +122,19 @@ def scan_resurrections(
             )
             if not candidates:
                 continue
-            # Convergent-add filter: if the candidate block's content also
-            # appears in the OTHER side's blob, both sides independently added
-            # it — it's a convergent addition, not a resurrection of deleted
-            # content. Skip it (both sides having the same content means the
-            # merge result legitimately includes it).
+            # Convergent-add filter: if the OTHER side independently ADDED the
+            # candidate block's content (relative to base), both branches
+            # converged on the same addition — not a resurrection. Skip it.
+            #
+            # Crucially, we compare against the other side's ADDED lines, not
+            # its full blob. A resurrection's block came from base, so it also
+            # appears verbatim in any side that didn't touch it — checking the
+            # full blob would wrongly classify every genuine resurrection as a
+            # "convergent addition" (the original bug: onto deleted dead(),
+            # replayed never touched it, so replayed's blob still contained it).
             other_oid = replayed_oid if side_label == "onto" else onto_oid
             other_blob = _blob_text(git, other_oid, path) if other_oid else None
-            other_lines = set(
-                ln for ln in (other_blob or "").splitlines() if ln.strip()
-            )
+            other_added_lines = _added_lines(base_blob or "", other_blob or "")
             # History-walk stability verification: for each candidate block,
             # check whether the deletion was stable on this branch.
             blob_seq = None
@@ -143,11 +146,14 @@ def scan_resurrections(
             for blk in candidates:
                 block_lines = blk.text.splitlines()
                 # Convergent-add check: if the majority of the block's non-blank
-                # lines appear in the other side's blob, both sides independently
-                # added the same content — not a resurrection.
+                # lines were independently ADDED by the other side (not just
+                # carried forward from base), both sides converged on the same
+                # addition — not a resurrection.
                 block_nonblank = [ln for ln in block_lines if ln.strip()]
-                if block_nonblank and other_lines:
-                    in_other = sum(1 for ln in block_nonblank if ln in other_lines)
+                if block_nonblank and other_added_lines:
+                    in_other = sum(
+                        1 for ln in block_nonblank if ln in other_added_lines
+                    )
                     if in_other >= len(block_nonblank) * 0.8:
                         continue  # convergent addition, not a resurrection
                 if blob_seq:
@@ -240,6 +246,32 @@ def _blob_text(git: "GitBackend", rev: str, path: str) -> str | None:
     if raw is None:
         return None
     return raw.decode("utf-8", errors="replace")
+
+
+def _added_lines(base: str, side: str) -> set[str]:
+    """Non-blank lines ``side`` introduced relative to ``base``.
+
+    Used by the convergent-add filter: a candidate block is only a convergent
+    addition if the OTHER side actually ADDED those lines, not merely carried
+    them forward unchanged from base. Uses difflib to isolate the inserted /
+    replaced-into lines, so content present in base (and thus in any side that
+    didn't edit it) is excluded — which is what distinguishes a genuine
+    convergent addition from a plain resurrection.
+    """
+    import difflib
+
+    if not side:
+        return set()
+    base_lines = base.splitlines()
+    side_lines = side.splitlines()
+    added: set[str] = set()
+    matcher = difflib.SequenceMatcher(a=base_lines, b=side_lines, autojunk=False)
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("insert", "replace"):
+            for ln in side_lines[j1:j2]:
+                if ln.strip():
+                    added.add(ln)
+    return added
 
 
 def _deleting_commit_subject(
