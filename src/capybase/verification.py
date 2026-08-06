@@ -3744,7 +3744,10 @@ class VerificationEngine:
         """Append a validator at the end of the chain (runs last)."""
         self.validators.append(validator)
 
-    def verify(self, unit: ConflictUnit, candidate: CandidateResolution) -> VerificationResult:
+    def verify(
+        self, unit: ConflictUnit, candidate: CandidateResolution, *,
+        fast_verify: bool = False,
+    ) -> VerificationResult:
         ctx = VerificationContext(unit=unit, candidate=candidate, config=self.config)
         hard: list[VerificationFailure] = []
         warnings: list[VerificationWarning] = []
@@ -3759,7 +3762,22 @@ class VerificationEngine:
         if isinstance(cf, dict):
             for k, val in cf.items():
                 features[k] = val
+        # fast_verify: skip expensive validators (AST parser, gcc subprocess,
+        # LLM critic) for deterministic-rule candidates. These validators exist
+        # to catch LLM defects (hallucinated entities, syntax errors). A
+        # deterministic rule provably preserves structure — the full gauntlet is
+        # redundant. The whole-file Phase 2 build gate still validates the final
+        # output. On large files (25K lines), this cuts per-unit verify from
+        # ~20s to ~0.1s. Only the cheap O(n) validators run.
+        _fast_skip = frozenset({
+            "ast_preservation", "preservation_heuristic", "both_sides_represented",
+            "intent_coverage", "unattributed_code", "obligation",
+            "needs_human", "verifier_model", "dependency_preservation",
+            "future_obligation", "rust_syntax", "ccs_syntax", "python_syntax",
+        })
         for v in self.validators:
+            if fast_verify and v.name in _fast_skip:
+                continue
             res = v.verify(ctx)
             for k, val in res.features.items():
                 # Conflict-level spine keys (seeded above) take precedence so a

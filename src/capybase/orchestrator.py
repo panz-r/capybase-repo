@@ -3442,7 +3442,17 @@ class Orchestrator:
             explanation=f"deterministic resolution via {result.rule} rule",
             provenance="deterministic_structural",
         )
-        validation = self.verification.verify(unit, cand)
+        # fast_verify=True: skip expensive validators (AST parser, gcc, LLM
+        # critic) for deterministic-rule candidates. The rules provably
+        # preserve structure; the whole-file Phase 2 build gate still
+        # validates the final output. On large files this cuts per-unit
+        # verify from ~20s to ~0.1s.
+        import time as _vt
+        _vt0 = _vt.monotonic()
+        validation = self.verification.verify(unit, cand, fast_verify=True)
+        _verify_elapsed = _vt.monotonic() - _vt0
+        if hasattr(self, "_unit_verify_time"):
+            self._unit_verify_time += _verify_elapsed
         self.journal.emit(
             "structurally_resolved",
             {"candidate_id": cand.candidate_id, "rule": result.rule,
@@ -3695,7 +3705,10 @@ class Orchestrator:
             explanation=f"deterministic resolution via {result.rule} rule",
             provenance="deterministic_structural",
         )
-        validation = self.verification.verify(unit, cand)
+        _vt0b = _vt.monotonic()
+        validation = self.verification.verify(unit, cand, fast_verify=True)
+        if hasattr(self, "_unit_verify_time"):
+            self._unit_verify_time += _vt.monotonic() - _vt0b
         self.journal.emit(
             "structurally_resolved",
             {
@@ -8015,6 +8028,10 @@ class Orchestrator:
         # first cargo check (dependency fetch) shouldn't eat the model's
         # retry budget. (Phase 5 D1.)
         _verify_time_accumulated = 0.0
+        # Also track verify time from pre-LLM resolvers (structural, exact_reuse,
+        # etc.) so it's excluded from the wall budget the same way CEGIS-loop
+        # verify time is.
+        self._unit_verify_time = 0.0
         # seed_failures: when set (whole-file CEGIS), the unit is re-resolved
         # starting from the repair path with the file-level failures pre-seeded,
         # so the model gets the concrete cross-unit error on its first attempt.
@@ -8182,7 +8199,7 @@ class Orchestrator:
                 return outcome
             if (
                 wall_budget > 0.0
-                and (_time.monotonic() - unit_start - _verify_time_accumulated) >= wall_budget
+                and (_time.monotonic() - unit_start - _verify_time_accumulated - self._unit_verify_time) >= wall_budget
                 and (retry_count > 0 or critic_retry_count > 0)
             ):
                 outcome.escalated = True
