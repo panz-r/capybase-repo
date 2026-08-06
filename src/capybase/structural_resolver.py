@@ -1353,6 +1353,68 @@ def _try_directive_union(unit) -> str | None:
     return "\n".join(out)
 
 
+def _extract_definition_names(lines: list[str]) -> dict[str, str]:
+    """Map function/method definition NAME → its full signature text.
+
+    Scans for lines that look like C/C++/Rust function/method definitions or
+    declarations: ``<type> <name>(...)`` followed by ``{`` or ``;`` (either on
+    the same line or the next line). Returns a dict of name → the trimmed
+    signature line. Used by the convergent-add guard to detect "both sides
+    added a function with the same name but different signatures."
+    """
+    import re
+
+    names: dict[str, str] = {}
+    # Match: identifier immediately followed by ``(`` with parameters, ending
+    # with ``)``, optionally followed by ``const``/``{``/``;``. The ``{`` or
+    # ``;`` may be on the NEXT line (common C++ brace-on-next-line style).
+    sig_pat = re.compile(
+        r"\b([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?:const\s*)?"
+        r"(?:[;{]\s*$)?\s*$"
+    )
+    skip_keywords = frozenset({
+        "if", "while", "for", "switch", "return", "sizeof", "catch",
+        "fn", "def", "class", "struct", "enum", "namespace", "typedef",
+    })
+    for idx, ln in enumerate(lines):
+        stripped = ln.strip()
+        if not stripped or stripped.startswith(("#", "//", "/*", "*")):
+            continue
+        # Exclude lines that are clearly statements, not definitions.
+        if stripped.startswith(("return ", "if ", "while ", "for ", "throw ",
+                                "assert", "static_assert")):
+            continue
+        m = sig_pat.search(stripped)
+        if not m:
+            continue
+        name = m.group(1)
+        if name in skip_keywords:
+            continue
+        # Confirm this is a definition/declaration: the line or the next
+        # non-blank line must end with ``{`` or ``;``.
+        next_stripped = ""
+        if idx + 1 < len(lines):
+            next_stripped = lines[idx + 1].strip()
+        is_def = stripped.endswith((";", "{")) or next_stripped.startswith(("{",))
+        if is_def:
+            names[name] = stripped
+    return names
+
+
+def _additions_have_same_name_conflict(
+    cur_flat: list[str], rep_flat: list[str],
+) -> bool:
+    """True when both sides' additions define a function with the same name but
+    different signature text — a signature conflict, not an additive merge."""
+    cur_defs = _extract_definition_names(cur_flat)
+    rep_defs = _extract_definition_names(rep_flat)
+    shared_names = set(cur_defs) & set(rep_defs)
+    for name in shared_names:
+        if cur_defs[name] != rep_defs[name]:
+            return True  # same function name, different signatures
+    return False
+
+
 def _try_convergent_addition_merge(base: str, current: str, replayed: str) -> str | None:
     """Merge when both sides added the same (or nearly the same) content.
 
@@ -1382,6 +1444,15 @@ def _try_convergent_addition_merge(base: str, current: str, replayed: str) -> st
     smaller = min(len(cur_set), len(rep_set))
     if smaller == 0 or len(shared) < smaller * 0.5:
         return None  # not convergent enough
+    # Same-name definition guard: if both sides' additions each introduce a
+    # function/method with the SAME name but DIFFERENT text, this is a
+    # signature conflict (both sides wrote alternative versions of the same
+    # function), not an additive merge. Concatenating both would produce two
+    # real definitions → duplicate_definition failure. Decline so the LLM
+    # picks one. (The shared doc-comment lines create enough overlap for the
+    # convergence threshold to pass, but the function bodies diverge.)
+    if _additions_have_same_name_conflict(cur_flat, rep_flat):
+        return None
     # Build the merge: walk base, at each anchor emit current's additions first,
     # then any replayed additions not already emitted. Both sides check
     # emitted_added so shared content at different anchors is deduplicated.

@@ -1333,3 +1333,59 @@ def test_partial_disjoint_offset_points_to_correct_occurrence_when_core_recurs()
         f"not core_cur {core_cur!r}"
     )
 
+
+# ---------------------------------------------------------------------------
+# convergent_addition_merge: same-name definition conflict guard (regression)
+# ---------------------------------------------------------------------------
+
+def test_convergent_addition_declines_on_same_name_conflicting_signatures():
+    """Regression: when both sides independently ADD a function with the same
+    name but different signatures, the rule must decline — concatenating both
+    would produce two real definitions (a duplicate_definition failure). The
+    nlohmann-json-0030 eval case: both sides added to_string, one templated,
+    one with a macro type — shared doc-comment lines made the convergence
+    threshold pass, but the signatures diverged."""
+    base = "};\n} // namespace nlohmann"
+    cur = (
+        "};\n"
+        "NLOHMANN_BASIC_JSON_TPL_DECLARATION\n"
+        "std::string to_string(const NLOHMANN_BASIC_JSON_TPL& j)\n"
+        "{\n    return j.dump();\n}\n"
+        "} // namespace nlohmann"
+    )
+    rep = (
+        "};\n"
+        "template <class T>\n"
+        "std::string to_string(const T& j){\n"
+        "    return j.dump();\n}\n"
+        "} // namespace nlohmann"
+    )
+    result = _try_convergent_addition_merge(base, cur, rep)
+    assert result is None, (
+        "should decline on same-name conflicting definitions, got: "
+        f"{result!r}"
+    )
+
+
+def test_convergent_addition_merges_when_function_names_differ():
+    """When both sides add functions with DIFFERENT names (plus shared
+    doc-comment lines), the rule should still merge — no name collision."""
+    base = "int main() { return 0; }"
+    cur = "int main() { return 0; }\n// shared\nvoid foo() { }"
+    rep = "int main() { return 0; }\n// shared\nvoid bar() { }"
+    result = _try_convergent_addition_merge(base, cur, rep)
+    assert result is not None
+    assert "void foo()" in result
+    assert "void bar()" in result
+
+
+def test_convergent_addition_merges_identical_signatures():
+    """When both sides add the IDENTICAL function (same name, same signature),
+    the rule should still deduplicate to one copy — no conflict."""
+    base = "int main() { return 0; }"
+    cur = "int main() { return 0; }\nvoid foo() { bar(); }"
+    rep = "int main() { return 0; }\nvoid foo() { bar(); }"
+    result = _try_convergent_addition_merge(base, cur, rep)
+    assert result is not None
+    assert result.count("void foo()") == 1
+
