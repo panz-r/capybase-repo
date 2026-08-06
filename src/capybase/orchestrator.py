@@ -1917,6 +1917,39 @@ def _overlap_is_actionable(overlap_lines: list[str]) -> bool:
     return False
 
 
+def _find_core_line_span(
+    resolved_lines: list[str], core_lines: list[str],
+) -> int:
+    """Line index where the deferred core sits in the resolved text, or -1.
+
+    The structural resolver joins ``[pre_resolved, core_cur, post_resolved]``,
+    so the core sits between the tails. ``core_cur`` (the upstream side of the
+    overlap) may appear several times in the resolved text — a lone ``}``,
+    ``break;``, or blank line recurs in the reconstructed tails. A naive
+    ``str.find``/``replace(.., 1)`` returns the FIRST match, which is often a
+    tail line, not the core.
+
+    We scan for every line range that textually matches ``core_lines`` and
+    return the one closest to the centre of the text — the core is the
+    "middle" element by construction, so the centremost match is the most
+    reliable heuristic when there are several.
+    """
+    n = len(resolved_lines)
+    clen = len(core_lines)
+    if clen == 0 or clen > n:
+        return -1
+    best = -1
+    best_dist = n  # distance from centre; smaller is better
+    centre = n / 2
+    for i in range(n - clen + 1):
+        if resolved_lines[i:i + clen] == core_lines:
+            dist = abs((i + clen / 2) - centre)
+            if dist < best_dist:
+                best_dist = dist
+                best = i
+    return best
+
+
 def _strip_boundary_echo(
     resolved_text: str,
     original: str,
@@ -3482,13 +3515,19 @@ class Orchestrator:
         # "resolve these 2 conflicting lines."
         if result.deferred_core is not None:
             core_base, core_cur, core_rep = result.deferred_core
-            patched = self._resolve_deferred_core(unit, cand, core_base, core_cur, core_rep)
-            if patched is not None:
+            patched = self._resolve_deferred_core(
+                unit, cand, core_base, core_cur, core_rep,
+                core_offset=result.deferred_core_offset,
+            )
+            core_was_resolved = patched is not None
+            if core_was_resolved:
                 cand.resolved_text = patched
+        else:
+            core_was_resolved = False
         self.journal.emit(
             "candidate_accepted",
             {"candidate_id": cand.candidate_id, "via": "structural",
-             "deferred_core_resolved": result.deferred_core is not None},
+             "deferred_core_resolved": core_was_resolved},
             step_index=self.step, path=unit.path, unit_id=unit.unit_id,
         )
         return outcome
@@ -3496,15 +3535,21 @@ class Orchestrator:
     def _resolve_deferred_core(
         self, unit: ConflictUnit, cand: "CandidateResolution",
         core_base: str, core_cur: str, core_rep: str,
+        *, core_offset: int | None = None,
     ) -> str | None:
         """Resolve a deferred mini-conflict core (1-3 lines) via the LLM.
 
         Called when ``partial_disjoint_merge`` resolved the deterministic tails
         but couldn't resolve the overlap core. Builds a tiny ConflictUnit from
         the core's 3-way texts, resolves it via the standard ``_resolve_unit``
-        pipeline (which includes SBCR, the LLM, and CEGIS), and patches the
-        result back into the candidate's resolved_text by replacing the
-        core_cur section.
+        pipeline (which includes SBCR, the LLM, and CEGIS), and splices the
+        result back into the candidate's resolved_text at ``core_offset``.
+
+        ``core_offset`` is the character offset of ``core_cur`` in the resolved
+        text, recorded by the structural resolver at assembly time. It MUST be
+        used rather than searching for ``core_cur``: the core (e.g. a lone
+        ``}``) frequently recurs in the reconstructed tails, so a textual
+        search would patch the wrong occurrence.
 
         The core unit inherits the parent's structural_metadata (enclosing
         function/class, node type/signature) and gets a padded worktree with
@@ -3522,11 +3567,18 @@ class Orchestrator:
             # text so the LLM sees the braces/scope around the core.
             resolved_lines = (cand.resolved_text or "").split("\n")
             core_lines = core_cur.split("\n")
-            core_start_in_resolved = -1
-            if core_cur in (cand.resolved_text or ""):
-                # Find the core's position in the resolved text.
-                pre_text = (cand.resolved_text or "").split(core_cur, 1)[0]
-                core_start_in_resolved = pre_text.count("\n")
+            # Compute the core's LINE position from the character offset the
+            # structural resolver recorded. Fall back to a textual scan only if
+            # the offset is absent (older resolution path); in that case prefer
+            # the centremost match (the core sits between the tails).
+            if core_offset is not None and core_offset <= len(cand.resolved_text or ""):
+                core_start_in_resolved = (
+                    cand.resolved_text or ""
+                )[:core_offset].count("\n")
+            else:
+                core_start_in_resolved = _find_core_line_span(
+                    resolved_lines, core_lines,
+                )
 
             # Build a padded worktree: 3 lines before + core + 3 lines after.
             pad_before: list[str] = []
@@ -3573,13 +3625,30 @@ class Orchestrator:
             self._unit_verify_time = _outer_verify_time + _core_verify_time
             if outcome.accepted is not None and outcome.accepted.resolved_text:
                 core_resolved = outcome.accepted.resolved_text
-                # Patch: replace core_cur in the resolved text with core_resolved.
-                if core_cur in cand.resolved_text:
-                    patched = cand.resolved_text.replace(core_cur, core_resolved, 1)
-                else:
-                    # Fallback: the core text may have been normalized; append the
-                    # resolved core (less precise but still correct).
-                    patched = cand.resolved_text + "\n" + core_resolved
+                # Splice the resolved core back into the candidate text BY LINE
+                # INDEX at core_start_in_resolved. str.replace(core_cur, ..., 1)
+                # was wrong: core_cur (e.g. a lone ``}``) may appear several
+                # times in the resolved text (in the reconstructed tails), and
+                # replace patches the FIRST textual occurrence — often a tail
+                # line, not the core. We use the offset the structural resolver
+                # recorded, which is authoritative.
+                patched: str | None = None
+                if core_start_in_resolved >= 0:
+                    rlines = (cand.resolved_text or "").split("\n")
+                    clen = len(core_lines)
+                    start = core_start_in_resolved
+                    if start + clen <= len(rlines):
+                        patched = "\n".join(
+                            rlines[:start]
+                            + core_resolved.split("\n")
+                            + rlines[start + clen:]
+                        )
+                if patched is None:
+                    # The core's position couldn't be determined. Rather than
+                    # append at the end (which would misplace the core after the
+                    # closing brace and corrupt the structure), decline: keep
+                    # the conservative core_cur default.
+                    return None
                 # Brace-delta safety check: check the PATCHED text (core in
                 # context), not the isolated core — a 1-3 line core naturally
                 # has unbalanced braces in isolation (e.g. ``if (x) {``).

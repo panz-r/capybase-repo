@@ -101,11 +101,15 @@ class StructuralResolution:
     replayed) when ``partial_disjoint_merge`` resolved the deterministic tails
     but couldn't resolve the overlap core. The orchestrator feeds ONLY the core
     to the LLM (a tiny prompt) and patches the result back into the resolved text.
+    ``deferred_core_offset`` is the character offset of ``core_cur`` within
+    ``text`` — needed because ``core_cur`` (e.g. a lone ``}``) may appear in the
+    reconstructed tails too, so the orchestrator cannot find it by searching.
     """
 
     rule: Rule | None
     text: str | None
     deferred_core: tuple[str, str, str] | None = None
+    deferred_core_offset: int | None = None
 
     @property
     def resolved(self) -> bool:
@@ -781,10 +785,15 @@ def _try_partial_disjoint_merge(base: str, current: str, replayed: str) -> str |
                 return None  # no decomposition value; defer to the LLM
             core_resolved = core_cur  # conservative default; patched by LLM
             parts = [p for p in [pre_resolved, core_resolved, post_resolved] if p]
+            # Record the core's character offset in the assembled text. The
+            # orchestrator splices the LLM-resolved core back at this offset;
+            # searching for core_cur is unsafe (it may recur in the tails).
+            core_offset = len(pre_resolved) + (1 if pre_resolved else 0)
             return StructuralResolution(
                 rule="partial_disjoint_merge",
                 text="\n".join(parts),
                 deferred_core=(core_base, core_cur, core_rep),
+                deferred_core_offset=core_offset,
             )
 
     # Assemble the full resolution.
