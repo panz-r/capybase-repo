@@ -249,3 +249,94 @@ def test_overlapping_one_sided_resolves_via_zealous_without_llm(repo: Path):
     events = [e for e in orch.journal.read_events() if e.event_type == "structurally_resolved"]
     assert events and events[0].payload["rule"] == "zealous_merge"
     assert events[0].payload["passed"] is True
+
+
+# ---------------------------------------------------------------------------
+# Intra-step shape memoization: sibling units with the same shape reuse
+# the first sibling's resolution without a model call.
+# ---------------------------------------------------------------------------
+
+
+def test_step_shape_reuse_returns_cached_resolution():
+    """When the content cache has an identical conflict's resolution,
+    _try_step_shape_reuse builds a candidate, verifies it, and returns it
+    without a model call. Two IDENTICAL conflicts (same 3-way text) match;
+    different-content conflicts do NOT."""
+    import tempfile, hashlib
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+
+    def _side(label, text):
+        return ConflictSide(label=label, text=text)  # type: ignore[arg-type]
+
+    # Two IDENTICAL conflicts: same base/current/replayed text.
+    unit_a = ConflictUnit(
+        session_id="s", step_index=0, path="f.cpp", unit_id="a",
+        language="cpp",
+        base=_side("BASE", "int x = 1;"),
+        current=_side("CURRENT_UPSTREAM_SIDE", "int x = 2;"),
+        replayed=_side("REPLAYED_COMMIT_SIDE", "int x = 1;"),  # one-sided by cur
+        original_worktree_text="int x = 1;",
+    )
+    unit_b = ConflictUnit(
+        session_id="s", step_index=0, path="f.cpp", unit_id="b",
+        language="cpp",
+        base=_side("BASE", "int x = 1;"),       # IDENTICAL content to unit_a
+        current=_side("CURRENT_UPSTREAM_SIDE", "int x = 2;"),
+        replayed=_side("REPLAYED_COMMIT_SIDE", "int x = 1;"),
+        original_worktree_text="int x = 1;",
+    )
+
+    with tempfile.TemporaryDirectory() as d:
+        rp = Path(d)
+        git(rp, "init", "-q", "-b", "main")
+        cfg = Config()
+        cfg.future.enable_structural_resolver = True
+        client = CallCountingClient()
+        engine = ResolutionEngine(cfg.model, client=client)
+        orch = Orchestrator(cfg, repo=str(rp), resolution_engine=engine,
+                            out=lambda *_a, **_k: None)
+
+        # Resolve unit_a deterministically (one_sided_change).
+        outcome_a = orch._try_structural_resolve(unit_a)
+        assert outcome_a is not None and outcome_a.accepted is not None
+        # Seed the cache with the same content-based key the method uses.
+        content = "int x = 1;\x00int x = 2;\x00int x = 1;"
+        key = f"{hashlib.sha1(content.encode()).hexdigest()[:16]}:f.cpp"
+        orch._step_shape_cache = {key: outcome_a.accepted.resolved_text}
+
+        # unit_b has identical content — reuse should replay without a model call.
+        outcome_b = orch._try_step_shape_reuse(unit_b)
+        assert outcome_b is not None, "should reuse identical conflict's resolution"
+        assert outcome_b.accepted is not None
+        assert "int x = 2;" in outcome_b.accepted.resolved_text
+        assert client.calls == 0
+
+
+def test_step_shape_reuse_returns_none_when_no_cache():
+    """When the shape cache is empty, _try_step_shape_reuse returns None
+    (fall through to the normal cascade)."""
+    import tempfile
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+
+    def _side(label, text):
+        return ConflictSide(label=label, text=text)  # type: ignore[arg-type]
+
+    unit = ConflictUnit(
+        session_id="s", step_index=0, path="f.cpp", unit_id="u",
+        language="cpp",
+        base=_side("BASE", "int a = 1;"),
+        current=_side("CURRENT_UPSTREAM_SIDE", "int a = 2;"),
+        replayed=_side("REPLAYED_COMMIT_SIDE", "int a = 1;"),
+        original_worktree_text="int a = 1;",
+    )
+    with tempfile.TemporaryDirectory() as d:
+        rp = Path(d)
+        git(rp, "init", "-q", "-b", "main")
+        cfg = Config()
+        client = CallCountingClient()
+        engine = ResolutionEngine(cfg.model, client=client)
+        orch = Orchestrator(cfg, repo=str(rp), resolution_engine=engine,
+                            out=lambda *_a, **_k: None)
+        orch._step_shape_cache = {}  # empty cache
+        result = orch._try_step_shape_reuse(unit)
+        assert result is None

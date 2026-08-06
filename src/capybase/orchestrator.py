@@ -3304,6 +3304,60 @@ class Orchestrator:
         essential = estimate_tokens(marker_text)
         return essential > available, essential, available
 
+    def _try_step_shape_reuse(self, unit: ConflictUnit) -> UnitOutcome | None:
+        """Replay a sibling unit's resolution from the intra-step shape cache.
+
+        When many units in one file share the same conflict shape (e.g. 78
+        regions of ``Type x;`` vs ``Type x{};``), only the first needs the full
+        cascade. This checks ``self._step_shape_cache`` — populated by earlier
+        deterministic acceptances in the same ``_resolve_step`` — and if a
+        sibling with the same shape was resolved, builds a candidate from its
+        text and runs it through verification.
+
+        Same safety model as ``_try_exact_reuse``: the reused candidate runs
+        the full verify gauntlet. A mismatch (the sibling's resolution doesn't
+        fit this unit's context) fails and returns None, falling through to the
+        normal cascade. This is a speed optimization, never a correctness bypass.
+        """
+        cache = getattr(self, "_step_shape_cache", None)
+        if not cache:
+            return None
+        # Key on the EXACT conflict content (base+current+replayed texts), not
+        # just the structural shape hash. Two conflicts with the same shape but
+        # different variable names (``int a = 1;`` vs ``int b = 1;``) must NOT
+        # reuse each other's resolution — the resolved text would have the wrong
+        # variable. Only truly identical conflicts (same 3-way text) match.
+        import hashlib as _hl
+        content = (
+            (unit.base.text or "") + "\x00"
+            + (unit.current.text or "") + "\x00"
+            + (unit.replayed.text or "")
+        )
+        key = f"{_hl.sha1(content.encode()).hexdigest()[:16]}:{unit.path}"
+        cached_text = cache.get(key)
+        if cached_text is None:
+            return None
+        cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:step_shape_reuse",
+            unit_id=unit.unit_id,
+            model_name="step_shape_reuse",
+            prompt_version="step_shape_reuse",
+            resolved_text=cached_text,
+            explanation="replayed from a sibling unit with the same conflict shape",
+            provenance="deterministic_structural",
+        )
+        validation = self.verification.verify(unit, cand, fast_verify=True)
+        self.journal.emit(
+            "step_shape_reuse",
+            {"candidate_id": cand.candidate_id, "passed": validation.passed},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        if not validation.passed:
+            return None  # the sibling's resolution doesn't fit this unit's context
+        outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+        outcome.accepted = cand
+        return outcome
+
     def _try_exact_reuse(self, unit: ConflictUnit) -> UnitOutcome | None:
         """Attempt a verbatim replay of a prior accepted resolution (#9 step 4).
 
@@ -6193,6 +6247,14 @@ class Orchestrator:
             # each later sub-unit's prompt so entity-split siblings stay
             # consistent (see _sibling_resolutions_block in resolution_engine).
             _sibling_resolved: dict[str, list[str]] = {}
+            # Intra-step shape cache: when many units in one file share the same
+            # conflict shape (e.g. 78 regions of `Type x;` vs `Type x{};`), only
+            # the first needs the full cascade; siblings can replay the accepted
+            # resolution and re-verify. Keyed on (shape_hash, path) → resolved_text.
+            # Populated after each deterministic acceptance; checked at the top
+            # of _resolve_unit before any model call. This is the intra-step
+            # analog of _try_exact_reuse (which is cross-session).
+            self._step_shape_cache: dict[str, str] = {}
             for unit in units:
                 _parent = unit.structural_metadata.get("parent_unit_id")
                 if _parent and _parent in _sibling_resolved:
@@ -6211,6 +6273,25 @@ class Orchestrator:
                         outcome.accepted.resolved_text
                     )
                 accepted.append((unit, outcome.accepted))
+                # Populate the intra-step shape cache so later sibling units
+                # with the same conflict shape can replay this resolution.
+                # Only cache deterministic resolutions (structural/exact_reuse/
+                # source_portfolio) — LLM resolutions may be case-specific.
+                _prov = outcome.accepted.provenance or ""
+                if _prov.startswith("deterministic"):
+                    try:
+                        import hashlib as _hl
+                        _content = (
+                            (unit.base.text or "") + "\x00"
+                            + (unit.current.text or "") + "\x00"
+                            + (unit.replayed.text or "")
+                        )
+                        _key = f"{_hl.sha1(_content.encode()).hexdigest()[:16]}:{unit.path}"
+                        self._step_shape_cache[_key] = (
+                            outcome.accepted.resolved_text
+                        )
+                    except Exception:  # noqa: BLE001 — advisory
+                        pass
             if escalated_unit is not None:
                 result.escalated = True
                 # Prefer the outcome's specific reason (e.g. "unit exceeded
@@ -8077,6 +8158,15 @@ class Orchestrator:
         # bypass; bugs surface immediately via re-validation. Only on a FRESH
         # resolve (the CEGIS loop must see counterexamples).
         if failures is None:
+            # Intra-step shape memoization: if a sibling unit in THIS step with
+            # the same conflict shape was already accepted (deterministically),
+            # replay its resolved text and re-verify. On a file with 78 tiny
+            # identical-shape conflicts, this turns 78 model calls into 1 + 77
+            # verify-only calls. Same safety model as exact_reuse: the reused
+            # candidate runs the full verify gauntlet; a mismatch falls through.
+            early = self._try_step_shape_reuse(unit)
+            if early is not None:
+                return early
             early = self._try_exact_reuse(unit)
             if early is not None:
                 return early  # accepted via verbatim reuse; LLM loop skipped
