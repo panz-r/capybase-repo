@@ -134,39 +134,42 @@ def _classify_terminal_reason(reason: str) -> str:
     """Classify an escalation reason into a disjoint terminal category.
 
     Returns one of:
+      SAFE_STOP           — safety guard caught a real danger (resurrection)
+      SAFE_SKIP           — no real conflict (git resolved cleanly)
       OVERSIZED           — oversized guard fired (file too large for model)
       MODEL_EMPTY         — model returned empty (not oversized)
       MODEL_NEEDS_HUMAN   — model self-reported needs_human
-      CARGO_NO_PROGRESS   — convergence with cargo/syntax errors
-      PROOF_NO_PROGRESS   — convergence without cargo errors (preservation only)
-      WHOLE_FILE_FAILED   — whole-file repair couldn't resolve
-      WALL_TIME           — exceeded per-unit wall-time budget
-      CASE_TIMEOUT        — exceeded per-case timeout (900s+ of CEGIS retries)
-      NO_CONFLICT         — git didn't produce a conflict
+      TIMEOUT_CONVERGENCE — CEGIS loop failed to converge (no-progress / wall-time)
+      TIMEOUT_CASE        — exceeded per-case timeout (1200s of CEGIS retries)
+      REPAIR_FAILURE      — whole-file repair couldn't resolve a unit
       OTHER               — uncategorized
     """
     r = (reason or "").lower()
+    # Safety stops (true-positive catches) — highest priority classification.
+    if "resurrection" in r:
+        return "SAFE_STOP"
+    # Safety skips (not real conflicts).
+    if "no conflict" in r or "skipped" in r:
+        return "SAFE_SKIP"
     if "too large" in r or "oversized" in r:
         return "OVERSIZED"
-    if "no conflict" in r or "skipped" in r:
-        return "NO_CONFLICT"
     if "case timeout" in r:
-        return "CASE_TIMEOUT"
+        return "TIMEOUT_CASE"
     if "wall-time" in r or "wall_time" in r:
-        return "WALL_TIME"
+        return "TIMEOUT_CONVERGENCE"
+    if "no hard-failure progress" in r:
+        return "TIMEOUT_CONVERGENCE"
     if "needs_human" in r:
         return "MODEL_NEEDS_HUMAN"
     if "empty resolution" in r or "empty res" in r:
         return "MODEL_EMPTY"
     if "whole-file" in r or "whole_file" in r:
-        return "WHOLE_FILE_FAILED"
+        return "REPAIR_FAILURE"
     if "convergence" in r:
-        if "stalled" in r or "unaccounted" in r:
-            return "PROOF_NO_PROGRESS"
-        return "CARGO_NO_PROGRESS"
+        return "TIMEOUT_CONVERGENCE"
     if "could not resolve" in r:
         if "error:" in r or "syntax" in r or "delimiter" in r:
-            return "CARGO_NO_PROGRESS"
+            return "TIMEOUT_CONVERGENCE"
         return "MODEL_EMPTY"
     return "OTHER"
 
@@ -470,7 +473,12 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     cfg.model.api_key = os.environ.get("CAPYBASE_API_KEY", "sk-local")
     cfg.model.model = os.environ.get("CAPYBASE_MODEL", "chat")
     cfg.model.temperature = 0.2
-    cfg.model.max_tokens = 8192
+    # Output token cap proportional to conflict size: a 3-line conflict doesn't
+    # need 8K tokens of generation headroom (the model would hallucinate
+    # boilerplate, wasting time on the slow endpoint). Cap at 16× the conflict's
+    # non-blank line count, floored at 512, ceiling at 8192.
+    _conflict_lines = sum(1 for ln in (case.marker_original or "").splitlines() if ln.strip())
+    cfg.model.max_tokens = min(8192, max(512, _conflict_lines * 16))
     cfg.model.json_mode = True
     cfg.model.request_timeout_seconds = 600
     cfg.model.generation_timeout_seconds = 240
@@ -1085,6 +1093,14 @@ def main():
     print(f"ESCALATE:   {escalate_ct}")
     print(f"ORACLE_DIVERGENT: {wrong_ct}  (sim < 0.80 or marker/brace failure)")
     print(f"wall:       {elapsed:.0f}s ({elapsed/60:.1f}m) [this run only]")
+    # Real-conflict pass rate: excludes SAFE_SKIP (no real conflict) from the
+    # denominator. This is the honest metric — a SAFE_SKIP isn't a resolution
+    # the system produced, it's a case git already resolved cleanly.
+    real_conflicts = [r for r in results if r.terminal_reason != "SAFE_SKIP"]
+    real_pass = sum(1 for r in real_conflicts if r.verdict == "PASS")
+    if real_conflicts:
+        print(f"real-conflict PASS rate: {real_pass}/{len(real_conflicts)} = "
+              f"{real_pass/len(real_conflicts)*100:.0f}%")
     for lang in ("python", "rust", "c", "cpp"):
         sub = [r for r in results if r.language == lang]
         if not sub: continue

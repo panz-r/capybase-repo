@@ -330,6 +330,8 @@ def _persist_unit_hashes(orch, outcome) -> None:
     Called after every ``_resolve_unit`` return so that a subsequent
     ``_whole_file_repair`` re-resolve of the same unit inherits the hashes —
     the model can't cycle through the same cosmetic variations again.
+    Also persists failure signatures so the no-progress guard sees prior
+    failures across the Phase 1 → Phase 2 boundary.
     """
     step_hashes = getattr(orch, "_step_convergence_hashes", None)
     if step_hashes is None or outcome is None:
@@ -339,6 +341,12 @@ def _persist_unit_hashes(orch, outcome) -> None:
     existing = step_hashes.get(uid, {})
     existing.update(outcome._seen_normalized_hashes)
     step_hashes[uid] = existing
+    # Persist failure signatures for the cross-call no-progress guard.
+    step_sigs = getattr(orch, "_step_failure_sigs", None)
+    if step_sigs is not None:
+        sigs = step_sigs.get(uid, [])
+        sigs.extend(getattr(outcome, "_recent_hard_failure_sigs", []))
+        step_sigs[uid] = sigs
 
 
 
@@ -6221,6 +6229,10 @@ class Orchestrator:
         # convergence hashes from the first pass — the model can't cycle
         # through the SAME cosmetic variations a second time. Reset each step.
         self._step_convergence_hashes: dict[str, dict[str, int]] = {}
+        # Per-step failure-signature persistence: survives across _resolve_unit
+        # calls (Phase 1 → Phase 2 re-resolve) so the no-progress guard sees
+        # prior compiler errors and doesn't reset its counter on re-entry.
+        self._step_failure_sigs: dict[str, list] = {}
 
         # ---- Phase 1: resolve + write all files (no staging, no cargo) ----
         import time as _p1time
@@ -8080,6 +8092,15 @@ class Orchestrator:
             prior = step_hashes.get(unit.unit_id)
             if prior:
                 outcome._seen_normalized_hashes = dict(prior)
+        # Inherit prior failure signatures so the no-progress guard doesn't
+        # reset its counter when Phase 2 re-enters _resolve_unit for the same
+        # unit. Without this, a unit that reproduces the same gcc error across
+        # the Phase 1 → Phase 2 boundary burns the full retry budget twice.
+        step_sigs = getattr(self, "_step_failure_sigs", None)
+        if step_sigs is not None:
+            prior_sigs = step_sigs.get(unit.unit_id)
+            if prior_sigs:
+                outcome._recent_hard_failure_sigs = list(prior_sigs)
         # Build the per-unit history snapshot ONCE (#idea 5 cohesion). This
         # memoizes the HistoryContext/confidence/obligations/etc. so every
         # downstream mechanism (prompt, gates, probe, features, reuse) reads from
@@ -8845,25 +8866,36 @@ class Orchestrator:
                 if not has_needs_human:
                     outcome._recent_hard_failure_sigs.append(sig)
                     recent = outcome._recent_hard_failure_sigs[-np_threshold:]
-                    if len(recent) >= np_threshold and len(set(recent)) == 1:
-                        validators = sorted({v for v, _ in sig}) or ["(none)"]
-                        self.journal.emit(
-                            "candidate_rejected",
-                            {"candidate_id": cand.candidate_id,
-                             "action": "escalate", "via": "no_progress",
-                             "reason": (f"identical hard-failure signature across "
-                                        f"{len(recent)} attempts ({validators})"),
-                             "retry_count": retry_count},
-                            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
-                        )
-                        outcome.escalated = True
-                        outcome.retry_count = retry_count
-                        outcome.reason = (
-                            f"no hard-failure progress: identical signature across "
-                            f"{len(recent)} attempts ({validators})"
-                            + _obligation_suffix(unit, cand)
-                        )
-                        return outcome
+                    if len(recent) >= np_threshold:
+                        # Gap A fix: the original check (len(set(recent)) == 1)
+                        # only caught N consecutive IDENTICAL signatures. A model
+                        # oscillating between two distinct errors (A, B, A, B)
+                        # never tripped it. Now escalate when ANY single signature
+                        # repeats >= np_threshold times within the rolling window.
+                        from collections import Counter
+                        sig_counts = Counter(recent)
+                        max_repeat = max(sig_counts.values())
+                        if max_repeat >= np_threshold:
+                            stalled_sig = sig_counts.most_common(1)[0][0]
+                            validators = sorted({v for v, _ in stalled_sig}) or ["(none)"]
+                            self.journal.emit(
+                                "candidate_rejected",
+                                {"candidate_id": cand.candidate_id,
+                                 "action": "escalate", "via": "no_progress",
+                                 "reason": (f"hard-failure signature repeated "
+                                            f"{max_repeat}/{len(recent)} times "
+                                            f"in recent attempts ({validators})"),
+                                 "retry_count": retry_count},
+                                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                            )
+                            outcome.escalated = True
+                            outcome.retry_count = retry_count
+                            outcome.reason = (
+                                f"no hard-failure progress: signature repeated "
+                                f"{max_repeat}/{len(recent)} times ({validators})"
+                                + _obligation_suffix(unit, cand)
+                            )
+                            return outcome
             # Oscillation backstop (CEGIS resilience): if the SAME resolved_text
             # has been seen more times than the retry budget allows, the model is
             # cycling — escalate instead of wasting more tokens. This fires only
