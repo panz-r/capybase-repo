@@ -9792,6 +9792,13 @@ class Orchestrator:
         """
         if not getattr(self.config.journal, "write_accept_reports", True):
             return
+        # A no-op when no unit was accepted (an escalation step): the report
+        # is a "why we accepted" summary; an escalated step has no accepted
+        # units to report on. The escalation review bundle is a separate file.
+        if result.escalated or not any(
+            o.accepted is not None for o in result.outcomes
+        ):
+            return
         try:
             from capybase.accept_report import build_accept_report
 
