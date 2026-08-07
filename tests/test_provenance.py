@@ -45,6 +45,7 @@ def test_provenance_values_match_spec():
         "deterministic_cc_repair",
         "deterministic_side_consistency_repair",
         "deterministic_side_consensus_repair",
+        "deterministic_preprocessor_repair",
         "deterministic_source_current_only",
         "deterministic_source_replayed_only",
         "deterministic_source_cur_rep",
