@@ -1963,6 +1963,136 @@ def _find_core_line_span(
     return best
 
 
+# ---------------------------------------------------------------------------
+# Edit-pattern extraction + instantiation for the intra-step pattern cache.
+# ---------------------------------------------------------------------------
+
+import re as _re_pat
+
+_TOKEN_RE_PAT = _re_pat.compile(r"[A-Za-z_]\w*|[0-9]+|\s+|[^\sA-Za-z0-9]+")
+
+
+def _tokenize_for_pattern(text: str) -> list[str]:
+    """Tokenize for pattern extraction (Summer's 4-category lossless tokenizer)."""
+    return _TOKEN_RE_PAT.findall(text or "")
+
+
+def _token_category(tok: str) -> str:
+    """Map a token to its structural category for pattern normalization.
+
+    Identifiers → ``IDENT``, numbers → ``NUM``, whitespace → ``WS``,
+    punctuation kept verbatim. Two conflicts with the same structure but
+    different variable names normalize to the same category sequence.
+    """
+    if _re_pat.fullmatch(r"[A-Za-z_]\w*", tok):
+        return "IDENT"
+    if _re_pat.fullmatch(r"[0-9]+", tok):
+        return "NUM"
+    if tok.strip() == "":
+        return "WS"
+    return tok  # punctuation — kept verbatim for anchor matching
+
+
+def _extract_edit_pattern(base: str, resolved: str) -> list[tuple[str, str, str]] | None:
+    """Extract a normalized token-level edit pattern from base→resolved.
+
+    Returns a list of ``(base_category_seq, resolved_category_seq, base_raw)``
+    tuples — one per non-equal opcode in the token diff — or None when the
+    pattern is empty or too complex (>10 ops). The ``base_raw`` carries the
+    raw base tokens for anchor matching during instantiation.
+    """
+    from capybase.diff import line_matcher
+    bt = _tokenize_for_pattern(base)
+    rt = _tokenize_for_pattern(resolved)
+    matcher = line_matcher(bt, rt)
+    pattern: list[tuple[str, str, str]] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        base_cats = "".join(_token_category(t) for t in bt[i1:i2])
+        repl_cats = "".join(_token_category(t) for t in rt[j1:j2])
+        base_raw = "\x00".join(bt[i1:i2])
+        pattern.append((base_cats, repl_cats, base_raw))
+    if not pattern or len(pattern) > 10:
+        return None
+    return pattern
+
+
+def _instantiate_pattern(
+    base: str, pattern: list[tuple[str, str, str]],
+) -> str | None:
+    """Apply a normalized edit pattern to a sibling's base text.
+
+    Walks the pattern's ops: for each, finds the raw base anchor in the
+    sibling's tokens by matching the category sequence. If found
+    unambiguously, replaces with the resolved tokens. If ambiguous (anchor
+    appears multiple times) or not found, skips the op.
+
+    Returns the instantiated resolved text, or None if no ops could be applied
+    (every anchor was ambiguous or missing).
+    """
+    bt = _tokenize_for_pattern(base)
+    applied = list(bt)
+    any_applied = False
+    for base_cats, repl_cats, base_raw in pattern:
+        anchor_toks = base_raw.split("\x00") if base_raw else []
+        if not anchor_toks:
+            continue
+        idx = _find_subsequence_simple(applied, anchor_toks)
+        if idx < 0:
+            continue
+        # Ambiguity guard: skip if the anchor appears again after the match.
+        next_idx = _find_subsequence_simple(applied[idx + len(anchor_toks):], anchor_toks)
+        if next_idx >= 0:
+            continue
+        # Build the replacement tokens from the category sequence. We can't
+        # recover the original tokens from categories alone, so for literal
+        # patterns (where repl_cats contains no IDENT/NUM), use the category
+        # sequence directly as tokens. For IDENT/NUM patterns, this won't work
+        # — but those are the ambiguous rename cases the guard declines.
+        repl_toks = _category_seq_to_tokens(repl_cats, anchor_toks)
+        if repl_toks is None:
+            continue  # can't instantiate — has IDENT/NUM we can't resolve
+        applied[idx:idx + len(anchor_toks)] = repl_toks
+        any_applied = True
+    if not any_applied:
+        return None
+    return "".join(applied)
+
+
+def _find_subsequence_simple(haystack: list[str], needle: list[str]) -> int:
+    """Index of the first occurrence of needle in haystack, or -1."""
+    if not needle:
+        return 0
+    n, m = len(haystack), len(needle)
+    if m > n:
+        return -1
+    for i in range(n - m + 1):
+        if haystack[i:i + m] == needle:
+            return i
+    return -1
+
+
+def _category_seq_to_tokens(
+    cats: str, anchor_toks: list[str],
+) -> list[str] | None:
+    """Convert a category sequence back to concrete tokens.
+
+    For literal patterns (punctuation/WS only), the categories ARE the tokens.
+    For IDENT/NUM categories, we can't recover the original identifier —
+    decline (return None) so the caller falls through to the LLM.
+    """
+    # If the pattern contains IDENT or NUM, we can't instantiate it — those
+    # would need the sibling's specific identifier, which we don't know how
+    # to place without full structural matching.
+    if "IDENT" in cats or "NUM" in cats:
+        return None
+    # All-literal pattern: split by WS boundaries. The category string for
+    # literals is the raw text (e.g. "{};" or "&&"). Re-tokenize it to get
+    # the individual tokens.
+    return _tokenize_for_pattern(cats)
+
+
 def _strip_boundary_echo(
     resolved_text: str,
     original: str,
@@ -3367,6 +3497,56 @@ class Orchestrator:
         )
         if not validation.passed:
             return None  # the sibling's resolution doesn't fit this unit's context
+        outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+        outcome.accepted = cand
+        return outcome
+
+    def _try_step_pattern_reuse(self, unit: ConflictUnit) -> UnitOutcome | None:
+        """Apply a sibling's edit pattern to this unit via the pattern cache.
+
+        When the exact-content cache misses (different variable names) but the
+        structural shape matches a previously-resolved sibling, extract the
+        token-level transformation (base→resolved) and apply it to this unit's
+        base text. Only fires for literal-substitution patterns (punctuation/
+        keyword changes like ``;`` → ``{};``, ``and`` → ``&&``) — patterns
+        involving identifier renames are declined (can't recover the specific
+        identifier from the category-normalized pattern).
+
+        Same safety model as ``_try_step_shape_reuse``: the instantiated
+        candidate runs ``verify(fast_verify=True)`` and falls through on failure.
+        """
+        cache = getattr(self, "_step_pattern_cache", None)
+        if not cache:
+            return None
+        try:
+            from capybase.memory.shape import shape_for_unit
+        except Exception:  # noqa: BLE001
+            return None
+        key = f"{shape_for_unit(unit)}:{unit.path}"
+        pattern = cache.get(key)
+        if pattern is None:
+            return None
+        base = unit.base.text or ""
+        instantiated = _instantiate_pattern(base, pattern)
+        if instantiated is None:
+            return None
+        cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:step_pattern_reuse",
+            unit_id=unit.unit_id,
+            model_name="step_pattern_reuse",
+            prompt_version="step_pattern_reuse",
+            resolved_text=instantiated,
+            explanation="instantiated from a sibling unit's edit pattern",
+            provenance="deterministic_structural",
+        )
+        validation = self.verification.verify(unit, cand, fast_verify=True)
+        self.journal.emit(
+            "step_pattern_reuse",
+            {"candidate_id": cand.candidate_id, "passed": validation.passed},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        if not validation.passed:
+            return None
         outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
         outcome.accepted = cand
         return outcome
@@ -6272,6 +6452,11 @@ class Orchestrator:
             # of _resolve_unit before any model call. This is the intra-step
             # analog of _try_exact_reuse (which is cross-session).
             self._step_shape_cache: dict[str, str] = {}
+            # Edit-pattern cache: keyed on conflict_shape_hash+path, stores
+            # normalized token-level edit patterns (base→resolved). Populated
+            # from BOTH deterministic and LLM resolutions; applied to sibling
+            # units with the same structural shape but different identifiers.
+            self._step_pattern_cache: dict[str, list] = {}
             # Unit-count-aware retry budget: scale down retries when a file has
             # many units, so the total model-call count stays within the wall-
             # time budget. With the default 2 retries (3 attempts), a 78-unit
@@ -6329,6 +6514,25 @@ class Orchestrator:
                         )
                     except Exception:  # noqa: BLE001 — advisory
                         pass
+                # Populate the edit-pattern cache from BOTH deterministic and
+                # LLM resolutions. The pattern is a normalized token-level diff
+                # (base→resolved), keyed on the conflict shape hash. Sibling
+                # units with the same shape but different identifiers can
+                # instantiate the pattern instead of calling the LLM.
+                try:
+                    from capybase.memory.shape import shape_for_unit
+                    _pat = _extract_edit_pattern(
+                        unit.base.text or "",
+                        outcome.accepted.resolved_text or "",
+                    )
+                    if _pat is not None:
+                        _pat_key = f"{shape_for_unit(unit)}:{unit.path}"
+                        # Don't overwrite a pattern from an earlier sibling —
+                        # the first resolution is the template.
+                        if _pat_key not in self._step_pattern_cache:
+                            self._step_pattern_cache[_pat_key] = _pat
+                except Exception:  # noqa: BLE001 — advisory
+                    pass
             if escalated_unit is not None:
                 result.escalated = True
                 # Prefer the outcome's specific reason (e.g. "unit exceeded
@@ -8228,6 +8432,15 @@ class Orchestrator:
             # verify-only calls. Same safety model as exact_reuse: the reused
             # candidate runs the full verify gauntlet; a mismatch falls through.
             early = self._try_step_shape_reuse(unit)
+            if early is not None:
+                return early
+            # Edit-pattern reuse: if a sibling with the same structural shape
+            # was already resolved, apply its token-level edit pattern to this
+            # unit's base. Handles structurally similar conflicts with different
+            # identifiers (e.g. ``int a;`` → ``int a{};`` vs ``int b;`` →
+            # ``int b{};``). Falls through on failure (ambiguous anchors or
+            # verification failure).
+            early = self._try_step_pattern_reuse(unit)
             if early is not None:
                 return early
             early = self._try_exact_reuse(unit)

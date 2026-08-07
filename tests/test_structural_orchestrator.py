@@ -340,3 +340,97 @@ def test_step_shape_reuse_returns_none_when_no_cache():
         orch._step_shape_cache = {}  # empty cache
         result = orch._try_step_shape_reuse(unit)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Edit-pattern cache: structurally similar sibling reuse
+# ---------------------------------------------------------------------------
+
+
+def test_step_pattern_reuse_instantiates_literal_substitution():
+    """When a sibling was resolved by changing a literal token (e.g. ``;`` →
+    ``{};``), the pattern cache can apply the same transformation to a sibling
+    unit with a different variable name but the same structural shape."""
+    import tempfile, hashlib
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+    from capybase.orchestrator import _extract_edit_pattern
+    from capybase.memory.shape import shape_for_unit
+
+    def _side(label, text):
+        return ConflictSide(label=label, text=text)  # type: ignore[arg-type]
+
+    # Unit A: base has ``int a;``, resolved to ``int a{};`` (literal ; → {};)
+    # The resolved text adds ``{}`` before the ``;``.
+    unit_a = ConflictUnit(
+        session_id="s", step_index=0, path="f.cpp", unit_id="a",
+        language="cpp",
+        base=_side("BASE", "int a;"),
+        current=_side("CURRENT_UPSTREAM_SIDE", "int a;"),
+        replayed=_side("REPLAYED_COMMIT_SIDE", "int a{};"),
+        original_worktree_text="int a;",
+    )
+    # Unit B: same shape, different variable.
+    unit_b = ConflictUnit(
+        session_id="s", step_index=0, path="f.cpp", unit_id="b",
+        language="cpp",
+        base=_side("BASE", "int b;"),
+        current=_side("CURRENT_UPSTREAM_SIDE", "int b;"),
+        replayed=_side("REPLAYED_COMMIT_SIDE", "int b{};"),
+        original_worktree_text="int b;",
+    )
+    # Both units share the same shape.
+    assert shape_for_unit(unit_a) == shape_for_unit(unit_b)
+
+    with tempfile.TemporaryDirectory() as d:
+        rp = Path(d)
+        git(rp, "init", "-q", "-b", "main")
+        cfg = Config()
+        client = CallCountingClient()
+        engine = ResolutionEngine(cfg.model, client=client)
+        orch = Orchestrator(cfg, repo=str(rp), resolution_engine=engine,
+                            out=lambda *_a, **_k: None)
+
+        # Extract the pattern from unit_a's resolution.
+        resolved_a = "int a{};"  # the one-sided-change resolution
+        pattern = _extract_edit_pattern("int a;", resolved_a)
+        assert pattern is not None, "should extract a literal-substitution pattern"
+
+        # Seed the pattern cache.
+        key = f"{shape_for_unit(unit_a)}:f.cpp"
+        orch._step_pattern_cache = {key: pattern}
+
+        # Unit B has the same shape — pattern reuse should instantiate.
+        outcome_b = orch._try_step_pattern_reuse(unit_b)
+        assert outcome_b is not None, "should reuse sibling's pattern"
+        assert outcome_b.accepted is not None
+        assert "int b{};" in outcome_b.accepted.resolved_text
+        assert client.calls == 0  # no LLM call
+
+
+def test_step_pattern_reuse_returns_none_when_no_cache():
+    """When the pattern cache is empty, _try_step_pattern_reuse returns None."""
+    import tempfile
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+
+    def _side(label, text):
+        return ConflictSide(label=label, text=text)  # type: ignore[arg-type]
+
+    unit = ConflictUnit(
+        session_id="s", step_index=0, path="f.cpp", unit_id="u",
+        language="cpp",
+        base=_side("BASE", "int x;"),
+        current=_side("CURRENT_UPSTREAM_SIDE", "int x;"),
+        replayed=_side("REPLAYED_COMMIT_SIDE", "int x{};"),
+        original_worktree_text="int x;",
+    )
+    with tempfile.TemporaryDirectory() as d:
+        rp = Path(d)
+        git(rp, "init", "-q", "-b", "main")
+        cfg = Config()
+        client = CallCountingClient()
+        engine = ResolutionEngine(cfg.model, client=client)
+        orch = Orchestrator(cfg, repo=str(rp), resolution_engine=engine,
+                            out=lambda *_a, **_k: None)
+        orch._step_pattern_cache = {}
+        result = orch._try_step_pattern_reuse(unit)
+        assert result is None
