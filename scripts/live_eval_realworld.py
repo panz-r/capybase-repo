@@ -123,6 +123,7 @@ class CaseResult:
     verdict: str = ""  # PASS | NEAR_MATCH | ORACLE_DIVERGENT | ESCALATE
     compiles_cargo: bool | None = None  # None when cargo didn't run
     terminal_reason: str = ""  # disjoint escalation classification
+    conflict_region_count: int = 0  # number of <<<<<<< regions (for timeout classification)
     # FR2a flight recorder: the orchestrator's session_id (the per-case artifact
     # root under .rebase-agent/sessions/<session_id>/). Populated when
     # --preserve-flights copies the session dir out; None otherwise. The flight
@@ -140,7 +141,8 @@ def _classify_terminal_reason(reason: str) -> str:
       MODEL_EMPTY         — model returned empty (not oversized)
       MODEL_NEEDS_HUMAN   — model self-reported needs_human
       TIMEOUT_CONVERGENCE — CEGIS loop failed to converge (no-progress / wall-time)
-      TIMEOUT_CASE        — exceeded per-case timeout (1200s of CEGIS retries)
+      TIMEOUT_THROUGHPUT  — per-case timeout on a many-region file (>20 units)
+      TIMEOUT_CAPABILITY  — per-case timeout on a small file (model can't solve it)
       REPAIR_FAILURE      — whole-file repair couldn't resolve a unit
       OTHER               — uncategorized
     """
@@ -716,6 +718,7 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
     ``crate_source``: when provided, the full crate tree at merge_sha is
     extracted into the temp repo so cargo check can run."""
     res = CaseResult(id=case.id, language=case.language, dataset=case.dataset)
+    res.conflict_region_count = case.marker_original.count("<<<<<<<")
     t0 = time.time()
     owns_td = td is None
     if owns_td:
@@ -1052,6 +1055,13 @@ def main():
         print(f"{verdict}  {r.elapsed:.0f}s  sim={r.matches_oracle:.2f}  {r.reason[:60]}")
         r.verdict = verdict
         r.terminal_reason = _classify_terminal_reason(r.reason) if r.escalated else ""
+        # Subclassify timeouts: throughput (many regions overwhelm the budget)
+        # vs capability (few regions but the model can't solve them).
+        if r.terminal_reason == "TIMEOUT_CASE":
+            if r.conflict_region_count > 20:
+                r.terminal_reason = "TIMEOUT_THROUGHPUT"
+            else:
+                r.terminal_reason = "TIMEOUT_CAPABILITY"
         results.append(r)
         # Incremental write: a kill won't lose progress.
         out.write_text(json.dumps([r.__dict__ for r in results], indent=2))

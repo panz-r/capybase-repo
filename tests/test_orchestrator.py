@@ -713,6 +713,82 @@ def test_run_aborts_tests_when_required_and_failing(conflicted_repo):
     assert "tests failed" in (result.reason or "")
 
 
+def test_unit_count_aware_retry_budget_caps_calls(repo):
+    """A file with many units (>20) gets max_retries=0: each failing unit
+    escalates after 1 LLM call instead of 3. This prevents throughput timeouts
+    on files like nlohmann-json-0019 (78 regions)."""
+    # Build a conflict with a single unit (we can't easily make 21+ real
+    # conflict regions in a temp repo). Instead, test the _resolve_unit
+    # parameter directly: verify that max_retries=0 caps model calls to 1.
+    base = "def f():\n    return 'hello'\n"
+    (repo / "app.py").write_text(base)
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
+    git(repo, "branch", "feat"); git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text("def f():\n    return 'howdy'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "replayed")
+    git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text("def f():\n    return 'hi'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "upstream")
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected conflict"
+
+    cfg = _config(repo)
+    # Use a CyclingClient that always returns broken output (leaked markers).
+    payload = _make_resolved_payload("    return 1\n<<<<<<< leaked\n")
+    client = CyclingClient([payload])
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert result.escalated
+    # With the default config (max_retries_per_unit=2), the model gets called
+    # multiple times before escalating. The call count depends on the
+    # convergence/no-progress guards, but should be > 1.
+    default_calls = client.calls
+    assert default_calls > 1, f"expected multiple calls with default budget, got {default_calls}"
+
+    # Now re-run with max_retries=0 (simulating a >20-unit file). Build a fresh
+    # repo to avoid state leakage.
+    import tempfile
+    with tempfile.TemporaryDirectory() as d2:
+        rp = Path(d2)
+        git(rp, "init", "-q", "-b", "main")
+        (rp / "app.py").write_text(base)
+        git(rp, "add", "app.py"); git(rp, "commit", "-q", "-m", "base")
+        git(rp, "branch", "feat"); git(rp, "checkout", "-q", "feat")
+        (rp / "app.py").write_text("def f():\n    return 'howdy'\n")
+        git(rp, "add", "app.py"); git(rp, "commit", "-q", "-m", "replayed")
+        git(rp, "checkout", "-q", "main")
+        (rp / "app.py").write_text("def f():\n    return 'hi'\n")
+        git(rp, "add", "app.py"); git(rp, "commit", "-q", "-m", "upstream")
+        git(rp, "checkout", "-q", "feat")
+        r2 = git(rp, "rebase", "main", check=False)
+        assert r2.returncode != 0
+
+        client2 = CyclingClient([payload])
+        engine2 = ResolutionEngine(cfg.model, client=client2)
+        orch2 = Orchestrator(
+            cfg, repo=str(rp), resolution_engine=engine2,
+            out=lambda *_a, **_k: None,
+        )
+        # Manually call _resolve_unit with max_retries=0.
+        from capybase.conflict_extractor import ConflictExtractor
+        ext = ConflictExtractor(orch2.git)
+        step_units = ext.extract_file_units("app.py", 1, "test-session")
+        if step_units:
+            unit = step_units[0]
+            outcome = orch2._resolve_unit(unit, max_retries=0)
+            assert outcome.accepted is None  # escalated
+            # With max_retries=0, the model should be called at most once
+            # (1 initial attempt, then the budget cap fires).
+            assert client2.calls <= 1, (
+                f"max_retries=0 should cap to 1 call, got {client2.calls}"
+            )
+
+
 # ---------------------------------------------------------------------------
 # Step 3: rank-order candidate validation (try the next sample if the
 # consensus winner fails validation, before falling back to CEGIS repair)

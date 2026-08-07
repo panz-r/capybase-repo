@@ -6272,13 +6272,28 @@ class Orchestrator:
             # of _resolve_unit before any model call. This is the intra-step
             # analog of _try_exact_reuse (which is cross-session).
             self._step_shape_cache: dict[str, str] = {}
+            # Unit-count-aware retry budget: scale down retries when a file has
+            # many units, so the total model-call count stays within the wall-
+            # time budget. With the default 2 retries (3 attempts), a 78-unit
+            # file needs up to 234 calls ≈ 3500s — far over the 1200s budget.
+            # Scaling to 0 retries (1 attempt) bounds it to 78 calls ≈ 1170s.
+            _n_units = len(units)
+            if _n_units > 20:
+                _file_max_retries = 0
+            elif _n_units > 5:
+                _file_max_retries = 1
+            else:
+                _file_max_retries = None  # use config default
             for unit in units:
                 _parent = unit.structural_metadata.get("parent_unit_id")
                 if _parent and _parent in _sibling_resolved:
                     unit.structural_metadata["sibling_resolutions"] = list(
                         _sibling_resolved[_parent]
                     )
-                outcome = self._resolve_unit(unit, wall_deadline=_file_wall_deadline)
+                outcome = self._resolve_unit(
+                    unit, wall_deadline=_file_wall_deadline,
+                    max_retries=_file_max_retries,
+                )
                 _persist_unit_hashes(self, outcome)  # D1: per-step convergence
                 result.outcomes.append(outcome)
                 if outcome.accepted is None:
@@ -8084,6 +8099,7 @@ class Orchestrator:
         self, unit: ConflictUnit, *, seed_failures: list | None = None,
         seed_candidate: "CandidateResolution | None" = None,
         wall_deadline: float | None = None,
+        max_retries: int | None = None,
     ) -> UnitOutcome:
         outcome = UnitOutcome(unit=unit)
         # D1: inherit per-step convergence hashes so _whole_file_repair's
@@ -8154,6 +8170,12 @@ class Orchestrator:
         _unit_path = unit.path or ""
         _is_header = _unit_path.endswith((".h", ".hpp", ".hh", ".hxx", ".H"))
         _header_max_retries = 0 if _is_header else self.config.policy.max_retries_per_unit
+        # Unit-count-aware retry budget: when a file has many units, each unit
+        # gets fewer retries so the total model-call count stays within the
+        # wall-time budget. A file with 78 units at 3 attempts each = 234 calls
+        # ≫ 1200s; at 1 attempt each = 78 calls ≈ 1170s. Overrides are merged
+        # with the header cap (most restrictive wins).
+        _unit_budget = max_retries if max_retries is not None else _header_max_retries
         # Track time spent in verification (cargo check, rustc, tests) so it
         # can be excluded from the wall-time budget. The budget is meant to
         # cap MODEL/CEGIS loop iterations, not compilation time — a slow
@@ -8747,6 +8769,26 @@ class Orchestrator:
                     decision="escalate", reason=outcome.reason,
                 )
                 return outcome
+            # Unit-count-aware budget cap: when max_retries was passed (many-
+            # unit file), enforce it here before risk.decide() — mirroring the
+            # header cap. Without this, a file with 78 units would allow each
+            # unit the full config retry budget, overflowing the wall-time.
+            if (
+                max_retries is not None
+                and retry_count >= _unit_budget
+                and retry_count > 0
+            ):
+                outcome.escalated = True
+                outcome.retry_count = retry_count
+                outcome.reason = (
+                    f"unit-count-aware retry cap reached ({_unit_budget} "
+                    f"retries; file has many units)"
+                )
+                self._record_resolution_attempt(
+                    outcome, mechanism="llm",
+                    decision="escalate", reason=outcome.reason,
+                )
+                return outcome
 
             decision = self.risk.decide(
                 validation,
@@ -8910,7 +8952,13 @@ class Orchestrator:
             # exhausted yet), as a backstop that cuts the loop early when the
             # candidate is provably stuck (identical across attempts).
             osc_count = outcome._seen_candidate_hashes.get(cand_hash, 0)
-            osc_budget = self.risk._effective_budget(validation.features)
+            # Honor the unit-count-aware override: if max_retries was passed,
+            # use it as the oscillation budget too (the risk engine's budget
+            # reads the unmodified config value, which may be higher).
+            osc_budget = (
+                _unit_budget if max_retries is not None
+                else self.risk._effective_budget(validation.features)
+            )
             if osc_count > osc_budget:
                 self.journal.emit(
                     "candidate_rejected",
