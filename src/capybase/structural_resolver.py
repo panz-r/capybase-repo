@@ -765,6 +765,15 @@ def _try_mechanical_reapply_merge(
     else:
         mech_ops, sem_text = rep_ops, current
 
+    # Decline when the mechanical side's ops are ALL pure insertions (i1==i2
+    # for every op). A pure-insertion side has no base-token anchors to
+    # re-apply onto the semantic text — its content would be silently dropped
+    # (the anchor bt[i1:i2] is empty for pure insertions, so the loop skips
+    # the op). This is an ADDITION, not a substitution; the union rules
+    # further down the cascade handle it correctly.
+    if all(i1 == i2 for i1, i2, _ in mech_ops):
+        return None
+
     # Build the semantic side's token sequence. We'll apply mechanical subs
     # onto it. The semantic side may have completely different tokens, so we
     # search for the mechanical op's BASE anchor tokens within the semantic
@@ -1537,11 +1546,12 @@ def _extract_definition_names(lines: list[str]) -> dict[str, str]:
     # Match: identifier immediately followed by ``(`` with parameters, ending
     # with ``)``, optionally followed by trailing C++ qualifiers (const,
     # noexcept, override, final, &, &&) and then ``{`` or ``;``. The ``{`` or
-    # ``;`` may be on the NEXT line (common C++ brace-on-next-line style).
+    # ``;`` may be on the NEXT line (common C++ brace-on-next-line style), or
+    # the full body may be on one line (``void foo() { return 1; }``).
     sig_pat = re.compile(
         r"\b([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\([^)]*\)"
         r"(?:\s*(?:const|noexcept|override|final|&|\|\||=\s*(?:default|delete)))*"
-        r"\s*(?:[;{]\s*$)?\s*$"
+        r"\s*(?:[;{].*)?\s*$"
     )
     skip_keywords = frozenset({
         "if", "while", "for", "switch", "return", "sizeof", "catch",
@@ -1570,12 +1580,17 @@ def _extract_definition_names(lines: list[str]) -> dict[str, str]:
         if not pre_call:
             # No return type before the name → likely a function call.
             continue
-        # Confirm this is a definition/declaration: the line or the next
-        # non-blank line must end with ``{`` or ``;``.
+        # Confirm this is a definition/declaration: the line ends with ``;``,
+        # ``{`` (brace on same line), or ``}`` (one-line body like
+        # ``void foo() { return 1; }``); OR the next non-blank line starts
+        # with ``{`` (brace on next line).
         next_stripped = ""
         if idx + 1 < len(lines):
             next_stripped = lines[idx + 1].strip()
-        is_def = stripped.endswith((";", "{")) or next_stripped.startswith(("{",))
+        is_def = (
+            stripped.endswith((";", "{", "}"))
+            or next_stripped.startswith(("{",))
+        )
         if is_def:
             names[name] = stripped
     return names
