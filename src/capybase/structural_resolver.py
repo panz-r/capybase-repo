@@ -1541,7 +1541,7 @@ def _extract_definition_names(lines: list[str]) -> dict[str, str]:
     sig_pat = re.compile(
         r"\b([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\([^)]*\)"
         r"(?:\s*(?:const|noexcept|override|final|&|\|\||=\s*(?:default|delete)))*"
-        r"(?:[;{]\s*$)?\s*$"
+        r"\s*(?:[;{]\s*$)?\s*$"
     )
     skip_keywords = frozenset({
         "if", "while", "for", "switch", "return", "sizeof", "catch",

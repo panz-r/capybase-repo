@@ -1367,6 +1367,21 @@ def test_convergent_addition_declines_on_same_name_conflicting_signatures():
     )
 
 
+def test_convergent_addition_declines_on_same_name_brace_same_line():
+    """Regression: the same-name guard's regex must match definitions with the
+    opening brace on the SAME line (``void foo() {``), not just brace-on-next-
+    line. A prior fix widened the qualifier alternation but broke same-line
+    brace matching by omitting \\s* before the trailing [;{] anchor."""
+    base = "};\n} // ns"
+    cur = "};\nvoid foo(int a) {\n    return a;\n}\n} // ns"
+    rep = "};\nvoid foo(int b) {\n    return b;\n}\n} // ns"
+    result = _try_convergent_addition_merge(base, cur, rep)
+    assert result is None, (
+        "should decline on same-name conflicting definitions (brace same line), got: "
+        f"{result!r}"
+    )
+
+
 def test_convergent_addition_merges_when_function_names_differ():
     """When both sides add functions with DIFFERENT names (plus shared
     doc-comment lines), the rule should still merge — no name collision."""
