@@ -771,7 +771,9 @@ def _try_mechanical_reapply_merge(
     # (the anchor bt[i1:i2] is empty for pure insertions, so the loop skips
     # the op). This is an ADDITION, not a substitution; the union rules
     # further down the cascade handle it correctly.
-    if all(i1 == i2 for i1, i2, _ in mech_ops):
+    # Decline when ANY op is a pure insertion — not just when ALL are. A mixed
+    # side (rename + insertion) would silently lose the insertion's content.
+    if any(i1 == i2 for i1, i2, _ in mech_ops):
         return None
 
     # Build the semantic side's token sequence. We'll apply mechanical subs
