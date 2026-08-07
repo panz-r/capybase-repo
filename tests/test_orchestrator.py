@@ -597,9 +597,9 @@ def test_no_progress_guard_does_not_fire_when_signature_changes(repo):
 def test_no_progress_guard_catches_alternating_signatures(repo):
     """Gap A fix: the original guard only fired when N consecutive signatures
     were ALL identical (len(set(recent)) == 1). A model oscillating between
-    two distinct error signatures (A, B, A, B, ...) never tripped it, burning
-    the full time budget. The strengthened guard now fires when ANY signature
-    repeats >= threshold times within the rolling window."""
+    two distinct error signatures (A, B, A, B, ...) never tripped it, because
+    the window size equaled the threshold. The strengthened guard uses a wider
+    window (2× threshold) so alternating repeats accumulate and fire."""
     base = "def f():\n    return 'hello'\n"
     (repo / "app.py").write_text(base)
     git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
@@ -615,25 +615,18 @@ def test_no_progress_guard_catches_alternating_signatures(repo):
 
     cfg = _config(repo)
     cfg.policy.cegis_convergence_threshold = 2
-    # Alternate between TWO distinct failure signatures using DIFFERENT
-    # candidates (so the normalized-hash backstop doesn't fire first):
-    # A: leaked markers with content "AAAA" (same each time → same sig A)
-    # B: leaked markers with content "BBBB" (same each time → same sig B)
-    # BUT: both produce the same normalized failure message. To get distinct
-    # signatures, use different validators: markers vs empty.
-    # Use distinct non-empty candidates so normalized-hash doesn't fire.
-    marker_a = _make_resolved_payload("    return AAAA\n<<<<<<< leaked\n")
-    empty_b = _make_resolved_payload("    return BBBB\n")  # non-empty but wrong
-    # Wait, "return BBBB" might pass validation. Let me use truly broken content.
-    # Actually the simplest: marker (fails no_conflict_markers) alternating with
-    # empty (fails non_empty_resolution). Use distinct marker text each A so
-    # normalized hash differs.
+    # Truly alternate between TWO distinct failure signatures:
+    # Sig A: leaked markers (no_conflict_markers validator)
+    # Sig B: empty resolution (non_empty_resolution validator)
+    # Each candidate has distinct text so the normalized-hash convergence
+    # backstop doesn't fire before the no-progress guard.
+    # Pattern: A, B, A, B, A → A repeats 3 times in a window of 4 (2×threshold).
     payloads = [
-        _make_resolved_payload("    x = AAA1\n<<<<<<< leaked\n"),
-        _make_resolved_payload("    x = BBB1\n<<<<<<< leaked2\n"),  # different marker text
-        _make_resolved_payload("    x = AAA2\n<<<<<<< leaked\n"),
-        _make_resolved_payload("    x = BBB2\n<<<<<<< leaked2\n"),
-        _make_resolved_payload("    x = AAA3\n<<<<<<< leaked\n"),
+        _make_resolved_payload("    x = AAA1\n<<<<<<< leaked\n"),  # sig A (markers)
+        _make_resolved_payload(""),                                  # sig B (empty)
+        _make_resolved_payload("    x = AAA2\n<<<<<<< leaked\n"),  # sig A again
+        _make_resolved_payload(""),                                  # sig B again
+        _make_resolved_payload("    x = AAA3\n<<<<<<< leaked\n"),  # sig A 3rd time
     ]
     engine = ResolutionEngine(cfg.model, client=FakeClient(payloads))
     orch = Orchestrator(
@@ -642,10 +635,10 @@ def test_no_progress_guard_catches_alternating_signatures(repo):
     )
     result = orch.run()
     assert result.escalated
-    # All candidates have leaked markers → same failure signature (no_conflict_markers).
-    # The signature repeats on every attempt → fires at threshold 2.
+    # The no-progress guard fires because sig A (markers) repeats 3 times
+    # within the wider window, even though it alternates with sig B (empty).
     assert "no hard-failure progress" in (result.reason or ""), (
-        f"guard should catch repeated signature, got: {result.reason}"
+        f"guard should catch alternating signatures with wider window, got: {result.reason}"
     )
 
 

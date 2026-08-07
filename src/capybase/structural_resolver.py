@@ -779,9 +779,19 @@ def _try_mechanical_reapply_merge(
         if not anchor:
             continue
         # Search for the anchor in the (current state of) applied tokens.
+        # If the anchor appears MULTIPLE times, the substitution is ambiguous
+        # — we don't know which occurrence the mechanical op targeted within
+        # the rewritten text. Declining the whole op (skip) is safer than
+        # guessing the first occurrence (which may corrupt an unrelated line).
         idx = _find_subsequence(applied, anchor)
         if idx < 0:
             continue  # anchor not found — the rewrite removed it; skip this op
+        # Check for ambiguity: a second occurrence means we can't be sure.
+        next_idx = _find_subsequence(
+            applied[idx + len(anchor):], anchor,
+        )
+        if next_idx >= 0:
+            continue  # ambiguous — multiple occurrences; skip this op
         applied[idx:idx + len(anchor)] = repl
 
     result = _detokenize(applied)
@@ -1525,10 +1535,12 @@ def _extract_definition_names(lines: list[str]) -> dict[str, str]:
 
     names: dict[str, str] = {}
     # Match: identifier immediately followed by ``(`` with parameters, ending
-    # with ``)``, optionally followed by ``const``/``{``/``;``. The ``{`` or
+    # with ``)``, optionally followed by trailing C++ qualifiers (const,
+    # noexcept, override, final, &, &&) and then ``{`` or ``;``. The ``{`` or
     # ``;`` may be on the NEXT line (common C++ brace-on-next-line style).
     sig_pat = re.compile(
-        r"\b([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?:const\s*)?"
+        r"\b([A-Za-z_]\w*)\s*(?:<[^>]*>)?\s*\([^)]*\)"
+        r"(?:\s*(?:const|noexcept|override|final|&|\|\||=\s*(?:default|delete)))*"
         r"(?:[;{]\s*$)?\s*$"
     )
     skip_keywords = frozenset({
@@ -1548,6 +1560,15 @@ def _extract_definition_names(lines: list[str]) -> dict[str, str]:
             continue
         name = m.group(1)
         if name in skip_keywords:
+            continue
+        # Exclude bare function CALL statements: a definition/declaration has
+        # a return type before the name. A call like ``log_error(msg);`` has
+        # the callee name at the start of the line (empty prefix before it).
+        # A definition like ``void foo();`` or ``std::string bar()`` has a
+        # type prefix before the name.
+        pre_call = stripped[:m.start()].strip()
+        if not pre_call:
+            # No return type before the name → likely a function call.
             continue
         # Confirm this is a definition/declaration: the line or the next
         # non-blank line must end with ``{`` or ``;``.

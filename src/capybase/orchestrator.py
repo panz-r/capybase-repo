@@ -342,11 +342,16 @@ def _persist_unit_hashes(orch, outcome) -> None:
     existing.update(outcome._seen_normalized_hashes)
     step_hashes[uid] = existing
     # Persist failure signatures for the cross-call no-progress guard.
+    # OVERWRITE (not extend): the outcome already contains the inherited sigs
+    # + new ones from this call. Extending would double-count the inherited
+    # entries on re-persist (Phase 1 → Phase 2 → ...). Window to prevent
+    # unbounded growth across many re-resolves.
     step_sigs = getattr(orch, "_step_failure_sigs", None)
     if step_sigs is not None:
-        sigs = step_sigs.get(uid, [])
-        sigs.extend(getattr(outcome, "_recent_hard_failure_sigs", []))
-        step_sigs[uid] = sigs
+        np_threshold = getattr(orch.config.policy, "cegis_convergence_threshold", 2)
+        _window = max(np_threshold * 2, np_threshold + 2)
+        all_sigs = getattr(outcome, "_recent_hard_failure_sigs", [])
+        step_sigs[uid] = list(all_sigs[-_window:])
 
 
 
@@ -8865,13 +8870,15 @@ class Orchestrator:
                 has_needs_human = any(v == "needs_human" for v, _ in sig)
                 if not has_needs_human:
                     outcome._recent_hard_failure_sigs.append(sig)
-                    recent = outcome._recent_hard_failure_sigs[-np_threshold:]
+                    # Use a window WIDER than the threshold so alternating
+                    # signatures (A, B, A, B, ...) are caught. With window ==
+                    # threshold, max_repeat can never reach threshold unless ALL
+                    # entries are identical — which is just the old behavior.
+                    # A window of 2×threshold lets an A,B,A,B pattern accumulate
+                    # threshold repeats of A within the window.
+                    _window = max(np_threshold * 2, np_threshold + 2)
+                    recent = outcome._recent_hard_failure_sigs[-_window:]
                     if len(recent) >= np_threshold:
-                        # Gap A fix: the original check (len(set(recent)) == 1)
-                        # only caught N consecutive IDENTICAL signatures. A model
-                        # oscillating between two distinct errors (A, B, A, B)
-                        # never tripped it. Now escalate when ANY single signature
-                        # repeats >= np_threshold times within the rolling window.
                         from collections import Counter
                         sig_counts = Counter(recent)
                         max_repeat = max(sig_counts.values())
