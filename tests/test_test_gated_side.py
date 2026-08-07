@@ -129,6 +129,11 @@ def test_test_gated_side_declines_when_no_test_configured(repo):
     cfg = _config(repo)
     cfg.tests.pre_continue = "true"  # no-op; can't discriminate
     cfg.tests.final = "true"
+    # Disable deterministic pre-LLM layers so the conflict reaches the LLM
+    # path (where no client is configured → escalate). Without this, the
+    # source portfolio resolves the conflict before the LLM is called.
+    cfg.future.enable_structural_resolver = False
+    cfg.future.enable_source_portfolio = False
     orch = Orchestrator(cfg, repo=str(repo), out=lambda *_a, **_k: None)
     # The side picker should NOT fire (no real test). The LLM (fake client, none
     # configured) will fail → escalate. The key assertion: no side was picked.

@@ -233,6 +233,7 @@ def test_samples_complex_draws_more_on_complex_unit(multi_unit_conflicted_repo):
     cfg.future.enable_structural_resolver = False
     cfg.future.enable_combination_search = False
     cfg.future.enable_block_capture = False
+    cfg.future.enable_source_portfolio = False
     # The comment-reconciliation pass + the verifier-model critic are always-on
     # by default and each make their own LLM calls after code resolution. This
     # test measures the CODE sample-count allocation (1 simple + 3 complex = 4),

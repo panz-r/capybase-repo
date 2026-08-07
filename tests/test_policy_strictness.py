@@ -173,6 +173,11 @@ def test_no_interactive_tightens_default_to_ci(py_repo_before_rebase):
     cfg.tests.required = False
     cfg.tests.pre_continue = "true"
     cfg.tests.final = "true"
+    # Disable deterministic pre-LLM layers so the low-confidence LLM candidate
+    # is actually reached and evaluated by the strictness gate. Without this,
+    # the source portfolio resolves the conflict before the LLM is called.
+    cfg.future.enable_structural_resolver = False
+    cfg.future.enable_source_portfolio = False
     # Low-confidence candidate the engine would accept.
     payload = json.dumps({
         "resolved_text": "    return 'hi' + 'howdy'",
