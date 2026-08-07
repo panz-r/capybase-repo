@@ -6385,6 +6385,13 @@ class Orchestrator:
             accepted = accepted_by_path[path]
             original = originals[path]
             language = units[0].language
+            # Refresh the unit-count-aware budget for THIS file (Phase 2 has its
+            # own per-file loop, so self._file_max_retries from Phase 1's last
+            # file would be stale here).
+            _n = len(units)
+            self._file_max_retries = (
+                0 if _n > 20 else (1 if _n > 5 else None)
+            )
             # Splice every accepted resolution in one offset-correct batch and
             # validate the whole file. Phase B (whole-file validation) is the
             # only place that can catch cross-unit errors (duplicate symbols,
