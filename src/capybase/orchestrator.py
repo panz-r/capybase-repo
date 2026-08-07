@@ -6284,6 +6284,11 @@ class Orchestrator:
                 _file_max_retries = 1
             else:
                 _file_max_retries = None  # use config default
+            # Store on self so Phase 2 whole-file repair inherits the same
+            # budget (it re-resolves units via _resolve_unit without the
+            # max_retries kwarg, so without this it would get the full config
+            # budget, undermining the throughput fix).
+            self._file_max_retries = _file_max_retries
             for unit in units:
                 _parent = unit.structural_metadata.get("parent_unit_id")
                 if _parent and _parent in _sibling_resolved:
@@ -7365,6 +7370,7 @@ class Orchestrator:
             )
             outcome = self._resolve_unit(
                 unit, seed_failures=[seed_failure], seed_candidate=seed_cand,
+                max_retries=getattr(self, "_file_max_retries", None),
             )
             _persist_unit_hashes(self, outcome)  # D1: per-step convergence
             if outcome.accepted is None:
@@ -7858,6 +7864,7 @@ class Orchestrator:
         outcome = self._resolve_unit(
             unit, seed_failures=enriched_failures, seed_candidate=seed_cand,
             wall_deadline=wall_deadline,
+            max_retries=getattr(self, "_file_max_retries", None),
         )
         _persist_unit_hashes(self, outcome)  # D1: per-step convergence
         self.journal.emit(
@@ -7903,6 +7910,7 @@ class Orchestrator:
                 seed_failures=enriched_failures,
                 seed_candidate=None,
                 wall_deadline=wall_deadline,
+                max_retries=getattr(self, "_file_max_retries", None),
             )
             _persist_unit_hashes(self, wf_outcome)
             self.journal.emit(
