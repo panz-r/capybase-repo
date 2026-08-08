@@ -659,39 +659,29 @@ def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
         _, repl = merged_ops[n]
         out.extend(repl)
     result_text = _detokenize(out)
-    # No-invented-lines guard: every non-blank output line must be explainable
-    # by the input sides (base, current, replayed). token_disjoint is a pure
-    # token recombination — a correct splice reassembles tokens within existing
-    # lines, producing lines recognizable from the inputs. A garbled splice
-    # fragments tokens across line boundaries, producing lines that never existed
-    # in any input. Decline on any invented line.
-    #
-    # A line is "explainable" if it either matches an input line exactly (after
-    # whitespace normalization) or is a close variant (SequenceMatcher ratio
-    # >= 0.65) of some input line. The fuzzy threshold allows legitimate
-    # token-level edits (e.g. `int x = 2;` vs base `int x = 1;`) while catching
-    # garbled fragments (scattered tokens with low similarity to any single input
-    # line). (Catches the clickhouse-0024 defect where token splice produced
-    # lines like `inner_ref, static_pointer_cast<ITableExpressionNode>` that
-    # appear nowhere in any input.)
-    from difflib import SequenceMatcher as _SM
-    _input_norm = [
-        " ".join(l.split())
-        for _src in (base, current, replayed)
-        for l in _src.split("\n")
-        if l.strip()
-    ]
-    _input_set = set(_input_norm)
-    for _ln in result_text.split("\n"):
-        _norm = " ".join(_ln.split())
-        if not _norm:
-            continue
-        if _norm in _input_set:
-            continue  # exact match
-        # Fuzzy: is this line a close variant of some input line?
-        if any(_SM(None, _norm, _il).ratio() >= 0.65 for _il in _input_norm):
-            continue  # close enough — legitimate token-level edit
-        return None  # garbled — no input line is similar
+    # Line-expansion guard: token_disjoint edits tokens WITHIN existing lines.
+    # When one side expanded the base into many more lines (a rewrite, not a
+    # token-level edit), the token splice pulls tokens from different lines of
+    # the expanding side into a new multi-line structure — producing garbled
+    # hybrid lines that are individually plausible but collectively wrong. This
+    # is NOT the disjoint-token scenario the rule was designed for. Decline when
+    # one side's line count is more than 2x the base's (a rewrite) while the
+    # other side is close to the base (a token edit). (Catches the clickhouse-
+    # 0024 defect where a 1-line base was expanded by current into 4 lines, and
+    # the token splice mixed those 4 lines with replayed's token edit.)
+    _base_nb = sum(1 for l in base.split("\n") if l.strip())
+    _cur_nb = sum(1 for l in current.split("\n") if l.strip())
+    _rep_nb = sum(1 for l in replayed.split("\n") if l.strip())
+    if _base_nb > 0:
+        _cur_expansion = _cur_nb / _base_nb
+        _rep_expansion = _rep_nb / _base_nb
+        # If one side expanded >>2x while the other is ~1x, it's a rewrite vs
+        # token-edit — not a safe disjoint-token merge.
+        if (
+            (_cur_expansion > 2.0 and _rep_expansion <= 1.5)
+            or (_rep_expansion > 2.0 and _cur_expansion <= 1.5)
+        ):
+            return None  # one side rewrote — not safe for token_disjoint
     return result_text
 
 
@@ -810,6 +800,22 @@ def _try_mechanical_reapply_merge(
     if any(i1 == i2 for i1, i2, _ in mech_ops):
         return None
 
+    # Line-expansion input guard: if the base is much shorter (fewer non-blank
+    # lines) than the semantic side, the semantic side rewrote the base into
+    # multiple lines. The mechanical side's token substitutions were computed
+    # against the short base — applying them to the rewritten text can mix
+    # variables from different lines (the mechanical diff sees a 1-line base and
+    # treats a token change as a rename, but the tokens actually belong to
+    # different variables on different lines of the rewrite). Decline so the
+    # cascade continues to the LLM. (Catches clickhouse-0024 where a 1-line
+    # base was expanded by the semantic side into 4 lines, and the mechanical
+    # substitution wrongly renamed `column` to `inner_ref` — different variables
+    # from different lines.)
+    _base_nb = sum(1 for l in base.split("\n") if l.strip())
+    _sem_nb = sum(1 for l in sem_text.split("\n") if l.strip())
+    if _base_nb > 0 and _sem_nb > _base_nb * 2:
+        return None  # semantic side rewrote the base — not safe for token reuse
+
     # Build the semantic side's token sequence. We'll apply mechanical subs
     # onto it. The semantic side may have completely different tokens, so we
     # search for the mechanical op's BASE anchor tokens within the semantic
@@ -840,11 +846,26 @@ def _try_mechanical_reapply_merge(
         applied[idx:idx + len(anchor)] = repl
 
     result = _detokenize(applied)
-    # Note: when no substitutions could be applied (the semantic rewrite
-    # subsumed all the mechanical anchors), result == sem_text. That's still a
-    # valid merge — the rewrite already handled those spots. Returning it is
-    # correct: the mechanical edits are redundant, not conflicting. The
-    # validation pipeline will catch any real defect.
+    return result
+    # substitutions onto the semantic side's text. Every output line should be
+    # recognizable from the semantic side (either identical or a close variant
+    # from the token substitution). If an output line doesn't match any semantic-
+    # side line even fuzzily, the substitution garbled it by mixing tokens from
+    # different lines. (Catches the clickhouse-0024 defect where the mechanical
+    # side's tokens were spliced across the semantic side's multi-line structure,
+    # producing hybrid lines like 'inner_ref, static_pointer_cast<...>' that
+    # don't match any line of the semantic side.)
+    from difflib import SequenceMatcher as _SM_mr
+    _sem_norm = [" ".join(l.split()) for l in sem_text.split("\n") if l.strip()]
+    for _ln in result.split("\n"):
+        _norm = " ".join(_ln.split())
+        if not _norm:
+            continue
+        if _norm in set(_sem_norm):
+            continue  # exact match with a semantic-side line
+        if any(_SM_mr(None, _norm, _sl).ratio() >= 0.65 for _sl in _sem_norm):
+            continue  # close variant — legitimate token substitution within the line
+        return None  # garbled — doesn't match any semantic-side line
     return result
 
 
