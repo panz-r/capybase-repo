@@ -3764,14 +3764,37 @@ class Orchestrator:
             explanation=f"deterministic resolution via {result.rule} rule",
             provenance="deterministic_structural",
         )
-        # fast_verify=True: skip expensive validators (AST parser, gcc, LLM
-        # critic) for deterministic-rule candidates. The rules provably
-        # preserve structure; the whole-file Phase 2 build gate still
-        # validates the final output. On large files this cuts per-unit
-        # verify from ~20s to ~0.1s.
+        # Rule-class-aware validation: rules that provably preserve structure
+        # (one_sided_change, disjoint_edits, etc.) use fast_verify (skip
+        # expensive syntax/AST validators). Rules that recombine or heuristically
+        # merge tokens/lines (token_disjoint, insertion_union, etc.) use FULL
+        # verify — their splices can introduce syntax errors that the cheap
+        # validators miss. This enforces the safety contract: "every deterministic
+        # candidate is validated before acceptance; a rejected candidate falls
+        # through to the LLM."
+        #
+        # Rules that PROVABLY preserve structure (safe to skip syntax check):
+        #   - take one side verbatim: one_sided_change, identical_sides, delete_side
+        #   - non-overlapping line splice: disjoint_edits, zealous_merge
+        #   - entity-level disjoint: entity_disjoint
+        #   - clean rename-vs-body partition: refactoring_aware_merge
+        #
+        # Rules that need FULL verify (recombinant/heuristic — can break syntax):
+        #   - token_disjoint: recombinant token splice
+        #   - mechanical_reapply_merge: heuristic anchor re-application
+        #   - partial_disjoint_merge: conservative core default relies on Phase B
+        #   - all union rules: insertion_union, list_union, dict_union, brace_union,
+        #     convergent_addition_merge, directive_union
+        #   - value resolution: text_value_resolution, dependency_version_resolution
+        _STRUCTURE_PRESERVING_RULES = frozenset({
+            "delete_side", "identical_sides", "one_sided_change",
+            "disjoint_edits", "zealous_merge", "entity_disjoint",
+            "refactoring_aware_merge",
+        })
+        _fast = result.rule in _STRUCTURE_PRESERVING_RULES
         import time as _vt
         _vt0 = _vt.monotonic()
-        validation = self.verification.verify(unit, cand, fast_verify=True)
+        validation = self.verification.verify(unit, cand, fast_verify=_fast)
         _verify_elapsed = _vt.monotonic() - _vt0
         if hasattr(self, "_unit_verify_time"):
             self._unit_verify_time += _verify_elapsed
