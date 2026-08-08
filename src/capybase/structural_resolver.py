@@ -658,7 +658,28 @@ def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
     if n in merged_ops:
         _, repl = merged_ops[n]
         out.extend(repl)
-    return _detokenize(out)
+    result_text = _detokenize(out)
+    # Line-count preservation guard: token-level edits change tokens WITHIN
+    # lines, not remove entire lines. If the output has significantly fewer
+    # non-blank lines than the base (accounting for lines both sides deleted),
+    # the splice scattered tokens across lines and dropped content — decline.
+    # (Catches the clickhouse-0024 defect where 9 function-body lines were
+    # silently lost.)
+    _base_nonblank = sum(1 for l in base.split("\n") if l.strip())
+    _out_nonblank = sum(1 for l in result_text.split("\n") if l.strip())
+    # Count base lines deleted by either side (replace/delete ops with i1 < i2).
+    _deleted_toks = sum(
+        (i2 - i1) for i1, i2, _ in cur_ops if i1 < i2
+    ) + sum(
+        (i2 - i1) for i1, i2, _ in rep_ops if i1 < i2
+    )
+    # Roughly: each deleted base token removes ~1/5 of a line (avg 5 tokens/
+    # line). If the output lost more than 2x the expected line deletions, the
+    # splice dropped content.
+    _expected_min = max(0, _base_nonblank - _deleted_toks // 3)
+    if _out_nonblank < _expected_min:
+        return None  # too many base lines lost — broken merge
+    return result_text
 
 
 # ---------------------------------------------------------------------------
@@ -1441,6 +1462,18 @@ def _try_insertion_union(base: str, current: str, replayed: str) -> str | None:
         out.append(bl)
     out.extend(cur_ins.get(len(base_lines), []))
     out.extend(rep_ins.get(len(base_lines), []))
+    # Size sanity guard: a pure insertion union should produce exactly
+    # base_lines + both sides' distinct insertions (including blank lines).
+    # If the output is larger than that, the rule kept extra (deleted) content
+    # alongside the new — a sign the entity-splitting made a sub-unit look like
+    # pure insertion when the whole conflict had deletions. Decline so the LLM
+    # handles it. (Catches the nlohmann-0020 defect where deleted code was
+    # resurrected.) Use ALL inserted lines (not just non-blank) for the bound.
+    _cur_all = [ln for run in cur_ins.values() for ln in run]
+    _rep_all = [ln for run in rep_ins.values() for ln in run]
+    _max_expected = len(base_lines) + len(_cur_all) + len(_rep_all)
+    if len(out) > _max_expected:
+        return None
     return "\n".join(out)
 
 

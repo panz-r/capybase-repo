@@ -4167,6 +4167,34 @@ class Orchestrator:
             ),
             provenance="combination_search",
         )
+        # Consecutive-terminator guard: if the interleaved text has an
+        # unconditional terminator (return/throw/break/continue/goto) on one
+        # line followed by another non-blank, non-brace-closing line, the
+        # interleaving stacked both sides' statements → unreachable code with
+        # potential undeclared identifiers. Decline so the LLM handles it.
+        # (Catches the clickhouse-0041 defect where sbcr stacked two returns.)
+        import re as _re_sbcr
+        _terminator_re = _re_sbcr.compile(
+            r"^\s*(return|throw|break|continue|goto)\b"
+        )
+        _result_lines = (result.text or "").split("\n")
+        for _i in range(len(_result_lines) - 1):
+            _line = _result_lines[_i].strip()
+            _next = _result_lines[_i + 1].strip()
+            if (
+                _terminator_re.match(_result_lines[_i])
+                and _next
+                and not _next.startswith("}")
+                and not _next.startswith(")")
+                and not _next.startswith("]")
+                and not _terminator_re.match(_result_lines[_i + 1])
+            ):
+                self._record_resolution_attempt(
+                    UnitOutcome(unit=unit), mechanism="sbcr",
+                    decision="skip",
+                    reason="consecutive terminator in interleaved text",
+                )
+                return None
         validation = self.verification.verify(unit, cand)
         self.journal.emit(
             "combination_resolved",
