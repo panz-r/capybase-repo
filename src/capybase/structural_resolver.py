@@ -659,24 +659,39 @@ def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
         _, repl = merged_ops[n]
         out.extend(repl)
     result_text = _detokenize(out)
-    # No-silent-line-drop guard (Counter-based): if a base line is kept by BOTH
-    # sides (present in current AND replayed), the candidate must not silently
-    # drop it. Token-level edits change tokens WITHIN a line; they should never
-    # remove an entire base line that both sides preserved. Uses normalized line
-    # counts (whitespace-collapsed) for robustness against token-boundary
-    # recombination artifacts. (Catches the clickhouse-0024 defect where 9
-    # function-body lines were scattered/dropped by the token splice.)
-    from collections import Counter as _Ctr
-    def _norm_lines(text):
-        return _Ctr(" ".join(l.split()) for l in text.split("\n") if l.strip())
-    _bc = _norm_lines(base)
-    _cc = _norm_lines(current)
-    _rc = _norm_lines(replayed)
-    _oc = _norm_lines(result_text)
-    for _line, _cnt in _bc.items():
-        _kept_both = min(_cnt, _cc.get(_line, 0), _rc.get(_line, 0))
-        if _oc.get(_line, 0) < _kept_both:
-            return None  # base line kept by both sides was silently dropped
+    # No-invented-lines guard: every non-blank output line must be explainable
+    # by the input sides (base, current, replayed). token_disjoint is a pure
+    # token recombination — a correct splice reassembles tokens within existing
+    # lines, producing lines recognizable from the inputs. A garbled splice
+    # fragments tokens across line boundaries, producing lines that never existed
+    # in any input. Decline on any invented line.
+    #
+    # A line is "explainable" if it either matches an input line exactly (after
+    # whitespace normalization) or is a close variant (SequenceMatcher ratio
+    # >= 0.65) of some input line. The fuzzy threshold allows legitimate
+    # token-level edits (e.g. `int x = 2;` vs base `int x = 1;`) while catching
+    # garbled fragments (scattered tokens with low similarity to any single input
+    # line). (Catches the clickhouse-0024 defect where token splice produced
+    # lines like `inner_ref, static_pointer_cast<ITableExpressionNode>` that
+    # appear nowhere in any input.)
+    from difflib import SequenceMatcher as _SM
+    _input_norm = [
+        " ".join(l.split())
+        for _src in (base, current, replayed)
+        for l in _src.split("\n")
+        if l.strip()
+    ]
+    _input_set = set(_input_norm)
+    for _ln in result_text.split("\n"):
+        _norm = " ".join(_ln.split())
+        if not _norm:
+            continue
+        if _norm in _input_set:
+            continue  # exact match
+        # Fuzzy: is this line a close variant of some input line?
+        if any(_SM(None, _norm, _il).ratio() >= 0.65 for _il in _input_norm):
+            continue  # close enough — legitimate token-level edit
+        return None  # garbled — no input line is similar
     return result_text
 
 
