@@ -1007,6 +1007,7 @@ def main():
                 result_holder.append(CaseResult(
                     id=case.id, language=case.language, dataset=case.dataset,
                     escalated=True,
+                    conflict_region_count=case.marker_original.count("<<<<<<<"),
                     reason=f"harness error: {type(exc).__name__}: {str(exc)[:100]}"))
         th = threading.Thread(target=_worker, daemon=True)
         th.start()
@@ -1025,13 +1026,15 @@ def main():
             print(f"\n      [TIMEOUT after {args.case_timeout}s — moving on]", end="")
             r = CaseResult(id=case.id, language=case.language, dataset=case.dataset,
                            escalated=True,
+                           conflict_region_count=case.marker_original.count("<<<<<<<"),
                            reason=f"case timeout after {args.case_timeout}s (endless CEGIS retries)")
         else:
             # Worker finished — safe to clean up the temp dir now.
             shutil.rmtree(case_td, ignore_errors=True)
             r = result_holder[0] if result_holder else CaseResult(
                 id=case.id, language=case.language, dataset=case.dataset,
-                escalated=True, reason="worker produced no result")
+                escalated=True, conflict_region_count=case.marker_original.count("<<<<<<<"),
+                reason="worker produced no result")
         if r.escalated:
             verdict = "ESCALATE"; escalate_ct += 1
         elif r.marker_free and r.compiles:

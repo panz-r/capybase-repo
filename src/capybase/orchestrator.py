@@ -3563,10 +3563,28 @@ class Orchestrator:
             explanation="instantiated from a sibling unit's edit pattern",
             provenance="deterministic_structural",
         )
-        validation = self.verification.verify(unit, cand, fast_verify=True)
+        # Use FULL verify (not fast_verify) for pattern reuse: the instantiated
+        # text is a TRANSFORMATION of the sibling's resolution, not a verbatim
+        # replay. It may introduce syntax errors or structural issues that
+        # fast_verify (which skips syntax/AST/both_sides_represented) would
+        # miss. The exact-content cache (_try_step_shape_reuse) can use
+        # fast_verify because it replays byte-identical text; the pattern cache
+        # cannot.
+        validation = self.verification.verify(unit, cand)
         self.journal.emit(
             "step_pattern_reuse",
-            {"candidate_id": cand.candidate_id, "passed": validation.passed},
+            {
+                "candidate_id": cand.candidate_id,
+                "passed": validation.passed,
+                "shape_hash": key.split(":")[0],
+                "pattern_ops": len(pattern),
+                "instantiated_lines": len(instantiated.split("\n")),
+                "unit_lines": max(
+                    len((unit.current.text or "").split("\n")),
+                    len((unit.replayed.text or "").split("\n")),
+                ),
+                "hard_failures": len(validation.hard_failures),
+            },
             step_index=self.step, path=unit.path, unit_id=unit.unit_id,
         )
         if not validation.passed:
