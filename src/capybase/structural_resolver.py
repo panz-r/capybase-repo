@@ -659,26 +659,24 @@ def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
         _, repl = merged_ops[n]
         out.extend(repl)
     result_text = _detokenize(out)
-    # Line-count preservation guard: token-level edits change tokens WITHIN
-    # lines, not remove entire lines. If the output has significantly fewer
-    # non-blank lines than the base (accounting for lines both sides deleted),
-    # the splice scattered tokens across lines and dropped content — decline.
-    # (Catches the clickhouse-0024 defect where 9 function-body lines were
-    # silently lost.)
-    _base_nonblank = sum(1 for l in base.split("\n") if l.strip())
-    _out_nonblank = sum(1 for l in result_text.split("\n") if l.strip())
-    # Count base lines deleted by either side (replace/delete ops with i1 < i2).
-    _deleted_toks = sum(
-        (i2 - i1) for i1, i2, _ in cur_ops if i1 < i2
-    ) + sum(
-        (i2 - i1) for i1, i2, _ in rep_ops if i1 < i2
-    )
-    # Roughly: each deleted base token removes ~1/5 of a line (avg 5 tokens/
-    # line). If the output lost more than 2x the expected line deletions, the
-    # splice dropped content.
-    _expected_min = max(0, _base_nonblank - _deleted_toks // 3)
-    if _out_nonblank < _expected_min:
-        return None  # too many base lines lost — broken merge
+    # No-silent-line-drop guard (Counter-based): if a base line is kept by BOTH
+    # sides (present in current AND replayed), the candidate must not silently
+    # drop it. Token-level edits change tokens WITHIN a line; they should never
+    # remove an entire base line that both sides preserved. Uses normalized line
+    # counts (whitespace-collapsed) for robustness against token-boundary
+    # recombination artifacts. (Catches the clickhouse-0024 defect where 9
+    # function-body lines were scattered/dropped by the token splice.)
+    from collections import Counter as _Ctr
+    def _norm_lines(text):
+        return _Ctr(" ".join(l.split()) for l in text.split("\n") if l.strip())
+    _bc = _norm_lines(base)
+    _cc = _norm_lines(current)
+    _rc = _norm_lines(replayed)
+    _oc = _norm_lines(result_text)
+    for _line, _cnt in _bc.items():
+        _kept_both = min(_cnt, _cc.get(_line, 0), _rc.get(_line, 0))
+        if _oc.get(_line, 0) < _kept_both:
+            return None  # base line kept by both sides was silently dropped
     return result_text
 
 
@@ -1468,12 +1466,24 @@ def _try_insertion_union(base: str, current: str, replayed: str) -> str | None:
     # alongside the new — a sign the entity-splitting made a sub-unit look like
     # pure insertion when the whole conflict had deletions. Decline so the LLM
     # handles it. (Catches the nlohmann-0020 defect where deleted code was
-    # resurrected.) Use ALL inserted lines (not just non-blank) for the bound.
-    _cur_all = [ln for run in cur_ins.values() for ln in run]
-    _rep_all = [ln for run in rep_ins.values() for ln in run]
-    _max_expected = len(base_lines) + len(_cur_all) + len(_rep_all)
-    if len(out) > _max_expected:
-        return None
+    # Line-explosion guard: if any normalized line appears MORE times in the
+    # output than in any side (base/current/replayed), the rule duplicated
+    # content beyond what either side contains. This catches cases where
+    # entity-splitting made a sub-unit look like pure insertion but the parent
+    # conflict had content that was duplicated by the union. (The prior size
+    # guard was a tautology — len(out) always equals base + insertions by
+    # construction. This per-line check catches the actual duplication pattern.)
+    from collections import Counter as _Ctr
+    def _nl(text):
+        return _Ctr(" ".join(l.split()) for l in text.split("\n") if l.strip())
+    _bc = _nl("\n".join(base_lines))
+    _cc = _nl(current)
+    _rc = _nl(replayed)
+    _oc = _nl("\n".join(out))
+    for _line, _cnt in _oc.items():
+        _allowed = max(_bc.get(_line, 0), _cc.get(_line, 0), _rc.get(_line, 0))
+        if _cnt > _allowed:
+            return None  # line duplicated beyond what any side contains
     return "\n".join(out)
 
 

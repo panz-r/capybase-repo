@@ -4167,32 +4167,67 @@ class Orchestrator:
             ),
             provenance="combination_search",
         )
-        # Consecutive-terminator guard: if the interleaved text has an
-        # unconditional terminator (return/throw/break/continue/goto) on one
-        # line followed by another non-blank, non-brace-closing line, the
-        # interleaving stacked both sides' statements → unreachable code with
-        # potential undeclared identifiers. Decline so the LLM handles it.
-        # (Catches the clickhouse-0041 defect where sbcr stacked two returns.)
+        # Consecutive-terminator guard with side-consensus + safe-next
+        # exceptions. If the interleaved text has an unconditional terminator
+        # (return/throw/break/continue/goto) followed by another executable
+        # statement (not a closing brace, case/default label, access specifier,
+        # preprocessor directive, or comment), the interleaving stacked both
+        # sides' statements → unreachable code. Only reject if neither side nor
+        # base had the same pattern (side consensus).
         import re as _re_sbcr
         _terminator_re = _re_sbcr.compile(
             r"^\s*(return|throw|break|continue|goto)\b"
         )
-        _result_lines = (result.text or "").split("\n")
-        for _i in range(len(_result_lines) - 1):
-            _line = _result_lines[_i].strip()
-            _next = _result_lines[_i + 1].strip()
+        _safe_next_re = _re_sbcr.compile(
+            r"^\s*("
+            r"\}|"
+            r"\)|"
+            r"\]|"
+            r"case\b|"
+            r"default\b|"
+            r"public:|"
+            r"private:|"
+            r"protected:|"
+            r"#|"
+            r"//|"
+            r"/\*|"
+            r"\*"
+            r")"
+        )
+        def _has_bad_consecutive_terminator(text):
+            lines = (text or "").split("\n")
+            for i in range(len(lines) - 1):
+                if not _terminator_re.match(lines[i]):
+                    continue
+                # Skip blank lines to find the next executable line
+                j = i + 1
+                while j < len(lines) and not lines[j].strip():
+                    j += 1
+                if j >= len(lines):
+                    continue
+                next_line = lines[j].strip()
+                if _safe_next_re.match(lines[j]):
+                    continue  # safe continuation (brace, label, preprocessor, comment)
+                if _terminator_re.match(lines[j]):
+                    continue  # another terminator (allowed — e.g. stacked returns in a switch)
+                return True  # executable statement after a terminator — unreachable
+            return False
+        _candidate_has_bad = _has_bad_consecutive_terminator(result.text)
+        if _candidate_has_bad:
+            # Side consensus: only reject if none of base/current/replayed had
+            # the same pattern (avoids rejecting code that already existed).
+            _base_text = unit.base.text or ""
+            _cur_text = unit.current.text or ""
+            _rep_text = unit.replayed.text or ""
             if (
-                _terminator_re.match(_result_lines[_i])
-                and _next
-                and not _next.startswith("}")
-                and not _next.startswith(")")
-                and not _next.startswith("]")
-                and not _terminator_re.match(_result_lines[_i + 1])
+                not _has_bad_consecutive_terminator(_base_text)
+                and not _has_bad_consecutive_terminator(_cur_text)
+                and not _has_bad_consecutive_terminator(_rep_text)
             ):
                 self._record_resolution_attempt(
                     UnitOutcome(unit=unit), mechanism="sbcr",
                     decision="skip",
-                    reason="consecutive terminator in interleaved text",
+                    reason="consecutive terminator in interleaved text (side consensus)",
                 )
                 return None
         validation = self.verification.verify(unit, cand)
