@@ -2015,6 +2015,19 @@ def _extract_edit_pattern(base: str, resolved: str) -> list[tuple[str, str, str]
         pattern.append((base_cats, repl_cats, base_raw))
     if not pattern or len(pattern) > 10:
         return None
+    # Length guard: reject when the base or resolved text is too large (the
+    # pattern should be a small local edit, not a whole-file diff). Without
+    # this, a whole-file base (unit.base.text is the entire file for marker
+    # units) produces a few gigantic garbage opcodes that pass the op-count
+    # check but corrupt the output when instantiated.
+    if len(bt) > 200 or len(rt) > 200:
+        return None
+    # Ratio guard: reject extreme size mismatches (>5x) — a 1-line resolution
+    # vs a 200-line base is almost certainly a whole-file-vs-hunk mismatch.
+    if len(bt) > 0 and len(rt) > 0:
+        ratio = max(len(bt), len(rt)) / min(len(bt), len(rt))
+        if ratio > 5:
+            return None
     return pattern
 
 
@@ -3526,9 +3539,20 @@ class Orchestrator:
         pattern = cache.get(key)
         if pattern is None:
             return None
-        base = unit.base.text or ""
+        # Use the diff3-refined hunk base, NOT unit.base.text (whole file).
+        _refined = unit.refined_sides
+        base = (_refined[1] if _refined else "") or (unit.base.text or "")
         instantiated = _instantiate_pattern(base, pattern)
         if instantiated is None:
+            return None
+        # Defense-in-depth: reject when the instantiated text is many lines
+        # but the unit's sides are 1-2 lines (the pattern produced garbage).
+        _unit_lines = max(
+            len((unit.current.text or "").split("\n")),
+            len((unit.replayed.text or "").split("\n")),
+        )
+        _inst_lines = len(instantiated.split("\n"))
+        if _inst_lines > _unit_lines * 3 + 3:
             return None
         cand = CandidateResolution(
             candidate_id=f"{unit.unit_id}:step_pattern_reuse",
@@ -6519,10 +6543,15 @@ class Orchestrator:
                 # (base→resolved), keyed on the conflict shape hash. Sibling
                 # units with the same shape but different identifiers can
                 # instantiate the pattern instead of calling the LLM.
+                # IMPORTANT: use the diff3-refined hunk base, NOT unit.base.text
+                # (which is the WHOLE FILE for marker units). A whole-file base
+                # produces garbage patterns that corrupt the output.
                 try:
                     from capybase.memory.shape import shape_for_unit
+                    _refined = unit.refined_sides
+                    _hunk_base = (_refined[1] if _refined else "") or (unit.base.text or "")
                     _pat = _extract_edit_pattern(
-                        unit.base.text or "",
+                        _hunk_base,
                         outcome.accepted.resolved_text or "",
                     )
                     if _pat is not None:
