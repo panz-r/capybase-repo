@@ -790,6 +790,119 @@ def test_unit_count_aware_retry_budget_caps_calls(repo):
 
 
 # ---------------------------------------------------------------------------
+# sbcr consecutive-terminator guard: valid C++ patterns must NOT be rejected
+# ---------------------------------------------------------------------------
+
+
+def test_sbcr_guard_accepts_switch_case_returns(repo):
+    """The sbcr consecutive-terminator guard must NOT reject switch cases
+    where each case has its own return — the intervening case/default label
+    makes it safe."""
+    import re
+    terminator_re = re.compile(r"^\s*(return|throw|break|continue|goto)\b")
+    safe_next_re = re.compile(
+        r"^\s*("
+        r"\}|\)|\]|"
+        r"case\b|default\b|"
+        r"public:|private:|protected:|"
+        r"#|//|/\*|\*"
+        r")"
+    )
+    # Valid switch: returns separated by case labels
+    switch_code = """switch (x) {
+    case 1:
+        return 1;
+    case 2:
+        return 2;
+    default:
+        return 0;
+}"""
+    lines = switch_code.split("\n")
+    bad = False
+    for i in range(len(lines) - 1):
+        if not terminator_re.match(lines[i]):
+            continue
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        if j >= len(lines):
+            continue
+        if safe_next_re.match(lines[j]):
+            continue
+        bad = True
+        break
+    assert not bad, "switch case returns should NOT be flagged"
+
+
+def test_sbcr_guard_accepts_preprocessor_branch_returns(repo):
+    """The sbcr guard must NOT reject preprocessor-branch returns where
+    #else/#endif separates the terminators."""
+    import re
+    terminator_re = re.compile(r"^\s*(return|throw|break|continue|goto)\b")
+    safe_next_re = re.compile(
+        r"^\s*("
+        r"\}|\)|\]|"
+        r"case\b|default\b|"
+        r"public:|private:|protected:|"
+        r"#|//|/\*|\*"
+        r")"
+    )
+    pp_code = """#if FOO
+    return 1;
+#else
+    return 2;
+#endif"""
+    lines = pp_code.split("\n")
+    bad = False
+    for i in range(len(lines) - 1):
+        if not terminator_re.match(lines[i]):
+            continue
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        if j >= len(lines):
+            continue
+        if safe_next_re.match(lines[j]):
+            continue
+        bad = True
+        break
+    assert not bad, "preprocessor branch returns should NOT be flagged"
+
+
+def test_sbcr_guard_rejects_return_after_return():
+    """The sbcr guard MUST reject two consecutive returns at the same block
+    level with no intervening label/brace/preprocessor — this is unreachable
+    code (the defect pattern from clickhouse-0041)."""
+    import re
+    terminator_re = re.compile(r"^\s*(return|throw|break|continue|goto)\b")
+    safe_next_re = re.compile(
+        r"^\s*("
+        r"\}|\)|\]|"
+        r"case\b|default\b|"
+        r"public:|private:|protected:|"
+        r"#|//|/\*|\*"
+        r")"
+    )
+    bad_code = """    return std::to_string(n) + "th";
+    return std::to_string(n) + suffix;"""
+    lines = bad_code.split("\n")
+    bad = False
+    for i in range(len(lines) - 1):
+        if not terminator_re.match(lines[i]):
+            continue
+        j = i + 1
+        while j < len(lines) and not lines[j].strip():
+            j += 1
+        if j >= len(lines):
+            continue
+        if safe_next_re.match(lines[j]):
+            continue
+        bad = True
+        break
+    assert bad, "return-after-return with no intervening label should be flagged"
+
+
+# ---------------------------------------------------------------------------
 # Step 3: rank-order candidate validation (try the next sample if the
 # consensus winner fails validation, before falling back to CEGIS repair)
 # ---------------------------------------------------------------------------
