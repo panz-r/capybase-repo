@@ -532,5 +532,98 @@ class _FakeGit:
             raise KeyError(stage)
         return self._blobs[stage]
 
+
+# ---------------------------------------------------------------------------
+# Parent-aware deletion metadata tests
+# ---------------------------------------------------------------------------
+
+
+def test_parent_deletion_meta_detects_large_deletions():
+    """When the parent conflict has one side deleting >5 base lines, the
+    _compute_parent_deletion_meta function should set parent_has_deletions=True.
+    This is the nlohmann-0020 pattern: replayed deleted 102 lines in a refactor."""
+    from capybase.conflict_extractor import _compute_parent_deletion_meta
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+
+    def _side(label, text):
+        return ConflictSide(label=label, text=text)  # type: ignore[arg-type]
+
+    # Parent: base has 10 lines, replayed deleted 8 of them (refactor)
+    base = "\n".join(f"line{i}" for i in range(10))
+    current = base  # current kept all lines
+    replayed = "\n".join(f"line{i}" for i in range(2))  # replayed deleted 8
+
+    unit = ConflictUnit(
+        session_id="s", step_index=0, path="f.cpp", unit_id="u",
+        language="cpp",
+        base=_side("BASE", base),
+        current=_side("CURRENT_UPSTREAM_SIDE", current),
+        replayed=_side("REPLAYED_COMMIT_SIDE", replayed),
+        original_worktree_text=base,
+    )
+    meta = _compute_parent_deletion_meta(unit)
+    assert meta["parent_has_deletions"] is True
+    assert meta["parent_replayed_deleted_count"] >= 8
+    assert meta["parent_current_deleted_count"] == 0
+
+
+def test_parent_deletion_meta_no_deletions():
+    """When neither side deleted significant base lines, parent_has_deletions
+    should be False — the union rules and source_portfolio can run normally."""
+    from capybase.conflict_extractor import _compute_parent_deletion_meta
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+
+    def _side(label, text):
+        return ConflictSide(label=label, text=text)  # type: ignore[arg-type]
+
+    base = "void a() {}\nvoid b() {}"
+    cur = "void a() {}\nvoid b() {}\nvoid c() {}"
+    rep = "void a() {}\nvoid b() {}\nvoid d() {}"
+
+    unit = ConflictUnit(
+        session_id="s", step_index=0, path="f.cpp", unit_id="u",
+        language="cpp",
+        base=_side("BASE", base),
+        current=_side("CURRENT_UPSTREAM_SIDE", cur),
+        replayed=_side("REPLAYED_COMMIT_SIDE", rep),
+        original_worktree_text=base,
+    )
+    meta = _compute_parent_deletion_meta(unit)
+    assert meta["parent_has_deletions"] is False
+
+
+def test_split_stamps_parent_deletion_meta_on_sub_units():
+    """When _split_unit_at_entities creates sub-units, each should carry the
+    parent_has_deletions flag from _compute_parent_deletion_meta."""
+    from capybase.conflict_extractor import _split_unit_at_entities
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+
+    def _side(label, text):
+        return ConflictSide(label=label, text=text)  # type: ignore[arg-type]
+
+    # Parent with large deletion: base has 12 functions, replayed deleted 8
+    base_funcs = "\n\n".join(f"void f{i}() {{}}" for i in range(12))
+    cur_funcs = base_funcs  # current kept all
+    rep_funcs = "\n\n".join(f"void f{i}() {{}}" for i in range(4))  # deleted 8
+
+    unit = ConflictUnit(
+        session_id="s", step_index=0, path="f.cpp", unit_id="u",
+        language="cpp",
+        base=_side("BASE", base_funcs),
+        current=_side("CURRENT_UPSTREAM_SIDE", cur_funcs),
+        replayed=_side("REPLAYED_COMMIT_SIDE", rep_funcs),
+        original_worktree_text=base_funcs,
+        marker_span=(0, 100),
+    )
+    subs = _split_unit_at_entities(unit, min_region_lines=4, min_sub_lines=2)
+    if len(subs) > 1:
+        for sub in subs:
+            assert "parent_has_deletions" in sub.structural_metadata, (
+                f"sub-unit {sub.unit_id} missing parent_has_deletions"
+            )
+            assert sub.structural_metadata["parent_has_deletions"] is True, (
+                f"sub-unit {sub.unit_id}: parent deleted 8 lines, should flag"
+            )
+
     def last_touch_blob(self, oid):
         return ("", "")

@@ -909,28 +909,48 @@ def test_sbcr_guard_rejects_return_after_return():
 # ---------------------------------------------------------------------------
 
 
-def test_asymmetry_flag_only_fires_for_sub_units(repo):
-    """The parent_has_asymmetry flag must only fire for actual entity-split
-    sub-units (those with parent_unit_id), NOT for naturally-asymmetric non-
-    split units. Regression: the flag fired on any unit with a 3x side ratio,
+def test_asymmetry_flag_only_fires_for_sub_units_with_deletions(repo):
+    """The parent_has_asymmetry flag must fire when the parent had substantial
+    deletions (computed by the conflict extractor at split time), NOT based on
+    the sub-unit's own side ratio. A sub-unit fragment can look balanced even
+    when the parent had 102 lines deleted by one side.
+
+    Regression: the old ratio-based flag fired on ANY unit with a 3x side ratio,
     disabling source_portfolio on 6 previously-PASS cases (large headers where
-    one side naturally had more content)."""
+    one side naturally had more content). The parent-deletion-based flag is
+    precise: it only fires when the parent conflict genuinely had deletions."""
     from capybase.conflict_model import ConflictUnit, ConflictSide
 
     def _side(label, text):
         return ConflictSide(label=label, text=text)  # type: ignore[arg-type]
 
-    # A sub-unit (has parent_unit_id) with 3x asymmetry
-    sub_unit = ConflictUnit(
+    # A sub-unit whose parent had >5 deleted base lines → flag fires
+    sub_with_deletions = ConflictUnit(
         session_id="s", step_index=0, path="f.hpp", unit_id="f.hpp:1:0#s0",
+        language="cpp",
+        base=_side("BASE", "line1\n"),
+        current=_side("CURRENT_UPSTREAM_SIDE", "a\nb\n"),
+        replayed=_side("REPLAYED_COMMIT_SIDE", "x\n"),
+        original_worktree_text="line1\n",
+        structural_metadata={
+            "parent_unit_id": "f.hpp:1:0",
+            "parent_has_deletions": True,
+        },
+    )
+    # A sub-unit whose parent had NO deletions → flag does NOT fire
+    sub_without_deletions = ConflictUnit(
+        session_id="s", step_index=0, path="f.hpp", unit_id="f.hpp:1:1#s0",
         language="cpp",
         base=_side("BASE", "line1\n"),
         current=_side("CURRENT_UPSTREAM_SIDE", "a\nb\nc\nd\ne\n"),
         replayed=_side("REPLAYED_COMMIT_SIDE", "x\n"),
         original_worktree_text="line1\n",
-        structural_metadata={"parent_unit_id": "f.hpp:1:0"},
+        structural_metadata={
+            "parent_unit_id": "f.hpp:1:1",
+            "parent_has_deletions": False,
+        },
     )
-    # A non-split unit with same asymmetry
+    # A non-split unit (no parent_unit_id) → flag does NOT fire
     nonsplit_unit = ConflictUnit(
         session_id="s", step_index=0, path="f.hpp", unit_id="f.hpp:1:0",
         language="cpp",
@@ -941,16 +961,16 @@ def test_asymmetry_flag_only_fires_for_sub_units(repo):
         structural_metadata={},
     )
 
-    # Simulate the asymmetry check from _resolve_step
-    for unit, should_flag in [(sub_unit, True), (nonsplit_unit, False)]:
-        _parent = unit.structural_metadata.get("parent_unit_id")
-        _cur_nb = sum(1 for l in (unit.current.text or "").split("\n") if l.strip())
-        _rep_nb = sum(1 for l in (unit.replayed.text or "").split("\n") if l.strip())
-        flagged = False
-        if _parent and _cur_nb > 0 and _rep_nb > 0:
-            _ratio = max(_cur_nb, _rep_nb) / min(_cur_nb, _rep_nb)
-            if _ratio >= 3.0:
-                flagged = True
+    # Simulate the orchestrator's asymmetry check (reads parent_has_deletions)
+    for unit, should_flag in [
+        (sub_with_deletions, True),
+        (sub_without_deletions, False),
+        (nonsplit_unit, False),
+    ]:
+        flagged = unit.structural_metadata.get("parent_has_deletions", False)
+        if flagged:
+            unit.structural_metadata["parent_has_asymmetry"] = True
+        flagged = unit.structural_metadata.get("parent_has_asymmetry", False)
         assert flagged == should_flag, (
             f"unit {unit.unit_id}: expected flag={should_flag}, got {flagged}"
         )

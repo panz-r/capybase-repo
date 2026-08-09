@@ -6634,24 +6634,17 @@ class Orchestrator:
             self._file_max_retries = _file_max_retries
             for unit in units:
                 _parent = unit.structural_metadata.get("parent_unit_id")
-                # Detect large side-size asymmetry: when one side is much larger
-                # than the other (a rewrite vs small edit), source_portfolio's
-                # current_only/replayed_only would pick the larger side verbatim —
-                # which may ignore the other side's deletions/replacements. Flag
-                # these sub-units so source_portfolio declines and the LLM gets
-                # a chance. (Catches the nlohmann-0020 pattern where replayed's
-                # 102-line refactor deletion was ignored by current_only picks
-                # on each sub-unit fragment.)
-                _cur_nb = sum(1 for l in (unit.current.text or "").split("\n") if l.strip())
-                _rep_nb = sum(1 for l in (unit.replayed.text or "").split("\n") if l.strip())
-                # Only flag asymmetry for ACTUAL sub-units of entity-split parents.
-                # Non-split units may have natural asymmetry (e.g. large headers
-                # where one side added more content) — that's not the rewrite-vs-
-                # edit pattern the flag was designed to catch.
-                if _parent and _cur_nb > 0 and _rep_nb > 0:
-                    _ratio = max(_cur_nb, _rep_nb) / min(_cur_nb, _rep_nb)
-                    if _ratio >= 3.0:
-                        unit.structural_metadata["parent_has_asymmetry"] = True
+                # Parent-aware asymmetry: if the parent conflict had substantial
+                # deletions on either side (computed by the conflict extractor
+                # at split time via _compute_parent_deletion_meta), flag the
+                # sub-unit so source_portfolio and union rules decline — the
+                # LLM should handle conflicts where one side deleted significant
+                # content. This replaces the imprecise sub-unit side-ratio
+                # check: a fragment can look balanced even when the parent had
+                # 102 lines deleted by one side. (Catches nlohmann-0020 where
+                # entity splitting hid replayed's refactor deletions.)
+                if unit.structural_metadata.get("parent_has_deletions"):
+                    unit.structural_metadata["parent_has_asymmetry"] = True
                 if _parent and _parent in _sibling_resolved:
                     unit.structural_metadata["sibling_resolutions"] = list(
                         _sibling_resolved[_parent]

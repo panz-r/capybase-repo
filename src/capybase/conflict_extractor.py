@@ -544,8 +544,17 @@ def _build_sub_unit(
     rep_text: str,
     base_text: str,
     n_subs: int,
+    *,
+    parent_meta: dict | None = None,
 ) -> ConflictUnit:
     """Construct one sub-``ConflictUnit`` from a partitioned span + sliced sides."""
+    meta = {
+        "parent_unit_id": parent.unit_id,
+        "sub_unit_index": sub_index,
+        "sub_unit_count": n_subs,
+    }
+    if parent_meta:
+        meta.update(parent_meta)
     return ConflictUnit(
         session_id=parent.session_id,
         step_index=parent.step_index,
@@ -570,15 +579,50 @@ def _build_sub_unit(
         enclosing_symbol=parent.enclosing_symbol,
         risk_tags=list(parent.risk_tags),
         severity=parent.severity,
-        # Traceability + the SRC seam the prompt builder reads. parent_unit_id
-        # groups the siblings; sub_unit_index orders them top-to-bottom so the
-        # orchestrator's Phase 1 loop can feed resolved text forward.
-        structural_metadata={
-            "parent_unit_id": parent.unit_id,
-            "sub_unit_index": sub_index,
-            "sub_unit_count": n_subs,
-        },
+        structural_metadata=meta,
     )
+
+
+def _compute_parent_deletion_meta(unit: ConflictUnit) -> dict:
+    """Compute parent-level deletion metadata for sub-units.
+
+    Returns a dict with:
+    - ``parent_has_deletions``: True if either side deleted >5 non-blank base
+      lines relative to the other (a refactor vs small edit pattern).
+    - ``parent_current_deleted_count``: number of base lines current deleted.
+    - ``parent_replayed_deleted_count``: number of base lines replayed deleted.
+
+    This lets downstream rules decline on sub-units whose parent had massive
+    deletions — even when the fragment itself looks balanced. (Fixes the
+    nlohmann-0020 Frankenstein merge: replayed deleted 102 lines, but each
+    sub-unit fragment looked like a pure insertion.)
+    """
+    from difflib import SequenceMatcher
+
+    base_lines = (unit.base.text or "").splitlines()
+    cur_lines = (unit.current.text or "").splitlines()
+    rep_lines = (unit.replayed.text or "").splitlines()
+
+    # Count non-blank base lines deleted by each side (delete opcodes only).
+    def _count_deleted(base_l: list[str], side_l: list[str]) -> int:
+        sm = SequenceMatcher(None, base_l, side_l, autojunk=False)
+        return sum(
+            (i2 - i1)
+            for tag, i1, i2, _j1, _j2 in sm.get_opcodes()
+            if tag == "delete"
+        )
+
+    cur_del = _count_deleted(base_lines, cur_lines)
+    rep_del = _count_deleted(base_lines, rep_lines)
+    # Threshold: >5 non-blank base lines deleted by at least one side signals
+    # a substantial cleanup/refactor — enough to be dangerous for union rules.
+    has_deletions = max(cur_del, rep_del) > 5
+
+    return {
+        "parent_has_deletions": has_deletions,
+        "parent_current_deleted_count": cur_del,
+        "parent_replayed_deleted_count": rep_del,
+    }
 
 
 def _split_unit_at_entities(
@@ -703,11 +747,21 @@ def _split_unit_at_entities(
     base_kept = _fragment_base(unit.base.text or "", lang, n_subs, cur_pts, rep_pts,
                                cur_has_struct, rep_has_struct)
 
+    # Parent-aware deletion context: compute the parent's deletion map once,
+    # then stamp it on every sub-unit. This lets downstream rules (insertion_
+    # union, source_portfolio, asymmetry detection) make parent-aware decisions
+    # instead of relying on the sub-unit fragment's own (misleading) side ratio.
+    # A sub-unit fragment can look like a pure insertion even when the parent
+    # had one side deleting 100+ base lines (a refactor). Without this context,
+    # insertion_union/source_portfolio produce Frankenstein merges.
+    parent_meta = _compute_parent_deletion_meta(unit)
+
     sub_units: list[ConflictUnit] = []
     for k in range(n_subs):
         sub_units.append(
             _build_sub_unit(
-                unit, k, sub_spans[k], cur_kept[k], rep_kept[k], base_kept[k], n_subs
+                unit, k, sub_spans[k], cur_kept[k], rep_kept[k], base_kept[k], n_subs,
+                parent_meta=parent_meta,
             )
         )
     return sub_units
