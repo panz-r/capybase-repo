@@ -4216,9 +4216,12 @@ class Orchestrator:
                 next_line = lines[j].strip()
                 if _safe_next_re.match(lines[j]):
                     continue  # safe continuation (brace, label, preprocessor, comment)
-                if _terminator_re.match(lines[j]):
-                    continue  # another terminator (allowed — e.g. stacked returns in a switch)
-                return True  # executable statement after a terminator — unreachable
+                # Do NOT skip when the next line is another terminator —
+                # return-after-return is the exact defect pattern (unreachable
+                # code with potential undeclared identifiers). In a switch, the
+                # intervening case/default label makes it safe, and those are
+                # caught by _safe_next_re above.
+                return True  # executable statement (or another terminator) after a terminator — unreachable
             return False
         _candidate_has_bad = _has_bad_consecutive_terminator(result.text)
         if _candidate_has_bad:
