@@ -8939,6 +8939,24 @@ class Orchestrator:
                     n_samples=n_complex,
                 )
             outcome.consensus = consensus_report
+            # Intent coverage re-ranking: among candidates grouped equally by
+            # consensus (same cluster size), prefer the one that preserves more
+            # side-specific lines. This directly targets the sim gap where the
+            # model drops lines the oracle kept. The coverage score is a TIE-
+            # BREAK, not a gate — it only affects WHICH valid candidate is tried
+            # first, not WHETHER a candidate is accepted.
+            if len(candidates) > 1:
+                from capybase.structural_resolver import intent_coverage_score
+                _base_t = unit.base.text or ""
+                _cur_t = unit.current.text or ""
+                _rep_t = unit.replayed.text or ""
+                # Stable sort: preserves consensus order for same-coverage candidates.
+                candidates = sorted(
+                    candidates,
+                    key=lambda c: -intent_coverage_score(
+                        c.resolved_text or "", _base_t, _cur_t, _rep_t,
+                    ),
+                )
             # Journal the generation round. With self-consistency this is the
             # full sample set; the consensus stats attach here so the audit
             # shows how split the samples were before validation.

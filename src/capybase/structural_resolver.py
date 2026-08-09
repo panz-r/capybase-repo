@@ -121,6 +121,29 @@ class StructuralResolution:
         return self.text is not None
 
 
+def intent_coverage_score(
+    candidate: str, base: str, current: str, replayed: str,
+) -> float:
+    """Fraction of side-specific lines preserved in the candidate.
+
+    Computes the ratio of lines added by each side (relative to base) that
+    survive in the candidate's resolved text. Returns the minimum of the two
+    sides' coverage ratios — the worst-case side preservation. A score of 1.0
+    means all side-specific additions are present; 0.0 means none survived.
+
+    Used to rank LLM candidates: among candidates that pass validation, prefer
+    the one that preserves more of both sides' intent. This directly targets
+    the sim gap where the model drops lines the oracle kept.
+    """
+    base_set = {l.strip() for l in base.split("\n") if l.strip()}
+    cur_added = {l.strip() for l in current.split("\n") if l.strip()} - base_set
+    rep_added = {l.strip() for l in replayed.split("\n") if l.strip()} - base_set
+    cand_set = {l.strip() for l in candidate.split("\n") if l.strip()}
+    cur_cov = len(cur_added & cand_set) / len(cur_added) if cur_added else 1.0
+    rep_cov = len(rep_added & cand_set) / len(rep_added) if rep_added else 1.0
+    return min(cur_cov, rep_cov)
+
+
 def _normalize(text: str) -> str:
     """Whitespace-only normalization for the identical-sides check.
 

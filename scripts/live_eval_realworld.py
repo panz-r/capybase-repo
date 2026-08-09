@@ -499,6 +499,11 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # Without this reserve, files that fit the marker threshold but push the
     # total prompt past the model's effective limit return empty responses.
     cfg.model.completion_reserve = int(os.environ.get("CAPYBASE_COMPLETION_RESERVE", "2048"))
+    # Self-consistency with 2 samples: gives the intent coverage ranker a
+    # second candidate to choose from. Only costs an extra model call for units
+    # that reach the LLM (deterministic resolver handles most without it).
+    cfg.model.samples = 2
+    cfg.model.enable_self_consistency = True
     # Test gate:
     # - Python: py_compile (always available)
     # - Rust with full crate: the orchestrator's _run_cargo_syntax_check runs
