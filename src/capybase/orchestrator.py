@@ -4001,6 +4001,14 @@ class Orchestrator:
         if not cur.strip() and not rep.strip():
             return None
 
+        # Decline when the parent conflict has large side-size asymmetry (one
+        # side is a rewrite, the other a small edit). Taking either side
+        # verbatim (current_only/replayed_only) ignores the other side's
+        # deletions/replacements — producing a Frankenstein merge. Let the LLM
+        # handle it. (Catches the nlohmann-0020 pattern.)
+        if unit.structural_metadata.get("parent_has_asymmetry"):
+            return None
+
         # Build the candidate portfolio. Each is (id, text, provenance_suffix).
         cur_lines = [l for l in cur.split("\n") if l.strip()]
         rep_lines = [l for l in rep.split("\n") if l.strip()]
@@ -6604,6 +6612,20 @@ class Orchestrator:
             self._file_max_retries = _file_max_retries
             for unit in units:
                 _parent = unit.structural_metadata.get("parent_unit_id")
+                # Detect large side-size asymmetry: when one side is much larger
+                # than the other (a rewrite vs small edit), source_portfolio's
+                # current_only/replayed_only would pick the larger side verbatim —
+                # which may ignore the other side's deletions/replacements. Flag
+                # these sub-units so source_portfolio declines and the LLM gets
+                # a chance. (Catches the nlohmann-0020 pattern where replayed's
+                # 102-line refactor deletion was ignored by current_only picks
+                # on each sub-unit fragment.)
+                _cur_nb = sum(1 for l in (unit.current.text or "").split("\n") if l.strip())
+                _rep_nb = sum(1 for l in (unit.replayed.text or "").split("\n") if l.strip())
+                if _cur_nb > 0 and _rep_nb > 0:
+                    _ratio = max(_cur_nb, _rep_nb) / min(_cur_nb, _rep_nb)
+                    if _ratio >= 3.0:
+                        unit.structural_metadata["parent_has_asymmetry"] = True
                 if _parent and _parent in _sibling_resolved:
                     unit.structural_metadata["sibling_resolutions"] = list(
                         _sibling_resolved[_parent]

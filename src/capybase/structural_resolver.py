@@ -196,6 +196,14 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         replayed = unit.replayed.text or ""
         base = unit.base.text or ""
 
+    # When the parent conflict has large side-size asymmetry (one side rewrote
+    # while the other made a small edit), the union/additive rules can produce
+    # Frankenstein merges by keeping both sides' content. Skip them so the LLM
+    # gets a chance. (Catches the nlohmann-0020 pattern where entity splitting
+    # made each sub-unit look like pure insertion while the parent had 102
+    # deleted lines on one side.)
+    _skip_union_rules = unit.structural_metadata.get("parent_has_asymmetry", False)
+
     # Rule 1: modify/delete — one side deliberately deleted the block and the
     # other side did NOT add anything that the deletion would clobber. The safe
     # resolution is to ACCEPT THE DELETION (emit the deleting side's text, which
@@ -316,27 +324,31 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         # replayed-appends). The merge is still validated before it's applied,
         # so an ordering that produces invalid code falls through to the LLM —
         # the policy can be opinionated without being unsafe.
-        merged = _try_list_union(base, current, replayed)
-        if merged is not None:
-            return StructuralResolution(rule="list_union", text=merged)
-        merged = _try_dict_union(base, current, replayed)
-        if merged is not None:
-            return StructuralResolution(rule="dict_union", text=merged)
-        merged = _try_brace_union(base, current, replayed)
-        if merged is not None:
-            return StructuralResolution(rule="brace_union", text=merged)
-        merged = _try_insertion_union(base, current, replayed)
-        if merged is not None:
-            return StructuralResolution(rule="insertion_union", text=merged)
-        # Convergent-addition merge: when both sides independently added the
-        # same content (overlapping adds), keep one copy + append unique extras.
-        # Covers the both_add shape where additions overlap but aren't disjoint.
-        merged = _try_convergent_addition_merge(base, current, replayed)
-        if merged is not None:
-            return StructuralResolution(rule="convergent_addition_merge", text=merged)
-        merged = _try_directive_union(unit)
-        if merged is not None:
-            return StructuralResolution(rule="directive_union", text=merged)
+        # Skip union rules when the parent conflict has large side-size asymmetry
+        # (one side rewrote while the other made a small edit) — the union would
+        # keep both sides' content, producing a Frankenstein merge.
+        if not _skip_union_rules:
+            merged = _try_list_union(base, current, replayed)
+            if merged is not None:
+                return StructuralResolution(rule="list_union", text=merged)
+            merged = _try_dict_union(base, current, replayed)
+            if merged is not None:
+                return StructuralResolution(rule="dict_union", text=merged)
+            merged = _try_brace_union(base, current, replayed)
+            if merged is not None:
+                return StructuralResolution(rule="brace_union", text=merged)
+            merged = _try_insertion_union(base, current, replayed)
+            if merged is not None:
+                return StructuralResolution(rule="insertion_union", text=merged)
+            # Convergent-addition merge: when both sides independently added the
+            # same content (overlapping adds), keep one copy + append unique extras.
+            # Covers the both_add shape where additions overlap but aren't disjoint.
+            merged = _try_convergent_addition_merge(base, current, replayed)
+            if merged is not None:
+                return StructuralResolution(rule="convergent_addition_merge", text=merged)
+            merged = _try_directive_union(unit)
+            if merged is not None:
+                return StructuralResolution(rule="directive_union", text=merged)
 
         # Partial-disjoint merge (last-resort deterministic): when ALL rules
         # above declined due to a small overlap (1-3 base lines both sides
