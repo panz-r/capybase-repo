@@ -3790,14 +3790,27 @@ class Orchestrator:
             "delete_side", "identical_sides", "one_sided_change",
             "disjoint_edits", "zealous_merge", "entity_disjoint",
             "refactoring_aware_merge",
-            # token_disjoint reassembles tokens from the input sides — it
-            # doesn't invent new code. The line-expansion guard (in the rule
-            # itself) handles the unsafe rewrite-vs-edit case. Keeping it in
-            # fast_verify avoids ~40s per unit on large files (14 × 40s = 560s
-            # on the 25K-line json.hpp amalgamated header).
-            "token_disjoint",
         })
         _fast = result.rule in _STRUCTURE_PRESERVING_RULES
+        # Shape-conditional fast_verify for token_disjoint: use fast_verify
+        # when the conflict shape is stable (both sides ~same line count as
+        # base), but switch to full verify when the shape is unstable (one side
+        # is a rewrite — the line-expansion guard is about to decline anyway,
+        # so the verify cost is moot). This gives performance on large files
+        # (14 × 0.1s vs 14 × 40s) while catching semantic defects on unstable
+        # shapes. (Reviewer §4 refinement: don't use a static classification.)
+        if result.rule == "token_disjoint":
+            _base_nb = sum(1 for l in (unit.base.text or "").split("\n") if l.strip())
+            _cur_nb = sum(1 for l in (unit.current.text or "").split("\n") if l.strip())
+            _rep_nb = sum(1 for l in (unit.replayed.text or "").split("\n") if l.strip())
+            if _base_nb > 0:
+                _cur_ratio = _cur_nb / _base_nb
+                _rep_ratio = _rep_nb / _base_nb
+                # Stable: both sides within 2x of base → safe for fast_verify.
+                # Unstable: one side >2x → use full verify (catches garbled splice).
+                _fast = (_cur_ratio <= 2.0 and _rep_ratio <= 2.0)
+            else:
+                _fast = False  # empty base → always full verify
         import time as _vt
         _vt0 = _vt.monotonic()
         validation = self.verification.verify(unit, cand, fast_verify=_fast)
@@ -6738,6 +6751,7 @@ class Orchestrator:
                     validation=escalated_unit.validation,
                     consensus=_consensus,
                 )
+                self._dump_conflict_bundles(result)
                 return result
             # Splice every accepted resolution in one offset-correct batch.
             # (For a whole_file unit the resolved text IS the file —
@@ -9700,6 +9714,54 @@ class Orchestrator:
             unit_id=outcome.unit.unit_id,
         )
         return attempt
+
+    def _dump_conflict_bundles(self, result: StepResult) -> None:
+        """Write runtime conflict inputs for non-PASS outcomes.
+
+        For every unit in an escalated step, dump the exact base/current/
+        replayed/refined texts + metadata to ``final/debug/<unit_id>/``.
+        This lets future investigations reproduce the exact runtime conflict
+        without guessing whether the rule saw diff3-refined or whole-file
+        sides. Pure instrumentation — no behavioral change.
+        """
+        try:
+            import json as _json_dbg
+            debug_root = self.paths.final / "debug"
+            for outcome in result.outcomes:
+                unit = outcome.unit
+                safe_id = unit.unit_id.replace("/", "_").replace(":", "_")
+                d = debug_root / safe_id
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "base.txt").write_text(unit.base.text or "", encoding="utf-8")
+                (d / "current.txt").write_text(unit.current.text or "", encoding="utf-8")
+                (d / "replayed.txt").write_text(unit.replayed.text or "", encoding="utf-8")
+                refined = unit.refined_sides
+                if refined:
+                    (d / "refined_current.txt").write_text(refined[0], encoding="utf-8")
+                    (d / "refined_base.txt").write_text(refined[1], encoding="utf-8")
+                    (d / "refined_replayed.txt").write_text(refined[2], encoding="utf-8")
+                meta = {
+                    "unit_id": unit.unit_id,
+                    "path": unit.path,
+                    "language": unit.language,
+                    "marker_span": list(unit.marker_span) if unit.marker_span else None,
+                    "parent_unit_id": unit.structural_metadata.get("parent_unit_id"),
+                    "parent_has_asymmetry": unit.structural_metadata.get("parent_has_asymmetry", False),
+                    "has_refined_sides": refined is not None,
+                    "escalated": outcome.accepted is None,
+                    "reason": outcome.reason or "",
+                }
+                if outcome.accepted:
+                    (d / "candidate.txt").write_text(
+                        outcome.accepted.resolved_text or "", encoding="utf-8")
+                    meta["resolved_via"] = outcome.accepted.provenance or ""
+                elif outcome.attempts:
+                    (d / "last_attempt.txt").write_text(
+                        outcome.attempts[-1].resolved_text or "", encoding="utf-8")
+                (d / "metadata.json").write_text(
+                    _json_dbg.dumps(meta, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001 — instrumentation only
+            pass
 
     def _record_outcomes_to_memory(self, result: StepResult) -> None:
         """Append labeled outcomes to the experience store for RAG/calibration.

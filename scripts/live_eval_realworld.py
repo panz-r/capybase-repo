@@ -1116,6 +1116,11 @@ def main():
     # the system produced, it's a case git already resolved cleanly.
     real_conflicts = [r for r in results if r.terminal_reason != "SAFE_SKIP"]
     real_pass = sum(1 for r in real_conflicts if r.verdict == "PASS")
+    safe_skip_ct = sum(1 for r in results if r.terminal_reason == "SAFE_SKIP")
+    # Explicit denominator breakdown so pass-rate comparisons are meaningful
+    # across runs (Sprint 8: 64/76 vs Sprint 9: 52/75 — the denominator
+    # changed by 1 with no explanation).
+    print(f"total: {len(results)} | SAFE_SKIP: {safe_skip_ct} | real conflicts: {len(real_conflicts)}")
     if real_conflicts:
         print(f"real-conflict PASS rate: {real_pass}/{len(real_conflicts)} = "
               f"{real_pass/len(real_conflicts)*100:.0f}%")

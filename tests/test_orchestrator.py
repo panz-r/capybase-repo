@@ -1017,27 +1017,30 @@ def test_no_progress_guard_fires_on_identical_non_needs_human(repo):
     )
 
 
-def test_structure_preserving_rules_includes_token_disjoint():
-    """token_disjoint must be in the _STRUCTURE_PRESERVING_RULES set so it
-    uses fast_verify. Removing it adds ~40s/unit for ccs_syntax on large files
-    (14 × 40s = 560s), causing timeouts on the 25K-line amalgamated header.
-    Regression: commit 16807fe removed it, causing nlohmann-0017 to timeout."""
-    import ast
-    # Parse the orchestrator source to extract the frozenset literal
+def test_structure_preserving_rules_and_token_disjoint_shape_conditional():
+    """token_disjoint uses SHAPE-CONDITIONAL fast_verify: fast when both sides
+    are within 2x of the base (stable), full when one side is a rewrite
+    (unstable). This gives performance on large files while catching garbled
+    splices. insertion_union must NOT be in the static set (needs full verify).
+    Regression: commit 16807fe removed token_disjoint from fast_verify entirely,
+    causing nlohmann-0017 to timeout at 14 × 40s = 560s overhead."""
+    # The static set must NOT include token_disjoint (it's handled shape-
+    # conditionally) and must NOT include insertion_union.
     src = open("src/capybase/orchestrator.py").read()
-    # Find the _STRUCTURE_PRESERVING_RULES frozenset
     idx = src.index("_STRUCTURE_PRESERVING_RULES = frozenset({")
-    # Extract the set contents
     start = src.index("{", idx)
     end = src.index("})", start) + 2
     set_str = src[idx:end]
-    assert '"token_disjoint"' in set_str, (
-        "token_disjoint must be in _STRUCTURE_PRESERVING_RULES (fast_verify) "
-        "to avoid ~40s/unit ccs_syntax overhead on large files"
+    assert '"token_disjoint"' not in set_str, (
+        "token_disjoint is handled shape-conditionally, not via the static set"
     )
     assert '"insertion_union"' not in set_str, (
         "insertion_union must NOT be in _STRUCTURE_PRESERVING_RULES — "
         "it needs full verify (can produce invalid unions)"
+    )
+    # The shape-conditional logic must exist for token_disjoint
+    assert 'result.rule == "token_disjoint"' in src, (
+        "token_disjoint must have shape-conditional fast_verify logic"
     )
 
 
