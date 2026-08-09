@@ -835,21 +835,27 @@ def _try_mechanical_reapply_merge(
     if any(i1 == i2 for i1, i2, _ in mech_ops):
         return None
 
-    # Line-expansion input guard: if the base is much shorter (fewer non-blank
-    # lines) than the semantic side, the semantic side rewrote the base into
-    # multiple lines. The mechanical side's token substitutions were computed
-    # against the short base — applying them to the rewritten text can mix
-    # variables from different lines (the mechanical diff sees a 1-line base and
-    # treats a token change as a rename, but the tokens actually belong to
-    # different variables on different lines of the rewrite). Decline so the
-    # cascade continues to the LLM. (Catches clickhouse-0024 where a 1-line
-    # base was expanded by the semantic side into 4 lines, and the mechanical
-    # substitution wrongly renamed `column` to `inner_ref` — different variables
-    # from different lines.)
-    _base_nb = sum(1 for l in base.split("\n") if l.strip())
-    _sem_nb = sum(1 for l in sem_text.split("\n") if l.strip())
-    if _base_nb > 0 and _sem_nb > _base_nb * 2:
-        return None  # semantic side rewrote the base — not safe for token reuse
+    # Substitution-context safety guard: for each mechanical substitution, check
+    # that the anchor tokens (the tokens being replaced) occur UNAMBIGUOUSLY in
+    # the semantic text. If the anchor appears multiple times, the substitution
+    # could map one variable to a different variable's position — semantically
+    # wrong even though the text looks plausible. (Replaces the coarse line-
+    # expansion guard: instead of declining based on line-count ratio, we check
+    # the actual substitution ambiguity. This allows clickhouse-0017 where the
+    # substitution is unambiguous, while still blocking clickhouse-0024 where
+    # `column` appears at multiple positions in the rewrite.)
+    sem_toks = _tokenize(sem_text)
+    for i1_m, i2_m, repl_m in mech_ops:
+        anchor_m = bt[i1_m:i2_m]
+        if not anchor_m:
+            continue  # pure insertion (already filtered above, but be safe)
+        occurrences = _count_subsequence(sem_toks, anchor_m)
+        if occurrences > 1:
+            # Ambiguous: the anchor token(s) appear multiple times in the
+            # semantic text. The substitution could apply to the wrong one.
+            return None
+        # If occurrences == 0, the semantic rewrite removed those tokens —
+        # the substitution will be skipped by the re-application loop anyway.
 
     # Build the semantic side's token sequence. We'll apply mechanical subs
     # onto it. The semantic side may have completely different tokens, so we
@@ -915,6 +921,24 @@ def _find_subsequence(haystack: list[str], needle: list[str]) -> int:
         if haystack[i:i + m] == needle:
             return i
     return -1
+
+
+def _count_subsequence(haystack: list[str], needle: list[str]) -> int:
+    """Count non-overlapping occurrences of ``needle`` in ``haystack``."""
+    if not needle:
+        return 0
+    n, m = len(haystack), len(needle)
+    if m > n:
+        return 0
+    count = 0
+    i = 0
+    while i <= n - m:
+        if haystack[i:i + m] == needle:
+            count += 1
+            i += m
+        else:
+            i += 1
+    return count
 
 
 # ---------------------------------------------------------------------------
