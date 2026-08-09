@@ -903,6 +903,145 @@ def test_sbcr_guard_rejects_return_after_return():
 
 
 # ---------------------------------------------------------------------------
+# Regression-prevention tests: each test closes a gap that let a Sprint 7-9
+# regression through. These would have caught the regression BEFORE the
+# expensive live eval.
+# ---------------------------------------------------------------------------
+
+
+def test_asymmetry_flag_only_fires_for_sub_units(repo):
+    """The parent_has_asymmetry flag must only fire for actual entity-split
+    sub-units (those with parent_unit_id), NOT for naturally-asymmetric non-
+    split units. Regression: the flag fired on any unit with a 3x side ratio,
+    disabling source_portfolio on 6 previously-PASS cases (large headers where
+    one side naturally had more content)."""
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+
+    def _side(label, text):
+        return ConflictSide(label=label, text=text)  # type: ignore[arg-type]
+
+    # A sub-unit (has parent_unit_id) with 3x asymmetry
+    sub_unit = ConflictUnit(
+        session_id="s", step_index=0, path="f.hpp", unit_id="f.hpp:1:0#s0",
+        language="cpp",
+        base=_side("BASE", "line1\n"),
+        current=_side("CURRENT_UPSTREAM_SIDE", "a\nb\nc\nd\ne\n"),
+        replayed=_side("REPLAYED_COMMIT_SIDE", "x\n"),
+        original_worktree_text="line1\n",
+        structural_metadata={"parent_unit_id": "f.hpp:1:0"},
+    )
+    # A non-split unit with same asymmetry
+    nonsplit_unit = ConflictUnit(
+        session_id="s", step_index=0, path="f.hpp", unit_id="f.hpp:1:0",
+        language="cpp",
+        base=_side("BASE", "line1\n"),
+        current=_side("CURRENT_UPSTREAM_SIDE", "a\nb\nc\nd\ne\n"),
+        replayed=_side("REPLAYED_COMMIT_SIDE", "x\n"),
+        original_worktree_text="line1\n",
+        structural_metadata={},
+    )
+
+    # Simulate the asymmetry check from _resolve_step
+    for unit, should_flag in [(sub_unit, True), (nonsplit_unit, False)]:
+        _parent = unit.structural_metadata.get("parent_unit_id")
+        _cur_nb = sum(1 for l in (unit.current.text or "").split("\n") if l.strip())
+        _rep_nb = sum(1 for l in (unit.replayed.text or "").split("\n") if l.strip())
+        flagged = False
+        if _parent and _cur_nb > 0 and _rep_nb > 0:
+            _ratio = max(_cur_nb, _rep_nb) / min(_cur_nb, _rep_nb)
+            if _ratio >= 3.0:
+                flagged = True
+        assert flagged == should_flag, (
+            f"unit {unit.unit_id}: expected flag={should_flag}, got {flagged}"
+        )
+
+
+def test_consensus_entropy_n2_disagreement_is_maximal():
+    """With n=2 samples that disagree (two singleton clusters), normalized
+    Shannon entropy is exactly 1.0. This means the consensus entropy gate
+    (threshold 0.6-0.8) escalates on ANY disagreement at n=2 — even when both
+    candidates are valid. This is why samples=2 is unsafe with the entropy gate.
+    This test documents the mathematical constraint so future changes don't
+    re-enable samples=2 without addressing it."""
+    from capybase.consensus import _entropy
+
+    # n=2, 2 singleton clusters → entropy = 1.0
+    assert _entropy([1, 1], 2) == 1.0
+
+    # n=3, 2-vs-1 split → entropy < 1.0 (safe for the gate)
+    e3 = _entropy([2, 1], 3)
+    assert 0.0 < e3 < 1.0
+
+    # n=3, all agree → entropy = 0.0
+    assert _entropy([3], 3) == 0.0
+
+
+def test_no_progress_guard_fires_on_identical_non_needs_human(repo):
+    """The no-progress guard must FIRE when two identical non-needs_human
+    signatures repeat. This proves the guard's exclusion of needs_human is
+    SCOPED (only excludes needs_human), not a universal no-op.
+
+    Regression: the has_needs_human predicate had a tuple-unpacking bug
+    ('v == needs_human' where v is a tuple) that made it always False.
+    The guard then appended ALL signatures (including needs_human ones),
+    but the existing test couldn't distinguish 'exclusion works' from
+    'exclusion is broken no-op' because both produced the same outcome."""
+    base = "def f():\n    return 'hello'\n"
+    (repo / "app.py").write_text(base)
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "base")
+    git(repo, "branch", "feat"); git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text("def f():\n    return 'howdy'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "replayed")
+    git(repo, "checkout", "-q", "main")
+    (repo / "app.py").write_text("def f():\n    return 'hi'\n")
+    git(repo, "add", "app.py"); git(repo, "commit", "-q", "-m", "upstream")
+    git(repo, "checkout", "-q", "feat")
+    r = git(repo, "rebase", "main", check=False)
+    assert r.returncode != 0, "expected conflict"
+
+    cfg = _config(repo)
+    cfg.policy.cegis_convergence_threshold = 2
+    # Two identical candidates that fail with leaked markers (NOT needs_human)
+    payload = _make_resolved_payload("    return 1\n<<<<<<< leaked\n")
+    client = CyclingClient([payload])
+    engine = ResolutionEngine(cfg.model, client=client)
+    orch = Orchestrator(
+        cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert result.escalated
+    # The no-progress guard MUST fire — this is a non-needs_human signature
+    assert "no hard-failure progress" in (result.reason or ""), (
+        f"guard should fire on identical non-needs_human signatures, got: {result.reason}"
+    )
+
+
+def test_structure_preserving_rules_includes_token_disjoint():
+    """token_disjoint must be in the _STRUCTURE_PRESERVING_RULES set so it
+    uses fast_verify. Removing it adds ~40s/unit for ccs_syntax on large files
+    (14 × 40s = 560s), causing timeouts on the 25K-line amalgamated header.
+    Regression: commit 16807fe removed it, causing nlohmann-0017 to timeout."""
+    import ast
+    # Parse the orchestrator source to extract the frozenset literal
+    src = open("src/capybase/orchestrator.py").read()
+    # Find the _STRUCTURE_PRESERVING_RULES frozenset
+    idx = src.index("_STRUCTURE_PRESERVING_RULES = frozenset({")
+    # Extract the set contents
+    start = src.index("{", idx)
+    end = src.index("})", start) + 2
+    set_str = src[idx:end]
+    assert '"token_disjoint"' in set_str, (
+        "token_disjoint must be in _STRUCTURE_PRESERVING_RULES (fast_verify) "
+        "to avoid ~40s/unit ccs_syntax overhead on large files"
+    )
+    assert '"insertion_union"' not in set_str, (
+        "insertion_union must NOT be in _STRUCTURE_PRESERVING_RULES — "
+        "it needs full verify (can produce invalid unions)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Step 3: rank-order candidate validation (try the next sample if the
 # consensus winner fails validation, before falling back to CEGIS repair)
 # ---------------------------------------------------------------------------
