@@ -151,7 +151,7 @@ def _classify_terminal_reason(reason: str) -> str:
     if "resurrection" in r:
         return "SAFE_STOP"
     # Safety skips (not real conflicts).
-    if "no conflict" in r or "skipped" in r:
+    if "no conflict" in r or "skipped (no conflict)" in r:
         return "SAFE_SKIP"
     if "too large" in r or "oversized" in r:
         return "OVERSIZED"
@@ -499,11 +499,11 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # Without this reserve, files that fit the marker threshold but push the
     # total prompt past the model's effective limit return empty responses.
     cfg.model.completion_reserve = int(os.environ.get("CAPYBASE_COMPLETION_RESERVE", "2048"))
-    # Self-consistency with 2 samples: gives the intent coverage ranker a
-    # second candidate to choose from. Only costs an extra model call for units
-    # that reach the LLM (deterministic resolver handles most without it).
-    cfg.model.samples = 2
-    cfg.model.enable_self_consistency = True
+    # Self-consistency is DISABLED (samples=1). With n=2, Shannon entropy is
+    # binary {0,1}, so the consensus entropy gate escalates on ANY disagreement
+    # — even when both candidates are valid. The intent coverage ranker still
+    # runs (it's a no-op with 1 candidate). Enable with samples>=3 (odd) for a
+    # stronger model.
     # Test gate:
     # - Python: py_compile (always available)
     # - Rust with full crate: the orchestrator's _run_cargo_syntax_check runs

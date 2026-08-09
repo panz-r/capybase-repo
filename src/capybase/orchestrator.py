@@ -3790,6 +3790,12 @@ class Orchestrator:
             "delete_side", "identical_sides", "one_sided_change",
             "disjoint_edits", "zealous_merge", "entity_disjoint",
             "refactoring_aware_merge",
+            # token_disjoint reassembles tokens from the input sides — it
+            # doesn't invent new code. The line-expansion guard (in the rule
+            # itself) handles the unsafe rewrite-vs-edit case. Keeping it in
+            # fast_verify avoids ~40s per unit on large files (14 × 40s = 560s
+            # on the 25K-line json.hpp amalgamated header).
+            "token_disjoint",
         })
         _fast = result.rule in _STRUCTURE_PRESERVING_RULES
         import time as _vt
@@ -6625,7 +6631,11 @@ class Orchestrator:
                 # on each sub-unit fragment.)
                 _cur_nb = sum(1 for l in (unit.current.text or "").split("\n") if l.strip())
                 _rep_nb = sum(1 for l in (unit.replayed.text or "").split("\n") if l.strip())
-                if _cur_nb > 0 and _rep_nb > 0:
+                # Only flag asymmetry for ACTUAL sub-units of entity-split parents.
+                # Non-split units may have natural asymmetry (e.g. large headers
+                # where one side added more content) — that's not the rewrite-vs-
+                # edit pattern the flag was designed to catch.
+                if _parent and _cur_nb > 0 and _rep_nb > 0:
                     _ratio = max(_cur_nb, _rep_nb) / min(_cur_nb, _rep_nb)
                     if _ratio >= 3.0:
                         unit.structural_metadata["parent_has_asymmetry"] = True
@@ -9313,7 +9323,12 @@ class Orchestrator:
                 # The guard still catches genuine compiler-error cycling (its
                 # primary purpose): those signatures contain syntax/structural
                 # validators, not needs_human.
-                has_needs_human = any(v == "needs_human" for v, _ in sig)
+                # sig is frozenset(Counter(...).items()) where each item is
+                # ((validator, normalized_msg), count). Unpack correctly.
+                has_needs_human = any(
+                    validator == "needs_human"
+                    for (validator, _msg), _cnt in sig
+                )
                 if not has_needs_human:
                     outcome._recent_hard_failure_sigs.append(sig)
                     # Use a window WIDER than the threshold so alternating
