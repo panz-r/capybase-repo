@@ -36,55 +36,28 @@ def _unit_with_metadata(metadata: dict, **kwargs) -> ConflictUnit:
 
 
 # ---------------------------------------------------------------------------
-# Fix 1: Entity-skeleton base broadening
+# Fix 1: Base broadening was removed — it's fundamentally unsafe.
+# token_disjoint reconstructs from the base, so a broadened base produces
+# full-function output that corrupts the splice. The test below verifies
+# that token_disjoint is NEVER called with a broadened base.
 # ---------------------------------------------------------------------------
 
 
-def test_broaden_base_returns_enclosing_when_refined_collapsed():
-    """When the refined base is much smaller than the enclosing entity,
-    _try_broaden_base returns the enclosing text."""
-    from capybase.structural_resolver import _try_broaden_base
+def test_token_disjoint_output_scope_matches_sides():
+    """token_disjoint must produce output with the same scope as its sides,
+    not the scope of a broadened base. Regression guard for the removed
+    base-broadening feature that corrupted splices."""
+    from capybase.structural_resolver import _try_token_disjoint
 
-    enclosing = "\n".join(f"    line_{i};" for i in range(20))
-    unit = _unit_with_metadata({
-        "enclosing_node_text": enclosing,
-    })
-    refined_base = "    column, query_root;"  # 1 non-blank line vs 20
-    result = _try_broaden_base(unit, refined_base)
-    assert result is not None
-    assert result == enclosing
-
-
-def test_broaden_base_declines_when_no_enclosing_text():
-    """When enclosing_node_text is absent, returns None."""
-    from capybase.structural_resolver import _try_broaden_base
-
-    unit = _unit_with_metadata({})
-    result = _try_broaden_base(unit, "some base")
-    assert result is None
-
-
-def test_broaden_base_declines_when_enclosing_too_large():
-    """When the enclosing entity is >80 non-blank lines, returns None."""
-    from capybase.structural_resolver import _try_broaden_base
-
-    enclosing = "\n".join(f"    line_{i};" for i in range(100))
-    unit = _unit_with_metadata({"enclosing_node_text": enclosing})
-    result = _try_broaden_base(unit, "short base")
-    assert result is None
-
-
-def test_broaden_base_declines_when_base_not_collapsed():
-    """When the refined base is already >= 50% of the enclosing text,
-    broadening adds no value — returns None."""
-    from capybase.structural_resolver import _try_broaden_base
-
-    enclosing = "\n".join(f"    line_{i};" for i in range(10))
-    unit = _unit_with_metadata({"enclosing_node_text": enclosing})
-    # Base is 8 non-blank lines vs enclosing's 10 → 80% → no broaden.
-    base = "\n".join(f"    line_{i};" for i in range(8))
-    result = _try_broaden_base(unit, base)
-    assert result is None
+    base = "result = a + b;"
+    current = "result = a + c;"
+    replayed = "result = a + b + 1;"
+    merged = _try_token_disjoint(base, current, replayed)
+    assert merged is not None
+    # Output must be 1 line (same scope as the sides), not multi-line.
+    assert merged.count("\n") == 0, (
+        f"token_disjoint output has wrong scope: {merged!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

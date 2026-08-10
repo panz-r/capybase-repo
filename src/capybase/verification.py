@@ -2799,15 +2799,16 @@ class CcsSyntaxValidator(_StandaloneSyntaxValidator):
         else:
             suffix = ".cpp" if is_cpp else ".c"
             timeout = 30.0
-        # Pass include paths for headers so gcc can resolve sibling headers
-        # defining project-internal types. The repo root + file directory
-        # cover most #include "..." directives.
-        include_paths = None
-        if _is_header and hasattr(cfg, "_repo_root"):
-            include_paths = [str(cfg._repo_root)]
+        # Include paths: the per-unit Phase A gate doesn't have access to the
+        # repo root (only Phase B verify_file does). Headers compile without
+        # include paths — the semantic-error filter defers "unknown type name"
+        # as non-resolution errors. Only genuine parse errors surface as hard
+        # failures, which is the primary goal. Include-path resolution for
+        # headers is a future improvement (requires threading repo_root
+        # through VerificationContext).
         return _compile_ccs(
             spliced, cc_path=tool, std=std, suffix=suffix,
-            timeout=timeout, include_paths=include_paths,
+            timeout=timeout,
         )
 
     def _is_resolution_error(self, msg: str) -> bool:
