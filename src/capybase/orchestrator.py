@@ -9788,11 +9788,20 @@ class Orchestrator:
                 # co-occur and retry_count never grows (risk gates on
                 # retry_count < budget, which stays true forever).
                 _reasons_text = " ".join(decision.reasons or []).lower()
+                # Match against the actual validator warning messages (which
+                # are in `soft` as "validator: message" strings). Use terms
+                # that appear in the real messages, not the human-readable
+                # defaults (which soft always overrides).
                 _is_content_loss_retry = any(
                     term in _reasons_text
                     for term in (
-                        "dropped a side", "intent coverage", "unattributed",
-                        "dependency", "later commit", "copied one side",
+                        "drop a side", "drops a side", "dropped a side",
+                        "copy one side", "copies one side", "copied one side",
+                        "side's additions", "additions",
+                        "intent_coverage", "coverage below",
+                        "unattributed",
+                        "referenced_symbol", "dependency",
+                        "future_obligation", "later commit",
                     )
                 )
                 if _is_content_loss_retry:
