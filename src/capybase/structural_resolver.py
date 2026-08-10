@@ -989,8 +989,18 @@ def _try_partial_disjoint_merge(base: str, current: str, replayed: str) -> str |
     # Partition into zones. For the pre/post zones, we need to reconstruct
     # each side's version of those base lines so we can pick the changed one.
     # Walk the opcodes to map base ranges → side ranges.
+    #
+    # Straddle guard: a replace opcode whose base span crosses a zone boundary
+    # (e.g. base[0:2] when the zone is [0,1)) would be emitted into BOTH zones,
+    # duplicating content. We detect this and signal the caller to decline.
+    _straddled = [False]  # mutable closure flag
+
     def _zone_text(side_lines: list[str], z_start: int, z_end: int) -> str:
-        """Reconstruct ``side_lines`` for base range [z_start, z_end)."""
+        """Reconstruct ``side_lines`` for base range [z_start, z_end).
+
+        Sets the _straddled flag if a replace opcode's base span crosses the
+        zone boundary — the caller must check this and decline.
+        """
         matcher = line_matcher(base_lines, side_lines)
         out: list[str] = []
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
@@ -1004,6 +1014,13 @@ def _try_partial_disjoint_merge(base: str, current: str, replayed: str) -> str |
             elif tag in ("replace", "insert"):
                 # If the replace/insert overlaps the zone, emit the side's version.
                 if i1 < z_end and i2 > z_start:
+                    # Straddle check: the opcode's base span crosses a zone
+                    # boundary. Splitting the replacement proportionally is
+                    # unreliable (we don't know which side lines map to which
+                    # base lines within a replace). Decline the whole merge.
+                    if i1 < z_start or i2 > z_end:
+                        _straddled[0] = True
+                        return ""
                     out.extend(side_lines[j1:j2])
             elif tag == "delete":
                 pass  # deleted lines don't appear in the side's zone
@@ -1023,6 +1040,13 @@ def _try_partial_disjoint_merge(base: str, current: str, replayed: str) -> str |
     core_cur = _zone_text(cur_lines, overlap_start, overlap_end)
     core_rep = _zone_text(rep_lines, overlap_start, overlap_end)
     core_base = "\n".join(base_lines[overlap_start:overlap_end])
+
+    # Straddle guard: if any _zone_text call detected a replace opcode
+    # crossing a zone boundary, decline — proportional splitting is
+    # unreliable and would duplicate content. (Fixes a defect where a
+    # one-sided edit spanning the pre/core boundary was emitted into both.)
+    if _straddled[0]:
+        return None
 
     # Resolve each zone.
     # Pre/post zones: deterministic — pick whichever side changed (or base if
@@ -1779,35 +1803,39 @@ def _try_convergent_addition_merge(base: str, current: str, replayed: str) -> st
     if _additions_have_same_name_conflict(cur_flat, rep_flat):
         return None
     # Build the merge: walk base, at each anchor emit current's additions first,
-    # then any replayed additions not already emitted. Both sides check
-    # emitted_added so shared content at different anchors is deduplicated.
-    emitted_added: set[str] = set()
+    # then any replayed additions not already emitted. Only SHARED lines (present
+    # in both sides' additions) are deduplicated across anchors — lines that
+    # repeat WITHIN one side's own additions (e.g. multiple break; statements in
+    # a switch) are legitimate repetitions and must NOT be collapsed.
+    emitted_shared: set[str] = set()
     out: list[str] = []
     for i, bl in enumerate(base_lines):
         if i in cur_ins:
             for ln in cur_ins[i]:
-                if ln.strip() and ln in emitted_added:
+                # Only deduplicate shared lines (in both sides) that were
+                # already emitted. Non-shared lines always pass through.
+                if ln.strip() and ln in shared and ln in emitted_shared:
                     continue
                 out.append(ln)
-                if ln.strip():
-                    emitted_added.add(ln)
+                if ln.strip() and ln in shared:
+                    emitted_shared.add(ln)
         if i in rep_ins:
             for ln in rep_ins[i]:
-                if ln.strip() and ln in emitted_added:
+                if ln.strip() and ln in shared and ln in emitted_shared:
                     continue
                 out.append(ln)
-                if ln.strip():
-                    emitted_added.add(ln)
+                if ln.strip() and ln in shared:
+                    emitted_shared.add(ln)
         out.append(bl)
     # Trailing insertions.
     for ln in cur_ins.get(len(base_lines), []):
-        if ln.strip() and ln in emitted_added:
+        if ln.strip() and ln in shared and ln in emitted_shared:
             continue
         out.append(ln)
-        if ln.strip():
-            emitted_added.add(ln)
+        if ln.strip() and ln in shared:
+            emitted_shared.add(ln)
     for ln in rep_ins.get(len(base_lines), []):
-        if ln.strip() and ln in emitted_added:
+        if ln.strip() and ln in shared and ln in emitted_shared:
             continue
         out.append(ln)
     return "\n".join(out)

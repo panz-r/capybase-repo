@@ -1203,30 +1203,32 @@ def _try_deterministic_cc_repair(
             repaired = "\n".join(lines)
 
     elif category == "stray_character" and target_idx is not None:
-        # gcc reports the byte position of the stray char. For ASCII strays,
-        # delete the non-ASCII byte. For control chars, strip them.
-        if target_idx < len(lines):
-            line = lines[target_idx]
-            # Remove non-ASCII bytes (stray chars are typically high bytes).
-            cleaned = "".join(c for c in line if ord(c) < 128)
-            if cleaned != line:
-                lines[target_idx] = cleaned
-                repaired = "\n".join(lines)
+        # gcc reports the byte position of the stray char. Previously this
+        # stripped ALL non-ASCII bytes from the target line, corrupting
+        # legitimate UTF-8 in string literals and comments (e.g. "café").
+        # The repair is more dangerous than the defect — stray characters in
+        # merge output are rare, and the brace-balance gate can't catch
+        # string/comment corruption. Disabled; defer to the LLM repair path.
+        pass
 
     elif category == "unterminated_literal" and target_idx is not None:
         # Add the missing closing quote. gcc reports the line where the
         # literal starts (or ends without termination).
         if target_idx < len(lines):
             line = lines[target_idx]
-            # Count unescaped quotes — if odd, append the matching quote.
+            # Strip line comments before counting quotes — a `'` or `"`
+            # inside a // comment (e.g. `// don't`) must not trigger a
+            # stray quote append.
+            _comment_pos = line.find("//")
+            _code_part = line[:_comment_pos] if _comment_pos >= 0 else line
             for q in ('"', "'", "*/"):
                 count = 0
                 i = 0
-                while i < len(line):
-                    if line[i] == "\\" and i + 1 < len(line):
+                while i < len(_code_part):
+                    if _code_part[i] == "\\" and i + 1 < len(_code_part):
                         i += 2
                         continue
-                    if line[i:i+len(q)] == q:
+                    if _code_part[i:i+len(q)] == q:
                         count += 1
                         i += len(q)
                         continue
@@ -7046,8 +7048,8 @@ class Orchestrator:
                     # `use` statements introduced when the model's per-unit
                     # resolution adds an import that already exists elsewhere
                     # in the file. The #1 cause of WHOLE_FILE_FAILED.
+                    pre_dedup_buffer = buffer  # unconditional — referenced below
                     if getattr(self.config.future, "enable_file_linker", True):
-                        pre_dedup_buffer = buffer
                         try:
                             from capybase.file_linker import deduplicate_imports
                             deduped, dedup_count = deduplicate_imports(buffer, language)
@@ -9599,7 +9601,12 @@ class Orchestrator:
                         max_repeat = max(sig_counts.values())
                         if max_repeat >= np_threshold:
                             stalled_sig = sig_counts.most_common(1)[0][0]
-                            validators = sorted({v for v, _ in stalled_sig}) or ["(none)"]
+                            # stalled_sig is frozenset(Counter(...).items())
+                            # where each item is ((validator, msg), count).
+                            # Unpack correctly to get bare validator names.
+                            validators = sorted(
+                                {v for (v, _msg), _cnt in stalled_sig}
+                            ) or ["(none)"]
                             self.journal.emit(
                                 "candidate_rejected",
                                 {"candidate_id": cand.candidate_id,
