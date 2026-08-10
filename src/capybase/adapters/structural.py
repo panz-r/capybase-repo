@@ -638,15 +638,18 @@ def dropped_entities(
     resolved_ents = enumerate_entities(resolved, language)
     if base_ents is None or side_ents is None or resolved_ents is None:
         return None
-    base_names = {e.name for e in base_ents}
-    # Added by the side = name not in base. A dropped entity is one that's
+    # Use (kind, name) identity — a name-only set would treat a side entity as
+    # "in base" even when the base entity is a different kind (e.g. base has
+    # function foo, side adds class foo → wrongly excluded from dropped check).
+    base_ids = {e.identity for e in base_ents}
+    # Added by the side = identity not in base. A dropped entity is one that's
     # UNMATCHED in the resolution (neither same-name nor a recognized rename —
     # including a semantic rename when embedder is given), so a legitimate
     # rename survives rather than counting as a false drop.
     matches = match_entities(side_ents, resolved_ents, embedder=embedder, lang=language)
     dropped: list[Entity] = []
     for m in matches:
-        if m.source.name not in base_names and m.kind == MATCH_UNMATCHED:
+        if m.source.identity not in base_ids and m.kind == MATCH_UNMATCHED:
             dropped.append(m.source)
     return dropped
 
@@ -693,8 +696,11 @@ def preservation_coverage(
     resolved_ents = enumerate_entities(resolved, language)
     if base_ents is None or side_ents is None or resolved_ents is None:
         return None
-    base_names = {e.name for e in base_ents}
-    # Added by the side = name not in base. Of those, the ones UNMATCHED in the
+    # Use (kind, name) identity — a name-only set would treat a side entity as
+    # "in base" even when the base entity is a different kind (e.g. base has
+    # function foo, side adds class foo → wrongly excluded from added check).
+    base_ids = {e.identity for e in base_ents}
+    # Added by the side = identity not in base. Of those, the ones UNMATCHED in the
     # resolution (neither same-name nor a recognized rename — including a
     # semantic rename when embedder is given) are dropped; a rename is preserved
     # (survives under a new name) and so not counted dropped.
@@ -702,7 +708,7 @@ def preservation_coverage(
     added: list[Entity] = []
     dropped: list[Entity] = []
     for m in matches:
-        if m.source.name in base_names:
+        if m.source.identity in base_ids:
             continue  # entity present in base → not an "add" by this side
         added.append(m.source)
         if m.kind == MATCH_UNMATCHED:

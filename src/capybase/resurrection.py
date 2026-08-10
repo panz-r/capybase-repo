@@ -145,16 +145,19 @@ def scan_resurrections(
             stable_blocks: list[ResurrectedBlock] = []
             for blk in candidates:
                 block_lines = blk.text.splitlines()
-                # Convergent-add check: if the majority of the block's non-blank
-                # lines were independently ADDED by the other side (not just
-                # carried forward from base), both sides converged on the same
-                # addition — not a resurrection.
+                # Convergent-add check: if ALL of the block's non-blank lines
+                # were independently ADDED by the other side (not just carried
+                # forward from base), both sides converged on the same addition
+                # — not a resurrection. Requires 100% match (not 80%) to avoid
+                # suppressing genuine resurrections whose block is dominated by
+                # generic boilerplate that the other side independently added
+                # elsewhere (false negative on the resurrection guard).
                 block_nonblank = [ln for ln in block_lines if ln.strip()]
                 if block_nonblank and other_added_lines:
                     in_other = sum(
                         1 for ln in block_nonblank if ln in other_added_lines
                     )
-                    if in_other >= len(block_nonblank) * 0.8:
+                    if in_other == len(block_nonblank):
                         continue  # convergent addition, not a resurrection
                 if blob_seq:
                     stability = classify_deletion_stability(

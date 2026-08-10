@@ -4067,7 +4067,10 @@ def enclosing_unit(ir: FileIR, span: tuple[int, int]) -> StructuralUnit | None:
         nonlocal best
         s0, s1 = u.span
         if s0 <= anchor <= s1:
-            if best is None or (u.span[0] >= best.span[0] and u.span[1] <= best.span[1]):
+            # Pick the SMALLEST enclosing span (deepest nesting). Using span
+            # area rather than pairwise containment makes the selection
+            # order-independent when sibling spans partially overlap.
+            if best is None or (s1 - s0) < (best.span[1] - best.span[0]):
                 best = u
 
     for u in all_units_flat(ir):

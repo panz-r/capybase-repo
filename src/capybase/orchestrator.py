@@ -3947,25 +3947,12 @@ class Orchestrator:
             "refactoring_aware_merge",
         })
         _fast = result.rule in _STRUCTURE_PRESERVING_RULES
-        # Shape-conditional fast_verify for token_disjoint: use fast_verify
-        # when the conflict shape is stable (both sides ~same line count as
-        # base), but switch to full verify when the shape is unstable (one side
-        # is a rewrite — the line-expansion guard is about to decline anyway,
-        # so the verify cost is moot). This gives performance on large files
-        # (14 × 0.1s vs 14 × 40s) while catching semantic defects on unstable
-        # shapes. (Reviewer §4 refinement: don't use a static classification.)
-        if result.rule == "token_disjoint":
-            _base_nb = sum(1 for l in (unit.base.text or "").split("\n") if l.strip())
-            _cur_nb = sum(1 for l in (unit.current.text or "").split("\n") if l.strip())
-            _rep_nb = sum(1 for l in (unit.replayed.text or "").split("\n") if l.strip())
-            if _base_nb > 0:
-                _cur_ratio = _cur_nb / _base_nb
-                _rep_ratio = _rep_nb / _base_nb
-                # Stable: both sides within 2x of base → safe for fast_verify.
-                # Unstable: one side >2x → use full verify (catches garbled splice).
-                _fast = (_cur_ratio <= 2.0 and _rep_ratio <= 2.0)
-            else:
-                _fast = False  # empty base → always full verify
+        # token_disjoint is a recombinant token splice — it ALWAYS gets full
+        # verify (syntax + AST). The line-count ratio is not a sound proxy for
+        # token-splice correctness: a splice on "stable" sides can still produce
+        # garbled output (tokens from different lines interleaved mid-expression).
+        # The shape-conditional fast_verify that was here before was a performance
+        # optimization that broke the rule's documented safety contract.
         import time as _vt
         _vt0 = _vt.monotonic()
         validation = self.verification.verify(unit, cand, fast_verify=_fast)
@@ -4180,8 +4167,19 @@ class Orchestrator:
         # verbatim (current_only/replayed_only) ignores the other side's
         # deletions/replacements — producing a Frankenstein merge. Let the LLM
         # handle it. (Catches the nlohmann-0020 pattern.)
+        #
+        # The parent_has_asymmetry flag is set only for entity-split sub-units
+        # (computed by _compute_parent_deletion_meta). For non-split (whole)
+        # units, compute the side-size ratio directly — a >5x non-blank line
+        # ratio between the two sides indicates one side is a rewrite.
         if unit.structural_metadata.get("parent_has_asymmetry"):
             return None
+        _cur_nb = sum(1 for l in cur.split("\n") if l.strip())
+        _rep_nb = sum(1 for l in rep.split("\n") if l.strip())
+        if _cur_nb > 0 and _rep_nb > 0:
+            _ratio = max(_cur_nb, _rep_nb) / min(_cur_nb, _rep_nb)
+            if _ratio > 5.0:
+                return None  # one side is a rewrite — don't take either verbatim
 
         # Build the candidate portfolio. Each is (id, text, provenance_suffix).
         cur_lines = [l for l in cur.split("\n") if l.strip()]

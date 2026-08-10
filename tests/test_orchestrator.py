@@ -1072,30 +1072,33 @@ def test_no_progress_guard_fires_on_identical_non_needs_human(repo):
     )
 
 
-def test_structure_preserving_rules_and_token_disjoint_shape_conditional():
-    """token_disjoint uses SHAPE-CONDITIONAL fast_verify: fast when both sides
-    are within 2x of the base (stable), full when one side is a rewrite
-    (unstable). This gives performance on large files while catching garbled
-    splices. insertion_union must NOT be in the static set (needs full verify).
-    Regression: commit 16807fe removed token_disjoint from fast_verify entirely,
-    causing nlohmann-0017 to timeout at 14 × 40s = 560s overhead."""
-    # The static set must NOT include token_disjoint (it's handled shape-
-    # conditionally) and must NOT include insertion_union.
+def test_structure_preserving_rules_and_token_disjoint_full_verify():
+    """token_disjoint ALWAYS gets full verify (syntax + AST). The line-count
+    ratio is not a sound proxy for token-splice correctness — a splice on
+    'stable' sides can still produce garbled output. insertion_union must
+    NOT be in the static set (needs full verify).
+
+    Regression: the shape-conditional fast_verify (commit 25c7263) used a
+    line-count ratio to skip syntax/AST validators for 'stable' shapes,
+    contradicting the rule's documented full-verify contract. Removed."""
+    # The static set must NOT include token_disjoint or insertion_union.
     src = open("src/capybase/orchestrator.py").read()
     idx = src.index("_STRUCTURE_PRESERVING_RULES = frozenset({")
     start = src.index("{", idx)
     end = src.index("})", start) + 2
     set_str = src[idx:end]
     assert '"token_disjoint"' not in set_str, (
-        "token_disjoint is handled shape-conditionally, not via the static set"
+        "token_disjoint must NOT be in _STRUCTURE_PRESERVING_RULES — "
+        "it's a recombinant token splice that always needs full verify"
     )
     assert '"insertion_union"' not in set_str, (
         "insertion_union must NOT be in _STRUCTURE_PRESERVING_RULES — "
         "it needs full verify (can produce invalid unions)"
     )
-    # The shape-conditional logic must exist for token_disjoint
-    assert 'result.rule == "token_disjoint"' in src, (
-        "token_disjoint must have shape-conditional fast_verify logic"
+    # The shape-conditional logic must NOT exist for token_disjoint
+    assert 'result.rule == "token_disjoint"' not in src, (
+        "token_disjoint must NOT have shape-conditional fast_verify — "
+        "it always gets full verify (line-count ratio is not a sound proxy)"
     )
 
 
