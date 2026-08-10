@@ -1328,6 +1328,59 @@ def _find_lcs_insertion_point(
     return (error_line - 1) if error_line else None
 
 
+def _try_restore_common_lines(
+    candidate_text: str,
+    base_text: str,
+    current_text: str,
+    replayed_text: str,
+    language: str | None,
+) -> str | None:
+    """Restore lines common to BOTH sides that the candidate dropped.
+
+    A production-safe deterministic post-processor: lines present in both
+    current AND replayed (agreed by both sides) but missing from the
+    candidate are re-inserted at the best-matched position. Only restores
+    side-common lines — never oracle-derived. The result must pass
+    brace-balance check.
+
+    Returns the repaired text, or None if no restoration was possible.
+    """
+    from capybase.verification import _braces_balanced
+
+    cur_lines = set((current_text or "").split("\n"))
+    rep_lines = set((replayed_text or "").split("\n"))
+    common_lines = cur_lines & rep_lines
+
+    cand_lines = candidate_text.split("\n")
+    cand_set = set(cand_lines)
+
+    missing_common = [
+        l for l in common_lines if l.strip() and l not in cand_set
+    ]
+    if not missing_common:
+        return None
+
+    # Try context from base, current, AND replayed — the missing line may
+    # be a side-added line (not in base), so base alone won't provide context.
+    context_sources = [
+        (base_text or "").split("\n"),
+        (current_text or "").split("\n"),
+        (replayed_text or "").split("\n"),
+    ]
+    for line in missing_common[:3]:
+        for ctx_lines in context_sources:
+            best_pos = _find_lcs_insertion_point(
+                cand_lines, line, ctx_lines, error_line=None
+            )
+            if best_pos is not None and 0 <= best_pos <= len(cand_lines):
+                trial = list(cand_lines)
+                trial.insert(best_pos, line)
+                candidate_trial = "\n".join(trial)
+                if _braces_balanced(candidate_trial, language):
+                    return candidate_trial
+    return None
+
+
 def _try_side_consistency_repair(
     failures: list,
     original: str,
@@ -1999,26 +2052,47 @@ def _token_category(tok: str) -> str:
     return tok  # punctuation — kept verbatim for anchor matching
 
 
-def _extract_edit_pattern(base: str, resolved: str) -> list[tuple[str, str, str]] | None:
+def _extract_edit_pattern(base: str, resolved: str) -> list[tuple[str, str, str, str]] | None:
     """Extract a normalized token-level edit pattern from base→resolved.
 
-    Returns a list of ``(base_category_seq, resolved_category_seq, base_raw)``
-    tuples — one per non-equal opcode in the token diff — or None when the
-    pattern is empty or too complex (>10 ops). The ``base_raw`` carries the
-    raw base tokens for anchor matching during instantiation.
+    Returns a list of ``(base_category_seq, resolved_category_seq, base_raw,
+    op_type)`` tuples — one per non-equal opcode in the token diff — or None
+    when the pattern is empty or too complex (>10 ops).
+
+    * ``base_raw`` carries the raw base tokens for anchor matching.
+    * ``op_type`` is ``"replace"`` (default), ``"insert"``, or ``"delete"``.
+
+    For **insert** opcodes (where nothing was removed from base), the anchor
+    is set to the **next base token after the insertion point** — the token
+    the insertion goes *before*. This lets pure-insertion patterns (e.g.
+    ``Type x;`` → ``Type x{};``, which inserts ``{}`` before ``;``) be
+    instantiated on sibling units. Previously, insert opcodes produced an
+    empty anchor and were silently skipped.
     """
     from capybase.diff import line_matcher
     bt = _tokenize_for_pattern(base)
     rt = _tokenize_for_pattern(resolved)
     matcher = line_matcher(bt, rt)
-    pattern: list[tuple[str, str, str]] = []
+    pattern: list[tuple[str, str, str, str]] = []
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             continue
-        base_cats = "".join(_token_category(t) for t in bt[i1:i2])
         repl_cats = "".join(_token_category(t) for t in rt[j1:j2])
-        base_raw = "\x00".join(bt[i1:i2])
-        pattern.append((base_cats, repl_cats, base_raw))
+        if tag == "insert":
+            # Insert: nothing removed from base. Anchor = the base token
+            # right AFTER the insertion point (the token the inserted content
+            # goes before). Critical for nlohmann-0019 shape (insert "{}"
+            # before ";").
+            anchor_tok = bt[i1] if i1 < len(bt) else ""
+            pattern.append(("", repl_cats, anchor_tok, "insert"))
+        elif tag == "delete":
+            base_cats = "".join(_token_category(t) for t in bt[i1:i2])
+            base_raw = "\x00".join(bt[i1:i2])
+            pattern.append((base_cats, "", base_raw, "delete"))
+        else:  # replace
+            base_cats = "".join(_token_category(t) for t in bt[i1:i2])
+            base_raw = "\x00".join(bt[i1:i2])
+            pattern.append((base_cats, repl_cats, base_raw, "replace"))
     if not pattern or len(pattern) > 10:
         return None
     # Length guard: reject when the base or resolved text is too large (the
@@ -2038,22 +2112,33 @@ def _extract_edit_pattern(base: str, resolved: str) -> list[tuple[str, str, str]
 
 
 def _instantiate_pattern(
-    base: str, pattern: list[tuple[str, str, str]],
+    base: str, pattern: list,
 ) -> str | None:
     """Apply a normalized edit pattern to a sibling's base text.
 
     Walks the pattern's ops: for each, finds the raw base anchor in the
-    sibling's tokens by matching the category sequence. If found
-    unambiguously, replaces with the resolved tokens. If ambiguous (anchor
-    appears multiple times) or not found, skips the op.
+    sibling's tokens. If found unambiguously, applies the edit (replace,
+    insert, or delete). If ambiguous (anchor appears multiple times) or
+    not found, skips the op.
 
-    Returns the instantiated resolved text, or None if no ops could be applied
-    (every anchor was ambiguous or missing).
+    Supports three op types (4th tuple element; legacy 3-tuples default to
+    ``"replace"``):
+    * ``"replace"``: replace the anchor tokens with the resolved tokens.
+    * ``"insert"``: insert the resolved tokens BEFORE the anchor token.
+    * ``"delete"``: remove the anchor tokens.
+
+    Returns the instantiated resolved text, or None if no ops could be applied.
     """
     bt = _tokenize_for_pattern(base)
     applied = list(bt)
     any_applied = False
-    for base_cats, repl_cats, base_raw in pattern:
+    for entry in pattern:
+        # Support both 3-tuple (legacy) and 4-tuple patterns.
+        if len(entry) == 4:
+            _base_cats, repl_cats, base_raw, op_type = entry
+        else:
+            _base_cats, repl_cats, base_raw = entry
+            op_type = "replace"
         anchor_toks = base_raw.split("\x00") if base_raw else []
         if not anchor_toks:
             continue
@@ -2064,15 +2149,19 @@ def _instantiate_pattern(
         next_idx = _find_subsequence_simple(applied[idx + len(anchor_toks):], anchor_toks)
         if next_idx >= 0:
             continue
-        # Build the replacement tokens from the category sequence. We can't
-        # recover the original tokens from categories alone, so for literal
-        # patterns (where repl_cats contains no IDENT/NUM), use the category
-        # sequence directly as tokens. For IDENT/NUM patterns, this won't work
-        # — but those are the ambiguous rename cases the guard declines.
+        if op_type == "delete":
+            del applied[idx:idx + len(anchor_toks)]
+            any_applied = True
+            continue
+        # Build the replacement/insertion tokens from the category sequence.
         repl_toks = _category_seq_to_tokens(repl_cats, anchor_toks)
         if repl_toks is None:
             continue  # can't instantiate — has IDENT/NUM we can't resolve
-        applied[idx:idx + len(anchor_toks)] = repl_toks
+        if op_type == "insert":
+            # Insert BEFORE the anchor (don't consume the anchor).
+            applied[idx:idx] = repl_toks
+        else:  # replace
+            applied[idx:idx + len(anchor_toks)] = repl_toks
         any_applied = True
     if not any_applied:
         return None
@@ -2514,6 +2603,61 @@ def _categorize_failure_mode(accepted, outcome) -> str:
         return "json_escape"
 
     return "escalated"
+
+
+def _has_undeclared_side_local_identifier(
+    candidate: str, base: str, current: str, replayed: str,
+) -> str | None:
+    """Detect an identifier used in the sbcr candidate but not declared in it,
+    where the identifier appears in exactly ONE side's text.
+
+    Catches the clickhouse-0041 defect: sbcr interleaved a ``return suffix...``
+    from replayed into a candidate where ``suffix`` was never declared
+    (replayed's declaration was in a part the interleave dropped).
+
+    Conservative: only checks identifiers used in ``return``/``throw``/
+    ``break``/``continue`` statements — the stacking zone where sbcr is most
+    likely to introduce side-local variables. An identifier is "declared" if
+    it appears as a C/C++ declaration (``type name`` pattern) earlier in the
+    candidate, or if it appears 3+ times (likely a parameter or member).
+
+    Returns the undeclared identifier name, or None.
+    """
+    import re as _re
+    from collections import Counter as _Counter
+    if not candidate:
+        return None
+    _term_re = _re.compile(
+        r"^\s*(return|throw|break|continue)\s+(.+?);", _re.MULTILINE
+    )
+    _ident_re = _re.compile(r"[A-Za-z_]\w*")
+    _decl_re = _re.compile(
+        r"\b(?:int|long|short|char|bool|float|double|void|auto|const|unsigned|"
+        r"signed|std::\w+|[A-Z][A-Za-z_]\w*)\s+([a-z_]\w*)\s*[=;,]"
+    )
+    declared = set(_decl_re.findall(candidate))
+    all_cand_ids = _ident_re.findall(candidate)
+    id_counts = _Counter(all_cand_ids)
+    frequent = {ident for ident, cnt in id_counts.items() if cnt >= 3}
+    declared |= frequent
+
+    _reserved = frozenset({
+        "true", "false", "nullptr", "NULL", "0", "1", "this", "self",
+    })
+    for m in _term_re.finditer(candidate):
+        expr = m.group(2)
+        for ident in _ident_re.findall(expr):
+            if ident in _reserved or ident in declared:
+                continue
+            in_base = ident in base
+            in_cur = ident in current
+            in_rep = ident in replayed
+            side_count = sum([in_base, in_cur, in_rep])
+            # Only flag if it's in exactly one side and NOT in base — it's a
+            # side-local variable whose declaration context was likely dropped.
+            if side_count == 1 and not in_base:
+                return ident
+    return None
 
 
 class Orchestrator:
@@ -4266,6 +4410,28 @@ class Orchestrator:
                     reason="consecutive terminator in interleaved text (side consensus)",
                 )
                 return None
+        # Identifier-provenance guard: detect an identifier used in the sbcr
+        # candidate but not declared in it, where the identifier appears in
+        # exactly ONE side (not base, not the other). This catches sbcr
+        # stacking a statement from side B that uses a variable declared only
+        # in side B's context — the clickhouse-0041 defect.
+        _undeclared = _has_undeclared_side_local_identifier(
+            result.text, unit.base.text or "",
+            unit.current.text or "", unit.replayed.text or "",
+        )
+        if _undeclared:
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="sbcr",
+                decision="skip",
+                reason=f"undeclared identifier in sbcr output: {_undeclared}",
+            )
+            self.journal.emit(
+                "combination_declined",
+                {"fitness": round(result.fitness, 4),
+                 "reason": f"undeclared identifier: {_undeclared}"},
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            return None
         validation = self.verification.verify(unit, cand)
         self.journal.emit(
             "combination_resolved",
@@ -5529,6 +5695,44 @@ class Orchestrator:
             unit_id=unit.unit_id,
         )
         return f"history-augmented (confidence {conf.score:.2f})"
+
+    def _try_intent_coverage_repair(
+        self, unit: ConflictUnit, cand: CandidateResolution
+    ) -> CandidateResolution:
+        """Post-process an accepted LLM candidate by restoring dropped
+        side-common lines.
+
+        When the LLM produces a compiling merge but drops 1-2 lines that BOTH
+        sides agreed on, this deterministic step restores them at the
+        best-matched position. Production-safe: only restores lines common to
+        both current AND replayed — never oracle-derived. The result must pass
+        brace-balance check.
+
+        Returns the original candidate unchanged if no restoration was possible
+        or the candidate is deterministic.
+        """
+        if str(getattr(cand, "provenance", "") or "").startswith("deterministic"):
+            return cand
+        repaired = _try_restore_common_lines(
+            cand.resolved_text or "",
+            unit.base.text or "",
+            unit.current.text or "",
+            unit.replayed.text or "",
+            unit.language,
+        )
+        if repaired is not None and repaired != cand.resolved_text:
+            self.journal.emit(
+                "intent_coverage_repair",
+                {"candidate_id": cand.candidate_id,
+                 "lines_diff": repaired.count("\n") - (cand.resolved_text or "").count("\n")},
+                step_index=self.step, path=unit.path,
+                unit_id=unit.unit_id,
+            )
+            return cand.model_copy(update={
+                "resolved_text": repaired,
+                "provenance": (cand.provenance or "plain_llm") + "+intent_coverage",
+            })
+        return cand
 
     def _clear_history_caches(self) -> None:
         """Clear the per-unit history caches (called per step in _resolve_step).
@@ -7075,6 +7279,13 @@ class Orchestrator:
             )
         else:
             self._record_outcomes_to_memory(result)
+        # Dump conflict bundles for NEAR_MATCH debugging: when any unit was
+        # resolved via an LLM candidate (not a deterministic rule), the result
+        # may be just below the sim threshold. Having the runtime inputs lets us
+        # investigate why the model dropped lines or why a guard didn't fire.
+        # Pure instrumentation — no behavioral change.
+        if not result.escalated and self._any_unit_used_llm(result):
+            self._dump_conflict_bundles(result)
         return result
 
     def _reconcile_comments(
@@ -9286,6 +9497,13 @@ class Orchestrator:
                 # and it's a named method (not an inline mutation) so the compat
                 # path is explicit and reasoned.
                 restamp_reason = self._restamp_for_history_augmentation(unit, cand)
+                # Intent-coverage post-processor: if the accepted candidate
+                # dropped lines common to BOTH sides, try to restore them
+                # deterministically. Bridges the 0.94→0.95 gap for
+                # rewrite-vs-edit conflicts where the LLM produces a compiling
+                # merge but drops 1-2 side-common lines. Production-safe: only
+                # restores lines common to both sides, never oracle-derived.
+                cand = self._try_intent_coverage_repair(unit, cand)
                 outcome.accepted = cand
                 outcome.retry_count = retry_count
                 self._record_resolution_attempt(
@@ -9724,6 +9942,20 @@ class Orchestrator:
             unit_id=outcome.unit.unit_id,
         )
         return attempt
+
+    def _any_unit_used_llm(self, result: StepResult) -> bool:
+        """True if any outcome in the step was resolved via an LLM candidate.
+
+        Used to decide whether to dump conflict bundles for NEAR_MATCH
+        debugging — deterministic-only steps don't need runtime input dumps
+        because the resolver is reproducible from the conflict text alone.
+        """
+        for outcome in result.outcomes:
+            if outcome.accepted and not str(
+                getattr(outcome.accepted, "provenance", "") or ""
+            ).startswith("deterministic"):
+                return True
+        return False
 
     def _dump_conflict_bundles(self, result: StepResult) -> None:
         """Write runtime conflict inputs for non-PASS outcomes.
