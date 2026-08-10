@@ -169,6 +169,37 @@ def _normalize(text: str) -> str:
     return "\n".join(" ".join(line.split()) for line in lines)
 
 
+def _classify_conflict_shape(unit: ConflictUnit) -> str:
+    """Classify the conflict shape from cached features for rule routing.
+
+    Returns one of: ``rewrite_vs_edit``, ``pure_insertion``,
+    ``stable_token_edit``, or ``general``. The classification is advisory —
+    it only makes the cascade MORE conservative by skipping rules that are
+    unsafe for certain shapes (e.g. token_disjoint on rewrite_vs_edit).
+
+    Reads ``conflict_features`` and ``merge_direction`` from
+    ``structural_metadata`` — both populated at extraction time.
+    """
+    feats = unit.structural_metadata.get("conflict_features") or {}
+    md = unit.structural_metadata.get("merge_direction") or {}
+    imbalance = feats.get("imbalance_ratio", 1.0)
+    merge_kind = md.get("kind")
+    same_line = feats.get("same_line_overlap", False)
+    # rewrite_vs_edit: one side rewrote, the other made a small edit.
+    # token_disjoint garbles these because the token splice crosses
+    # the rewrite boundary (clickhouse-0024).
+    if imbalance > 3.0 and merge_kind == "both_modify":
+        return "rewrite_vs_edit"
+    # pure_insertion: both sides (or one) added content without modifying base.
+    if merge_kind in ("both_add", "one_unchanged") and not same_line:
+        return "pure_insertion"
+    # stable_token_edit: small balanced conflict where token-level rules
+    # are designed to work.
+    if same_line and imbalance <= 2.0:
+        return "stable_token_edit"
+    return "general"
+
+
 def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
     """Attempt the deterministic resolution rules in priority order.
 
@@ -286,16 +317,25 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         # disjoint and splices both edits in. Scoped to small conflicts (a line
         # budget) so reconstruction stays local. Declines on any token overlap
         # or ambiguous pure-insertion anchors.
-        merged = _try_token_disjoint(base, current, replayed)
-        if merged is not None:
-            return StructuralResolution(rule="token_disjoint", text=merged)
+        #
+        # Shape router: skip token_disjoint on rewrite_vs_edit shapes — the
+        # token splice crosses the rewrite boundary, producing garbled output
+        # (clickhouse-0024). The LLM gets this shape instead.
+        _shape = _classify_conflict_shape(unit)
+        if _shape != "rewrite_vs_edit":
+            merged = _try_token_disjoint(base, current, replayed)
+            if merged is not None:
+                return StructuralResolution(rule="token_disjoint", text=merged)
 
         # Mechanical re-application: when token_disjoint DECLINED because the
         # spans overlap, but one side's changes are purely small mechanical
         # substitutions (API rename, operator keyword lint) and the other side
         # is a wholesale rewrite, take the rewriter's text and re-apply the
         # mechanical substitutions where the base-token anchors survive.
-        merged = _try_mechanical_reapply_merge(base, current, replayed)
+        # Also gated by the shape router — mechanical_reapply is unsafe on
+        # rewrite_vs_edit (the substitution anchors may not survive the rewrite).
+        if _shape != "rewrite_vs_edit":
+            merged = _try_mechanical_reapply_merge(base, current, replayed)
         if merged is not None:
             return StructuralResolution(rule="mechanical_reapply_merge", text=merged)
 
@@ -579,6 +619,36 @@ def _tokenize(text: str) -> list[str]:
     return _TOKEN_RE.findall(text or "")
 
 
+# Token equivalence classes: semantically identical tokens mapped to a canonical
+# form for COMPARISON ONLY (overlap detection, disjointness checking). The
+# original tokens are always preserved in the splice output. This lets the
+# resolver recognize that NULL→nullptr or and→&& are the same change, resolving
+# via identical_sides instead of escalating to the LLM.
+_TOKEN_EQUIV: dict[str, str] = {
+    # Null pointers
+    "NULL": "nullptr",
+    # Boolean literals (C macros)
+    "TRUE": "true", "FALSE": "false",
+    # C++ operator keyword alternatives
+    "and": "&&", "or": "||", "not": "!",
+    "bitand": "&", "bitor": "|", "xor": "^", "compl": "~",
+    "and_eq": "&=", "or_eq": "|=", "xor_eq": "^=", "not_eq": "!=",
+    # std:: prefix normalization (for comparison only)
+    "std::size_t": "size_t", "std::nullptr_t": "nullptr_t",
+    "std::move": "move", "std::forward": "forward",
+}
+
+
+def _norm_tok(tok: str) -> str:
+    """Return the canonical form of a token for comparison purposes."""
+    return _TOKEN_EQUIV.get(tok, tok)
+
+
+def _norm_tokens(toks: list[str]) -> list[str]:
+    """Normalize a token list for comparison (preserves length)."""
+    return [_norm_tok(t) for t in toks]
+
+
 def _detokenize(tokens: list[str]) -> str:
     """Rejoin tokens into the original text (inverse of :func:`_tokenize`)."""
     return "".join(tokens)
@@ -599,9 +669,17 @@ def _token_change_ops(base_toks: list[str], other_toks: list[str]) -> list[tuple
 
     Mirrors :func:`_base_changed_lines` but returns the replacement content too,
     so a disjoint merge can splice each side's replacement into base in one pass.
+
+    Uses token equivalence normalization for the diff: ``NULL`` vs ``nullptr``
+    or ``and`` vs ``&&`` are treated as equal (no change). The original
+    (unnormalized) tokens are returned in the replacement, preserving the
+    actual text for the splice.
     """
     ops: list[tuple[int, int, list[str]]] = []
-    matcher = line_matcher(base_toks, other_toks)
+    # Normalize for comparison; the replacement uses original tokens.
+    nb = _norm_tokens(base_toks)
+    no = _norm_tokens(other_toks)
+    matcher = line_matcher(nb, no)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag != "equal":
             ops.append((i1, i2, other_toks[j1:j2]))

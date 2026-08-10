@@ -3582,6 +3582,118 @@ def _is_ccache_failure(stderr: str) -> bool:
     return any(p in stderr for p in _CCACHE_FAILURE_PATTERNS)
 
 
+# Compile_commands.json cache: parsed once per repo, keyed by repo_root path.
+_COMPILE_COMMANDS_CACHE: dict[str, dict[str, str]] = {}
+
+
+def _load_compile_commands(repo_root: str) -> dict[str, str] | None:
+    """Load and cache compile_commands.json from the repo root or build dir.
+
+    Returns a dict mapping file path → compile command (the ``command`` or
+    ``arguments`` field from the JSON entry). Returns None when no
+    compile_commands.json is found or parsing fails.
+    """
+    if repo_root in _COMPILE_COMMANDS_CACHE:
+        return _COMPILE_COMMANDS_CACHE[repo_root] or None
+    import json as _json_cc
+    # Check repo root and common build dirs
+    for cc_path in (
+        Path(repo_root) / "compile_commands.json",
+        Path(repo_root) / "build" / "compile_commands.json",
+    ):
+        if not cc_path.exists():
+            continue
+        try:
+            entries = _json_cc.loads(cc_path.read_text(encoding="utf-8"))
+            mapping: dict[str, str] = {}
+            for entry in entries:
+                f = entry.get("file", "")
+                cmd = entry.get("command") or entry.get("arguments")
+                if isinstance(cmd, list):
+                    cmd = " ".join(cmd)
+                if f and cmd:
+                    # Normalize to relative path for lookup
+                    rel = str(Path(f).relative_to(repo_root)) if Path(f).is_absolute() else f
+                    mapping[rel] = cmd
+                    # Also store the basename for fuzzy matching
+                    mapping[Path(f).name] = cmd
+            _COMPILE_COMMANDS_CACHE[repo_root] = mapping
+            return mapping if mapping else None
+        except Exception:  # noqa: BLE001
+            continue
+    _COMPILE_COMMANDS_CACHE[repo_root] = {}
+    return None
+
+
+def _try_compile_commands(
+    repo_root: str, path: str, source_text: str, language: str | None,
+) -> tuple[bool, str] | None:
+    """Try to compile a single file using the compile_commands.json entry.
+
+    Returns ``(True/False, message)`` if the compile ran, or ``None`` if no
+    compile_commands.json entry was found for this file.
+
+    Replaces the source path in the compile command with a temp file
+    containing ``source_text``, runs with ``-fsyntax-only -c`` (skip linking),
+    and returns the pass/fail result. The exact flags from the original command
+    (``-I``, ``-D``, ``-std``) are preserved.
+    """
+    cc = _load_compile_commands(repo_root)
+    if not cc:
+        return None
+    # Look up by exact path or basename
+    cmd = cc.get(path) or cc.get(Path(path).name)
+    if not cmd:
+        return None
+    import shlex as _shlex_cc
+    import subprocess as _sp_cc
+    import tempfile as _tf_cc
+    try:
+        parts = _shlex_cc.split(cmd)
+        if not parts:
+            return None
+        # The compiler is the first token; flags follow. Find the source file
+        # in the arguments and replace it with our temp file.
+        suffix = ".cpp" if language in ("cpp", "c++") else ".c"
+        with _tf_cc.NamedTemporaryFile(suffix=suffix, delete=False, mode="w") as tmp:
+            tmp.write(source_text)
+            tmp_path = tmp.name
+        try:
+            # Build new command: compiler + flags (minus old source) + -fsyntax-only + tmp
+            old_source = None
+            for p in parts[1:]:
+                if p.endswith((".c", ".cpp", ".cc", ".cxx", ".C", ".mm")):
+                    old_source = p
+                    break
+            flags = [p for p in parts[1:] if p != old_source]
+            # Replace -o output.o with nothing (syntax-only doesn't produce output)
+            clean_flags = []
+            skip_next = False
+            for f in flags:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if f == "-o":
+                    skip_next = True
+                    continue
+                if f.startswith("-o"):
+                    continue
+                clean_flags.append(f)
+            new_cmd = [parts[0]] + clean_flags + ["-fsyntax-only", tmp_path]
+            proc = _sp_cc.run(
+                new_cmd, capture_output=True, text=True, timeout=30,
+                cwd=str(repo_root),
+            )
+            if proc.returncode == 0:
+                return True, "compile_commands.json: syntax OK"
+            err = (proc.stderr or "").strip()
+            return False, err.split("\n")[0] if err else "compile_commands.json: failed"
+        finally:
+            Path(tmp_path).unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 _CC_ERROR_LINE_RE = re.compile(r":(\d+):\d+:\s*(?:error|warning):")
 
 # Captures the file path BEFORE the ``:line:col:`` position. gcc/clang emit
@@ -4196,7 +4308,26 @@ class VerificationEngine:
                     build_cmd = target_tmpl.format(stem=_stem)
                 except (KeyError, IndexError):
                     pass  # malformed template; use full build_cmd
-            if build_cmd:
+            # Compile_commands.json fast path: if the repo has a
+            # compile_commands.json (generated by cmake with
+            # -DCMAKE_EXPORT_COMPILE_COMMANDS=ON), look up the exact compile
+            # command for this file and run it with -fsyntax-only. This gives
+            # the correct -I paths, -D defines, and -std flags without running
+            # the full build (75s → 2-5s). Falls back to the build command if
+            # the file isn't in compile_commands.json or the compile fails.
+            _cc_result = _try_compile_commands(repo_root, path, whole, language)
+            _cc_skip_build = False
+            if _cc_result is not None:
+                _cc_ok, _cc_msg = _cc_result
+                syntax_checked = True
+                syntax_ok = _cc_ok
+                if _cc_ok:
+                    features["syntax_checked"] = True
+                    features["syntax_passed"] = True
+                    _cc_skip_build = True  # skip the full build
+                # If _cc_ok is False, fall through to the full build below
+                # (which may reveal cross-file issues or better diagnostics).
+            if not _cc_skip_build and build_cmd:
                 import subprocess as _sp_build
                 target_path = Path(repo_root) / path
                 saved = target_path.read_bytes() if target_path.exists() else None

@@ -76,10 +76,10 @@ TESTDATA = Path(__file__).resolve().parent.parent / "extracted-testdata" / "real
 # probes the extracted tree and adapts (cmake → autotools fallback) per case.
 C_PREPARE_COMMANDS: dict[str, str] = {
     "redis-history": "",
-    "jsonc-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+    "jsonc-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
     "sqlite-history": "./configure && make -j4",
-    "nlohmann-json-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
-    "clickhouse-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+    "nlohmann-json-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+    "clickhouse-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
 }
 
 # Per-case build-command cache: populated by _materialize_conflict after it
