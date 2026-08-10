@@ -1386,6 +1386,15 @@ def _refine_with_diff3(
         # consumers. The prompt-side _prompt_sides has its own anchor-based
         # localization safety net for oversized bases.
         return
+    # Base-substring validation: verify each diff3 block's base text actually
+    # appears in the full base file. Git can coalesce adjacent conflict regions
+    # differently than the worktree markers — when the count accidentally
+    # matches but the positional association is wrong, stamping the wrong
+    # refined sides on units corrupts downstream resolver inputs. If ANY
+    # block's base doesn't appear in the file, bail out (don't set refined).
+    for block in blocks:
+        if block.base and block.base not in base_text:
+            return
     for unit, block in zip(units, blocks):
         # Only record if diff3 produced a tighter view (shorter sides).
         cur_lines = block.ours.count("\n") + 1 if block.ours else 0

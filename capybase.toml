@@ -341,7 +341,6 @@ enable_combination_search = true
 # aggregated over both parents; the search is union-constrained (every candidate
 # keeps all lines from both sides). These knobs expose the research-tuned params.
 sbcr_floor = 0.6                  # min fitness to accept a candidate
-sbcr_min_candidate_ratio = 0.5    # reject candidates < this fraction of the larger side (shrinkage guard)
 sbcr_stagnation_limit = 10        # stop hill-climb after N consecutive non-improving evals
 sbcr_max_time_seconds = 15.0      # wall-clock budget for hill-climb on large blocks
 sbcr_max_iterations = 2000        # hard budget on fitness evaluations

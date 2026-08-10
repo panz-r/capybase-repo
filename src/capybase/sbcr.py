@@ -362,12 +362,16 @@ def _hill_climb_best(
                 if f > best_fit:
                     best_fit, best = f, list(nb)
                     stagnation = 0
-                else:
-                    stagnation += 1
                 if f > current_fit:
                     current, cur_orig, current_fit = nb, no, f
                     improved = True
                     break  # first-improvement: re-scan neighbors from the new current
+                # Only count as stagnation when the neighbor didn't improve
+                # over EITHER the global best or the local current. A neighbor
+                # that improved the local climbing position is active progress,
+                # not stagnation — counting it would prematurely terminate.
+                if f <= best_fit:
+                    stagnation += 1
         # random restart (stagnation carries across restarts, bounding churn)
     if best is None or best_fit < floor:
         return None, best_fit
@@ -386,7 +390,6 @@ def resolve_by_combination_search(
     max_iterations: int = 2000,
     stagnation_limit: int = 10,
     max_time: float = 15.0,
-    min_candidate_ratio: float = 0.5,
     seed: int | None = None,
 ) -> CombinationResolution:
     """Attempt a search-based combination resolution of ``unit``.
@@ -416,12 +419,6 @@ def resolve_by_combination_search(
         (arXiv:2605.16646 §4.1 tunes to 15s). 0 disables the time budget. The
         exhaustive path is already bounded by ``EXHAUSTIVE_THRESHOLD`` and
         ignores this.
-    min_candidate_ratio : float
-        Shrinkage guard (arXiv:2605.16646 §4.3): reject a candidate whose line
-        count is below this fraction of the LARGER side. Prevents a one-sided
-        merge (silently dropping most of a side) from scoring high on fitness
-        against the kept side. 0.5 = the candidate must keep at least half of
-        the bigger side's lines.
     seed : int | None
         RNG seed for reproducible hill climbing (tests pass a fixed seed).
 
@@ -507,18 +504,5 @@ def resolve_by_combination_search(
         return CombinationResolution(
             text=None, fitness=best_fit,
             skip_reason=f"fitness {best_fit:.3f} < floor {floor:.2f}",
-        )
-    # Shrinkage guard: a candidate shorter than ``min_candidate_ratio`` of the
-    # larger side has dropped too much of a side to be a genuine combination —
-    # it's a one-sided merge wearing a high fitness score. Decline (defer to the
-    # LLM) rather than propose it.
-    larger = max(len(ours), len(theirs))
-    if larger > 0 and len(best) < min_candidate_ratio * larger:
-        return CombinationResolution(
-            text=None, fitness=best_fit,
-            skip_reason=(
-                f"shrinkage: {len(best)} candidate lines < "
-                f"{min_candidate_ratio:.0%} of larger side ({larger})"
-            ),
         )
     return CombinationResolution(text="\n".join(best), fitness=best_fit)

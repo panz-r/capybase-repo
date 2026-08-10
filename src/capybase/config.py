@@ -629,11 +629,6 @@ class FutureConfig(BaseModel):
     # Minimum fitness for SBCR to accept a candidate. Below this the candidate
     # is essentially one-sided and is left to the LLM.
     sbcr_floor: float = 0.6
-    # Shrinkage guard (§4.3): reject a candidate whose line count is below this
-    # fraction of the LARGER side — prevents a one-sided merge from scoring high
-    # on fitness against the kept side.
-    sbcr_min_candidate_ratio: float = 0.5
-    # Stop the hill-climb search after this many consecutive non-improving
     # fitness evaluations (§2.2 stagnation; §4.1 tunes to 10).
     sbcr_stagnation_limit: int = 10
     # Wall-clock budget (seconds) for hill climbing on large blocks (§4.1 tunes

@@ -4295,7 +4295,6 @@ class Orchestrator:
             max_iterations=fut.sbcr_max_iterations,
             stagnation_limit=fut.sbcr_stagnation_limit,
             max_time=fut.sbcr_max_time_seconds,
-            min_candidate_ratio=fut.sbcr_min_candidate_ratio,
         )
         if not result.resolved or result.text is None:
             # The search declined (modification conflict, below floor, shrinkage

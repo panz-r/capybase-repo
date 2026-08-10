@@ -382,27 +382,22 @@ def test_hill_climb_never_drops_a_side_union():
         assert len(lines) == 16
 
 
-def test_shrinkage_guard_rejects_short_candidate():
-    # When the floor forces a degenerate search and the best candidate is
-    # shorter than min_candidate_ratio of the larger side, the shrinkage guard
-    # declines. With a near-1.0 ratio this rejects almost everything that
-    # drops lines — but more importantly it must be a documented, populated
-    # skip_reason when it fires.
-    # We force the situation by giving one side far more lines than the other
-    # and demanding a low floor; the exhaustive search will prefer the shorter
-    # candidate (high fitness against the small side), triggering the guard.
+def test_search_produces_full_union_not_subset():
+    # The search space is order-preserving interleavings of ALL lines from
+    # both sides (full union, not subsets). The shrinkage guard that was here
+    # before could never fire because every candidate contains all lines.
+    # This test verifies the search correctly returns a candidate that
+    # includes ALL lines from both sides.
     ours = "x = 1"
     theirs = "\n".join(f"v{i} = {i}" for i in range(6))
     r = resolve_by_combination_search(
-        _unit(ours, theirs), floor=0.0, min_candidate_ratio=0.99,
+        _unit(ours, theirs), floor=0.0,
     )
-    # The best candidate that drops lines from the 6-line side is 1-2 lines; a
-    # 0.99 guard on a 6-line larger side requires ≥ 5.94 → 6 lines. So either
-    # the full union is found (resolves) or the guard declines. Either way the
-    # result is honest. Verify the skip_reason is populated on a decline.
-    if not r.resolved:
-        assert r.skip_reason is not None
-        assert "shrinkage" in r.skip_reason
+    assert r.resolved, f"should resolve with floor=0: {r.skip_reason}"
+    for line in ours.split("\n"):
+        assert line in r.text, f"missing ours line: {line!r}"
+    for line in theirs.split("\n"):
+        assert line in r.text, f"missing theirs line: {line!r}"
 
 
 def test_time_budget_terminates_long_search():
