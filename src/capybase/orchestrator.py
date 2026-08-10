@@ -2644,7 +2644,15 @@ def _has_undeclared_side_local_identifier(
     _ident_re = _re.compile(r"[A-Za-z_]\w*")
     _decl_re = _re.compile(
         r"\b(?:int|long|short|char|bool|float|double|void|auto|const|unsigned|"
-        r"signed|std::\w+|[A-Za-z_]\w*)\s*[*&]*\s*([a-z_]\w*)\s*[=;,]"
+        r"signed|std::\w+|"
+        # User-defined types: require either a capital letter (CamelCase
+        # types like Foo, MyType), underscore prefix (_t types),
+        # or a known lowercase typedef pattern (size_t, uint32_t, int64_t).
+        # This excludes C/C++ control keywords (return, if, while, etc.)
+        # which start lowercase and would wrongly match as type names.
+        r"[A-Z_][A-Za-z_]\w*|"
+        r"(?:size|u?int\d*|u?char|ssize|off|pid|mode|dev|time|clock)_t)"
+        r"\s*[*&]*\s*([a-z_]\w*)\s*[=;,]"
     )
     declared = set(_decl_re.findall(candidate))
     all_cand_ids = _ident_re.findall(candidate)
@@ -9772,7 +9780,25 @@ class Orchestrator:
                 # spun until the wall budget — the CASE_TIMEOUT spin bug.
                 retry_count += 1
             elif critic_warning is not None:
-                critic_retry_count += 1
+                # Route based on WHY risk decided to retry: if the decision
+                # reasons contain content-loss terms (not just critic terms),
+                # the retry was driven by the content-loss warning and should
+                # consume the normal retry_count budget, not the critic budget.
+                # This prevents the infinite loop where content-loss + critic
+                # co-occur and retry_count never grows (risk gates on
+                # retry_count < budget, which stays true forever).
+                _reasons_text = " ".join(decision.reasons or []).lower()
+                _is_content_loss_retry = any(
+                    term in _reasons_text
+                    for term in (
+                        "dropped a side", "intent coverage", "unattributed",
+                        "dependency", "later commit", "copied one side",
+                    )
+                )
+                if _is_content_loss_retry:
+                    retry_count += 1
+                else:
+                    critic_retry_count += 1
             else:
                 retry_count += 1
             prev_candidate = cand  # for targeted repair on next attempt
