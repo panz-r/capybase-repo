@@ -2427,11 +2427,14 @@ def _try_balance_braces(text: str, language: str | None = None) -> str | None:
 
         # Candidate 1: before trailing brace-only lines.
         # Walk backward past pure-``}`` and blank lines to find the
-        # last content line before the structural closers.
+        # last content line before the structural closers. Also skip lines
+        # that are structural closers with trailing punctuation (``};``,
+        # ``})``, ``},``) — these close class/struct/namespace scopes and
+        # should NOT be treated as "content".
         _trailing_start = len(lines)
         for i in range(len(cleaned) - 1, -1, -1):
             c = cleaned[i].strip()
-            if c == "}" or c == "":
+            if c == "" or c == "}" or c in ("};", "})", "},", "})/", "}}"):
                 continue
             # Found the last content line before trailing braces.
             _trailing_start = i + 1

@@ -1352,10 +1352,13 @@ def _try_restore_common_lines(
     common_lines = cur_lines & rep_lines
 
     cand_lines = candidate_text.split("\n")
-    cand_set = set(cand_lines)
+    # Compare stripped content, not exact strings — a line present in the
+    # candidate with different indentation is NOT "missing" and must not be
+    # re-inserted (would create a duplicate statement).
+    cand_stripped = {l.strip() for l in cand_lines}
 
     missing_common = [
-        l for l in common_lines if l.strip() and l not in cand_set
+        l for l in common_lines if l.strip() and l.strip() not in cand_stripped
     ]
     if not missing_common:
         return None
@@ -2633,7 +2636,7 @@ def _has_undeclared_side_local_identifier(
     _ident_re = _re.compile(r"[A-Za-z_]\w*")
     _decl_re = _re.compile(
         r"\b(?:int|long|short|char|bool|float|double|void|auto|const|unsigned|"
-        r"signed|std::\w+|[A-Z][A-Za-z_]\w*)\s+([a-z_]\w*)\s*[=;,]"
+        r"signed|std::\w+|[A-Za-z_]\w*)\s*[*&]*\s*([a-z_]\w*)\s*[=;,]"
     )
     declared = set(_decl_re.findall(candidate))
     all_cand_ids = _ident_re.findall(candidate)
@@ -9405,8 +9408,17 @@ class Orchestrator:
 
             # Header file CEGIS cap: headers have no per-unit compile gate,
             # so retries are blind. Allow 1 retry (to act on risk feedback),
-            # then escalate instead of retrying further.
-            if _is_header and retry_count >= _header_max_retries and retry_count > 0:
+            # then escalate instead of retrying further. The cap checks the
+            # TOTAL model-call count (retry_count + critic_retry_count +
+            # recovery_retry_count) so critic-driven and recovery retries
+            # can't bypass the budget.
+            _total_header_calls = (
+                retry_count + critic_retry_count + recovery_retry_count
+            )
+            if (
+                _is_header
+                and _total_header_calls > _header_max_retries
+            ):
                 outcome.escalated = True
                 outcome.retry_count = retry_count
                 outcome.reason = (
@@ -9949,11 +9961,23 @@ class Orchestrator:
         Used to decide whether to dump conflict bundles for NEAR_MATCH
         debugging — deterministic-only steps don't need runtime input dumps
         because the resolver is reproducible from the conflict text alone.
+
+        Uses a positive check for known LLM provenance labels rather than a
+        negative check on "deterministic" — several deterministic mechanisms
+        (combination_search, exact_history_reuse, block_capture, etc.) don't
+        carry the "deterministic" prefix and would be wrongly flagged.
         """
+        _LLM_PROVENANCES = frozenset({
+            "plain_llm", "history_augmented_llm",
+            "plain_llm+intent_coverage", "history_augmented_llm+intent_coverage",
+        })
         for outcome in result.outcomes:
-            if outcome.accepted and not str(
-                getattr(outcome.accepted, "provenance", "") or ""
-            ).startswith("deterministic"):
+            if not outcome.accepted:
+                continue
+            prov = str(getattr(outcome.accepted, "provenance", "") or "")
+            # Check exact match against known LLM labels, or any label that
+            # contains "llm" (catches future variants).
+            if prov in _LLM_PROVENANCES or "llm" in prov.lower():
                 return True
         return False
 

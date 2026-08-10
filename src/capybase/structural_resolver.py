@@ -897,28 +897,7 @@ def _try_mechanical_reapply_merge(
             continue  # ambiguous — multiple occurrences; skip this op
         applied[idx:idx + len(anchor)] = repl
 
-    result = _detokenize(applied)
-    return result
-    # substitutions onto the semantic side's text. Every output line should be
-    # recognizable from the semantic side (either identical or a close variant
-    # from the token substitution). If an output line doesn't match any semantic-
-    # side line even fuzzily, the substitution garbled it by mixing tokens from
-    # different lines. (Catches the clickhouse-0024 defect where the mechanical
-    # side's tokens were spliced across the semantic side's multi-line structure,
-    # producing hybrid lines like 'inner_ref, static_pointer_cast<...>' that
-    # don't match any line of the semantic side.)
-    from difflib import SequenceMatcher as _SM_mr
-    _sem_norm = [" ".join(l.split()) for l in sem_text.split("\n") if l.strip()]
-    for _ln in result.split("\n"):
-        _norm = " ".join(_ln.split())
-        if not _norm:
-            continue
-        if _norm in set(_sem_norm):
-            continue  # exact match with a semantic-side line
-        if any(_SM_mr(None, _norm, _sl).ratio() >= 0.65 for _sl in _sem_norm):
-            continue  # close variant — legitimate token substitution within the line
-        return None  # garbled — doesn't match any semantic-side line
-    return result
+    return _detokenize(applied)
 
 
 def _find_subsequence(haystack: list[str], needle: list[str]) -> int:
