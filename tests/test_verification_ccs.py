@@ -809,11 +809,12 @@ def test_verify_file_gcc_fallback_werror_passes(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 @skip_no_gcc
-def test_ccs_syntax_validator_skips_header_files():
-    """Header files (.h/.hpp) skip the per-unit CCS gate entirely. Headers
-    are never compiled standalone — they're always #included from a .c file
-    that provides type definitions. Standalone gcc reports false-positive
-    'unknown type name' errors for project-internal types."""
+def test_ccs_syntax_validator_compiles_header_files():
+    """Header files (.h/.hpp) are now syntax-checked via -fsyntax-only instead
+    of being skipped. A clean header with only declarations should compile and
+    pass. The semantic-error filter defers 'unknown type name' errors (artifacts
+    of standalone compilation without sibling headers), so only genuine parse
+    errors surface as hard failures."""
     from capybase.verification import CcsSyntaxValidator, VerificationContext
     unit = ConflictUnit(
         session_id="s", step_index=1, path="src/vdbe.h", language="c",
@@ -822,7 +823,7 @@ def test_ccs_syntax_validator_skips_header_files():
         current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="typedef struct Foo Foo;"),
         replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="typedef struct Foo Foo;"),
         original_worktree_text="typedef struct Foo Foo;",
-        marker_span=(0, 1),
+        marker_span=(0, 0),
     )
     cand = CandidateResolution(
         candidate_id="c1", unit_id="u", model_name="m",
@@ -832,9 +833,11 @@ def test_ccs_syntax_validator_skips_header_files():
     ctx = VerificationContext(unit=unit, candidate=cand, config=cfg)
     validator = CcsSyntaxValidator()
     result = validator.verify(ctx)
+    # A clean declaration-only header should pass — either compiled OK or
+    # deferred (compiler not available). Either way, passed=True.
     assert result.passed
-    assert result.features.get("ccs_syntax_checked") is False
-    assert "header file" in result.message.lower()
+    # The header should NOT be skipped with the old "header file" message.
+    assert "header file" not in result.message.lower()
 
 
 @skip_no_gcc

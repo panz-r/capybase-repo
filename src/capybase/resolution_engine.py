@@ -375,6 +375,57 @@ def _mask_sides_if_enabled(unit) -> tuple[str, str, str]:
     return _mask_sides_deferred(unit, cur, base, rep)
 
 
+def _shape_hint_block(unit: ConflictUnit) -> str:
+    """A 1-2 sentence strategic hint based on the conflict shape.
+
+    Reads cached signals from ``structural_metadata`` (``conflict_features``,
+    ``merge_direction``). Pure function of the unit — no external state.
+    Returns ``""`` when no specific shape is detected.
+
+    The hints give the weak 4B model a strategic starting point for the
+    hardest conflict shapes (refactor-vs-lint, rewrite-vs-edit). They are
+    advisory — they don't change the output contract or validation.
+    """
+    feats = unit.structural_metadata.get("conflict_features") or {}
+    md = unit.structural_metadata.get("merge_direction") or {}
+    hints: list[str] = []
+
+    # Refactor vs lint/add: one side refactored, the other made small changes.
+    commit_type = feats.get("commit_change_type")
+    if commit_type == "refactor":
+        hints.append(
+            "One side refactored this code. Preserve the refactor and apply "
+            "the other side's changes within it — do not revert the refactor."
+        )
+
+    # Rewrite vs edit: one side is much larger than the other (asymmetric).
+    imbalance = feats.get("imbalance_ratio", 1.0)
+    merge_kind = md.get("kind")
+    if imbalance > 3.0 and merge_kind == "both_modify":
+        hints.append(
+            "One side rewrote this code while the other made a small edit. "
+            "Do not take either side verbatim — preserve the rewrite's "
+            "structure and integrate the small edit within it."
+        )
+
+    # Both-add disjoint: both sides added independent content.
+    if merge_kind == "both_add" and not feats.get("same_line_overlap"):
+        hints.append(
+            "Both sides added independent content. Include both sides' "
+            "additions unless they directly conflict."
+        )
+
+    # Modify/delete: one side deleted the block.
+    if feats.get("modify_delete"):
+        hints.append(
+            "This is a modify/delete conflict — one side deleted this block "
+            "and the other modified it. Decide carefully whether the deletion "
+            "or the modification should win."
+        )
+
+    return "\n".join(hints) if hints else ""
+
+
 def _side_intent_block(unit: ConflictUnit) -> str:
     """A short 'what each side DID' annotation + obligations contract for the prompt.
 
@@ -1338,6 +1389,10 @@ def _resolve_prompt_parts(
     side_intent = _side_intent_block(unit)
     semantic_change = _semantic_change_block(unit)
     value_resolution = _value_resolution_block(unit)
+    # Shape-specific strategic hint: a 1-2 sentence nudge for the hardest
+    # conflict shapes (refactor-vs-lint, rewrite-vs-edit). Advisory only —
+    # doesn't change the contract or validation.
+    shape_hint = _shape_hint_block(unit)
     # 3-way structural context annotation (Improvement #6): aligns the file's
     # structural units across base/left/right and renders a compact summary —
     # which units each side changed, whether there are structural conflicts,
@@ -1375,7 +1430,7 @@ def _resolve_prompt_parts(
     else:
         _sides = _cur_block + _rep_block + _base_block
     sides_text = (
-        f"{struct_ctx}{side_intent}{semantic_change}{value_resolution}{_sides}"
+        f"{struct_ctx}{side_intent}{shape_hint}{semantic_change}{value_resolution}{_sides}"
     )
     anchor_t, siblings_t, deps_t, few_shot_t, primary_t, history_t, obls_t, trims, skeleton_block = _fit_to_budget(
         budget=budget,

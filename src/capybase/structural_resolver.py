@@ -115,6 +115,7 @@ class StructuralResolution:
     text: str | None
     deferred_core: tuple[str, str, str] | None = None
     deferred_core_offset: int | None = None
+    broadened_base: bool = False
 
     @property
     def resolved(self) -> bool:
@@ -285,18 +286,35 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         # disjoint and splices both edits in. Scoped to small conflicts (a line
         # budget) so reconstruction stays local. Declines on any token overlap
         # or ambiguous pure-insertion anchors.
-        merged = _try_token_disjoint(base, current, replayed)
+        #
+        # Base broadening: when the refined hunk collapsed the base to 1-2
+        # lines, identifiers that sit on separate lines in the full function
+        # appear on the same line, causing false token collisions. Broaden
+        # the base to the enclosing entity's text when the refinement over-
+        # collapsed, giving each variable its own line for unambiguous
+        # anchoring (clickhouse-0024).
+        _broad = _try_broaden_base(unit, base)
+        _td_base = _broad if _broad is not None else base
+        merged = _try_token_disjoint(_td_base, current, replayed)
         if merged is not None:
-            return StructuralResolution(rule="token_disjoint", text=merged)
+            return StructuralResolution(
+                rule="token_disjoint",
+                text=merged,
+                broadened_base=_broad is not None,
+            )
 
         # Mechanical re-application: when token_disjoint DECLINED because the
         # spans overlap, but one side's changes are purely small mechanical
         # substitutions (API rename, operator keyword lint) and the other side
         # is a wholesale rewrite, take the rewriter's text and re-apply the
         # mechanical substitutions where the base-token anchors survive.
-        merged = _try_mechanical_reapply_merge(base, current, replayed)
+        merged = _try_mechanical_reapply_merge(_td_base, current, replayed)
         if merged is not None:
-            return StructuralResolution(rule="mechanical_reapply_merge", text=merged)
+            return StructuralResolution(
+                rule="mechanical_reapply_merge",
+                text=merged,
+                broadened_base=_broad is not None,
+            )
 
         # Prose value-resolution: both sides edited the SAME prose line
         # differently (a version-string bump, a changelog header, a date). Every
@@ -581,6 +599,42 @@ def _tokenize(text: str) -> list[str]:
 def _detokenize(tokens: list[str]) -> str:
     """Rejoin tokens into the original text (inverse of :func:`_tokenize`)."""
     return "".join(tokens)
+
+
+def _try_broaden_base(unit: ConflictUnit, refined_base: str) -> str | None:
+    """Return the enclosing entity's base text when the refined hunk
+    collapsed too aggressively, to give the token rules a broader anchor
+    context.
+
+    When diff3 refinement collapses the base to 1-2 lines, identifiers that
+    sit on separate lines in the full function appear on the same line in
+    the refined hunk. This causes false token collisions (clickhouse-0024:
+    ``column`` and ``inner_ref`` appeared to collide because the refined
+    base was a single line). Broadening to the enclosing function's text
+    gives each variable its own line, so token anchors are unambiguous.
+
+    Returns the enclosing-node base text if ALL conditions hold:
+    * ``enclosing_node_text`` is available on ``structural_metadata``
+    * it is ≤ 80 non-blank lines (bounded for performance)
+    * the refined base is < 50% of the enclosing text's non-blank line count
+      (indicating the refinement over-collapsed)
+
+    Returns None otherwise (keep the original base).
+    """
+    enclosing = unit.structural_metadata.get("enclosing_node_text")
+    if not enclosing:
+        return None
+    enc_nb = sum(1 for l in enclosing.split("\n") if l.strip())
+    if enc_nb == 0 or enc_nb > 80:
+        return None
+    base_nb = sum(1 for l in refined_base.split("\n") if l.strip())
+    if base_nb == 0:
+        return None
+    # Only broaden when the refined base is significantly smaller — if it's
+    # already close to the enclosing text size, broadening adds no value.
+    if base_nb >= enc_nb * 0.5:
+        return None
+    return enclosing
 
 
 def _token_change_ops(base_toks: list[str], other_toks: list[str]) -> list[tuple[int, int, list[str]]]:

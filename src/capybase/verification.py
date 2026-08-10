@@ -2760,21 +2760,13 @@ class CcsSyntaxValidator(_StandaloneSyntaxValidator):
     _check_braces = True
 
     def _skip_before_compile(self, ctx: VerificationContext) -> VerificationCheckResult | None:
-        # Header files are never compiled standalone in real projects — they're
-        # always #included from a .c file providing the types/macros/prototypes
-        # the header references. Standalone gcc -fsyntax-only on a header reports
-        # false-positive "unknown type name" errors for project-internal types
-        # defined in sibling headers. Skip; Phase B's whole-file build is the
-        # only honest check for a header.
-        _path = ctx.unit.path or ""
-        if _path.endswith((".h", ".hpp", ".hh", ".hxx", ".H")):
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="header file; per-unit standalone compile skipped "
-                        "(headers are never compiled in isolation — Phase B "
-                        "whole-file build is the authoritative check)",
-                features={self._feature_key: False, "syntax_passed": True},
-            )
+        # Headers CAN be syntax-checked with -fsyntax-only. The semantic-error
+        # filter (_is_ccs_resolution_error) defers "unknown type name" etc.
+        # (artifacts of standalone compilation without sibling headers) as
+        # non-resolution errors. Only genuine parse errors (missing brace,
+        # stray punctuation) surface as hard failures. Previously headers were
+        # skipped unconditionally — now we attempt validation and rely on the
+        # filter + include paths to suppress false positives.
         return None
 
     def _resolve_compiler(self, cfg: object) -> str | None:
@@ -2790,13 +2782,33 @@ class CcsSyntaxValidator(_StandaloneSyntaxValidator):
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
         # Stash whether this unit is C++ so _resolve_compiler picks g++/cpp_std.
         self._lang_is_cpp = ctx.unit.language in ("cpp", "c++")
+        self._unit_path = ctx.unit.path or ""
         return super().verify(ctx)
 
     def _compile(self, spliced: str, tool: str, cfg: object) -> tuple[bool, str]:
         is_cpp = self._is_cpp
         std = getattr(cfg, "cpp_std" if is_cpp else "c_std", "c++17" if is_cpp else "c11")
-        suffix = ".cpp" if is_cpp else ".c"
-        return _compile_ccs(spliced, cc_path=tool, std=std, suffix=suffix)
+        # Use the header suffix when the unit is a header file — gcc infers
+        # the language from the suffix, and header suffixes produce more
+        # accurate diagnostics than .c/.cpp for header content.
+        _path = getattr(self, "_unit_path", "") or ""
+        _is_header = _path.endswith((".h", ".hpp", ".hh", ".hxx", ".H"))
+        if _is_header:
+            suffix = ".hpp" if is_cpp else ".h"
+            timeout = 10.0  # headers should compile fast; avoid blocking on complex includes
+        else:
+            suffix = ".cpp" if is_cpp else ".c"
+            timeout = 30.0
+        # Pass include paths for headers so gcc can resolve sibling headers
+        # defining project-internal types. The repo root + file directory
+        # cover most #include "..." directives.
+        include_paths = None
+        if _is_header and hasattr(cfg, "_repo_root"):
+            include_paths = [str(cfg._repo_root)]
+        return _compile_ccs(
+            spliced, cc_path=tool, std=std, suffix=suffix,
+            timeout=timeout, include_paths=include_paths,
+        )
 
     def _is_resolution_error(self, msg: str) -> bool:
         return _is_ccs_resolution_error(msg)
