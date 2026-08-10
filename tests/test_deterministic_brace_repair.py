@@ -71,7 +71,7 @@ def test_det_repair_single_unit_extra_brace():
     assert imb is not None
     failures = [_brace_failure(imb + 1)]
     fault_idx = _attribute_whole_file_failure(failures, [unit])
-    result = _try_deterministic_brace_repair(failures, worktree, accepted, fault_idx)
+    result, diag = _try_deterministic_brace_repair(failures, worktree, accepted, fault_idx)
     assert result is not None, "should deterministically repair"
     u_r, c_r = result[0]
     assert u_r.unit_kind == "whole_file"
@@ -97,7 +97,7 @@ def test_det_repair_single_unit_unclosed_brace():
     assert imb is not None
     failures = [_brace_failure(imb + 1)]
     fault_idx = _attribute_whole_file_failure(failures, [unit])
-    result = _try_deterministic_brace_repair(failures, worktree, accepted, fault_idx)
+    result, diag = _try_deterministic_brace_repair(failures, worktree, accepted, fault_idx)
     assert result is not None
     re_spliced = _resolved_buffer(worktree, result)
     assert _brace_imbalance_line(re_spliced) is None
@@ -115,7 +115,7 @@ def test_det_repair_defers_on_non_brace_failure():
         validator="cargo", severity="error",
         message="error[E0433]: failed to resolve", detail={},
     )]
-    result = _try_deterministic_brace_repair(failures, worktree, accepted, 0)
+    result, diag = _try_deterministic_brace_repair(failures, worktree, accepted, 0)
     assert result is None
 
 
@@ -128,7 +128,7 @@ def test_det_repair_defers_on_balanced_splice():
     good = _cand("u:1", "    x")  # balanced
     accepted = [(unit, good)]
     failures = [_brace_failure(99)]
-    result = _try_deterministic_brace_repair(failures, worktree, accepted, 0)
+    result, diag = _try_deterministic_brace_repair(failures, worktree, accepted, 0)
     assert result is None
 
 
@@ -153,7 +153,7 @@ def test_det_repair_defers_on_structural_error():
     if imb is None:
         return  # balanced by coincidence; skip
     failures = [_brace_failure(imb + 1)]
-    result = _try_deterministic_brace_repair(failures, worktree, accepted, 0)
+    result, diag = _try_deterministic_brace_repair(failures, worktree, accepted, 0)
     # The stray } is on a code line (foo() } bar()) — not brace-only → defer.
     # But if the imbalance happens to be a standalone trailing }, the repair may
     # succeed. Only assert defer when the divergence line has real code.

@@ -2381,12 +2381,18 @@ def _try_balance_braces(text: str, language: str | None = None) -> str | None:
             # (e.g. ``return foo();}``) rather than on its own brace-only line.
             # Try removing ONE trailing } from the divergence line itself.
             # Conservative: only the last } on the line, only when deficit==1,
-            # and the result is re-validated.
+            # only when the non-brace content ends with a statement terminator
+            # (``;`` or ``:``) — meaning the } is trailing junk after a
+            # complete statement, NOT sharing the line with an expression like
+            # ``bar() }`` where removal would corrupt structure. The result is
+            # always re-validated.
             if deficit == 1 and neg_line < len(lines):
                 raw = lines[neg_line]
-                # Find the last } in the raw line.
+                cleaned_neg = cleaned[neg_line] if neg_line < len(cleaned) else raw
+                _non_brace = cleaned_neg.replace("}", "").replace("{", "").strip()
+                _terminates = bool(_non_brace) and _non_brace[-1] in (";", ":")
                 last_brace = raw.rfind("}")
-                if last_brace >= 0:
+                if last_brace >= 0 and _terminates:
                     patched = raw[:last_brace] + raw[last_brace + 1:]
                     candidate = list(lines)
                     candidate[neg_line] = patched
@@ -2401,21 +2407,53 @@ def _try_balance_braces(text: str, language: str | None = None) -> str | None:
         return None
 
     if depth > 0:
-        # Unclosed opening brace(s): close them at the end of the last line
-        # that has non-brace content, so we don't append after a bare `}`.
-        # Find the last line whose cleaned form has content other than braces.
+        # Unclosed opening brace(s): insert the deficit of ``}`` closers.
+        # The placement matters: for a file ending with structural closers
+        # (``};`` for a class, ``}`` for namespaces), inserting at the very
+        # last content line (which is often the ``};``) puts the closers in
+        # the WRONG scope (after the class/namespace closers, not before).
+        # This produces a brace-balanced file that fails the gcc build because
+        # the closers are in the wrong scope.
+        #
+        # Strategy: try multiple insertion points, best-first:
+        #  1. Before trailing brace-only lines: walk backward past trailing
+        #     ``}``-only and blank lines, then find the last content line
+        #     BEFORE those structural closers. This places closers inside
+        #     the correct scope (after the function body, before class/ns
+        #     closers). This is the nlohmann-0033 case.
+        #  2. After the last content line (the original strategy): catches
+        #     the case where the file doesn't end with structural closers.
+        suffix = "}" * depth
+
+        # Candidate 1: before trailing brace-only lines.
+        # Walk backward past pure-``}`` and blank lines to find the
+        # last content line before the structural closers.
+        _trailing_start = len(lines)
+        for i in range(len(cleaned) - 1, -1, -1):
+            c = cleaned[i].strip()
+            if c == "}" or c == "":
+                continue
+            # Found the last content line before trailing braces.
+            _trailing_start = i + 1
+            break
+        if _trailing_start < len(lines):
+            # There ARE trailing brace-only lines — insert before them.
+            candidate_1 = lines[:_trailing_start] + [suffix] + lines[_trailing_start:]
+            result_1 = "\n".join(candidate_1)
+            if _brace_imbalance_line(result_1, language) is None:
+                return result_1
+
+        # Candidate 2: after the last content line (original strategy).
         insert_at = len(lines)
         for i in range(len(cleaned) - 1, -1, -1):
             content = cleaned[i].replace("{", "").replace("}", "").strip()
             if content:
                 insert_at = i + 1
                 break
-        suffix = "}" * depth
-        # Append the closing braces on their own line at the insertion point.
-        candidate = lines[:insert_at] + [suffix] + lines[insert_at:]
-        result = "\n".join(candidate)
-        if _brace_imbalance_line(result, language) is None:
-            return result
+        candidate_2 = lines[:insert_at] + [suffix] + lines[insert_at:]
+        result_2 = "\n".join(candidate_2)
+        if _brace_imbalance_line(result_2, language) is None:
+            return result_2
         return None
 
     # Already balanced.

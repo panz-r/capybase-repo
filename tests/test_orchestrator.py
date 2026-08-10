@@ -976,6 +976,41 @@ def test_asymmetry_flag_only_fires_for_sub_units_with_deletions(repo):
         )
 
 
+def test_header_retry_budget_allows_one_retry():
+    """Header files get _header_max_retries=1 (not 0), allowing the model to
+    act on risk-layer rejection feedback. Previously capped at 0, which meant
+    any header unit whose first candidate was risk-rejected escalated
+    immediately — the second attempt (informed by the rejection reason) was
+    never made. This caused nlohmann-0034 (sim=1.00) to escalate despite the
+    resolution being correct.
+
+    This test verifies the header detection and budget computation in
+    _resolve_unit's setup block, without running the full CEGIS loop."""
+    from capybase.config import Config
+
+    config = Config()
+    # Header extensions: .h, .hpp, .hh, .hxx, .H
+    header_paths = ["a.h", "a.hpp", "a.hh", "a.hxx", "a.H"]
+    for path in header_paths:
+        _is_header = path.endswith((".h", ".hpp", ".hh", ".hxx", ".H"))
+        _header_max_retries = 1 if _is_header else config.policy.max_retries_per_unit
+        assert _is_header, f"{path} should be detected as header"
+        assert _header_max_retries == 1, (
+            f"header {path}: expected _header_max_retries=1, got {_header_max_retries}"
+        )
+
+    # Source files get the config default (not capped)
+    source_paths = ["a.cpp", "a.c", "a.cc", "a.rs", "a.py"]
+    for path in source_paths:
+        _is_header = path.endswith((".h", ".hpp", ".hh", ".hxx", ".H"))
+        _header_max_retries = 1 if _is_header else config.policy.max_retries_per_unit
+        assert not _is_header, f"{path} should NOT be detected as header"
+        assert _header_max_retries == config.policy.max_retries_per_unit, (
+            f"source {path}: expected config default "
+            f"({config.policy.max_retries_per_unit}), got {_header_max_retries}"
+        )
+
+
 def test_consensus_entropy_n2_disagreement_is_maximal():
     """With n=2 samples that disagree (two singleton clusters), normalized
     Shannon entropy is exactly 1.0. This means the consensus entropy gate

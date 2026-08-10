@@ -145,6 +145,63 @@ def test_balance_braces_nested_extra():
     assert _brace_imbalance_line(fixed) is None
 
 
+def test_balance_braces_unclosed_before_trailing_closers():
+    """When unclosed braces sit BEFORE trailing structural closers (class/namespace
+    ``};`` / ``}`` lines), the closers must be inserted BEFORE those trailing
+    closers — not after them. Inserting after puts the closers in the wrong scope
+    (after the namespace closers instead of inside the function body).
+
+    This is the nlohmann-0033 shape: a spliced function body with unclosed braces,
+    followed by ``};`` (class close), ``}`` (namespace detail), ``}`` (namespace
+    nlohmann). The repair must insert the missing closers before ``};``, not after."""
+    text = (
+        "namespace nlohmann {\n"
+        "namespace detail {\n"
+        "class binary_writer {\n"
+        "  public:\n"
+        "    void write_number() {\n"        # +1 unclosed (function body)
+        "        if (x) {\n"                  # +1
+        "            bar();\n"
+        "        }\n"                         # -1 (closes if)
+        "        oa->write_characters();\n"   # function body still open (+1 net)
+        "};\n"                                # class close (has content ';')
+        "}  // namespace detail\n"
+        "}  // namespace nlohmann\n"
+    )
+    fixed = _try_balance_braces(text, "cpp")
+    assert fixed is not None, "should repair unclosed braces before trailing closers"
+    assert _brace_imbalance_line(fixed, "cpp") is None
+    # The inserted closers must appear BEFORE the }; line (class closer),
+    # not after the final namespace closer. We check by finding the };
+    # line in the repaired output and verifying the inserted closer line
+    # (a standalone "}") appears before it.
+    fixed_lines = fixed.split("\n")
+    # The }; is the class closer. Find its index.
+    brace_class_idx = next(
+        (i for i, l in enumerate(fixed_lines) if l.strip() == "};"),
+        None,
+    )
+    assert brace_class_idx is not None, "}; class closer must be present"
+    # The LAST standalone "}" in the original was the namespace nlohmann closer.
+    # In the repaired output, the inserted closers must be BEFORE }; (the
+    # class closer), not after it. Count standalone "}" lines before vs after.
+    standalone_before = sum(
+        1 for i, l in enumerate(fixed_lines)
+        if l.strip() == "}" and i < brace_class_idx
+    )
+    standalone_after = sum(
+        1 for i, l in enumerate(fixed_lines)
+        if l.strip() == "}" and i > brace_class_idx
+    )
+    # The original had 0 standalone "}" before }; and 2 after (namespace closers).
+    # The repair inserted 1 closer. If correctly placed, it goes BEFORE };.
+    assert standalone_before >= 1, (
+        f"expected inserted closer BEFORE }}; (class closer at line "
+        f"{brace_class_idx}), but only {standalone_before} standalone '}}' "
+        f"lines before it. Repaired:\n{fixed}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # _is_rust_resolution_error (semantic filter)
 # ---------------------------------------------------------------------------

@@ -834,7 +834,7 @@ def _try_deterministic_brace_repair(
     original: str,
     accepted: list[tuple[ConflictUnit, CandidateResolution]],
     fault_idx: int,
-) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+) -> tuple[list[tuple[ConflictUnit, CandidateResolution]] | None, str]:
     """Attempt a deterministic brace-balance fix before invoking the LLM.
 
     The recurring splice-junction brace imbalance is a single-edit fix away
@@ -844,11 +844,17 @@ def _try_deterministic_brace_repair(
     it directly when ``_try_balance_braces`` can balance the spliced buffer in
     one clean edit.
 
-    Returns a replacement ``accepted`` list (the fault unit becomes a whole-file
-    unit carrying the repaired buffer as its resolved_text), or ``None`` to
-    defer to the LLM path. Conservative on two axes: (1) the brace repair acts
-    only on brace-only lines / unclosed blocks (see ``_try_balance_braces``),
-    and (2) the repaired buffer is re-validated for brace balance before use.
+    Returns ``(result, diag_reason)`` where ``result`` is a replacement
+    ``accepted`` list (the fault unit becomes a whole-file unit carrying the
+    repaired buffer as its resolved_text), or ``None`` to defer to the LLM
+    path. ``diag_reason`` is a short diagnostic string explaining the outcome
+    (``"repaired"``, ``"not_brace_failure"``, ``"splice_exception"``,
+    ``"no_imbalance"``, ``"balance_failed"``, ``"revalidation_failed"``)
+    so the caller can journal it for future diagnosis.
+
+    Conservative on two axes: (1) the brace repair acts only on brace-only
+    lines / unclosed blocks (see ``_try_balance_braces``), and (2) the repaired
+    buffer is re-validated for brace balance before use.
 
     The repair replaces the whole ``accepted`` list with a single whole-file
     unit rather than back-projecting the fix onto one unit's ``resolved_text``.
@@ -868,23 +874,23 @@ def _try_deterministic_brace_repair(
         for f in failures
     )
     if not is_brace_failure:
-        return None
+        return None, "not_brace_failure"
     if fault_idx < 0 or fault_idx >= len(accepted):
-        return None
+        return None, "fault_idx_out_of_range"
     unit, _old_cand = accepted[fault_idx]
     try:
         spliced = _resolved_buffer(original, accepted)
     except Exception:  # noqa: BLE001 - splice may fail on bad spans
-        return None
+        return None, "splice_exception"
     # Language for comment-marker awareness (Python '#' vs Rust '//').
     _lang = accepted[fault_idx][0].language if 0 <= fault_idx < len(accepted) else None
     if _brace_imbalance_line(spliced, _lang) is None:
-        return None  # not actually a brace imbalance; nothing to fix
+        return None, "no_imbalance"  # not actually a brace imbalance; nothing to fix
     repaired = _try_balance_braces(spliced, _lang)
     if repaired is None:
-        return None  # couldn't balance in one edit → defer to LLM
+        return None, "balance_failed"  # couldn't balance in one edit → defer to LLM
     if _brace_imbalance_line(repaired, _lang) is not None:
-        return None  # safety re-check (shouldn't happen, but never trust)
+        return None, "revalidation_failed"  # safety re-check (shouldn't happen)
     # Build a synthetic whole-file unit carrying the repaired buffer. This is
     # the correct representation: the deterministic fix produced a complete file.
     # ``_resolved_buffer`` returns its resolved_text verbatim (no splicing), and
@@ -900,7 +906,7 @@ def _try_deterministic_brace_repair(
         self_reported_confidence=0.9,
         explanation="deterministic brace-balance repair (splice junction)",
     )
-    return [(wf_unit, wf_cand)]
+    return [(wf_unit, wf_cand)], "repaired"
 
 
 def _try_deterministic_preprocessor_repair(
@@ -7915,7 +7921,7 @@ class Orchestrator:
         # a chance to fix it. Conservative: acts only when one edit fully
         # balances the braces.
         if not deterministic_only:
-            det = _try_deterministic_brace_repair(
+            det, _brace_diag = _try_deterministic_brace_repair(
                 failures, original, accepted, max(0, fault_idx)
             )
             if det is not None:
@@ -7933,6 +7939,14 @@ class Orchestrator:
                     unit_id=unit_new.unit_id,
                 )
                 return det
+            elif _brace_diag not in ("not_brace_failure", "no_imbalance"):
+                # Only journal when we TRIED to repair braces and failed —
+                # not when the failure wasn't brace-related at all.
+                self.journal.emit(
+                    "brace_repair_skipped",
+                    {"reason": _brace_diag},
+                    step_index=self.step, path=path,
+                )
 
         # Smart blame (tiered verification): when no unit's span contains the
         # error line AND we're in tiered mode (time budget active), skip the
@@ -8557,13 +8571,16 @@ class Orchestrator:
         # Header file Phase 1 CEGIS cap: headers skip the per-unit gcc gate
         # (no standalone compilation), so CEGIS retries are blind — the model
         # produces output, nothing validates it at the compile level, and it
-        # retries on advisory warnings only. Cap to 1 model call (retry_count
-        # max = 0) so a header unit doesn't burn 180s in blind CEGIS retries.
-        # The structural resolver and source portfolio still run (pre-LLM).
-        # The whole-file build in Phase 2 is the header's true verifier.
+        # retries on advisory warnings only. Allow 1 retry (2 model calls max)
+        # so the model can act on risk-layer rejection feedback (e.g. "drops a
+        # side's additions"). Previously capped at 0 retries, which prevented
+        # the model from ever responding to risk feedback — the second attempt
+        # (informed by the rejection reason) was discarded. The whole-file
+        # build in Phase 2 is the header's true verifier; the structural
+        # resolver and source portfolio still run (pre-LLM).
         _unit_path = unit.path or ""
         _is_header = _unit_path.endswith((".h", ".hpp", ".hh", ".hxx", ".H"))
-        _header_max_retries = 0 if _is_header else self.config.policy.max_retries_per_unit
+        _header_max_retries = 1 if _is_header else self.config.policy.max_retries_per_unit
         # Unit-count-aware retry budget: when a file has many units, each unit
         # gets fewer retries so the total model-call count stays within the
         # wall-time budget. A file with 78 units at 3 attempts each = 234 calls
@@ -9176,8 +9193,8 @@ class Orchestrator:
                     return outcome
 
             # Header file CEGIS cap: headers have no per-unit compile gate,
-            # so retries are blind. If we've used our 1 allowed model call
-            # for a header, escalate instead of retrying.
+            # so retries are blind. Allow 1 retry (to act on risk feedback),
+            # then escalate instead of retrying further.
             if _is_header and retry_count >= _header_max_retries and retry_count > 0:
                 outcome.escalated = True
                 outcome.retry_count = retry_count
