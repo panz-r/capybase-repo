@@ -151,6 +151,13 @@ class RiskEngine:
         # Used for every retryable branch below; the critic budget applies the
         # same role factor on top of its coverage scaling (see _critic_budget).
         budget = self._effective_budget(feats)
+        # Effective total retries: the orchestrator routes verifier_model
+        # warnings to critic_retry_count and content-loss warnings to
+        # retry_count. When BOTH co-occur, retry_count alone doesn't reflect
+        # the total model calls. Use the combined count for the content-loss
+        # budget gates so the loop terminates (fixes infinite retry when
+        # content-loss + verifier_model co-occur).
+        _total_retries = retry_count + critic_retry_count
 
         # --- immediate-escalate signals (CEGIS resilience) ---
         # no_op_repair: the model's SEARCH/REPLACE was a no-op (search ==
@@ -271,16 +278,13 @@ class RiskEngine:
         # BUT: for exclusive choices (SAFE_SCALAR, GENERIC_EXCLUSIVE), picking
         # one side is defensible — retrying just oscillates between sides.
         # Check the proof class before retrying.
-        if "both_sides_represented" in warning_names and retry_count < budget:
+        if "both_sides_represented" in warning_names and _total_retries < budget:
             # Check if this is an exclusive choice that the preservation
-            # validator already classified as safe.
-            pres_warning = next(
-                (w for w in result.warnings if w.validator == "preservation_heuristic"),
-                None,
-            )
-            proof_class = None
-            if pres_warning and pres_warning.detail:
-                proof_class = pres_warning.detail.get("exclusive_proof_class")
+            # validator already classified as safe. The proof class is in
+            # result.features (not result.warnings) because the preservation
+            # validator returns passed=True when it sets exclusive_proof_class,
+            # so its warning is absent from result.warnings.
+            proof_class = result.features.get("exclusive_proof_class")
             if proof_class in ("SAFE_SCALAR", "GENERIC_EXCLUSIVE"):
                 pass  # Don't retry — picking one side is defensible
             else:
@@ -294,7 +298,7 @@ class RiskEngine:
         # below the configured fraction — a hard, quantitative backstop that
         # fires even when the LLM critic is uncertain or skipped. Same retry
         # contract as the other soft drops.
-        if "intent_coverage" in warning_names and retry_count < budget:
+        if "intent_coverage" in warning_names and _total_retries < budget:
             return RiskDecision(
                 action="retry",
                 reasons=soft or ["intent coverage below floor"],
@@ -304,7 +308,7 @@ class RiskEngine:
         # contains a unit present in NONE of the three sides — a hallucinated
         # helper/branch the model invented. The inverse failure mode of the
         # coverage drops above. Retry so the model removes or justifies it.
-        if "unattributed_code" in warning_names and retry_count < budget:
+        if "unattributed_code" in warning_names and _total_retries < budget:
             return RiskDecision(
                 action="retry",
                 reasons=soft or ["unattributed code (unit in neither side)"],
@@ -314,7 +318,7 @@ class RiskEngine:
         # condition): the merge silently removed a symbol base + both sides kept
         # — a semantic regression the syntactic checks miss. Retry so the model
         # re-includes it; escalate if it persists.
-        if "referenced_symbol_dropped" in warning_names and retry_count < budget:
+        if "referenced_symbol_dropped" in warning_names and _total_retries < budget:
             return RiskDecision(
                 action="retry",
                 reasons=soft or ["dropped a base-referenced dependency"],
@@ -325,7 +329,7 @@ class RiskEngine:
         # re-includes the symbol; escalate if it persists (same class as the
         # side-obligation + dependency drops above — "didn't preserve what the
         # branch needs").
-        if "future_obligation" in warning_names and retry_count < budget:
+        if "future_obligation" in warning_names and _total_retries < budget:
             return RiskDecision(
                 action="retry",
                 reasons=soft or ["dropped a symbol a later commit needs"],

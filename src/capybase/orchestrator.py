@@ -270,6 +270,12 @@ def _resolved_buffer(
     from capybase.adapters.parsers import splice_all_resolutions
 
     if any(unit.marker_span is None for unit, _ in accepted):
+        # Find the whole-file unit's resolution — it may not be at index 0
+        # (the orchestrator sorts by marker_span start, skipping None-span units).
+        for unit, cand in accepted:
+            if unit.marker_span is None:
+                return cand.resolved_text
+        # Fallback: shouldn't happen (the any() above confirmed one exists)
         return accepted[0][1].resolved_text
     spans_and_texts = [
         (unit.marker_span, cand.resolved_text) for unit, cand in accepted

@@ -483,7 +483,19 @@ def resolve_by_combination_search(
         )
 
     if space <= EXHAUSTIVE_THRESHOLD:
-        best, best_fit = _exhaustive_best(ours, theirs, floor=floor)
+        # Depth guard: _interleavings recurses to depth m+n. Python's default
+        # recursion limit is 1000, so a skewed conflict (e.g. 1023+1 lines)
+        # with C(1024,1)=1024 ≤ EXHAUSTIVE_THRESHOLD would crash with
+        # RecursionError. Fall back to hill-climb when the total depth would
+        # exceed a safe limit.
+        if len(ours) + len(theirs) > 500:
+            best, best_fit = _hill_climb_best(
+                ours, theirs, floor=floor, max_iterations=max_iterations,
+                stagnation_limit=stagnation_limit, max_time=max_time,
+                rng=random.Random(seed),
+            )
+        else:
+            best, best_fit = _exhaustive_best(ours, theirs, floor=floor)
     else:
         best, best_fit = _hill_climb_best(
             ours, theirs, floor=floor, max_iterations=max_iterations,

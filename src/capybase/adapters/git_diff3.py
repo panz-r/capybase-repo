@@ -110,10 +110,13 @@ def merge_file_diff3(
                 text=True,
                 timeout=30,
             )
-            # git merge-file exit codes: 0 = clean merge, >0 = number of
-            # conflicts found, negative = error. So any non-negative exit is
-            # valid output; we parse the stdout to determine the blocks.
-            if proc.returncode < 0:
+            # git merge-file exit codes: 0 = clean merge, 1-127 = number of
+            # conflicts found, negative = signal death, 255 = error (e.g.
+            # permission denied, I/O failure). Only 0-127 are valid conflict
+            # counts; anything else is an error → return None so callers fall
+            # back to raw sides instead of treating error output as a clean
+            # merge (empty stdout → [] → "clean merge" false positive).
+            if proc.returncode < 0 or proc.returncode > 127:
                 return None
             if proc.returncode == 0:
                 # No conflict — the sides merge cleanly.
