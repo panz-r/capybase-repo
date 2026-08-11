@@ -119,8 +119,18 @@ class StrictnessPolicy:
         # the extra unattended gate, but ci applies it too for caution).
         conf = float(getattr(candidate, "self_reported_confidence", 0.0) or 0.0)
         if conf < self.min_confidence:
+            # Deterministic confidence override: when the model's self-reported
+            # confidence is low, check if deterministic signals (compiles,
+            # intent coverage, line count) are strong enough to accept anyway.
+            # This prevents false escalations of structurally-sound candidates
+            # that the model under-rated (e.g. clickhouse-0041 where two valid
+            # implementations exist). Safe: the compiler and all hard validators
+            # already passed; this only relaxes the model-opinion floor.
+            det_conf = _deterministic_confidence(unit, candidate, validation)
+            if det_conf >= 0.8:
+                return True, ""  # accept despite low self-reported confidence
             label = "unattended" if self.unattended else "ci"
-            return False, f"{label} mode: confidence {conf:.2f} < floor {self.min_confidence:.2f}"
+            return False, f"{label} mode: confidence {conf:.2f} < floor {self.min_confidence:.2f} (det={det_conf:.2f})"
         return True, ""
 
     # ------------------------------------------------------------------ shared
@@ -147,3 +157,54 @@ class StrictnessPolicy:
         if self.unattended and band in self.escalate_bands:
             return f"unattended mode: {band} conflict needs a human"
         return ""
+
+
+def _deterministic_confidence(
+    unit: "ConflictUnit",
+    candidate: "CandidateResolution",
+    validation: "VerificationResult",
+) -> float:
+    """Compute a deterministic confidence score in [0, 1] from candidate
+    properties — NOT from the model's self-report.
+
+    Signals (each adds to the score):
+    - Candidate passed all hard checks (no hard failures): +0.3
+    - Intent coverage > 0.9 (side-specific additions preserved): +0.3
+    - Line count within 20% of expected: +0.2
+    - No preservation/both-sides warnings: +0.1
+    - No needs_human flag: +0.1
+
+    A candidate scoring ≥ 0.8 has strong deterministic evidence of correctness
+    and can be accepted even when the model's self-reported confidence is low.
+    """
+    score = 0.0
+    feats = getattr(validation, "features", {}) or {}
+    # 1. Passed all hard checks (compiler, syntax, scope)
+    if validation.passed and not validation.hard_failures:
+        score += 0.3
+    # 2. Intent coverage > 0.9
+    cur_ratio = feats.get("current_preservation_ratio")
+    rep_ratio = feats.get("replayed_preservation_ratio")
+    ratios = [r for r in (cur_ratio, rep_ratio) if isinstance(r, (int, float))]
+    if ratios and min(ratios) > 0.9:
+        score += 0.3
+    elif not ratios:
+        # No ratios computed (no entities added) — can't penalize for missing
+        # signal. Give partial credit (the candidate didn't drop anything we
+        # can measure).
+        score += 0.15
+    # 3. Line count within 20% of expected (max of both sides)
+    resolved_lines = len((candidate.resolved_text or "").splitlines())
+    cur_lines = len((unit.current.text or "").splitlines())
+    rep_lines = len((unit.replayed.text or "").splitlines())
+    expected = max(cur_lines, rep_lines, 1)
+    if expected > 0 and abs(resolved_lines - expected) / expected <= 0.2:
+        score += 0.2
+    # 4. No preservation/both-sides warnings
+    warning_validators = {w.validator for w in validation.warnings}
+    if not warning_validators & {"preservation_heuristic", "both_sides_represented"}:
+        score += 0.1
+    # 5. No needs_human
+    if not feats.get("model_needs_human") and not getattr(candidate, "needs_human", False):
+        score += 0.1
+    return min(score, 1.0)

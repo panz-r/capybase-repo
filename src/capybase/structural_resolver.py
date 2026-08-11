@@ -350,6 +350,15 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if merged is not None:
             return StructuralResolution(rule="mechanical_reapply_merge", text=merged)
 
+        # Lint transform: when mechanical_reapply declined because base anchors
+        # didn't survive the refactor, try applying known-safe lint substitutions
+        # (NULL→nullptr, and→&&, etc.) directly to the refactor side's text.
+        # This resolves refactor_vs_lint conflicts without the LLM.
+        if _shape != "rewrite_vs_edit":
+            linted = _try_lint_transform(base, current, replayed)
+            if linted is not None:
+                return StructuralResolution(rule="lint_transform", text=linted)
+
         # Prose value-resolution: both sides edited the SAME prose line
         # differently (a version-string bump, a changelog header, a date). Every
         # code-shaped rule above declines (no entities, same-line two-sided
@@ -1110,6 +1119,96 @@ def _try_mechanical_reapply_merge(
         applied[idx:idx + len(anchor)] = repl
 
     return _detokenize_with_macros(applied, _macro_lookup_mr)
+
+
+# Directional lint substitutions: apply the mechanical side's lint transforms
+# directly to the refactor side's text. Unlike _TOKEN_EQUIV (which is for
+# COMPARISON only), this is for APPLICATION — it rewrites old → new. Used when
+# mechanical_reapply_merge declines because base anchors didn't survive the
+# refactor (the refactor restructured or removed the base text).
+_LINT_TRANSFORMS: list[tuple[str, str]] = [
+    ("NULL", "nullptr"),
+    ("TRUE", "true"),
+    ("FALSE", "false"),
+    ("and", "&&"),
+    ("or", "||"),
+    ("not", "!"),
+    ("bitand", "&"),
+    ("bitor", "|"),
+    ("xor", "^"),
+    ("compl", "~"),
+]
+
+
+def _apply_lint_transforms(
+    text: str, transforms: list[tuple[str, str]],
+) -> str:
+    """Apply directional lint substitutions with word-boundary matching.
+
+    Each (old, new) pair replaces whole-word occurrences of ``old`` with
+    ``new``. Word boundaries prevent partial matches (``Anderson`` won't
+    match ``and``). Only fires when ``old`` is not already in ``new`` form.
+    """
+    import re as _re_lt
+    result = text
+    for old, new in transforms:
+        if old == new:
+            continue
+        # Word-boundary replacement: \b ensures we don't match inside identifiers
+        result = _re_lt.sub(r"\b" + _re_lt.escape(old) + r"\b", new, result)
+    return result
+
+
+def _try_lint_transform(base: str, current: str, replayed: str) -> str | None:
+    """When one side is a refactor and the other is a mechanical lint pass,
+    apply the lint transforms directly to the refactor side's text.
+
+    Unlike ``_try_mechanical_reapply_merge``, this rule does NOT require base
+    anchors to survive — it applies known-safe lint substitutions (NULL→nullptr,
+    and→&&, etc.) directly to the refactor text using word-boundary matching.
+
+    Fires when:
+    - Exactly one side is classified as mechanical (via _is_mechanical_side)
+    - The other side (semantic/refactor) is substantially different from base
+    - The mechanical side's changes match known lint transforms
+
+    Returns the transformed semantic text, or None to defer.
+    """
+    bt = _tokenize_with_macros(base)[0]
+    ct = _tokenize_with_macros(current)[0]
+    rt = _tokenize_with_macros(replayed)[0]
+    cur_ops = _token_change_ops(bt, ct)
+    rep_ops = _token_change_ops(bt, rt)
+    if not cur_ops or not rep_ops:
+        return None
+    # Classify which side is mechanical
+    cur_mech = _is_mechanical_side(cur_ops, len(bt), base, current)
+    rep_mech = _is_mechanical_side(rep_ops, len(bt), base, replayed)
+    if cur_mech == rep_mech:
+        return None  # both mechanical or both semantic
+    if cur_mech:
+        mech_text, sem_text = current, replayed
+        mech_ops = cur_ops
+    else:
+        mech_text, sem_text = replayed, current
+        mech_ops = rep_ops
+    # Check if the mechanical side's changes match known lint transforms.
+    # Extract the (old, new) token pairs from the mechanical ops.
+    detected_transforms: list[tuple[str, str]] = []
+    for _i1, _i2, repl in mech_ops:
+        # The replacement tokens are the "new" form; the base tokens are the "old"
+        # We check if any known transform matches
+        new_text = "".join(repl).strip()
+        for old, new in _LINT_TRANSFORMS:
+            if new_text == new:
+                detected_transforms.append((old, new))
+    if not detected_transforms:
+        return None  # the mechanical changes aren't known lint transforms
+    # Apply the detected transforms to the semantic side
+    result = _apply_lint_transforms(sem_text, detected_transforms)
+    if result == sem_text:
+        return None  # no changes applied (the refactor already had the new form)
+    return result
 
 
 def _find_subsequence(haystack: list[str], needle: list[str]) -> int:
