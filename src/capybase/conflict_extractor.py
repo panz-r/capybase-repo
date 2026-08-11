@@ -1238,7 +1238,17 @@ def _commit_change_type_of(
     ``rep_changes`` optionally supplies a pre-computed BASE→REPLAYED entity diff
     (cached by :func:`conflict_features`) so the parse is shared with the
     operation-count features. When ``None`` the diff is computed here.
+
+    Performance guard: when the base text is >200 lines (typical for marker
+    units where ``unit.base.text`` is the WHOLE file), skip — the entity diff
+    is both meaningless (24K base vs 2-line side) and expensive (0.5s parse ×
+    90 units = 45s). Returns "unknown" which is the correct degradation.
     """
+    # Performance guard: same as _cached_entity_diff. classify_commit_change
+    # would compute its own semantic_diff (parsing 24K lines) when changes=None.
+    base_line_count = (unit.base.text or "").count("\n")
+    if base_line_count > 200 and rep_changes is None:
+        return "unknown"
     try:
         from capybase.adapters import structural
 
