@@ -1261,6 +1261,13 @@ def _cached_entity_diff(unit: ConflictUnit, side: str) -> list | None:
     share one parse per side instead of re-parsing 3-4× per unit. Returns ``None``
     when the parser is unavailable or the side fails to parse (callers degrade to
     zero-counts / "unknown").
+
+    Performance guard: when the base text is >200 lines (typical for marker
+    units where ``unit.base.text`` is the WHOLE file), the entity diff is
+    both meaningless (24K base vs 2-line side = everything "deleted") and
+    expensive (parsing 24K lines × 90 units = 50+ seconds). Skip it — the
+    operation counts degrade to 0 and commit_change_type degrades to
+    "unknown", which is the correct behavior for whole-file bases.
     """
     meta = unit.structural_metadata
     cache = meta.get("entity_changes")
@@ -1269,6 +1276,14 @@ def _cached_entity_diff(unit: ConflictUnit, side: str) -> list | None:
         meta["entity_changes"] = cache
     if side in cache:
         return cache[side]
+    # Performance guard: skip entity diff for large bases (whole-file marker
+    # units). The semantic_diff would parse the entire file for each of 90+
+    # units, adding 50+ seconds to extraction. The diff is meaningless anyway
+    # (whole file vs 2-line hunk = everything deleted).
+    base_line_count = (unit.base.text or "").count("\n")
+    if base_line_count > 200:
+        cache[side] = None
+        return None
     try:
         from capybase.adapters import structural
 
