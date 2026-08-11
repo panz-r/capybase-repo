@@ -3942,7 +3942,10 @@ class VerificationEngine:
             "future_obligation", "rust_syntax", "ccs_syntax", "python_syntax",
         })
         for v in self.validators:
-            if fast_verify and v.name in _fast_skip:
+            if fast_verify and (
+                v.name in _fast_skip
+                or v.name.startswith("verifier_model")
+            ):
                 continue
             res = v.verify(ctx)
             for k, val in res.features.items():

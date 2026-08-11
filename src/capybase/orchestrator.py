@@ -3790,15 +3790,7 @@ class Orchestrator:
             explanation="instantiated from a sibling unit's edit pattern",
             provenance="deterministic_structural",
         )
-        # Use fast_verify for pattern reuse: the instantiated text is a
-        # pure-punctuation substitution (no IDENT/NUM in the replacement —
-        # guaranteed by _category_seq_to_tokens which returns None for
-        # identifier-rename patterns). Pure-punctuation insertions (e.g.
-        # inserting "{}" before ";") are structurally safe — they cannot
-        # break syntax in ways the cheap validators miss. The Phase 2
-        # whole-file build gate catches any edge case. Using fast_verify here
-        # is CRITICAL for throughput: without it, each of 78 sibling units
-        # runs gcc -fsyntax-only on the spliced file (~15s each = 1170s).
+        # Use fast_verify for pattern reuse (see comment above).
         validation = self.verification.verify(unit, cand, fast_verify=True)
         self.journal.emit(
             "step_pattern_reuse",
