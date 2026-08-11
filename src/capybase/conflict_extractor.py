@@ -1498,7 +1498,7 @@ def _refine_with_diff3(
     # for brace/semicolon languages and prefer it when tighter. The projection
     # lets line-diff anchor on real statement/block boundaries.
     if project_separators and language is not None:
-        blocks = _maybe_use_projected(
+        projected = _maybe_use_projected(
             blocks,
             base_text,
             current_text,
@@ -1506,6 +1506,12 @@ def _refine_with_diff3(
             language,
             diff_algorithm,
         )
+        # Safety: if the projected merge returns [] (clean merge) but the raw
+        # blocks had real conflicts, the projection silently lost them — keep
+        # the raw blocks. This is critical for nlohmann-0019 where the
+        # separator projection produces 0 blocks from 79 real conflicts.
+        if projected is not None and (len(projected) > 0 or len(blocks) == 0):
+            blocks = projected
     if not blocks or len(blocks) != len(units):
         # Multi-diff portfolio: try alternative diff algorithms before giving
         # up. Different algorithms (patience, minimal, myers) produce different
