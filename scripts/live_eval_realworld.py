@@ -542,6 +542,18 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     cfg.future.enable_structural_resolver = True
     cfg.future.enable_combination_search = True
     cfg.policy.max_retries_per_unit = 2  # cap CEGIS retries for throughput
+    # Disable the verifier model jury for high-region-count conflicts.
+    # The jury makes 4 separate LLM calls (model + assertion + reflection +
+    # guardrail) per non-fast_verify unit, at ~12s each = 48s per unit.
+    # For 89-region files, even 7 non-deterministic units × 48s = 336s →
+    # timeout. The Phase 2 whole-file build gate is the real verifier.
+    # Threshold: >40 non-blank conflict lines ≈ >10 regions (each region
+    # has ~3-4 non-blank lines: base/current/replayed).
+    if _conflict_lines > 120:
+        cfg.validation.enable_verifier_model = False
+        cfg.validation.enable_verifier_assertion = False
+        cfg.validation.enable_verifier_reflection = False
+        cfg.validation.enable_verifier_guardrail = False
     # Recovery retry budget: when the model self-reports needs_human, give it
     # one more attempt with a reframed prompt. Raised from 1 to 2 — the 12
     # MODEL_NEEDS_HUMAN cases in V6 had sim >= 0.85 (most >= 0.97), suggesting
