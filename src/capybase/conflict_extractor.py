@@ -298,7 +298,36 @@ class ConflictExtractor:
                 min_region_lines=fut.entity_split_min_lines if fut else 40,
                 min_sub_lines=fut.entity_split_min_sub_lines if fut else 8,
             )
-            out.extend(subs)
+            # Statement-level splitting: when entity splitting still leaves
+            # oversized sub-units (>80 non-blank lines inside a function body),
+            # split further at safe statement boundaries (lines ending with ;
+            # at body indent, outside nested blocks). This turns a 200-line
+            # LLM call into 5-10 tiny resolutions.
+            final_subs: list[ConflictUnit] = []
+            for sub in subs:
+                stmt_pts = _find_statement_split_points(sub)
+                if stmt_pts is None:
+                    final_subs.append(sub)
+                    continue
+                # Split the sub-unit at statement boundaries using the existing
+                # proportional sub-span infrastructure. Conservative: if any
+                # step fails, keep the original sub-unit.
+                try:
+                    n_stmt = len(stmt_pts) + 1
+                    s_start, s_end = sub.marker_span
+                    spans = _proportional_sub_spans(s_start, s_end, [1] * n_stmt)
+                    stmt_subs = [
+                        _build_sub_unit(
+                            sub, span, k, n_stmt,
+                            sub.current.text or "", sub.replayed.text or "",
+                            sub.base.text or "", n_stmt,
+                        )
+                        for k, span in enumerate(spans)
+                    ]
+                    final_subs.extend(stmt_subs)
+                except Exception:  # noqa: BLE001
+                    final_subs.append(sub)
+            out.extend(final_subs)
         return out
 
     def _extract_whole_file_units(
@@ -765,6 +794,74 @@ def _split_unit_at_entities(
             )
         )
     return sub_units
+
+
+def _find_statement_split_points(
+    unit: ConflictUnit, *, max_lines: int = 80, min_splits: int = 3,
+) -> list[int] | None:
+    """Find safe statement-level split points inside an oversized sub-unit.
+
+    Scans the unit's worktree text (within its marker_span) for lines that:
+    - end with ``;`` (statement end)
+    - are at the same indentation level as the function body's start
+    - are NOT inside any nested brace pair (brace depth == body depth)
+
+    Returns a list of 0-based worktree line indices, or None when the unit
+    is small enough or not enough safe points exist. The caller uses these
+    to split the unit into statement-level sub-units.
+    """
+    if unit.marker_span is None:
+        return None
+    wt = (unit.original_worktree_text or "").splitlines()
+    start, end = unit.marker_span
+    region = wt[start:end + 1] if end < len(wt) else wt[start:]
+    nb = sum(1 for l in region if l.strip())
+    if nb <= max_lines:
+        return None  # small enough — no need to split further
+    # Determine the body indentation: find the first line that is inside
+    # the function body (depth >= 1 after processing its braces) and not
+    # the function signature itself.
+    body_indent = 0
+    _scan_depth = 0
+    for line in region:
+        if not line.strip():
+            continue
+        _scan_depth_before = _scan_depth
+        for ch in line.strip():
+            if ch == "{":
+                _scan_depth += 1
+            elif ch == "}":
+                _scan_depth -= 1
+        # The first line where depth transitions to >= 1 is the opening
+        # brace line. The NEXT non-blank line at depth >= 1 gives body indent.
+        if _scan_depth >= 1 and _scan_depth_before >= 1:
+            body_indent = len(line) - len(line.lstrip())
+            break
+    # Track brace depth and find statement boundaries at body level
+    depth = 0
+    split_points: list[int] = []
+    for i, line in enumerate(region):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Track brace depth changes
+        for ch in stripped:
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+        # A safe split point: line ends with ;, is at body indent, depth == 1
+        # (inside the function body but not inside a nested block)
+        indent = len(line) - len(line.lstrip())
+        if (
+            stripped.endswith(";")
+            and indent == body_indent
+            and depth == 1
+        ):
+            split_points.append(start + i)  # absolute worktree line index
+    if len(split_points) < min_splits:
+        return None
+    return split_points
 
 
 def _fragment_base(

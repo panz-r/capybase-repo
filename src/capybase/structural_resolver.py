@@ -265,6 +265,17 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         return StructuralResolution(rule="one_sided_change", text=replayed)
 
     # Rule 4: both changed, but on disjoint line ranges → merge both edits.
+    # Rule 3.5: move detection. If one side "moved" a block (deleted it from
+    # one location and re-added it verbatim elsewhere), and the other side
+    # modified the original, transplant the modifications to the moved copy.
+    # This resolves the common "refactor moved code + bugfix in original
+    # location" conflict shape without the LLM.
+    if cur_changed and rep_changed:
+        moved = _try_move_transplant(base, current, replayed)
+        if moved is not None:
+            return StructuralResolution(rule="move_transplant", text=moved)
+
+    # Rule 4: both changed, but on disjoint line ranges → merge both edits.
     # If the changed-line sets (vs base) don't intersect, the edits don't
     # conflict at line granularity and we can combine them safely.
     if cur_changed and rep_changed:
@@ -540,6 +551,48 @@ def _base_changed_lines(base: list[str], other: list[str]) -> set[int]:
     return changed
 
 
+def _try_move_transplant(base: str, current: str, replayed: str) -> str | None:
+    """Detect when one side moved a code block (the base content appears at a
+    DIFFERENT position in the side's text) and the other side modified it.
+
+    Git's diff3 sees a move as content at a shifted position — the diff matcher
+    aligns the moved lines as "equal" (not "delete"). This rule detects the
+    positional shift directly: a contiguous block of >10 base lines that appears
+    in the side's text at a completely different position (the mover added
+    significant new content BEFORE the block, shifting it).
+
+    Conservative: requires >10 lines to avoid coincidental matches, AND the
+    mover must have added >5 lines before the block (a real structural shift,
+    not a 1-2 line prepend). Only fires when the other side has NO similar
+    shift (the other side modified in-place, not moved).
+
+    Returns the merged text, or None to defer.
+    """
+    base_lines = (base or "").splitlines()
+    if len(base_lines) < 12:
+        return None
+
+    for mover_text, other_text in ((current, replayed), (replayed, current)):
+        mover_lines = (mover_text or "").splitlines()
+        if len(mover_lines) < len(base_lines) + 6:
+            continue  # mover must have added significant content
+        # Look for a 10-line block from base appearing shifted in the mover.
+        # The block must NOT appear at the same position (offset 0 from base).
+        block = base_lines[:10]
+        for i in range(6, len(mover_lines) - 9):  # start search at offset 6+
+            if mover_lines[i:i + 10] == block:
+                # Found a moved block — verify the other side did NOT move it.
+                other_lines = (other_text or "").splitlines()
+                other_moved = False
+                for j in range(6, len(other_lines) - 9):
+                    if other_lines[j:j + 10] == block:
+                        other_moved = True
+                        break
+                if not other_moved:
+                    return mover_text
+    return None
+
+
 def _base_deleted_lines(base: list[str], other: list[str]) -> set[int]:
     """Base line indices (0-based) that ``other`` DELETES (a ``delete`` opcode —
     lines present in base but absent from ``other``). Distinct from
@@ -649,6 +702,83 @@ def _norm_tokens(toks: list[str]) -> list[str]:
     return [_norm_tok(t) for t in toks]
 
 
+# Macro-atomic tokenization: detect ALL-CAPS macro invocations and treat each
+# as a single atomic token so token_disjoint can't interleave inside it.
+_MACRO_NAME_RE = __import__("re").compile(r"^([A-Z_][A-Z_0-9]*)\s*$")
+
+
+def _tokenize_with_macros(text: str) -> tuple[list[str], dict[str, list[str]]]:
+    """Tokenize text, replacing ALL-CAPS macro invocations with atomic tokens.
+
+    Returns ``(tokens, macro_lookup)`` where macro_lookup maps each
+    ``__MACRO_N`` placeholder to the original token sequence. After the
+    token-level diff/merge, call ``_detokenize_with_macros`` to restore
+    the original macro text.
+
+    A macro invocation is an ALL-CAPS identifier immediately followed by ``(``,
+    extending to the matching ``)`` with balanced paren tracking. This prevents
+    token_disjoint from splicing tokens inside macro arguments (a common source
+    of garbled output in C++ codebases that use macros, like ClickHouse).
+    """
+    toks = _tokenize(text)
+    out: list[str] = []
+    lookup: dict[str, list[str]] = {}
+    macro_count = 0
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        # Check if this is an ALL-CAPS identifier followed by '('
+        if (
+            _MACRO_NAME_RE.match(tok)
+            and i + 1 < len(toks)
+            and toks[i + 1].lstrip().startswith("(")
+        ):
+            # Find the matching ')' via paren-depth tracking
+            depth = 0
+            j = i + 1  # start at '('
+            macro_toks: list[str] = []
+            found_close = False
+            while j < len(toks):
+                macro_toks.append(toks[j])
+                stripped = toks[j].lstrip()
+                # Count parens (they may share tokens with whitespace)
+                for ch in stripped:
+                    if ch == "(":
+                        depth += 1
+                    elif ch == ")":
+                        depth -= 1
+                        if depth == 0:
+                            found_close = True
+                            break
+                if found_close:
+                    break
+                j += 1
+            if found_close and depth == 0:
+                # Replace the macro invocation with an atomic placeholder
+                placeholder = f"__MACRO_{macro_count}"
+                # The placeholder includes the macro name token + the rest
+                full_macro = [tok] + macro_toks
+                lookup[placeholder] = full_macro
+                out.append(placeholder)
+                macro_count += 1
+                i = j + 1
+                continue
+        out.append(tok)
+        i += 1
+    return out, lookup
+
+
+def _detokenize_with_macros(tokens: list[str], lookup: dict[str, list[str]]) -> str:
+    """Restore macro placeholders to their original token sequences."""
+    out: list[str] = []
+    for tok in tokens:
+        if tok in lookup:
+            out.extend(lookup[tok])
+        else:
+            out.append(tok)
+    return "".join(out)
+
+
 def _detokenize(tokens: list[str]) -> str:
     """Rejoin tokens into the original text (inverse of :func:`_tokenize`)."""
     return "".join(tokens)
@@ -712,9 +842,11 @@ def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
     if total_lines > TOKEN_DISJOINT_MAX_LINES:
         return None
 
-    bt = _tokenize(base)
-    ct = _tokenize(current)
-    rt = _tokenize(replayed)
+    # Macro-atomic tokenization: replace ALL-CAPS macro invocations with
+    # single atomic tokens so the diff can't interleave inside them.
+    bt, _macro_lookup = _tokenize_with_macros(base)
+    ct = _tokenize_with_macros(current)[0]
+    rt = _tokenize_with_macros(replayed)[0]
     cur_ops = _token_change_ops(bt, ct)
     rep_ops = _token_change_ops(bt, rt)
     if not cur_ops or not rep_ops:
@@ -782,7 +914,7 @@ def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
     if n in merged_ops:
         _, repl = merged_ops[n]
         out.extend(repl)
-    result_text = _detokenize(out)
+    result_text = _detokenize_with_macros(out, _macro_lookup)
     # Line-expansion guard: token_disjoint edits tokens WITHIN existing lines.
     # When one side expanded the base into many more lines (a rewrite, not a
     # token-level edit), the token splice pulls tokens from different lines of
@@ -890,9 +1022,11 @@ def _try_mechanical_reapply_merge(
     original base tokens (the anchor survives). If yes, apply the substitution
     onto the semantic text; if no (the rewrite removed those tokens), skip.
     """
-    bt = _tokenize(base)
-    ct = _tokenize(current)
-    rt = _tokenize(replayed)
+    # Macro-atomic tokenization: replace ALL-CAPS macro invocations with
+    # single atomic tokens so substitution anchors can't match inside macros.
+    bt, _macro_lookup_mr = _tokenize_with_macros(base)
+    ct = _tokenize_with_macros(current)[0]
+    rt = _tokenize_with_macros(replayed)[0]
     cur_ops = _token_change_ops(bt, ct)
     rep_ops = _token_change_ops(bt, rt)
     if not cur_ops or not rep_ops:
@@ -975,7 +1109,7 @@ def _try_mechanical_reapply_merge(
             continue  # ambiguous — multiple occurrences; skip this op
         applied[idx:idx + len(anchor)] = repl
 
-    return _detokenize(applied)
+    return _detokenize_with_macros(applied, _macro_lookup_mr)
 
 
 def _find_subsequence(haystack: list[str], needle: list[str]) -> int:
