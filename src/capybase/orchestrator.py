@@ -1343,53 +1343,111 @@ def _try_restore_common_lines(
     replayed_text: str,
     language: str | None,
 ) -> str | None:
-    """Restore lines common to BOTH sides that the candidate dropped.
+    """Restore lines the candidate dropped — both side-common AND side-specific.
 
-    A production-safe deterministic post-processor: lines present in both
-    current AND replayed (agreed by both sides) but missing from the
-    candidate are re-inserted at the best-matched position. Only restores
-    side-common lines — never oracle-derived. The result must pass
-    brace-balance check.
+    A production-safe deterministic post-processor:
+    1. Lines common to BOTH sides (agreed additions) → always safe to restore.
+    2. Lines specific to ONE side → restore only if the other side didn't
+       delete or replace them (the other side's base still has the line or
+       the line is a new addition not present in base).
+
+    Lines are re-inserted at the best-matched position via LCS context.
+    The result must pass brace-balance check.
 
     Returns the repaired text, or None if no restoration was possible.
     """
     from capybase.verification import _braces_balanced
 
-    cur_lines = set((current_text or "").split("\n"))
-    rep_lines = set((replayed_text or "").split("\n"))
-    common_lines = cur_lines & rep_lines
+    cur_set = set((current_text or "").split("\n"))
+    rep_set = set((replayed_text or "").split("\n"))
+    base_set = set((base_text or "").split("\n"))
+    common_lines = cur_set & rep_set
+
+    # Side-specific additions: lines in one side but NOT in base
+    cur_specific = cur_set - base_set - rep_set
+    rep_specific = rep_set - base_set - cur_set
 
     cand_lines = candidate_text.split("\n")
-    # Compare stripped content, not exact strings — a line present in the
-    # candidate with different indentation is NOT "missing" and must not be
-    # re-inserted (would create a duplicate statement).
     cand_stripped = {l.strip() for l in cand_lines}
 
+    # Phase 1: restore common lines (both sides agreed)
     missing_common = [
         l for l in common_lines if l.strip() and l.strip() not in cand_stripped
     ]
-    if not missing_common:
+    # Phase 2: restore side-specific lines
+    # For current-specific: the replayed side must NOT have deleted the base
+    # line at the same position. Since these are additions (not in base),
+    # the other side simply didn't add them — that's fine, the addition
+    # is an obligation of the side that added it.
+    # Safety: only restore if the line is a genuine addition (not in base)
+    # AND not a closing brace or structural token.
+    # CRITICAL: do NOT restore lines that are modifications of base lines
+    # the candidate already has a different version of — that would create
+    # duplicate definitions (e.g., candidate has "B = 200", don't restore
+    # "B = 20" — they're different versions of the same base line "B = 2").
+    _structural_skip = {"{", "}", "};", ")", "(", "};", "}; "}
+
+    def _is_modification_duplicate(line: str, base_lines: set[str], cand_lines: set[str]) -> bool:
+        """True if `line` is a modified version of a base line that the
+        candidate already has a DIFFERENT modified version of."""
+        import re as _re_md
+        # Extract the assignment target: "B = 200" → "B", "int x = 1;" → "x"
+        # Try simple pattern: IDENT = ... (variable assignment)
+        m = _re_md.match(r'\s*(?:\w+\s+)*(\w+)\s*=', line)
+        if not m:
+            return False  # not an assignment — can't be a modification duplicate
+        var_name = m.group(1)
+        # Check if base has a line assigning to the same variable
+        for bl in base_lines:
+            bm = _re_md.match(r'\s*(?:\w+\s+)*(\w+)\s*=', bl)
+            if bm and bm.group(1) == var_name:
+                # Base has this variable. Check if candidate already has it.
+                for cl in cand_lines:
+                    cm = _re_md.match(r'\s*(?:\w+\s+)*(\w+)\s*=', cl)
+                    if cm and cm.group(1) == var_name:
+                        return True  # candidate already has a version → don't restore
+        return False
+
+    missing_cur_specific = [
+        l for l in cur_specific
+        if l.strip() and l.strip() not in cand_stripped
+        and l.strip() not in _structural_skip
+        and not _is_modification_duplicate(l.strip(), base_set, cand_stripped)
+    ]
+    missing_rep_specific = [
+        l for l in rep_specific
+        if l.strip() and l.strip() not in cand_stripped
+        and l.strip() not in _structural_skip
+        and not _is_modification_duplicate(l.strip(), base_set, cand_stripped)
+    ]
+
+    all_missing = missing_common[:3] + missing_cur_specific[:2] + missing_rep_specific[:2]
+    if not all_missing:
         return None
 
-    # Try context from base, current, AND replayed — the missing line may
-    # be a side-added line (not in base), so base alone won't provide context.
     context_sources = [
         (base_text or "").split("\n"),
         (current_text or "").split("\n"),
         (replayed_text or "").split("\n"),
     ]
-    for line in missing_common[:3]:
+    # Try restoring each missing line
+    result = candidate_text
+    for line in all_missing:
+        cand_now = result.split("\n")
+        if line.strip() in {l.strip() for l in cand_now}:
+            continue  # already present (maybe from a previous iteration)
         for ctx_lines in context_sources:
             best_pos = _find_lcs_insertion_point(
-                cand_lines, line, ctx_lines, error_line=None
+                cand_now, line, ctx_lines, error_line=None
             )
-            if best_pos is not None and 0 <= best_pos <= len(cand_lines):
-                trial = list(cand_lines)
+            if best_pos is not None and 0 <= best_pos <= len(cand_now):
+                trial = list(cand_now)
                 trial.insert(best_pos, line)
                 candidate_trial = "\n".join(trial)
                 if _braces_balanced(candidate_trial, language):
-                    return candidate_trial
-    return None
+                    result = candidate_trial
+                    break
+    return result if result != candidate_text else None
 
 
 def _try_side_consistency_repair(

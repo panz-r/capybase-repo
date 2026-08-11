@@ -1176,10 +1176,15 @@ def _try_lint_transform(base: str, current: str, replayed: str) -> str | None:
     anchors to survive — it applies known-safe lint substitutions (NULL→nullptr,
     and→&&, etc.) directly to the refactor text using word-boundary matching.
 
-    Fires when:
-    - Exactly one side is classified as mechanical (via _is_mechanical_side)
-    - The other side (semantic/refactor) is substantially different from base
-    - The mechanical side's changes match known lint transforms
+    Two detection paths:
+    1. Mechanical-side classification (via _is_mechanical_side) — conservative,
+       works for small conflicts.
+    2. Frequency-based detection — scans both sides' diffs for repeated known
+       lint substitutions. If the same transform appears >5 times in one side,
+       it's a lint pass regardless of total op count. This handles large
+       refactor-vs-lint conflicts (e.g. nlohmann-0020) where the conservative
+       _is_mechanical_side guards reject the lint side because the total
+       number of ops exceeds their thresholds.
 
     Returns the transformed semantic text, or None to defer.
     """
@@ -1188,36 +1193,83 @@ def _try_lint_transform(base: str, current: str, replayed: str) -> str | None:
     rt = _tokenize_with_macros(replayed)[0]
     cur_ops = _token_change_ops(bt, ct)
     rep_ops = _token_change_ops(bt, rt)
-    if not cur_ops or not rep_ops:
+    # Note: don't bail when one side has no NORMALIZED ops — token equivalence
+    # normalization (and→&&, NULL→nullptr) can make a side's changes invisible.
+    # The frequency-based path (below) uses raw un-normalized ops which will
+    # detect these. Only bail when BOTH sides are truly unchanged.
+    if not cur_ops and not rep_ops:
         return None
-    # Classify which side is mechanical
+
+    # Path 1: mechanical-side classification (original path)
     cur_mech = _is_mechanical_side(cur_ops, len(bt), base, current)
     rep_mech = _is_mechanical_side(rep_ops, len(bt), base, replayed)
-    if cur_mech == rep_mech:
-        return None  # both mechanical or both semantic
-    if cur_mech:
-        mech_text, sem_text = current, replayed
-        mech_ops = cur_ops
-    else:
-        mech_text, sem_text = replayed, current
-        mech_ops = rep_ops
-    # Check if the mechanical side's changes match known lint transforms.
-    # Extract the (old, new) token pairs from the mechanical ops.
-    detected_transforms: list[tuple[str, str]] = []
-    for _i1, _i2, repl in mech_ops:
-        # The replacement tokens are the "new" form; the base tokens are the "old"
-        # We check if any known transform matches
+    if cur_mech != rep_mech:
+        if cur_mech:
+            mech_text, sem_text = current, replayed
+            mech_ops = cur_ops
+        else:
+            mech_text, sem_text = replayed, current
+            mech_ops = rep_ops
+        detected_transforms = _detect_lint_transforms_from_ops(mech_ops)
+        if detected_transforms:
+            result = _apply_lint_transforms(sem_text, detected_transforms)
+            if result != sem_text:
+                return result
+
+    # Path 2: frequency-based detection — handles large conflicts where
+    # _is_mechanical_side rejects both sides (too many ops).
+    # Use a RAW (un-normalized) diff here, because _token_change_ops normalizes
+    # tokens via _norm_tokens which maps and→&& — making lint transforms invisible.
+    from capybase.diff import line_matcher as _lm_lt
+    def _raw_ops(base_toks, other_toks):
+        ops_r = []
+        m = _lm_lt(base_toks, other_toks)
+        for tag, i1, i2, j1, j2 in m.get_opcodes():
+            if tag != "equal":
+                ops_r.append((i1, i2, other_toks[j1:j2]))
+        return ops_r
+    cur_raw_ops = _raw_ops(bt, ct)
+    rep_raw_ops = _raw_ops(bt, rt)
+    cur_transforms = _detect_lint_transforms_from_ops(cur_raw_ops)
+    rep_transforms = _detect_lint_transforms_from_ops(rep_raw_ops)
+    # Count how many times each transform appears
+    from collections import Counter
+    cur_counts = Counter(cur_transforms)
+    rep_counts = Counter(rep_transforms)
+    # If one side has a lint transform appearing >5 times, it's the lint side
+    cur_dominant = sum(1 for t, c in cur_counts.items() if c >= 5)
+    rep_dominant = sum(1 for t, c in rep_counts.items() if c >= 5)
+    if cur_dominant > 0 and rep_dominant == 0:
+        # Current is the lint side, replayed is the refactor
+        detected = list(set(cur_transforms))
+        result = _apply_lint_transforms(replayed, detected)
+        if result != replayed:
+            return result
+    elif rep_dominant > 0 and cur_dominant == 0:
+        # Replayed is the lint side, current is the refactor
+        detected = list(set(rep_transforms))
+        result = _apply_lint_transforms(current, detected)
+        if result != current:
+            return result
+
+    return None
+
+
+def _detect_lint_transforms_from_ops(
+    ops: list[tuple[int, int, list[str]]],
+) -> list[tuple[str, str]]:
+    """Extract known lint transforms from token change ops.
+
+    Returns a list of (old, new) pairs where the replacement matches a
+    known lint transform. May contain duplicates (for frequency counting).
+    """
+    detected: list[tuple[str, str]] = []
+    for _i1, _i2, repl in ops:
         new_text = "".join(repl).strip()
         for old, new in _LINT_TRANSFORMS:
             if new_text == new:
-                detected_transforms.append((old, new))
-    if not detected_transforms:
-        return None  # the mechanical changes aren't known lint transforms
-    # Apply the detected transforms to the semantic side
-    result = _apply_lint_transforms(sem_text, detected_transforms)
-    if result == sem_text:
-        return None  # no changes applied (the refactor already had the new form)
-    return result
+                detected.append((old, new))
+    return detected
 
 
 def _find_subsequence(haystack: list[str], needle: list[str]) -> int:

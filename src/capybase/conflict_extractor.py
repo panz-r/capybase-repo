@@ -1405,6 +1405,57 @@ def _entity_name_from_signature(signature: str | None) -> str | None:
     return declaration_name(signature)
 
 
+def _match_blocks_to_units(
+    blocks: list, units: list, base_text: str,
+) -> list | None:
+    """Best-effort positional matching of diff3 blocks to conflict units.
+
+    When git merge-file produces a different block count than the worktree
+    marker parser (e.g. 79 vs 78), match each unit to its corresponding block
+    by finding the block whose `.ours` text best overlaps with the unit's
+    current.text (the marker hunk).
+
+    Returns a list of blocks aligned 1:1 with units, or None if matching
+    fails (e.g., too many blocks can't be matched).
+    """
+    from difflib import SequenceMatcher
+    aligned: list = []
+    used_block_indices: set[int] = set()
+    for unit in units:
+        unit_cur = (unit.current.text or "").strip()
+        best_idx = -1
+        best_ratio = 0.0
+        for bi, block in enumerate(blocks):
+            if bi in used_block_indices:
+                continue
+            block_ours = (block.ours or "").strip()
+            if not block_ours and not unit_cur:
+                best_idx = bi
+                best_ratio = 1.0
+                break
+            # Quick check: if one is a substring of the other, accept
+            if block_ours and unit_cur:
+                if block_ours in unit_cur or unit_cur in block_ours:
+                    best_idx = bi
+                    best_ratio = 0.9
+                    break
+            # Fuzzy match
+            ratio = SequenceMatcher(None, block_ours[:200], unit_cur[:200]).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_idx = bi
+        if best_idx < 0 or best_ratio < 0.3:
+            # Can't match this unit — bail
+            return None
+        used_block_indices.add(best_idx)
+        aligned.append(blocks[best_idx])
+    # Validate: each block's base appears in the full base text
+    for block in aligned:
+        if block.base and block.base not in base_text:
+            return None
+    return aligned
+
+
 def _refine_with_diff3(
     units: list[ConflictUnit],
     base_text: str,
@@ -1476,13 +1527,20 @@ def _refine_with_diff3(
                 blocks = alt_blocks
                 break
     if not blocks or len(blocks) != len(units):
-        # diff3 block count mismatch — can't safely associate blocks to units.
-        # Do NOT pollute diff3_refined with a windowed approximation — that
-        # field has a strong semantic meaning (true diff3 refinement) and
-        # changing it could affect the deterministic resolver and other
-        # consumers. The prompt-side _prompt_sides has its own anchor-based
-        # localization safety net for oversized bases.
-        return
+        # diff3 block count mismatch — can't safely associate blocks to units
+        # via simple zip. Try a positional best-effort match: for each unit,
+        # find the diff3 block whose `.ours` text best matches the unit's
+        # current.text (which is already the tight marker hunk). This handles
+        # the common case where git coalesces or splits one region differently
+        # than the worktree marker parser (e.g., 79 blocks vs 78 units).
+        # Without this fallback, the ENTIRE file gets no refinement, breaking
+        # the structural resolver, pattern cache, and shape hashing.
+        if blocks and len(blocks) >= len(units) - 2 and len(blocks) <= len(units) + 2:
+            blocks = _match_blocks_to_units(blocks, units, base_text)
+            if blocks is None:
+                return
+        else:
+            return
     # Base-substring validation: verify each diff3 block's base text actually
     # appears in the full base file. Git can coalesce adjacent conflict regions
     # differently than the worktree markers — when the count accidentally
