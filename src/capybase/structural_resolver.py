@@ -427,6 +427,15 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
                 return merged
             return StructuralResolution(rule="partial_disjoint_merge", text=merged)
 
+    # Rule N: generalized mini-conflict extraction. If all rules above declined,
+    # try to shrink the conflict to its ambiguous core by resolving provably
+    # deterministic regions (identical lines, one-sided changes, agreed
+    # deletions). If the entire conflict is deterministic, accept it without
+    # the LLM. If a core remains, emit a deferred_core for the LLM.
+    mini = _try_generalized_mini_conflict(base, current, replayed)
+    if mini is not None:
+        return mini
+
     return StructuralResolution(rule=None, text=None)
 
 
@@ -1453,6 +1462,300 @@ _CODE_LANGUAGES_FOR_TEXT_RULE = frozenset({
     "jsx", "tsx", "go", "golang", "java", "c", "cpp", "c++", "csharp", "cs",
     "kotlin", "swift", "scala", "dart", "php",
 })
+
+
+def _try_generalized_mini_conflict(
+    base: str, current: str, replayed: str,
+) -> StructuralResolution | None:
+    """Generalized mini-conflict extraction: shrink a conflict to its ambiguous
+    core by resolving provably deterministic regions (identical lines, one-sided
+    additions, agreed deletions), then emit a deferred_core for the remaining
+    ambiguous regions.
+
+    Unlike ``_try_partial_disjoint_merge`` (which requires ≤5 overlap lines and
+    a single contiguous core), this rule handles arbitrary conflict sizes and
+    multiple disjoint overlap regions. It merges all ambiguous regions into a
+    single deferred core, separated by deterministic tails as read-only context.
+
+    Conservative by design — only resolves regions that are provably safe:
+    - Lines identical in all sides (or both sides agree on the change)
+    - Lines only one side changed (the other kept base verbatim)
+    - Lines both sides deleted (agreed deletion)
+    Everything else stays in the core for the LLM.
+
+    Returns a StructuralResolution:
+    - With ``text`` set and ``deferred_core=None``: fully deterministic (no
+      LLM call needed — all regions were provably safe)
+    - With ``text`` and ``deferred_core`` set: deterministic tails assembled,
+      core deferred for LLM resolution
+    - None: no shrinking was possible or side-intent would be lost
+    """
+    base_lines = (base or "").splitlines()
+    cur_lines = (current or "").splitlines()
+    rep_lines = (replayed or "").splitlines()
+    if not base_lines:
+        return None  # empty base → nothing to classify
+
+    # Only fire on conflicts large enough that shrinking would help.
+    # Small conflicts (<10 non-blank lines total) should go directly to
+    # the LLM — the mini-conflict overhead isn't worth it.
+    total_nb = sum(
+        1 for t in (base, current, replayed)
+        for ln in (t or "").split("\n") if ln.strip()
+    )
+    if total_nb < 10:
+        return None
+
+    # Classify each base line's fate in both sides via opcodes.
+    cur_changed = _base_changed_lines(base_lines, cur_lines)
+    rep_changed = _base_changed_lines(base_lines, rep_lines)
+    cur_deleted = _base_deleted_lines(base_lines, cur_lines)
+    rep_deleted = _base_deleted_lines(base_lines, rep_lines)
+
+    # Walk base lines, classifying into deterministic (tail) vs ambiguous (core).
+    # Build a list of segments: ("det", text) or ("amb", base_range, cur_range, rep_range)
+    # For deterministic regions, resolve them immediately (pick the changed side).
+    tail_parts: list[str] = []  # accumulated deterministic tail text
+    core_parts: list[tuple[str, str, str]] = []  # (base, current, replayed) per core
+    # Track side-specific additions that fall between base lines (inserts)
+    # via a walk of both opcodes simultaneously.
+
+    # Build per-base-line classification
+    n = len(base_lines)
+    # For each base line index, determine: is it ambiguous?
+    ambiguous_indices: list[int] = []
+    for i in range(n):
+        in_cur_changed = i in cur_changed
+        in_rep_changed = i in rep_changed
+        if in_cur_changed and in_rep_changed:
+            # Both sides changed this line → ambiguous
+            ambiguous_indices.append(i)
+        # else: deterministic (at most one side changed it)
+
+    if not ambiguous_indices:
+        # All lines are deterministic! Resolve them all.
+        resolved_lines: list[str] = []
+        # Use a simple line-by-line resolution: for each base line,
+        # pick whichever side changed it (or base if neither).
+        # Also handle inserts (one-sided additions between base lines).
+        cur_matcher = line_matcher(base_lines, cur_lines)
+        rep_matcher = line_matcher(base_lines, rep_lines)
+        # Walk all three together using a base-aligned merge.
+        # Simple approach: use _try_disjoint_merge on the whole thing.
+        # If that fails, just pick the side with more content.
+        merged = _try_disjoint_merge(base, current, replayed)
+        if merged is not None:
+            # Verify side-intent coverage
+            cov = intent_coverage_score(merged, base, current, replayed)
+            if cov >= 0.5:
+                return StructuralResolution(rule="mini_conflict_deterministic", text=merged)
+        # Fall through: try line-by-line resolution
+        for i in range(n):
+            cur_line = cur_lines[i] if i < len(cur_lines) else ""
+            rep_line = rep_lines[i] if i < len(rep_lines) else ""
+            base_line = base_lines[i]
+            if _normalize(cur_line) != _normalize(base_line):
+                resolved_lines.append(cur_line)  # current changed it
+            elif _normalize(rep_line) != _normalize(base_line):
+                resolved_lines.append(rep_line)  # replayed changed it
+            else:
+                resolved_lines.append(base_line)  # unchanged
+        result_text = "\n".join(resolved_lines)
+        cov = intent_coverage_score(result_text, base, current, replayed)
+        if cov >= 0.5:
+            return StructuralResolution(rule="mini_conflict_deterministic", text=result_text)
+        return None  # side-intent dropped — unsafe
+
+    # There ARE ambiguous lines. Find maximal contiguous runs.
+    amb_runs: list[tuple[int, int]] = []  # (start, end_inclusive)
+    start = ambiguous_indices[0]
+    prev = start
+    for idx in ambiguous_indices[1:]:
+        if idx == prev + 1:
+            prev = idx
+        else:
+            amb_runs.append((start, prev))
+            start = idx
+            prev = idx
+    amb_runs.append((start, prev))
+
+    # If ALL base lines are ambiguous (no deterministic tails), the
+    # mini-conflict pass provides no value — the entire conflict is the core.
+    # Decline and let the LLM handle it.
+    total_ambiguous = sum(e - s + 1 for s, e in amb_runs)
+    if total_ambiguous >= n:
+        return None
+
+    # Build the resolved text: deterministic tails + core markers.
+    # For each deterministic region (between ambiguous runs), resolve the lines.
+    resolved_tail_lines: list[str] = []
+    cur_pos = 0  # position in current/replayed for insert tracking
+    for run_idx, (amb_start, amb_end) in enumerate(amb_runs):
+        # Resolve the deterministic region before this ambiguous run
+        det_start = amb_runs[run_idx - 1][1] + 1 if run_idx > 0 else 0
+        det_end = amb_start  # exclusive
+        for i in range(det_start, det_end):
+            base_line = base_lines[i]
+            cur_line = cur_lines[i] if i < len(cur_lines) else ""
+            rep_line = rep_lines[i] if i < len(rep_lines) else ""
+            if _normalize(cur_line) != _normalize(base_line):
+                resolved_tail_lines.append(cur_line)
+            elif _normalize(rep_line) != _normalize(base_line):
+                resolved_tail_lines.append(rep_line)
+            else:
+                resolved_tail_lines.append(base_line)
+        # Extract the ambiguous core's 3-way text
+        core_base = "\n".join(base_lines[amb_start:amb_end + 1])
+        core_cur = "\n".join(cur_lines[amb_start:amb_end + 1]) if amb_end < len(cur_lines) else ""
+        core_rep = "\n".join(rep_lines[amb_start:amb_end + 1]) if amb_end < len(rep_lines) else ""
+        core_parts.append((core_base, core_cur, core_rep))
+
+    # Resolve the deterministic region after the last ambiguous run
+    det_start = amb_runs[-1][1] + 1
+    for i in range(det_start, n):
+        base_line = base_lines[i]
+        cur_line = cur_lines[i] if i < len(cur_lines) else ""
+        rep_line = rep_lines[i] if i < len(rep_lines) else ""
+        if _normalize(cur_line) != _normalize(base_line):
+            resolved_tail_lines.append(cur_line)
+        elif _normalize(rep_line) != _normalize(base_line):
+            resolved_tail_lines.append(rep_line)
+        else:
+            resolved_tail_lines.append(base_line)
+
+    # If there's only one core, use it directly. If multiple, merge into one.
+    if len(core_parts) == 1:
+        merged_core_base, merged_core_cur, merged_core_rep = core_parts[0]
+    else:
+        # Merge multiple cores: concatenate with the deterministic tail lines
+        # between them as read-only context. The LLM sees all cores at once.
+        # Build the merged core by interleaving cores with their separating tails.
+        merged_core_base_parts = []
+        merged_core_cur_parts = []
+        merged_core_rep_parts = []
+        for ci, (cb, cc, cr) in enumerate(core_parts):
+            if ci > 0:
+                # Insert the deterministic tail lines between this core and the previous
+                prev_end = amb_runs[ci - 1][1] + 1
+                this_start = amb_runs[ci][0]
+                between = []
+                for i in range(prev_end, this_start):
+                    base_line = base_lines[i]
+                    cur_line = cur_lines[i] if i < len(cur_lines) else ""
+                    rep_line = rep_lines[i] if i < len(rep_lines) else ""
+                    if _normalize(cur_line) != _normalize(base_line):
+                        between.append(cur_line)
+                    elif _normalize(rep_line) != _normalize(base_line):
+                        between.append(rep_line)
+                    else:
+                        between.append(base_line)
+                sep = "\n".join(between)
+                merged_core_base_parts.append(sep)
+                merged_core_cur_parts.append(sep)
+                merged_core_rep_parts.append(sep)
+            merged_core_base_parts.append(cb)
+            merged_core_cur_parts.append(cc)
+            merged_core_rep_parts.append(cr)
+        merged_core_base = "\n".join(merged_core_base_parts)
+        merged_core_cur = "\n".join(merged_core_cur_parts)
+        merged_core_rep = "\n".join(merged_core_rep_parts)
+
+    # Assemble the full resolved text: tails + core_cur (conservative default)
+    # The core will be replaced by the LLM via deferred_core.
+    # Find where the first core sits in the assembled text.
+    pre_core_lines: list[str] = []
+    first_amb_start = amb_runs[0][0]
+    for i in range(first_amb_start):
+        base_line = base_lines[i]
+        cur_line = cur_lines[i] if i < len(cur_lines) else ""
+        rep_line = rep_lines[i] if i < len(rep_lines) else ""
+        if _normalize(cur_line) != _normalize(base_line):
+            pre_core_lines.append(cur_line)
+        elif _normalize(rep_line) != _normalize(base_line):
+            pre_core_lines.append(rep_line)
+        else:
+            pre_core_lines.append(base_line)
+
+    # Assemble: pre_core + merged_core_cur + post_core
+    full_text_parts = []
+    if pre_core_lines:
+        full_text_parts.append("\n".join(pre_core_lines))
+    full_text_parts.append(merged_core_cur)
+    # post_core_lines are the resolved_tail_lines after the last ambiguous run
+    # (already computed above as the tail after the last run)
+    # We need to extract them from resolved_tail_lines
+    # Actually, resolved_tail_lines was built incrementally including all
+    # deterministic regions. Let's rebuild the full text properly.
+    # The simplest approach: assemble all resolved tails + core_cur interleaved
+    # at the right position.
+
+    # Rebuild: walk all base lines, emitting resolved tail or core_cur marker
+    full_lines: list[str] = []
+    amb_ranges_set = set()
+    for s, e in amb_runs:
+        amb_ranges_set.update(range(s, e + 1))
+
+    # For single core: core_offset = character position of core in full text
+    core_char_offset = 0
+    core_inserted = False
+    for i in range(n):
+        if i in amb_ranges_set:
+            if not core_inserted:
+                # Insert the merged core here
+                core_char_offset = len("\n".join(full_lines)) + (1 if full_lines else 0)
+                full_lines.extend(merged_core_cur.split("\n"))
+                core_inserted = True
+            # Skip individual ambiguous lines (they're in the core)
+            continue
+        # Deterministic line
+        base_line = base_lines[i]
+        cur_line = cur_lines[i] if i < len(cur_lines) else ""
+        rep_line = rep_lines[i] if i < len(rep_lines) else ""
+        if _normalize(cur_line) != _normalize(base_line):
+            full_lines.append(cur_line)
+        elif _normalize(rep_line) != _normalize(base_line):
+            full_lines.append(rep_line)
+        else:
+            full_lines.append(base_line)
+
+    full_text = "\n".join(full_lines)
+
+    # Side-intent guard: verify the deterministic TAILS preserve additions.
+    # The core is deferred to the LLM — we only check that the tails didn't
+    # silently drop side-specific additions OUTSIDE the ambiguous region.
+    # Build a "tails-only" text (excluding the core) and check coverage.
+    tails_only_lines = [
+        l for i, l in enumerate(full_lines)
+        if not (
+            core_char_offset <= sum(len(fl) + 1 for fl in full_lines[:i])
+            and sum(len(fl) + 1 for fl in full_lines[:i]) < core_char_offset + len(merged_core_cur)
+        )
+    ]
+    tails_text = "\n".join(tails_only_lines)
+    # Compute additions that are OUTSIDE the ambiguous region — these must
+    # survive in the tails. Lines inside the ambiguous region are the LLM's job.
+    base_set = {l.strip() for l in base.split("\n") if l.strip()}
+    cur_added = {l.strip() for l in current.split("\n") if l.strip()} - base_set
+    rep_added = {l.strip() for l in replayed.split("\n") if l.strip()} - base_set
+    # Lines in the ambiguous core region are expected to be resolved by the LLM
+    core_cur_set = {l.strip() for l in merged_core_cur.split("\n") if l.strip()}
+    core_rep_set = {l.strip() for l in merged_core_rep.split("\n") if l.strip()}
+    # Only check additions NOT in the core's version (those are the LLM's job)
+    cur_tail_adds = cur_added - core_cur_set
+    rep_tail_adds = rep_added - core_rep_set
+    tails_set = {l.strip() for l in tails_text.split("\n") if l.strip()}
+    cur_tail_cov = len(cur_tail_adds & tails_set) / len(cur_tail_adds) if cur_tail_adds else 1.0
+    rep_tail_cov = len(rep_tail_adds & tails_set) / len(rep_tail_adds) if rep_tail_adds else 1.0
+    tail_cov = min(cur_tail_cov, rep_tail_cov)
+    if tail_cov < 0.5:
+        return None  # shrinking dropped side-specific additions from the tails
+
+    return StructuralResolution(
+        rule="mini_conflict",
+        text=full_text,
+        deferred_core=(merged_core_base, merged_core_cur, merged_core_rep),
+        deferred_core_offset=core_char_offset,
+    )
 
 
 def _try_text_value_resolution(unit: ConflictUnit) -> str | None:
