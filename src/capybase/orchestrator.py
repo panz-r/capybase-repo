@@ -3790,14 +3790,16 @@ class Orchestrator:
             explanation="instantiated from a sibling unit's edit pattern",
             provenance="deterministic_structural",
         )
-        # Use FULL verify (not fast_verify) for pattern reuse: the instantiated
-        # text is a TRANSFORMATION of the sibling's resolution, not a verbatim
-        # replay. It may introduce syntax errors or structural issues that
-        # fast_verify (which skips syntax/AST/both_sides_represented) would
-        # miss. The exact-content cache (_try_step_shape_reuse) can use
-        # fast_verify because it replays byte-identical text; the pattern cache
-        # cannot.
-        validation = self.verification.verify(unit, cand)
+        # Use fast_verify for pattern reuse: the instantiated text is a
+        # pure-punctuation substitution (no IDENT/NUM in the replacement —
+        # guaranteed by _category_seq_to_tokens which returns None for
+        # identifier-rename patterns). Pure-punctuation insertions (e.g.
+        # inserting "{}" before ";") are structurally safe — they cannot
+        # break syntax in ways the cheap validators miss. The Phase 2
+        # whole-file build gate catches any edge case. Using fast_verify here
+        # is CRITICAL for throughput: without it, each of 78 sibling units
+        # runs gcc -fsyntax-only on the spliced file (~15s each = 1170s).
+        validation = self.verification.verify(unit, cand, fast_verify=True)
         self.journal.emit(
             "step_pattern_reuse",
             {
@@ -3976,6 +3978,7 @@ class Orchestrator:
         from capybase.structural_resolver import resolve_structurally
 
         result = resolve_structurally(unit)
+
         if not result.resolved or result.text is None:
             self._record_resolution_attempt(
                 UnitOutcome(unit=unit), mechanism="structural",
@@ -6881,6 +6884,7 @@ class Orchestrator:
             # pairs and splice them in one offset-correct batch at the end.
             accepted: list[tuple[ConflictUnit, CandidateResolution]] = []
             escalated_unit: UnitOutcome | None = None
+
             # SRC accumulator: parent_unit_id -> list of accepted resolved-text
             # from earlier sibling sub-units, in document order. Fed one-way into
             # each later sub-unit's prompt so entity-split siblings stay
@@ -6937,6 +6941,7 @@ class Orchestrator:
                     unit, wall_deadline=_file_wall_deadline,
                     max_retries=_file_max_retries,
                 )
+
                 _persist_unit_hashes(self, outcome)  # D1: per-step convergence
                 result.outcomes.append(outcome)
                 if outcome.accepted is None:
