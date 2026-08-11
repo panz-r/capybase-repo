@@ -347,8 +347,8 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         # rewrite_vs_edit (the substitution anchors may not survive the rewrite).
         if _shape != "rewrite_vs_edit":
             merged = _try_mechanical_reapply_merge(base, current, replayed)
-        if merged is not None:
-            return StructuralResolution(rule="mechanical_reapply_merge", text=merged)
+            if merged is not None:
+                return StructuralResolution(rule="mechanical_reapply_merge", text=merged)
 
         # Lint transform: when mechanical_reapply declined because base anchors
         # didn't survive the refactor, try applying known-safe lint substitutions
