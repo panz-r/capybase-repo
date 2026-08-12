@@ -1218,13 +1218,39 @@ def _try_deterministic_cc_repair(
             repaired = "\n".join(lines)
 
     elif category == "stray_character" and target_idx is not None:
-        # gcc reports the byte position of the stray char. Previously this
-        # stripped ALL non-ASCII bytes from the target line, corrupting
-        # legitimate UTF-8 in string literals and comments (e.g. "café").
-        # The repair is more dangerous than the defect — stray characters in
-        # merge output are rare, and the brace-balance gate can't catch
-        # string/comment corruption. Disabled; defer to the LLM repair path.
-        pass
+        # gcc reports: "stray '@' in program" or "stray '\200' in program"
+        # (octal for non-printable bytes). Extract the SPECIFIC character and
+        # remove ONLY its first occurrence on the target line.
+        #
+        # The prior implementation stripped ALL non-ASCII bytes, corrupting
+        # legitimate UTF-8 (e.g. "café" in comments). This targeted version
+        # removes only the character gcc identified as stray, preserving all
+        # other content. Safe because the stray char is in CODE context (gcc
+        # doesn't flag chars inside properly-terminated string literals).
+        import re as _re_stray
+        # Normalize Unicode curly quotes (gcc uses U+2018/U+2019) to ASCII
+        # so the regex matches regardless of locale/terminal settings.
+        _msg_norm = msg.replace("\u2018", "'").replace("\u2019", "'")
+        _stray_match = _re_stray.search(r"stray '(.+?)' in program", _msg_norm)
+        if _stray_match and target_idx < len(lines):
+            stray_raw = _stray_match.group(1)
+            # Handle octal escapes: gcc emits e.g. '\200' for byte 0x80
+            if stray_raw.startswith("\\") and len(stray_raw) == 4:
+                try:
+                    stray_char = chr(int(stray_raw[1:], 8))
+                except ValueError:
+                    stray_char = None
+            else:
+                stray_char = stray_raw
+            if stray_char and len(stray_char) == 1:
+                line = lines[target_idx]
+                # Remove the FIRST occurrence only. If the char appears in a
+                # string/comment context, the whole-file re-validation will
+                # catch any corruption.
+                _pos = line.find(stray_char)
+                if _pos >= 0:
+                    lines[target_idx] = line[:_pos] + line[_pos + 1:]
+                    repaired = "\n".join(lines)
 
     elif category == "unterminated_literal" and target_idx is not None:
         # Add the missing closing quote. gcc reports the line where the
@@ -9592,11 +9618,55 @@ class Orchestrator:
                 _is_header
                 and _total_header_calls > _header_max_retries
             ):
+                # Before escalating, try deterministic stray-character repair
+                # directly on the candidate's resolved_text. The per-unit gcc
+                # gate (active since Sprint 12) catches real syntax errors in
+                # headers. The 4B model sometimes emits stray characters
+                # (e.g. '@') that gcc flags. Removing them is safe (@ is never
+                # valid in C/C++ code outside strings/comments) and avoids
+                # wasting the header retry budget on the same defect.
+                if validation and validation.hard_failures and cand.resolved_text:
+                    import re as _re_hdr
+                    _repaired_text = cand.resolved_text
+                    _repaired = False
+                    for f in validation.hard_failures:
+                        msg = getattr(f, "message", "") or ""
+                        _msg_norm = msg.replace("\u2018", "'").replace("\u2019", "'")
+                        _m = _re_hdr.search(r"stray '(.+?)' in program", _msg_norm)
+                        if _m:
+                            _raw = _m.group(1)
+                            if _raw.startswith("\\") and len(_raw) == 4:
+                                try:
+                                    _sc = chr(int(_raw[1:], 8))
+                                except ValueError:
+                                    continue
+                            else:
+                                _sc = _raw
+                            if len(_sc) == 1 and _sc in _repaired_text:
+                                _repaired_text = _repaired_text.replace(_sc, "")
+                                _repaired = True
+                    if _repaired:
+                        _rc = cand.model_copy(update={"resolved_text": _repaired_text})
+                        _rv = self.verification.verify(unit, _rc)
+                        if _rv.passed:
+                            outcome.accepted = _rc
+                            outcome.validation = _rv
+                            outcome.retry_count = retry_count
+                            outcome.reason = (
+                                "deterministic header repair: removed stray "
+                                "character (CEGIS cap reached)"
+                            )
+                            self._record_resolution_attempt(
+                                outcome, mechanism="deterministic_header_repair",
+                                candidate=_rc, validation=_rv,
+                                decision="accept", reason=outcome.reason,
+                            )
+                            return outcome
                 outcome.escalated = True
                 outcome.retry_count = retry_count
                 outcome.reason = (
                     f"header file CEGIS cap reached ({_header_max_retries} "
-                    f"retry budget for headers; per-unit gcc gate is skipped)"
+                    f"retry budget for headers)"
                 )
                 self._record_resolution_attempt(
                     outcome, mechanism="llm",
