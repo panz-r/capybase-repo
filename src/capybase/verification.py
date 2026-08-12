@@ -1976,7 +1976,8 @@ def _is_rust_resolution_error(msg: str) -> bool:
 # a prefix not listed here is treated as a parse error (surfaced), erring toward
 # catching real defects over suppressing noise.
 _CCS_SEMANTIC_PATTERNS = (
-    "undeclared identifier",          # gcc/clang: use of undeclared identifier
+    "undeclared identifier",          # gcc/clang C++: use of undeclared identifier
+    "' undeclared",                   # gcc C-mode: 'varname' undeclared (first use)
     "implicit declaration of function",  # gcc C-mode: undeclared function (C-specific)
     "was not declared in this scope",  # g++ scope resolution
     "has not been declared",          # g++ forward-decl-only

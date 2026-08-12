@@ -8339,7 +8339,18 @@ class Orchestrator:
                 "preprocessor" in (getattr(f, "message", "") or "").lower()
                 for f in failures
             )
-            if not _is_pp_failure and not deterministic_only and _tiered_active and len(accepted) > 1:
+            # Build-test failures (from Phase 2's per-file build check) are
+            # compilation errors caused by a specific unit's resolution.
+            # Don't skip even when attribution fails — the model can fix
+            # these by producing a different candidate. The tiered budget
+            # (_phase2_model_used) already bounds to 1 model call.
+            _is_build_test = any(
+                getattr(f, "validator", "") == "build_test"
+                for f in failures
+            )
+            if (not _is_pp_failure and not _is_build_test
+                    and not deterministic_only and _tiered_active
+                    and len(accepted) > 1):
                 self.journal.emit(
                     "whole_file_repair_skipped",
                     {"reason": "fault attribution: error outside all unit spans (tiered mode)"},
