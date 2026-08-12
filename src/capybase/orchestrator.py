@@ -9517,6 +9517,47 @@ class Orchestrator:
                         break
             outcome.validation = validation
             outcome.attempts.append(cand)
+            # Enrich duplicate-definition failures IMMEDIATELY so the very
+            # first CEGIS retry includes the existing definition's context.
+            # Without this, the model retries blindly — it knows a function
+            # is duplicated but can't see where the original is (it may be
+            # 10K lines away, outside the conflict hunk). The enrichment
+            # greps the file for the existing definition and appends its
+            # source lines to the failure message. All subsequent retry
+            # prompts, convergence checks, and risk decisions see the
+            # enriched context.
+            if not validation.passed and validation.hard_failures:
+                import re as _re_dup
+                _orig_text = unit.original_worktree_text or ""
+                for _f in validation.hard_failures:
+                    _fmsg = getattr(_f, "message", "") or ""
+                    if "NOTE: This function already exists" in _fmsg:
+                        continue  # already enriched
+                    _fmsg_n = _fmsg.replace("\u2018", "'").replace("\u2019", "'")
+                    if "cannot be overloaded" not in _fmsg_n and "redefinition" not in _fmsg_n:
+                        continue
+                    _fm = _re_dup.search(r"::(\w+)\(", _fmsg_n)
+                    if not _fm:
+                        continue
+                    _fn = _fm.group(1)
+                    _orig_lines = _orig_text.split("\n")
+                    for _oi, _ol in enumerate(_orig_lines):
+                        if _fn in _ol and "(" in _ol and "{" not in _ol:
+                            _ctx_s = max(0, _oi - 1)
+                            _ctx_e = min(len(_orig_lines), _oi + 8)
+                            _ctx = "\n".join(
+                                f"  {_orig_lines[j]}"
+                                for j in range(_ctx_s, _ctx_e)
+                            )
+                            _f.message = (
+                                f"{_fmsg}\n\n"
+                                f"NOTE: This function already exists "
+                                f"elsewhere in the file (near line "
+                                f"{_oi + 1}):\n{_ctx}\n\n"
+                                f"Do NOT re-define it in your merge. "
+                                f"The existing definition is kept."
+                            )
+                            break
             # Track candidate hashes for oscillation detection (CEGIS resilience).
             # cand_hash is already computed above (for the no-op cache). The
             # escalation check runs AFTER the risk decision — only when the
@@ -9659,49 +9700,20 @@ class Orchestrator:
                                 decision="accept", reason=outcome.reason,
                             )
                             return outcome
-                # 2. Duplicate definition: surface the compiler error with
-                # the existing definition's context and give the LLM one
-                # more try. The 4B model can't see that a function it's
-                # merging already exists 10K lines away. Finding the
-                # existing definition and including it in the CEGIS
-                # feedback lets the model decide how to avoid the
-                # duplicate — no blunt regex surgery.
+                # 2. Duplicate definition: if the failure was already
+                # enriched with the existing definition's context (done
+                # above, right after validation), allow one extra CEGIS
+                # iteration so the model can act on it. The enrichment
+                # fires on the FIRST failure, but the header cap may cut
+                # the loop short before the model gets to use it.
                 if (not _dup_def_retried and validation
                         and validation.hard_failures):
                     _is_dup = any(
-                        "cannot be overloaded" in (getattr(f, "message", "") or "")
-                        or "redefinition" in (getattr(f, "message", "") or "")
+                        "NOTE: This function already exists" in (getattr(f, "message", "") or "")
                         for f in validation.hard_failures
                     )
                     if _is_dup:
                         _dup_def_retried = True
-                        _orig = unit.original_worktree_text or ""
-                        for f in validation.hard_failures:
-                            _fmsg = getattr(f, "message", "") or ""
-                            _fmsg_n = _fmsg.replace("\u2018", "'").replace("\u2019", "'")
-                            _fm = _re_hdr.search(r"::(\w+)\(", _fmsg_n)
-                            if not _fm:
-                                continue
-                            _fn = _fm.group(1)
-                            _orig_lines = _orig.split("\n")
-                            for _oi, _ol in enumerate(_orig_lines):
-                                if _fn in _ol and "(" in _ol and "{" not in _ol:
-                                    _ctx_start = max(0, _oi - 1)
-                                    _ctx_end = min(len(_orig_lines), _oi + 8)
-                                    _ctx = "\n".join(
-                                        f"  {_orig_lines[j]}"
-                                        for j in range(_ctx_start, _ctx_end)
-                                    )
-                                    f.message = (
-                                        f"{_fmsg}\n\n"
-                                        f"NOTE: This function already exists "
-                                        f"elsewhere in the file (near line "
-                                        f"{_oi + 1}):\n{_ctx}\n\n"
-                                        f"Do NOT re-define it in your merge. "
-                                        f"The existing definition is kept."
-                                    )
-                                    break
-                            break
                         _header_repaired = True  # allow one more iteration
                 # Escalate unless a repair strategy granted a retry.
                 if not _header_repaired:
