@@ -2786,6 +2786,14 @@ class CcsSyntaxValidator(_StandaloneSyntaxValidator):
         # Stash whether this unit is C++ so _resolve_compiler picks g++/cpp_std.
         self._lang_is_cpp = ctx.unit.language in ("cpp", "c++")
         self._unit_path = ctx.unit.path or ""
+        # Source-portfolio candidates copy one side verbatim. "Undeclared
+        # identifier" errors in these candidates are REAL — the side's code
+        # references variables that don't exist in the merged context (the
+        # surrounding code is from the base/common ancestor, not the side's
+        # branch). Don't filter them as standalone-compilation false positives.
+        self._strict_semantic = (
+            getattr(ctx.candidate, "model_name", "") == "source_portfolio"
+        )
         return super().verify(ctx)
 
     def _compile(self, spliced: str, tool: str, cfg: object) -> tuple[bool, str]:
@@ -2815,6 +2823,28 @@ class CcsSyntaxValidator(_StandaloneSyntaxValidator):
         )
 
     def _is_resolution_error(self, msg: str) -> bool:
+        if getattr(self, "_strict_semantic", False):
+            # Source-portfolio strict mode: only filter errors that are
+            # genuine standalone-compilation false positives (missing
+            # project headers, unknown project-internal types). DO filter
+            # these so a valid portfolio candidate isn't rejected just
+            # because standalone gcc can't see sibling headers.
+            for pattern in (
+                "unknown type name",      # project typedef in sibling header
+                "does not name a type",   # same (clang wording)
+                "fatal error",            # missing #include
+                "no such file or directory",
+                "incomplete type",        # forward-declared type
+                "no matching function",   # overload resolution (needs full TU)
+                "suggest an alternative", # clang "did you mean?"
+            ):
+                if pattern in msg:
+                    return True
+            # "undeclared identifier", "was not declared", "has not been
+            # declared", "cannot convert", "is not a member of", "no member
+            # named" → DON'T filter. For source_portfolio these are real
+            # errors (the side's code doesn't fit the merged context).
+            return False
         return _is_ccs_resolution_error(msg)
 
 
