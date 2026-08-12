@@ -9632,6 +9632,7 @@ class Orchestrator:
                     for f in validation.hard_failures:
                         msg = getattr(f, "message", "") or ""
                         _msg_norm = msg.replace("\u2018", "'").replace("\u2019", "'")
+                        # 1. Stray character repair
                         _m = _re_hdr.search(r"stray '(.+?)' in program", _msg_norm)
                         if _m:
                             _raw = _m.group(1)
@@ -9645,6 +9646,52 @@ class Orchestrator:
                             if len(_sc) == 1 and _sc in _repaired_text:
                                 _repaired_text = _repaired_text.replace(_sc, "")
                                 _repaired = True
+                    # 2. Duplicate definition repair: when gcc reports
+                    # "cannot be overloaded" or "redefinition", the
+                    # candidate adds a function that already exists in the
+                    # non-conflicting part of the file. Remove the duplicate
+                    # function block from the candidate — the version
+                    # outside the conflict region (from the base/common
+                    # ancestor) is kept.
+                    for f in validation.hard_failures:
+                        msg = getattr(f, "message", "") or ""
+                        _msg_norm = msg.replace("\u2018", "'").replace("\u2019", "'")
+                        if "cannot be overloaded" in _msg_norm or "redefinition" in _msg_norm:
+                            # Extract function name from gcc's fully-qualified path:
+                            # '...::get_cbor_float_prefix(float)' cannot be overloaded
+                            _fm = _re_hdr.search(r"::(\w+)\(", _msg_norm)
+                            if _fm:
+                                _fn = _fm.group(1)
+                                _lines = _repaired_text.split("\n")
+                                _new_lines = []
+                                _skip_depth = 0
+                                for _line in _lines:
+                                    if _skip_depth > 0:
+                                        for _ch in _line:
+                                            if _ch == "{": _skip_depth += 1
+                                            elif _ch == "}": _skip_depth -= 1
+                                        continue
+                                    # Match function definition lines containing the name
+                                    if _fn in _line and any(
+                                        kw in _line for kw in
+                                        ("static ", "constexpr ", "void ", "auto ",
+                                         "inline ", "CharType ", "std::", "bool ",
+                                         "int ", "size_t ", "std::size_t")
+                                    ):
+                                        _skip_depth = 0
+                                        for _ch in _line:
+                                            if _ch == "{": _skip_depth += 1
+                                            elif _ch == "}": _skip_depth -= 1
+                                        if _skip_depth > 0:
+                                            _repaired = True
+                                            continue
+                                        elif _skip_depth == 0 and "{" in _line:
+                                            # Single-line definition — skip it
+                                            _repaired = True
+                                            continue
+                                    _new_lines.append(_line)
+                                if _repaired:
+                                    _repaired_text = "\n".join(_new_lines)
                     if _repaired:
                         _rc = cand.model_copy(update={"resolved_text": _repaired_text})
                         _rv = self.verification.verify(unit, _rc)
