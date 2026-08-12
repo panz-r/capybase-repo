@@ -556,7 +556,20 @@ def _structural_context_block(unit: ConflictUnit, *, attempt: int = 0) -> str:
             if not unit_lines:
                 return ""
             lines.append("File structure:")
-            lines.extend(unit_lines)
+            # Bound the unit listing: for files with hundreds of entities (e.g.
+            # nlohmann json.hpp's 24K-line single-include), listing every unit
+            # produces a 10K+ char block that gets folded into the budget-
+            # protected sides_text, making the prompt untrimmable → OVERSIZED.
+            # Show up to _MAX_STRUCT_CTX_UNITS units, then a summary count.
+            _MAX_STRUCT_CTX_UNITS = 30
+            if len(unit_lines) <= _MAX_STRUCT_CTX_UNITS:
+                lines.extend(unit_lines)
+            else:
+                lines.extend(unit_lines[:_MAX_STRUCT_CTX_UNITS])
+                lines.append(
+                    f"  …and {len(unit_lines) - _MAX_STRUCT_CTX_UNITS} more "
+                    f"(total {len(unit_lines)} structural units)"
+                )
             # Highlight which unit this conflict falls inside.
             if unit.marker_span is not None:
                 enc = enclosing_unit(ir, unit.marker_span)

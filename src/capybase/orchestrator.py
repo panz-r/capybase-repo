@@ -9139,7 +9139,7 @@ class Orchestrator:
                 if pending_recovery:
                     from capybase.resolution_engine import build_recovery_prompt
                     pv = "cegis_recovery.v1"
-                    prompt = build_recovery_prompt(unit, context, failures)
+                    prompt = build_recovery_prompt(unit, context, failures, budget=self.resolution_engine.token_budget)
                 elif failures and prev_candidate and prev_candidate.resolved_text:
                     pv = PROMPT_REPAIR
                     # Build prior-attempt summaries for failed-patch memory.
@@ -9157,13 +9157,13 @@ class Orchestrator:
                             summary_parts.append(f"{f.validator}: {f.message[:60]}")
                         if summary_parts:
                             prior_summaries.append("; ".join(summary_parts[:2]))
-                    prompt = build_repair_prompt(unit, context, prev_candidate, failures, attempt=retry_count, prior_attempt_summaries=prior_summaries or None)
+                    prompt = build_repair_prompt(unit, context, prev_candidate, failures, attempt=retry_count, prior_attempt_summaries=prior_summaries or None, budget=self.resolution_engine.token_budget)
                 elif failures:
                     pv = PROMPT_RETRY
-                    prompt = build_retry_prompt(unit, context, failures)
+                    prompt = build_retry_prompt(unit, context, failures, budget=self.resolution_engine.token_budget)
                 else:
                     pv = PROMPT_RESOLVE
-                    prompt = build_resolve_prompt(unit, context)
+                    prompt = build_resolve_prompt(unit, context, budget=self.resolution_engine.token_budget)
                 # Post-construction oversized check: the pre-construction guard
                 # (_llm_oversized_for_window) measures only the windowed marker
                 # block, assuming augmentation is trimmable. But the obligations
