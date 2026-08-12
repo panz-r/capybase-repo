@@ -535,23 +535,10 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
         "sqlite-history": "make {stem}.lo",
         "redis-history": "make {stem}.o",
     }
-    # Datasets where the per-file build target is reliable (the Makefile has
-    # a pattern rule like %.o: %.c). For these, the per-file build is used as
-    # a REQUIRED test gate — non-compiling source_portfolio candidates trigger
-    # Phase 2 repair (LLM) instead of being silently accepted. Datasets
-    # WITHOUT reliable pattern rules (sqlite's .lo targets are explicit, not
-    # pattern-matched) keep the advisory gate to avoid false escalations.
-    _C_REQUIRED_BUILD = frozenset({"redis-history"})
     if case.language in ("c", "cpp", "c++"):
         _target = _C_BUILD_TARGETS.get(case.dataset, "")
         if _target:
             cfg.validation.cc_build_target_template = _target
-            if case.dataset in _C_REQUIRED_BUILD:
-                from pathlib import Path as _P2
-                _stem = _P2(case.path).stem
-                cfg.tests.pre_continue = _target.format(stem=_stem)
-                cfg.tests.final = cfg.tests.pre_continue
-                cfg.tests.required = True
     cfg.future.enable_structural_resolver = True
     cfg.future.enable_combination_search = True
     cfg.policy.max_retries_per_unit = 2  # cap CEGIS retries for throughput

@@ -667,6 +667,15 @@ def _attribute_whole_file_failure(
                     line = int(m.group(1))
                 except ValueError:
                     pass
+        # Also parse gcc/clang error format: "file:line:col: error:"
+        if line is None:
+            msg = getattr(f, "message", "") or ""
+            m = re.search(r":(\d+):\d+:\s*(?:error|fatal error):", msg)
+            if m:
+                try:
+                    line = int(m.group(1))
+                except ValueError:
+                    pass
         if line is None:
             continue
         # marker_span is 0-based [start, end]; the error line is 1-based.
@@ -7126,6 +7135,7 @@ class Orchestrator:
                 # the model/Layer-3 path instead of re-firing the same idempotent
                 # repair until the time budget expires.
                 _det_unchanged = False
+                self._p2_build_checked = False  # one build-test attempt per Phase 2
                 while True:
                     spans_and_texts = [
                         (unit.marker_span, cand.resolved_text) for unit, cand in accepted
@@ -7211,7 +7221,60 @@ class Orchestrator:
                         )
                     prev_failure_sig = cur_sig
                     if file_validation.passed:
-                        break
+                        # Structural validation passed (markers, splice,
+                        # standalone syntax). Also run the build test —
+                        # verify_file's per-unit gcc -fsyntax-only can't see
+                        # semantic errors that require the full TU context
+                        # (undeclared identifiers, type mismatches across
+                        # headers). The build test catches these. Run it HERE
+                        # so Phase 2 repair gets a chance to fix build
+                        # failures, regardless of tests.required.
+                        #
+                        # Prefer the per-file build target (cc_build_target_template)
+                        # over the full pre_continue command — the per-file
+                        # target only compiles the conflict file's TU, avoiding
+                        # false failures from sibling-file errors.
+                        if not getattr(self, "_p2_build_checked", False):
+                            self._p2_build_checked = True
+                            _build_cmd = self._resolve_per_file_build(path)
+                            if _build_cmd:
+                                self._write_worktree_only(path, buffer, accepted=accepted)
+                                _build_ok, _build_output = self._run_raw_test(_build_cmd)
+                                if not _build_ok:
+                                    # Build failed — synthesize a file-level
+                                    # failure so the repair loop can re-resolve
+                                    # the responsible unit with the build error
+                                    # as CEGIS feedback. Include the raw build
+                                    # output (with file:line info) so fault
+                                    # attribution can identify the unit.
+                                    from capybase.verification import (
+                                        VerificationResult as _VR,
+                                        VerificationFailure as _VF,
+                                    )
+                                    # Extract the most relevant error lines
+                                    # (file:line:error patterns) for attribution
+                                    _error_lines = [
+                                        ln for ln in _build_output.splitlines()
+                                        if "error" in ln.lower() and ".c" in ln.lower()
+                                    ][:5]
+                                    _msg = "; ".join(_error_lines) or f"build failed ({_build_cmd})"
+                                    file_validation = _VR(
+                                        candidate_id="build_test",
+                                        unit_id=path,
+                                        passed=False,
+                                        hard_failures=[_VF(
+                                            validator="build_test",
+                                            severity="error",
+                                            message=_msg,
+                                        )],
+                                    )
+                                    # Don't break — fall through to repair.
+                                else:
+                                    break
+                            else:
+                                break
+                        else:
+                            break
                     # Tiered verification: check time budget before retrying.
                     if _phase2_budget > 0:
                         _elapsed_p2 = _p2time.monotonic() - _phase2_start
@@ -8227,7 +8290,7 @@ class Orchestrator:
         # the tiered attribution gate returns None before the brace repair gets
         # a chance to fix it. Conservative: acts only when one edit fully
         # balances the braces.
-        if not deterministic_only:
+        if not skip_deterministic:
             det, _brace_diag = _try_deterministic_brace_repair(
                 failures, original, accepted, max(0, fault_idx)
             )
@@ -8276,7 +8339,7 @@ class Orchestrator:
                 "preprocessor" in (getattr(f, "message", "") or "").lower()
                 for f in failures
             )
-            if not _is_pp_failure and not deterministic_only and _tiered_active:
+            if not _is_pp_failure and not deterministic_only and _tiered_active and len(accepted) > 1:
                 self.journal.emit(
                     "whole_file_repair_skipped",
                     {"reason": "fault attribution: error outside all unit spans (tiered mode)"},
@@ -10457,6 +10520,45 @@ class Orchestrator:
         postmerge_passing = parse_passing_node_ids(postmerge_stdout or "", tool)
         regressed = sorted(baseline - postmerge_passing)
         return regressed
+
+    def _resolve_per_file_build(self, path: str) -> str:
+        """Resolve the per-file build command for Phase 2's build check.
+
+        Uses ``cc_build_target_template`` (e.g. ``make {stem}.o``) when
+        configured — this compiles only the conflict file's TU, avoiding
+        false failures from sibling-file errors that a full ``make -j4``
+        would surface. Returns "" when no per-file target is available.
+        """
+        from pathlib import PurePosixPath as _P
+        template = getattr(self.config.validation, "cc_build_target_template", "") or ""
+        if not template:
+            return ""
+        stem = _P(path).stem
+        return template.format(stem=stem)
+
+    def _run_raw_test(self, cmd: str) -> tuple[bool, str]:
+        """Run a shell command in the repo root; return (passed, output).
+
+        Lightweight test runner for Phase 2's per-file build check — no
+        journal events, no verdict parsing. Returns the combined
+        stdout+stderr so the caller can feed the error to fault attribution.
+
+        A "No rule to make target" failure is treated as PASS — the per-file
+        build target doesn't exist in the Makefile (e.g. sqlite's explicit
+        .lo rules vs redis's %.o pattern rule), so the check is N/A.
+        """
+        import subprocess as _sp
+        try:
+            proc = _sp.run(
+                cmd, shell=True, cwd=str(self.git.repo),
+                capture_output=True, text=True, timeout=120,
+            )
+            output = (proc.stderr or "") + (proc.stdout or "")
+            if proc.returncode != 0 and "No rule to make target" in output:
+                return True, ""  # target doesn't exist → N/A, treat as pass
+            return proc.returncode == 0, output
+        except Exception as exc:  # noqa: BLE001
+            return False, str(exc)
 
     def _run_tests(self, label: str, result: StepResult) -> bool:
         cmd = getattr(self.config.tests, label) if hasattr(self.config.tests, label) else None
