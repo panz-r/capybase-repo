@@ -288,7 +288,18 @@ def _prompt_sides(unit: ConflictUnit) -> tuple[str, str, str]:
     deferred comments are reconciled later in Phase 3.
     """
     refined = unit.refined_sides
-    if refined is not None:
+    # Prefer the separator-projected sides for the LLM prompt when available —
+    # they give the model a tighter conflict window (separator-split alignment
+    # strips non-conflicting context). These carry projection newlines that are
+    # fine for the model to see but must never be spliced into the file, so they
+    # are stored SEPARATELY from diff3_refined (which the structural resolver
+    # uses for deterministic output).
+    projected = unit.structural_metadata.get("diff3_projected")
+    if projected is not None:
+        cur = projected.get("current", "")
+        base = projected.get("base", "")
+        rep = projected.get("replayed", "")
+    elif refined is not None:
         cur, base, rep = refined
     else:
         cur = unit.current.text or ""

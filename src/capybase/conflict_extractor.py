@@ -1522,6 +1522,15 @@ def _refine_with_diff3(
     # Separator-projected pass: re-run diff3 on projected blobs
     # for brace/semicolon languages and prefer it when tighter. The projection
     # lets line-diff anchor on real statement/block boundaries.
+    #
+    # IMPORTANT: the projected fragments carry separator-split newlines (e.g.
+    # "foo(bar)" → "foo\n(\nbar\n)") that are alignment artifacts, NOT valid
+    # code. The structural resolver would splice these artifacts into the file.
+    # So we store the projected blocks SEPARATELY (diff3_projected) for the LLM
+    # prompt builder (which benefits from the tighter window) and keep the RAW
+    # diff3 blocks as diff3_refined for the resolver and all deterministic
+    # consumers.
+    projected_blocks: list | None = None
     if project_separators and language is not None:
         projected = _maybe_use_projected(
             blocks,
@@ -1536,7 +1545,11 @@ def _refine_with_diff3(
         # the raw blocks. This is critical for nlohmann-0019 where the
         # separator projection produces 0 blocks from 79 real conflicts.
         if projected is not None and (len(projected) > 0 or len(blocks) == 0):
-            blocks = projected
+            # Only use projected for diff3_projected (prompt builder). Keep raw
+            # blocks for diff3_refined (resolver). When the projected block
+            # count matches the unit count, store it for the prompt builder.
+            if len(projected) == len(units):
+                projected_blocks = projected
     if not blocks or len(blocks) != len(units):
         # Multi-diff portfolio: try alternative diff algorithms before giving
         # up. Different algorithms (patience, minimal, myers) produce different
@@ -1590,6 +1603,18 @@ def _refine_with_diff3(
                 "current": block.ours,
                 "base": block.base,
                 "replayed": block.theirs,
+            }
+    # Store projected blocks SEPARATELY for the LLM prompt builder. These carry
+    # separator-split newlines (alignment artifacts) so they MUST NOT be used by
+    # the structural resolver or any consumer whose output is spliced into the
+    # file. The prompt builder (_prompt_sides) prefers these when available for
+    # a tighter conflict window.
+    if projected_blocks is not None:
+        for unit, pblock in zip(units, projected_blocks):
+            unit.structural_metadata["diff3_projected"] = {
+                "current": pblock.ours,
+                "base": pblock.base,
+                "replayed": pblock.theirs,
             }
 
 
