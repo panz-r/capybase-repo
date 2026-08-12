@@ -350,14 +350,30 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
             if merged is not None:
                 return StructuralResolution(rule="mechanical_reapply_merge", text=merged)
 
-        # Lint transform: when mechanical_reapply declined because base anchors
-        # didn't survive the refactor, try applying known-safe lint substitutions
-        # (NULL→nullptr, and→&&, etc.) directly to the refactor side's text.
-        # This resolves refactor_vs_lint conflicts without the LLM.
-        if _shape != "rewrite_vs_edit":
-            linted = _try_lint_transform(base, current, replayed)
+        # File-level lint transform: when the FILE-level analysis detected a
+        # lint pass (e.g. 17 and→&& changes across 6 regions), apply the
+        # transforms to whichever side is NOT the lint side. This fires even
+        # when no single unit has enough changes to meet the per-unit frequency
+        # threshold (5). Unlike token_disjoint/mechanical_reapply, lint_transform
+        # is SAFE on rewrite_vs_edit — it takes the refactor side as-is and
+        # applies known-safe word-boundary substitutions; it never crosses the
+        # rewrite boundary.
+        file_transforms = unit.structural_metadata.get("file_level_lint_transforms")
+        if file_transforms:
+            linted = _try_file_level_lint(base, current, replayed, file_transforms)
             if linted is not None:
                 return StructuralResolution(rule="lint_transform", text=linted)
+
+        # Lint transform (per-unit): when mechanical_reapply declined because
+        # base anchors didn't survive the refactor, try applying known-safe lint
+        # substitutions (NULL→nullptr, and→&&, etc.) directly to the refactor
+        # side's text. NOT gated by the shape router — unlike token_disjoint
+        # and mechanical_reapply, lint_transform does NOT cross the rewrite
+        # boundary; it takes the refactor text as-is and applies word-boundary
+        # substitutions. It is exactly the rule designed for rewrite_vs_edit.
+        linted = _try_lint_transform(base, current, replayed)
+        if linted is not None:
+            return StructuralResolution(rule="lint_transform", text=linted)
 
         # Prose value-resolution: both sides edited the SAME prose line
         # differently (a version-string bump, a changelog header, a date). Every
@@ -1253,6 +1269,110 @@ def _try_lint_transform(base: str, current: str, replayed: str) -> str | None:
             return result
 
     return None
+
+
+def _try_file_level_lint(
+    base: str, current: str, replayed: str,
+    file_transforms: list[tuple[str, str]],
+) -> str | None:
+    """Apply file-level lint transforms to whichever side is the refactor.
+
+    Called when the FILE-level analysis detected a lint pass (e.g. 17 and→&&
+    changes across 6 regions). Each individual unit may have too few changes
+    to meet the per-unit frequency threshold, but the aggregate count confirms
+    a file-wide lint pass.
+
+    Determines which side is the lint side by counting how many of the
+    file-level transforms appear in each side's raw diff vs base. The side
+    with more transform applications is the lint side; the other is the
+    refactor side (apply transforms to it).
+    """
+    bt = _tokenize_with_macros(base)[0]
+    ct = _tokenize_with_macros(current)[0]
+    rt = _tokenize_with_macros(replayed)[0]
+    from capybase.diff import line_matcher as _lm_fl
+    def _raw_ops(base_toks, other_toks):
+        ops_r = []
+        m = _lm_fl(base_toks, other_toks)
+        for tag, i1, i2, j1, j2 in m.get_opcodes():
+            if tag != "equal":
+                ops_r.append((i1, i2, other_toks[j1:j2]))
+        return ops_r
+    cur_raw_ops = _raw_ops(bt, ct)
+    rep_raw_ops = _raw_ops(bt, rt)
+    cur_transforms = _detect_lint_transforms_from_ops(cur_raw_ops)
+    rep_transforms = _detect_lint_transforms_from_ops(rep_raw_ops)
+    cur_set = set(t for t in cur_transforms if t in file_transforms)
+    rep_set = set(t for t in rep_transforms if t in file_transforms)
+    # The lint side has MORE of the file-level transforms applied.
+    # The refactor side has FEWER (it may have picked up some incidentally).
+    if len(cur_set) > len(rep_set):
+        # Current is the lint side, replayed is the refactor.
+        result = _apply_lint_transforms(replayed, file_transforms)
+        if result != replayed:
+            return result
+    elif len(rep_set) > len(cur_set):
+        # Replayed is the lint side, current is the refactor.
+        result = _apply_lint_transforms(current, file_transforms)
+        if result != current:
+            return result
+    elif cur_set == rep_set and cur_set:
+        # Both sides applied the same transforms (or same count). Fall back:
+        # try applying to whichever side has FEWER total raw changes (the
+        # "simpler" side is more likely the refactor — it changed less).
+        if len(cur_raw_ops) <= len(rep_raw_ops):
+            result = _apply_lint_transforms(current, file_transforms)
+            if result != current:
+                return result
+        else:
+            result = _apply_lint_transforms(replayed, file_transforms)
+            if result != replayed:
+                return result
+    return None
+
+
+def detect_file_level_lint_transforms(units) -> list[tuple[str, str]]:
+    """Scan ALL units for repeated lint substitutions across the file.
+
+    Aggregates transform frequency across every unit's diff. If a known-safe
+    lint transform appears ≥5 times total across the file, it's promoted to a
+    file-level transform applied to every unit's refactor side. This catches
+    the pattern where each unit has only 2-3 and→&& changes (below the per-unit
+    threshold) but the file has 17 total (clearly a lint pass).
+
+    Returns a deduplicated list of (old, new) transform pairs.
+    """
+    from collections import Counter
+    from capybase.diff import line_matcher as _lm_fld
+
+    def _raw_ops(base_toks, other_toks):
+        ops_r = []
+        m = _lm_fld(base_toks, other_toks)
+        for tag, i1, i2, j1, j2 in m.get_opcodes():
+            if tag != "equal":
+                ops_r.append((i1, i2, other_toks[j1:j2]))
+        return ops_r
+
+    transform_counts: Counter[tuple[str, str]] = Counter()
+    for unit in units:
+        refined = unit.refined_sides
+        if refined is not None:
+            current, base, replayed = refined
+        else:
+            current = unit.current.text or ""
+            base = unit.base.text or ""
+            replayed = unit.replayed.text or ""
+        bt = _tokenize_with_macros(base)[0]
+        ct = _tokenize_with_macros(current)[0]
+        rt = _tokenize_with_macros(replayed)[0]
+        cur_raw_ops = _raw_ops(bt, ct)
+        rep_raw_ops = _raw_ops(bt, rt)
+        for t in _detect_lint_transforms_from_ops(cur_raw_ops):
+            transform_counts[t] += 1
+        for t in _detect_lint_transforms_from_ops(rep_raw_ops):
+            transform_counts[t] += 1
+    # ≥5 total across the file → lint pass
+    return [t for t, c in transform_counts.items() if c >= 5]
 
 
 def _detect_lint_transforms_from_ops(

@@ -6912,6 +6912,26 @@ class Orchestrator:
             # max_retries kwarg, so without this it would get the full config
             # budget, undermining the throughput fix).
             self._file_max_retries = _file_max_retries
+            # File-level lint transform detection: scan ALL units for repeated
+            # known-safe lint substitutions (NULL→nullptr, and→&&, etc.). When
+            # the aggregate count is high (≥5), promote the transforms to a
+            # file-level set stored in every unit's structural_metadata. This
+            # catches refactor-vs-lint conflicts where each unit has too few
+            # changes for the per-unit threshold but the file clearly had a
+            # lint pass (e.g. nlohmann-0020: 6 regions × ~3 and→&& each = 17
+            # total). Applied by resolve_structurally before the per-unit rules.
+            try:
+                from capybase.structural_resolver import (
+                    detect_file_level_lint_transforms,
+                )
+                _file_transforms = detect_file_level_lint_transforms(units)
+            except Exception:
+                _file_transforms = []
+            if _file_transforms:
+                for unit in units:
+                    unit.structural_metadata["file_level_lint_transforms"] = (
+                        _file_transforms
+                    )
             for unit in units:
                 _parent = unit.structural_metadata.get("parent_unit_id")
                 # Parent-aware asymmetry: if the parent conflict had substantial

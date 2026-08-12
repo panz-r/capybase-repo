@@ -163,3 +163,86 @@ def test_lint_transform_declines_when_no_frequency():
     result = _try_lint_transform(base, current, replayed)
     # Neither side has lint transforms — should decline
     assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Fix 3b: File-level lint transform detection + removed rewrite_vs_edit gate
+# ---------------------------------------------------------------------------
+
+
+def test_file_level_lint_detection_aggregates_across_units():
+    """detect_file_level_lint_transforms scans ALL units. When the aggregate
+    count of a lint transform ≥5, it's promoted to file-level."""
+    from capybase.structural_resolver import detect_file_level_lint_transforms
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+
+    # 6 units, each with 2 and→&& changes = 12 total
+    units = []
+    for i in range(6):
+        units.append(ConflictUnit(
+            session_id="s", step_index=0, path="f.cpp", language="cpp",
+            conflict_type="UU", unit_id=f"f:1:{i}", unit_kind="text_marker_block",
+            base=ConflictSide(label="BASE", text=f"x{i} and y{i};\na{i} and b{i};\n"),
+            current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=f"x{i} && y{i};\na{i} && b{i};\n"),
+            replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=f"x{i} and y{i};\na{i} and b{i};\n"),
+            original_worktree_text="", marker_span=(0, 0),
+            structural_metadata={},
+        ))
+    transforms = detect_file_level_lint_transforms(units)
+    assert ("and", "&&") in transforms, "should detect file-level and→&&"
+
+
+def test_file_level_lint_applied_via_resolve_structurally():
+    """When file_level_lint_transforms is set in metadata, resolve_structurally
+    applies them even when no single unit meets the per-unit threshold."""
+    from capybase.structural_resolver import resolve_structurally
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+
+    # A unit with only 2 and→&& changes (below per-unit threshold of 5)
+    unit = ConflictUnit(
+        session_id="s", step_index=0, path="f.cpp", language="cpp",
+        conflict_type="UU", unit_id="f:1:0", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="void f() {\n    if (a and b) x();\n    if (c and d) y();\n}\n"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text="void f() {\n    if (a && b) x();\n    if (c && d) y();\n}\n"),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="void f() {\n    if (a and b) do_x();\n    if (c and d) do_y();\n}\n"),
+        original_worktree_text="", marker_span=(0, 0),
+        structural_metadata={"file_level_lint_transforms": [("and", "&&")]},
+    )
+    result = resolve_structurally(unit)
+    assert result.resolved, "should resolve via file-level lint transform"
+    assert result.rule == "lint_transform"
+    # The refactor (replayed) should have and→&& applied
+    assert "&&" in result.text
+    assert "do_x" in result.text, "should keep refactor content"
+
+
+def test_lint_transform_not_gated_by_rewrite_vs_edit():
+    """lint_transform should fire even on rewrite_vs_edit shapes — it's the
+    rule specifically designed for refactor-vs-lint conflicts."""
+    from capybase.structural_resolver import resolve_structurally
+    from capybase.conflict_model import ConflictUnit, ConflictSide
+
+    # One side lints (and→&& many times), the other refactors but keeps
+    # the 'and' tokens (so the lint transform can apply to it).
+    base = "\n".join(f"    if (a{i} and b{i}) v{i}++;" for i in range(8))
+    current = "\n".join(f"    if (a{i} && b{i}) v{i}++;" for i in range(8))
+    # Replayed refactors variable names but keeps the and-operator structure
+    replayed = "\n".join(f"    if (x{i} and y{i}) result{i}++;" for i in range(8))
+
+    unit = ConflictUnit(
+        session_id="s", step_index=0, path="f.cpp", language="cpp",
+        conflict_type="UU", unit_id="f:1:0", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=current),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=replayed),
+        original_worktree_text="", marker_span=(0, 0),
+        structural_metadata={},
+    )
+    result = resolve_structurally(unit)
+    # lint_transform should fire: current is lint side (8 and→&&), replayed
+    # is refactor with 'and' that needs linting. Per-unit threshold (5) met.
+    assert result.resolved, "should resolve via lint_transform"
+    assert result.rule == "lint_transform"
+    assert "&&" in result.text, "refactored side should have lint applied"
+    assert "result0" in result.text, "should keep refactor variable names"
+
