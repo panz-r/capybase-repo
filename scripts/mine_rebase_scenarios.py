@@ -337,6 +337,7 @@ def _mine_one_merge(
             except Exception:  # noqa: BLE001
                 pass
             gb.prune_worktrees()
+            shutil.rmtree(wt_path, ignore_errors=True)
 
 
 def _capture_conflict_steps(wt: Path, source_commits: list[dict]) -> list[ConflictStep]:

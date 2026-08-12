@@ -921,6 +921,14 @@ def main():
                          "--census /tmp/capybase-live/c-live-full-corpus.json")
     args = ap.parse_args()
 
+    # Startup sweep: remove stale capy-rw-* temp dirs from prior runs that
+    # were killed (SIGTERM/SIGKILL) before their atexit handler could run.
+    # These leak ~50-200MB each (full crate tree) and accumulate across
+    # killed eval runs. Safe because no two eval runs should coexist.
+    import glob as _glob
+    for _stale in _glob.glob("/var/tmp/capy-rw-*"):
+        shutil.rmtree(_stale, ignore_errors=True)
+
     if args.census:
         _print_census(args.census)
         return
@@ -980,10 +988,19 @@ def main():
     # killed (Ctrl-C, OOM, crash). Without this, killed runs leak their capy-rw-*
     # dirs in /var/tmp (observed: 90 leaked dirs = 6.7G after multiple runs).
     import atexit
+    import signal as _signal
     def _cleanup_eval_temp_dirs():
         for td in deferred_cleanup:
             shutil.rmtree(td, ignore_errors=True)
     atexit.register(_cleanup_eval_temp_dirs)
+    # Signal handlers: atexit doesn't fire on SIGTERM (what `timeout` sends).
+    # Register explicit handlers so temp dirs are cleaned up on kill.
+    def _signal_cleanup(signum, frame):
+        _cleanup_eval_temp_dirs()
+        # Re-raise to get the correct exit code
+        raise SystemExit(128 + signum)
+    for _sig in (_signal.SIGTERM, _signal.SIGINT):
+        _signal.signal(_sig, _signal_cleanup)
     for i, case in enumerate(cases, 1):
         if case.id in done_ids:
             skipped += 1
