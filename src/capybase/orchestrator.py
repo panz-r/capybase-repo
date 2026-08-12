@@ -6875,7 +6875,7 @@ class Orchestrator:
             # against an aborted rebase. Collect accepted (unit, candidate)
             # pairs and splice them in one offset-correct batch at the end.
             accepted: list[tuple[ConflictUnit, CandidateResolution]] = []
-            escalated_unit: UnitOutcome | None = None
+            escalated_units: list[UnitOutcome] = []
 
             # SRC accumulator: parent_unit_id -> list of accepted resolved-text
             # from earlier sibling sub-units, in document order. Fed one-way into
@@ -6957,8 +6957,12 @@ class Orchestrator:
                 _persist_unit_hashes(self, outcome)  # D1: per-step convergence
                 result.outcomes.append(outcome)
                 if outcome.accepted is None:
-                    escalated_unit = outcome
-                    break
+                    escalated_units.append(outcome)
+                    # Don't break — continue processing remaining units so
+                    # all outcomes are logged. The step still escalates
+                    # (safety invariant: don't splice a partially-resolved
+                    # file), but every unit gets its resolution attempted.
+                    continue
                 # Feed this resolution forward to later siblings in the same group.
                 if _parent:
                     _sibling_resolved.setdefault(_parent, []).append(
@@ -7008,7 +7012,8 @@ class Orchestrator:
                             self._step_pattern_cache[_pat_key] = _pat
                 except Exception:  # noqa: BLE001 — advisory
                     pass
-            if escalated_unit is not None:
+            if escalated_units:
+                escalated_unit = escalated_units[0]
                 result.escalated = True
                 # Prefer the outcome's specific reason (e.g. "unit exceeded
                 # wall-time budget") when the escalation path set one. Fall
@@ -9480,6 +9485,12 @@ class Orchestrator:
                     # The ONLY blockers are advisory warnings on a cycling,
                     # compiled candidate. Accept it.
                     blocker_names = sorted({w.validator for w in blocking})
+                    # Run intent-coverage repair BEFORE accepting — the escape
+                    # hatch returns before the normal accept path (line ~9606)
+                    # where _try_intent_coverage_repair runs. Without this,
+                    # escape-hatch-accepted candidates never get dropped lines
+                    # restored, leaving the 0.94→0.95 gap unbridged.
+                    cand = self._try_intent_coverage_repair(unit, cand)
                     outcome.accepted = cand
                     outcome.validation = validation
                     outcome.reason = (
@@ -9538,6 +9549,64 @@ class Orchestrator:
                     decision="escalate", reason=outcome.reason,
                 )
                 return outcome
+
+            # Zero-budget escape: when the unit-count cap gives 0 retries
+            # (files with >20 units) and this is the first (and only)
+            # attempt, accept compiling candidates with advisory-only
+            # warnings directly. Without this, risk.decide() would say
+            # "retry" (it doesn't know about the unit-count cap), but the
+            # next iteration's oscillation backstop escalates immediately
+            # (osc_budget=0). The compiling, possibly-high-confidence
+            # candidate is thrown away — wasting the one attempt we had.
+            # For a 89-unit file, accepting one unit's content-loss
+            # candidate is strictly better than escalating the entire file
+            # (losing all units' resolutions).
+            if (
+                max_retries is not None
+                and _unit_budget == 0
+                and retry_count == 0
+                and cand.resolved_text
+                and not validation.hard_failures
+            ):
+                _ZB_ADVISORY = frozenset({
+                    "preservation_heuristic",
+                    "both_sides_represented",
+                    "obligation",
+                    "intent_coverage",
+                    "unattributed_code",
+                })
+                _zb_non_advisory = [
+                    w for w in validation.warnings
+                    if w.validator not in _ZB_ADVISORY
+                ]
+                if not _zb_non_advisory:
+                    cand = self._try_intent_coverage_repair(unit, cand)
+                    outcome.accepted = cand
+                    outcome.validation = validation
+                    outcome.retry_count = retry_count
+                    _zb_blockers = sorted(
+                        {w.validator for w in validation.warnings
+                         if w.validator in _ZB_ADVISORY}
+                    )
+                    outcome.reason = (
+                        f"zero-budget escape: accepted compiling candidate "
+                        f"(unit-count cap = 0 retries, advisory-only "
+                        f"blockers {_zb_blockers})"
+                    )
+                    self._record_resolution_attempt(
+                        outcome, mechanism="zero_budget_escape",
+                        candidate=cand, validation=validation,
+                        decision="accept", reason=outcome.reason,
+                    )
+                    self.journal.emit(
+                        "candidate_accepted",
+                        {"candidate_id": cand.candidate_id,
+                         "via": cand.provenance or "plain_llm",
+                         "provenance": cand.provenance or ""},
+                        step_index=self.step, path=unit.path,
+                        unit_id=unit.unit_id,
+                    )
+                    return outcome
 
             decision = self.risk.decide(
                 validation,
