@@ -9152,6 +9152,7 @@ class Orchestrator:
                 )
                 return outcome
 
+        _dup_def_retried = False  # one duplicate-def CEGIS retry per unit
         while True:
             # Wall-clock deadline (outermost budget): if this unit has run past
             # its time budget across retries, escalate rather than proposing
@@ -9618,21 +9619,16 @@ class Orchestrator:
                 _is_header
                 and _total_header_calls > _header_max_retries
             ):
-                # Before escalating, try deterministic stray-character repair
-                # directly on the candidate's resolved_text. The per-unit gcc
-                # gate (active since Sprint 12) catches real syntax errors in
-                # headers. The 4B model sometimes emits stray characters
-                # (e.g. '@') that gcc flags. Removing them is safe (@ is never
-                # valid in C/C++ code outside strings/comments) and avoids
-                # wasting the header retry budget on the same defect.
+                import re as _re_hdr
+                _header_repaired = False  # set True if a repair avoids escalation
+                # 1. Stray-character repair: the 4B model sometimes emits
+                # stray characters (e.g. '@') that gcc flags as parse errors.
                 if validation and validation.hard_failures and cand.resolved_text:
-                    import re as _re_hdr
                     _repaired_text = cand.resolved_text
                     _repaired = False
                     for f in validation.hard_failures:
                         msg = getattr(f, "message", "") or ""
                         _msg_norm = msg.replace("\u2018", "'").replace("\u2019", "'")
-                        # 1. Stray character repair
                         _m = _re_hdr.search(r"stray '(.+?)' in program", _msg_norm)
                         if _m:
                             _raw = _m.group(1)
@@ -9646,52 +9642,6 @@ class Orchestrator:
                             if len(_sc) == 1 and _sc in _repaired_text:
                                 _repaired_text = _repaired_text.replace(_sc, "")
                                 _repaired = True
-                    # 2. Duplicate definition repair: when gcc reports
-                    # "cannot be overloaded" or "redefinition", the
-                    # candidate adds a function that already exists in the
-                    # non-conflicting part of the file. Remove the duplicate
-                    # function block from the candidate — the version
-                    # outside the conflict region (from the base/common
-                    # ancestor) is kept.
-                    for f in validation.hard_failures:
-                        msg = getattr(f, "message", "") or ""
-                        _msg_norm = msg.replace("\u2018", "'").replace("\u2019", "'")
-                        if "cannot be overloaded" in _msg_norm or "redefinition" in _msg_norm:
-                            # Extract function name from gcc's fully-qualified path:
-                            # '...::get_cbor_float_prefix(float)' cannot be overloaded
-                            _fm = _re_hdr.search(r"::(\w+)\(", _msg_norm)
-                            if _fm:
-                                _fn = _fm.group(1)
-                                _lines = _repaired_text.split("\n")
-                                _new_lines = []
-                                _skip_depth = 0
-                                for _line in _lines:
-                                    if _skip_depth > 0:
-                                        for _ch in _line:
-                                            if _ch == "{": _skip_depth += 1
-                                            elif _ch == "}": _skip_depth -= 1
-                                        continue
-                                    # Match function definition lines containing the name
-                                    if _fn in _line and any(
-                                        kw in _line for kw in
-                                        ("static ", "constexpr ", "void ", "auto ",
-                                         "inline ", "CharType ", "std::", "bool ",
-                                         "int ", "size_t ", "std::size_t")
-                                    ):
-                                        _skip_depth = 0
-                                        for _ch in _line:
-                                            if _ch == "{": _skip_depth += 1
-                                            elif _ch == "}": _skip_depth -= 1
-                                        if _skip_depth > 0:
-                                            _repaired = True
-                                            continue
-                                        elif _skip_depth == 0 and "{" in _line:
-                                            # Single-line definition — skip it
-                                            _repaired = True
-                                            continue
-                                    _new_lines.append(_line)
-                                if _repaired:
-                                    _repaired_text = "\n".join(_new_lines)
                     if _repaired:
                         _rc = cand.model_copy(update={"resolved_text": _repaired_text})
                         _rv = self.verification.verify(unit, _rc)
@@ -9709,17 +9659,63 @@ class Orchestrator:
                                 decision="accept", reason=outcome.reason,
                             )
                             return outcome
-                outcome.escalated = True
-                outcome.retry_count = retry_count
-                outcome.reason = (
-                    f"header file CEGIS cap reached ({_header_max_retries} "
-                    f"retry budget for headers)"
-                )
-                self._record_resolution_attempt(
-                    outcome, mechanism="llm",
-                    decision="escalate", reason=outcome.reason,
-                )
-                return outcome
+                # 2. Duplicate definition: surface the compiler error with
+                # the existing definition's context and give the LLM one
+                # more try. The 4B model can't see that a function it's
+                # merging already exists 10K lines away. Finding the
+                # existing definition and including it in the CEGIS
+                # feedback lets the model decide how to avoid the
+                # duplicate — no blunt regex surgery.
+                if (not _dup_def_retried and validation
+                        and validation.hard_failures):
+                    _is_dup = any(
+                        "cannot be overloaded" in (getattr(f, "message", "") or "")
+                        or "redefinition" in (getattr(f, "message", "") or "")
+                        for f in validation.hard_failures
+                    )
+                    if _is_dup:
+                        _dup_def_retried = True
+                        _orig = unit.original_worktree_text or ""
+                        for f in validation.hard_failures:
+                            _fmsg = getattr(f, "message", "") or ""
+                            _fmsg_n = _fmsg.replace("\u2018", "'").replace("\u2019", "'")
+                            _fm = _re_hdr.search(r"::(\w+)\(", _fmsg_n)
+                            if not _fm:
+                                continue
+                            _fn = _fm.group(1)
+                            _orig_lines = _orig.split("\n")
+                            for _oi, _ol in enumerate(_orig_lines):
+                                if _fn in _ol and "(" in _ol and "{" not in _ol:
+                                    _ctx_start = max(0, _oi - 1)
+                                    _ctx_end = min(len(_orig_lines), _oi + 8)
+                                    _ctx = "\n".join(
+                                        f"  {_orig_lines[j]}"
+                                        for j in range(_ctx_start, _ctx_end)
+                                    )
+                                    f.message = (
+                                        f"{_fmsg}\n\n"
+                                        f"NOTE: This function already exists "
+                                        f"elsewhere in the file (near line "
+                                        f"{_oi + 1}):\n{_ctx}\n\n"
+                                        f"Do NOT re-define it in your merge. "
+                                        f"The existing definition is kept."
+                                    )
+                                    break
+                            break
+                        _header_repaired = True  # allow one more iteration
+                # Escalate unless a repair strategy granted a retry.
+                if not _header_repaired:
+                    outcome.escalated = True
+                    outcome.retry_count = retry_count
+                    outcome.reason = (
+                        f"header file CEGIS cap reached "
+                        f"({_header_max_retries} retry budget for headers)"
+                    )
+                    self._record_resolution_attempt(
+                        outcome, mechanism="llm",
+                        decision="escalate", reason=outcome.reason,
+                    )
+                    return outcome
             # Unit-count-aware budget cap: when max_retries was passed (many-
             # unit file), enforce it here before risk.decide() — mirroring the
             # header cap. Without this, a file with 78 units would allow each

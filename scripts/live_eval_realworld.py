@@ -926,8 +926,9 @@ def main():
     # These leak ~50-200MB each (full crate tree) and accumulate across
     # killed eval runs. Safe because no two eval runs should coexist.
     import glob as _glob
+    import shutil as _shutil_sweep
     for _stale in _glob.glob("/var/tmp/capy-rw-*"):
-        shutil.rmtree(_stale, ignore_errors=True)
+        _shutil_sweep.rmtree(_stale, ignore_errors=True)
 
     if args.census:
         _print_census(args.census)
