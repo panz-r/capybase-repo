@@ -617,7 +617,24 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
 
 
 def _contains_markers(text: str) -> bool:
-    return any(m in text for m in ("<<<<<<<", ">>>>>>>")) or text.count("=======\n") > 0
+    """True if the text contains git conflict markers.
+
+    Checks for ``<<<<<<<``, ``=======``, ``>>>>>>>`` at the START of a line
+    (after whitespace stripping). This avoids false positives from comment
+    decorators like ``// ===================================================================``
+    (common in protobuf/Google C++ style) which contain ``=======`` as a
+    substring but are not conflict markers.
+    """
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("<<<<<<<") or stripped.startswith(">>>>>>>"):
+            return True
+        # Git's conflict separator is exactly 7 '=' at line start (after
+        # stripping). Comment decorators have a non-'=' prefix (// or #) or
+        # more than 7 '=' and must NOT match.
+        if stripped == "=======":
+            return True
+    return False
 
 
 def _brace_balanced(text: str, lang: str) -> bool:
