@@ -6783,7 +6783,53 @@ class Orchestrator:
             resurrections=findings,
             resume_hint=f"git rebase --continue  # after reviewing {backup_ref}",
         )
-        if cfg.resurrection_policy == "stop":
+        # Provenance-aware resurrection filtering: if ALL flagged blocks
+        # appear in the REPLAYED side's version of the file, the
+        # "resurrection" is an explicit merge choice (the replayed side
+        # deliberately provided a refactored replacement for content the
+        # upstream deleted), not a silent undo. Downgrade to WARNING so the
+        # rebase can complete.
+        #
+        # Safety (per reviewer feedback): true silent restorations — where
+        # the LLM hallucinated deleted code that the replayed side never had
+        # — will NOT match the replayed blob. The check uses the same
+        # _coverage_against metric as the resurrection detector itself.
+        _effective_policy = cfg.resurrection_policy
+        if _effective_policy == "stop" and findings:
+            try:
+                from capybase.merge_intent import _coverage_against
+                _all_explained = True
+                for _finding in findings:
+                    _blob = self.git.blob_at(start_oid, _finding.path)
+                    if not _blob:
+                        _all_explained = False
+                        break
+                    _replayed_lines = _blob.decode(
+                        "utf-8", errors="replace"
+                    ).split("\n")
+                    for _block in _finding.blocks:
+                        _block_lines = _block.text.split("\n")
+                        _cov = _coverage_against(
+                            _block_lines, _replayed_lines
+                        )
+                        if _cov < cfg.resurrection_min_similarity:
+                            _all_explained = False
+                            break
+                    if not _all_explained:
+                        break
+                if _all_explained:
+                    self.journal.emit(
+                        "resurrection_downgrade",
+                        {"paths": [f.path for f in findings],
+                         "reason": "all findings explained by "
+                                   "replayed side content "
+                                   "(explicit merge choice)"},
+                        step_index=self.step,
+                    )
+                    _effective_policy = "warn"
+            except Exception:  # noqa: BLE001 - never break on provenance check
+                pass
+        if _effective_policy == "stop":
             self.log.warning(
                 "resurrection detection stopped the rebase: session=%s paths=%d "
                 "lines=%d backup=%s",
