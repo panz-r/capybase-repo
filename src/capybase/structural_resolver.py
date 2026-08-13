@@ -362,16 +362,32 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
     # When the refined base is empty (entity-split sub-unit where the entity
     # didn't exist in base), fall back progressively: first unit.base.text
     # (full-file base for non-split units), then original_worktree_text (the
-    # full file WITH conflict markers — the last resort for entity-split
-    # sub-units where unit.base.text is also empty). The subsequence check
-    # still works: the lint side's "addition" is old code that exists in the
-    # file, and the markers add only a few noise tokens.
+    # full file WITH conflict markers). When using original_worktree_text,
+    # STRIP the conflict marker regions first — their content is from the
+    # sides being compared, not from the base file. Including marker content
+    # would make both sides' text appear as subsequences of the "base",
+    # causing false-positive lint classification (e.g., protobuf-0034: the
+    # replayed side's new functions appeared in the markers → classified as
+    # lint → rule took the empty current side → functions lost).
     lint_base = (
         base if base.strip()
         else (unit.base.text or "")
     )
     if not lint_base.strip():
-        lint_base = getattr(unit, "original_worktree_text", "") or ""
+        _raw = getattr(unit, "original_worktree_text", "") or ""
+        _lines = []
+        _in_marker = False
+        for _ml in _raw.split("\n"):
+            if _ml.startswith("<<<<<<<"):
+                _in_marker = True
+                continue
+            if _ml.startswith(">>>>>>>"):
+                _in_marker = False
+                continue
+            if _in_marker:
+                continue
+            _lines.append(_ml)
+        lint_base = "\n".join(_lines)
     lint_res = _try_lint_vs_refactor(lint_base, current, replayed, lang=lang)
     if lint_res is not None:
         return StructuralResolution(rule="lint_vs_refactor", text=lint_res)
