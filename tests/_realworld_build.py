@@ -59,6 +59,7 @@ C_BUILD_COMMANDS: dict[str, str] = {
     "sqlite-history": "./configure && make -j4",
     "nlohmann-json-history": "cmake --build build",
     "clickhouse-history": "cmake --build build",
+    "protobuf-history": "cmake --build build",
 }
 
 # Build timeout. C builds at a specific commit can be slow (a full sqlite
