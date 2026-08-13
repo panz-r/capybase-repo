@@ -705,6 +705,94 @@ def test_insertion_union_explosion_guard_ignores_braces():
 
 
 # ---------------------------------------------------------------------------
+# lint_vs_refactor: one side is purely mechanical lint, the other a semantic
+# refactor. Take the refactor side verbatim — the lint carries no unique intent.
+# ---------------------------------------------------------------------------
+
+
+def test_lint_vs_refactor_takes_semantic_side():
+    """When current is purely lint (and→&&, whitespace) and replayed is a
+    real refactor, take the replayed side verbatim."""
+    base = (
+        "bool check(int x) {\n"
+        "    if (x > 0 and x < 10) {\n"
+        "        return true;\n"
+        "    }\n"
+        "    return false;\n"
+        "}\n"
+    )
+    current = (
+        "bool check(int x) {\n"
+        "    if (x > 0 && x < 10) {\n"
+        "        return true;\n"
+        "    }\n"
+        "    return false;\n"
+        "}\n"
+    )
+    replayed = (
+        "bool validate(int value) {\n"
+        "    return value > 0 && value < MAX_VAL;\n"
+        "}\n"
+    )
+    u = _unit(base, current, replayed)
+    u.language = "cpp"
+    r = resolve_structurally(u)
+    assert r.rule == "lint_vs_refactor"
+    assert r.text == replayed
+
+
+def test_lint_vs_refactor_declines_when_both_semantic():
+    """When both sides make real changes, the rule declines to the LLM."""
+    base = "int f(int x) {\n    return x;\n}\n"
+    current = "int f(int x) {\n    return x + 1;\n}\n"  # semantic change
+    replayed = "int f(int x) {\n    return x * 2;\n}\n"  # different semantic change
+    u = _unit(base, current, replayed)
+    u.language = "cpp"
+    r = resolve_structurally(u)
+    assert r.rule != "lint_vs_refactor"
+
+
+def test_lint_vs_refactor_does_not_fire_on_one_sided_change():
+    """When one side is unchanged (== base), the rule must NOT fire —
+    one_sided_change handles it."""
+    base = "def f():\n    return 1\n"
+    current = "def f():\n    return 1\n"  # unchanged
+    replayed = "def f():\n    return 3\n"  # changed
+    u = _unit(base, current, replayed)
+    r = resolve_structurally(u)
+    assert r.rule == "one_sided_change"
+
+
+def test_lint_vs_refactor_handles_full_file_base():
+    """When the base is the full file and sides are hunks (diff3 refinement
+    not stored), the subsequence check finds the lint side's content."""
+    full_base = (
+        "#pragma once\n"
+        "#include <vector>\n"
+        "void old_api(int* cursor) {\n"
+        "    assert(cursor != nullptr and cursor < limit);\n"
+        "    return *cursor;\n"
+        "}\n"
+        "void other() { return; }\n"
+    )
+    # Current hunk: linted version of old_api (and → &&)
+    cur_hunk = (
+        "    assert(cursor != nullptr && cursor < limit);\n"
+        "    return *cursor;\n"
+    )
+    # Replayed hunk: refactored iterator-based API
+    rep_hunk = (
+        "    auto result = *current;\n"
+        "    std::advance(current, 1);\n"
+        "    return result;\n"
+    )
+    from capybase.structural_resolver import _try_lint_vs_refactor
+    result = _try_lint_vs_refactor(full_base, cur_hunk, rep_hunk, lang="cpp")
+    assert result is not None, "should fire: current is lint of base content"
+    assert result == rep_hunk, "should take the refactor (replayed) side"
+
+
+# ---------------------------------------------------------------------------
 # Blessed-corpus: the union/combine shapes now resolve with ZERO LLM calls
 # (the reviewer's "Done when" criterion for #1).
 # ---------------------------------------------------------------------------

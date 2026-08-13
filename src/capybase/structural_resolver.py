@@ -169,6 +169,100 @@ def _normalize(text: str) -> str:
     return "\n".join(" ".join(line.split()) for line in lines)
 
 
+#: C++ alternative tokens (ISO C++ §16.4) that are syntactically equivalent to
+#: their symbolic counterparts. A side whose ONLY changes are these token
+#: substitutions + whitespace/formatting is a mechanical lint pass, not a
+#: semantic change. Normalizing them collapses a "purely lint" side back to the
+#: base text — exposing the lint-vs-refactor conflict shape.
+_CPP_ALT_TOKEN_MAP: dict[str, str] = {
+    "and": "&&", "or": "||", "not": "!", "not_eq": "!=",
+    "bitand": "&", "bitor": "|", "xor": "^", "compl": "~",
+    "and_eq": "&=", "or_eq": "|=", "xor_eq": "^=",
+}
+_CPP_ALT_TOKEN_RE = __import__("re").compile(
+    r"\b(" + "|".join(_CPP_ALT_TOKEN_MAP) + r")\b"
+)
+_LINT_TOKEN_RE = __import__("re").compile(r"\w+|[^\w\s]")
+
+
+def _normalize_cpp_lint(text: str, lang: str | None = None) -> str:
+    """Normalize C++ lint/formatting to detect purely cosmetic changes.
+
+    Replaces C++ alternative tokens (``and``→``&&``, ``or``→``||``, etc.) and
+    tokenizes to ignore ALL whitespace/punctuation-spacing differences. Two
+    texts that differ ONLY in alternative tokens and formatting produce the
+    same normalized form.
+
+    For non-C/C++ languages, only tokenization is applied (the alternative-token
+    replacement is C++-specific — Python's ``and``/``or`` are keywords, not
+    operator aliases).
+    """
+    if not text:
+        return ""
+    if lang and lang.lower() in ("cpp", "c++", "c", "h", "hpp", "cc", "cxx", "hxx"):
+        text = _CPP_ALT_TOKEN_RE.sub(
+            lambda m: _CPP_ALT_TOKEN_MAP[m.group(1)], text)
+    return " ".join(_LINT_TOKEN_RE.findall(text))
+
+
+def _try_lint_vs_refactor(
+    base: str, current: str, replayed: str, *, lang: str | None = None,
+) -> str | None:
+    """Resolve a lint-vs-refactor conflict by taking the semantic side verbatim.
+
+    When one side's changes are PURELY mechanical lint (C++ alternative tokens,
+    whitespace, template spacing) and the other side makes a real semantic
+    change, the lint side carries no unique intent — the correct merge takes
+    the semantic (refactor) side verbatim, preventing the Frankenstein merges
+    the LLM produces when it tries to combine old-API code with new-API code.
+
+    Detection: normalize both sides + base via ``_normalize_cpp_lint``. If one
+    side's normalized tokens are a contiguous subsequence of the base's (or
+    equal when both are hunk-sized), that side is purely lint. Take the other.
+
+    The subsequence check handles the common case where ``base`` is the full
+    file (481 lines) while ``current``/``replayed`` are tiny conflict hunks
+    (2–7 lines) — diff3 refinement isn't always stored, so the resolver passes
+    the full-file base. Equality would never match; token-aligned containment
+    finds the base region that the lint side corresponds to.
+
+    Declines (returns ``None``) when:
+    - Both sides are lint (no real conflict — other rules handle).
+    - Neither is lint (both semantic — genuine conflict for the LLM).
+    """
+    base_n = _normalize_cpp_lint(base, lang)
+    if not base_n:
+        return None  # no base to compare against
+    cur_n = _normalize_cpp_lint(current, lang)
+    rep_n = _normalize_cpp_lint(replayed, lang)
+
+    def _lint_match(side_n: str) -> bool:
+        """True if side_n's normalized tokens are in base_n (equality or
+        token-aligned contiguous subsequence)."""
+        if not side_n:
+            return False
+        if side_n == base_n:
+            return True
+        # Token-aligned containment: wrap in spaces so partial-token matches
+        # ('a' in 'aa') are rejected. ' a ' in ' aa ' → False; ' b ' in
+        # ' aa b ' → True.
+        return f" {side_n} " in f" {base_n} "
+
+    # A side is "lint" only if it CHANGED from base (standard whitespace
+    # normalization) AND the change is purely cosmetic (lint normalization).
+    # A side identical to base is NOT lint — it's just unchanged, and
+    # one_sided_change handles it.
+    cur_changed = _normalize(current) != _normalize(base)
+    rep_changed = _normalize(replayed) != _normalize(base)
+    cur_is_lint = cur_changed and _lint_match(cur_n)
+    rep_is_lint = rep_changed and _lint_match(rep_n)
+    if cur_is_lint and not rep_is_lint:
+        return replayed  # current is purely lint → take the refactor
+    if rep_is_lint and not cur_is_lint:
+        return current   # replayed is purely lint → take current's changes
+    return None
+
+
 def _classify_conflict_shape(unit: ConflictUnit) -> str:
     """Classify the conflict shape from cached features for rule routing.
 
@@ -254,6 +348,26 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         text = current if current.strip() else replayed
         return StructuralResolution(rule="identical_sides", text=text)
 
+    # Rule 2.5: lint-vs-refactor. One side's changes are PURELY mechanical
+    # lint (C++ alternative tokens, whitespace, template spacing) and the
+    # other side makes a real semantic change. The lint carries no unique
+    # intent — take the semantic (refactor) side verbatim. This prevents the
+    # Frankenstein merges the LLM produces when it tries to combine old-API
+    # code with new-API code (e.g., mixing cursor-based and iterator-based
+    # input adapters). Must fire BEFORE one_sided_change (Rule 3): when the
+    # refined base is empty (entity-split sub-unit) and the refactor side is
+    # also empty (deletion), Rule 3 would take the lint side — the wrong
+    # choice. The subsequence check against the full-file base catches this.
+    lang = getattr(unit, "language", None)
+    # When the refined base is empty (entity-split sub-unit where the entity
+    # didn't exist in base), fall back to the full-file base for the
+    # subsequence check — the lint side's "addition" may be old code that
+    # exists elsewhere in the file.
+    lint_base = base if base.strip() else (unit.base.text or "")
+    lint_res = _try_lint_vs_refactor(lint_base, current, replayed, lang=lang)
+    if lint_res is not None:
+        return StructuralResolution(rule="lint_vs_refactor", text=lint_res)
+
     # Rule 3: one-sided change. Only one side diverged from base → take it.
     cur_changed = _normalize(current) != _normalize(base)
     rep_changed = _normalize(replayed) != _normalize(base)
@@ -264,8 +378,7 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
     if rep_changed and not cur_changed:
         return StructuralResolution(rule="one_sided_change", text=replayed)
 
-    # Rule 4: both changed, but on disjoint line ranges → merge both edits.
-    # Rule 3.5: move detection. If one side "moved" a block (deleted it from
+    # Rule 3.6: move detection. If one side "moved" a block (deleted it from
     # one location and re-added it verbatim elsewhere), and the other side
     # modified the original, transplant the modifications to the moved copy.
     # This resolves the common "refactor moved code + bugfix in original
