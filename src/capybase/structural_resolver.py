@@ -1194,67 +1194,58 @@ def _try_mechanical_reapply_merge(
     else:
         mech_ops, sem_text = rep_ops, current
 
-    # Decline when the mechanical side's ops are ALL pure insertions (i1==i2
-    # for every op). A pure-insertion side has no base-token anchors to
-    # re-apply onto the semantic text — its content would be silently dropped
-    # (the anchor bt[i1:i2] is empty for pure insertions, so the loop skips
-    # the op). This is an ADDITION, not a substitution; the union rules
-    # further down the cascade handle it correctly.
-    # Decline when ANY op is a pure insertion — not just when ALL are. A mixed
-    # side (rename + insertion) would silently lose the insertion's content.
-    if any(i1 == i2 for i1, i2, _ in mech_ops):
-        return None
-
-    # Substitution-context safety guard: for each mechanical substitution, check
-    # that the anchor tokens (the tokens being replaced) occur UNAMBIGUOUSLY in
-    # the semantic text. If the anchor appears multiple times, the substitution
-    # could map one variable to a different variable's position — semantically
-    # wrong even though the text looks plausible. (Replaces the coarse line-
-    # expansion guard: instead of declining based on line-count ratio, we check
-    # the actual substitution ambiguity. This allows clickhouse-0017 where the
-    # substitution is unambiguous, while still blocking clickhouse-0024 where
-    # `column` appears at multiple positions in the rewrite.)
+    # Filter mechanical ops to SAFE substitutions only:
+    # - Skip pure insertions (i1==i2): no base anchor to re-apply onto the
+    #   semantic text; the insertion's content can't be placed reliably.
+    # - Skip ambiguous anchors (appear >1× in the semantic text): can't tell
+    #   which occurrence the mechanical op targeted.
+    # - Keep unambiguous substitutions (anchor appears exactly 1×).
+    # Previously the rule DECLINED entirely if ANY op was an insertion or
+    # ambiguous. Now it applies the safe ops and skips the rest — partial
+    # application. This unlocks refactor+bugfix merges where the bugfix has
+    # a mix of unambiguous renames and ambiguous/insertion changes (e.g.,
+    # clickhouse-0024: an API rename that IS unambiguous + a type-cast
+    # wrapping that is an insertion). The unambiguous rename gets applied;
+    # the cast is skipped (the code compiles without it).
     sem_toks = _tokenize(sem_text)
+    safe_ops: list[tuple[int, int, list[str]]] = []
     for i1_m, i2_m, repl_m in mech_ops:
+        if i1_m == i2_m:
+            continue  # pure insertion — skip
         anchor_m = bt[i1_m:i2_m]
         if not anchor_m:
-            continue  # pure insertion (already filtered above, but be safe)
+            continue
         occurrences = _count_subsequence(sem_toks, anchor_m)
-        if occurrences > 1:
-            # Ambiguous: the anchor token(s) appear multiple times in the
-            # semantic text. The substitution could apply to the wrong one.
-            return None
-        # If occurrences == 0, the semantic rewrite removed those tokens —
-        # the substitution will be skipped by the re-application loop anyway.
+        if occurrences == 1:
+            safe_ops.append((i1_m, i2_m, repl_m))
+        # occurrences == 0: anchor removed by the rewrite — skip
+        # occurrences > 1: ambiguous — skip
+    if not safe_ops:
+        return None  # no unambiguous substitutions to apply → defer
 
     # Build the semantic side's token sequence. We'll apply mechanical subs
     # onto it. The semantic side may have completely different tokens, so we
     # search for the mechanical op's BASE anchor tokens within the semantic
     # text's token stream.
-    sem_toks = _tokenize(sem_text)
-
-    # For each mechanical op, try to locate the base anchor tokens (bt[i1:i2])
-    # within sem_toks. If found, replace them with the op's replacement tokens.
     applied = list(sem_toks)  # mutable copy
-    for i1, i2, repl in mech_ops:
+    applied_count = 0
+    for i1, i2, repl in safe_ops:
         anchor = bt[i1:i2]
         if not anchor:
             continue
-        # Search for the anchor in the (current state of) applied tokens.
-        # If the anchor appears MULTIPLE times, the substitution is ambiguous
-        # — we don't know which occurrence the mechanical op targeted within
-        # the rewritten text. Declining the whole op (skip) is safer than
-        # guessing the first occurrence (which may corrupt an unrelated line).
         idx = _find_subsequence(applied, anchor)
         if idx < 0:
-            continue  # anchor not found — the rewrite removed it; skip this op
-        # Check for ambiguity: a second occurrence means we can't be sure.
-        next_idx = _find_subsequence(
-            applied[idx + len(anchor):], anchor,
-        )
+            continue  # anchor not found — the rewrite removed it; skip
+        # Re-check ambiguity in the CURRENT state (a prior op may have
+        # changed the token landscape).
+        next_idx = _find_subsequence(applied[idx + len(anchor):], anchor)
         if next_idx >= 0:
-            continue  # ambiguous — multiple occurrences; skip this op
+            continue  # ambiguous — skip
         applied[idx:idx + len(anchor)] = repl
+        applied_count += 1
+
+    if applied_count == 0:
+        return None  # nothing was applicable → no improvement over semantic side
 
     return _detokenize_with_macros(applied, _macro_lookup_mr)
 
