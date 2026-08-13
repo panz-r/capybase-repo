@@ -602,6 +602,188 @@ def _soft_warning_failures(
     return out
 
 
+# Compiler-error substrings that signal a duplicate-definition failure. When gcc
+# emits one of these, the root cause is almost always a function/method defined
+# BOTH inside the candidate's merge AND elsewhere in the file (the conflict
+# region is a duplicate of code 10K lines away the model can't see).
+_DUP_DEF_MARKERS = ("cannot be overloaded", "redefinition", "redeclared")
+
+
+def _find_def_context(
+    lines: list[str], fn_name: str, *, width: int = 8,
+) -> tuple[int, str] | None:
+    """Grep ``lines`` for ``fn_name``'s DEFINITION; return ``(1-based line, src)``.
+
+    Lightweight (regex, no treesitter): finds the first line that is a real
+    definition/declaration signature — a return-type prefix before the name, a
+    parameter list, and a ``{`` body (same line or next non-blank line) — then
+    returns ``width`` lines of surrounding source. This is the definition
+    context appended to duplicate-def CEGIS feedback so the model can SEE the
+    function it must not re-define (the original may be thousands of lines
+    outside the conflict hunk).
+
+    Crucially skips CALL sites (``…name(…);``) and bare calls — these appear
+    BEFORE the definition in source order, so a naïve "first line with name+("
+    grep would surface a call, not the conflicting definition.
+    """
+    for i, ln in enumerate(lines):
+        if fn_name not in ln or "(" not in ln:
+            continue
+        stripped = ln.strip()
+        # Skip call/declaration statements (end with ';').
+        if stripped.endswith(";"):
+            continue
+        # Require a return-type prefix before the name (not a bare call at the
+        # start of the line, e.g. ``log_error(msg);``).
+        idx = ln.find(fn_name)
+        if not ln[:idx].strip():
+            continue
+        # Confirm a definition body: '{' on the same line after the closing
+        # ')', or the next non-blank line starts with '{'.
+        paren_end = stripped.rfind(")")
+        if paren_end != -1 and "{" in stripped[paren_end:]:
+            pass  # brace-on-same-line definition
+        else:
+            j = i + 1
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j >= len(lines) or not lines[j].strip().startswith("{"):
+                continue  # not a definition body — skip
+        ctx_s = max(0, i - 1)
+        ctx_e = min(len(lines), i + width)
+        ctx = "\n".join(f"  {lines[j]}" for j in range(ctx_s, ctx_e))
+        return i + 1, ctx
+    return None
+
+
+def _enrich_duplicate_definition_failures(
+    unit: "ConflictUnit", cand: "CandidateResolution",
+    validation: "VerificationResult",
+) -> None:
+    """Append existing-definition source to duplicate-def failures (in place).
+
+    gcc reports "cannot be overloaded" / "redefinition" with only the symbol
+    name — the model knows a function is duplicated but can't see WHERE the
+    conflicting definition is (it may be 10K lines outside the conflict hunk).
+    This mutates each such failure's ``message`` to include the existing
+    definition's source, so the very first CEGIS retry gives the model the code
+    it must not re-define.
+
+    Two passes:
+
+    1. **Single-symbol** — the function gcc named. Extracted from gcc's
+       fully-qualified path (``::get_cbor_float_prefix(``); grepped in the file.
+
+    2. **Multi-symbol** — gcc stops at the FIRST overload conflict, but the
+       candidate often defines a FAMILY of functions that all already exist
+       (e.g. ``get_{cbor,msgpack,ubjson}_float_prefix`` × {float,double}).
+       Without this pass the model fixes ONE duplicate per CEGIS iteration and
+       the header retry cap (1) is exhausted before the rest are fixed. This
+       pass scans the candidate for ALL function definitions, cross-references
+       each against the non-conflict part of the file, and appends a
+       consolidated note listing every pre-existing definition so one retry can
+       fix them all at once.
+
+    Idempotent (skips failures already carrying the NOTE marker). No-op when the
+    candidate is empty, the file is empty, or no duplicate-def failure exists.
+    """
+    if validation.passed or not getattr(validation, "hard_failures", None):
+        return
+    res_text = getattr(cand, "resolved_text", "") or ""
+    if not res_text.strip():
+        return
+    orig_text = getattr(unit, "original_worktree_text", "") or ""
+    if not orig_text.strip():
+        return
+
+    import re as _re_dup
+    try:
+        from capybase.structural_resolver import _extract_definition_names
+    except Exception:  # noqa: BLE001 - enrichment degrades gracefully
+        _extract_definition_names = None
+
+    # Idempotency: skip failures already carrying either NOTE form (single-
+    # symbol "This function" or multi-symbol "These functions"). Both are
+    # injected by this function; recognizing both prevents double-appending on
+    # a repeated call (e.g. validation reuse across CEGIS iterations).
+    _ENRICHED_TAGS = (
+        "NOTE: This function already exists",
+        "NOTE: These functions",
+    )
+    orig_lines = orig_text.split("\n")
+
+    # The "rest of file": orig_text MINUS the unit's own conflict region. The
+    # candidate replaces ``marker_span``, so a function defined there is not a
+    # duplicate of itself — only definitions OUTSIDE the region count. Used for
+    # the multi-symbol cross-reference (single-symbol reuses orig_lines for
+    # accurate, marker-original line numbers).
+    rest_lines = orig_lines
+    ms = getattr(unit, "marker_span", None)
+    if ms is not None:
+        _s, _e = ms[0], ms[1]
+        rest_lines = orig_lines[:max(0, _s)] + orig_lines[min(len(orig_lines), _e + 1):]
+
+    for f in validation.hard_failures:
+        fmsg = getattr(f, "message", "") or ""
+        if any(_tag in fmsg for _tag in _ENRICHED_TAGS):
+            continue  # already enriched (e.g. by a prior validation reuse)
+        fmsg_n = fmsg.replace("\u2018", "'").replace("\u2019", "'")
+        if not any(m in fmsg_n for m in _DUP_DEF_MARKERS):
+            continue
+
+        enriched_names: set[str] = set()
+
+        # --- Pass 1: single-symbol (the function gcc named) ---
+        fm = _re_dup.search(r"::(\w+)\(", fmsg_n)
+        if fm:
+            fn = fm.group(1)
+            enriched_names.add(fn)
+            hit = _find_def_context(orig_lines, fn)
+            if hit:
+                lineno, ctx = hit
+                f.message = (
+                    f"{fmsg}\n\n"
+                    f"NOTE: This function already exists elsewhere in the "
+                    f"file (near line {lineno}):\n{ctx}\n\n"
+                    f"Do NOT re-define it in your merge. The existing "
+                    f"definition is kept."
+                )
+
+        # --- Pass 2: multi-symbol (ALL candidate fns already in the file) ---
+        if _extract_definition_names is None:
+            continue
+        cand_defs = _extract_definition_names(res_text.split("\n"))
+        rest_defs = _extract_definition_names(rest_lines)
+        extras: list[tuple[str, int, str]] = []
+        for cname in cand_defs:
+            if cname in enriched_names:
+                continue
+            if cname not in rest_defs:
+                continue
+            hit = _find_def_context(orig_lines, cname)
+            if hit:
+                extras.append((cname, hit[0], hit[1]))
+                enriched_names.add(cname)
+        if extras:
+            blocks = [
+                f"  - {cn} (near line {ln}):\n{ctx}"
+                for cn, ln, ctx in extras[:5]  # cap to bound prompt size
+            ]
+            cur_msg = getattr(f, "message", "") or fmsg
+            lead = (
+                "These functions ALSO already exist"
+                if fm else "These functions already exist"
+            )
+            cur_msg += (
+                "\n\n"
+                f"NOTE: {lead} elsewhere in this file — do NOT re-define "
+                f"any of them either (the existing definitions are kept):\n"
+                + "\n".join(blocks)
+                + "\n\nRemove every duplicate definition from your merge."
+            )
+            f.message = cur_msg
+
+
 def _invalidate_pycache(repo_root: "str | Path", path: str) -> None:
     """Remove stale ``__pycache__`` bytecode for ``path`` (a .py file).
 
@@ -9525,39 +9707,9 @@ class Orchestrator:
             # greps the file for the existing definition and appends its
             # source lines to the failure message. All subsequent retry
             # prompts, convergence checks, and risk decisions see the
-            # enriched context.
-            if not validation.passed and validation.hard_failures:
-                import re as _re_dup
-                _orig_text = unit.original_worktree_text or ""
-                for _f in validation.hard_failures:
-                    _fmsg = getattr(_f, "message", "") or ""
-                    if "NOTE: This function already exists" in _fmsg:
-                        continue  # already enriched
-                    _fmsg_n = _fmsg.replace("\u2018", "'").replace("\u2019", "'")
-                    if "cannot be overloaded" not in _fmsg_n and "redefinition" not in _fmsg_n:
-                        continue
-                    _fm = _re_dup.search(r"::(\w+)\(", _fmsg_n)
-                    if not _fm:
-                        continue
-                    _fn = _fm.group(1)
-                    _orig_lines = _orig_text.split("\n")
-                    for _oi, _ol in enumerate(_orig_lines):
-                        if _fn in _ol and "(" in _ol and "{" not in _ol:
-                            _ctx_s = max(0, _oi - 1)
-                            _ctx_e = min(len(_orig_lines), _oi + 8)
-                            _ctx = "\n".join(
-                                f"  {_orig_lines[j]}"
-                                for j in range(_ctx_s, _ctx_e)
-                            )
-                            _f.message = (
-                                f"{_fmsg}\n\n"
-                                f"NOTE: This function already exists "
-                                f"elsewhere in the file (near line "
-                                f"{_oi + 1}):\n{_ctx}\n\n"
-                                f"Do NOT re-define it in your merge. "
-                                f"The existing definition is kept."
-                            )
-                            break
+            # enriched context. See ``_enrich_duplicate_definition_failures``
+            # for the two-pass (single-symbol + multi-symbol) logic.
+            _enrich_duplicate_definition_failures(unit, cand, validation)
             # Track candidate hashes for oscillation detection (CEGIS resilience).
             # cand_hash is already computed above (for the no-op cache). The
             # escalation check runs AFTER the risk decision — only when the
@@ -9705,12 +9857,19 @@ class Orchestrator:
                 # above, right after validation), allow one extra CEGIS
                 # iteration so the model can act on it. The enrichment
                 # fires on the FIRST failure, but the header cap may cut
-                # the loop short before the model gets to use it.
+                # the loop short before the model gets to use it. Match
+                # BOTH note forms: single-symbol ("This function ...") and
+                # multi-symbol ("These functions ...") — either signals the
+                # model has been shown the pre-existing definition(s).
                 if (not _dup_def_retried and validation
                         and validation.hard_failures):
                     _is_dup = any(
-                        "NOTE: This function already exists" in (getattr(f, "message", "") or "")
-                        for f in validation.hard_failures
+                        ("NOTE: This function already exists" in _fm
+                         or "NOTE: These functions" in _fm)
+                        for _fm in (
+                            (getattr(f, "message", "") or "")
+                            for f in validation.hard_failures
+                        )
                     )
                     if _is_dup:
                         _dup_def_retried = True

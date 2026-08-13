@@ -199,3 +199,185 @@ def test_loop_continues_after_escalation():
     # Only u1 should be in escalated
     assert len(escalated) == 1
     assert escalated[0].unit_id == "u1"
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: multi-symbol duplicate-definition enrichment
+# ---------------------------------------------------------------------------
+
+# A file where three ``get_*_float_prefix`` overload families are defined
+# OUTSIDE the conflict region. gcc stops at the FIRST overload conflict, but
+# the candidate re-defines the whole family — without multi-symbol enrichment
+# the model fixes one duplicate per CEGIS iteration and the header cap (1
+# retry) is exhausted before the rest are addressed.
+_FLOAT_PREFIX_FILE = """\
+// ... ~9000 lines of preamble ...
+  static constexpr CharType get_cbor_float_prefix(float /*unused*/)
+  {
+      return static_cast<CharType>(0xFA);
+  }
+
+  static constexpr CharType get_cbor_float_prefix(double /*unused*/)
+  {
+      return static_cast<CharType>(0xFB);
+  }
+
+  static constexpr CharType get_msgpack_float_prefix(float /*unused*/)
+  {
+      return static_cast<CharType>(0xCA);
+  }
+
+  static constexpr CharType get_msgpack_float_prefix(double /*unused*/)
+  {
+      return static_cast<CharType>(0xCB);
+  }
+
+  static constexpr CharType get_ubjson_float_prefix(float /*unused*/)
+  {
+      return static_cast<CharType>(0xFA);
+  }
+
+  static constexpr CharType get_ubjson_float_prefix(double /*unused*/)
+  {
+      return static_cast<CharType>(0xFB);
+  }
+// ... rest of file ...
+"""
+
+
+def test_dup_def_enrichment_surfaces_all_pre_existing_definitions():
+    """Multi-symbol pass lists EVERY function family gcc didn't report yet.
+
+    gcc emits one "cannot be overloaded" per overload-pair and stops. The
+    candidate re-defined all three prefix families, so the enrichment must
+    surface the two gcc hasn't mentioned yet (msgpack + ubjson) alongside the
+    one it did (cbor). One CEGIS retry can then fix all of them.
+    """
+    from capybase.orchestrator import _enrich_duplicate_definition_failures
+    from capybase.verification import VerificationResult, VerificationFailure
+    from types import SimpleNamespace
+
+    cand_text = (
+        "  static constexpr CharType get_cbor_float_prefix(float /*unused*/)\n"
+        "  {\n      return to_char_type(0xFA);\n  }\n\n"
+        "  static constexpr CharType get_msgpack_float_prefix(float /*unused*/)\n"
+        "  {\n      return to_char_type(0xCA);\n  }\n\n"
+        "  static constexpr CharType get_ubjson_float_prefix(float /*unused*/)\n"
+        "  {\n      return to_char_type(0xFB);\n  }\n"
+    )
+    unit = SimpleNamespace(
+        original_worktree_text=_FLOAT_PREFIX_FILE,
+        marker_span=(2, 6),  # conflict region is tiny, far from the defs
+        language="cpp",
+    )
+    cand = SimpleNamespace(resolved_text=cand_text)
+    validation = VerificationResult(
+        candidate_id="t", unit_id="t", passed=False,
+        hard_failures=[VerificationFailure(
+            validator="ccs_syntax", severity="error",
+            message=("test.hpp:4:1: error: 'static constexpr CharType "
+                     "...::get_cbor_float_prefix(float)' cannot be overloaded "
+                     "with 'static constexpr CharType "
+                     "...::get_cbor_float_prefix(float)'"),
+        )],
+        warnings=[],
+    )
+
+    _enrich_duplicate_definition_failures(unit, cand, validation)
+    msg = validation.hard_failures[0].message
+
+    # Pass 1: gcc's function enriched with its existing definition.
+    assert "NOTE: This function already exists" in msg
+    assert "get_cbor_float_prefix" in msg
+    # The context must show the DEFINITION (static_cast), not a call site.
+    assert "static_cast<CharType>(0xFA)" in msg
+
+    # Pass 2: the two siblings gcc didn't mention yet.
+    assert "NOTE: These functions" in msg
+    assert "get_msgpack_float_prefix" in msg
+    assert "get_ubjson_float_prefix" in msg
+    assert "static_cast<CharType>(0xCA)" in msg
+    assert "static_cast<CharType>(0xFB)" in msg
+
+
+def test_dup_def_enrichment_shows_definition_not_call_site():
+    """``_find_def_context`` must locate the DEFINITION, not a preceding call.
+
+    A call like ``write_character(get_cbor_float_prefix(x));`` appears BEFORE
+    the definition in source order. The enrichment must skip it and anchor on
+    the real definition signature (return-type prefix + ``{`` body).
+    """
+    from capybase.orchestrator import _find_def_context
+
+    lines = (
+        # call site comes first in source order
+        "    oa->write_character(get_cbor_float_prefix(j.m_value.number_float));\n"
+        "    return get_cbor_float_prefix(x);  // another call\n"
+        "\n"
+        "    static constexpr CharType get_cbor_float_prefix(float /*unused*/)\n"
+        "    {\n"
+        "        return static_cast<CharType>(0xFA);\n"
+        "    }\n"
+    ).split("\n")
+
+    hit = _find_def_context(lines, "get_cbor_float_prefix")
+    assert hit is not None, "should find the definition"
+    lineno, ctx = hit
+    # The definition signature is on the 4th line (1-based), NOT the call on
+    # line 1 or 2.
+    assert "static constexpr CharType" in lines[lineno - 1]
+    assert "static_cast<CharType>(0xFA)" in ctx
+
+
+def test_dup_def_enrichment_is_idempotent():
+    """Re-running enrichment on an already-enriched failure is a no-op."""
+    from capybase.orchestrator import _enrich_duplicate_definition_failures
+    from capybase.verification import VerificationResult, VerificationFailure
+    from types import SimpleNamespace
+
+    unit = SimpleNamespace(
+        original_worktree_text="  int foo() {\n    return 1;\n  }\n",
+        marker_span=None, language="cpp",
+    )
+    cand = SimpleNamespace(resolved_text="  int foo() {\n    return 2;\n  }\n")
+    validation = VerificationResult(
+        candidate_id="t", unit_id="t", passed=False,
+        hard_failures=[VerificationFailure(
+            validator="ccs_syntax", severity="error",
+            message="error: redefinition of 'int foo()'",
+        )],
+        warnings=[],
+    )
+    _enrich_duplicate_definition_failures(unit, cand, validation)
+    first = validation.hard_failures[0].message
+    # Run again — must not duplicate the NOTE block.
+    _enrich_duplicate_definition_failures(unit, cand, validation)
+    second = validation.hard_failures[0].message
+    assert first == second, "second enrichment must be a no-op"
+    assert second.count("NOTE:") == 1, "exactly one NOTE block"
+
+
+def test_dup_def_enrichment_skips_when_no_duplicate_failure():
+    """Non-duplicate errors (e.g. missing semicolon) are left untouched."""
+    from capybase.orchestrator import _enrich_duplicate_definition_failures
+    from capybase.verification import VerificationResult, VerificationFailure
+    from types import SimpleNamespace
+
+    unit = SimpleNamespace(
+        original_worktree_text="  int foo() {\n    return 1;\n  }\n",
+        marker_span=None, language="cpp",
+    )
+    cand = SimpleNamespace(resolved_text="  int foo() {\n    return 1\n  }\n")
+    original_msg = "test.hpp:2:12: error: expected ';' before '}' token"
+    validation = VerificationResult(
+        candidate_id="t", unit_id="t", passed=False,
+        hard_failures=[VerificationFailure(
+            validator="ccs_syntax", severity="error",
+            message=original_msg,
+        )],
+        warnings=[],
+    )
+    _enrich_duplicate_definition_failures(unit, cand, validation)
+    assert validation.hard_failures[0].message == original_msg, (
+        "non-duplicate error must not be enriched"
+    )
