@@ -360,10 +360,18 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
     # choice. The subsequence check against the full-file base catches this.
     lang = getattr(unit, "language", None)
     # When the refined base is empty (entity-split sub-unit where the entity
-    # didn't exist in base), fall back to the full-file base for the
-    # subsequence check — the lint side's "addition" may be old code that
-    # exists elsewhere in the file.
-    lint_base = base if base.strip() else (unit.base.text or "")
+    # didn't exist in base), fall back progressively: first unit.base.text
+    # (full-file base for non-split units), then original_worktree_text (the
+    # full file WITH conflict markers — the last resort for entity-split
+    # sub-units where unit.base.text is also empty). The subsequence check
+    # still works: the lint side's "addition" is old code that exists in the
+    # file, and the markers add only a few noise tokens.
+    lint_base = (
+        base if base.strip()
+        else (unit.base.text or "")
+    )
+    if not lint_base.strip():
+        lint_base = getattr(unit, "original_worktree_text", "") or ""
     lint_res = _try_lint_vs_refactor(lint_base, current, replayed, lang=lang)
     if lint_res is not None:
         return StructuralResolution(rule="lint_vs_refactor", text=lint_res)
