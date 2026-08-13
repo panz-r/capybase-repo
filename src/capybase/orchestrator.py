@@ -1010,6 +1010,67 @@ def _try_coordinated_side_swap(
     return new_accepted
 
 
+def _try_majority_side_rescue(
+    units: list,
+    accepted: list[tuple["ConflictUnit", "CandidateResolution"]],
+    escalated: list["UnitOutcome"],
+) -> list[tuple["ConflictUnit", "CandidateResolution"]] | None:
+    """Rescue escalated units by taking the file's majority-resolved side.
+
+    When most resolved units took the SAME side (current or replayed) and one
+    or more units escalated, try the majority side for each escalated unit.
+    This catches file-wide refactors where per-unit resolution fails on one
+    region (e.g., the LLM can't avoid duplicate definitions) but the correct
+    resolution is to take the same side the other units already chose.
+
+    Conservative — only fires when:
+    - ≥3 total units (otherwise "majority" is meaningless for 1-of-2).
+    - ≥2/3 of RESOLVED units took the same side.
+    - The escalated unit's majority-side text is non-empty.
+    - Phase 2's whole-file validation is the authoritative check.
+
+    Returns a list of (unit, candidate) for the rescued units, or None.
+    """
+    from capybase.conflict_model import CandidateResolution
+    total = len(accepted) + len(escalated)
+    if total < 3 or len(accepted) < 2:
+        return None
+    # Determine which side the accepted units took.
+    cur_count = rep_count = 0
+    for unit, cand in accepted:
+        cur_text = (getattr(getattr(unit, "current", None), "text", "") or "").strip()
+        rep_text = (getattr(getattr(unit, "replayed", None), "text", "") or "").strip()
+        res_text = (getattr(cand, "resolved_text", "") or "").strip()
+        if res_text == rep_text:
+            rep_count += 1
+        elif res_text == cur_text:
+            cur_count += 1
+    threshold = max(1, (len(accepted) * 2) // 3)  # ≥2/3
+    if rep_count >= threshold and rep_count > cur_count:
+        majority_side = "replayed"
+    elif cur_count >= threshold and cur_count > rep_count:
+        majority_side = "current"
+    else:
+        return None  # no clear majority
+    # Build rescue candidates for each escalated unit.
+    rescued: list[tuple] = []
+    for outcome in escalated:
+        unit = outcome.unit
+        side_obj = getattr(unit, majority_side, None)
+        side_text = getattr(side_obj, "text", "") or ""
+        if not side_text.strip():
+            continue  # don't rescue with empty text (could be wrong deletion)
+        rescued.append((unit, CandidateResolution(
+            candidate_id=f"{unit.unit_id}:{majority_side}_majority_rescue",
+            unit_id=unit.unit_id,
+            model_name="majority_side_rescue",
+            resolved_text=side_text,
+            provenance=f"deterministic_source_{majority_side}_only",
+            prompt_version=f"majority_rescue.{majority_side}",
+        )))
+    return rescued if rescued else None
+
+
 def _attribute_whole_file_failure(
     failures: list, units: list[ConflictUnit]
 ) -> int:
@@ -7428,6 +7489,25 @@ class Orchestrator:
                             self._step_pattern_cache[_pat_key] = _pat
                 except Exception:  # noqa: BLE001 — advisory
                     pass
+            # Majority-side rescue: when a unit escalates but the file's other
+            # resolved units consistently took ONE side (≥2/3 majority), try
+            # that side for the escalated unit before aborting. This catches
+            # the pattern where per-unit resolution fails on one region of a
+            # file-wide refactor (e.g., nlohmann-0034: 2 of 3 units took the
+            # replayed side via dup_def_deletion_accept + lint_vs_refactor, but
+            # unit 1#s0 escalates because the LLM can't avoid duplicate defs).
+            # The whole-file build (Phase 2) is the authoritative check.
+            if escalated_units and len(accepted) >= 2:
+                _rescued = _try_majority_side_rescue(units, accepted, escalated_units)
+                if _rescued:
+                    accepted.extend(_rescued)
+                    escalated_units = []
+                    self.journal.emit(
+                        "majority_side_rescue",
+                        {"n_rescued": len(_rescued),
+                         "n_accepted": len(accepted)},
+                        step_index=result.step_index, path=path,
+                    )
             if escalated_units:
                 escalated_unit = escalated_units[0]
                 result.escalated = True
