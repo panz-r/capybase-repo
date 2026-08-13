@@ -277,6 +277,36 @@ DATASETS: dict[str, Dataset] = {
         source_url="https://github.com/ClickHouse/ClickHouse",
         merge_limit=2000,
     ),
+    "abseil-cpp-history": Dataset(
+        id="abseil-cpp-history",
+        kind="git-history",
+        url="https://github.com/abseil/abseil-cpp.git",
+        extract_subdir="abseil-cpp",
+        extractor="git_history",
+        license="Apache-2.0",
+        source_url="https://github.com/abseil/abseil-cpp",
+        merge_limit=2000,
+    ),
+    "fmt-history": Dataset(
+        id="fmt-history",
+        kind="git-history",
+        url="https://github.com/fmtlib/fmt.git",
+        extract_subdir="fmtlib-fmt",
+        extractor="git_history",
+        license="MIT",
+        source_url="https://github.com/fmtlib/fmt",
+        merge_limit=500,
+    ),
+    "protobuf-history": Dataset(
+        id="protobuf-history",
+        kind="git-history",
+        url="https://github.com/protocolbuffers/protobuf.git",
+        extract_subdir="protobuf",
+        extractor="git_history",
+        license="BSD-3-Clause",
+        source_url="https://github.com/protocolbuffers/protobuf",
+        merge_limit=2000,
+    ),
 }
 
 
