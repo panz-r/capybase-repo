@@ -917,7 +917,33 @@ def _print_census(results_path: str) -> None:
     print(f"  (these are the highest-ROI repair targets)")
 
 
+def _kill_stale_build_processes():
+    """Kill orphaned compiler/ccache processes from previous eval runs.
+
+    Eval runs launch cmake/make/gcc/ccache subprocesses that can outlive the
+    parent Python process (especially when killed via timeout or SIGKILL).
+    This sweeps stale processes at startup and exit to prevent resource
+    leaks (18-hour-old ccache processes have been observed).
+    """
+    import subprocess
+    for pattern in (
+        "capybase-ccache-shim",
+        "capy-rw-",
+    ):
+        try:
+            subprocess.run(
+                ["pkill", "-9", "-f", pattern],
+                capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+
+
 def main():
+    # Kill stale compiler/ccache processes from previous runs before starting.
+    _kill_stale_build_processes()
+    import atexit
+    atexit.register(_kill_stale_build_processes)
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--lang", choices=("rust", "python", "c", "cpp", "c++"), default=None)
