@@ -609,6 +609,87 @@ def _soft_warning_failures(
 _DUP_DEF_MARKERS = ("cannot be overloaded", "redefinition", "redeclared")
 
 
+def _remove_duplicate_function_blocks(
+    text: str, fn_names: set[str],
+) -> str | None:
+    """Remove duplicate function DEFINITION blocks from ``text``.
+
+    For each name in ``fn_names``, finds the function's signature line (return-
+    type prefix + name + ``(``), tracks the brace depth to the matching closing
+    ``}``, and removes the entire block (signature through closing brace +
+    trailing blank line). Returns the repaired text, or ``None`` if no blocks
+    were removed.
+
+    Safety: this removes from the CANDIDATE (the new, untested merge). The
+    EXISTING definition elsewhere in the file is untouched — it's the well-
+    tested version that remains after the duplicate is removed. gcc identified
+    the specific function; this is compiler-guided, not regex-guessed.
+    """
+    if not text or not fn_names:
+        return None
+    lines = text.split("\n")
+    removals: list[tuple[int, int]] = []  # (start, end_inclusive)
+    for target in fn_names:
+        for i, ln in enumerate(lines):
+            if target not in ln or "(" not in ln:
+                continue
+            stripped = ln.strip()
+            if stripped.endswith(";"):
+                continue  # declaration, not definition
+            # Require a return-type prefix before the name (not a bare call).
+            idx = ln.find(target)
+            prefix = ln[:idx].strip()
+            if not prefix:
+                # Multi-line signature: return type on the previous line,
+                # function name on this line. Common in the model's merges.
+                if i > 0:
+                    prev = lines[i - 1].strip()
+                    if (prev and not prev.startswith(("//", "/*", "*"))
+                            and not prev.endswith((";", "{", "}", ","))):
+                        pass  # previous line looks like a return type
+                    else:
+                        continue
+                else:
+                    continue
+            # Skip if this line is inside a removal range already found.
+            # Skip if this line is inside a removal range already found.
+            # For multi-line signatures, also check the previous line.
+            block_start = i - 1 if not prefix else i
+            if any(s <= block_start <= e or s <= i <= e for s, e in removals):
+                continue
+            # Find the matching closing brace.
+            depth = 0
+            found_open = False
+            end = i
+            for j in range(i, len(lines)):
+                for ch in lines[j]:
+                    if ch == "{":
+                        depth += 1
+                        found_open = True
+                    elif ch == "}":
+                        depth -= 1
+                        if found_open and depth == 0:
+                            end = j
+                            break
+                if found_open and depth == 0:
+                    break
+            else:
+                continue  # unbalanced — skip this match
+            removals.append((block_start, end))
+            break  # first match per name
+    if not removals:
+        return None
+    # Remove blocks in reverse order (so indices stay valid).
+    removals.sort(reverse=True)
+    for start, end in removals:
+        # Also remove one trailing blank line if present.
+        if end + 1 < len(lines) and not lines[end + 1].strip():
+            del lines[start:end + 2]
+        else:
+            del lines[start:end + 1]
+    return "\n".join(lines)
+
+
 def _find_def_context(
     lines: list[str], fn_name: str, *, width: int = 8,
 ) -> tuple[int, str] | None:
@@ -10057,6 +10138,79 @@ class Orchestrator:
                     step_index=self.step, path=unit.path, unit_id=unit.unit_id,
                 )
                 return outcome
+            # Compiler-guided duplicate function-block removal: when the
+            # candidate has functions that duplicate existing definitions
+            # elsewhere in the file, surgically remove the duplicate blocks
+            # from the candidate BEFORE the risk decision. The existing
+            # definitions are the well-tested versions; only the candidate's
+            # (new, untested) copies are removed. This fires on EVERY
+            # iteration (not just at the header cap) so it catches duplicates
+            # before the risk engine can escalate on a "suspected false
+            # positive." gcc identified the specific function — this is
+            # compiler-guided, not regex-guessed.
+            if (not validation.passed and validation.hard_failures
+                    and cand.resolved_text and cand.resolved_text.strip()):
+                _has_dup = any(
+                    any(_m in (getattr(f, "message", "") or "")
+                        .replace("\u2018", "'").replace("\u2019", "'")
+                        for _m in _DUP_DEF_MARKERS)
+                    for f in validation.hard_failures
+                )
+                if _has_dup:
+                    try:
+                        # Only remove functions gcc EXPLICITLY identified as
+                        # duplicates (parse from its fully-qualified error
+                        # path ::name(). Do NOT use the broad
+                        # _extract_definition_names cross-reference — it
+                        # causes false positives from same-name methods in
+                        # different classes (a major regression source in
+                        # large amalgamated headers).
+                        import re as _re_fn
+                        _dup_br: set[str] = set()
+                        for _f in (validation.hard_failures or []):
+                            _fm = (getattr(_f, "message", "") or "")
+                            for _m_fn in _re_fn.finditer(
+                                r"::(\w+)\(", _fm
+                            ):
+                                _fn = _m_fn.group(1)
+                                if _fn in cand.resolved_text:
+                                    _dup_br.add(_fn)
+                        if _dup_br:
+                            _rt_br = _remove_duplicate_function_blocks(
+                                cand.resolved_text, _dup_br)
+                            if (_rt_br and _rt_br.strip()
+                                    and _rt_br != cand.resolved_text):
+                                _rc_br = cand.model_copy(
+                                    update={"resolved_text": _rt_br})
+                                _rv_br = self.verification.verify(unit, _rc_br)
+                                if _rv_br.passed:
+                                    outcome.accepted = _rc_br
+                                    outcome.validation = _rv_br
+                                    outcome.retry_count = retry_count
+                                    outcome.reason = (
+                                        "compiler-guided duplicate removal: "
+                                        f"removed {len(_dup_br)} duplicate "
+                                        "function(s); existing definitions kept"
+                                    )
+                                    self._record_resolution_attempt(
+                                        outcome,
+                                        mechanism="dup_def_block_removal",
+                                        candidate=_rc_br,
+                                        validation=_rv_br,
+                                        decision="accept",
+                                        reason=outcome.reason,
+                                    )
+                                    self.journal.emit(
+                                        "candidate_accepted",
+                                        {"candidate_id": _rc_br.candidate_id,
+                                         "via": "dup_def_block_removal"},
+                                        step_index=self.step,
+                                        path=unit.path,
+                                        unit_id=unit.unit_id,
+                                    )
+                                    return outcome
+                    except Exception:  # noqa: BLE001
+                        pass
             # Track candidate hashes for oscillation detection (CEGIS resilience).
             # cand_hash is already computed above (for the no-op cache). The
             # escalation check runs AFTER the risk decision — only when the
@@ -10199,31 +10353,101 @@ class Orchestrator:
                                 decision="accept", reason=outcome.reason,
                             )
                             return outcome
-                # 2. Duplicate definition: if the failure was already
-                # enriched with the existing definition's context (done
-                # above, right after validation), allow one extra CEGIS
-                # iteration so the model can act on it. The enrichment
-                # fires on the FIRST failure, but the header cap may cut
-                # the loop short before the model gets to use it. Matches
-                # every NOTE form the enrichment emits: legacy
-                # "This/These function(s)" and the conclusion-first
-                # "RESOLVE BY / PREFER THE / DUPLICATE DEFINITIONS".
-                if (not _dup_def_retried and validation
-                        and validation.hard_failures):
-                    _is_dup = any(
-                        ("NOTE: This function already exists" in _fm
-                         or "NOTE: These functions" in _fm
-                         or "NOTE \u2014 RESOLVE BY" in _fm
-                         or "NOTE \u2014 PREFER THE" in _fm
-                         or "NOTE \u2014 DUPLICATE DEFINITIONS" in _fm)
-                        for _fm in (
-                            (getattr(f, "message", "") or "")
-                            for f in validation.hard_failures
+                # 2. Duplicate definition handling.
+                # 2a. Compiler-guided function-block removal: scan ALL
+                # candidates (current + prior attempts) for functions that
+                # duplicate existing definitions elsewhere in the file.
+                # Surgically remove the duplicate blocks — the existing
+                # definitions are the well-tested versions; only the
+                # candidate's (new, untested) copies are removed.
+                # Fires regardless of the current validation's error type:
+                # the model oscillates between duplicate and empty candidates,
+                # and the cap may fire on an empty iteration. The block
+                # removal scans prior attempts to find a candidate WITH the
+                # duplicates to repair.
+                # 2b. Enrichment-retry: if block removal doesn't work, fall
+                # back to granting one extra CEGIS iteration.
+                if not _dup_def_retried:
+                    _dup_block_resolved = False
+                    try:
+                        from capybase.structural_resolver import (
+                            _extract_definition_names as _edn,
                         )
+                        _orig_lines = (unit.original_worktree_text or "").split("\n")
+                        _ms_rem = getattr(unit, "marker_span", None)
+                        if _ms_rem is not None:
+                            _rest_rem = (
+                                _orig_lines[:max(0, _ms_rem[0])]
+                                + _orig_lines[min(len(_orig_lines), _ms_rem[1] + 1):]
+                            )
+                        else:
+                            _rest_rem = _orig_lines
+                        _rd = _edn(_rest_rem)
+                        _seen_texts: set[str] = set()
+                        for _pc in [cand] + list(outcome.attempts):
+                            if not (_pc and getattr(_pc, "resolved_text", "")
+                                    and _pc.resolved_text.strip()):
+                                continue
+                            if _pc.resolved_text in _seen_texts:
+                                continue
+                            _seen_texts.add(_pc.resolved_text)
+                            _cd = _edn(_pc.resolved_text.split("\n"))
+                            _dup_fns = {n for n in _cd if n in _rd}
+                            self.journal.emit(
+                                "block_removal_scan",
+                                {"cand_len": len(_pc.resolved_text),
+                                 "cand_defs": sorted(_cd)[:10],
+                                 "dup_fns": sorted(_dup_fns)[:10],
+                                 "rest_defs_count": len(_rd)},
+                                step_index=self.step, path=unit.path,
+                                unit_id=unit.unit_id,
+                            )
+                            if not _dup_fns:
+                                continue
+                            _rt = _remove_duplicate_function_blocks(
+                                _pc.resolved_text, _dup_fns)
+                            if not (_rt and _rt.strip()
+                                    and _rt != _pc.resolved_text):
+                                continue
+                            _rc = _pc.model_copy(update={"resolved_text": _rt})
+                            _rv = self.verification.verify(unit, _rc)
+                            if _rv.passed:
+                                outcome.accepted = _rc
+                                outcome.validation = _rv
+                                outcome.retry_count = retry_count
+                                outcome.reason = (
+                                    "compiler-guided duplicate removal: "
+                                    f"removed {len(_dup_fns)} duplicate "
+                                    "function(s); existing definitions kept"
+                                )
+                                self._record_resolution_attempt(
+                                    outcome, mechanism="dup_def_block_removal",
+                                    candidate=_rc, validation=_rv,
+                                    decision="accept", reason=outcome.reason,
+                                )
+                                self.journal.emit(
+                                    "candidate_accepted",
+                                    {"candidate_id": _rc.candidate_id,
+                                     "via": "dup_def_block_removal"},
+                                    step_index=self.step, path=unit.path,
+                                    unit_id=unit.unit_id,
+                                )
+                                return outcome
+                            _dup_block_resolved = False  # tried but didn't compile
+                    except Exception:  # noqa: BLE001
+                        pass
+                    # 2b. Block removal didn't produce a compiling candidate.
+                    # If the failure was a duplicate-def error, grant one
+                    # more CEGIS iteration with the enriched context.
+                    _had_dup_marker = validation and validation.hard_failures and any(
+                        any(_m in (getattr(f, "message", "") or "")
+                            .replace("\u2018", "'").replace("\u2019", "'")
+                            for _m in _DUP_DEF_MARKERS)
+                        for f in validation.hard_failures
                     )
-                    if _is_dup:
+                    if _had_dup_marker:
                         _dup_def_retried = True
-                        _header_repaired = True  # allow one more iteration
+                        _header_repaired = True
                 # Escalate unless a repair strategy granted a retry.
                 if not _header_repaired:
                     outcome.escalated = True
