@@ -449,3 +449,97 @@ def test_dup_def_enrichment_skips_when_no_duplicate_failure():
     assert validation.hard_failures[0].message == original_msg, (
         "non-duplicate error must not be enriched"
     )
+
+
+# ---------------------------------------------------------------------------
+# Fix 5: coordinated-side swap for cross-unit variable dependencies
+# ---------------------------------------------------------------------------
+
+
+def test_detect_cross_unit_coordination_finds_shared_variable():
+    """_detect_cross_unit_coordination finds a variable declared in one unit
+    and used in another (same side)."""
+    from capybase.orchestrator import _detect_cross_unit_coordination
+    from types import SimpleNamespace
+
+    u0 = SimpleNamespace(
+        replayed=SimpleNamespace(text='const char * suffix = "th";\nconst size_t n = i + 1;'),
+        current=SimpleNamespace(text='const size_t n = i + 1;'),
+    )
+    u1 = SimpleNamespace(
+        replayed=SimpleNamespace(text='suffix = "st"; break;'),
+        current=SimpleNamespace(text='return std::to_string(n) + "st";'),
+    )
+    u2 = SimpleNamespace(
+        replayed=SimpleNamespace(text='return std::to_string(n) + suffix;'),
+        current=SimpleNamespace(text='return std::to_string(n) + "th";'),
+    )
+    rep_coord = _detect_cross_unit_coordination([u0, u1, u2], "replayed")
+    cur_coord = _detect_cross_unit_coordination([u0, u1, u2], "current")
+    assert "suffix" in rep_coord
+    assert cur_coord == set()
+
+
+def test_coordinated_side_swap_fires_when_asymmetric():
+    """When all units took current_only and replayed has cross-unit
+    coordination, the swap fires."""
+    from capybase.orchestrator import _try_coordinated_side_swap
+    from capybase.conflict_model import CandidateResolution
+    from types import SimpleNamespace
+
+    u0 = SimpleNamespace(
+        unit_id="u0",
+        replayed=SimpleNamespace(text='const char * suffix = "th";'),
+        current=SimpleNamespace(text='return "th";'),
+    )
+    u1 = SimpleNamespace(
+        unit_id="u1",
+        replayed=SimpleNamespace(text='suffix = "st"; break;'),
+        current=SimpleNamespace(text='return "st";'),
+    )
+    # All units took current_only
+    accepted = [
+        (u0, CandidateResolution(
+            candidate_id="u0:current_only", unit_id="u0",
+            model_name="source_portfolio", prompt_version="source_portfolio.current_only",
+            resolved_text='return "th";',
+            provenance="deterministic_source_current_only")),
+        (u1, CandidateResolution(
+            candidate_id="u1:current_only", unit_id="u1",
+            model_name="source_portfolio", prompt_version="source_portfolio.current_only",
+            resolved_text='return "st";',
+            provenance="deterministic_source_current_only")),
+    ]
+    result = _try_coordinated_side_swap([u0, u1], accepted)
+    assert result is not None, "swap should fire — replayed has coordination"
+    assert len(result) == 2
+    # Swapped to replayed side
+    assert result[0][1].resolved_text == 'const char * suffix = "th";'
+    assert result[1][1].resolved_text == 'suffix = "st"; break;'
+
+
+def test_coordinated_side_swap_declines_when_mixed_provenance():
+    """If units took different sides, don't swap — mixing is unsafe."""
+    from capybase.orchestrator import _try_coordinated_side_swap
+    from capybase.conflict_model import CandidateResolution
+    from types import SimpleNamespace
+
+    u0 = SimpleNamespace(unit_id="u0",
+        replayed=SimpleNamespace(text='const char * x = "a";'),
+        current=SimpleNamespace(text='return "a";'))
+    u1 = SimpleNamespace(unit_id="u1",
+        replayed=SimpleNamespace(text='x = "b";'),
+        current=SimpleNamespace(text='return "b";'))
+    accepted = [
+        (u0, CandidateResolution(
+            candidate_id="u0:current_only", unit_id="u0",
+            model_name="m", prompt_version="p",
+            resolved_text='return "a";',
+            provenance="deterministic_source_current_only")),
+        (u1, CandidateResolution(
+            candidate_id="u1:replayed_only", unit_id="u1",
+            model_name="m", prompt_version="p",
+            resolved_text='x = "b";',
+            provenance="deterministic_source_replayed_only")),
+    ]
+    assert _try_coordinated_side_swap([u0, u1], accepted) is None

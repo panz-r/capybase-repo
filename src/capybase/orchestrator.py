@@ -902,6 +902,114 @@ def _invalidate_pycache(repo_root: "str | Path", path: str) -> None:
         pass
 
 
+#: Regex for C/C++ local variable declarations: [modifiers] type [*&]+ name [=;{(]
+_LOCAL_VAR_DECL_RE = __import__("re").compile(
+    r"(?:const\s+)?(?:static\s+)?(?:inline\s+)?"
+    r"(?:unsigned\s+|signed\s+)?"
+    r"(?:int|long|short|char|bool|float|double|void|auto|size_t|ssize_t|"
+    r"uint\d+_t|int\d+_t|std::\w+|[A-Z]\w*)"
+    r"(?:\s*[*&])*\s+(\w+)\s*(?:[=;{(,])"
+)
+
+
+def _detect_cross_unit_coordination(
+    units: list, side: str,
+) -> set[str]:
+    """Identifiers declared in one unit's side and used in another (same side).
+
+    Returns the set of coordinating identifiers — variables declared in one
+    conflict unit's ``side`` text and referenced in a DIFFERENT unit's ``side``
+    text. This signals a deliberate cross-unit refactor (e.g., a local variable
+    introduced in region 0 and consumed in regions 1+2). When one side has
+    coordination and the other doesn't, the coordinated side is likely the
+    intentional refactor; per-unit resolution that uniformly picked the other
+    side may be wrong.
+    """
+    import re as _re_coord
+    side_texts: list[str] = []
+    for u in units:
+        t = getattr(getattr(u, side, None), "text", "") or ""
+        side_texts.append(t)
+    # Extract declared names per unit.
+    declared_per_unit: list[set[str]] = []
+    for t in side_texts:
+        declared_per_unit.append(set(_LOCAL_VAR_DECL_RE.findall(t)))
+    # An identifier is "coordinating" if it's declared in one unit and appears
+    # as a bare word in another unit's text.
+    coordinating: set[str] = set()
+    for i, declared in enumerate(declared_per_unit):
+        for name in declared:
+            if not name or len(name) < 2:
+                continue
+            for j, t in enumerate(side_texts):
+                if i == j:
+                    continue
+                if _re_coord.search(rf"\b{_re_coord.escape(name)}\b", t):
+                    coordinating.add(name)
+                    break
+    return coordinating
+
+
+def _try_coordinated_side_swap(
+    units: list,
+    accepted: list[tuple["ConflictUnit", "CandidateResolution"]],
+) -> list[tuple["ConflictUnit", "CandidateResolution"]] | None:
+    """When all units took the same source-portfolio side and the OTHER side
+    has cross-unit variable coordination, swap to the coordinated side.
+
+    Per-unit resolution can't see variables declared in one conflict region
+    and used in another. When it uniformly picks side A (because side B's
+    per-unit compilation fails on the undeclared variable), but side B has
+    a coherent cross-unit dependency (declares a variable in one unit, uses
+    it in others), side B is likely the intentional refactor. Swapping all
+    units to side B produces a consistent, compiling whole-file result.
+
+    Conservative — only fires when:
+    - ALL units took the SAME source-portfolio side (``current_only`` or
+      ``replayed_only``), indicating uniform (likely default) side selection.
+    - The OPPOSITE side has ≥1 cross-unit coordinating identifier.
+    - The chosen side has NONE (asymmetric coordination).
+    - ≥2 units in the file (single-unit files have no cross-unit dependency).
+
+    Returns a new ``accepted`` list with all units swapped to the coordinated
+    side, or ``None`` to keep the original.
+    """
+    if len(accepted) < 2:
+        return None  # single unit — no cross-unit dependency possible
+    from capybase.conflict_model import CandidateResolution
+    provs = [getattr(c, "provenance", "") or "" for _, c in accepted]
+    all_current = all(p == "deterministic_source_current_only" for p in provs)
+    all_replayed = all(p == "deterministic_source_replayed_only" for p in provs)
+    if not (all_current or all_replayed):
+        return None  # mixed or non-portfolio provenance
+    if all_current:
+        chosen, opposite = "current", "replayed"
+    else:
+        chosen, opposite = "replayed", "current"
+    # Detect coordination on both sides.
+    opp_coord = _detect_cross_unit_coordination(units, opposite)
+    if not opp_coord:
+        return None  # opposite side has no coordination
+    chosen_coord = _detect_cross_unit_coordination(units, chosen)
+    if chosen_coord:
+        return None  # BOTH sides coordinated — ambiguous, don't swap
+    # Swap: build new accepted list with the opposite side's text.
+    new_accepted: list[tuple] = []
+    for unit, _ in accepted:
+        side_obj = getattr(unit, opposite, None)
+        side_text = getattr(side_obj, "text", "") or ""
+        new_cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:{opposite}_only_coord",
+            unit_id=unit.unit_id,
+            model_name="coordinated_side_swap",
+            resolved_text=side_text,
+            provenance=f"deterministic_source_{opposite}_only",
+            prompt_version=f"coord_swap.{opposite}",
+        )
+        new_accepted.append((unit, new_cand))
+    return new_accepted
+
+
 def _attribute_whole_file_failure(
     failures: list, units: list[ConflictUnit]
 ) -> int:
@@ -7364,6 +7472,22 @@ class Orchestrator:
             # (For a whole_file unit the resolved text IS the file —
             # ``_resolved_buffer`` returns it verbatim, no splicing.)
             original = accepted[0][0].original_worktree_text
+            # Coordinated-side swap: when all units took the same source-
+            # portfolio side but the OTHER side has a cross-unit variable
+            # dependency (declared in one region, used in another), per-unit
+            # compilation couldn't validate the other side. The whole-file
+            # splice CAN. Swap to the coordinated side — Phase 2's whole-file
+            # validation is the authoritative check (if it doesn't compile,
+            # the repair loop handles it).
+            swapped = _try_coordinated_side_swap(units, accepted)
+            if swapped is not None:
+                self.journal.emit(
+                    "coordinated_side_swap",
+                    {"n_units": len(swapped),
+                     "swapped_to": swapped[0][1].provenance or ""},
+                    step_index=result.step_index, path=path,
+                )
+                accepted = swapped
             buffer = _resolved_buffer(original, accepted)
             resolved_files[path] = buffer
             accepted_by_path[path] = accepted
