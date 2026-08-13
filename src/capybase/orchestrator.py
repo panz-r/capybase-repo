@@ -669,7 +669,7 @@ def _enrich_duplicate_definition_failures(
     definition's source, so the very first CEGIS retry gives the model the code
     it must not re-define.
 
-    Two passes:
+    Three passes:
 
     1. **Single-symbol** — the function gcc named. Extracted from gcc's
        fully-qualified path (``::get_cbor_float_prefix(``); grepped in the file.
@@ -677,15 +677,23 @@ def _enrich_duplicate_definition_failures(
     2. **Multi-symbol** — gcc stops at the FIRST overload conflict, but the
        candidate often defines a FAMILY of functions that all already exist
        (e.g. ``get_{cbor,msgpack,ubjson}_float_prefix`` × {float,double}).
-       Without this pass the model fixes ONE duplicate per CEGIS iteration and
-       the header retry cap (1) is exhausted before the rest are fixed. This
-       pass scans the candidate for ALL function definitions, cross-references
-       each against the non-conflict part of the file, and appends a
-       consolidated note listing every pre-existing definition so one retry can
-       fix them all at once.
+       This pass scans the candidate for ALL function definitions and
+       cross-references each against the non-conflict part of the file so one
+       retry can fix them all at once (instead of one-per-iteration, which
+       exhausts the header retry cap of 1).
 
-    Idempotent (skips failures already carrying the NOTE marker). No-op when the
-    candidate is empty, the file is empty, or no duplicate-def failure exists.
+    3. **Side attribution** — the model often fails not because it lacks the
+       duplicate LIST but because the prompt's obligation block says
+       "CURRENT must preserve: added get_cbor_float_prefix" — actively fighting
+       the correct resolution. When one side's function additions are ALL
+       duplicates and the other side is clean (or deleted the block), this pass
+       reframes the note as a **conclusion-first recommendation**: "accept the
+       deletion" / "prefer the other side." It explicitly states the "must
+       preserve" obligation is INCORRECT for these functions. Without this, a
+       4B model oscillates between the duplicate candidate and an empty one.
+
+    Idempotent. No-op when the candidate is empty, the file is empty, or no
+    duplicate-def failure exists.
     """
     if validation.passed or not getattr(validation, "hard_failures", None):
         return
@@ -702,26 +710,29 @@ def _enrich_duplicate_definition_failures(
     except Exception:  # noqa: BLE001 - enrichment degrades gracefully
         _extract_definition_names = None
 
-    # Idempotency: skip failures already carrying either NOTE form (single-
-    # symbol "This function" or multi-symbol "These functions"). Both are
-    # injected by this function; recognizing both prevents double-appending on
-    # a repeated call (e.g. validation reuse across CEGIS iterations).
+    # Idempotency: skip failures already carrying any enrichment NOTE form.
+    # Covers the legacy "NOTE: This/These function(s)" and the new conclusion-
+    # first "NOTE — RESOLVE BY / PREFER THE / DUPLICATE DEFINITIONS" headers.
     _ENRICHED_TAGS = (
         "NOTE: This function already exists",
         "NOTE: These functions",
+        "NOTE \u2014 RESOLVE BY",
+        "NOTE \u2014 PREFER THE",
+        "NOTE \u2014 DUPLICATE DEFINITIONS",
     )
     orig_lines = orig_text.split("\n")
 
     # The "rest of file": orig_text MINUS the unit's own conflict region. The
     # candidate replaces ``marker_span``, so a function defined there is not a
-    # duplicate of itself — only definitions OUTSIDE the region count. Used for
-    # the multi-symbol cross-reference (single-symbol reuses orig_lines for
-    # accurate, marker-original line numbers).
+    # duplicate of itself — only definitions OUTSIDE the region count.
     rest_lines = orig_lines
     ms = getattr(unit, "marker_span", None)
     if ms is not None:
         _s, _e = ms[0], ms[1]
         rest_lines = orig_lines[:max(0, _s)] + orig_lines[min(len(orig_lines), _e + 1):]
+
+    rest_defs = (_extract_definition_names(rest_lines)
+                 if _extract_definition_names is not None else {})
 
     for f in validation.hard_failures:
         fmsg = getattr(f, "message", "") or ""
@@ -731,57 +742,137 @@ def _enrich_duplicate_definition_failures(
         if not any(m in fmsg_n for m in _DUP_DEF_MARKERS):
             continue
 
-        enriched_names: set[str] = set()
+        # --- Pass 1+2: collect ALL duplicate functions (name -> (line, src)) ---
+        dupes: dict[str, tuple[int, str]] = {}  # name -> (1-based line, context)
 
-        # --- Pass 1: single-symbol (the function gcc named) ---
+        # Pass 1: the function gcc named.
         fm = _re_dup.search(r"::(\w+)\(", fmsg_n)
         if fm:
             fn = fm.group(1)
-            enriched_names.add(fn)
             hit = _find_def_context(orig_lines, fn)
             if hit:
-                lineno, ctx = hit
-                f.message = (
-                    f"{fmsg}\n\n"
-                    f"NOTE: This function already exists elsewhere in the "
-                    f"file (near line {lineno}):\n{ctx}\n\n"
-                    f"Do NOT re-define it in your merge. The existing "
-                    f"definition is kept."
-                )
+                dupes[fn] = hit
 
-        # --- Pass 2: multi-symbol (ALL candidate fns already in the file) ---
-        if _extract_definition_names is None:
+        # Pass 2: all candidate functions that already exist in the file.
+        if _extract_definition_names is not None:
+            cand_defs = _extract_definition_names(res_text.split("\n"))
+            for cname in cand_defs:
+                if cname in dupes:
+                    continue
+                if cname not in rest_defs:
+                    continue
+                hit = _find_def_context(orig_lines, cname)
+                if hit:
+                    dupes[cname] = hit
+
+        if not dupes:
             continue
-        cand_defs = _extract_definition_names(res_text.split("\n"))
-        rest_defs = _extract_definition_names(rest_lines)
-        extras: list[tuple[str, int, str]] = []
-        for cname in cand_defs:
-            if cname in enriched_names:
-                continue
-            if cname not in rest_defs:
-                continue
-            hit = _find_def_context(orig_lines, cname)
-            if hit:
-                extras.append((cname, hit[0], hit[1]))
-                enriched_names.add(cname)
-        if extras:
-            blocks = [
-                f"  - {cn} (near line {ln}):\n{ctx}"
-                for cn, ln, ctx in extras[:5]  # cap to bound prompt size
-            ]
-            cur_msg = getattr(f, "message", "") or fmsg
-            lead = (
-                "These functions ALSO already exist"
-                if fm else "These functions already exist"
+
+        # --- Pass 3: side attribution + conclusion-first recommendation ---
+        rec = _dup_def_side_recommendation(
+            unit, set(dupes), rest_defs, _extract_definition_names)
+
+        # Build the note. When side attribution succeeds, lead with the
+        # actionable conclusion (accept deletion / prefer side) and explicitly
+        # state the "must preserve" obligation is incorrect. Otherwise fall
+        # back to the prohibition framing.
+        dupe_lines = [
+            f"  - {name} (defined at line {ln})"
+            for name, (ln, _) in dupes.items()
+        ]
+
+        if rec is not None:
+            side, other, other_empty, _side_dupe_names = rec
+            if other_empty:
+                header = (
+                    f"NOTE \u2014 RESOLVE BY ACCEPTING THE {other} SIDE'S "
+                    f"DELETION:"
+                )
+                tail = (
+                    f"\n\nThe {other} side deleted this duplicate block. "
+                    f"Since these functions are already defined at the lines "
+                    f"above, output EMPTY resolved_text (accept the deletion). "
+                    f"Do NOT include any of these function definitions in your "
+                    f"merge."
+                )
+            else:
+                header = f"NOTE \u2014 PREFER THE {other} SIDE:"
+                tail = (
+                    f"\n\nPrefer the {other} side's content for this region; "
+                    f"do NOT include the {side} side's duplicate functions."
+                )
+            body = (
+                f"The {side} side's \"must preserve\" obligation for these "
+                f"functions is INCORRECT \u2014 they are duplicate definitions "
+                f"that already exist elsewhere in this file, not unique "
+                f"additions:\n"
+                + "\n".join(dupe_lines)
+                + tail
             )
-            cur_msg += (
-                "\n\n"
-                f"NOTE: {lead} elsewhere in this file — do NOT re-define "
-                f"any of them either (the existing definitions are kept):\n"
-                + "\n".join(blocks)
-                + "\n\nRemove every duplicate definition from your merge."
+        else:
+            header = (
+                "NOTE \u2014 DUPLICATE DEFINITIONS "
+                "(these already exist elsewhere in this file):"
             )
-            f.message = cur_msg
+            # Fallback: show source for the gcc-reported function (first entry)
+            # to help the model understand what to omit.
+            src_block = ""
+            if dupes:
+                _first_name = next(iter(dupes))
+                _ln, _ctx = dupes[_first_name]
+                src_block = f"\n\nExisting definition of {_first_name}:\n{_ctx}"
+            body = (
+                "Your merge re-defines functions that already exist in the "
+                "non-conflicting part of this file:\n"
+                + "\n".join(dupe_lines)
+                + src_block
+                + "\n\nRemove every duplicate definition from your merge \u2014 "
+                "the existing definitions are kept."
+            )
+
+        f.message = f"{fmsg}\n\n{header}\n{body}"
+
+
+def _dup_def_side_recommendation(
+    unit: "ConflictUnit",
+    dup_names: set[str],
+    rest_defs: dict[str, str],
+    extract_fn: "callable | None",
+) -> tuple[str, str, bool, list[str]] | None:
+    """Attribute duplicate functions to a conflict side and recommend an action.
+
+    Returns ``(dup_side, clean_side, clean_side_empty, dup_names_from_side)``
+    when one side's function additions are ALL duplicates and the other side is
+    clean — so the note can recommend accepting the clean side. Returns ``None``
+    when attribution is inconclusive (both sides have duplicates, neither is
+    fully duplicates, or the unit is a whole-file conflict where side text IS
+    the full file and the cross-reference is meaningless).
+
+    ``dup_side``/``clean_side`` are ``"CURRENT"`` / ``"REPLAYED"``.
+    ``clean_side_empty`` is True when the clean side deleted the block
+    (modify/delete conflict) — the recommendation becomes "accept the deletion"
+    rather than "prefer the clean side's content."
+    """
+    if extract_fn is None:
+        return None
+    ms = getattr(unit, "marker_span", None)
+    if ms is None:
+        return None  # whole-file unit — side text is the full file
+
+    cur_text = getattr(getattr(unit, "current", None), "text", "") or ""
+    rep_text = getattr(getattr(unit, "replayed", None), "text", "") or ""
+    cur_defs = set(extract_fn(cur_text.split("\n")))
+    rep_defs = set(extract_fn(rep_text.split("\n")))
+
+    cur_dupes = {n for n in cur_defs if n in rest_defs}
+    rep_dupes = {n for n in rep_defs if n in rest_defs}
+
+    # One side's function additions are ALL duplicates; the other is clean.
+    if cur_dupes and cur_dupes == cur_defs and not rep_dupes:
+        return ("CURRENT", "REPLAYED", not rep_text.strip(), sorted(cur_dupes))
+    if rep_dupes and rep_dupes == rep_defs and not cur_dupes:
+        return ("REPLAYED", "CURRENT", not cur_text.strip(), sorted(rep_dupes))
+    return None
 
 
 def _invalidate_pycache(repo_root: "str | Path", path: str) -> None:
@@ -9335,6 +9426,12 @@ class Orchestrator:
                 return outcome
 
         _dup_def_retried = False  # one duplicate-def CEGIS retry per unit
+        # Set True when the duplicate-def enrichment verifies a modify/delete
+        # where one side's function additions are ALL duplicates — the correct
+        # resolution is to accept the deletion (empty resolved_text). Persists
+        # across CEGIS iterations so a SUBSEQUENT empty candidate (the model
+        # obeying "output EMPTY") is accepted rather than rejected.
+        _accept_deletion_recommended = False
         while True:
             # Wall-clock deadline (outermost budget): if this unit has run past
             # its time budget across retries, escalate rather than proposing
@@ -9708,8 +9805,54 @@ class Orchestrator:
             # source lines to the failure message. All subsequent retry
             # prompts, convergence checks, and risk decisions see the
             # enriched context. See ``_enrich_duplicate_definition_failures``
-            # for the two-pass (single-symbol + multi-symbol) logic.
+            # for the three-pass (single-symbol + multi-symbol + side-attribution)
+            # logic.
             _enrich_duplicate_definition_failures(unit, cand, validation)
+            # Track whether the enrichment recommended accepting a deletion.
+            # Set when the conclusion-first note says "RESOLVE BY ACCEPTING" —
+            # meaning a verified modify/delete where one side's additions are
+            # ALL duplicates. Persists so the NEXT iteration's empty candidate
+            # (the model obeying) is accepted, not rejected.
+            if (not validation.passed and validation.hard_failures
+                    and any("RESOLVE BY ACCEPTING" in (getattr(f, "message", "") or "")
+                            for f in validation.hard_failures)):
+                _accept_deletion_recommended = True
+            # Accept an empty candidate when the enrichment (on a PRIOR
+            # iteration with duplicate definitions) verified this is a
+            # modify/delete where the current side's additions are ALL
+            # duplicates — empty IS the correct resolution.
+            # NonEmptyResolutionValidator normally rejects empty LLM output (a
+            # model failure), but here the model was EXPLICITLY told to accept
+            # the deletion. Conservative: only fires when the ONLY hard failure
+            # is the empty-resolution check (no other compile/syntax errors).
+            _cand_empty = not (cand.resolved_text or "").strip()
+            if (_accept_deletion_recommended and _cand_empty
+                    and validation.hard_failures
+                    and all("empty resolution" in (getattr(f, "message", "") or "").lower()
+                            for f in validation.hard_failures
+                            if getattr(f, "severity", "") == "error")):
+                outcome.accepted = cand
+                outcome.validation = validation
+                outcome.retry_count = retry_count
+                outcome.reason = (
+                    "accepted empty resolution: the duplicate-def enrichment "
+                    "verified this is a modify/delete where the current "
+                    "side's function additions are ALL duplicates of existing "
+                    "definitions — empty resolved_text correctly accepts the "
+                    "replayed side's deletion"
+                )
+                self._record_resolution_attempt(
+                    outcome, mechanism="dup_def_deletion_accept",
+                    candidate=cand, validation=validation,
+                    decision="accept", reason=outcome.reason,
+                )
+                self.journal.emit(
+                    "candidate_accepted",
+                    {"candidate_id": cand.candidate_id,
+                     "via": "dup_def_deletion_accept"},
+                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                )
+                return outcome
             # Track candidate hashes for oscillation detection (CEGIS resilience).
             # cand_hash is already computed above (for the no-op cache). The
             # escalation check runs AFTER the risk decision — only when the
@@ -9857,15 +10000,18 @@ class Orchestrator:
                 # above, right after validation), allow one extra CEGIS
                 # iteration so the model can act on it. The enrichment
                 # fires on the FIRST failure, but the header cap may cut
-                # the loop short before the model gets to use it. Match
-                # BOTH note forms: single-symbol ("This function ...") and
-                # multi-symbol ("These functions ...") — either signals the
-                # model has been shown the pre-existing definition(s).
+                # the loop short before the model gets to use it. Matches
+                # every NOTE form the enrichment emits: legacy
+                # "This/These function(s)" and the conclusion-first
+                # "RESOLVE BY / PREFER THE / DUPLICATE DEFINITIONS".
                 if (not _dup_def_retried and validation
                         and validation.hard_failures):
                     _is_dup = any(
                         ("NOTE: This function already exists" in _fm
-                         or "NOTE: These functions" in _fm)
+                         or "NOTE: These functions" in _fm
+                         or "NOTE \u2014 RESOLVE BY" in _fm
+                         or "NOTE \u2014 PREFER THE" in _fm
+                         or "NOTE \u2014 DUPLICATE DEFINITIONS" in _fm)
                         for _fm in (
                             (getattr(f, "message", "") or "")
                             for f in validation.hard_failures

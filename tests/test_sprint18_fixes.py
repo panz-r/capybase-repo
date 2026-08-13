@@ -245,14 +245,97 @@ _FLOAT_PREFIX_FILE = """\
 """
 
 
-def test_dup_def_enrichment_surfaces_all_pre_existing_definitions():
-    """Multi-symbol pass lists EVERY function family gcc didn't report yet.
+def test_dup_def_modify_delete_recommends_accept_deletion():
+    """modify/delete: when one side's additions are ALL duplicates and the
+    other side deleted the block, the note leads with "accept the deletion."
 
-    gcc emits one "cannot be overloaded" per overload-pair and stops. The
-    candidate re-defined all three prefix families, so the enrichment must
-    surface the two gcc hasn't mentioned yet (msgpack + ubjson) alongside the
-    one it did (cbor). One CEGIS retry can then fix all of them.
+    This is the nlohmann-0034 scenario: the CURRENT side added float-prefix
+    functions that already exist elsewhere; the REPLAYED side deleted the
+    duplicate block. The prompt's obligation block says "CURRENT must preserve
+    these" — the enrichment must explicitly override that and tell the model to
+    accept the deletion (output EMPTY resolved_text).
     """
+    from capybase.orchestrator import _enrich_duplicate_definition_failures
+    from capybase.verification import VerificationResult, VerificationFailure
+    from types import SimpleNamespace
+
+    cur_side = (
+        "  static constexpr CharType get_cbor_float_prefix(float /*unused*/)\n"
+        "  {\n      return to_char_type(0xFA);\n  }\n\n"
+        "  static constexpr CharType get_msgpack_float_prefix(float /*unused*/)\n"
+        "  {\n      return to_char_type(0xCA);\n  }\n"
+    )
+    unit = SimpleNamespace(
+        original_worktree_text=_FLOAT_PREFIX_FILE,
+        marker_span=(2, 6), language="cpp",
+        current=SimpleNamespace(text=cur_side),
+        replayed=SimpleNamespace(text=""),  # deleted the block
+    )
+    cand = SimpleNamespace(resolved_text=cur_side)  # model copied current
+    validation = VerificationResult(
+        candidate_id="t", unit_id="t", passed=False,
+        hard_failures=[VerificationFailure(
+            validator="ccs_syntax", severity="error",
+            message=("test.hpp:4:1: error: '...::get_cbor_float_prefix(float)'"
+                     " cannot be overloaded with '...::get_cbor_float_prefix"
+                     "(float)'"),
+        )], warnings=[],
+    )
+
+    _enrich_duplicate_definition_failures(unit, cand, validation)
+    msg = validation.hard_failures[0].message
+
+    # Conclusion-first: leads with the actionable recommendation.
+    assert "RESOLVE BY ACCEPTING THE REPLAYED SIDE'S DELETION" in msg
+    # Explicitly overrides the misleading obligation.
+    assert "must preserve" in msg.lower() or "must preserve" in msg
+    assert "INCORRECT" in msg
+    # Lists all duplicate families (gcc only reported cbor).
+    assert "get_cbor_float_prefix" in msg
+    assert "get_msgpack_float_prefix" in msg
+    # Positive instruction: output empty.
+    assert "EMPTY" in msg
+
+
+def test_dup_def_modify_modify_recommends_prefer_side():
+    """modify/modify: when one side's additions are ALL duplicates but the
+    other side has content, the note says "prefer the [clean] side"."""
+    from capybase.orchestrator import _enrich_duplicate_definition_failures
+    from capybase.verification import VerificationResult, VerificationFailure
+    from types import SimpleNamespace
+
+    cur_side = (
+        "  static constexpr CharType get_cbor_float_prefix(float /*unused*/)\n"
+        "  {\n      return to_char_type(0xFA);\n  }\n"
+    )
+    rep_side = (
+        "  // replaced with a comment block\n"
+        "  int new_helper() { return 42; }\n"
+    )
+    unit = SimpleNamespace(
+        original_worktree_text=_FLOAT_PREFIX_FILE,
+        marker_span=(2, 6), language="cpp",
+        current=SimpleNamespace(text=cur_side),
+        replayed=SimpleNamespace(text=rep_side),
+    )
+    cand = SimpleNamespace(resolved_text=cur_side)
+    validation = VerificationResult(
+        candidate_id="t", unit_id="t", passed=False,
+        hard_failures=[VerificationFailure(
+            validator="ccs_syntax", severity="error",
+            message=("error: '::get_cbor_float_prefix(float)' cannot be "
+                     "overloaded"),
+        )], warnings=[],
+    )
+    _enrich_duplicate_definition_failures(unit, cand, validation)
+    msg = validation.hard_failures[0].message
+    assert "PREFER THE REPLAYED SIDE" in msg
+    assert "do NOT include the CURRENT side" in msg
+
+
+def test_dup_def_fallback_when_no_side_info():
+    """When side attribution is inconclusive (both sides have duplicates, or
+    unit lacks side info), the note falls back to "omit these functions"."""
     from capybase.orchestrator import _enrich_duplicate_definition_failures
     from capybase.verification import VerificationResult, VerificationFailure
     from types import SimpleNamespace
@@ -260,44 +343,29 @@ def test_dup_def_enrichment_surfaces_all_pre_existing_definitions():
     cand_text = (
         "  static constexpr CharType get_cbor_float_prefix(float /*unused*/)\n"
         "  {\n      return to_char_type(0xFA);\n  }\n\n"
-        "  static constexpr CharType get_msgpack_float_prefix(float /*unused*/)\n"
-        "  {\n      return to_char_type(0xCA);\n  }\n\n"
         "  static constexpr CharType get_ubjson_float_prefix(float /*unused*/)\n"
         "  {\n      return to_char_type(0xFB);\n  }\n"
     )
+    # No current/replayed on unit → side attribution returns None → fallback.
     unit = SimpleNamespace(
         original_worktree_text=_FLOAT_PREFIX_FILE,
-        marker_span=(2, 6),  # conflict region is tiny, far from the defs
-        language="cpp",
+        marker_span=(2, 6), language="cpp",
     )
     cand = SimpleNamespace(resolved_text=cand_text)
     validation = VerificationResult(
         candidate_id="t", unit_id="t", passed=False,
         hard_failures=[VerificationFailure(
             validator="ccs_syntax", severity="error",
-            message=("test.hpp:4:1: error: 'static constexpr CharType "
-                     "...::get_cbor_float_prefix(float)' cannot be overloaded "
-                     "with 'static constexpr CharType "
-                     "...::get_cbor_float_prefix(float)'"),
-        )],
-        warnings=[],
+            message=("error: '::get_cbor_float_prefix(float)' cannot be "
+                     "overloaded"),
+        )], warnings=[],
     )
-
     _enrich_duplicate_definition_failures(unit, cand, validation)
     msg = validation.hard_failures[0].message
-
-    # Pass 1: gcc's function enriched with its existing definition.
-    assert "NOTE: This function already exists" in msg
+    assert "DUPLICATE DEFINITIONS" in msg
     assert "get_cbor_float_prefix" in msg
-    # The context must show the DEFINITION (static_cast), not a call site.
-    assert "static_cast<CharType>(0xFA)" in msg
-
-    # Pass 2: the two siblings gcc didn't mention yet.
-    assert "NOTE: These functions" in msg
-    assert "get_msgpack_float_prefix" in msg
     assert "get_ubjson_float_prefix" in msg
-    assert "static_cast<CharType>(0xCA)" in msg
-    assert "static_cast<CharType>(0xFB)" in msg
+    assert "Remove every duplicate definition" in msg
 
 
 def test_dup_def_enrichment_shows_definition_not_call_site():
@@ -354,7 +422,7 @@ def test_dup_def_enrichment_is_idempotent():
     _enrich_duplicate_definition_failures(unit, cand, validation)
     second = validation.hard_failures[0].message
     assert first == second, "second enrichment must be a no-op"
-    assert second.count("NOTE:") == 1, "exactly one NOTE block"
+    assert second.count("NOTE") == 1, "exactly one NOTE block"
 
 
 def test_dup_def_enrichment_skips_when_no_duplicate_failure():
