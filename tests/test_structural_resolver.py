@@ -640,6 +640,70 @@ def test_insertion_union_declines_on_shared_inserted_line():
     assert r.rule != "insertion_union"
 
 
+def test_insertion_union_ignores_structural_brace_overlap():
+    """Two independent blocks sharing a standalone ``{`` brace line merge.
+
+    Without the structural-noise filter, the shared ``{`` (the opening brace
+    common to both sides' SECTION/function blocks) falsely registers as
+    semantic overlap, declining a trivial additive merge. This forced the
+    LLM path for nlohmann-0032 (two test SECTION blocks), which truncated on
+    the large insertion and escalated as MODEL_NEEDS_HUMAN.
+    """
+    base = "    return 0;\n}"
+    current = (
+        "    return 0;\n"
+        '    SECTION("issue A")\n'
+        "    {\n"
+        "        CHECK(a == 1);\n"
+        "    }\n"
+        "}"
+    )
+    replayed = (
+        "    return 0;\n"
+        '    SECTION("issue B")\n'
+        "    {\n"
+        "        CHECK(b == 2);\n"
+        "    }\n"
+        "}"
+    )
+    r = resolve_structurally(_unit(base, current, replayed))
+    assert r.rule == "insertion_union", (
+        f"expected insertion_union, got {r.rule}"
+    )
+    assert 'issue A' in r.text
+    assert 'issue B' in r.text
+
+
+def test_insertion_union_explosion_guard_ignores_braces():
+    """The line-explosion guard must skip structural braces.
+
+    When two blocks with multiple ``{``/``}`` lines are concatenated, the
+    brace count in the output exceeds any single side's count. Without
+    the structural-noise skip, the guard treats this as content duplication
+    and declines — blocking the same additive merge.
+    """
+    base = "end"
+    current = (
+        "void f1() {\n"
+        "    if (x) {\n"
+        "        a();\n"
+        "    }\n"
+        "}\n"
+        "end"
+    )
+    replayed = (
+        "void f2() {\n"
+        "    if (y) {\n"
+        "        b();\n"
+        "    }\n"
+        "}\n"
+        "end"
+    )
+    r = resolve_structurally(_unit(base, current, replayed))
+    assert r.rule == "insertion_union"
+    assert "void f1" in r.text and "void f2" in r.text
+
+
 # ---------------------------------------------------------------------------
 # Blessed-corpus: the union/combine shapes now resolve with ZERO LLM calls
 # (the reviewer's "Done when" criterion for #1).

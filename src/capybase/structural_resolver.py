@@ -2317,6 +2317,15 @@ def _try_brace_union(base: str, current: str, replayed: str) -> str | None:
     return b_pre + "{" + ", ".join(merged_items) + "}" + b_suf
 
 
+#: Lines that are pure structural punctuation — braces, semicolons, closing
+#: brackets. They carry no semantic weight and appear in any block-structured
+#: code (C/C++/Rust/Java). Ignored in the insertion_union overlap check and
+#: line-explosion guard: two independent SECTION/function blocks naturally
+#: share ``{``/``}`` lines, and their braces multiply when concatenated —
+#: neither indicates semantic overlap or content duplication.
+_STRUCTURAL_NOISE_LINES = frozenset({"{", "}", "};", "});"})
+
+
 def _try_insertion_union(base: str, current: str, replayed: str) -> str | None:
     """Merge two sides that each INSERT distinct whole lines after base anchors.
 
@@ -2338,11 +2347,16 @@ def _try_insertion_union(base: str, current: str, replayed: str) -> str | None:
     if cur_ins is None or rep_ins is None:
         return None  # a side modified/deleted a base line
     # Disjoint inserted lines (a line both sides added → ambiguous, decline).
-    # Blank lines are ignored in the overlap check: a blank separator inserted
-    # by both sides is not meaningful shared content (it carries no semantic
-    # weight and re-appears naturally between two inserted blocks).
-    cur_flat = [ln for run in cur_ins.values() for ln in run if ln.strip()]
-    rep_flat = [ln for run in rep_ins.values() for ln in run if ln.strip()]
+    # Blank lines AND pure structural punctuation ({, }, };) are ignored in
+    # the overlap check: they carry no semantic weight and appear in any
+    # block-structured code. Without this, two independent SECTION/function
+    # blocks that share a standalone ``{`` brace line would falsely register
+    # as overlapping content, declining a trivial additive merge and forcing
+    # the LLM (which may truncate on large insertions like test data arrays).
+    cur_flat = [ln for run in cur_ins.values() for ln in run
+                if ln.strip() and ln.strip() not in _STRUCTURAL_NOISE_LINES]
+    rep_flat = [ln for run in rep_ins.values() for ln in run
+                if ln.strip() and ln.strip() not in _STRUCTURAL_NOISE_LINES]
     if set(cur_flat) & set(rep_flat):
         return None
     # Merge: walk base, emitting each base line preceded by any insertion runs
@@ -2376,6 +2390,8 @@ def _try_insertion_union(base: str, current: str, replayed: str) -> str | None:
     _rc = _nl(replayed)
     _oc = _nl("\n".join(out))
     for _line, _cnt in _oc.items():
+        if _line in _STRUCTURAL_NOISE_LINES:
+            continue  # braces multiply when blocks concatenate — expected
         _allowed = max(_bc.get(_line, 0), _cc.get(_line, 0), _rc.get(_line, 0))
         if _cnt > _allowed:
             return None  # line duplicated beyond what any side contains
