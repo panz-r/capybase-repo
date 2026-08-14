@@ -1091,6 +1091,136 @@ def _try_coordinated_side_swap(
     return new_accepted
 
 
+def _whole_file_side_candidates(
+    units: list,
+) -> list[tuple[str, list[tuple["ConflictUnit", "CandidateResolution"]]]]:
+    """Generate whole-file all-current and all-replayed accepted lists.
+
+    Returns ``[("current", [(unit, cand), ...]), ("replayed", [...])]``
+    where each candidate takes that side's text verbatim. Pure text
+    substitution — no compilation, no side effects.
+    """
+    from capybase.conflict_model import CandidateResolution
+    out: list[tuple[str, list]] = []
+    for side in ("current", "replayed"):
+        cands: list[tuple] = []
+        for unit in units:
+            side_obj = getattr(unit, side, None)
+            side_text = getattr(side_obj, "text", "") or ""
+            cands.append((unit, CandidateResolution(
+                candidate_id=f"{unit.unit_id}:{side}_only_wf",
+                unit_id=unit.unit_id,
+                model_name="whole_file_portfolio",
+                resolved_text=side_text,
+                provenance=f"deterministic_source_{side}_only",
+                prompt_version=f"wf_portfolio.{side}",
+            )))
+        out.append((side, cands))
+    return out
+
+
+def _try_whole_file_portfolio(
+    units: list,
+    accepted: list,
+    original: str,
+    *,
+    journal=None,
+    step_index: int = 0,
+    path: str = "",
+    force: bool = False,
+) -> tuple[list, dict] | None:
+    """Generate whole-file side candidates and pick the best by coverage.
+
+    Per-unit compilation is advisory for cross-unit dependencies — a unit's
+    ``current_only`` candidate can fail standalone (symbol declared in a
+    different unit) causing the per-unit portfolio to pick the wrong side.
+    The whole-file build sees all declarations and is the authoritative
+    check. This generates all-current and all-replayed candidates and picks
+    whichever has the highest file-level intent coverage (brace-balanced).
+
+    Only fires when the per-unit result has LOW file-level intent coverage
+    (< 0.8) — when the per-unit merge already preserves both sides' intent,
+    the portfolio is skipped.
+
+    Returns ``(new_accepted_list, journal_payload)`` or ``None`` to keep.
+    """
+    if len(accepted) < 2:
+        return None  # single unit — per-unit portfolio already handles it
+    try:
+        from capybase.structural_resolver import intent_coverage_score
+    except Exception:
+        return None
+    _base_full = (units[0].base.text or "") if units else ""
+    if not _base_full.strip():
+        return None
+
+    # Full-file current/replayed: reconstruct from the marker text by
+    # replacing each side's marker content with that side (shared context
+    # outside markers appears in both).
+    _per_unit_buf = _resolved_buffer(original, accepted)
+    _orig_lines = original.split("\n")
+    _cur_lines: list[str] = []
+    _rep_lines: list[str] = []
+    _in_cur = _in_rep = False
+    for _ml in _orig_lines:
+        if _ml.startswith("<<<<<<<"):
+            _in_cur, _in_rep = True, False
+        elif _ml.startswith("=======") and ">>>>" not in _ml:
+            _in_cur, _in_rep = False, True
+        elif _ml.startswith(">>>>>>>"):
+            _in_cur = _in_rep = False
+        elif _in_cur:
+            _cur_lines.append(_ml)
+        elif _in_rep:
+            _rep_lines.append(_ml)
+        else:
+            _cur_lines.append(_ml)
+            _rep_lines.append(_ml)
+    _cur_full = "\n".join(_cur_lines)
+    _rep_full = "\n".join(_rep_lines)
+
+    _ic_per = intent_coverage_score(
+        _per_unit_buf, _base_full, _cur_full, _rep_full)
+    if journal:
+        journal.emit(
+            "whole_file_portfolio_gate",
+            {"ic_per_unit": round(_ic_per, 4),
+             "base_lines": len(_base_full.splitlines()),
+             "cur_lines": len(_cur_full.splitlines()),
+             "rep_lines": len(_rep_full.splitlines()),
+             "n_accepted": len(accepted)},
+            step_index=step_index, path=path,
+        )
+    if _ic_per >= 0.80 and not force:
+        return None  # per-unit result already good — skip
+
+    _lang = getattr(units[0], "language", None) if units else None
+    _best: tuple[float, str, list] | None = None
+    for _side, _cand_list in _whole_file_side_candidates(units):
+        _buf = _resolved_buffer(original, _cand_list)
+        _ic = intent_coverage_score(
+            _buf, _base_full, _cur_full, _rep_full)
+        if _ic <= _ic_per + 0.02:
+            continue  # doesn't beat per-unit by margin
+        try:
+            if _lang and not _braces_balanced(_buf, _lang):
+                continue  # syntax broken — skip
+        except Exception:
+            pass
+        if _best is None or _ic > _best[0]:
+            _best = (_ic, _side, _cand_list)
+
+    if _best is None:
+        return None
+    _ic, _side, _cand_list = _best
+    return _cand_list, {
+        "side": _side,
+        "ic_per_unit": round(_ic_per, 4),
+        "ic_whole_file": round(_ic, 4),
+        "n_units": len(_cand_list),
+    }
+
+
 def _try_majority_side_rescue(
     units: list,
     accepted: list[tuple["ConflictUnit", "CandidateResolution"]],
@@ -7695,6 +7825,23 @@ class Orchestrator:
                     step_index=result.step_index, path=path,
                 )
                 accepted = swapped
+            # Whole-file portfolio: generate all-current / all-replayed
+            # candidates and pick the best by file-level intent coverage.
+            # Only fires when per-unit coverage is LOW (<0.80) — catches
+            # cases where per-unit compilation picked the wrong side due
+            # to cross-unit dependencies (protobuf-0067: unit 3 wrongly
+            # took replayed_only because current_only failed standalone).
+            _wf = _try_whole_file_portfolio(
+                units, accepted, original,
+                journal=self.journal, step_index=result.step_index,
+                path=path,
+            )
+            if _wf is not None:
+                accepted, _wf_payload = _wf
+                self.journal.emit(
+                    "whole_file_portfolio", _wf_payload,
+                    step_index=result.step_index, path=path,
+                )
             buffer = _resolved_buffer(original, accepted)
             resolved_files[path] = buffer
             accepted_by_path[path] = accepted
@@ -7914,6 +8061,71 @@ class Orchestrator:
                             break  # only 1 model re-resolve allowed in tiered mode
                     else:
                         if wf_retries >= wf_budget:
+                            break
+                    # Whole-file portfolio fallback: when Phase 2 validation
+                    # fails with a CROSS-UNIT error pattern (duplicate
+                    # definitions, undeclared identifiers — symptoms of the
+                    # per-unit portfolio picking inconsistent sides), try
+                    # all-current / all-replayed candidates before the
+                    # per-unit repair loop. Gated to cross-unit patterns so
+                    # ordinary syntax errors still go to the repair loop
+                    # (which correctly merges both sides).
+                    _wf_failures_text = " ".join(
+                        f.message for f in file_validation.hard_failures
+                    ).lower()
+                    _wf_is_cross_unit = any(
+                        p in _wf_failures_text
+                        for p in (
+                            "cannot be overloaded", "redefinition",
+                            "defined more than once", "redeclared",
+                            "undeclared identifier", "was not declared",
+                            "duplicate",
+                        )
+                    )
+                    if wf_retries == 0 and _wf_is_cross_unit:
+                        for _side, _cand_list in _whole_file_side_candidates(units):
+                            _wf_buf = _resolved_buffer(original, _cand_list)
+                            # Quick brace-balance gate (milliseconds).
+                            try:
+                                if language and not _braces_balanced(
+                                        _wf_buf, language):
+                                    continue
+                            except Exception:
+                                pass
+                            # Write and validate at the whole-file level.
+                            self._write_worktree_only(
+                                path, _wf_buf, accepted=_cand_list)
+                            _wf_spans = [
+                                (u.marker_span, c.resolved_text)
+                                for u, c in _cand_list if u.marker_span
+                            ]
+                            _wf_val = self.verification.verify_file(
+                                path, language, original, _wf_spans,
+                                repo_root=str(self.git.repo),
+                                whole_text=_wf_buf,
+                            )
+                            if not _wf_val.passed:
+                                continue
+                            # Also run the build test if configured.
+                            _wf_build_ok = True
+                            _wf_build = self._resolve_per_file_build(path)
+                            if _wf_build:
+                                _wf_ok, _ = self._run_raw_test(_wf_build)
+                                _wf_build_ok = _wf_ok
+                            if _wf_build_ok:
+                                accepted = _cand_list
+                                buffer = _wf_buf
+                                self.journal.emit(
+                                    "whole_file_portfolio",
+                                    {"side": _side,
+                                     "n_units": len(_cand_list),
+                                     "via": "phase2_fallback"},
+                                    step_index=self.step, path=path,
+                                )
+                                # Signal success — break out of the while.
+                                file_validation = _wf_val
+                                break
+                        if file_validation.passed:
                             break
                     # Attribute the failure to a unit and re-resolve it with the
                     # file-level failures as concrete repair feedback.
