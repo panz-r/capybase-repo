@@ -664,6 +664,27 @@ def _accept_deletion(base: str, current: str, replayed: str) -> str | None:
     keeper_kind = classify_side(base, keeper)
     if keeper_kind in ("unchanged", "deleted"):
         return deleter
+    # Relaxation: a "modified" keeper with very minor changes (≤2 changed
+    # lines) can be superseded by a substantial deletion (≥5 base lines
+    # removed). The deletion is the dominant intent — the keeper's minor
+    # tweak (e.g., a 1-line #if rename) is collateral that the deleting
+    # branch already accounted for. Without this, a tiny rename blocks
+    # a large cleanup, forcing the LLM path and often a resurrection
+    # SAFE_STOP (protobuf-0053: current changed _WIN32→_MSC_VER, replayed
+    # deleted the whole 23-line include block).
+    if keeper_kind == "modified":
+        from capybase.diff import line_matcher
+        _base_l = base.splitlines()
+        _keep_l = keeper.splitlines()
+        _n_changed = sum(
+            max(i2 - i1, j2 - j1)
+            for tag, i1, i2, j1, j2
+            in line_matcher(_base_l, _keep_l).get_opcodes()
+            if tag != "equal"
+        )
+        _n_deleted = len(_base_l) - len(deleter.splitlines())
+        if _n_changed <= 2 and _n_deleted >= 5:
+            return deleter
     return None
 
 

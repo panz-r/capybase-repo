@@ -961,21 +961,25 @@ def _kill_stale_build_processes():
 
     Eval runs launch cmake/make/gcc/ccache subprocesses that can outlive the
     parent Python process (especially when killed via timeout or SIGKILL).
-    This sweeps stale processes at startup and exit to prevent resource
-    leaks (18-hour-old ccache processes have been observed).
+    Uses /proc scanning (not pkill, which can hang on large process tables)
+    with a hard 5s budget. Best-effort — never blocks the eval.
     """
-    import subprocess
-    for pattern in (
-        "capybase-ccache-shim",
-        "capy-rw-",
-    ):
+    import os
+    import signal
+    import time
+    _deadline = time.monotonic() + 5.0
+    for pid_dir in os.listdir("/proc"):
+        if not pid_dir.isdigit():
+            continue
+        if time.monotonic() > _deadline:
+            break
         try:
-            subprocess.run(
-                ["pkill", "-9", "-f", pattern],
-                capture_output=True, timeout=10,
-            )
-        except Exception:
-            pass
+            with open(f"/proc/{pid_dir}/cmdline", "rb") as f:
+                cmdline = f.read().decode("utf-8", errors="replace")
+            if "capybase-ccache-shim" in cmdline or "capy-rw-" in cmdline:
+                os.kill(int(pid_dir), signal.SIGKILL)
+        except (OSError, ValueError):
+            continue
 
 
 def main():
