@@ -383,33 +383,43 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
         )
 
     # Reconstruct the conflict file using git merge-file on the three
-    # authoritative case versions. The rebase's merge engine (merge-ort/
-    # merge-recursive) can produce wider conflict regions than git
-    # merge-file for massively asymmetric cases (e.g., 8000-line rewrite
-    # vs 1-line change), incorrectly including non-conflicting deletions
-    # in the conflict region. This ensures non-conflicting changes from
-    # BOTH sides are correctly applied — only genuine conflicts remain.
-    import tempfile as _tf_merge
-    with _tf_merge.NamedTemporaryFile(mode="w", suffix=".cur", delete=False) as _cf:
-        _cf.write(case.current); _cur_p = _cf.name
-    with _tf_merge.NamedTemporaryFile(mode="w", suffix=".base", delete=False) as _bf:
-        _bf.write(case.base); _base_p = _bf.name
-    with _tf_merge.NamedTemporaryFile(mode="w", suffix=".rep", delete=False) as _rf:
-        _rf.write(case.replayed); _rep_p = _rf.name
-    try:
-        _merge_proc = subprocess.run(
-            ["git", "merge-file", "-p", "--diff3", _cur_p, _base_p, _rep_p],
-            capture_output=True, text=True, timeout=30,
-        )
-        if _merge_proc.returncode > 0 and _merge_proc.stdout:
-            # Overwrite the worktree file with the corrected conflict.
-            (repo / case.path).write_text(_merge_proc.stdout)
-    except Exception:
-        pass  # fall back to the rebase's conflict file
-    finally:
-        from pathlib import Path as _Pf_merge
-        for _p in (_cur_p, _base_p, _rep_p):
-            _Pf_merge(_p).unlink(missing_ok=True)
+    # authoritative case versions — but ONLY for massively asymmetric
+    # cases. The rebase's merge engine (merge-ort/merge-recursive) can
+    # produce wider conflict regions than git merge-file when one side
+    # massively rewrote the file (e.g., 8000-line rewrite vs 1-line
+    # change), incorrectly including non-conflicting deletions in the
+    # conflict region. For symmetric conflicts, the rebase's markers are
+    # equivalent or tighter — reconstructing would only risk regression.
+    # Asymmetry heuristic: one side's line count differs from base by >30%.
+    _base_n = len(case.base.splitlines())
+    _cur_n = len(case.current.splitlines())
+    _rep_n = len(case.replayed.splitlines())
+    _asymmetric = _base_n > 0 and (
+        abs(_cur_n - _base_n) / _base_n > 0.30
+        or abs(_rep_n - _base_n) / _base_n > 0.30
+    )
+    if _asymmetric:
+        import tempfile as _tf_merge
+        with _tf_merge.NamedTemporaryFile(mode="w", suffix=".cur", delete=False) as _cf:
+            _cf.write(case.current); _cur_p = _cf.name
+        with _tf_merge.NamedTemporaryFile(mode="w", suffix=".base", delete=False) as _bf:
+            _bf.write(case.base); _base_p = _bf.name
+        with _tf_merge.NamedTemporaryFile(mode="w", suffix=".rep", delete=False) as _rf:
+            _rf.write(case.replayed); _rep_p = _rf.name
+        try:
+            _merge_proc = subprocess.run(
+                ["git", "merge-file", "-p", "--diff3", _cur_p, _base_p, _rep_p],
+                capture_output=True, text=True, timeout=30,
+            )
+            if _merge_proc.returncode > 0 and _merge_proc.stdout:
+                # Overwrite the worktree file with the corrected conflict.
+                (repo / case.path).write_text(_merge_proc.stdout)
+        except Exception:
+            pass  # fall back to the rebase's conflict file
+        finally:
+            from pathlib import Path as _Pf_merge
+            for _p in (_cur_p, _base_p, _rep_p):
+                _Pf_merge(_p).unlink(missing_ok=True)
 
     # For C cases: run the build-prepare step AFTER the rebase, so the build
     # dir is fresh on the final conflicted state. The rebase's git checkouts

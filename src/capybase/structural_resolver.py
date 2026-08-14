@@ -392,6 +392,33 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
     if lint_res is not None:
         return StructuralResolution(rule="lint_vs_refactor", text=lint_res)
 
+    # Rule 2.7: asymmetric-deletion override for entity-split sub-units.
+    # When the PARENT conflict's CURRENT side is a massive rewrite (much
+    # smaller than the replayed side — a deletion/cleanup) and this sub-
+    # unit's current side is empty, the parent's rewrite deleted this
+    # content. The replayed side's additions are from the PRE-rewrite
+    # version (they would resurrect deleted code). Prefer the empty
+    # current side (apply the deletion).
+    # DIRECTION CHECK uses the unit's own full-file sides (available on
+    # marker-based units): current must be significantly SMALLER than
+    # replayed, indicating current is the deletion side. For the reverse
+    # (replayed is the refactor — e.g., nlohmann-0020), replayed is larger
+    # and the rule correctly does not fire.
+    _cur_file = (unit.current.text or "")
+    _rep_file = (unit.replayed.text or "")
+    _cur_n = len(_cur_file.splitlines())
+    _rep_n = len(_rep_file.splitlines())
+    if (
+        _rep_n > 0
+        and _cur_n < _rep_n * 0.5  # current is much smaller = deletion side
+        and not (current or "").strip()
+        and (replayed or "").strip()
+        and (base or "").strip() == ""
+    ):
+        return StructuralResolution(
+            rule="parent_deletion_override", text=current
+        )
+
     # Rule 3: one-sided change. Only one side diverged from base → take it.
     cur_changed = _normalize(current) != _normalize(base)
     rep_changed = _normalize(replayed) != _normalize(base)
