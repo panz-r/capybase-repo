@@ -1402,6 +1402,48 @@ Respond with ONLY a JSON object:
 {{"choice": "current" or "replayed", "confidence": <0.0-1.0>, "reason": "<one sentence>"}}"""
 
 
+def _classify_build_error_lines(
+    error_lines: list[str], path: str,
+) -> tuple[list[str], int]:
+    """Split build error lines into (merge-relevant, environmental count).
+
+    Mirrors verify_file's error localization (research §9): a whole-tree
+    build compiles many TUs, and a pre-existing error in a SIBLING file is
+    not caused by the merge. Returns the lines that implicate the conflict
+    file (or are unparseable — conservative) plus how many were positively
+    classified as sibling/-Werror/build-driver noise.
+    """
+    from capybase.verification import (
+        _is_cc_werror_warning,
+        _parse_cc_error_location,
+    )
+
+    conflict_stem = Path(path).stem
+    merge_lines: list[str] = []
+    env_ct = 0
+    for ln in error_lines:
+        if (
+            ln.startswith("make[")
+            or ln.startswith("make:")
+            or "CMake Error" in ln
+            or ln.startswith("ninja:")
+            or ln.startswith("*** ")
+            or "Error 1" in ln
+            or "Error 2" in ln
+        ):
+            env_ct += 1  # build-driver summary, not a gcc diagnostic
+            continue
+        if _is_cc_werror_warning(ln):
+            env_ct += 1
+            continue
+        stem, _ = _parse_cc_error_location(ln)
+        if stem is not None and stem != conflict_stem:
+            env_ct += 1
+            continue
+        merge_lines.append(ln)  # conflict-file error, or unparseable
+    return merge_lines, env_ct
+
+
 def _try_majority_side_rescue(
     units: list,
     accepted: list[tuple["ConflictUnit", "CandidateResolution"]],
@@ -8179,6 +8221,21 @@ class Orchestrator:
                         )
                     prev_failure_sig = cur_sig
                     if file_validation.passed:
+                        # Cross-ordered-blocks pathology: even a PASSING
+                        # splice still carries duplicate definitions in the
+                        # shared context when git interleaved both sides —
+                        # the build can't always see them (sibling-file
+                        # failures abort the build before it reaches the
+                        # conflict TU). When the pathology is present, swap
+                        # in a verified pristine side from the index stages.
+                        if wf_retries == 0:
+                            _ts_res = self._try_true_side_portfolio(
+                                path, language, original, units)
+                            if _ts_res is not None:
+                                _ts_acc, _ts_buf, _ts_val = _ts_res
+                                if _ts_val.passed and _ts_buf != buffer:
+                                    accepted, buffer = _ts_acc, _ts_buf
+                                    file_validation = _ts_val
                         # Structural validation passed (markers, splice,
                         # standalone syntax). Also run the build test —
                         # verify_file's per-unit gcc -fsyntax-only can't see
@@ -8199,9 +8256,32 @@ class Orchestrator:
                                 self._write_worktree_only(path, buffer, accepted=accepted)
                                 _build_ok, _build_output = self._run_raw_test(_build_cmd)
                                 if not _build_ok:
-                                    # Build failed — synthesize a file-level
-                                    # failure so the repair loop can re-resolve
-                                    # the responsible unit with the build error
+                                    # Build failed — classify the error lines
+                                    # first: a pre-existing SIBLING-file error
+                                    # is infrastructure, not a merge defect
+                                    # (the build never reached the conflict
+                                    # TU). Only a conflict-file error justifies
+                                    # the repair loop.
+                                    _error_lines = [
+                                        ln for ln in _build_output.splitlines()
+                                        if "error" in ln.lower() and ".c" in ln.lower()
+                                    ][:5]
+                                    _merge_lines, _env_ct = (
+                                        _classify_build_error_lines(
+                                            _error_lines, path)
+                                    )
+                                    if _error_lines and not _merge_lines and _env_ct > 0:
+                                        self.journal.emit(
+                                            "phase2_build_environmental",
+                                            {"env_lines": _env_ct,
+                                             "sample": _error_lines[:1]},
+                                            step_index=self.step, path=path,
+                                        )
+                                        break  # accept — infrastructure failure
+                                    # Build failed for merge-relevant reasons —
+                                    # synthesize a file-level failure so the
+                                    # repair loop can re-resolve the
+                                    # responsible unit with the build error
                                     # as CEGIS feedback. Include the raw build
                                     # output (with file:line info) so fault
                                     # attribution can identify the unit.
@@ -8211,11 +8291,9 @@ class Orchestrator:
                                     )
                                     # Extract the most relevant error lines
                                     # (file:line:error patterns) for attribution
-                                    _error_lines = [
-                                        ln for ln in _build_output.splitlines()
-                                        if "error" in ln.lower() and ".c" in ln.lower()
-                                    ][:5]
-                                    _msg = "; ".join(_error_lines) or f"build failed ({_build_cmd})"
+                                    _msg = "; ".join(
+                                        _merge_lines or _error_lines
+                                    ) or f"build failed ({_build_cmd})"
                                     file_validation = _VR(
                                         candidate_id="build_test",
                                         unit_id=path,
@@ -8316,104 +8394,11 @@ class Orchestrator:
                         # still holds the pristine side files — offer each
                         # as a whole-file candidate and let the compiler
                         # plus adjudication decide.
-                        _ts = None
-                        try:
-                            _ts = _true_stage_sides(self.git, path)
-                        except Exception:
-                            _ts = None
-                        _ts_dupes = _shared_context_duplicate_definitions(
-                            original, language)
-                        if _ts and _ts_dupes:
-                            _ts_sides, _ts_base = _ts
-                            _ts_verified: list[tuple[str, str, object]] = []
-                            for _side, _text in _ts_sides.items():
-                                try:
-                                    if language and not _braces_balanced(
-                                            _text, language):
-                                        continue
-                                except Exception:
-                                    pass
-                                self._write_worktree_only(
-                                    path, _text, accepted=None)
-                                _ts_val = self.verification.verify_file(
-                                    path, language, original, [],
-                                    repo_root=str(self.git.repo),
-                                    whole_text=_text,
-                                )
-                                if not _ts_val.passed:
-                                    continue
-                                _ts_verified.append((_side, _text, _ts_val))
-                            if _ts_verified:
-                                if len(_ts_verified) == 2:
-                                    _ts_choice, _ts_via = (
-                                        self._adjudicate_whole_side(
-                                            path, language, _ts_base,
-                                            _ts_sides))
-                                else:
-                                    _ts_choice = _ts_verified[0][0]
-                                    _ts_via = "single_compiling_side"
-                                # Full build test on the chosen side first;
-                                # fall back to the other if it alone builds.
-                                _ts_order = [s for s, _, _ in _ts_verified
-                                             if s == _ts_choice]
-                                _ts_order += [s for s, _, _ in _ts_verified
-                                              if s != _ts_choice]
-                                for _side in _ts_order:
-                                    _text = _ts_sides[_side]
-                                    _ts_val = next(
-                                        v for s, _, v in _ts_verified
-                                        if s == _side)
-                                    _ts_build = self._resolve_per_file_build(path)
-                                    if _ts_build:
-                                        _ts_ok, _ = self._run_raw_test(_ts_build)
-                                        if not _ts_ok:
-                                            continue
-                                    from capybase.conflict_model import (
-                                        CandidateResolution as _TS_CR,
-                                        ConflictSide as _TS_CS,
-                                    )
-                                    _ts_unit = ConflictUnit(
-                                        session_id=units[0].session_id,
-                                        step_index=units[0].step_index,
-                                        path=path,
-                                        language=units[0].language,
-                                        unit_id=f"{path}:true_side_stage",
-                                        unit_kind="whole_file",
-                                        base=_TS_CS(label="BASE", text=_ts_base),
-                                        current=_TS_CS(
-                                            label="CURRENT_UPSTREAM_SIDE",
-                                            text=_ts_sides.get("current", "")),
-                                        replayed=_TS_CS(
-                                            label="REPLAYED_COMMIT_SIDE",
-                                            text=_ts_sides.get("replayed", "")),
-                                        original_worktree_text=original,
-                                        marker_span=None,
-                                    )
-                                    _ts_cand = _TS_CR(
-                                        candidate_id=f"{_ts_unit.unit_id}:{_side}",
-                                        unit_id=_ts_unit.unit_id,
-                                        model_name="true_side_portfolio",
-                                        resolved_text=_text,
-                                        provenance=(
-                                            f"deterministic_source_{_side}"
-                                            "_only_stage"),
-                                        prompt_version="true_side_portfolio.v1",
-                                    )
-                                    accepted = [(_ts_unit, _ts_cand)]
-                                    buffer = _text
-                                    self.journal.emit(
-                                        "true_side_portfolio",
-                                        {"side": _side,
-                                         "via": _ts_via,
-                                         "n_units": len(units),
-                                         "dup_definitions": len(_ts_dupes)},
-                                        step_index=self.step, path=path,
-                                    )
-                                    # Signal success — break out of the while.
-                                    file_validation = _ts_val
-                                    break
-                            if file_validation.passed:
-                                break
+                        _ts_res = self._try_true_side_portfolio(
+                            path, language, original, units)
+                        if _ts_res is not None:
+                            accepted, buffer, file_validation = _ts_res
+                            break
                     # Attribute the failure to a unit and re-resolve it with the
                     # file-level failures as concrete repair feedback.
                     wf_retries += 1
@@ -11934,6 +11919,118 @@ class Orchestrator:
         postmerge_passing = parse_passing_node_ids(postmerge_stdout or "", tool)
         regressed = sorted(baseline - postmerge_passing)
         return regressed
+
+    def _try_true_side_portfolio(
+        self,
+        path: str,
+        language: str | None,
+        original: str,
+        units: list,
+    ):
+        """Whole-file candidates from the merge index's pristine side blobs.
+
+        For the cross-ordered-blocks pathology (duplicate identical-signature
+        definitions in the marker file's SHARED context — content outside
+        every marker span that no per-region resolution can remove), the
+        splice of ANY region choices keeps the duplicates. The index stages
+        (2 = current, 3 = replayed) still hold the pristine side files; each
+        becomes a whole-file candidate via a synthetic whole_file unit
+        (marker_span=None). Candidates pass verify_file (which classifies
+        sibling build noise as infrastructure) and the per-file build test
+        (same classification, via _classify_build_error_lines). When both
+        sides verify, adjudication (LLM, churn-heuristic fallback) picks.
+
+        Returns ``(accepted, buffer, validation)`` for the winning side, or
+        None when no candidate verifies — the caller keeps its own result.
+        """
+        dupes = _shared_context_duplicate_definitions(original, language)
+        if not dupes:
+            return None
+        try:
+            ts = _true_stage_sides(self.git, path)
+        except Exception:
+            ts = None
+        if not ts:
+            return None
+        sides, base_text = ts
+        verified: list[tuple[str, str, object]] = []
+        for side, text in sides.items():
+            try:
+                if language and not _braces_balanced(text, language):
+                    continue
+            except Exception:
+                pass
+            self._write_worktree_only(path, text, accepted=None)
+            val = self.verification.verify_file(
+                path, language, original, [],
+                repo_root=str(self.git.repo), whole_text=text)
+            if not val.passed:
+                continue
+            verified.append((side, text, val))
+        if not verified:
+            return None
+        if len(verified) == 2:
+            choice, via = self._adjudicate_whole_side(
+                path, language, base_text, sides)
+        else:
+            choice, via = verified[0][0], "single_compiling_side"
+        # Full build test on the chosen side first; fall back to the other
+        # if it alone builds.
+        order = [s for s, _, _ in verified if s == choice] + [
+            s for s, _, _ in verified if s != choice]
+        build_cmd = self._resolve_per_file_build(path)
+        for side in order:
+            text = sides[side]
+            val = next(v for s, _, v in verified if s == side)
+            if build_cmd:
+                ok, out = self._run_raw_test(build_cmd)
+                if not ok:
+                    err_lines = [
+                        ln for ln in (out or "").splitlines()
+                        if "error" in ln.lower()
+                    ][:5]
+                    merge_lines, env_ct = _classify_build_error_lines(
+                        err_lines, path)
+                    if merge_lines or env_ct == 0:
+                        continue  # genuine conflict-file error, or opaque
+                    # else: sibling-only failure — infrastructure, keep going
+            from capybase.conflict_model import (
+                CandidateResolution as _TS_CR,
+                ConflictSide as _TS_CS,
+            )
+            unit = ConflictUnit(
+                session_id=units[0].session_id,
+                step_index=units[0].step_index,
+                path=path,
+                language=units[0].language,
+                unit_id=f"{path}:true_side_stage",
+                unit_kind="whole_file",
+                base=_TS_CS(label="BASE", text=base_text),
+                current=_TS_CS(
+                    label="CURRENT_UPSTREAM_SIDE",
+                    text=sides.get("current", "")),
+                replayed=_TS_CS(
+                    label="REPLAYED_COMMIT_SIDE",
+                    text=sides.get("replayed", "")),
+                original_worktree_text=original,
+                marker_span=None,
+            )
+            cand = _TS_CR(
+                candidate_id=f"{unit.unit_id}:{side}",
+                unit_id=unit.unit_id,
+                model_name="true_side_portfolio",
+                resolved_text=text,
+                provenance=f"deterministic_source_{side}_only_stage",
+                prompt_version="true_side_portfolio.v1",
+            )
+            self.journal.emit(
+                "true_side_portfolio",
+                {"side": side, "via": via, "n_units": len(units),
+                 "dup_definitions": len(dupes)},
+                step_index=self.step, path=path,
+            )
+            return [(unit, cand)], text, val
+        return None
 
     def _adjudicate_whole_side(
         self,

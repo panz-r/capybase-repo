@@ -3732,7 +3732,7 @@ _CC_ERROR_LINE_RE = re.compile(r":(\d+):\d+:\s*(?:error|warning):")
 # (e.g. ``src/delete.c``, ``tool/lemon.c``, ``/tmp/tmpXXX.c``). This regex
 # captures the file component so the build gate can determine whether an error
 # is in the conflict file or a sibling file the merge didn't touch.
-_CC_ERROR_FILE_RE = re.compile(r"([^\s:][^\s:]*?)\.([chp]+)(?:\+\+)?:\d+:\d+:\s*(?:error|warning):", re.IGNORECASE)
+_CC_ERROR_FILE_RE = re.compile(r"([^\s:][^\s:]*?)\.([chp]+)(?:\+\+)?:\d+:\d+:\s*(?:fatal\s+)?(?:error|warning):", re.IGNORECASE)
 
 # Detects gcc/clang -Werror warning promotions: ``error: ... [-Werror=category]``.
 # These are warnings promoted to errors by -Werror, NOT real compile failures.

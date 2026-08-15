@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from capybase.conflict_model import ConflictSide, ConflictUnit  # noqa: F401
 from capybase.orchestrator import (
+    _classify_build_error_lines,
     _shared_context_duplicate_definitions,
     _true_stage_sides,
     _whole_side_adjudication_prompt,
@@ -135,6 +136,44 @@ def test_conflict_region_content_ignored():
         ">>>>>>> B\n"
     )
     assert _shared_context_duplicate_definitions(original, "cpp") == []
+
+
+# ---------------------------------------------------------------------------
+# _classify_build_error_lines — sibling-vs-merge attribution
+# ---------------------------------------------------------------------------
+
+def test_fatal_error_in_sibling_file_is_environmental():
+    # The protobuf-0063 regression: gcc's "fatal error:" phrasing (missing
+    # includes) must parse, or the line falls into the conservative fallback
+    # and a pre-existing sibling failure rejects the merge.
+    lines = [
+        "/var/tmp/capy-rw-x/r/upb/decode.c:7:10: fatal error: "
+        "upb/decode.int.h: No such file or directory",
+        "make[2]: *** [Makefile:512: upb/decode.lo] Error 1",
+    ]
+    merge, env = _classify_build_error_lines(lines, "tests/benchmark.cc")
+    assert merge == []
+    assert env == 2
+
+
+def test_conflict_file_error_is_merge_relevant():
+    lines = [
+        "tests/benchmark.cc:120:6: error: redefinition of "
+        "'void BM_ParseDescriptor_Upb(int)'",
+        "make[1]: *** [Makefile:30: benchmark.o] Error 1",
+    ]
+    merge, env = _classify_build_error_lines(lines, "tests/benchmark.cc")
+    assert len(merge) == 1
+    assert "redefinition" in merge[0]
+    assert env == 1
+
+
+def test_unparseable_lines_stay_merge_relevant():
+    # Opaque failures keep the conservative behavior (no environmental pass).
+    merge, env = _classify_build_error_lines(
+        ["something went wrong"], "tests/benchmark.cc")
+    assert merge == ["something went wrong"]
+    assert env == 0
 
 
 # ---------------------------------------------------------------------------
