@@ -8280,7 +8280,8 @@ class Orchestrator:
                         _ts_attempted = True
                         _ts_res = self._try_true_side_portfolio(
                             path, language, original, units,
-                            per_unit_buffer=buffer)
+                            per_unit_buffer=buffer,
+                            wall_deadline=_file_wall_deadline)
                         if _ts_res is not None:
                             accepted, buffer, file_validation = _ts_res
                             # Re-enter the loop: the next iteration
@@ -8299,7 +8300,8 @@ class Orchestrator:
                             _ts_attempted = True
                             _ts_res = self._try_true_side_portfolio(
                                 path, language, original, units,
-                                per_unit_buffer=buffer)
+                                per_unit_buffer=buffer,
+                                wall_deadline=_file_wall_deadline)
                             if _ts_res is not None:
                                 _ts_acc, _ts_buf, _ts_val = _ts_res
                                 if _ts_val.passed and _ts_buf != buffer:
@@ -11989,6 +11991,7 @@ class Orchestrator:
         original: str,
         units: list,
         per_unit_buffer: str | None = None,
+        wall_deadline: float | None = None,
     ):
         """Whole-file candidates from the merge index's pristine side blobs.
 
@@ -12057,7 +12060,27 @@ class Orchestrator:
             # anyway (ratio >= 0.90 >> its 0.35 refinement band).
             asym_winner = gates.get("winner")
         verified: list[tuple[str, str, object]] = []
-        for side, text in sides.items():
+        # The asymmetry takeover needs only the gate winner — the loser is
+        # by construction stale. The dup-pathology flow verifies both sides
+        # (adjudication chooses between two plausibly-good versions).
+        _candidates = (
+            [(asym_winner, sides[asym_winner])] if asym_winner
+            else list(sides.items())
+        )
+        if wall_deadline is not None:
+            import time as _ts_time
+
+            if _ts_time.monotonic() > wall_deadline - 300:
+                # Whole-file verification runs a build per candidate; with
+                # <5 min of wall clock left, leave the budget to Phase 2's
+                # own validation instead of starting builds we can't finish.
+                self.journal.emit(
+                    "true_side_portfolio_skipped",
+                    {"reason": "wall_deadline", "trigger": trigger},
+                    step_index=self.step, path=path,
+                )
+                return None
+        for side, text in _candidates:
             try:
                 if language and not _braces_balanced(text, language):
                     continue
@@ -12079,26 +12102,14 @@ class Orchestrator:
                 path, language, base_text, sides)
         else:
             choice, via = verified[0][0], "single_compiling_side"
-        # Full build test on the chosen side first; fall back to the other
-        # if it alone builds.
-        order = [s for s, _, _ in verified if s == choice] + [
-            s for s, _, _ in verified if s != choice]
-        build_cmd = self._resolve_per_file_build(path)
-        for side in order:
-            text = sides[side]
-            val = next(v for s, _, v in verified if s == side)
-            if build_cmd:
-                ok, out = self._run_raw_test(build_cmd)
-                if not ok:
-                    err_lines = [
-                        ln for ln in (out or "").splitlines()
-                        if "error" in ln.lower()
-                    ][:5]
-                    merge_lines, env_ct = _classify_build_error_lines(
-                        err_lines, path)
-                    if merge_lines or env_ct == 0:
-                        continue  # genuine conflict-file error, or opaque
-                    # else: sibling-only failure — infrastructure, keep going
+        # No separate _run_raw_test here: it only ran when a build command
+        # was configured — exactly when verify_file above already ran that
+        # same build (with sibling-error classification). Re-running it
+        # doubled/tripled the build count and blew the case wall clock on
+        # large-file cases (protobuf-0073's enabled run timed out on ~5
+        # sequential per-file builds). The post-swap Phase 2 iteration
+        # re-validates the final buffer anyway.
+        for side, text, val in [(c, sides[c], v) for c, _, v in verified if c == choice]:
             from capybase.conflict_model import (
                 CandidateResolution as _TS_CR,
                 ConflictSide as _TS_CS,

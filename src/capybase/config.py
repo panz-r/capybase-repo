@@ -746,10 +746,11 @@ class FutureConfig(BaseModel):
     # rewrote the file wholesale (full-file churn ratio >= 0.90, dominant
     # churn) and the per-unit merge is >= 15% stale content absent from
     # that winning side, swap the merge for the winner's pristine stage file
-    # (verified + adjudicated like the duplicate-definition path). Default
-    # OFF — ships journal-only (``asymmetry_takeover_gate`` events) until
-    # the thresholds are calibrated on live runs.
-    enable_true_side_asymmetry_takeover: bool = False
+    # (verified + adjudicated like the duplicate-definition path). Enabled
+    # after live calibration: true positives 0073 (stale 0.3475) and 0067
+    # (stale 0.2918), zero false positives across the >= 0.90 band and
+    # mid-band controls (worst good-merge stale 0.021 vs threshold 0.15).
+    enable_true_side_asymmetry_takeover: bool = True
     # Phase 4 comment jury (design §5). An untrusted semantic sensor that
     # evaluates comment claims produced by the comment pass. Three operating
     # modes:
