@@ -1221,6 +1221,187 @@ def _try_whole_file_portfolio(
     }
 
 
+def _true_stage_sides(git_backend, path: str):
+    """Pristine whole-file side texts from the merge index.
+
+    Returns ``(sides, base_text)`` — sides maps ``current`` (stage 2) and
+    ``replayed`` (stage 3) to their full file texts, base_text is stage 1
+    (empty when absent) — or ``None`` when the stages can't be read.
+
+    The worktree's conflict file is git's line-aligned merge of the two
+    sides. When both sides carry the same lines in a DIFFERENT order (e.g.
+    two versions of the same added block), git interleaves them into the
+    SHARED context between markers — content no per-region resolution can
+    remove, because it isn't inside any marker span. The stage blobs hold
+    the pristine side files, the only compilable whole-file candidates in
+    that situation.
+    """
+    import re as _re
+
+    out: dict[str, str] = {}
+    base_text = ""
+    try:
+        for side, stage in (("current", 2), ("replayed", 3)):
+            text = git_backend.read_stage_blob(path, stage).decode(
+                "utf-8", errors="replace").replace("\r\n", "\n")
+            if text.strip():
+                out[side] = text
+        try:
+            base_text = git_backend.read_stage_blob(path, 1).decode(
+                "utf-8", errors="replace").replace("\r\n", "\n")
+        except Exception:
+            base_text = ""
+    except Exception:
+        return None
+    if not out:
+        return None
+    return out, base_text
+
+
+def _shared_context_duplicate_definitions(
+    original: str, language: str | None,
+) -> list[str]:
+    """Identical-signature definitions repeated OUTSIDE conflict markers.
+
+    A compilable translation unit cannot define the same signature twice, so
+    duplicates in the marker file's SHARED context prove git's line-aligned
+    merge interleaved the two sides' content outside every marker span —
+    the cross-ordered-blocks pathology (both sides added the same block in
+    a different order). Per-region resolution is structurally insufficient
+    there: the duplicates aren't inside any span it may rewrite.
+
+    Definition lines are matched per language family and keyed by their
+    whitespace-normalized text, so legitimate overloads (different params)
+    don't fire. Returns the duplicated keys (empty list = healthy).
+    """
+    import re as _re
+
+    lang = (language or "").lower()
+    if lang in ("cpp", "c", "c++", "cxx", "cc", "hpp", "h"):
+        patterns = [_re.compile(
+            r"^\s*(?:(?:static|inline|constexpr|virtual|explicit)\s+)*"
+            r"(?:[A-Za-z_][\w:<>]*\s+)+\**[A-Za-z_]\w*\s*\([^;{}]*\)\s*"
+            r"(?:const\s*)?(?:noexcept\s*)?\{\s*$")]
+        skip_names = {"if", "for", "while", "switch", "catch", "do", "else",
+                      "return", "sizeof", "typeof"}
+    elif lang in ("python", "py"):
+        patterns = [
+            _re.compile(r"^\s*def\s+\w+\s*\(.*\)\s*(->\s*[^:]+)?:"),
+            _re.compile(r"^\s*class\s+\w+"),
+        ]
+        skip_names = set()
+    elif lang in ("rust", "rs"):
+        patterns = [
+            _re.compile(r"^\s*(?:pub\s+)?(?:\w+\s+)*fn\s+\w+[^{]*\{\s*$"),
+            _re.compile(r"^\s*(?:pub\s+)?(?:struct|enum|trait)\s+\w+"),
+        ]
+        skip_names = set()
+    else:
+        return []
+
+    counts: dict[str, int] = {}
+    in_conflict = False
+    for line in original.split("\n"):
+        if line.startswith("<<<<<<<"):
+            in_conflict = True
+            continue
+        if line.startswith(">>>>>>>"):
+            in_conflict = False
+            continue
+        if in_conflict or line.startswith("======="):
+            continue
+        for pat in patterns:
+            if pat.match(line):
+                name = _re.search(r"[A-Za-z_]\w*\s*\(", line)
+                if name and name.group().rstrip(" (") in skip_names:
+                    break
+                key = _re.sub(r"\s+", " ", line).strip()
+                counts[key] = counts.get(key, 0) + 1
+                break
+    return [k for k, n in counts.items() if n > 1]
+
+
+def _whole_side_churn(base_text: str, side_text: str) -> int:
+    """Absolute changed-line count of a side vs the base (both directions)."""
+    import difflib as _difflib
+
+    b = base_text.splitlines()
+    s = side_text.splitlines()
+    n = 0
+    for tag, i1, i2, j1, j2 in _difflib.SequenceMatcher(None, b, s).get_opcodes():
+        if tag != "equal":
+            n += (i2 - i1) + (j2 - j1)
+    return n
+
+
+def _whole_side_heuristic(base_text: str, sides: dict[str, str]) -> str:
+    """Deterministic pick between two compiling true whole-file sides.
+
+    Massive churn asymmetry means the higher-churn side carries the merge
+    intent — the other side is pre-change content git failed to align
+    (deletions/rewrites: keep the side that actually changed). Near-
+    symmetric churn means both sides did the same-sized work on the same
+    block — a refinement pair (rename/style pass); prefer replayed, the
+    commit being applied, i.e. the newer pass. Threshold 0.35 validated on
+    the corpus's four known whole-file cases (0063 0.28→replayed, 0067
+    0.99→current, 0073 0.99→current, clickhouse-0041 0.03→replayed).
+    """
+    c = _whole_side_churn(base_text, sides.get("current", ""))
+    r = _whole_side_churn(base_text, sides.get("replayed", ""))
+    if max(c, r) == 0 or abs(c - r) / max(c, r) < 0.35:
+        return "replayed"
+    return "current" if c > r else "replayed"
+
+
+def _whole_side_adjudication_prompt(
+    path: str, language: str | None,
+    base_text: str, sides: dict[str, str],
+    max_lines: int = 1200,
+) -> str:
+    """LLM adjudication prompt between two compiling whole-file sides."""
+
+    def _clip(text: str) -> str:
+        lines = text.splitlines()
+        if len(lines) <= max_lines:
+            return text
+        return "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines truncated)"
+
+    lang = (language or "").strip()
+    cur = _clip(sides.get("current", ""))
+    rep = _clip(sides.get("replayed", ""))
+    base = _clip(base_text)
+    return f"""You are deciding the resolution of a git rebase conflict for `{path}`.
+
+Region-level merging is IMPOSSIBLE for this file: the conflict file interleaves
+both versions' code outside the conflict markers, so exactly one WHOLE version
+must survive. Both versions below compile and pass their build. The common
+ancestor (base) is included for context.
+
+CURRENT — upstream, the branch being rebased onto:
+```{lang}
+{cur}
+```
+
+REPLAYED — the commit being replayed on top of current:
+```{lang}
+{rep}
+```
+
+BASE — common ancestor:
+```{lang}
+{base}
+```
+
+Pick the version that should survive as the merge result. Consider: which is
+the more evolved form of the same work (consistent renames, newer API usage,
+refined structure — typically the replayed commit's pass); versus which is a
+deliberate larger change (massive deletion, rewrite) that the other side
+predates and cannot subsume.
+
+Respond with ONLY a JSON object:
+{{"choice": "current" or "replayed", "confidence": <0.0-1.0>, "reason": "<one sentence>"}}"""
+
+
 def _try_majority_side_rescue(
     units: list,
     accepted: list[tuple["ConflictUnit", "CandidateResolution"]],
@@ -8127,6 +8308,112 @@ class Orchestrator:
                                 break
                         if file_validation.passed:
                             break
+                        # True-side portfolio — the cross-ordered-blocks
+                        # pathology. When git interleaves both sides' content
+                        # into the SHARED context (duplicate identical-
+                        # signature definitions outside every marker span),
+                        # no per-region merge can compile. The merge index
+                        # still holds the pristine side files — offer each
+                        # as a whole-file candidate and let the compiler
+                        # plus adjudication decide.
+                        _ts = None
+                        try:
+                            _ts = _true_stage_sides(self.git, path)
+                        except Exception:
+                            _ts = None
+                        _ts_dupes = _shared_context_duplicate_definitions(
+                            original, language)
+                        if _ts and _ts_dupes:
+                            _ts_sides, _ts_base = _ts
+                            _ts_verified: list[tuple[str, str, object]] = []
+                            for _side, _text in _ts_sides.items():
+                                try:
+                                    if language and not _braces_balanced(
+                                            _text, language):
+                                        continue
+                                except Exception:
+                                    pass
+                                self._write_worktree_only(
+                                    path, _text, accepted=None)
+                                _ts_val = self.verification.verify_file(
+                                    path, language, original, [],
+                                    repo_root=str(self.git.repo),
+                                    whole_text=_text,
+                                )
+                                if not _ts_val.passed:
+                                    continue
+                                _ts_verified.append((_side, _text, _ts_val))
+                            if _ts_verified:
+                                if len(_ts_verified) == 2:
+                                    _ts_choice, _ts_via = (
+                                        self._adjudicate_whole_side(
+                                            path, language, _ts_base,
+                                            _ts_sides))
+                                else:
+                                    _ts_choice = _ts_verified[0][0]
+                                    _ts_via = "single_compiling_side"
+                                # Full build test on the chosen side first;
+                                # fall back to the other if it alone builds.
+                                _ts_order = [s for s, _, _ in _ts_verified
+                                             if s == _ts_choice]
+                                _ts_order += [s for s, _, _ in _ts_verified
+                                              if s != _ts_choice]
+                                for _side in _ts_order:
+                                    _text = _ts_sides[_side]
+                                    _ts_val = next(
+                                        v for s, _, v in _ts_verified
+                                        if s == _side)
+                                    _ts_build = self._resolve_per_file_build(path)
+                                    if _ts_build:
+                                        _ts_ok, _ = self._run_raw_test(_ts_build)
+                                        if not _ts_ok:
+                                            continue
+                                    from capybase.conflict_model import (
+                                        CandidateResolution as _TS_CR,
+                                        ConflictSide as _TS_CS,
+                                    )
+                                    _ts_unit = ConflictUnit(
+                                        session_id=units[0].session_id,
+                                        step_index=units[0].step_index,
+                                        path=path,
+                                        language=units[0].language,
+                                        unit_id=f"{path}:true_side_stage",
+                                        unit_kind="whole_file",
+                                        base=_TS_CS(label="BASE", text=_ts_base),
+                                        current=_TS_CS(
+                                            label="CURRENT_UPSTREAM_SIDE",
+                                            text=_ts_sides.get("current", "")),
+                                        replayed=_TS_CS(
+                                            label="REPLAYED_COMMIT_SIDE",
+                                            text=_ts_sides.get("replayed", "")),
+                                        original_worktree_text=original,
+                                        marker_span=None,
+                                    )
+                                    _ts_cand = _TS_CR(
+                                        candidate_id=f"{_ts_unit.unit_id}:{_side}",
+                                        unit_id=_ts_unit.unit_id,
+                                        model_name="true_side_portfolio",
+                                        resolved_text=_text,
+                                        provenance=(
+                                            f"deterministic_source_{_side}"
+                                            "_only_stage"),
+                                        prompt_version="true_side_portfolio.v1",
+                                    )
+                                    accepted = [(_ts_unit, _ts_cand)]
+                                    buffer = _text
+                                    self.journal.emit(
+                                        "true_side_portfolio",
+                                        {"side": _side,
+                                         "via": _ts_via,
+                                         "n_units": len(units),
+                                         "dup_definitions": len(_ts_dupes)},
+                                        step_index=self.step, path=path,
+                                    )
+                                    # Signal success — break out of the while.
+                                    file_validation = _ts_val
+                                    break
+                            if file_validation.passed:
+                                break
                     # Attribute the failure to a unit and re-resolve it with the
                     # file-level failures as concrete repair feedback.
                     wf_retries += 1
@@ -11647,6 +11934,56 @@ class Orchestrator:
         postmerge_passing = parse_passing_node_ids(postmerge_stdout or "", tool)
         regressed = sorted(baseline - postmerge_passing)
         return regressed
+
+    def _adjudicate_whole_side(
+        self,
+        path: str,
+        language: str | None,
+        base_text: str,
+        sides: dict[str, str],
+    ) -> tuple[str, str]:
+        """Choose between two compiling true whole-file sides.
+
+        LLM adjudication first — it sees refinement semantics (consistent
+        renames, API evolution, deliberate deletions) that churn numbers
+        can't. The deterministic churn heuristic is the fallback when the
+        model is unparseable or low-confidence. Returns ``(side, via)``.
+        """
+        import json as _json
+
+        heuristic = _whole_side_heuristic(base_text, sides)
+        llm_info: dict | None = None
+        try:
+            prompt = _whole_side_adjudication_prompt(
+                path, language, base_text, sides)
+            resp = self.resolution_engine.raw_complete(prompt, json_mode=True)
+            raw = resp.text if hasattr(resp, "text") else str(resp)
+            parsed = _json.loads(raw)
+            choice = str(parsed.get("choice", "")).strip().lower()
+            conf = float(parsed.get("confidence", 0.0))
+            if choice in ("current", "replayed"):
+                llm_info = {
+                    "choice": choice,
+                    "confidence": round(conf, 2),
+                    "reason": str(parsed.get("reason", ""))[:200],
+                }
+                if conf >= 0.70:
+                    self.journal.emit(
+                        "whole_side_adjudication",
+                        {"llm": llm_info, "heuristic": heuristic,
+                         "picked": choice, "via": "llm"},
+                        step_index=self.step, path=path,
+                    )
+                    return choice, "llm_adjudication"
+        except Exception:
+            llm_info = None
+        self.journal.emit(
+            "whole_side_adjudication",
+            {"llm": llm_info, "heuristic": heuristic,
+             "picked": heuristic, "via": "heuristic"},
+            step_index=self.step, path=path,
+        )
+        return heuristic, "churn_heuristic"
 
     def _resolve_per_file_build(self, path: str) -> str:
         """Resolve the per-file build command for Phase 2's build check.
