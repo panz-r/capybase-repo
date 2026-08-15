@@ -1128,6 +1128,7 @@ def _try_whole_file_portfolio(
     step_index: int = 0,
     path: str = "",
     force: bool = False,
+    true_sides: tuple[dict[str, str], str] | None = None,
 ) -> tuple[list, dict] | None:
     """Generate whole-file side candidates and pick the best by coverage.
 
@@ -1142,6 +1143,13 @@ def _try_whole_file_portfolio(
     (< 0.8) — when the per-unit merge already preserves both sides' intent,
     the portfolio is skipped.
 
+    ``true_sides`` — ``(sides_dict, base_text)`` from the merge index stages
+    (see :func:`_true_stage_sides`) — overrides the full-file side texts.
+    Without it, the sides are reconstructed by marker-splicing, and the base
+    falls back to ``units[0].base.text`` — which is a FRAGMENT (or empty)
+    when the unit is an entity/statement sub-unit, silently no-opping the
+    portfolio exactly where it's needed. The stage texts are authoritative.
+
     Returns ``(new_accepted_list, journal_payload)`` or ``None`` to keep.
     """
     if len(accepted) < 2:
@@ -1150,35 +1158,71 @@ def _try_whole_file_portfolio(
         from capybase.structural_resolver import intent_coverage_score
     except Exception:
         return None
-    _base_full = (units[0].base.text or "") if units else ""
-    if not _base_full.strip():
-        return None
+    _sides_source = "marker_splice"
+    if true_sides is not None:
+        _ts_sides, _base_full = true_sides
+        _cur_full = _ts_sides.get("current", "")
+        _rep_full = _ts_sides.get("replayed", "")
+        _sides_source = "stages"
+    else:
+        _base_full = (units[0].base.text or "") if units else ""
+        if not _base_full.strip():
+            return None
 
-    # Full-file current/replayed: reconstruct from the marker text by
-    # replacing each side's marker content with that side (shared context
-    # outside markers appears in both).
+        # Full-file current/replayed: reconstruct from the marker text by
+        # replacing each side's marker content with that side (shared context
+        # outside markers appears in both).
+        _orig_lines = original.split("\n")
+        _cur_lines: list[str] = []
+        _rep_lines: list[str] = []
+        _in_cur = _in_rep = False
+        for _ml in _orig_lines:
+            if _ml.startswith("<<<<<<<"):
+                _in_cur, _in_rep = True, False
+            elif _ml.startswith("=======") and ">>>>" not in _ml:
+                _in_cur, _in_rep = False, True
+            elif _ml.startswith(">>>>>>>"):
+                _in_cur = _in_rep = False
+            elif _in_cur:
+                _cur_lines.append(_ml)
+            elif _in_rep:
+                _rep_lines.append(_ml)
+            else:
+                _cur_lines.append(_ml)
+                _rep_lines.append(_ml)
+        _cur_full = "\n".join(_cur_lines)
+        _rep_full = "\n".join(_rep_lines)
+
     _per_unit_buf = _resolved_buffer(original, accepted)
-    _orig_lines = original.split("\n")
-    _cur_lines: list[str] = []
-    _rep_lines: list[str] = []
-    _in_cur = _in_rep = False
-    for _ml in _orig_lines:
-        if _ml.startswith("<<<<<<<"):
-            _in_cur, _in_rep = True, False
-        elif _ml.startswith("=======") and ">>>>" not in _ml:
-            _in_cur, _in_rep = False, True
-        elif _ml.startswith(">>>>>>>"):
-            _in_cur = _in_rep = False
-        elif _in_cur:
-            _cur_lines.append(_ml)
-        elif _in_rep:
-            _rep_lines.append(_ml)
-        else:
-            _cur_lines.append(_ml)
-            _rep_lines.append(_ml)
-    _cur_full = "\n".join(_cur_lines)
-    _rep_full = "\n".join(_rep_lines)
+    # Asymmetric files (one side rewrote wholesale, churn_ratio >= 0.90)
+    # are the asymmetry-takeover's territory, not this portfolio's: the
+    # min()-coverage metric mis-scores them badly — a merge that correctly
+    # drops the inert side's few added lines scores 0.0, and the "fix" (take
+    # a whole side) picks the stale side as often as the right one
+    # (protobuf-0043: correct merge 0.0 → all-replayed 1.0 → wrong swap →
+    # endless repair; 0067/0070: wrong-way swaps). Skip and let the churn/
+    # stale gates decide.
+    from capybase.merge_intent import (
+        FULL_FILE_ASYMMETRY_RATIO,
+        full_file_context as _ffc,
+    )
 
+    _ffc_ctx = _ffc(_base_full, _cur_full, _rep_full)
+    if _ffc_ctx["churn_ratio"] >= FULL_FILE_ASYMMETRY_RATIO:
+        if journal:
+            journal.emit(
+                "whole_file_portfolio_gate",
+                {"ic_per_unit": None,
+                 "base_lines": _ffc_ctx["base_lines"],
+                 "cur_lines": _ffc_ctx["current_lines"],
+                 "rep_lines": _ffc_ctx["replayed_lines"],
+                 "n_accepted": len(accepted),
+                 "sides_source": _sides_source,
+                 "skipped": "asymmetric_file",
+                 "churn_ratio": _ffc_ctx["churn_ratio"]},
+                step_index=step_index, path=path,
+            )
+        return None
     _ic_per = intent_coverage_score(
         _per_unit_buf, _base_full, _cur_full, _rep_full)
     if journal:
@@ -1188,7 +1232,8 @@ def _try_whole_file_portfolio(
              "base_lines": len(_base_full.splitlines()),
              "cur_lines": len(_cur_full.splitlines()),
              "rep_lines": len(_rep_full.splitlines()),
-             "n_accepted": len(accepted)},
+             "n_accepted": len(accepted),
+             "sides_source": _sides_source},
             step_index=step_index, path=path,
         )
     if _ic_per >= 0.80 and not force:
@@ -1323,15 +1368,9 @@ def _shared_context_duplicate_definitions(
 
 def _whole_side_churn(base_text: str, side_text: str) -> int:
     """Absolute changed-line count of a side vs the base (both directions)."""
-    import difflib as _difflib
+    from capybase.merge_intent import side_churn
 
-    b = base_text.splitlines()
-    s = side_text.splitlines()
-    n = 0
-    for tag, i1, i2, j1, j2 in _difflib.SequenceMatcher(None, b, s).get_opcodes():
-        if tag != "equal":
-            n += (i2 - i1) + (j2 - j1)
-    return n
+    return side_churn(base_text, side_text)
 
 
 def _whole_side_heuristic(base_text: str, sides: dict[str, str]) -> str:
@@ -8051,13 +8090,22 @@ class Orchestrator:
             # Whole-file portfolio: generate all-current / all-replayed
             # candidates and pick the best by file-level intent coverage.
             # Only fires when per-unit coverage is LOW (<0.80) — catches
-            # cases where per-unit compilation picked the wrong side due
-            # to cross-unit dependencies (protobuf-0067: unit 3 wrongly
+            # cases where per-unit compilation picked the wrong side due to
+            # cross-unit dependencies (protobuf-0067: unit 3 wrongly
             # took replayed_only because current_only failed standalone).
+            # Full-file sides come from the merge index stages when readable:
+            # marker-splice reconstruction is wrong for merge-ort-interleaved
+            # files, and units[0].base.text is a fragment for sub-units.
+            _wf_true = None
+            if len(accepted) >= 2:
+                try:
+                    _wf_true = _true_stage_sides(self.git, path)
+                except Exception:
+                    _wf_true = None
             _wf = _try_whole_file_portfolio(
                 units, accepted, original,
                 journal=self.journal, step_index=result.step_index,
-                path=path,
+                path=path, true_sides=_wf_true,
             )
             if _wf is not None:
                 accepted, _wf_payload = _wf
@@ -8136,6 +8184,7 @@ class Orchestrator:
                 # repair until the time budget expires.
                 _det_unchanged = False
                 self._p2_build_checked = False  # one build-test attempt per Phase 2
+                _ts_attempted = False  # true-side portfolio: once per file
                 while True:
                     spans_and_texts = [
                         (unit.marker_span, cand.resolved_text) for unit, cand in accepted
@@ -8220,17 +8269,37 @@ class Orchestrator:
                             not _phase2_model_used and effect == "UNCHANGED"
                         )
                     prev_failure_sig = cur_sig
+                    if not file_validation.passed and wf_retries == 0 and not _ts_attempted:
+                        # True-side portfolio at FIRST failure, before the
+                        # repair loop: a whole-file side swap — the duplicate-
+                        # definition pathology or the asymmetry takeover — is
+                        # a better answer than repairing a fundamentally
+                        # stale splice (0073: the stale merge's brace noise
+                        # gets "repaired" into a passing-but-wrong file).
+                        # Cheap when it declines; once per file.
+                        _ts_attempted = True
+                        _ts_res = self._try_true_side_portfolio(
+                            path, language, original, units,
+                            per_unit_buffer=buffer)
+                        if _ts_res is not None:
+                            accepted, buffer, file_validation = _ts_res
+                            # Re-enter the loop: the next iteration
+                            # re-splices from the swapped whole-file unit and
+                            # revalidates (including the build test).
+                            continue
                     if file_validation.passed:
-                        # Cross-ordered-blocks pathology: even a PASSING
-                        # splice still carries duplicate definitions in the
-                        # shared context when git interleaved both sides —
-                        # the build can't always see them (sibling-file
-                        # failures abort the build before it reaches the
-                        # conflict TU). When the pathology is present, swap
-                        # in a verified pristine side from the index stages.
-                        if wf_retries == 0:
+                        # Cross-ordered-blocks pathology / asymmetry takeover:
+                        # even a PASSING splice can be unsound — duplicates in
+                        # shared context when git interleaved both sides (the
+                        # build may abort on a sibling file before reaching
+                        # the conflict TU), or a wholesale rewrite whose
+                        # deletions the per-unit merge resurrected. Swap in a
+                        # verified pristine side from the index stages.
+                        if wf_retries == 0 and not _ts_attempted:
+                            _ts_attempted = True
                             _ts_res = self._try_true_side_portfolio(
-                                path, language, original, units)
+                                path, language, original, units,
+                                per_unit_buffer=buffer)
                             if _ts_res is not None:
                                 _ts_acc, _ts_buf, _ts_val = _ts_res
                                 if _ts_val.passed and _ts_buf != buffer:
@@ -8386,19 +8455,12 @@ class Orchestrator:
                                 break
                         if file_validation.passed:
                             break
-                        # True-side portfolio — the cross-ordered-blocks
-                        # pathology. When git interleaves both sides' content
-                        # into the SHARED context (duplicate identical-
-                        # signature definitions outside every marker span),
-                        # no per-region merge can compile. The merge index
-                        # still holds the pristine side files — offer each
-                        # as a whole-file candidate and let the compiler
-                        # plus adjudication decide.
-                        _ts_res = self._try_true_side_portfolio(
-                            path, language, original, units)
-                        if _ts_res is not None:
-                            accepted, buffer, file_validation = _ts_res
-                            break
+                        # (The true-side portfolio already ran at first
+                        # failure above — including its duplicate-definition
+                        # and journal-only asymmetry triggers. What remains
+                        # here is the marker-spliced candidate portfolio for
+                        # mixed merges whose per-unit sides were picked
+                        # inconsistently.)
                     # Attribute the failure to a unit and re-resolve it with the
                     # file-level failures as concrete repair feedback.
                     wf_retries += 1
@@ -11926,26 +11988,37 @@ class Orchestrator:
         language: str | None,
         original: str,
         units: list,
+        per_unit_buffer: str | None = None,
     ):
         """Whole-file candidates from the merge index's pristine side blobs.
 
-        For the cross-ordered-blocks pathology (duplicate identical-signature
-        definitions in the marker file's SHARED context — content outside
-        every marker span that no per-region resolution can remove), the
-        splice of ANY region choices keeps the duplicates. The index stages
-        (2 = current, 3 = replayed) still hold the pristine side files; each
-        becomes a whole-file candidate via a synthetic whole_file unit
-        (marker_span=None). Candidates pass verify_file (which classifies
+        Two triggers, either of which engages the same verify/adjudicate/swap
+        machinery:
+
+        1. Cross-ordered-blocks pathology — duplicate identical-signature
+           definitions in the marker file's SHARED context (content outside
+           every marker span that no per-region resolution can remove).
+        2. Asymmetry takeover — one side rewrote the file wholesale
+           (full-file churn gates, see ``merge_intent.asymmetry_takeover_gates``)
+           and the per-unit merge resurrected a large fraction of that side's
+           deletions. Journal-only until calibrated: gated behind
+           ``future.enable_true_side_asymmetry_takeover`` (default OFF); the
+           gate values are journaled either way as
+           ``asymmetry_takeover_gate`` events.
+
+        The index stages (2 = current, 3 = replayed) hold the pristine side
+        files; each becomes a whole-file candidate via a synthetic whole_file
+        unit (marker_span=None). Candidates pass verify_file (which classifies
         sibling build noise as infrastructure) and the per-file build test
         (same classification, via _classify_build_error_lines). When both
         sides verify, adjudication (LLM, churn-heuristic fallback) picks.
 
+        ``per_unit_buffer`` is the current spliced merge text, used by the
+        asymmetry trigger's resurrection measurement.
+
         Returns ``(accepted, buffer, validation)`` for the winning side, or
         None when no candidate verifies — the caller keeps its own result.
         """
-        dupes = _shared_context_duplicate_definitions(original, language)
-        if not dupes:
-            return None
         try:
             ts = _true_stage_sides(self.git, path)
         except Exception:
@@ -11953,6 +12026,36 @@ class Orchestrator:
         if not ts:
             return None
         sides, base_text = ts
+        trigger = "dup_pathology"
+        asym_winner: str | None = None
+        dupes = _shared_context_duplicate_definitions(original, language)
+        if not dupes:
+            from capybase.merge_intent import asymmetry_takeover_gates
+
+            gates = asymmetry_takeover_gates(
+                base_text,
+                sides.get("current", ""),
+                sides.get("replayed", ""),
+                per_unit_buffer or "",
+            )
+            enabled = bool(getattr(
+                self.config.future,
+                "enable_true_side_asymmetry_takeover", False))
+            self.journal.emit(
+                "asymmetry_takeover_gate",
+                {**gates, "dup_definitions": 0, "enabled": enabled},
+                step_index=self.step, path=path,
+            )
+            if not (enabled and gates.get("fires")):
+                return None
+            trigger = "asymmetry_takeover"
+            # The winner is gate-determined; adjudication is for choosing
+            # between two plausibly-good sides (the dup-pathology flow).
+            # Here the losing side is by construction the stale one, and an
+            # LLM asked to choose suffers "merge guilt" — weaving stale
+            # lines back. The churn heuristic would return the gate winner
+            # anyway (ratio >= 0.90 >> its 0.35 refinement band).
+            asym_winner = gates.get("winner")
         verified: list[tuple[str, str, object]] = []
         for side, text in sides.items():
             try:
@@ -11969,7 +12072,9 @@ class Orchestrator:
             verified.append((side, text, val))
         if not verified:
             return None
-        if len(verified) == 2:
+        if asym_winner is not None:
+            choice, via = asym_winner, "gate_determined"
+        elif len(verified) == 2:
             choice, via = self._adjudicate_whole_side(
                 path, language, base_text, sides)
         else:
@@ -12025,8 +12130,8 @@ class Orchestrator:
             )
             self.journal.emit(
                 "true_side_portfolio",
-                {"side": side, "via": via, "n_units": len(units),
-                 "dup_definitions": len(dupes)},
+                {"side": side, "via": via, "trigger": trigger,
+                 "n_units": len(units), "dup_definitions": len(dupes)},
                 step_index=self.step, path=path,
             )
             return [(unit, cand)], text, val

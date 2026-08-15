@@ -389,3 +389,177 @@ def classify_deletion_stability(
     # reappeared → stable (deliberate permanent deletion).
     return "stable"
 
+
+# ---------------------------------------------------------------------------
+# Full-file context — whole-file asymmetry signals for region-level decisions
+# ---------------------------------------------------------------------------
+#
+# Region-level units (and their entity/statement sub-splits) carry FRAGMENT
+# side texts; any decision computed from them about which side "deleted" is
+# unreliable — the reverted parent_deletion_override rule (14681db) failed
+# exactly there: full-file base diffed against region fragments inflated
+# deletion counts for both sides, and fragment-size ratios cannot distinguish
+# a true wholesale deletion (protobuf-0073) from a symmetric additive conflict
+# (protobuf-0061). The functions below compute the authoritative whole-file
+# signals from the pristine stage blobs, for stamping on every unit at
+# extraction (``structural_metadata["full_file_context"]``) and for the
+# whole-file-side takeover gates.
+
+# Thresholds calibrated on the realworld corpus (74 cases). churn_ratio is
+# |c-r|/max(c,r) of full-file changed-line counts vs base; >= 0.90 separates
+# a clean category — in all 17 such cases the oracle is one side verbatim
+# (winner token-Jaccard >= 0.973, and the oracle's stale-fraction vs the
+# winner is <= 0.021), and below ~0.75 a whole-side takeover becomes unsafe.
+# Dominance (winner churn >= 0.3 x base lines) excludes small-churn
+# high-ratio files where both sides made minor edits. Stale fraction is the
+# share of the merge's stripped non-blank line-set absent from the winner —
+# the failing protobuf-0073 merge measures 0.364 (kept the stale side's
+# conflict-region content on top of the winner's clean deletions, which git
+# had already applied to the shared context — so only the region's ~70 lines
+# are stale, not all 573 deleted lines; a deletion-count metric reads 0.15
+# and misses it).
+FULL_FILE_ASYMMETRY_RATIO = 0.90
+FULL_FILE_DOMINANCE_FRACTION = 0.30
+FULL_FILE_STALE_FRACTION = 0.15
+# Absolute contamination floor: a fractional threshold alone mis-fires on
+# tiny merges (winner reduced to 5 lines + 1 legitimate loser line = 17%
+# stale). Require a meaningful amount of stale content too.
+FULL_FILE_STALE_MIN_LINES = 3
+
+
+def side_churn(base_text: str, side_text: str) -> int:
+    """Absolute changed-line count of one side vs the base (both directions).
+
+    The full-file analogue of the fragment diffs in structural_resolver —
+    same histogram-diff seam (``line_matcher``), applied to whole files.
+    """
+    b = base_text.splitlines()
+    s = side_text.splitlines()
+    n = 0
+    for tag, i1, i2, j1, j2 in line_matcher(b, s).get_opcodes():
+        if tag != "equal":
+            n += (i2 - i1) + (j2 - j1)
+    return n
+
+
+def full_file_context(base_text: str, current_text: str, replayed_text: str) -> dict:
+    """Whole-file three-way shape summary, for stamping on every unit.
+
+    Keys: line counts; ``current_churn``/``replayed_churn`` (changed lines
+    vs base); ``churn_ratio`` (normalized asymmetry); ``asymmetry_side``
+    (the higher-churn side when the ratio clears
+    ``FULL_FILE_ASYMMETRY_RATIO``, else None — the side whose wholesale
+    rewrite/deletion carries the merge intent); ``deleting_side`` (the
+    asymmetry side when it also NET-removed >= 30% of the base's lines —
+    the side whose deletions are at resurrection risk; informational);
+    ``dominant_churn``. Pure numbers — no texts, so it is cheap to stamp
+    on every unit and inherit into sub-splits.
+    """
+    c = side_churn(base_text, current_text)
+    r = side_churn(base_text, replayed_text)
+    ratio = abs(c - r) / max(c, r, 1)
+    winner = "current" if c >= r else "replayed"
+    base_n = len(base_text.splitlines())
+    winner_lines = len(
+        (current_text if winner == "current" else replayed_text).splitlines()
+    )
+    asymmetry_side = winner if ratio >= FULL_FILE_ASYMMETRY_RATIO else None
+    return {
+        "base_lines": base_n,
+        "current_lines": len(current_text.splitlines()),
+        "replayed_lines": len(replayed_text.splitlines()),
+        "current_churn": c,
+        "replayed_churn": r,
+        "churn_ratio": round(ratio, 4),
+        "asymmetry_side": asymmetry_side,
+        "deleting_side": (
+            asymmetry_side
+            if asymmetry_side is not None and winner_lines <= 0.70 * base_n
+            else None
+        ),
+        "dominant_churn": max(c, r),
+    }
+
+
+def asymmetry_takeover_gates(
+    base_text: str,
+    current_text: str,
+    replayed_text: str,
+    merged_text: str,
+) -> dict:
+    """Evaluate the whole-file-side takeover gates for a candidate merge.
+
+    Fires only when ALL of these hold (corpus-calibrated, see constants):
+
+    1. ``churn_ratio >= 0.90`` — one side rewrote the file wholesale while
+       the other barely touched it (the oracle in this regime is one side
+       verbatim; below ~0.75 taking a side loses real mixed-merge content).
+    2. dominance — the winning side's churn is >= 0.3 x base lines, so
+       small-churn high-ratio files (both sides made minor edits) decline.
+    3. staleness — >= 15% of the merge's line-set AND >= 3 lines are absent
+       from the winning side's file: the merge kept meaningful stale-side
+       content the winner superseded. Lines are whitespace-collapsed before
+       set insertion so indentation drift doesn't inflate the fraction.
+       Corpus separation is 17x (failing protobuf-0073 merge: 0.364; worst
+       good merge in the band: 0.021). Note git's shared context already
+       carries the winner's CLEAN deletions, so this — not a deleted-line
+       resurrection count — is the measurable trace of the failure.
+
+    The gate payload journals the stale-line count and a sample of the
+    stale lines so post-hoc analysis can see WHAT the takeover would drop
+    (the loser's-small-fix edge case: a legitimate small addition riding
+    inside the stale content).
+
+    Returns the gate values (all journalable) with a ``fires`` key.
+    """
+    ctx = full_file_context(base_text, current_text, replayed_text)
+    ratio_ok = ctx["churn_ratio"] >= FULL_FILE_ASYMMETRY_RATIO
+    dominance_ok = ctx["dominant_churn"] >= (
+        FULL_FILE_DOMINANCE_FRACTION * max(ctx["base_lines"], 1)
+    )
+    winner = ctx["asymmetry_side"]
+    gates: dict = {
+        "churn_ratio": ctx["churn_ratio"],
+        "ratio_ok": ratio_ok,
+        "dominance_ok": dominance_ok,
+        "winner": winner,
+        "current_churn": ctx["current_churn"],
+        "replayed_churn": ctx["replayed_churn"],
+        "base_lines": ctx["base_lines"],
+        "stale_fraction": 0.0,
+        "stale_lines": 0,
+        "stale_ok": False,
+        "stale_sample": [],
+    }
+    if not (ratio_ok and dominance_ok and winner is not None):
+        gates["fires"] = False
+        return gates
+    winner_text = current_text if winner == "current" else replayed_text
+
+    def _line_set(text: str) -> set[str]:
+        # Whitespace-collapsed: semantically identical lines with different
+        # indentation must not count as stale.
+        return {
+            "".join(ln.split())
+            for ln in text.splitlines()
+            if ln.strip()
+        }
+
+    merged_set = _line_set(merged_text)
+    winner_set = _line_set(winner_text)
+    stale = merged_set - winner_set
+    frac = len(stale) / len(merged_set) if merged_set else 0.0
+    gates["stale_fraction"] = round(frac, 4)
+    gates["stale_lines"] = len(stale)
+    gates["stale_ok"] = (
+        frac >= FULL_FILE_STALE_FRACTION
+        and len(stale) >= FULL_FILE_STALE_MIN_LINES
+    )
+    # First few stale lines, whitespace-resqueezed for readability.
+    gates["stale_sample"] = [
+        (s[:70] + "…") if len(s) > 70 else s
+        for s in sorted(stale)[:3]
+    ]
+    gates["fires"] = bool(gates["stale_ok"])
+    return gates
+

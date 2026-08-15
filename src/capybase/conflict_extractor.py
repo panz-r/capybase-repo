@@ -187,6 +187,22 @@ class ConflictExtractor:
             for u in units:
                 u.structural_metadata["sibling_units"] = siblings
                 u.structural_metadata["sibling_count"] = len(units)
+        # Full-file context: stamp the whole-file three-way shape (line counts,
+        # churn vs base, asymmetry/deletion direction) on every unit. Region
+        # fragments cannot answer "which side rewrote the file" — the reverted
+        # parent_deletion_override rule failed on exactly that confusion.
+        # Numbers only (texts stay in the stage blobs, reachable via the
+        # units' blob_oid), so stamping is cheap. Inherited by sub-splits via
+        # _build_sub_unit's metadata merge. Computed AFTER _split_units so
+        # sub-units receive it too.
+        try:
+            from capybase.merge_intent import full_file_context
+
+            _ffc = full_file_context(base_text, current_text, replayed_text)
+            for u in units:
+                u.structural_metadata["full_file_context"] = dict(_ffc)
+        except Exception:  # noqa: BLE001 - context stamping is advisory
+            pass
         # Enrich units with abstract-parser structural data when configured and the
         # grammar is available. For each unit we resolve the lowest enclosing
         # AST node (the specific def/impl/struct) and record its text, type,
@@ -316,11 +332,20 @@ class ConflictExtractor:
                     n_stmt = len(stmt_pts) + 1
                     s_start, s_end = sub.marker_span
                     spans = _proportional_sub_spans(s_start, s_end, [1] * n_stmt)
+                    # Carry the entity split's parent-deletion metadata through
+                    # the statement split — a fresh meta dict here would drop
+                    # it, blinding parent_has_asymmetry consumers downstream.
+                    _stmt_parent_meta = {
+                        k: v
+                        for k, v in sub.structural_metadata.items()
+                        if k.startswith("parent_")
+                    }
                     stmt_subs = [
                         _build_sub_unit(
                             sub, span, k, n_stmt,
                             sub.current.text or "", sub.replayed.text or "",
                             sub.base.text or "", n_stmt,
+                            parent_meta=_stmt_parent_meta or None,
                         )
                         for k, span in enumerate(spans)
                     ]
