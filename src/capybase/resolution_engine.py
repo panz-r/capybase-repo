@@ -3620,6 +3620,8 @@ class ResolutionEngine:
             mean_token_entropy=resp.mean_token_entropy,
             raw_response=resp.text,
             parse_warnings=warnings,
+            finish_reason=getattr(resp, "finish_reason", None) or "",
+            llm_latency_ms=getattr(resp, "latency_ms", None),
             # A genuine model refusal (it answered JSON but said needs_human).
             failure_kind="model_refusal" if needs_human else "",
             # Default LLM provenance (#9 step 8): plain LLM. The orchestrator

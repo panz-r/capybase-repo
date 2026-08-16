@@ -164,6 +164,13 @@ class LLMResponse:
     content tokens, reduced from per-token logprobs the API emits in each SSE
     delta. It is ``None`` when the API returned no logprobs (the default when
     ``capture_token_entropy`` is off, or the server doesn't support them).
+
+    Degradation telemetry: ``finish_reason`` (stop/length/content_filter...),
+    ``usage_prompt_tokens``/``usage_completion_tokens`` (parsed from the
+    server's ``usage`` block when present), and ``latency_ms`` (wall time of
+    the call). These diagnose empty-response pathology — ``stop`` with zero
+    completion tokens is a prompt-shape refusal; ``length`` is a truncation;
+    absent finish_reason with high latency is transport trouble.
     """
 
     def __init__(
@@ -171,10 +178,18 @@ class LLMResponse:
         text: str,
         raw: dict[str, Any] | None = None,
         mean_token_entropy: float | None = None,
+        finish_reason: str | None = None,
+        usage_prompt_tokens: int | None = None,
+        usage_completion_tokens: int | None = None,
+        latency_ms: float | None = None,
     ) -> None:
         self.text = text
         self.raw = raw
         self.mean_token_entropy = mean_token_entropy
+        self.finish_reason = finish_reason
+        self.usage_prompt_tokens = usage_prompt_tokens
+        self.usage_completion_tokens = usage_completion_tokens
+        self.latency_ms = latency_ms
 
 
 class LLMClient(Protocol):
@@ -372,8 +387,10 @@ class OpenAICompatibleClient:
         """Non-streaming read returning one ``LLMResponse`` per choice.
 
         ``url`` is accepted for signature parity with :meth:`_read_stream` so a
-        single :meth:`_attempt` path can call either reader; it is unused here.
+        single :meth:`_attempt` path can call either reader; it's unused here.
         """
+        import time as _time_lm
+        _t0 = _time_lm.monotonic()
         try:
             with urllib.request.urlopen(
                 req, timeout=self.config.generation_timeout_seconds
@@ -384,6 +401,9 @@ class OpenAICompatibleClient:
                 f"LLM request failed: socket read timed out after "
                 f"{self.config.generation_timeout_seconds}s"
             ) from exc
+        if isinstance(raw, dict):
+            raw["_latency_ms"] = (_time_lm.monotonic() - _t0) * 1000.0
+        usage = raw.get("usage") or {}
         choices = raw.get("choices") or []
         out: list[LLMResponse] = []
         for ch in choices:
@@ -396,7 +416,15 @@ class OpenAICompatibleClient:
             ch_lp = (ch.get("logprobs") or {})
             if isinstance(ch_lp, dict):
                 mte = _mean_token_entropy_from_logprobs(ch_lp.get("content") or [])
-            out.append(LLMResponse(text=text or "", raw=raw, mean_token_entropy=mte))
+            out.append(LLMResponse(
+                text=text or "", raw=raw, mean_token_entropy=mte,
+                finish_reason=ch.get("finish_reason"),
+                usage_prompt_tokens=(usage.get("prompt_tokens")
+                                     if isinstance(usage, dict) else None),
+                usage_completion_tokens=(usage.get("completion_tokens")
+                                         if isinstance(usage, dict) else None),
+                latency_ms=_latency_ms(raw),
+            ))
         return out
 
     def _read_stream(self, req: urllib.request.Request, url: str) -> LLMResponse:
@@ -418,6 +446,7 @@ class OpenAICompatibleClient:
         Falls back to non-streaming if the server returns a non-SSE JSON body.
         """
         deadline = time.monotonic() + self.config.generation_timeout_seconds
+        _t0 = time.monotonic()
         try:
             with urllib.request.urlopen(
                 req, timeout=self.config.request_timeout_seconds
@@ -426,6 +455,8 @@ class OpenAICompatibleClient:
                 if "text/event-stream" not in ctype and "application/x-ndjson" not in ctype:
                     # Server ignored stream=true and returned a single JSON object.
                     raw = json.loads(resp.read().decode("utf-8"))
+                    if isinstance(raw, dict):
+                        raw["_latency_ms"] = (time.monotonic() - _t0) * 1000.0
                     return _from_non_stream(raw)
                 content_parts: list[str] = []
                 finish_reason: str | None = None
@@ -479,11 +510,15 @@ class OpenAICompatibleClient:
         text = "".join(content_parts)
         meta = {"finish_reason": finish_reason, "early_terminated": early_stop}
         raw_meta.setdefault("_accumulated", meta)
+        raw_meta.setdefault(
+            "_latency_ms", (time.monotonic() - _t0) * 1000.0)
         mean_token_entropy = (
             sum(token_nlls) / len(token_nlls) if token_nlls else None
         )
         return LLMResponse(
-            text=text, raw=raw_meta, mean_token_entropy=mean_token_entropy
+            text=text, raw=raw_meta, mean_token_entropy=mean_token_entropy,
+            finish_reason=finish_reason,
+            latency_ms=_latency_ms(raw_meta),
         )
 
 
@@ -585,7 +620,35 @@ def _from_non_stream(raw: dict[str, Any]) -> LLMResponse:
         text = raw["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise RuntimeError(f"unexpected LLM response shape: {exc}") from exc
-    return LLMResponse(text=text, raw=raw)
+    finish = None
+    usage = raw.get("usage") or {}
+    try:
+        finish = raw["choices"][0].get("finish_reason")
+    except (KeyError, IndexError, TypeError):
+        pass
+    return LLMResponse(
+        text=text, raw=raw, finish_reason=finish,
+        usage_prompt_tokens=(usage.get("prompt_tokens")
+                             if isinstance(usage, dict) else None),
+        usage_completion_tokens=(usage.get("completion_tokens")
+                                 if isinstance(usage, dict) else None),
+        latency_ms=_latency_ms(raw),
+    )
+
+
+def _latency_ms(raw: dict[str, Any]) -> float | None:
+    """Latency from the request-layer timing stamp, when present.
+
+    The transport layer stamps ``raw["_latency_ms"]`` (monotonic wall time
+    around the HTTP call) before handing the raw body to the response
+    constructors; streaming responses have no usage block, so this is the
+    only latency source there.
+    """
+    v = raw.get("_latency_ms") if isinstance(raw, dict) else None
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def coerce_candidate_dict(

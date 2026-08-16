@@ -10166,6 +10166,59 @@ class Orchestrator:
             )
         return cand
 
+    def _empty_fast_fail_recovery(
+        self, unit: ConflictUnit, failed: "CandidateResolution",
+    ) -> "UnitOutcome | None":
+        """Deterministic recovery after a first empty LLM response.
+
+        The pre-LLM source portfolio already declined this unit (it runs
+        before the LLM in the cascade), so its compositions failed
+        verification. What remains cheap and safe: the two single-side
+        candidates, verified directly. First that passes wins; both failing
+        returns None so the caller continues the normal retry policy.
+        """
+        for side in ("current", "replayed"):
+            side_obj = getattr(unit, side, None)
+            text = (getattr(side_obj, "text", "") or "") if side_obj else ""
+            if not text.strip():
+                continue
+            cand = CandidateResolution(
+                candidate_id=f"{unit.unit_id}:{side}_only_empty_fallback",
+                unit_id=unit.unit_id,
+                model_name="empty_fast_fail",
+                prompt_version="empty-fallback.v1",
+                resolved_text=text,
+                provenance=f"deterministic_source_{side}_only",
+            )
+            validation = self.verification.verify(unit, cand)
+            self.journal.emit(
+                "candidate_validated",
+                {"candidate_id": cand.candidate_id, "passed": validation.passed,
+                 "hard_failures": [f.message for f in validation.hard_failures][:3]},
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            if not validation.passed:
+                continue
+            if self._strictness_blocks_pre_llm(unit, cand, validation, "empty_fast_fail"):
+                continue
+            outcome = UnitOutcome(
+                unit=unit, validation=validation, attempts=[failed, cand])
+            outcome.accepted = cand
+            self._record_resolution_attempt(
+                outcome, mechanism="empty_fast_fail",
+                candidate=cand, validation=validation,
+                decision="accept",
+                reason="first-empty fast-fail: deterministic side fallback",
+            )
+            self.journal.emit(
+                "candidate_accepted",
+                {"candidate_id": cand.candidate_id, "via": "empty_fast_fail",
+                 "provenance": cand.provenance},
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            return outcome
+        return None
+
     def _resolve_unit(
         self, unit: ConflictUnit, *, seed_failures: list | None = None,
         seed_candidate: "CandidateResolution | None" = None,
@@ -10702,6 +10755,14 @@ class Orchestrator:
             prompt_trims = getattr(winner, "prompt_trims", None)
             if prompt_trims:
                 emit_payload["prompt_trims"] = prompt_trims
+            # Degradation telemetry: finish_reason + latency distinguish
+            # prompt-shape refusals (stop + empty), truncation (length), and
+            # transport trouble (no finish_reason + high latency).
+            if getattr(winner, "finish_reason", ""):
+                emit_payload["finish_reason"] = winner.finish_reason
+            if getattr(winner, "llm_latency_ms", None) is not None:
+                emit_payload["llm_latency_ms"] = round(
+                    winner.llm_latency_ms, 1)
             if consensus_report is not None:
                 emit_payload["consensus_agreement"] = consensus_report.agreement_score
                 emit_payload["consensus_clusters"] = consensus_report.cluster_count
@@ -11237,6 +11298,33 @@ class Orchestrator:
                         unit_id=unit.unit_id,
                     )
                     return outcome
+
+            # First-empty fast-fail (reviewer-consensus hardening): for a
+            # SMALL fresh unit, an empty first response means the model
+            # can't handle this fragment's prompt shape — retrying the same
+            # prompt statistically won't change that but burns 30-60s per
+            # retry of the Phase-1 budget (protobuf-0043's empty-LLM
+            # sub-units starved every downstream recovery). Recover
+            # deterministically instead; fall through to the normal retry
+            # policy when even that declines (no behavior loss).
+            if (
+                failures is None
+                and retry_count == 0
+                and not (cand.resolved_text or "").strip()
+                and getattr(context, "token_estimate", 0) < 1500
+            ):
+                _unit_kind = "sub" if "#s" in unit.unit_id else "top"
+                self.journal.emit(
+                    "llm_empty_fragment",
+                    {"token_estimate": context.token_estimate,
+                     "unit_kind": _unit_kind,
+                     "failure_kind": cand.failure_kind or "",
+                     "unit_id": unit.unit_id},
+                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                )
+                _ef = self._empty_fast_fail_recovery(unit, cand)
+                if _ef is not None:
+                    return _ef
 
             decision = self.risk.decide(
                 validation,

@@ -311,6 +311,13 @@ class CandidateResolution(BaseModel):
 
     raw_response: str = ""
     parse_warnings: list[str] = Field(default_factory=list)
+    # Degradation telemetry (surfaced into candidate_generated journal
+    # events): why the model stopped (stop/length/content_filter...) and how
+    # long the call took. Diagnoses empty-response pathology — "stop" with
+    # empty text is a prompt-shape refusal; "length" is truncation; high
+    # latency with no finish_reason is transport trouble.
+    finish_reason: str = ""
+    llm_latency_ms: float | None = None
     # Distinguishes a genuine model refusal (``"model_refusal"``) from a
     # transient/technical failure (``"request_failed"``, ``"parse_failed"``,
     # ``"truncated"``) — and an LSP/type-check failure (``"lsp_failed"``). Risk
