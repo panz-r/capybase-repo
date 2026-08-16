@@ -461,14 +461,19 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
 
         if prepare:
             # Run the prepare step (configure/cmake). The prepare is
-            # deterministic per source tree but takes ~30s; we accept this
-            # overhead per case rather than caching, because cached Makefiles
-            # contain absolute paths (TOP=/var/tmp/capy-rw-OLD/r) that break
-            # when restored into a different temp dir.
+            # deterministic per source tree but takes ~30s (cmake) to ~3-5
+            # minutes (autoreconf+configure on old autotools trees —
+            # protobuf's 2015-era commits intermittently exceeded the old
+            # 180s budget under load, leaving no Makefile and a bare `make`
+            # gate that poisoned verification). We accept this overhead per
+            # case rather than caching, because cached Makefiles contain
+            # absolute paths (TOP=/var/tmp/capy-rw-OLD/r) that break when
+            # restored into a different temp dir.
             try:
                 import subprocess as _sp
+                _prepare_timeout = 300 if "autoreconf" in prepare else 180
                 proc = _sp.run(prepare, shell=True, cwd=str(repo),
-                               capture_output=True, timeout=180)
+                               capture_output=True, timeout=_prepare_timeout)
                 prepare_ok = proc.returncode == 0
             except Exception:  # noqa: BLE001 — best-effort
                 prepare_ok = False
@@ -484,6 +489,15 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
         # directory hangs or fails repeatedly inside the orchestrator loop).
         if prepare_ok and "cmake --build" in build_cmd:
             if not (repo / "build").is_dir():
+                prepare_ok = False
+        # Same honesty for make-based gates: a `make`/`make -jN` build
+        # command with no Makefile in the tree fails instantly with
+        # "No targets specified and no makefile found" — previously a
+        # poisoned hard failure in every Phase 2 verify. If prepare
+        # didn't actually leave a Makefile, degrade to "true" and let the
+        # per-unit gcc -fsyntax-only gate carry compile checking.
+        if prepare_ok and build_cmd.strip().startswith("make"):
+            if not (repo / "Makefile").exists():
                 prepare_ok = False
         _DETECTED_BUILD_CMD[case.id] = build_cmd if prepare_ok else "true"
         # Generate sqlite's derived headers (parse.h, opcodes.h, sqlite3.h,
@@ -1117,7 +1131,13 @@ def main():
             # dataset name omits (jsonc-history → external-datasets/json-c/).
             # The CLONE_OVERRIDES table covers those exceptions; everything else
             # follows the standard convention (redis, sqlite, tokio, ...).
-            _CLONE_OVERRIDES = {"jsonc-history": "json-c"}
+            # fmt-history → fmtlib-fmt: without the override the clone misses,
+            # cases get single-file repos, no build gate, and no
+            # compile_commands.json.
+            _CLONE_OVERRIDES = {
+                "jsonc-history": "json-c",
+                "fmt-history": "fmtlib-fmt",
+            }
             clone_name = _CLONE_OVERRIDES.get(
                 case.dataset,
                 case.dataset.replace("-history", "") if case.dataset else "",
