@@ -572,24 +572,39 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         # highest-leverage rule for real C++ conflicts where both sides modify
         # a shared signature but add different code. Runs LAST so the more
         # specific rules (insertion_union, token_disjoint, etc.) get priority.
-        merged = _try_partial_disjoint_merge(base, current, replayed)
-        if merged is not None:
-            if isinstance(merged, StructuralResolution):
-                # The deferred-core path returns a StructuralResolution directly
-                # (with deferred_core set). Pass it through without re-wrapping.
-                return merged
-            return StructuralResolution(rule="partial_disjoint_merge", text=merged)
+        #
+        # Depth cap: the orchestrator resolves a deferred core through the
+        # FULL cascade, which lands here again. Past two levels the
+        # decomposition has stopped paying for itself (and misaligned shapes
+        # can fixpoint) — decline and let the portfolio/SBCR/LLM finish.
+        if _deferred_core_depth(unit) < 2:
+            merged = _try_partial_disjoint_merge(base, current, replayed)
+            if merged is not None:
+                if isinstance(merged, StructuralResolution):
+                    # The deferred-core path returns a StructuralResolution directly
+                    # (with deferred_core set). Pass it through without re-wrapping.
+                    return merged
+                return StructuralResolution(rule="partial_disjoint_merge", text=merged)
 
     # Rule N: generalized mini-conflict extraction. If all rules above declined,
     # try to shrink the conflict to its ambiguous core by resolving provably
     # deterministic regions (identical lines, one-sided changes, agreed
     # deletions). If the entire conflict is deterministic, accept it without
     # the LLM. If a core remains, emit a deferred_core for the LLM.
-    mini = _try_generalized_mini_conflict(base, current, replayed)
-    if mini is not None:
-        return mini
+    if _deferred_core_depth(unit) < 2:
+        mini = _try_generalized_mini_conflict(base, current, replayed)
+        if mini is not None:
+            return mini
 
     return StructuralResolution(rule=None, text=None)
+
+
+def _deferred_core_depth(unit: ConflictUnit) -> int:
+    """How many deferred-core levels deep this unit already is (0 = top)."""
+    try:
+        return int(unit.structural_metadata.get("deferred_core_depth", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def deterministically_mergeable(unit: ConflictUnit) -> bool:
@@ -1732,6 +1747,15 @@ def _try_partial_disjoint_merge(base: str, current: str, replayed: str) -> str |
             has_tails = bool(pre_resolved.strip()) or bool(post_resolved.strip())
             if not has_tails:
                 return None  # no decomposition value; defer to the LLM
+            # Degenerate-core guard: a deferred core with no resolvable
+            # content (both side texts empty) has nothing for the LLM to
+            # resolve — assembling without the core IS the resolution.
+            if not core_cur.strip() and not core_rep.strip():
+                parts = [p for p in [pre_resolved, post_resolved] if p]
+                return StructuralResolution(
+                    rule="partial_disjoint_merge",
+                    text="\n".join(parts),
+                )
             core_resolved = core_cur  # conservative default; patched by LLM
             parts = [p for p in [pre_resolved, core_resolved, post_resolved] if p]
             # Record the core's character offset in the assembled text. The
@@ -2070,6 +2094,21 @@ def _try_generalized_mini_conflict(
     tail_cov = min(cur_tail_cov, rep_tail_cov)
     if tail_cov < 0.5:
         return None  # shrinking dropped side-specific additions from the tails
+
+    # Degenerate/fixpoint guards. The core extraction slices
+    # ``cur_lines``/``rep_lines`` with BASE indices — only aligned when the
+    # sides have no net insertions. On misaligned shapes the slices can
+    # produce an empty core or a core as large as the input. An empty core
+    # has nothing for the LLM to resolve; a non-shrinking core recurses
+    # forever (the orchestrator re-runs the full cascade on the core, which
+    # re-fires this rule): protobuf-0065 hit the Python recursion limit at
+    # 327 levels and wrote a 4.8x-ballooned file. Decline both.
+    if not merged_core_cur.strip() and not merged_core_rep.strip():
+        return StructuralResolution(rule="mini_conflict", text=full_text)
+    _nb = lambda t: sum(  # noqa: E731 — local, used twice
+        1 for ln in (t or "").split("\n") if ln.strip())
+    if _nb(merged_core_cur) + _nb(merged_core_rep) >= _nb(current) + _nb(replayed):
+        return None  # the core didn't shrink — recursing would not converge
 
     return StructuralResolution(
         rule="mini_conflict",

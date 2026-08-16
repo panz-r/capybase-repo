@@ -5050,6 +5050,11 @@ class Orchestrator:
         Returns the patched resolved_text, or None if the core couldn't be
         resolved (the conservative default — core_cur — remains in place).
         """
+        # Empty-core guard: nothing to resolve — the assembly without the
+        # core is already the resolution (protobuf-0065's recursion spun
+        # 327 levels on exactly this shape before hitting the stack limit).
+        if not core_cur.strip() and not core_rep.strip():
+            return None
         try:
             from capybase.conflict_model import ConflictUnit as CU, ConflictSide
 
@@ -5084,8 +5089,15 @@ class Orchestrator:
 
             # Inherit the parent's structural metadata so the LLM sees the
             # enclosing function/class and the structural anchor renders.
+            # The depth stamp caps the cascade's structural recursion: at
+            # depth >= 2 resolve_structurally declines the mini-conflict
+            # family (see _deferred_core_depth), so the core resolves via
+            # portfolio/SBCR/LLM instead of recursing.
             core_meta = dict(unit.structural_metadata)
             core_meta["deferred_core_context"] = "\n".join(pad_before + pad_after)
+            core_meta["deferred_core_depth"] = (
+                int(unit.structural_metadata.get("deferred_core_depth", 0) or 0) + 1
+            )
 
             core_unit = CU(
                 session_id=unit.session_id,
@@ -5148,6 +5160,17 @@ class Orchestrator:
                     if repaired is not None and _brace_imbalance_line(repaired, unit.language) is None:
                         return repaired
                 return patched
+            return None
+        except RecursionError:
+            # The deferred-core recursion ran away (the depth cap and
+            # emitter guards are the primary defenses; this is the last
+            # line). Journal it — a silently-swallowed RecursionError is
+            # how the protobuf-0065 ballooning hid for as long as it did.
+            self.journal.emit(
+                "deferred_core_overflow",
+                {"unit_id": unit.unit_id},
+                step_index=self.step, path=unit.path,
+            )
             return None
         except Exception:  # noqa: BLE001 — mini-conflict is advisory
             return None
