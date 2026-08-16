@@ -3614,40 +3614,53 @@ def _is_ccache_failure(stderr: str) -> bool:
 
 
 # Compile_commands.json cache: parsed once per repo, keyed by repo_root path.
-_COMPILE_COMMANDS_CACHE: dict[str, dict[str, str]] = {}
+# Values map lookup key (relative path + basename) -> (command, directory).
+_COMPILE_COMMANDS_CACHE: dict[str, dict[str, tuple[str, str]]] = {}
 
 
-def _load_compile_commands(repo_root: str) -> dict[str, str] | None:
-    """Load and cache compile_commands.json from the repo root or build dir.
+def _load_compile_commands(repo_root: str) -> dict[str, tuple[str, str]] | None:
+    """Load and cache compile_commands.json from the repo root or build dirs.
 
-    Returns a dict mapping file path → compile command (the ``command`` or
-    ``arguments`` field from the JSON entry). Returns None when no
-    compile_commands.json is found or parsing fails.
+    Returns a dict mapping file path → ``(command, directory)`` — the
+    ``command``/``arguments`` field plus the entry's ``directory`` (the cwd
+    the command was generated to run from, typically the build dir; cmake
+    emits relative ``-I`` flags that only resolve from there). Returns None
+    when no compile_commands.json is found or parsing fails.
     """
     if repo_root in _COMPILE_COMMANDS_CACHE:
         return _COMPILE_COMMANDS_CACHE[repo_root] or None
     import json as _json_cc
-    # Check repo root and common build dirs
-    for cc_path in (
-        Path(repo_root) / "compile_commands.json",
-        Path(repo_root) / "build" / "compile_commands.json",
-    ):
+    # Repo root and the common build-dir layouts (cmake single-config at
+    # build/, multi-config at build/<cfg>/).
+    root = Path(repo_root)
+    candidates = [
+        root / "compile_commands.json",
+        root / "build" / "compile_commands.json",
+    ]
+    if (root / "build").is_dir():
+        candidates.extend(
+            sorted((root / "build").glob("*/compile_commands.json")))
+    for cc_path in candidates:
         if not cc_path.exists():
             continue
         try:
             entries = _json_cc.loads(cc_path.read_text(encoding="utf-8"))
-            mapping: dict[str, str] = {}
+            mapping: dict[str, tuple[str, str]] = {}
             for entry in entries:
                 f = entry.get("file", "")
                 cmd = entry.get("command") or entry.get("arguments")
                 if isinstance(cmd, list):
                     cmd = " ".join(cmd)
+                directory = entry.get("directory", "") or str(repo_root)
                 if f and cmd:
                     # Normalize to relative path for lookup
-                    rel = str(Path(f).relative_to(repo_root)) if Path(f).is_absolute() else f
-                    mapping[rel] = cmd
+                    try:
+                        rel = str(Path(f).relative_to(repo_root)) if Path(f).is_absolute() else f
+                    except ValueError:
+                        rel = f  # file outside repo_root (worktree mismatch)
+                    mapping[rel] = (cmd, directory)
                     # Also store the basename for fuzzy matching
-                    mapping[Path(f).name] = cmd
+                    mapping[Path(f).name] = (cmd, directory)
             _COMPILE_COMMANDS_CACHE[repo_root] = mapping
             return mapping if mapping else None
         except Exception:  # noqa: BLE001
@@ -3656,26 +3669,46 @@ def _load_compile_commands(repo_root: str) -> dict[str, str] | None:
     return None
 
 
+def _cc_include_resolution_failure(stderr: str) -> bool:
+    """True when a compile-commands compile died on #include resolution.
+
+    ``fatal error: foo.h: No such file or directory`` means the adapted
+    flags didn't resolve includes (wrong cwd/relative -I) — the check
+    mis-ran, not the code failed. Callers should treat this as
+    "check unavailable" (fall through to the build branch), never as a
+    syntax verdict; otherwise a mis-adapted database becomes a new
+    poisoned-failure source.
+    """
+    return "fatal error:" in (stderr or "") and (
+        "No such file or directory" in (stderr or "")
+    )
+
+
 def _try_compile_commands(
     repo_root: str, path: str, source_text: str, language: str | None,
 ) -> tuple[bool, str] | None:
     """Try to compile a single file using the compile_commands.json entry.
 
     Returns ``(True/False, message)`` if the compile ran, or ``None`` if no
-    compile_commands.json entry was found for this file.
+    compile_commands.json entry was found — or the adapted command couldn't
+    resolve its includes (treated as check-unavailable, not a failure).
 
     Replaces the source path in the compile command with a temp file
-    containing ``source_text``, runs with ``-fsyntax-only -c`` (skip linking),
-    and returns the pass/fail result. The exact flags from the original command
-    (``-I``, ``-D``, ``-std``) are preserved.
+    containing ``source_text``, runs with ``-fsyntax-only`` (skip linking).
+    The original flags (``-I``, ``-D``, ``-std``) are preserved; the command
+    runs with the ENTRY's ``directory`` as cwd (cmake's per-entry base —
+    relative ``-I`` flags only resolve from there), and relative include
+    paths are additionally absolutized against it so cwd variance can't
+    break includes.
     """
     cc = _load_compile_commands(repo_root)
     if not cc:
         return None
     # Look up by exact path or basename
-    cmd = cc.get(path) or cc.get(Path(path).name)
-    if not cmd:
+    entry = cc.get(path) or cc.get(Path(path).name)
+    if not entry:
         return None
+    cmd, directory = entry
     import shlex as _shlex_cc
     import subprocess as _sp_cc
     import tempfile as _tf_cc
@@ -3700,29 +3733,55 @@ def _try_compile_commands(
             # Replace -o output.o with nothing (syntax-only doesn't produce output)
             clean_flags = []
             skip_next = False
+            abs_dir = Path(directory).resolve()
             for f in flags:
                 if skip_next:
                     skip_next = False
+                    # -I <rel> / -isystem <rel> (separate-argument form):
+                    # absolutize against the entry directory.
+                    clean_flags.append(_cc_abs_path(f, abs_dir))
                     continue
                 if f == "-o":
                     skip_next = True
                     continue
                 if f.startswith("-o"):
                     continue
+                if f == "-I" or f == "-isystem":
+                    clean_flags.append(f)
+                    skip_next = True
+                    continue
+                if f.startswith("-I") and len(f) > 2 and not os.path.isabs(f[2:]):
+                    clean_flags.append("-I" + str(_cc_abs_path(f[2:], abs_dir)))
+                    continue
+                if f.startswith("-isystem") and len(f) > 8 and not os.path.isabs(f[8:]):
+                    clean_flags.append("-isystem" + str(_cc_abs_path(f[8:], abs_dir)))
+                    continue
                 clean_flags.append(f)
             new_cmd = [parts[0]] + clean_flags + ["-fsyntax-only", tmp_path]
             proc = _sp_cc.run(
                 new_cmd, capture_output=True, text=True, timeout=30,
-                cwd=str(repo_root),
+                cwd=directory if Path(directory).is_dir() else str(repo_root),
             )
             if proc.returncode == 0:
                 return True, "compile_commands.json: syntax OK"
             err = (proc.stderr or "").strip()
+            if _cc_include_resolution_failure(err):
+                # The adapted flags couldn't resolve includes — the check
+                # mis-ran. Fall through to the build branch rather than
+                # reporting a false syntax failure.
+                return None
             return False, err.split("\n")[0] if err else "compile_commands.json: failed"
         finally:
             Path(tmp_path).unlink(missing_ok=True)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _cc_abs_path(p: str, base: Path) -> str:
+    """Resolve ``p`` against ``base`` unless already absolute or a flag."""
+    if os.path.isabs(p) or p.startswith("-"):
+        return p
+    return str((base / p).resolve())
 
 
 _CC_ERROR_LINE_RE = re.compile(r":(\d+):\d+:\s*(?:error|warning):")
