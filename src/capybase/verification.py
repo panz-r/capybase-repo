@@ -3762,6 +3762,23 @@ def _parse_cc_error_line(msg: str) -> int | None:
     return None
 
 
+def _is_missing_build_system(output: str) -> bool:
+    """True when a build failed because the build system isn't THERE.
+
+    ``make: *** No targets specified and no makefile found. Stop.`` (and
+    friends) mean the invocation couldn't even start — no Makefile in this
+    context (a rebase worktree carries tracked sources, not generated
+    build artifacts). Distinct from a build that ran and reported compile
+    errors: this is "check unavailable", never a merge verdict.
+    """
+    low = (output or "").lower()
+    return (
+        "no makefile found" in low
+        or "no targets specified and no makefile" in low
+        or "can't find cmake cache" in low
+    )
+
+
 def _parse_cc_error_location(msg: str) -> tuple[str | None, int | None]:
     """Extract ``(file_stem, line)`` from a gcc/clang diagnostic.
 
@@ -4434,6 +4451,26 @@ class VerificationEngine:
                             if is_linker_error:
                                 syntax_ok = True  # compile passed; link is infra
                                 msg = "build: linker error (not a model defect; compile succeeded)"
+                            elif _is_missing_build_system(
+                                    (proc.stderr or "") + (proc.stdout or "")):
+                                # The build system isn't materialized in this
+                                # context (no Makefile — e.g. a rebase worktree
+                                # carries tracked sources but not generated
+                                # build artifacts). The build check is
+                                # UNAVAILABLE, not failed: treating it as a
+                                # failure poisons every downstream candidate
+                                # and feeds garbage feedback to the repair
+                                # loop (protobuf-0043: the LLM declined the
+                                # meaningless "make: No targets specified"
+                                # feedback three times and the rebase
+                                # escalated). Fall back to the syntax/dup
+                                # checks that DID run.
+                                syntax_ok = True
+                                features["build_unavailable"] = True
+                                msg = (
+                                    "build: build system not materialized "
+                                    "(no Makefile) — check skipped"
+                                )
                             else:
                                 # Error localization (research §9): classify each
                                 # gcc error line by WHERE it occurs. A whole-tree

@@ -1483,6 +1483,48 @@ def _classify_build_error_lines(
     return merge_lines, env_ct
 
 
+def _empty_repair_side_fallback(
+    accepted: list,
+) -> list | None:
+    """Whole-file majority-side replacement when a repair re-resolution dies.
+
+    Only reached when ``_whole_file_repair`` escalated (typically: the model
+    returned empty for the fault-attributed unit). Replaces every unit's
+    resolution with the side the file's accepted resolutions predominantly
+    chose (ties and no-votes → current, the conservative default), so the
+    Phase 2 loop re-validates a coherent side instead of escalating on a
+    missing model opinion. Returns None when the accepted list already IS
+    that side (nothing to try — the caller escalates as before).
+    """
+    from capybase.conflict_model import CandidateResolution
+
+    votes = {"current": 0, "replayed": 0}
+    for _u, c in accepted:
+        p = c.provenance or ""
+        for s in ("current", "replayed"):
+            if f"{s}_only" in p:
+                votes[s] += 1
+    side = "current" if votes["current"] >= votes["replayed"] else "replayed"
+    out: list = []
+    swapped = False
+    for u, c in accepted:
+        side_obj = getattr(u, side, None)
+        text = (getattr(side_obj, "text", "") or "") if side_obj else ""
+        if c.resolved_text != text:
+            swapped = True
+            out.append((u, CandidateResolution(
+                candidate_id=f"{u.unit_id}:{side}_only_fallback",
+                unit_id=u.unit_id,
+                model_name="repair_side_fallback",
+                prompt_version="side-fallback.v1",
+                resolved_text=text,
+                provenance=f"deterministic_source_{side}_only_fallback",
+            )))
+        else:
+            out.append((u, c))
+    return out if swapped else None
+
+
 def _try_majority_side_rescue(
     units: list,
     accepted: list[tuple["ConflictUnit", "CandidateResolution"]],
@@ -8405,22 +8447,16 @@ class Orchestrator:
                                 break
                         else:
                             break
-                    # Tiered verification: check time budget before retrying.
-                    if _phase2_budget > 0:
-                        _elapsed_p2 = _p2time.monotonic() - _phase2_start
-                        if _elapsed_p2 >= _phase2_budget:
-                            break  # time budget exhausted
-                        if _phase2_model_used:
-                            break  # only 1 model re-resolve allowed in tiered mode
-                    else:
-                        if wf_retries >= wf_budget:
-                            break
                     # Whole-file portfolio fallback: when Phase 2 validation
                     # fails with a CROSS-UNIT error pattern (duplicate
                     # definitions, undeclared identifiers — symptoms of the
                     # per-unit portfolio picking inconsistent sides), try
-                    # all-current / all-replayed candidates before the
-                    # per-unit repair loop. Gated to cross-unit patterns so
+                    # all-current / all-replayed candidates BEFORE the time
+                    # budget checks — this is the designed recovery for
+                    # exactly that failure shape, and skipping it because
+                    # Phase 1 burned the budget (e.g. on empty-LLM retries)
+                    # leaves only the far weaker repair loop
+                    # (protobuf-0043). Gated to cross-unit patterns so
                     # ordinary syntax errors still go to the repair loop
                     # (which correctly merges both sides).
                     _wf_failures_text = " ".join(
@@ -8442,6 +8478,11 @@ class Orchestrator:
                             try:
                                 if language and not _braces_balanced(
                                         _wf_buf, language):
+                                    self.journal.emit(
+                                        "whole_file_portfolio_candidate",
+                                        {"side": _side, "declined": "braces"},
+                                        step_index=self.step, path=path,
+                                    )
                                     continue
                             except Exception:
                                 pass
@@ -8458,6 +8499,18 @@ class Orchestrator:
                                 whole_text=_wf_buf,
                             )
                             if not _wf_val.passed:
+                                # Visibility: the cross-unit portfolio used
+                                # to decline silently, hiding WHY whole-side
+                                # candidates failed (protobuf-0043's chain).
+                                self.journal.emit(
+                                    "whole_file_portfolio_candidate",
+                                    {"side": _side, "declined": "verify",
+                                     "hard_failures": [
+                                         f.message
+                                         for f in _wf_val.hard_failures
+                                     ][:3]},
+                                    step_index=self.step, path=path,
+                                )
                                 continue
                             # Also run the build test if configured.
                             _wf_build_ok = True
@@ -8486,6 +8539,17 @@ class Orchestrator:
                         # here is the marker-spliced candidate portfolio for
                         # mixed merges whose per-unit sides were picked
                         # inconsistently.)
+                    # Tiered verification: check time budget before the
+                    # (weaker, costlier) per-unit repair loop.
+                    if _phase2_budget > 0:
+                        _elapsed_p2 = _p2time.monotonic() - _phase2_start
+                        if _elapsed_p2 >= _phase2_budget:
+                            break  # time budget exhausted
+                        if _phase2_model_used:
+                            break  # only 1 model re-resolve allowed in tiered mode
+                    else:
+                        if wf_retries >= wf_budget:
+                            break
                     # Attribute the failure to a unit and re-resolve it with the
                     # file-level failures as concrete repair feedback.
                     wf_retries += 1
@@ -8508,9 +8572,26 @@ class Orchestrator:
                         )
                     )
                     if accepted_opt is None:
-                        # A unit could not be re-resolved (escalated) → bail.
-                        file_validation = None  # type: ignore[assignment]
-                        break
+                        # The re-resolution escalated — most commonly the
+                        # model returned EMPTY for the attributed unit
+                        # (protobuf-0043's oscillation: a declined model
+                        # opinion killed the whole rebase). A missing model
+                        # opinion is not evidence the merge is unresolvable:
+                        # fall back to the file's majority side (conservative
+                        # tie-break: current) and let the loop re-validate.
+                        # If that splice still fails, the budget guards
+                        # escalate as before.
+                        _fb = _empty_repair_side_fallback(accepted)
+                        if _fb is not None:
+                            self.journal.emit(
+                                "repair_side_fallback",
+                                {"n_units": len(_fb)},
+                                step_index=self.step, path=path,
+                            )
+                            accepted = _fb
+                        else:
+                            file_validation = None  # type: ignore[assignment]
+                            break
                     accepted = accepted_opt
                     # Tiered budget: only count a MODEL re-resolve against the
                     # single-model-call budget. A deterministic repair (brace/
@@ -12093,10 +12174,14 @@ class Orchestrator:
         if wall_deadline is not None:
             import time as _ts_time
 
-            if _ts_time.monotonic() > wall_deadline - 300:
+            if _ts_time.monotonic() > wall_deadline - 120:
                 # Whole-file verification runs a build per candidate; with
-                # <5 min of wall clock left, leave the budget to Phase 2's
-                # own validation instead of starting builds we can't finish.
+                # very little wall clock left, don't start builds we can't
+                # finish. 120s covers one ccache-warm targeted verify — the
+                # earlier 300s margin starved the recovery entirely on
+                # cases whose Phase 1 burned the budget on empty-LLM
+                # retries (protobuf-0043: the only mechanism that could
+                # fix the duplicate never got to run).
                 self.journal.emit(
                     "true_side_portfolio_skipped",
                     {"reason": "wall_deadline", "trigger": trigger},
@@ -12245,17 +12330,23 @@ class Orchestrator:
 
         A "No rule to make target" failure is treated as PASS — the per-file
         build target doesn't exist in the Makefile (e.g. sqlite's explicit
-        .lo rules vs redis's %.o pattern rule), so the check is N/A.
+        .lo rules vs redis's %.o pattern rule), so the check is N/A. A
+        missing build system ("no makefile found") is likewise N/A — a
+        rebase worktree doesn't carry generated build artifacts.
         """
         import subprocess as _sp
+        from capybase.verification import _is_missing_build_system
         try:
             proc = _sp.run(
                 cmd, shell=True, cwd=str(self.git.repo),
                 capture_output=True, text=True, timeout=120,
             )
             output = (proc.stderr or "") + (proc.stdout or "")
-            if proc.returncode != 0 and "No rule to make target" in output:
-                return True, ""  # target doesn't exist → N/A, treat as pass
+            if proc.returncode != 0 and (
+                "No rule to make target" in output
+                or _is_missing_build_system(output)
+            ):
+                return True, ""  # target/build system unavailable → N/A
             return proc.returncode == 0, output
         except Exception as exc:  # noqa: BLE001
             return False, str(exc)
