@@ -132,14 +132,39 @@ sometimes contradicts "what a faithful merge should do".
    still drop it during a rebase of a stale branch" — or does that just
    teach the model to guess the benchmark?
 
-## 6. Current corpus state (fresh single-case reruns, post-af41b2e + this change)
+## 6. Decision: the WORKING verdict (question 1, adopted)
+
+**Answer adopted from project review:** these cases get a third label,
+**WORKING** — a compiling, functioning solution was reached that is not the
+repo-derived oracle. The human resolution may have dropped a side's working
+code for reasons outside the merge inputs (overall project direction,
+planning); since those reasons are unknowable from the inputs and state, it
+is out of scope for the system to reproduce them. WORKING is a distinct
+near-success outcome, not a failure.
+
+Implemented in `scripts/live_eval_realworld.py`:
+
+- `_side_preservation` measures, per side, the share of its changed-line
+  content the output preserves (added/changed lines present, deleted lines
+  absent; whitespace-normalized).
+- A result is **WORKING** iff: not escalated, marker-free, compiles, sim
+  below the PASS bar, and **both** sides' preservation ≥ 0.50 — the label
+  means "both sides' work survived", so a wrong-side pick or a dropped
+  rewrite (one-sided preservation) stays NEAR_MATCH/ORACLE_DIVERGENT.
+- NEAR_MATCH keeps its meaning (sub-bar, not preservation-explained:
+  defensible but imperfect). Summary reporting gains WORKING counts and a
+  PASS+WORKING real-conflict rate.
+
+jsonc-0004's recorded output measures loser-preservation 0.891 /
+winner-preservation 0.781 → WORKING. nlohmann-0020 is the same class.
+
+## 7. Current corpus state (fresh single-case reruns, post-af41b2e + this change)
 
 | case | verdict | note |
 |---|---|---|
-| jsonc 0001–0017 | **16/17 PASS** | 0001 via wholesale fast path (9s, needs `CAPYBASE_SKIP_SIZE_GUARD=1`) |
-| jsonc-0004 | NEAR 0.858 | this document |
-| nlohmann-0020 | NEAR 0.813 | same class as 0004 (oracle = replayed verbatim) |
+| jsonc 0001–0017 | **16 PASS + 1 WORKING** | 0001 via wholesale fast path (9s, needs `CAPYBASE_SKIP_SIZE_GUARD=1`); 0004 WORKING |
+| nlohmann-0020 | WORKING (was NEAR 0.813) | same class as 0004 (oracle = one side verbatim, output preserves both) |
 | nlohmann-0038 | ESCALATE 0.999 | header CEGIS cap — 1 retry short |
-| clickhouse-0013 | NEAR 0.854 | distinct shape |
+| clickhouse-0013 | see WORKING relabel run | preservation-measured at eval time |
 | clickhouse-0021 | ESCALATE 0.889 | mid-band risky (correctly kept) |
 | fmt-0001/0003 | ESCALATE sim 1.000 | validation-environmental, content already oracle-equal |

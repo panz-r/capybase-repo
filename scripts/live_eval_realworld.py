@@ -15,14 +15,22 @@ NOT part of the hermetic test suite — makes real network calls. Run:
 
 Verdict per case:
   PASS       — orch.run() did not escalate; resolved file is marker-free,
-               brace-balanced, AND sim >= 0.95 (matches the oracle closely).
-  NEAR_MATCH — marker-free and brace-balanced, but sim 0.80–0.95. The
-               resolution is defensible but imperfect — the oracle's answer
-               isn't the only valid one (exclusive choices, import ordering,
-               doc-comment style differences). Investigate before trusting.
+               brace-balanced, AND sim >= PASS_THRESHOLD (matches the oracle
+               closely).
+  WORKING    — marker-free, compiles/builds, but sim below the PASS bar AND
+               the output preserves both sides' changes (>= 0.5 of each
+               side's changed-line content). A correct, functioning merge
+               that legitimately differs from the repo-derived oracle: the
+               human resolution dropped one side's working code for reasons
+               outside the merge inputs (project direction, planning), which
+               no content signal carries. Distinct near-success outcome —
+               good for the system, not identical to history.
+  NEAR_MATCH — marker-free and brace-balanced, sim 0.80–PASS_THRESHOLD, and
+               NOT both-sides-preserving. The resolution is defensible but
+               imperfect — investigate before trusting.
   ESCALATE   — orch.run() escalated (human required). The SAFE outcome.
-  ORACLE_DIVERGENT — marker/brace failure OR sim < 0.80 (genuinely different
-               from the oracle).
+  ORACLE_DIVERGENT — marker/brace failure OR sim < 0.80 without the
+               preservation property (genuinely different from the oracle).
 
 IMPORTANT — VALIDATION GAP for Rust:
   The temp repo has NO Cargo.toml, so cargo check/test never runs. The
@@ -126,10 +134,16 @@ class CaseResult:
     matches_oracle: float = 0.0
     elapsed: float = 0.0
     reason: str = ""
-    verdict: str = ""  # PASS | NEAR_MATCH | ORACLE_DIVERGENT | ESCALATE
+    verdict: str = ""  # PASS | WORKING | NEAR_MATCH | ORACLE_DIVERGENT | ESCALATE
     compiles_cargo: bool | None = None  # None when cargo didn't run
     terminal_reason: str = ""  # disjoint escalation classification
     conflict_region_count: int = 0  # number of <<<<<<< regions (for timeout classification)
+    # Side-preservation fractions (the WORKING classification): share of each
+    # side's changed-line content the resolved output preserves — added/
+    # changed lines present in the output, deleted lines absent. None when
+    # not measurable (empty output, or a side with no changes vs base).
+    loser_preservation: float | None = None
+    winner_preservation: float | None = None
     # FR2a flight recorder: the orchestrator's session_id (the per-case artifact
     # root under .rebase-agent/sessions/<session_id>/). Populated when
     # --preserve-flights copies the session dir out; None otherwise. The flight
@@ -825,6 +839,91 @@ def _token_jaccard(a: str, b: str) -> float:
     return len(ta & tb) / len(u) if u else 0.0
 
 
+#: Minimum per-side preservation for the WORKING verdict: the output must
+#: carry at least this share of EACH side's changed-line content, so the
+#: label means "both sides' work survived", not "half a merge".
+WORKING_PRESERVATION_MIN = 0.50
+
+
+def _norm_lines(text: str) -> set[str]:
+    return {ln.strip() for ln in text.splitlines() if ln.strip()}
+
+
+def _side_preservation(base_text: str, side_text: str, output_text: str) -> float | None:
+    """Share of one side's changes the output preserves (0.0–1.0).
+
+    Added/changed lines (the side's side of the base diff) count as
+    preserved when present in the output; deleted base lines count as
+    preserved when absent from it. Whitespace-normalized line-set
+    membership, so indentation drift doesn't dent the fraction. Returns
+    None when the side made no changes vs base (nothing to preserve — the
+    WORKING property is vacuous, not satisfied).
+    """
+    import difflib as _dl
+
+    b, s = base_text.splitlines(), side_text.splitlines()
+    added: list[str] = []
+    deleted: list[str] = []
+    for tag, i1, i2, j1, j2 in _dl.SequenceMatcher(None, b, s, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "delete":
+            added.extend(s[j1:j2])
+        if tag != "insert":
+            deleted.extend(b[i1:i2])
+    if not added and not deleted:
+        return None
+    out = _norm_lines(output_text)
+    n_ok = 0
+    n_tot = 0
+    for ln in added:
+        if ln.strip():
+            n_tot += 1
+            n_ok += ln.strip() in out
+    for ln in deleted:
+        if ln.strip():
+            n_tot += 1
+            n_ok += ln.strip() not in out
+    return n_ok / n_tot if n_tot else None
+
+
+def _preservation_fields(case, content: str) -> tuple[float | None, float | None]:
+    """(loser, winner) side-preservation fractions for a resolved output.
+
+    Loser/winner by full-file churn (the merge_intent seam) — the loser is
+    the lower-churn side whose small changes the oracle may have dropped.
+    """
+    if not content:
+        return None, None
+    try:
+        from capybase.merge_intent import side_churn
+        c = side_churn(case.base, case.current)
+        r = side_churn(case.base, case.replayed)
+        loser_side, winner_side = (
+            (case.replayed, case.current) if c >= r else (case.current, case.replayed))
+        return (
+            _side_preservation(case.base, loser_side, content),
+            _side_preservation(case.base, winner_side, content),
+        )
+    except Exception:
+        return None, None
+
+
+def _is_working(r: "CaseResult") -> bool:
+    """WORKING: compiling, marker-free, below the PASS bar, and preserving
+    both sides' changes — a functioning both-features merge the oracle
+    diverged from for out-of-band (human/planning) reasons."""
+    return (
+        not r.escalated
+        and r.marker_free
+        and r.compiles
+        and r.matches_oracle < PASS_THRESHOLD
+        and r.loser_preservation is not None
+        and (r.winner_preservation or 0.0) >= WORKING_PRESERVATION_MIN
+        and r.loser_preservation >= WORKING_PRESERVATION_MIN
+    )
+
+
 def run_case(case: Case, client: OpenAICompatibleClient, *,
              flights_dir: Path | None = None,
              td: str | None = None,
@@ -912,6 +1011,7 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
     else:
         res.compiles = _brace_balanced(content, case.language) if content else False
     res.matches_oracle = _token_jaccard(content, case.expected_resolved) if content else 0.0
+    res.loser_preservation, res.winner_preservation = _preservation_fields(case, content)
     return res
 
 
@@ -1111,6 +1211,10 @@ def main():
 
     pass_ct = sum(1 for r in results if not r.escalated and r.marker_free and r.compiles and r.matches_oracle >= PASS_THRESHOLD)
     near_ct = sum(1 for r in results if not r.escalated and r.marker_free and r.compiles and 0.80 <= r.matches_oracle < PASS_THRESHOLD)
+    # Verdict-based (not field-recomputed): resumed legacy results carry no
+    # preservation fields, and _is_working would read them as non-WORKING —
+    # the same conservative behavior the fresh loop produces.
+    working_ct = sum(1 for r in results if r.verdict == "WORKING" or _is_working(r))
     escalate_ct = sum(1 for r in results if r.escalated)
     wrong_ct = sum(1 for r in results
                    if not (r.escalated or (r.marker_free and r.compiles and r.matches_oracle >= 0.80)))
@@ -1221,12 +1325,19 @@ def main():
             # Rust — the temp repo has no Cargo.toml. So "compiles" here is a
             # weak gate (brace balance only). Classify by oracle similarity:
             #   sim >= PASS_THRESHOLD → PASS (matches the oracle closely enough)
+            #   both sides preserved → WORKING (compiles + carries each side's
+            #                  changes, but the oracle diverged — the human
+            #                  resolution dropped working code for reasons
+            #                  outside the merge inputs; not reproducible and
+            #                  not our failure)
             #   sim >= 0.80 → NEAR_MATCH (defensible but imperfect — the oracle's
             #                  answer isn't the only valid one, e.g. exclusive
             #                  choices, import reordering, doc-comment style)
             #   sim < 0.80 → ORACLE_DIVERGENT (genuinely different from the oracle)
             if r.matches_oracle >= PASS_THRESHOLD:
                 verdict = "PASS"; pass_ct += 1
+            elif _is_working(r):
+                verdict = "WORKING"; working_ct += 1
             elif r.matches_oracle >= 0.80:
                 verdict = "NEAR_MATCH"; near_ct += 1
             else:
@@ -1280,7 +1391,9 @@ def main():
     print("=" * 64)
     print(f"cases:    {len(results)} ({skipped} resumed, {len(results)-skipped} fresh this run)")
     print(f"PASS:       {pass_ct}")
-    print(f"NEAR_MATCH: {near_ct}  (sim 0.80–0.95: defensible but imperfect)")
+    print(f"WORKING:    {working_ct}  (compiles + preserves both sides; diverged from")
+    print(f"              the human oracle for out-of-band reasons — near-success)")
+    print(f"NEAR_MATCH: {near_ct}  (sim 0.80–{PASS_THRESHOLD}: defensible but imperfect)")
     print(f"ESCALATE:   {escalate_ct}")
     print(f"ORACLE_DIVERGENT: {wrong_ct}  (sim < 0.80 or marker/brace failure)")
     print(f"wall:       {elapsed:.0f}s ({elapsed/60:.1f}m) [this run only]")
@@ -1289,6 +1402,7 @@ def main():
     # the system produced, it's a case git already resolved cleanly.
     real_conflicts = [r for r in results if r.terminal_reason != "SAFE_SKIP"]
     real_pass = sum(1 for r in real_conflicts if r.verdict == "PASS")
+    real_work = sum(1 for r in real_conflicts if r.verdict == "WORKING")
     safe_skip_ct = sum(1 for r in results if r.terminal_reason == "SAFE_SKIP")
     # Explicit denominator breakdown so pass-rate comparisons are meaningful
     # across runs (Sprint 8: 64/76 vs Sprint 9: 52/75 — the denominator
@@ -1297,23 +1411,27 @@ def main():
     if real_conflicts:
         print(f"real-conflict PASS rate: {real_pass}/{len(real_conflicts)} = "
               f"{real_pass/len(real_conflicts)*100:.0f}%")
+        print(f"real-conflict PASS+WORKING rate: {real_pass+real_work}/{len(real_conflicts)} = "
+              f"{(real_pass+real_work)/len(real_conflicts)*100:.0f}%")
     for lang in ("python", "rust", "c", "cpp"):
         sub = [r for r in results if r.language == lang]
         if not sub: continue
-        p = sum(1 for r in sub if not r.escalated and r.marker_free and r.compiles and r.matches_oracle >= PASS_THRESHOLD)
-        n = sum(1 for r in sub if not r.escalated and r.marker_free and r.compiles and 0.80 <= r.matches_oracle < 0.95)
+        p = sum(1 for r in sub if r.verdict == "PASS")
+        wk = sum(1 for r in sub if r.verdict == "WORKING")
+        n = sum(1 for r in sub if r.verdict == "NEAR_MATCH")
         e = sum(1 for r in sub if r.escalated)
-        w = len(sub) - p - n - e
-        print(f"  {lang}: {len(sub)} → PASS {p} / NEAR {n} / ESC {e} / DIVERGE {w}")
+        w = len(sub) - p - wk - n - e
+        print(f"  {lang}: {len(sub)} → PASS {p} / WORK {wk} / NEAR {n} / ESC {e} / DIVERGE {w}")
     from collections import Counter
     dt = Counter(r.dataset for r in results)
-    dp = Counter(r.dataset for r in results if not r.escalated and r.marker_free and r.compiles and r.matches_oracle >= PASS_THRESHOLD)
-    dn = Counter(r.dataset for r in results if not r.escalated and r.marker_free and r.compiles and 0.80 <= r.matches_oracle < 0.95)
+    dp = Counter(r.dataset for r in results if r.verdict == "PASS")
+    dw = Counter(r.dataset for r in results if r.verdict == "WORKING")
+    dn = Counter(r.dataset for r in results if r.verdict == "NEAR_MATCH")
     de = Counter(r.dataset for r in results if r.escalated)
     print("  by dataset:")
     for ds in sorted(dt):
         t = dt[ds]
-        print(f"    {ds:24s} {t:3d} → PASS {dp[ds]:3d} / NEAR {dn[ds]:3d} / ESC {de[ds]:3d} / DIVERGE {t-dp[ds]-dn[ds]-de[ds]:3d}")
+        print(f"    {ds:24s} {t:3d} → PASS {dp[ds]:3d} / WORK {dw[ds]:3d} / NEAR {dn[ds]:3d} / ESC {de[ds]:3d} / DIVERGE {t-dp[ds]-dw[ds]-dn[ds]-de[ds]:3d}")
     # Terminal reason distribution for escalations
     from collections import Counter as _C
     tr = _C(r.terminal_reason for r in results if r.escalated)
