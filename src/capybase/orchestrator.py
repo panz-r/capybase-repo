@@ -45,7 +45,11 @@ from capybase.policy_strictness import StrictnessPolicy
 from capybase.resolution_engine import ResolutionEngine
 from capybase.risk import RiskEngine
 from capybase.session import SessionPaths, new_session_id
-from capybase.verification import ValidationConfig, VerificationEngine
+from capybase.verification import (
+    ValidationConfig,
+    VerificationEngine,
+    _braces_balanced,
+)
 from capybase.adapters.tests import TestRunner
 from capybase.test_output import parse_passing_node_ids
 from capybase.test_output import _tool_of as _tool_of_test_cmd
@@ -8592,7 +8596,13 @@ class Orchestrator:
                         else:
                             file_validation = None  # type: ignore[assignment]
                             break
-                    accepted = accepted_opt
+                    elif accepted_opt is not None:
+                        # NB: NOT `accepted = accepted_opt` unconditionally —
+                        # that overwrites the fallback assignment above with
+                        # None and crashes the tiered-budget comprehension
+                        # below (jsonc-0001: repair escalated, fallback
+                        # rescued, then TypeError 'NoneType' not iterable).
+                        accepted = accepted_opt
                     # Tiered budget: only count a MODEL re-resolve against the
                     # single-model-call budget. A deterministic repair (brace/
                     # preprocessor/side-consistency/etc.) returns a candidate

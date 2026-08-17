@@ -839,6 +839,12 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
             res.escalated = bool(step.escalated)
             res.reason = step.reason or ""
         except Exception as exc:
+            # A swallowed orchestrator exception is undiagnosable from the
+            # truncated reason alone (jsonc-0001's TypeError hid for a whole
+            # soak). Print the full traceback to stderr — it lands in the
+            # per-case log next to the summary.
+            import traceback as _tb
+            _tb.print_exc()
             res.escalated = True
             res.reason = f"orch raised: {type(exc).__name__}: {str(exc)[:100]}"
         # FR2a flight recorder: copy the per-case session artifacts out of the
