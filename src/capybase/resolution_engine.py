@@ -3009,7 +3009,8 @@ class ResolutionEngine:
         return self.config.json_mode
 
     def raw_complete(self, prompt: str, *, json_mode: bool = False,
-                     temperature: float | None = None) -> LLMResponse:
+                     temperature: float | None = None,
+                     max_tokens: int | None = None) -> LLMResponse:
         """One-shot completion: send ``prompt`` and return the raw response.
 
         Used by the block-capture layer (and any future decision-style prompt)
@@ -3022,6 +3023,13 @@ class ResolutionEngine:
         ``temperature``: when provided, overrides the engine's default
         temperature. Used by block_capture to force a lower temperature for
         the keep/delete decision (a binary choice where determinism matters).
+
+        ``max_tokens``: when provided, overrides the engine's configured
+        output cap. Decision prompts on the local server bill a large hidden
+        pre-fill against the completion budget (a one-sentence JSON verdict
+        measured 742-802 completion tokens) — a config sized for small
+        fragments (512-640) returns empty content with finish_reason=length,
+        so decision callers with big prompts pass an explicit floor.
         """
         self._log_prompt(prompt, prompt_version="raw_complete")
         messages = [
@@ -3032,7 +3040,7 @@ class ResolutionEngine:
             messages,
             model=self.config.model,
             temperature=temperature if temperature is not None else self.config.temperature,
-            max_tokens=self.config.max_tokens,
+            max_tokens=max_tokens if max_tokens is not None else self.config.max_tokens,
             json_mode=json_mode,
         )
 

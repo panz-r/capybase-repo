@@ -426,6 +426,19 @@ FULL_FILE_STALE_FRACTION = 0.15
 # stale). Require a meaningful amount of stale content too.
 FULL_FILE_STALE_MIN_LINES = 3
 
+# Mid-band subsumption gates (jsonc-0004 class): one side's churn dominates
+# the other's by a large multiple while the normalized ratio sits BELOW the
+# wholesale band — 0.55 <= ratio < 0.90 with winner/loser churn >= 2.5x.
+# Corpus measurement (372 C cases, 116 in-band): 100/116 mid-band oracles
+# equal the winner side (token-Jaccard >= 0.95), but the 16 counter-examples
+# (jsonc-0015, clickhouse-0015/0021/0043, sqlite-0098/0099/0109, ...) are
+# genuine both-sides merges whose numbers are indistinguishable from the
+# safe cases on every shape metric — the discriminator is semantic, so the
+# mid-band takeover fires only when the LLM subsumption adjudication
+# agrees (orchestrator `_adjudicate_subsumption`), never on numbers alone.
+FULL_FILE_MIDBAND_RATIO_MIN = 0.55
+FULL_FILE_MIDBAND_DOMINANCE_MULT = 2.5
+
 
 def side_churn(base_text: str, side_text: str) -> int:
     """Absolute changed-line count of one side vs the base (both directions).
@@ -478,6 +491,45 @@ def full_file_context(base_text: str, current_text: str, replayed_text: str) -> 
             else None
         ),
         "dominant_churn": max(c, r),
+    }
+
+
+def midband_subsumption_gates(
+    base_text: str,
+    current_text: str,
+    replayed_text: str,
+) -> dict:
+    """Mid-band takeover gates: churn-dominant but not wholesale (0004 class).
+
+    ``full_file_context`` covers the >= 0.90 wholesale band where taking the
+    winner verbatim is safe on numbers alone. This gate covers the band just
+    below it — one side's churn dominates the other's by >=
+    ``FULL_FILE_MIDBAND_DOMINANCE_MULT`` while ``0.55 <= churn_ratio < 0.90``.
+    Numbers-only in-band is NOT sufficient to act (16/116 corpus
+    counter-examples are genuine both-sides merges — see the constants); the
+    orchestrator additionally requires the LLM subsumption adjudication to
+    say the winner's rewrite covers the loser's intent before firing.
+
+    Returns the gate values (journalable) with an ``in_band`` key and the
+    churn-``winner``/``loser`` side names the adjudication prompt needs.
+    """
+    ctx = full_file_context(base_text, current_text, replayed_text)
+    c, r = ctx["current_churn"], ctx["replayed_churn"]
+    mult = max(c, r) / max(1, min(c, r))
+    winner = "current" if c >= r else "replayed"
+    in_band = (
+        FULL_FILE_MIDBAND_RATIO_MIN <= ctx["churn_ratio"] < FULL_FILE_ASYMMETRY_RATIO
+        and mult >= FULL_FILE_MIDBAND_DOMINANCE_MULT
+    )
+    return {
+        "churn_ratio": ctx["churn_ratio"],
+        "churn_mult": round(mult, 2),
+        "current_churn": c,
+        "replayed_churn": r,
+        "base_lines": ctx["base_lines"],
+        "winner": winner,
+        "loser": "replayed" if winner == "current" else "current",
+        "in_band": in_band,
     }
 
 

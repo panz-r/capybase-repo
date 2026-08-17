@@ -1,0 +1,287 @@
+"""Mid-band subsumption takeover — the jsonc-0004 class.
+
+Between the >= 0.90 wholesale band (where taking the churn winner verbatim
+is safe on numbers alone) and the symmetric middle, one side's churn can
+dominate the other's by a large multiple. Corpus measurement: 100/116
+mid-band oracles equal the winner, but 16 counter-examples are genuine
+both-sides merges indistinguishable on shape metrics — so the takeover
+requires an LLM subsumption adjudication on top of the numeric gates.
+These tests pin the pure gate math, the adjudication prompt, the verdict
+parsing, and the wiring inside _try_true_side_portfolio's Phase-1 branch.
+No network; the engine is always a fake.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from capybase.merge_intent import (
+    FULL_FILE_MIDBAND_DOMINANCE_MULT,
+    FULL_FILE_MIDBAND_RATIO_MIN,
+    midband_subsumption_gates,
+)
+from capybase.orchestrator import (
+    Orchestrator,
+    _subsumption_adjudication_prompt,
+)
+
+
+# ---------------------------------------------------------------------------
+# midband_subsumption_gates — pure numeric gates
+# ---------------------------------------------------------------------------
+
+def _texts(cur_churn: int, rep_churn: int, base_n: int = 400):
+    """Base of base_n distinct lines; each side rewrites its churn budget."""
+    base = [f"base line {i}" for i in range(base_n)]
+    cur = [f"cur line {i}" if i < cur_churn else f"base line {i}"
+           for i in range(base_n)]
+    rep = [f"rep line {i}" if i < rep_churn else f"base line {i}"
+           for i in range(base_n)]
+    return "\n".join(base) + "\n", "\n".join(cur) + "\n", "\n".join(rep) + "\n"
+
+
+def test_gates_in_band_0004_shape():
+    # current churn 200 vs replayed 52 on a 243-line base: ratio 0.74, mult 3.8
+    base, cur, rep = _texts(200, 52, 243)
+    g = midband_subsumption_gates(base, cur, rep)
+    assert g["in_band"] is True
+    assert g["winner"] == "current"
+    assert g["loser"] == "replayed"
+    assert FULL_FILE_MIDBAND_RATIO_MIN <= g["churn_ratio"] < 0.90
+    assert g["churn_mult"] >= FULL_FILE_MIDBAND_DOMINANCE_MULT
+
+
+def test_gates_exclude_wholesale_band():
+    # ratio >= 0.90 is the phase1 fast path's territory, not mid-band
+    base, cur, rep = _texts(665, 12, 756)  # jsonc-0013 shape: ratio 0.98
+    g = midband_subsumption_gates(base, cur, rep)
+    assert g["churn_ratio"] >= 0.90
+    assert g["in_band"] is False
+
+
+def test_gates_exclude_symmetric_shape():
+    # jsonc-0017 shape: both sides churn similarly → no dominance, no band
+    base, cur, rep = _texts(71, 63, 149)
+    g = midband_subsumption_gates(base, cur, rep)
+    assert g["in_band"] is False
+
+
+def test_gates_exclude_low_dominance():
+    # mid ratio but winner churn < 2.5x the loser's → adjudication cannot
+    # be trusted to separate; keep the per-unit cascade
+    base, cur, rep = _texts(116, 38, 291)  # mult ~3 — in band actually
+    assert midband_subsumption_gates(base, cur, rep)["in_band"] is True
+    base, cur, rep = _texts(100, 45, 291)  # mult ~2.2 → below the gate
+    g = midband_subsumption_gates(base, cur, rep)
+    assert g["churn_mult"] < FULL_FILE_MIDBAND_DOMINANCE_MULT
+    assert g["in_band"] is False
+
+
+def test_gates_winner_can_be_replayed():
+    base, cur, rep = _texts(52, 200, 243)
+    g = midband_subsumption_gates(base, cur, rep)
+    assert g["in_band"] is True
+    assert g["winner"] == "replayed"
+    assert g["loser"] == "current"
+
+
+# ---------------------------------------------------------------------------
+# _subsumption_adjudication_prompt
+# ---------------------------------------------------------------------------
+
+def test_prompt_contains_both_diffs_and_strict_json():
+    base = "int a;\nint b;\nint c;\n"
+    winner = "int a;\nint b2;\nint c;\n"
+    loser = "int a;\nint b;\nint c;\nint d;\n"
+    p = _subsumption_adjudication_prompt(
+        "f.c", "c", base, "current", winner, loser)
+    assert "-int b;" in p and "+int b2;" in p       # winner diff present
+    assert "+int d;" in p                            # loser diff present
+    assert '"verdict": "keep" or "superseded"' in p   # strict JSON contract
+    assert "CURRENT (upstream, being rebased onto) rewrote the file heavily" in p
+    assert "REPLAYED (the commit being applied on top) made smaller changes" in p
+
+
+def test_prompt_labels_swap_for_replayed_winner():
+    base = "int a;\n"
+    winner = "int a;\nint new;\n"
+    loser = "int a2;\n"
+    p = _subsumption_adjudication_prompt(
+        "f.c", "c", base, "replayed", winner, loser)
+    assert "REPLAYED (the commit being applied on top) rewrote the file heavily" in p
+    assert "CURRENT (upstream, being rebased onto) made smaller changes" in p
+
+
+def test_prompt_clips_oversized_diffs():
+    base = "\n".join(f"l{i}" for i in range(500)) + "\n"
+    winner = "\n".join(f"w{i}" if i % 2 else f"l{i}" for i in range(500)) + "\n"
+    p = _subsumption_adjudication_prompt(
+        "f.c", "c", base, "current", winner, base, max_diff_lines=50)
+    assert "more diff lines truncated" in p
+
+
+# ---------------------------------------------------------------------------
+# _adjudicate_subsumption — verdict parsing (stub orchestrator, fake engine)
+# ---------------------------------------------------------------------------
+
+class _RecJournal:
+    def __init__(self):
+        self.events: list[tuple[str, dict]] = []
+
+    def emit(self, event, payload, **_kw):
+        self.events.append((event, payload))
+
+
+class _FakeEngine:
+    def __init__(self, text: str):
+        self._text = text
+        self.calls: list[dict] = []
+        self.config = SimpleNamespace(max_tokens=8192)
+
+    def raw_complete(self, prompt, *, json_mode=False, temperature=None,
+                     max_tokens=None):
+        self.calls.append({"prompt": prompt, "max_tokens": max_tokens})
+        return SimpleNamespace(text=self._text)
+
+
+def _stub_orchestrator(engine) -> Orchestrator:
+    orch = object.__new__(Orchestrator)
+    orch.resolution_engine = engine
+    orch.journal = _RecJournal()
+    orch.step = 1
+    return orch
+
+
+def test_adjudicate_parses_superseded():
+    engine = _FakeEngine(
+        '{"verdict": "superseded", "confidence": 0.9, "reason": "cosmetic"}')
+    orch = _stub_orchestrator(engine)
+    out = orch._adjudicate_subsumption(
+        "f.c", "c", "int a;\n", {"current": "int a;\n", "replayed": "int b;\n"},
+        "current")
+    assert out == {"verdict": "superseded", "confidence": 0.9, "reason": "cosmetic"}
+    # decision prompts must clear the local server's hidden pre-fill budget
+    assert engine.calls[0]["max_tokens"] >= 1024
+
+
+def test_adjudicate_empty_response_is_keep():
+    # finish_reason=length returns empty content — no verdict, no takeover
+    orch = _stub_orchestrator(_FakeEngine(""))
+    out = orch._adjudicate_subsumption(
+        "f.c", "c", "int a;\n", {"current": "int a;\n", "replayed": "int b;\n"},
+        "current")
+    assert out is None
+
+
+def test_adjudicate_garbage_json_is_keep():
+    orch = _stub_orchestrator(_FakeEngine("I think the merge should keep it"))
+    out = orch._adjudicate_subsumption(
+        "f.c", "c", "int a;\n", {"current": "int a;\n", "replayed": "int b;\n"},
+        "current")
+    assert out is None
+    failed = [e for e in orch.journal.events
+              if e[0] == "midband_subsumption_adjudication_failed"]
+    assert failed, "parse failure must be journaled"
+
+
+# ---------------------------------------------------------------------------
+# Wiring — _try_true_side_portfolio's Phase-1 mid-band branch
+# ---------------------------------------------------------------------------
+
+class _FakeGit:
+    def __init__(self, stages: dict[int, str]):
+        self._stages = stages
+        self.repo = "/tmp/fake-repo"
+
+    def read_stage_blob(self, path: str, stage: int) -> bytes:
+        if stage not in self._stages:
+            raise RuntimeError(f"no stage {stage}")
+        return self._stages[stage].encode()
+
+
+class _AlwaysPassVerification:
+    def verify_file(self, path, language, original, units, *, repo_root=None,
+                    whole_text=None):
+        return SimpleNamespace(passed=True, hard_failures=[])
+
+
+class _KeepEngine(_FakeEngine):
+    def __init__(self):
+        super().__init__(
+            '{"verdict": "keep", "confidence": 1.0, "reason": "new feature"}')
+
+
+class _SupersededEngine(_FakeEngine):
+    def __init__(self):
+        super().__init__(
+            '{"verdict": "superseded", "confidence": 0.95, "reason": "cosmetic"}')
+
+
+def _wiring_orchestrator(engine) -> Orchestrator:
+    orch = object.__new__(Orchestrator)
+    orch.resolution_engine = engine
+    orch.journal = _RecJournal()
+    orch.step = 1
+    orch.git = _FakeGit({1: _BASE, 2: _CUR, 3: _REP})
+    orch.verification = _AlwaysPassVerification()
+    orch.config = SimpleNamespace(
+        future=SimpleNamespace(
+            enable_true_side_asymmetry_takeover=True,
+            enable_midband_subsumption_takeover=True),
+    )
+    orch._write_worktree_only = lambda *a, **k: None
+    return orch
+
+
+_BASE, _CUR, _REP = _texts(200, 52, 243)  # the 0004 shape: ratio 0.74, mult 3.8
+
+
+def _units():
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+    return [ConflictUnit(
+        session_id="s", step_index=1, path="f.c", language="c",
+        unit_id="f.c:1:0", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=_BASE),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=_CUR),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=_REP),
+        original_worktree_text=_CUR,
+        marker_span=(0, 1),
+    )]
+
+
+def test_midband_keep_declines_to_cascade():
+    orch = _wiring_orchestrator(_KeepEngine())
+    out = orch._try_true_side_portfolio(
+        "f.c", "c", _CUR, _units(), phase1_fast_path=True)
+    assert out is None
+    gates = [e for e in orch.journal.events
+             if e[0] == "midband_subsumption_gate"]
+    assert gates and gates[0][1]["in_band"] is True
+    assert gates[0][1]["fires"] is False
+
+
+def test_midband_superseded_takes_winner():
+    orch = _wiring_orchestrator(_SupersededEngine())
+    out = orch._try_true_side_portfolio(
+        "f.c", "c", _CUR, _units(), phase1_fast_path=True)
+    assert out is not None
+    accepted, buffer, val = out
+    assert buffer == _CUR  # winner verbatim
+    assert val.passed
+    swaps = [e for e in orch.journal.events
+             if e[0] == "true_side_portfolio"]
+    assert swaps and swaps[0][1]["trigger"] == "midband_subsumption"
+    assert swaps[0][1]["side"] == "current"
+
+
+def test_midband_disabled_flag_skips_adjudication():
+    orch = _wiring_orchestrator(_SupersededEngine())
+    orch.config.future.enable_midband_subsumption_takeover = False
+    out = orch._try_true_side_portfolio(
+        "f.c", "c", _CUR, _units(), phase1_fast_path=True)
+    assert out is None
+    # the flag being off means no LLM call at all
+    assert not orch.resolution_engine.calls
+    gates = [e for e in orch.journal.events
+             if e[0] == "midband_subsumption_gate"]
+    assert gates and gates[0][1]["enabled"] is False

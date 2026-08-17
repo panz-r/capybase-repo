@@ -751,6 +751,18 @@ class FutureConfig(BaseModel):
     # (stale 0.2918), zero false positives across the >= 0.90 band and
     # mid-band controls (worst good-merge stale 0.021 vs threshold 0.15).
     enable_true_side_asymmetry_takeover: bool = True
+    # Mid-band subsumption takeover (jsonc-0004 class): one side's churn
+    # dominates the other's >= 2.5x while the normalized asymmetry sits in
+    # [0.55, 0.90) — below the wholesale band where taking the winner is
+    # safe on numbers alone. In this band 100/116 corpus oracles equal the
+    # winner, but the 16 counter-examples (jsonc-0015, clickhouse-0015/
+    # 0021/0043, ...) are genuine both-sides merges indistinguishable on
+    # every shape metric, so the takeover fires ONLY when the LLM
+    # subsumption adjudication confirms the winner's rewrite covers the
+    # loser's intent (confidence >= 0.70); otherwise the per-unit merge
+    # proceeds unchanged. Offline validation on the 45 active-corpus
+    # mid-band cases: zero false-superseded on the risky set.
+    enable_midband_subsumption_takeover: bool = True
     # Phase 4 comment jury (design §5). An untrusted semantic sensor that
     # evaluates comment claims produced by the comment pass. Three operating
     # modes:

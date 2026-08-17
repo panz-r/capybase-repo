@@ -1445,6 +1445,65 @@ Respond with ONLY a JSON object:
 {{"choice": "current" or "replayed", "confidence": <0.0-1.0>, "reason": "<one sentence>"}}"""
 
 
+def _subsumption_adjudication_prompt(
+    path: str,
+    language: str | None,
+    base_text: str,
+    winner_side: str,
+    winner_text: str,
+    loser_text: str,
+    max_diff_lines: int = 150,
+) -> str:
+    """Mid-band subsumption adjudication prompt (jsonc-0004 class).
+
+    Unlike ``_whole_side_adjudication_prompt`` (whole files, pick a side),
+    this decides whether the LOSER's changes must survive the region merge
+    or are superseded by the WINNER's rewrite. Diffs vs base, not whole
+    files: the question is about the loser's edit set, and diff-shaped
+    prompts fit the fragment budget the model handles best. Validated
+    offline against the 45 active-corpus mid-band cases before wiring
+    (see enable_midband_subsumption_takeover in config.py).
+    """
+    import difflib as _difflib
+
+    def _clip_diff(side_text: str) -> str:
+        lines = _difflib.unified_diff(
+            base_text.splitlines(), side_text.splitlines(), lineterm="", n=2)
+        body = list(lines)[2:]  # drop ---/+++ headers
+        if len(body) <= max_diff_lines:
+            return "\n".join(body)
+        return ("\n".join(body[:max_diff_lines])
+                + f"\n... ({len(body) - max_diff_lines} more diff lines truncated)")
+
+    lang = (language or "").strip()
+    # The churn winner is nearly always current (upstream rewrite), but the
+    # gates admit a replayed-side winner; label the blocks with their git
+    # roles so "superseded -> winner verbatim" stays accurate either way.
+    win_label = ("CURRENT (upstream, being rebased onto)" if winner_side == "current"
+                 else "REPLAYED (the commit being applied on top)")
+    lose_label = ("REPLAYED (the commit being applied on top)" if winner_side == "current"
+                  else "CURRENT (upstream, being rebased onto)")
+    return f"""You are adjudicating a git rebase conflict for `{path}` where one side rewrote the file.
+
+{win_label} rewrote the file heavily. Its changes vs the common ancestor BASE:
+```{lang}
+{_clip_diff(winner_text)}
+```
+
+{lose_label} made smaller changes. Its changes vs BASE:
+```{lang}
+{_clip_diff(loser_text)}
+```
+
+A region-level merge that weaves the smaller side's changes into the rewrite compiles and passes tests. Decide which result is correct:
+
+keep        — the smaller side's changes add functionality or fixes that the rewrite does not provide; they must survive the merge.
+superseded  — the rewrite already provides the same behavior, deleted the code the smaller side touched, or the smaller side's edits are cosmetic on regions the rewrite reformatted; the correct result is the rewriting side's file verbatim.
+
+Respond with ONLY a JSON object:
+{{"verdict": "keep" or "superseded", "confidence": <0.0-1.0>, "reason": "<one sentence>"}}"""
+
+
 def _classify_build_error_lines(
     error_lines: list[str], path: str,
 ) -> tuple[list[str], int]:
@@ -12380,9 +12439,41 @@ class Orchestrator:
                 step_index=self.step, path=path,
             )
             if not fires:
-                return None
-            trigger = "phase1_fast_path"
-            asym_winner = ctx["asymmetry_side"]
+                # Mid-band extension (jsonc-0004 class): churn-dominant but
+                # below the wholesale band. Numbers alone are NOT safe here
+                # (16/116 corpus counter-examples are genuine both-sides
+                # merges), so the takeover additionally requires the LLM
+                # subsumption adjudication to confirm the winner's rewrite
+                # covers the loser's intent. No adjudication, no firing —
+                # the per-unit cascade proceeds exactly as before.
+                from capybase.merge_intent import midband_subsumption_gates
+
+                mb = midband_subsumption_gates(
+                    base_text, sides.get("current", ""), sides.get("replayed", ""))
+                mb_enabled = bool(getattr(
+                    self.config.future,
+                    "enable_midband_subsumption_takeover", False))
+                adj = None
+                if mb_enabled and mb["in_band"]:
+                    adj = self._adjudicate_subsumption(
+                        path, language, base_text, sides, mb["winner"])
+                mb_fires = bool(
+                    adj is not None
+                    and adj["verdict"] == "superseded"
+                    and adj["confidence"] >= 0.70)
+                self.journal.emit(
+                    "midband_subsumption_gate",
+                    {**mb, "enabled": mb_enabled, "adjudication": adj,
+                     "fires": mb_fires},
+                    step_index=self.step, path=path,
+                )
+                if not mb_fires:
+                    return None
+                trigger = "midband_subsumption"
+                asym_winner = mb["winner"]
+            else:
+                trigger = "phase1_fast_path"
+                asym_winner = ctx["asymmetry_side"]
         elif not dupes:
             from capybase.merge_intent import asymmetry_takeover_gates
 
@@ -12552,6 +12643,60 @@ class Orchestrator:
             step_index=self.step, path=path,
         )
         return heuristic, "churn_heuristic"
+
+    def _adjudicate_subsumption(
+        self,
+        path: str,
+        language: str | None,
+        base_text: str,
+        sides: dict[str, str],
+        winner: str,
+    ) -> dict | None:
+        """Ask the model whether the winner's rewrite supersedes the loser.
+
+        Mid-band takeover's semantic gate: churn numbers alone cannot
+        separate "rewrite subsumes the small side" (take the winner
+        verbatim) from "small side adds real functionality" (keep the
+        region merge) — the corpus counter-examples overlap on every
+        shape metric. Returns the parsed verdict dict
+        (``{"verdict": "keep"|"superseded", "confidence": f, "reason": s}``)
+        or None on an unparseable/absent model response (the caller treats
+        None as "keep": no takeover without a positive superseded verdict).
+        """
+        import json as _json
+
+        loser = "replayed" if winner == "current" else "current"
+        try:
+            prompt = _subsumption_adjudication_prompt(
+                path, language, base_text, winner,
+                sides.get(winner, ""), sides.get(loser, ""))
+            # Decision prompts bill a large hidden pre-fill against the
+            # completion budget on the local server (742-802 tokens measured
+            # for a one-sentence JSON on a 5K-char prompt, scaling up with
+            # prompt size); a fragment-sized config cap returns empty
+            # content with finish_reason=length. Floor at 2048.
+            resp = self.resolution_engine.raw_complete(
+                prompt, json_mode=True,
+                max_tokens=max(2048, self.resolution_engine.config.max_tokens))
+            raw = resp.text if hasattr(resp, "text") else str(resp)
+            if not (raw or "").strip():
+                return None
+            parsed = _json.loads(raw)
+            verdict = str(parsed.get("verdict", "")).strip().lower()
+            if verdict not in ("keep", "superseded"):
+                return None
+            return {
+                "verdict": verdict,
+                "confidence": round(float(parsed.get("confidence", 0.0)), 2),
+                "reason": str(parsed.get("reason", ""))[:200],
+            }
+        except Exception as exc:  # noqa: BLE001 — adjudication is advisory
+            self.journal.emit(
+                "midband_subsumption_adjudication_failed",
+                {"error": f"{type(exc).__name__}: {exc}"[:200]},
+                step_index=self.step, path=path,
+            )
+            return None
 
     def _resolve_per_file_build(self, path: str) -> str:
         """Resolve the per-file build command for Phase 2's build check.
