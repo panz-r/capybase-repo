@@ -526,6 +526,31 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
                 )
             except Exception:  # noqa: BLE001 — header generation is advisory
                 pass
+        # Autotools prepares regenerate TRACKED files (config.h.in etc.)
+        # after the rebase has stopped — leaving them unstaged makes the
+        # worktree dirty, and `git rebase --continue` then refuses with
+        # "You must edit all merge conflicts and then mark them as
+        # resolved" on EVERY continue (jsonc 0013/0014/0016 spun to their
+        # case timeouts on exactly this). The regeneration's useful
+        # products are untracked (build/, generated headers); restore the
+        # tracked side effects so the continue can proceed.
+        try:
+            import subprocess as _sp_restore
+            _diff = _sp_restore.run(
+                ["git", "diff", "--name-only"],
+                cwd=str(repo), capture_output=True, text=True,
+            )
+            _dirty = [
+                ln for ln in (_diff.stdout or "").splitlines()
+                if ln.strip() and ln.strip() != case.path
+            ]
+            if _dirty:
+                _sp_restore.run(
+                    ["git", "checkout", "--", *_dirty],
+                    cwd=str(repo), capture_output=True, text=True,
+                )
+        except Exception:  # noqa: BLE001 — restoration is advisory
+            pass
 
 
 def _config_for(case: Case, *, has_crate: bool = False) -> Config:

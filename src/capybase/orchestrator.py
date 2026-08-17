@@ -1529,6 +1529,27 @@ def _empty_repair_side_fallback(
     return out if swapped else None
 
 
+def _rebase_continue_empty(cont) -> bool:
+    """True when ``git rebase --continue`` failed because the pick is empty.
+
+    git's phrasings vary by version and land on either stream: "nothing to
+    commit", "The previous cherry pick commit is now empty ... use git
+    rebase --skip", "no changes". A fully-superseded resolution (e.g. the
+    whole-file fast path taking the rewriting side verbatim) produces
+    exactly this — and without --skip the rebase stays wedged mid-flight.
+    """
+    text = f"{getattr(cont, 'stdout', '') or ''}\n{getattr(cont, 'stderr', '') or ''}".lower()
+    return any(
+        p in text
+        for p in (
+            "nothing to commit",
+            "is now empty",
+            "rebase --skip",
+            "no changes",
+        )
+    )
+
+
 def _try_majority_side_rescue(
     units: list,
     accepted: list[tuple["ConflictUnit", "CandidateResolution"]],
@@ -7729,6 +7750,8 @@ class Orchestrator:
 
         # Loop over rebase stops until clean or escalated.
         last: StepResult | None = None
+        _stuck_continues = 0
+        _prev_head: str | None = None
         while True:
             self.step += 1
             head_before = self.git.head_oid()
@@ -7771,13 +7794,73 @@ class Orchestrator:
             self._run_future_apply_probe(result)
             if result.escalated:
                 break  # the probe escalated (unattended mode) — stop before continue
-            # Continue rebase.
+            # Continue rebase. First: git requires a clean worktree beyond
+            # the staged resolution — in-tree build verification (autotools
+            # regenerates tracked files like config.h.in) leaves unstaged
+            # modifications that make EVERY continue refuse with "You must
+            # edit all merge conflicts..." (on stdout — invisible in a
+            # stderr-only journal). Stash the non-resolution dirty files
+            # (recoverable; what a human would run) before continuing.
+            try:
+                _resolved_paths = set(result.units_by_path.keys())
+                _dirty = [
+                    f for f in self.git.dirty_tracked_files()
+                    if f not in _resolved_paths
+                ]
+            except Exception:  # noqa: BLE001 — staleness check is advisory
+                _dirty = []
+            if _dirty:
+                _stash = self.git.stash_files(_dirty)
+                self.journal.emit(
+                    "continue_stash",
+                    {"files": _dirty[:10],
+                     "returncode": _stash.returncode},
+                    step_index=self.step,
+                )
             cont = self.git.continue_rebase()
             self.journal.emit(
                 "step_continued",
-                {"returncode": cont.returncode, "stderr": cont.stderr[:500]},
+                {"returncode": cont.returncode,
+                 "stderr": cont.stderr[:500],
+                 "stdout": (getattr(cont, "stdout", "") or "")[:500]},
                 step_index=self.step,
             )
+            # Empty-commit completion: a resolution that fully superseded
+            # the replayed commit (e.g. the whole-file fast path taking the
+            # rewriting side verbatim) leaves the pick empty — git refuses
+            # to continue but STAYS mid-rebase, and without this the step
+            # loop spins forever (jsonc-0013: 268k iterations to the case
+            # timeout). git's semantics for a fully-superseded pick is
+            # --skip; after skipping, the completion check below (or the
+            # next iteration's gather) proceeds normally.
+            if (
+                cont.returncode != 0
+                and self.git.rebase_in_progress()
+                and _rebase_continue_empty(cont)
+            ):
+                skip = self.git.skip_rebase()
+                self.journal.emit(
+                    "rebase_skip_empty",
+                    {"returncode": skip.returncode,
+                     "stderr": (skip.stderr or "")[:200]},
+                    step_index=self.step,
+                )
+            # Stuck-loop guard (defense in depth): if continues keep failing
+            # without the head moving, the rebase is wedged — escalate
+            # instead of spinning to the case timeout.
+            _head_now = self.git.head_oid()
+            if cont.returncode != 0 and _head_now == _prev_head:
+                _stuck_continues += 1
+                if _stuck_continues >= 3:
+                    last.escalated = True
+                    last.reason = (
+                        "rebase --continue repeatedly failed without "
+                        "progress (empty pick not skippable?)"
+                    )
+                    break
+            else:
+                _stuck_continues = 0
+            _prev_head = _head_now
             result.continued = True
             if not self.git.rebase_in_progress():
                 # Rebase finished cleanly. Run the resurrection scan: the rebase
@@ -7997,6 +8080,33 @@ class Orchestrator:
                     unit.structural_metadata["file_level_lint_transforms"] = (
                         _file_transforms
                     )
+            # Phase-1 whole-file fast path (wholesale-rewrite files): when
+            # the full-file context says one side rewrote the file, take
+            # that side's pristine stage file BEFORE the per-unit cascade —
+            # the cascade is doomed-and-slow on these (jsonc 0013/0014/0016
+            # burned the whole 1200s case budget in Phase 1 and timed out,
+            # with the correct answer sitting in the index the entire
+            # time). On a hit, record the whole-file resolution and skip to
+            # the next file; Phase 2 re-validates it like any other.
+            if units and units[0].marker_span is not None:
+                try:
+                    _fp = self._try_true_side_portfolio(
+                        path, units[0].language,
+                        units[0].original_worktree_text, units,
+                        wall_deadline=_file_wall_deadline,
+                        phase1_fast_path=True,
+                    )
+                except Exception:
+                    _fp = None
+                if _fp is not None:
+                    accepted = _fp[0]
+                    original = accepted[0][0].original_worktree_text
+                    buffer = _resolved_buffer(original, accepted)
+                    resolved_files[path] = buffer
+                    accepted_by_path[path] = accepted
+                    originals[path] = original
+                    self._write_worktree_only(path, buffer, accepted=accepted)
+                    continue
             for unit in units:
                 _parent = unit.structural_metadata.get("parent_unit_id")
                 # Parent-aware asymmetry: if the parent conflict had substantial
@@ -12194,6 +12304,7 @@ class Orchestrator:
         units: list,
         per_unit_buffer: str | None = None,
         wall_deadline: float | None = None,
+        phase1_fast_path: bool = False,
     ):
         """Whole-file candidates from the merge index's pristine side blobs.
 
@@ -12234,7 +12345,45 @@ class Orchestrator:
         trigger = "dup_pathology"
         asym_winner: str | None = None
         dupes = _shared_context_duplicate_definitions(original, language)
-        if not dupes:
+        if phase1_fast_path:
+            # Pre-cascade whole-file fast path: when one side rewrote the
+            # file wholesale, the per-unit cascade is doomed-and-slow —
+            # dozens of fragment LLM calls burn the case budget before
+            # Phase 2's takeover could rescue (jsonc 0013/0014/0016: 1200s
+            # timeouts with the correct answer sitting in the index). In
+            # this regime the oracle is the winner verbatim (corpus: worst
+            # winner-jaccard 0.944 across both C++ corpora's firing band),
+            # so take the winner's pristine stage file up front and let
+            # verification + the build gate it.
+            from capybase.merge_intent import (
+                FULL_FILE_ASYMMETRY_RATIO,
+                FULL_FILE_DOMINANCE_FRACTION,
+                full_file_context as _ffc,
+            )
+
+            ctx = _ffc(
+                base_text, sides.get("current", ""), sides.get("replayed", ""))
+            enabled = bool(getattr(
+                self.config.future,
+                "enable_true_side_asymmetry_takeover", False))
+            ratio_ok = ctx["churn_ratio"] >= FULL_FILE_ASYMMETRY_RATIO
+            dominance_ok = ctx["dominant_churn"] >= (
+                FULL_FILE_DOMINANCE_FRACTION * max(ctx["base_lines"], 1))
+            fires = bool(
+                enabled and ratio_ok and dominance_ok
+                and ctx["asymmetry_side"] is not None)
+            self.journal.emit(
+                "phase1_fast_path_gate",
+                {"churn_ratio": ctx["churn_ratio"], "ratio_ok": ratio_ok,
+                 "dominance_ok": dominance_ok, "winner": ctx["asymmetry_side"],
+                 "fires": fires, "enabled": enabled},
+                step_index=self.step, path=path,
+            )
+            if not fires:
+                return None
+            trigger = "phase1_fast_path"
+            asym_winner = ctx["asymmetry_side"]
+        elif not dupes:
             from capybase.merge_intent import asymmetry_takeover_gates
 
             gates = asymmetry_takeover_gates(

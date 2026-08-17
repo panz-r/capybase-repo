@@ -433,6 +433,31 @@ class GitBackend:
             env={"GIT_EDITOR": "true"},
         )
 
+    def skip_rebase(self) -> GitResult:
+        """``git rebase --skip`` — drop the current (empty) pick.
+
+        A resolution that fully superseded the replayed commit (e.g. taking
+        the rewriting side verbatim) leaves the pick empty; ``--continue``
+        refuses ("nothing to commit") but stays mid-rebase. git's own
+        semantics for a fully-superseded pick is --skip.
+        """
+        return self._run(["rebase", "--skip"], what="rebase --skip")
+
+    def dirty_tracked_files(self) -> list[str]:
+        """Unstaged modifications to tracked files (``git diff --name-only``)."""
+        r = self._run(["diff", "--name-only"], what="diff --name-only")
+        return [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+
+    def stash_files(self, files: list[str]) -> GitResult:
+        """``git stash push -- <files>`` — set aside worktree modifications.
+
+        Used before ``rebase --continue``: in-tree build verification
+        (autotools regenerates tracked files like config.h.in) leaves the
+        worktree dirty, and git refuses to continue until it's clean.
+        Stashing is reversible — the stash survives for recovery.
+        """
+        return self._run(["stash", "push", "--", *files], what="stash push")
+
     def abort_rebase(self) -> GitResult:
         return self._run(["rebase", "--abort"], what="rebase --abort")
 
