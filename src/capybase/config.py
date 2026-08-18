@@ -430,6 +430,15 @@ class ValidationConfig(BaseModel):
     # (single object). Falls back to the full build if the target rule
     # doesn't exist. Empty (default) = use cc_build_command verbatim.
     cc_build_target_template: str = ""
+    # Phase-2 build-check fallback when no per-file target template exists:
+    # use the pre_continue build command (make / cmake --build / configure &&
+    # make) as the whole-tree gate. Without this, the only build check that
+    # runs regardless of tests.required never fires for datasets without
+    # per-object Makefile rules (protobuf, fmt, json-c, nlohmann), and a
+    # build-broken merge ships silently (protobuf-0055: sim 1.000, make rc=2,
+    # accepted anyway). The no-classifiable-error guard makes build timeouts
+    # / infra failures N/A rather than merge defects.
+    cc_phase2_full_build_fallback: bool = True
     # Clippy lint check (cargo clippy) for Rust: a quality check that runs in
     # Phase B on the fully-spliced file and flags clippy findings the merge
     # INTRODUCES (compared to a pre-conflict baseline, so a repo's pre-existing

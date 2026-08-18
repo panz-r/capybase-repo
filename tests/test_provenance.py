@@ -43,6 +43,7 @@ def test_provenance_values_match_spec():
         "deterministic_brace_repair",
         "deterministic_gcc_fixit",
         "deterministic_cc_repair",
+        "deterministic_dup_eradication",
         "deterministic_side_consistency_repair",
         "deterministic_side_consensus_repair",
         "deterministic_preprocessor_repair",
@@ -58,6 +59,7 @@ def test_provenance_values_match_spec():
         "block_capture",
         "history_augmented_llm",
         "plain_llm",
+        "micro_patch_repair",
         "manual",
     )
 

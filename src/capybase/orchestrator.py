@@ -2403,6 +2403,202 @@ def _try_deterministic_cc_repair(
     return [(wf_unit, wf_cand)]
 
 
+def _dup_eradication_regions(lines: list[str], name: str) -> list[tuple[int, int]]:
+    """Find definition-shaped regions of ``name`` in a spliced C/C++ buffer.
+
+    A region is either a brace-balanced block whose header line defines
+    ``name`` (function/method/ctor/class — the name is preceded by a type or
+    qualifier path and followed by ``(``, or introduced by class/struct), or
+    a single-line variable definition (``<type> name = ...;``). Mere
+    references — call statements, ``x = name(...)``, member access — do not
+    start regions. Returns (start, end) line-index pairs, 0-based, inclusive.
+    """
+    import re as _re_dr
+
+    word = _re_dr.compile(rf"\b{_re_dr.escape(name)}\b")
+    regions: list[tuple[int, int]] = []
+    n = len(lines)
+    i = 0
+    while i < n:
+        code = lines[i].split("//")[0]
+        if not word.search(code):
+            i += 1
+            continue
+        stripped = code.strip()
+        # Definition-shaped headers:
+        #   <type-or-qualifiers> name ( ... )   — function/method/ctor
+        #   (class|struct) name                 — type definition
+        #   <type> name (=|[|;)                 — variable definition
+        is_fn_def = bool(_re_dr.search(
+            rf"^[A-Za-z_][\w:<>~,&*\s]*\b{_re_dr.escape(name)}\s*\(", stripped))
+        is_type_def = bool(_re_dr.match(
+            rf"(?:class|struct)\s+{_re_dr.escape(name)}\b", stripped))
+        is_var_def = bool(_re_dr.match(
+            rf"(?:[A-Za-z_][\w:<>]*[\s*\[\]]+)+"
+            rf"(?:const\s+|static\s+|constexpr\s+|inline\s+|extern\s+)*"
+            rf"{_re_dr.escape(name)}\s*(?:=|\[|;)", stripped))
+        if is_fn_def or is_type_def:
+            if stripped.endswith(";"):
+                i += 1
+                continue  # forward declaration, not a definition
+            # Expand to the balanced-brace block starting at/below this line.
+            depth = 0
+            opened = False
+            j = i
+            while j < n:
+                _c = lines[j].split("//")[0]
+                depth += _c.count("{") - _c.count("}")
+                if _c.count("{"):
+                    opened = True
+                if opened and depth <= 0:
+                    break
+                if not opened and _c.rstrip().endswith(";"):
+                    # Signature-only header (body on next lines is still
+                    # possible; keep scanning) — but a ';' before any '{'
+                    # means a declaration: abandon.
+                    break
+                j += 1
+            if opened and depth <= 0 and j < n:
+                regions.append((i, j))
+                i = j + 1
+                continue
+            i += 1
+        elif is_var_def:
+            regions.append((i, i))
+            i += 1
+        else:
+            i += 1
+    return regions
+
+
+def _phase2_fallback_build_cmd(pre_continue: str, *, enabled: bool = True) -> str:
+    """The pre_continue command used as the Phase-2 build gate, if it IS a build.
+
+    Phase-2's build check prefers the per-file target template (one TU, fast,
+    no sibling noise). When no template exists, the pre_continue command is
+    the only build available — but only when it actually builds (make /
+    cmake --build / configure && make). ``true``, py_compile, and pytest are
+    not builds: falling back to them would waste a subprocess or, worse,
+    "pass" a gate that never compiled anything. Compound commands are
+    recognized by their build words (``./configure && make -j4`` contains
+    ``make``).
+    """
+    gate = (pre_continue or "").strip()
+    if not enabled or not gate or gate == "true":
+        return ""
+    words = {w.strip("./;&|") for w in gate.split()}
+    if words & {"make", "cmake", "ninja", "meson", "scons"}:
+        return gate
+    return ""
+
+
+def _try_duplicate_eradication_repair(
+    failures: list,
+    original: str,
+    accepted: list[tuple[ConflictUnit, CandidateResolution]],
+    fault_idx: int,
+) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+    """Skeleton-aware eradication of duplicate definitions (sprint-18 WS1).
+
+    gcc's ``redefinition of 'X'`` on a merged C/C++ file is the classic
+    merge-splice defect: the resolution kept a pre-merge definition of X AND
+    emitted the other side's, so X now exists twice. The single-line cc
+    repair can only drop the redefinition HEADER (leaving an orphaned body),
+    and the whole-file side portfolio throws away every other unit's correct
+    merge to fix one duplicated entity.
+
+    This repair deletes exactly ONE definition region of the compiler-named
+    entity in the spliced buffer:
+
+    - locate both definition regions (``_dup_eradication_regions``);
+    - if the two are textually identical → delete the second (pure echo);
+    - else if exactly one region's text appears verbatim in the pre-merge
+      file → delete THAT one (the kept-base copy; the freshly generated
+      definition is the merge's intent);
+    - otherwise decline — an overload, a moved definition, or a genuine
+      semantic divergence is the LLM's call, not ours.
+
+    Safe by construction: acts only on the compiler-named entity, requires
+    exactly two regions, deletes a region whose content provably survives
+    elsewhere, and the caller's whole-file loop re-validates the result.
+    """
+    from capybase.verification import _braces_balanced
+    from capybase.conflict_model import CandidateResolution as _CR
+
+    if fault_idx < 0 or fault_idx >= len(accepted):
+        return None
+    unit, _old_cand = accepted[fault_idx]
+    if unit.language not in ("c", "cpp", "c++"):
+        return None
+    # Entity name from the diagnostic: gcc/clang quote it after
+    # "redefinition of" (possibly with return type / params — take the
+    # identifier before any '(' and drop type tokens).
+    import re as _re_dup
+
+    name = None
+    for f in failures:
+        msg = getattr(f, "message", "") or ""
+        m = _re_dup.search(r"redefinition of\s+'([^']+)'", msg) or _re_dup.search(
+            r"redefinition of\s+([A-Za-z_][\w:]*)", msg)
+        if m:
+            quoted = m.group(1).split("(")[0].strip()
+            toks = [t for t in quoted.split() if t] or [quoted]
+            cand_name = toks[-1].strip("~&*<>")
+            if cand_name and not cand_name[0].isdigit():
+                name = cand_name
+                break
+    if not name:
+        return None
+    try:
+        spliced = _resolved_buffer(original, accepted)
+    except Exception:  # noqa: BLE001 - splice may fail on bad spans
+        return None
+    lines = spliced.split("\n")
+    regions = _dup_eradication_regions(lines, name)
+    if len(regions) != 2:
+        return None
+
+    def _text(r: tuple[int, int]) -> str:
+        return "\n".join(lines[r[0]:r[1] + 1])
+
+    t1, t2 = _text(regions[0]), _text(regions[1])
+    victim = None
+    diag = ""
+    if t1.strip() == t2.strip():
+        victim = regions[1]
+        diag = "identical duplicate"
+    elif t1 in original and t2 not in original:
+        victim = regions[0]
+        diag = "region 1 is the pre-merge copy"
+    elif t2 in original and t1 not in original:
+        victim = regions[1]
+        diag = "region 2 is the pre-merge copy"
+    if victim is None:
+        return None
+    new_lines = lines[:victim[0]] + lines[victim[1] + 1:]
+    repaired = "\n".join(new_lines)
+    if "<<<<<<<" in repaired or ">>>>>>>" in repaired:
+        return None
+    if not _braces_balanced(repaired, unit.language):
+        return None
+    # The surviving definition must still be present exactly once.
+    if sum(1 for ln in new_lines if _re_dup.search(rf"\b{_re_dup.escape(name)}\b", ln.split("//")[0])) < 1:
+        return None
+    wf_unit = unit.model_copy(update={"marker_span": None, "unit_kind": "whole_file"})
+    wf_cand = _CR(
+        candidate_id=(getattr(_old_cand, "candidate_id", unit.unit_id) or unit.unit_id) + ":dupfix",
+        unit_id=unit.unit_id,
+        model_name=getattr(_old_cand, "model_name", "deterministic") or "deterministic",
+        resolved_text=repaired,
+        prompt_version="deterministic_dup_eradication",
+        provenance="deterministic_dup_eradication",
+        self_reported_confidence=0.9,
+        explanation=(f"duplicate-definition eradication: removed the "
+                     f"'{name}' copy at lines {victim[0] + 1}-{victim[1] + 1} ({diag})"),
+    )
+    return [(wf_unit, wf_cand)]
+
+
 def _find_lcs_insertion_point(
     candidate_lines: list[str],
     missing_line: str,
@@ -8666,10 +8862,48 @@ class Orchestrator:
                         if not getattr(self, "_p2_build_checked", False):
                             self._p2_build_checked = True
                             _build_cmd = self._resolve_per_file_build(path)
+                            if not _build_cmd:
+                                # No per-file target template (protobuf, fmt,
+                                # json-c, nlohmann — no per-object Makefile
+                                # rules). Fall back to the pre_continue build
+                                # command when it IS a build: without this,
+                                # the only tests.required-independent build
+                                # gate never fires for those trees and a
+                                # build-broken merge ships silently
+                                # (protobuf-0055: sim 1.000, make rc=2,
+                                # accepted anyway).
+                                _build_cmd = _phase2_fallback_build_cmd(
+                                    getattr(self.config.tests, "pre_continue", ""),
+                                    enabled=getattr(
+                                        self.config.validation,
+                                        "cc_phase2_full_build_fallback", True),
+                                )
+                                if _build_cmd:
+                                    self.journal.emit(
+                                        "phase2_build_fallback_full",
+                                        {"command": _build_cmd},
+                                        step_index=self.step, path=path,
+                                    )
                             if _build_cmd:
                                 self._write_worktree_only(path, buffer, accepted=accepted)
                                 _build_ok, _build_output = self._run_raw_test(_build_cmd)
-                                if not _build_ok:
+                                _error_probe = [
+                                    ln for ln in (_build_output or "").splitlines()
+                                    if "error" in ln.lower()
+                                ]
+                                if not _build_ok and not _error_probe:
+                                    # Failure with NO error lines = timeout /
+                                    # OOM-kill / infra noise. Not a merge
+                                    # defect and nothing to feed the repair
+                                    # loop — treat as N/A (the pre_continue
+                                    # gate still reports it).
+                                    self.journal.emit(
+                                        "phase2_build_inconclusive",
+                                        {"command": _build_cmd,
+                                         "output_tail": (_build_output or "")[-200:]},
+                                        step_index=self.step, path=path,
+                                    )
+                                elif not _build_ok:
                                     # Build failed — classify the error lines
                                     # first: a pre-existing SIBLING-file error
                                     # is infrastructure, not a merge defect
@@ -10134,6 +10368,30 @@ class Orchestrator:
                     unit_id=unit_new.unit_id,
                 )
                 return det
+            # Duplicate-definition eradication: gcc's "redefinition of X"
+            # means the spliced file carries the entity twice (kept the
+            # pre-merge copy AND emitted the new one). Supersedes the cc
+            # repair's duplicate_entity branch for this class — that one can
+            # only drop the header line, orphaning the body.
+            det = _try_duplicate_eradication_repair(
+                failures, original, accepted, fault_idx,
+            )
+            if det is not None:
+                unit_new, cand_new = det[0]
+                self.journal.emit(
+                    "candidate_validated",
+                    {
+                        "candidate_id": cand_new.candidate_id,
+                        "passed": True,
+                        "whole_file_repair_for": unit_new.unit_id,
+                        "deterministic_dup_eradication": True,
+                        "explanation": cand_new.explanation,
+                    },
+                    step_index=self.step,
+                    path=path,
+                    unit_id=unit_new.unit_id,
+                )
+                return det
             # Compiler-diagnostic-driven deterministic repair for C/C++: reads the
             # gcc error message, classifies it, and generates minimal fix
             # hypotheses (missing ';', missing '}', stray char, etc.) at the
@@ -10249,6 +10507,20 @@ class Orchestrator:
             unit_id=unit.unit_id,
         )
         if outcome.accepted is None:
+            # Sprint-18 WS1: an oversized-prompt escalation means this unit's
+            # CEGIS context cannot fit the window (protobuf-0055: 15.5K tokens
+            # vs an 8K window) — but the build error localizes the defect to a
+            # handful of lines. Patch exactly those lines with a micro-prompt
+            # (~300 tokens: error + ±10 lines of the spliced file) instead of
+            # abandoning repair. Runs before Layer 3 (which only handles
+            # preprocessor imbalances anyway).
+            if "oversized prompt" in (outcome.reason or ""):
+                micro = self._micro_patch_repair(
+                    path, original, accepted, enriched_failures,
+                    wall_deadline=wall_deadline,
+                )
+                if micro is not None:
+                    return micro
             # Layer 3 (last resort): whole-file model resolution for a cross-unit
             # preprocessor imbalance. The unit-scoped re-resolve above couldn't
             # fix it (the matching #if/#endif is outside the unit's view). As a
@@ -10303,6 +10575,155 @@ class Orchestrator:
             return [(wf_unit, wf_outcome.accepted)]
         accepted[fault_idx] = (unit, outcome.accepted)
         return accepted
+
+    def _micro_patch_repair(
+        self,
+        path: str,
+        original: str,
+        accepted: list[tuple[ConflictUnit, CandidateResolution]],
+        failures: list,
+        *,
+        wall_deadline: float | None = None,
+    ) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+        """Build-error-guided micro patch for files too large for CEGIS (WS1).
+
+        The whole-file repair's model path re-resolves the attributed UNIT
+        with the build error as feedback. For big files that unit's context
+        (whole-file sides, obligations) can exceed the model window, and the
+        re-resolve escalates as oversized — historically the end of the road.
+        But the compiler error names a LINE; the defect lives in a few lines
+        around it. This repair sends the model only:
+
+        - the compiler error,
+        - ±10 lines of the spliced file around the error line,
+        - the attributed unit's own three sides (small by construction),
+
+        asks it to return the corrected excerpt, and splices the excerpt back
+        into the spliced buffer at the same window. One model call; validated
+        as a whole-file candidate before returning. Declines when the error
+        has no usable file:line, the model returns garbage, or validation
+        fails — the caller then escalates with the build error attached.
+        """
+        import re as _re_mp
+        import time as _time_mp
+        from capybase.conflict_model import CandidateResolution as _CR, \
+            estimate_tokens
+        from capybase.verification import _braces_balanced
+
+        if wall_deadline is not None and _time_mp.monotonic() > wall_deadline:
+            return None
+        # Locate the error: file:line:col: error: message
+        err_line = None
+        err_msg = ""
+        for f in failures:
+            msg = getattr(f, "message", "") or ""
+            m = _re_mp.search(r"(\d+):(\d+):\s*(?:fatal\s+)?error:\s*(.+)", msg)
+            if m:
+                try:
+                    err_line = int(m.group(1))
+                except ValueError:
+                    continue
+                err_msg = m.group(3).strip()
+                break
+        if err_line is None or err_line <= 0:
+            return None
+        try:
+            spliced = _resolved_buffer(original, accepted)
+        except Exception:  # noqa: BLE001
+            return None
+        lines = spliced.split("\n")
+        if err_line > len(lines):
+            return None
+        idx = err_line - 1
+        win_start = max(0, idx - 10)
+        win_end = min(len(lines), idx + 11)
+        excerpt = lines[win_start:win_end]
+        # Base context: the attributed unit's sides give the model the
+        # pre-merge ground truth for the contested region.
+        base_ctx = ""
+        for u, _c in reversed(accepted):
+            if u.marker_span is not None and u.marker_span[0] <= idx <= u.marker_span[1]:
+                base_ctx = (
+                    f"Pre-merge conflict sides for this region:\n"
+                    f"--- base ---\n{u.base.text}\n"
+                    f"--- current ---\n{u.current.text}\n"
+                    f"--- replayed ---\n{u.replayed.text}\n"
+                )
+                break
+        prompt = (
+            "Your merge of a C/C++ file is 99% correct but has a microscopic "
+            "defect that breaks the build. Fix ONLY the defect — do not "
+            "reformat, reorder, or touch anything else.\n\n"
+            f"Compiler error (at line {err_line} of the merged file):\n"
+            f"  error: {err_msg}\n\n"
+            f"Excerpt of the merged file (lines {win_start + 1}-{win_end}, "
+            "the error is on the line marked ERRORHERE):\n"
+            + "\n".join(
+                (f"{win_start + k + 1}: " + ("ERRORHERE> " if win_start + k == idx else "")
+                 + ln) for k, ln in enumerate(excerpt))
+            + "\n\n" + base_ctx +
+            "\nReturn JSON: {\"resolved_text\": \"<the corrected excerpt, "
+            "same number of lines, no line-number prefixes>\"}. Keep every "
+            "unchanged line exactly as given."
+        )
+        _window = int(getattr(self.config.model, "context_window", 0) or 0)
+        if _window > 0 and estimate_tokens(prompt) > _window * 0.9:
+            return None  # even the micro prompt doesn't fit — escalate
+        try:
+            resp = self.resolution_engine.raw_complete(prompt, json_mode=True)
+        except Exception:  # noqa: BLE001 - endpoint failure → escalate
+            return None
+        raw = (getattr(resp, "text", "") or "").strip()
+        if not raw:
+            return None
+        patched_excerpt = None
+        try:
+            import json as _json_mp
+            data = _json_mp.loads(raw)
+            patched_excerpt = (data.get("resolved_text") or "").strip("\n")
+        except Exception:  # noqa: BLE001
+            from json_repair import repair_json as _rj
+            try:
+                data = _json_mp.loads(_rj(raw))
+                patched_excerpt = (data.get("resolved_text") or "").strip("\n")
+            except Exception:  # noqa: BLE001
+                return None
+        if not patched_excerpt:
+            return None
+        patched_lines = patched_excerpt.split("\n")
+        # The model was told to return the excerpt WITHOUT line-number
+        # prefixes; strip any it added anyway ("12: code").
+        patched_lines = [
+            _re_mp.sub(r"^\s*\d+:\s?", "", ln) for ln in patched_lines
+        ]
+        if abs(len(patched_lines) - len(excerpt)) > max(8, len(excerpt) // 2):
+            return None  # grossly different shape — not a micro patch
+        new_buffer = "\n".join(
+            lines[:win_start] + patched_lines + lines[win_end:])
+        if "<<<<<<<" in new_buffer or ">>>>>>>" in new_buffer:
+            return None
+        unit, _old_cand = accepted[0]
+        lang = unit.language
+        if lang in ("c", "cpp", "c++", "rust", "java") and not _braces_balanced(new_buffer, lang):
+            return None
+        wf_unit = unit.model_copy(update={"marker_span": None, "unit_kind": "whole_file"})
+        wf_cand = _CR(
+            candidate_id=(getattr(_old_cand, "candidate_id", unit.unit_id) or unit.unit_id) + ":micropatch",
+            unit_id=unit.unit_id,
+            model_name=getattr(self.config.model, "model", "micro") or "micro",
+            resolved_text=new_buffer,
+            prompt_version="micro_patch_repair",
+            provenance="micro_patch_repair",
+            self_reported_confidence=0.8,
+            explanation=(f"micro patch at line {err_line}: {err_msg[:80]}"),
+        )
+        self.journal.emit(
+            "micro_patch_repair",
+            {"error_line": err_line, "error": err_msg[:120],
+             "window": [win_start + 1, win_end]},
+            step_index=self.step, path=path, unit_id=unit.unit_id,
+        )
+        return [(wf_unit, wf_cand)]
 
     def _apply_deterministic_closure(
         self, unit: ConflictUnit, cand: CandidateResolution,

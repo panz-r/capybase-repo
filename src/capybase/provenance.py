@@ -60,6 +60,7 @@ PROVENANCE_VALUES: tuple[str, ...] = (
     "deterministic_brace_repair",
     "deterministic_gcc_fixit",
     "deterministic_cc_repair",
+    "deterministic_dup_eradication",
     "deterministic_side_consistency_repair",
     "deterministic_side_consensus_repair",
     "deterministic_preprocessor_repair",
@@ -75,6 +76,7 @@ PROVENANCE_VALUES: tuple[str, ...] = (
     "block_capture",
     "history_augmented_llm",
     "plain_llm",
+    "micro_patch_repair",
     "manual",
 )
 
@@ -89,6 +91,7 @@ PROVENANCE_LABELS: dict[str, str] = {
     "deterministic_brace_repair": "deterministic brace repair",
     "deterministic_gcc_fixit": "deterministic gcc fix-it",
     "deterministic_cc_repair": "deterministic cc repair (gcc-diagnostic)",
+    "deterministic_dup_eradication": "deterministic duplicate-definition eradication",
     "deterministic_side_consistency_repair": "deterministic side-consistency repair",
     "deterministic_side_consensus_repair": "deterministic side-consensus repair",
     "deterministic_preprocessor_repair": "deterministic preprocessor repair",
@@ -104,6 +107,7 @@ PROVENANCE_LABELS: dict[str, str] = {
     "exact_history_reuse": "exact history reuse",
     "history_augmented_llm": "history-augmented LLM",
     "plain_llm": "LLM",
+    "micro_patch_repair": "LLM micro-patch (build-error window)",
     "manual": "manual (human)",
     LEGACY_PROVENANCE: "(legacy)",
 }
