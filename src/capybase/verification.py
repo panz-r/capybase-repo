@@ -2100,6 +2100,32 @@ def _mask_strings_and_comments(text: str, language: str | None) -> str:
     return blank_strings_and_comments(text, language)
 
 
+#: Extensions whose content is source code for the language-structural gates
+#: (brace balance, py_compile, AST sanity). Everything else — markdown,
+#: TOML/lockfiles, plain text — has no brace semantics: brace-counting prose
+#: rejects perfect merges because a code fence or template placeholder had an
+#: unbalanced brace (axum CHANGELOG.md ×4 at sim 1.000, sprint-16 census).
+#: Extensionless files (LICENSE, README, CHANGELOG) are not code either.
+_STRUCTURAL_CODE_EXTS = frozenset({
+    ".rs", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".hh", ".hxx", ".ipp",
+    ".inl", ".py", ".pyi", ".java", ".go", ".ts", ".tsx", ".js", ".mjs",
+})
+
+
+def structural_gate_applies(path: str | None) -> bool:
+    """Whether the file at ``path`` should run the code-structural gates.
+
+    False for markdown/config/prose files: their merge quality is judged by
+    marker-free-ness and content similarity alone. The single allowlist used
+    by the live eval's post-hoc compiles check, the true-side portfolio's
+    brace sanity check, and the wholesale winner floor.
+    """
+    if not path:
+        return False
+    ext = os.path.splitext(path)[1].lower()
+    return ext in _STRUCTURAL_CODE_EXTS if ext else False
+
+
 def _braces_balanced(text: str, language: str | None = None) -> bool:
     """Cheap structural sanity check: are ``{}`` braces balanced?
 
@@ -4866,6 +4892,11 @@ class VerificationEngine:
         runner = lsp_mod.RustAnalyzerRunner(
             cargo_path=self.config.cargo_path,
             rust_analyzer_path=self.config.rust_analyzer_path,
+            # Cold first compile of a fresh workspace tree (tokio: ~2-4 min
+            # from an empty target/ with warm CARGO_HOME) blows the 120s
+            # default — and a timed-out BASELINE is worse than no baseline
+            # (see below), so give the cold pass real headroom.
+            timeout=300,
         )
         # Baseline: the original file with conflict markers blanked to ONE side
         # so it parses as valid Rust (no duplicate-definition noise from the
@@ -4873,8 +4904,15 @@ class VerificationEngine:
         baseline_src = _blank_markers_one_side(original, "rust")
         baseline = runner.check(baseline_src, path=path, repo_root=repo_root)
         after = runner.check(whole, path=path, repo_root=repo_root)
-        if not after.checked:
-            # cargo absent or failed to run → not checked (never a false fail).
+        if not after.checked or not baseline.checked:
+            # cargo absent/failed/timed out on EITHER side → not checked. An
+            # unchecked baseline carries an EMPTY error list; deltaing against
+            # it counts every candidate error as "new" and rejects even the
+            # oracle — tokio-0110: the baseline's cold compile blew the 120s
+            # subprocess cap, and a calm-environment probe showed base,
+            # current, replayed AND the oracle all carry the same two
+            # pre-existing errors at merge_sha (zero new for every variant).
+            # An undecidable delta must abstain, never fail.
             features["syntax_checked"] = False
             features["syntax_passed"] = True
             return False
@@ -4958,6 +4996,12 @@ class VerificationEngine:
         _baseline_src = _blank_markers_one_side(original)
         with temp_worktree_file(repo_root, path, _baseline_src):
             baseline = runner._check_cargo(_baseline_src, path, repo_root)
+        if not baseline.checked:
+            # Undecidable delta (unchecked baseline = empty error list) →
+            # abstain, never count every candidate error as "new".
+            features["syntax_checked"] = False
+            features["syntax_passed"] = True
+            return False, True
         features["syntax_checked"] = True
         # Phase-scoped: cargo manifest check has full crate context — do NOT
         # pass suppress_codes (E0432/E0433 are decidable here, unlike the
@@ -5024,14 +5068,19 @@ class VerificationEngine:
         if not after.checked:
             features["clippy_checked"] = False
             return
-        features["clippy_checked"] = True
         # Baseline: temporarily write the marker-blanked (one-side) original,
         # run clippy, then restore the saved worktree state.
         with temp_worktree_file(repo_root, path, _blank_markers_one_side(original, "rust")):
             baseline = lsp_mod.run_clippy(
                 repo_root, cargo_path=self.config.cargo_path
             )
-        baseline_diags = list(baseline.diagnostics) if baseline.checked else []
+        if not baseline.checked:
+            # Undecidable delta (unchecked baseline = empty finding list) →
+            # abstain, never count every candidate finding as "new".
+            features["clippy_checked"] = False
+            return
+        features["clippy_checked"] = True
+        baseline_diags = list(baseline.diagnostics)
         new_findings = compute_diagnostic_delta(
             baseline_diags, list(after.diagnostics),
             suppress_codes=set(getattr(self.config, "rust_suppress_codes", []) or []),
@@ -5260,7 +5309,10 @@ class VerificationEngine:
         baseline_src = _blank_markers(original, language)
         baseline = runner.check(baseline_src, path=path, repo_root=repo_root)
         after = runner.check(whole, path=path, repo_root=repo_root)
-        if not after.checked:
+        if not after.checked or not baseline.checked:
+            # Same abstain rule as the cargo syntax check: an unchecked
+            # baseline has an empty error list — deltaing against it counts
+            # every candidate error as "new" and rejects even the oracle.
             features["lsp_checked"] = False
             features["lsp_error_count"] = 0
             features["lsp_new_error_count"] = 0

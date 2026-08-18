@@ -439,3 +439,34 @@ def test_floor_uses_merge_stages_not_unit_sides():
     units = _units(1, base="stale base\n", cur="stale cur\n", rep="stale rep\n")
     out = orch._wholesale_winner_floor("f.c", "c", units, buffer=_REP_W)
     assert out is not None and out[0][1].resolved_text == _CUR_W
+# ---------------------------------------------------------------------------
+# Non-code files and the brace sanity checks (sprint-17 WS1a)
+# ---------------------------------------------------------------------------
+
+def test_floor_skips_brace_check_for_markdown():
+    # A markdown wholesale rewrite whose winner contains an unbalanced brace
+    # (a code fence, a template placeholder) must still floor — braces in
+    # prose have no structural meaning.
+    md_cur = _CUR_W + "\nsee the `foo {` template above\n"
+    orch = _wiring_orchestrator(_KeepEngine(), _BASE_W, md_cur, _REP_W)
+    units = _units(1, base=_BASE_W, cur=md_cur, rep=_REP_W)
+    for u in units:
+        u.path = "CHANGELOG.md"
+        u.language = "markdown"
+    out = orch._wholesale_winner_floor(
+        "CHANGELOG.md", "markdown", units, buffer=_REP_W)
+    assert out is not None and out[0][1].resolved_text == md_cur
+
+
+def test_portfolio_brace_check_skips_markdown():
+    # Same exemption on the true-side portfolio's candidate sanity check:
+    # an unbalanced brace in a markdown side must not disqualify it.
+    md_cur = _CUR_W + "\nsee the `foo {` template above\n"
+    orch = _wiring_orchestrator(_SupersededEngine(), _BASE_W, md_cur, _REP_W)
+    units = _units(1, base=_BASE_W, cur=md_cur, rep=_REP_W)
+    for u in units:
+        u.path = "CHANGELOG.md"
+        u.language = "markdown"
+    out = orch._try_true_side_portfolio(
+        "CHANGELOG.md", "markdown", md_cur, units, phase1_fast_path=True)
+    assert out is not None and out[1] == md_cur

@@ -348,6 +348,17 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         text = current if current.strip() else replayed
         return StructuralResolution(rule="identical_sides", text=text)
 
+    # Rule 2.7: text additive union — non-code files (markdown/prose) whose
+    # both sides overwhelmingly added content. CHANGELOG-class merges are
+    # additive unions; the line-union scores sim 1.000 on 34/36 tokio
+    # CHANGELOG oracles. Fires before any LLM call — the prompts for these
+    # whole-file markdown units exceed the endpoint's context and return
+    # empty (the sprint-16 empty-response escalations).
+    if not _skip_union_rules:
+        _txt_union = _try_text_additive_union(unit, current, base, replayed)
+        if _txt_union is not None:
+            return StructuralResolution(rule="text_additive_union", text=_txt_union)
+
     # Rule 2.5: lint-vs-refactor. One side's changes are PURELY mechanical
     # lint (C++ alternative tokens, whitespace, template spacing) and the
     # other side makes a real semantic change. The lint carries no unique
@@ -801,18 +812,44 @@ def _try_move_transplant(base: str, current: str, replayed: str) -> str | None:
 
 
 def _base_deleted_lines(base: list[str], other: list[str]) -> set[int]:
-    """Base line indices (0-based) that ``other`` DELETES (a ``delete`` opcode —
-    lines present in base but absent from ``other``). Distinct from
-    :func:`_base_changed_lines` (which also counts replaces/inserts): a line one
-    side deletes that the other side KEEPS is a modify/delete conflict, not a
-    disjoint change, and must escalate rather than silently drop the kept line.
-    """
+    """Base line indices (0-based) that ``other`` deletes."""
     deleted: set[int] = set()
     matcher = line_matcher(base, other)
     for tag, i1, i2, _j1, _j2 in matcher.get_opcodes():
         if tag == "delete":
             deleted.update(range(i1, i2))
     return deleted
+
+
+def _side_line_fates(base: list[str], side: list[str]):
+    """Alignment-aware per-line fate of one side vs the base.
+
+    Returns ``(replacements, insertions)`` — replacements maps a base line
+    index to its 1:1 modified replacement, insertions maps a base anchor
+    index to the side's inserted lines before it — or None when any change
+    is not a clean 1:1 modify or pure insert (multi-line replaces and
+    deletions decline; the caller/LLM handles those).
+
+    Positional indexing (side[i] vs base[i]) is WRONG the moment a side
+    deleted or inserted lines: everything after shifts and the walk
+    silently drops content — the r40 modify/delete data-loss class.
+    """
+    repl: dict[int, str] = {}
+    ins: dict[int, list[str]] = {}
+    matcher = line_matcher(base, side)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag == "replace":
+            if i2 - i1 != j2 - j1:
+                return None
+            for k in range(i2 - i1):
+                repl[i1 + k] = side[j1 + k]
+        elif tag == "insert":
+            ins.setdefault(i1, []).extend(side[j1:j2])
+        elif tag == "delete":
+            return None
+    return repl, ins
 
 
 def _has_delete_adjacent_to_other_change(
@@ -1894,17 +1931,34 @@ def _try_generalized_mini_conflict(
             cov = intent_coverage_score(merged, base, current, replayed)
             if cov >= 0.5:
                 return StructuralResolution(rule="mini_conflict_deterministic", text=merged)
-        # Fall through: try line-by-line resolution
+        # Fall through: alignment-aware line-by-line resolution. Positional
+        # indexing (cur_lines[i]) misaligns the moment a side deleted or
+        # inserted lines — the r40 modify/delete class: replayed's deletion
+        # shifted every later line up and the positional walk silently
+        # dropped the line current kept.
+        if cur_deleted != rep_deleted:
+            # A base line deleted by exactly one side is a genuine
+            # modify/delete conflict — not deterministically resolvable;
+            # decline so the LLM (or escalation) decides.
+            return None
+        _cur_fates = _side_line_fates(base_lines, cur_lines)
+        _rep_fates = _side_line_fates(base_lines, rep_lines)
+        if _cur_fates is None or _rep_fates is None:
+            return None
+        _cur_repl, _cur_ins = _cur_fates
+        _rep_repl, _rep_ins = _rep_fates
+        resolved_lines: list[str] = []
         for i in range(n):
-            cur_line = cur_lines[i] if i < len(cur_lines) else ""
-            rep_line = rep_lines[i] if i < len(rep_lines) else ""
-            base_line = base_lines[i]
-            if _normalize(cur_line) != _normalize(base_line):
-                resolved_lines.append(cur_line)  # current changed it
-            elif _normalize(rep_line) != _normalize(base_line):
-                resolved_lines.append(rep_line)  # replayed changed it
+            resolved_lines.extend(_cur_ins.get(i, []))
+            resolved_lines.extend(_rep_ins.get(i, []))
+            if i in _cur_repl:
+                resolved_lines.append(_cur_repl[i])
+            elif i in _rep_repl:
+                resolved_lines.append(_rep_repl[i])
             else:
-                resolved_lines.append(base_line)  # unchanged
+                resolved_lines.append(base_lines[i])
+        resolved_lines.extend(_cur_ins.get(n, []))
+        resolved_lines.extend(_rep_ins.get(n, []))
         result_text = "\n".join(resolved_lines)
         cov = intent_coverage_score(result_text, base, current, replayed)
         if cov >= 0.5:
@@ -2584,6 +2638,110 @@ def _try_insertion_union(base: str, current: str, replayed: str) -> str | None:
         if _cnt > _allowed:
             return None  # line duplicated beyond what any side contains
     return "\n".join(out)
+
+
+def _side_add_del_counts(base_lines, side_lines):
+    """(added, deleted) line counts for one side vs the base (difflib)."""
+    import difflib as _dl
+    added = deleted = 0
+    for tag, i1, i2, j1, j2 in _dl.SequenceMatcher(
+            None, base_lines, side_lines, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "delete":
+            added += j2 - j1
+        if tag != "insert":
+            deleted += i2 - i1
+    return added, deleted
+
+
+def _try_text_additive_union(unit, current: str, base: str, replayed: str) -> str | None:
+    """Non-code files whose both sides overwhelmingly ADDED content: union
+    the additions.
+
+    CHANGELOG/doc merges are additive unions — each branch prepends its own
+    entries (and both re-add a shared "## [Unreleased]" heading, which is why
+    insertion_union's disjointness check declines them). Measured on the
+    36-case tokio CHANGELOG corpus (sprint-17 WS2b): the line-union scores
+    sim 1.000 against the oracle on 34/36 and >= 0.92 on all; the 16 cases
+    the sprint-16 census lost (empty LLM responses on >20KB prompts that
+    cannot fit the endpoint's hard 8192-token context) all sit in this shape,
+    so this rule resolves them without ever calling the model.
+
+    Gating: the ADDITIVITY condition runs on the WHOLE-FILE sides (hunk-level
+    diffs see empty refined bases and cannot distinguish adds from deletes);
+    the MERGE runs on the refined hunk like every other rule. A side counts
+    as overwhelmingly additive when it deleted <= 8 lines AND its additions
+    outnumber deletions 8:1 (pure additions trivially qualify; real rewrites
+    like tokio-0105's +726/-370 decline).
+    """
+    from capybase.verification import structural_gate_applies
+    path = getattr(unit, "path", "") or ""
+    if structural_gate_applies(path):
+        return None  # code file — the code rules own it
+    # Whole-file sides: the orchestrator stashes the pristine merge-index
+    # texts in structural_metadata (marker units carry conflict-block-only
+    # current/replayed; diffing a block vs the whole-file base reads as a
+    # total rewrite and declines everything). Fall back to the unit's own
+    # side texts (tests, whole-file units).
+    _wf = (getattr(unit, "structural_metadata", None) or {}).get(
+        "whole_file_sides") or {}
+    wf_base = (_wf.get("base") or (unit.base.text if unit.base is not None else "") or "").splitlines()
+    wf_cur = (_wf.get("current") or (unit.current.text if unit.current is not None else "") or "").splitlines()
+    wf_rep = (_wf.get("replayed") or (unit.replayed.text if unit.replayed is not None else "") or "").splitlines()
+    if not wf_cur or not wf_rep:
+        return None
+    ca, cd = _side_add_del_counts(wf_base, wf_cur)
+    ra, rd = _side_add_del_counts(wf_base, wf_rep)
+    if ca == 0 and ra == 0:
+        return None  # nobody added anything — not an additive merge
+    for added, deleted in ((ca, cd), (ra, rd)):
+        if deleted > 8:
+            return None
+        if deleted and added < 8 * deleted:
+            return None
+    # Union at the hunk level via a monotone two-pointer walk. Shared lines
+    # are anchors; at each anchor the output takes current's additions for
+    # that segment first, then replayed's buffered additions, then the
+    # anchor itself. This matches insertion_union's current-before-replayed
+    # run convention and anchors each run where it sits: prepend (changelogs
+    # — each side's entries above a shared tail) and append (a README gaining
+    # a bullet at the end — the blessed corpus's text-combine shape).
+    cur_lines = current.split("\n")
+    rep_lines = replayed.split("\n")
+    cur_set = {ln.strip() for ln in cur_lines if ln.strip()}
+    out: list[str] = []
+    rep_buffer: list[str] = []
+    i = 0
+    for rep_ln in rep_lines:
+        key = rep_ln.strip()
+        if key and key in cur_set:
+            cur_adds: list[str] = []
+            while i < len(cur_lines) and cur_lines[i].strip() != key:
+                cur_adds.append(cur_lines[i])
+                i += 1
+            out.extend(cur_adds)
+            out.extend(rep_buffer)
+            rep_buffer = []
+            if i < len(cur_lines):
+                out.append(cur_lines[i])
+                i += 1
+        else:
+            rep_buffer.append(rep_ln)
+    tail = cur_lines[i:]
+    # A trailing blank is the file's newline, not current's segment addition
+    # — keep it after replayed's buffered additions.
+    while tail and not tail[-1].strip():
+        rep_buffer.append(tail.pop())
+    out.extend(tail)
+    out.extend(rep_buffer)
+    # Both sides' trailing newline produces two trailing blanks — keep one.
+    while len(out) > 1 and not out[-1].strip() and not out[-2].strip():
+        out.pop()
+    merged = "\n".join(out)
+    if not merged.strip():
+        return None
+    return merged
 
 
 # C/C++ preprocessor directives eligible for directive_union. Only the ADDITIVE

@@ -49,6 +49,7 @@ from capybase.verification import (
     ValidationConfig,
     VerificationEngine,
     _braces_balanced,
+    structural_gate_applies,
 )
 from capybase.adapters.tests import TestRunner
 from capybase.test_output import parse_passing_node_ids
@@ -5085,6 +5086,18 @@ class Orchestrator:
         """
         from capybase.structural_resolver import resolve_structurally
 
+        # Whole-file side texts for rules whose gating needs file-level
+        # context (text_additive_union's additivity check): marker units
+        # carry the whole-file BASE but conflict-block-only current/replayed
+        # — diffing a block against a whole file reads as a total rewrite
+        # and the rule declines everything.
+        if "whole_file_sides" not in (unit.structural_metadata or {}):
+            try:
+                _wf_sides, _wf_base = _true_stage_sides(self.git, unit.path)
+                unit.structural_metadata["whole_file_sides"] = {
+                    **_wf_sides, "base": _wf_base}
+            except Exception:  # noqa: BLE001 — metadata is advisory
+                pass
         result = resolve_structurally(unit)
 
         if not result.resolved or result.text is None:
@@ -11575,7 +11588,11 @@ class Orchestrator:
                      "unit_id": unit.unit_id},
                     step_index=self.step, path=unit.path, unit_id=unit.unit_id,
                 )
-                _ef = self._empty_fast_fail_recovery(unit, cand)
+                _ef = (
+                    self._empty_fast_fail_recovery(unit, cand)
+                    if getattr(self.config.future, "enable_empty_fast_fail", True)
+                    else None
+                )
                 if _ef is not None:
                     return _ef
 
@@ -12492,7 +12509,10 @@ class Orchestrator:
         winner = "current" if ctx["current_churn"] >= ctx["replayed_churn"] else "replayed"
         wtext = sides[winner]
         try:
-            if language and not _braces_balanced(wtext, language):
+            # Brace sanity only for code files — the floor can fire on
+            # markdown/config wholesale rewrites where braces are prose.
+            if (language and structural_gate_applies(path)
+                    and not _braces_balanced(wtext, language)):
                 return None
         except Exception:
             pass
@@ -12741,7 +12761,10 @@ class Orchestrator:
                 return None
         for side, text in _candidates:
             try:
-                if language and not _braces_balanced(text, language):
+                # Brace sanity only for code files — prose/config files have
+                # no brace semantics (markdown code fences false-fail it).
+                if (language and structural_gate_applies(path)
+                        and not _braces_balanced(text, language)):
                     continue
             except Exception:
                 pass

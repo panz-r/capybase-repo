@@ -44,14 +44,24 @@ def _make_resurrection_repo(repo: Path) -> dict:
     git(repo, "commit", "-q", "-m", "main: delete dead() cleanup")
     main_oid = git(repo, "rev-parse", "HEAD").stdout.strip()
 
+    # The replayed branch ALSO deletes dead() — so when the result tree
+    # re-adds it, the resurrection is explained by NEITHER side. (With the
+    # old shape the replayed branch still carried dead(), and the
+    # provenance downgrade correctly defuses the finding as replayed's
+    # explicit content — the stop policy never fired.)
     git(repo, "checkout", "-q", "feat")
+    (repo / "app.py").write_text("def useful():\n    return 1\n\n# replayed edit\n")
+    git(repo, "add", "app.py")
+    git(repo, "commit", "-q", "-m", "replayed: delete dead() too + edit")
+    start_oid = git(repo, "rev-parse", "HEAD").stdout.strip()
+
     (repo / "app.py").write_text(base + "# replayed edit\n")
     git(repo, "add", "app.py")
-    git(repo, "commit", "-q", "-m", "result: keeps dead() + replayed edit")
+    git(repo, "commit", "-q", "-m", "result: resurrects dead()")
     result_oid = git(repo, "rev-parse", "HEAD").stdout.strip()
 
     return {
-        "base_oid": base_oid, "onto_oid": main_oid, "result_oid": result_oid,
+        "base_oid": start_oid, "onto_oid": main_oid, "result_oid": result_oid,
     }
 
 
@@ -76,9 +86,12 @@ def test_resurrection_scan_finds_the_resurrection():
             result_oid=ctx["result_oid"],
             backup_ref="capybase/backup/x",
         )
-        assert len(findings) == 1
-        assert findings[0].path == "app.py"
-        assert "delete dead()" in findings[0].deleting_commit
+        # The genuine-resurrection fixture (dead() deleted by BOTH sides,
+        # re-added by the result) can yield multiple adjacent blocks on the
+        # one path — all findings are app.py blocks from the dead() cleanup.
+        assert findings
+        assert all(f.path == "app.py" for f in findings)
+        assert any("delete dead()" in f.deleting_commit for f in findings)
 
 
 def test_stop_policy_escalates_and_writes_bundle():

@@ -334,3 +334,101 @@ def test_verify_file_rust_disabled_when_require_syntax_off(tmp_path):
     assert res.features["syntax_checked"] is True
     assert res.features["syntax_passed"] is False
     assert not any(f.validator == "syntax" for f in res.hard_failures)
+
+
+# ---------------------------------------------------------------------------
+# Unchecked-baseline abstention (tokio-0110, sprint-17 WS1b)
+# ---------------------------------------------------------------------------
+
+class _SeqRunner:
+    """Fake RustAnalyzerRunner returning a scripted sequence of Diagnostics.
+
+    The baseline check runs first, the candidate check second — the live
+    ordering inside _run_cargo_syntax_check."""
+
+    def __init__(self, results):
+        self._results = list(results)
+        self.calls = []
+
+    def check(self, source, *, path, repo_root):
+        self.calls.append(source)
+        return self._results.pop(0)
+
+
+def _diags(checked, messages=()):
+    from capybase.adapters.lsp import Diagnostic, Diagnostics
+    return Diagnostics(
+        checked=checked, tool="cargo",
+        diagnostics=[Diagnostic(severity="error", message=m, line=1, column=1,
+                                code="E0599", source="cargo") for m in messages])
+
+
+def _syntax_engine():
+    return VerificationEngine.default(ValidationConfig())
+
+
+def test_unchecked_baseline_abstains_never_fails():
+    # tokio-0110: the baseline's cold compile blew the subprocess timeout —
+    # Diagnostics(checked=False) with an EMPTY error list. Deltaing against
+    # it counted the candidate's (pre-existing) errors as "new" and rejected
+    # a sim-0.999 merge whose oracle carries the same errors. Undecidable
+    # delta must abstain.
+    import capybase.adapters.lsp as lsp_mod
+    eng = _syntax_engine()
+    fake = _SeqRunner([
+        _diags(False),                      # baseline: timed out, unchecked
+        _diags(True, ["no method named `remove` found"]),
+    ])
+    from unittest.mock import patch
+    with patch.object(lsp_mod, "RustAnalyzerRunner", return_value=fake):
+        hard = []
+        features: dict = {}
+        ran = eng._run_cargo_syntax_check(
+            "f.rs", "<<<<<<<\na\n=======\nb\n>>>>>>>\n", "fn a() {}\n",
+            "/tmp/r", hard, features)
+    assert ran is False                      # abstained — cargo "didn't run"
+    assert features["syntax_checked"] is False
+    assert features["syntax_passed"] is True
+    assert hard == []                        # no failure recorded
+
+
+def test_checked_baseline_still_fails_new_errors():
+    # The true-positive path is unchanged: a checked baseline with no such
+    # error + a candidate introducing it remains a hard failure.
+    from unittest.mock import patch
+    import capybase.adapters.lsp as lsp_mod
+    eng = _syntax_engine()
+    fake = _SeqRunner([
+        _diags(True),                        # baseline clean
+        _diags(True, ["no method named `remove` found"]),
+    ])
+    with patch.object(lsp_mod, "RustAnalyzerRunner", return_value=fake):
+        hard = []
+        features: dict = {}
+        eng._run_cargo_syntax_check(
+            "f.rs", "<<<<<<<\na\n=======\nb\n>>>>>>>\n", "fn a() {}\n",
+            "/tmp/r", hard, features)
+    assert features["syntax_checked"] is True
+    assert features["syntax_passed"] is False
+    assert hard and "remove" in hard[0].message
+
+
+def test_preexisting_errors_in_baseline_are_not_new():
+    # The delta still cancels errors the baseline already had (the
+    # no-worse-than-before contract).
+    from unittest.mock import patch
+    import capybase.adapters.lsp as lsp_mod
+    eng = _syntax_engine()
+    fake = _SeqRunner([
+        _diags(True, ["no method named `remove` found"]),
+        _diags(True, ["no method named `remove` found"]),
+    ])
+    with patch.object(lsp_mod, "RustAnalyzerRunner", return_value=fake):
+        hard = []
+        features: dict = {}
+        eng._run_cargo_syntax_check(
+            "f.rs", "<<<<<<<\na\n=======\nb\n>>>>>>>\n", "fn a() {}\n",
+            "/tmp/r", hard, features)
+    assert features["syntax_checked"] is True
+    assert features["syntax_passed"] is True
+    assert hard == []

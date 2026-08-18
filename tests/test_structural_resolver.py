@@ -1603,16 +1603,14 @@ def test_mechanical_reapply_fires_on_rewrite_vs_rename():
         "    return c;\n"
         "}"
     )
-    cur = (
-        "void f() {\n"
-        "    assert(x && y);\n"       # mechanical: and -> &&
-        "    char c = get_char();\n"
-        "    cursor++;\n"
-        "    int len = 0;\n"
-        "    buffer[len] = c;\n"
-        "    return c;\n"
-        "}"
-    )
+    # Mechanical: a 1-line API rename. (The original fixture used
+    # and -> &&, which the alternative-token equivalence map made
+    # token-invisible — nothing mechanical left to re-apply, and the rule
+    # correctly declined; the rename is the rule's real clickhouse-0024
+    # shape.)
+    # Mechanical: rename the return variable on the ONE line the rewrite
+    # keeps (line 7) — the anchor survives, so the substitution re-applies.
+    cur = base.replace("return c;", "return ch;")
     rep = (
         "void f() {\n"
         "    assert(x and y);\n"       # kept unchanged
@@ -1620,14 +1618,13 @@ def test_mechanical_reapply_fires_on_rewrite_vs_rename():
         "    advance_pos();\n"              # rewrite line 4
         "    int count = byte + 1;\n"       # rewrite line 5
         "    store(byte, count);\n"         # rewrite line 6
-        "    return byte;\n"                # rewrite line 7
+        "    return c;\n"                   # kept — the mechanical anchor
         "}"
     )
     result = _try_mechanical_reapply_merge(base, cur, rep)
     assert result is not None, "should fire: cur=mechanical(1 line), rep=semantic(5 lines)"
-    assert "&&" in result, "mechanical substitution should be applied"
     assert "read_stream" in result, "semantic rewrite should be kept"
-    assert " and " not in result, "the original 'and' should be replaced by '&&'"
+    assert "return ch;" in result, "mechanical rename should be re-applied"
 
 
 def test_mechanical_reapply_declines_when_both_mechanical():

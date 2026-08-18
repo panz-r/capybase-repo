@@ -775,6 +775,12 @@ class FutureConfig(BaseModel):
     # markers unresolved. Woven merges (sea-orm-0009) preserve the winner
     # and never floor.
     enable_wholesale_winner_floor: bool = True
+    # First-empty fast-fail (7b6ae57): on the model's FIRST empty response,
+    # skip the retry ladder and try the two verified single-side candidates.
+    # Disabled by the escalation-path unit tests so they still exercise
+    # their target mechanisms (no-progress guard, transient-failure
+    # escalation, whole-file repair) instead of being rescued here.
+    enable_empty_fast_fail: bool = True
     # Phase 4 comment jury (design §5). An untrusted semantic sensor that
     # evaluates comment claims produced by the comment pass. Three operating
     # modes:

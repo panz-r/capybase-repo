@@ -31,6 +31,14 @@ Verdict per case:
   ESCALATE   — orch.run() escalated (human required). The SAFE outcome.
   ORACLE_DIVERGENT — marker/brace failure OR sim < 0.80 without the
                preservation property (genuinely different from the oracle).
+  GATE_UNAVAILABLE — sim >= 0.95 content that the build/validation gate
+               rejected, where the ORACLE itself fails the same gate
+               (oracle_builds=False, probed post-hoc while the materialized
+               tree still exists). The gate cannot distinguish the resolver's
+               output from the human resolution — the case measures the
+               sandbox, not the resolver (protobuf-0055/0065, fmt-0003,
+               tokio-0110 classes). Distinct from PASS: not counted as a
+               resolution success.
 
 IMPORTANT — VALIDATION GAP for Rust:
   The temp repo has NO Cargo.toml, so cargo check/test never runs. The
@@ -149,6 +157,18 @@ class CaseResult:
     # --preserve-flights copies the session dir out; None otherwise. The flight
     # manifest maps case_id → session_id → artifacts for replay.
     session_id: str = ""
+    # Variance-aware evaluation (--repeat-nonpass): all verdicts observed
+    # across the repeat runs for this case, in order (first run first).
+    # Empty when the case passed first try or repeats are off. The stored
+    # record is the first run whose verdict equals the majority.
+    repeat_verdicts: list = None
+    # WS1c oracle-build-check: does expected_resolved pass the SAME build
+    # gate the merge faced (C: the tree build; rust-with-crate: the cargo
+    # new-error delta vs the one-side-blanked baseline)? None when no gate
+    # ran or the probe was undecidable. True + sim >= 0.95 + a gate-rejected
+    # verdict => GATE_UNAVAILABLE: the case measures the sandbox, not the
+    # resolver. Probed only for cases heading to a non-clean verdict.
+    oracle_builds: bool | None = None
 
 
 def _classify_terminal_reason(reason: str) -> str:
@@ -841,6 +861,49 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
         return None
 
 
+def _oracle_builds(repo: Path, case: Case, crate_source: Path | None) -> bool | None:
+    """Does the ORACLE (expected_resolved) pass the same gate the merge faced?
+
+    Writes expected_resolved into the materialized tree and runs the gate the
+    resolver itself faced: the C/C++ tree build for c/cpp cases, the cargo
+    new-error delta (vs the one-side-blanked baseline — the orchestrator's own
+    baseline construction) for rust-with-crate cases. Returns None when no
+    gate applies or the probe is undecidable. Used by the GATE_UNAVAILABLE
+    classification: a sim >= 0.95 merge the gate rejected is a sandbox
+    artifact, not a resolver failure, when the human resolution fails the
+    same gate.
+    """
+    target = repo / case.path
+    saved = target.read_bytes() if target.exists() else None
+    try:
+        target.write_text(case.expected_resolved)
+        if case.language in ("c", "cpp", "c++"):
+            return _c_builds(repo, case)
+        if case.language == "rust" and crate_source is not None:
+            from capybase.adapters import lsp as lsp_mod
+            from capybase.verification import (
+                _blank_markers_one_side,
+                compute_diagnostic_delta,
+            )
+            runner = lsp_mod.RustAnalyzerRunner(timeout=300)
+            baseline = runner.check(
+                _blank_markers_one_side(case.marker_original, "rust"),
+                path=case.path, repo_root=str(repo))
+            oracle = runner.check(
+                case.expected_resolved, path=case.path, repo_root=str(repo))
+            if not baseline.checked or not oracle.checked:
+                return None
+            new = compute_diagnostic_delta(
+                list(baseline.errors), list(oracle.errors))
+            return len(new) == 0
+        return None
+    except Exception:  # noqa: BLE001 — best-effort probe
+        return None
+    finally:
+        if saved is not None:
+            target.write_bytes(saved)
+
+
 def _token_jaccard(a: str, b: str) -> float:
     ta, tb = set(a.split()), set(b.split())
     if not ta and not tb: return 1.0
@@ -933,6 +996,33 @@ def _is_working(r: "CaseResult") -> bool:
     )
 
 
+def _verdict_chain(r: "CaseResult") -> str:
+    """The pure per-run verdict chain (module-level so tests can pin it).
+
+    ESCALATE / PASS / WORKING / NEAR_MATCH / ORACLE_DIVERGENT per the fields,
+    then the GATE_UNAVAILABLE override: a sim >= 0.95 gate rejection where
+    the ORACLE fails the same gate (oracle_builds probed on the live tree) is
+    a sandbox artifact, not a resolver failure."""
+    if r.escalated:
+        verdict = "ESCALATE"
+    elif r.marker_free and r.compiles:
+        if r.matches_oracle >= PASS_THRESHOLD:
+            verdict = "PASS"
+        elif _is_working(r):
+            verdict = "WORKING"
+        elif r.matches_oracle >= 0.80:
+            verdict = "NEAR_MATCH"
+        else:
+            verdict = "ORACLE_DIVERGENT"
+    else:
+        verdict = "ORACLE_DIVERGENT"
+    if (verdict in ("ESCALATE", "ORACLE_DIVERGENT")
+            and getattr(r, "oracle_builds", None) is False
+            and r.matches_oracle >= 0.95):
+        return "GATE_UNAVAILABLE"
+    return verdict
+
+
 def run_case(case: Case, client: OpenAICompatibleClient, *,
              flights_dir: Path | None = None,
              td: str | None = None,
@@ -1001,6 +1091,22 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         c_builds_result: bool | None = None
         if case.language in ("c", "cpp", "c++") and content:
             c_builds_result = _c_builds(repo, case)
+        # WS1c oracle-build-check — only for cases heading to a non-clean
+        # verdict (cost: one tree build / two cargo runs per failing case;
+        # clean passes never need reclassification). The predicate mirrors
+        # the verdict chain: escalated, markers left, empty output, or a
+        # structural-gate failure on a code file.
+        oracle_builds_result: bool | None = None
+        from capybase.verification import structural_gate_applies as _sga_probe
+        if content and (
+                res.escalated
+                or _contains_markers(content)
+                or (_sga_probe(case.path)
+                    and not _brace_balanced(content, case.language))):
+            try:
+                oracle_builds_result = _oracle_builds(repo, case, crate_source)
+            except Exception:  # noqa: BLE001 — classification is best-effort
+                oracle_builds_result = None
     finally:
         # D3: when the main thread owns the temp dir, it cleans up after the
         # worker returns or times out. When we own it, clean up here.
@@ -1008,17 +1114,30 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
             import shutil
             shutil.rmtree(td, ignore_errors=True)
     res.elapsed = time.time() - t0
+    res.oracle_builds = oracle_builds_result
     res.marker_free = not _contains_markers(content) if content else False
-    if case.language == "python":
-        res.compiles = _py_compiles(content) if content else False
+    # Non-code files (markdown, lockfiles, prose): marker-free is the only
+    # structural gate. Brace-balance on prose rejects perfect merges — a
+    # CHANGELOG code fence or template placeholder with an unbalanced brace
+    # classified four sim-1.000 axum CHANGELOG.md merges as ORACLE_DIVERGENT
+    # (sprint-16 census). The C build gate is skipped too: a docs-only
+    # conflict can't affect compilation, so the tree build's outcome would
+    # be orthogonal to the merge.
+    from capybase.verification import structural_gate_applies as _sga
+    if not content:
+        res.compiles = False
+    elif not _sga(case.path):
+        res.compiles = True
+    elif case.language == "python":
+        res.compiles = _py_compiles(content)
     elif case.language in ("c", "cpp", "c++"):
         # Use the build verdict captured before cleanup; fall back to brace-
         # balance if the build couldn't run (no command registered or no tree).
         res.compiles = c_builds_result if c_builds_result is not None else (
-            _brace_balanced(content, case.language) if content else False
+            _brace_balanced(content, case.language)
         )
     else:
-        res.compiles = _brace_balanced(content, case.language) if content else False
+        res.compiles = _brace_balanced(content, case.language)
     res.matches_oracle = _token_jaccard(content, case.expected_resolved) if content else 0.0
     res.loser_preservation, res.winner_preservation = _preservation_fields(case, content)
     return res
@@ -1157,6 +1276,15 @@ def main():
                          "Raised from 900 to 1200 in V6 — the dominant-counterexample "
                          "repair (one fix per iteration) can take more iterations to "
                          "converge but each is more focused.")
+    ap.add_argument("--repeat-nonpass", type=int, default=1,
+                    help="Variance-aware evaluation: rerun a case whose first verdict "
+                         "is not PASS until this many total runs exist (3 = first run "
+                         "+ 2 retries) and keep the MAJORITY verdict. A single run at "
+                         "temperature > 0 is not evidence — the sprint-16 tokio-0109/"
+                         "0110 chase burned an hour on what repeat runs showed was "
+                         "single-run variance. The kept record is the first run with "
+                         "the majority verdict; all verdicts are stored in "
+                         "repeat_verdicts. Cases that PASS first try are not rerun.")
     ap.add_argument("--preserve-flights", default=None,
                     help="Directory to copy per-case orchestrator session artifacts into "
                          "(FR2a flight recorder). Produces <dir>/flights/<case_id>/<session_id>/ "
@@ -1225,8 +1353,10 @@ def main():
     # the same conservative behavior the fresh loop produces.
     working_ct = sum(1 for r in results if r.verdict == "WORKING" or _is_working(r))
     escalate_ct = sum(1 for r in results if r.escalated)
+    gate_ct = sum(1 for r in results if r.verdict == "GATE_UNAVAILABLE")
     wrong_ct = sum(1 for r in results
-                   if not (r.escalated or (r.marker_free and r.compiles and r.matches_oracle >= 0.80)))
+                   if not (r.escalated or (r.marker_free and r.compiles and r.matches_oracle >= 0.80)
+                           or r.verdict == "GATE_UNAVAILABLE"))
     t_start = time.time()
     skipped = 0
     # Temp dirs for timed-out cases are deferred: the daemon worker thread may
@@ -1259,101 +1389,125 @@ def main():
         print(f"[{i}/{len(cases)}] {case.id} ({case.language}/{case.dataset}) ...", end=" ", flush=True)
         # Run with a per-case wall-clock cap so one hard case (endless CEGIS
         # retries) can't stall the whole run. Implemented via a watchdog thread
-        # that interrupts the worker. If the cap fires, treat it as an escalate.
+        # that interrupts the worker. If the cap fires, treat as an escalate.
         import threading
         import shutil
-        # D3: create the temp dir in the MAIN thread so we own cleanup. The
-        # worker receives it via `td=`; if the worker times out and is
-        # abandoned, the main thread cleans up here (no leaked temp trees).
-        case_td = tempfile.mkdtemp(prefix="capy-rw-", dir="/var/tmp")
-        # Resolve the crate source clone for full-tree materialization.
-        # Maps dataset name → external-datasets clone dir. Enables cargo check.
-        crate_source = None
-        if case.merge_sha:
-            # Map dataset name → external-datasets clone dir. The convention is
-            # dataset.replace("-history",""), but some repos use a dash the
-            # dataset name omits (jsonc-history → external-datasets/json-c/).
-            # The CLONE_OVERRIDES table covers those exceptions; everything else
-            # follows the standard convention (redis, sqlite, tokio, ...).
-            # fmt-history → fmtlib-fmt: without the override the clone misses,
-            # cases get single-file repos, no build gate, and no
-            # compile_commands.json.
-            _CLONE_OVERRIDES = {
-                "jsonc-history": "json-c",
-                "fmt-history": "fmtlib-fmt",
-            }
-            clone_name = _CLONE_OVERRIDES.get(
-                case.dataset,
-                case.dataset.replace("-history", "") if case.dataset else "",
-            )
-            clone_path = Path(__file__).resolve().parent.parent / "external-datasets" / clone_name
-            if clone_path.is_dir():
-                crate_source = clone_path
-        result_holder: list = []
-        def _worker():
-            try:
-                result_holder.append(run_case(case, client, flights_dir=flights_dir,
-                                              td=case_td, crate_source=crate_source))
-            except Exception as exc:
-                result_holder.append(CaseResult(
+
+        def _execute_case() -> CaseResult:
+            """One full attempt: fresh temp repo, worker thread, wall-clock cap."""
+            # D3: create the temp dir in the MAIN thread so we own cleanup. The
+            # worker receives it via `td=`; if the worker times out and is
+            # abandoned, the main thread cleans up here (no leaked temp trees).
+            _td = tempfile.mkdtemp(prefix="capy-rw-", dir="/var/tmp")
+            # Resolve the crate source clone for full-tree materialization.
+            # Maps dataset name → external-datasets clone dir. Enables cargo check.
+            _crate = None
+            if case.merge_sha:
+                # Map dataset name → external-datasets clone dir. The convention is
+                # dataset.replace("-history",""), but some repos use a dash the
+                # dataset name omits (jsonc-history → external-datasets/json-c/).
+                # The CLONE_OVERRIDES table covers those exceptions; everything else
+                # follows the standard convention (redis, sqlite, tokio, ...).
+                # fmt-history → fmtlib-fmt: without the override the clone misses,
+                # cases get single-file repos, no build gate, and no
+                # compile_commands.json.
+                _CLONE_OVERRIDES = {
+                    "jsonc-history": "json-c",
+                    "fmt-history": "fmtlib-fmt",
+                }
+                _clone_name = _CLONE_OVERRIDES.get(
+                    case.dataset,
+                    case.dataset.replace("-history", "") if case.dataset else "",
+                )
+                _clone_path = Path(__file__).resolve().parent.parent / "external-datasets" / _clone_name
+                if _clone_path.is_dir():
+                    _crate = _clone_path
+            _holder: list = []
+
+            def _worker():
+                try:
+                    _holder.append(run_case(case, client, flights_dir=flights_dir,
+                                            td=_td, crate_source=_crate))
+                except Exception as exc:
+                    _holder.append(CaseResult(
+                        id=case.id, language=case.language, dataset=case.dataset,
+                        escalated=True,
+                        conflict_region_count=case.marker_original.count("<<<<<<<"),
+                        reason=f"harness error: {type(exc).__name__}: {str(exc)[:100]}"))
+
+            _th = threading.Thread(target=_worker, daemon=True)
+            _th.start()
+            _th.join(timeout=args.case_timeout or None)
+            # D3: clean up the temp dir from the main thread. BUT only when the
+            # worker has actually finished — if the thread is still alive
+            # (timeout), destroying its temp dir causes a race: the daemon
+            # thread tries to access .rebase-agent/sessions/ or run git, and
+            # crashes with GitError/FileNotFoundError because the directory is
+            # gone. Defer cleanup to the end of the run for timed-out cases.
+            if _th.is_alive():
+                # The worker is still in an LLM/CEGIS loop — abandon it (daemon)
+                # and record an escalate. The next case starts fresh. DON'T
+                # destroy the temp dir yet — the daemon thread may still write.
+                deferred_cleanup.append(_td)
+                print(f"\n      [TIMEOUT after {args.case_timeout}s — moving on]", end="")
+                return CaseResult(
                     id=case.id, language=case.language, dataset=case.dataset,
                     escalated=True,
                     conflict_region_count=case.marker_original.count("<<<<<<<"),
-                    reason=f"harness error: {type(exc).__name__}: {str(exc)[:100]}"))
-        th = threading.Thread(target=_worker, daemon=True)
-        th.start()
-        th.join(timeout=args.case_timeout or None)
-        # D3: clean up the temp dir from the main thread. BUT only when the
-        # worker has actually finished — if the thread is still alive (timeout),
-        # destroying its temp dir causes a race: the daemon thread tries to
-        # access .rebase-agent/sessions/ or run git, and crashes with
-        # GitError/FileNotFoundError because the directory is gone. Defer
-        # cleanup to the end of the run for timed-out cases.
-        if th.is_alive():
-            # The worker is still in an LLM/CEGIS loop — abandon it (daemon) and
-            # record an escalate. The next case starts fresh. DON'T destroy the
-            # temp dir yet — the daemon thread may still be writing to it.
-            deferred_cleanup.append(case_td)
-            print(f"\n      [TIMEOUT after {args.case_timeout}s — moving on]", end="")
-            r = CaseResult(id=case.id, language=case.language, dataset=case.dataset,
-                           escalated=True,
-                           conflict_region_count=case.marker_original.count("<<<<<<<"),
-                           reason=f"case timeout after {args.case_timeout}s (endless CEGIS retries)")
-        else:
+                    reason=f"case timeout after {args.case_timeout}s (endless CEGIS retries)")
             # Worker finished — safe to clean up the temp dir now.
-            shutil.rmtree(case_td, ignore_errors=True)
-            r = result_holder[0] if result_holder else CaseResult(
+            shutil.rmtree(_td, ignore_errors=True)
+            return _holder[0] if _holder else CaseResult(
                 id=case.id, language=case.language, dataset=case.dataset,
                 escalated=True, conflict_region_count=case.marker_original.count("<<<<<<<"),
                 reason="worker produced no result")
-        if r.escalated:
-            verdict = "ESCALATE"; escalate_ct += 1
-        elif r.marker_free and r.compiles:
-            # The resolution is marker-free and brace-balanced (or py_compiles
-            # for Python). But the live eval does NOT run cargo check/test for
-            # Rust — the temp repo has no Cargo.toml. So "compiles" here is a
-            # weak gate (brace balance only). Classify by oracle similarity:
-            #   sim >= PASS_THRESHOLD → PASS (matches the oracle closely enough)
-            #   both sides preserved → WORKING (compiles + carries each side's
-            #                  changes, but the oracle diverged — the human
-            #                  resolution dropped working code for reasons
-            #                  outside the merge inputs; not reproducible and
-            #                  not our failure)
-            #   sim >= 0.80 → NEAR_MATCH (defensible but imperfect — the oracle's
-            #                  answer isn't the only valid one, e.g. exclusive
-            #                  choices, import reordering, doc-comment style)
-            #   sim < 0.80 → ORACLE_DIVERGENT (genuinely different from the oracle)
-            if r.matches_oracle >= PASS_THRESHOLD:
-                verdict = "PASS"; pass_ct += 1
-            elif _is_working(r):
-                verdict = "WORKING"; working_ct += 1
-            elif r.matches_oracle >= 0.80:
-                verdict = "NEAR_MATCH"; near_ct += 1
-            else:
-                verdict = "ORACLE_DIVERGENT"; wrong_ct += 1
-        else:
-            verdict = "ORACLE_DIVERGENT"; wrong_ct += 1
+
+        def _verdict_for(res: CaseResult) -> str:
+            """Delegate to the module-level chain (kept as a closure for the
+            repeat loop's readability; counters stay in the caller)."""
+            return _verdict_chain(res)
+
+        r = _execute_case()
+        verdict = _verdict_for(r)
+        r.repeat_verdicts = []
+        if args.repeat_nonpass > 1 and verdict != "PASS":
+            # Variance-aware majority: rerun non-PASS cases, keep the modal
+            # verdict (the first run exhibiting it) so a single lucky or
+            # unlucky draw doesn't label the case.
+            from collections import Counter as _VC
+            _verdicts = [verdict]
+            _records = [r]
+            for _k in range(args.repeat_nonpass - 1):
+                print(f"\n      [repeat {_k + 2}/{args.repeat_nonpass}] ...", end=" ")
+                _rr = _execute_case()
+                _vv = _verdict_for(_rr)
+                _rr.verdict = _vv
+                _verdicts.append(_vv)
+                _records.append(_rr)
+                print(f"{_vv}  {_rr.elapsed:.0f}s  sim={_rr.matches_oracle:.2f}", end="")
+            print()
+            _maj, _ = _VC(_verdicts).most_common(1)[0]
+            # The first run exhibiting the majority verdict (records[0].verdict
+            # isn't assigned yet — index the verdict list instead).
+            _kept = _records[_verdicts.index(_maj)]
+            _kept.repeat_verdicts = _verdicts
+            if _kept is not r:
+                print(f"      [majority: {_maj} (verdicts: {','.join(_verdicts)})]",
+                      end=" ")
+                r, verdict = _kept, _maj
         print(f"{verdict}  {r.elapsed:.0f}s  sim={r.matches_oracle:.2f}  {r.reason[:60]}")
+        if verdict == "PASS":
+            pass_ct += 1
+        elif verdict == "WORKING":
+            working_ct += 1
+        elif verdict == "NEAR_MATCH":
+            near_ct += 1
+        elif verdict == "ESCALATE":
+            escalate_ct += 1
+        elif verdict == "GATE_UNAVAILABLE":
+            gate_ct += 1
+        else:
+            wrong_ct += 1
         r.verdict = verdict
         r.terminal_reason = _classify_terminal_reason(r.reason) if r.escalated else ""
         # Subclassify timeouts: throughput (many regions overwhelm the budget)
@@ -1405,6 +1559,8 @@ def main():
     print(f"NEAR_MATCH: {near_ct}  (sim 0.80–{PASS_THRESHOLD}: defensible but imperfect)")
     print(f"ESCALATE:   {escalate_ct}")
     print(f"ORACLE_DIVERGENT: {wrong_ct}  (sim < 0.80 or marker/brace failure)")
+    print(f"GATE_UNAVAILABLE: {gate_ct}  (sim >= 0.95 gate rejection the oracle "
+          f"shares — sandbox artifact, not a resolver failure)")
     print(f"wall:       {elapsed:.0f}s ({elapsed/60:.1f}m) [this run only]")
     # Real-conflict pass rate: excludes SAFE_SKIP (no real conflict) from the
     # denominator. This is the honest metric — a SAFE_SKIP isn't a resolution
@@ -1429,18 +1585,21 @@ def main():
         wk = sum(1 for r in sub if r.verdict == "WORKING")
         n = sum(1 for r in sub if r.verdict == "NEAR_MATCH")
         e = sum(1 for r in sub if r.escalated)
-        w = len(sub) - p - wk - n - e
-        print(f"  {lang}: {len(sub)} → PASS {p} / WORK {wk} / NEAR {n} / ESC {e} / DIVERGE {w}")
+        g = sum(1 for r in sub if r.verdict == "GATE_UNAVAILABLE")
+        w = len(sub) - p - wk - n - e - g
+        print(f"  {lang}: {len(sub)} → PASS {p} / WORK {wk} / NEAR {n} / ESC {e} / GATE_UNAVAIL {g} / DIVERGE {w}")
     from collections import Counter
     dt = Counter(r.dataset for r in results)
     dp = Counter(r.dataset for r in results if r.verdict == "PASS")
     dw = Counter(r.dataset for r in results if r.verdict == "WORKING")
     dn = Counter(r.dataset for r in results if r.verdict == "NEAR_MATCH")
     de = Counter(r.dataset for r in results if r.escalated)
+    dg = Counter(r.dataset for r in results if r.verdict == "GATE_UNAVAILABLE")
     print("  by dataset:")
     for ds in sorted(dt):
         t = dt[ds]
-        print(f"    {ds:24s} {t:3d} → PASS {dp[ds]:3d} / WORK {dw[ds]:3d} / NEAR {dn[ds]:3d} / ESC {de[ds]:3d} / DIVERGE {t-dp[ds]-dw[ds]-dn[ds]-de[ds]:3d}")
+        w = t - dp[ds] - dw[ds] - dn[ds] - de[ds] - dg[ds]
+        print(f"    {ds:24s} {t:3d} → PASS {dp[ds]:3d} / WORK {dw[ds]:3d} / NEAR {dn[ds]:3d} / ESC {de[ds]:3d} / GATE_UNAVAIL {dg[ds]:3d} / DIVERGE {w:3d}")
     # Terminal reason distribution for escalations
     from collections import Counter as _C
     tr = _C(r.terminal_reason for r in results if r.escalated)

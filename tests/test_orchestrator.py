@@ -669,6 +669,9 @@ def test_no_progress_guard_excludes_needs_human_signatures(repo):
     assert r.returncode != 0, "expected conflict"
 
     cfg = _config(repo)
+    # The first-empty fast-fail would rescue the empty candidates (7b6ae57) —
+    # disable it so this test's mechanism decides the outcome.
+    cfg.future.enable_empty_fast_fail = False
     cfg.policy.cegis_convergence_threshold = 2
     cfg.policy.max_retries_per_unit = 50        # large, so only the guard/budget limits
     cfg.policy.max_recovery_retries_per_unit = 0  # exhaust recovery fast → escalate via budget
@@ -1121,6 +1124,11 @@ class FakeConsensusEngine:
         from capybase.consensus import ConsensusReport
 
         self._candidates = list(candidates)
+        # The orchestrator's recovery/repair prompts read engine.token_budget
+        # (a TokenBudget on the real engine — an int would crash .enabled).
+        # total=0 → disabled, matching the historical unbounded default.
+        from capybase.conflict_model import TokenBudget
+        self.token_budget = TokenBudget(total=0)
         # A unanimous report so the risk engine doesn't escalate on entropy/
         # agreement — we want to isolate the rank-order validation behavior.
         self._report = ConsensusReport(
@@ -1170,8 +1178,12 @@ def test_run_accepts_second_candidate_when_winner_fails(conflicted_repo):
         _cand("    return 'hi' + 'howdy'", cid="second-valid"),
         _cand("    return 'hi' + 'howdy'", cid="third-valid"),
     ])
+    # The first-empty fast-fail would rescue the empty candidates (7b6ae57);
+    # disable it so this test's mechanism decides the outcome.
+    _cfg = _self_consistency_config(repo)
+    _cfg.future.enable_empty_fast_fail = False
     orch = Orchestrator(
-        _self_consistency_config(repo), repo=str(repo), resolution_engine=engine,
+        _cfg, repo=str(repo), resolution_engine=engine,
         out=lambda *_a, **_k: None,
     )
     result = orch.run()
@@ -1194,8 +1206,12 @@ def test_run_escalates_when_all_candidates_fail(conflicted_repo):
         _cand("    return 'howdy'(", cid="b-broken"),
         _cand("    x\n<<<<<<< leaked\n", cid="c-marker"),
     ])
+    # The first-empty fast-fail would rescue the empty candidates (7b6ae57);
+    # disable it so this test's mechanism decides the outcome.
+    _cfg = _self_consistency_config(repo)
+    _cfg.future.enable_empty_fast_fail = False
     orch = Orchestrator(
-        _self_consistency_config(repo), repo=str(repo), resolution_engine=engine,
+        _cfg, repo=str(repo), resolution_engine=engine,
         out=lambda *_a, **_k: None,
     )
     result = orch.run()
@@ -1245,6 +1261,9 @@ def test_run_escalates_fast_on_repeated_transient_failures(conflicted_repo):
 
     repo = conflicted_repo["repo"]
     cfg = _config(repo)
+    # The first-empty fast-fail would rescue the empty candidates (7b6ae57) —
+    # disable it so this test's mechanism decides the outcome.
+    cfg.future.enable_empty_fast_fail = False
     cfg.policy.max_retries_per_unit = 2  # the default; make it explicit
     # Recovery retry stays ON (the production default) — the V8 spin scenario
     # had recovery retry on; the bug was that request_failed retries were
@@ -1344,6 +1363,9 @@ def test_run_escalates_when_whole_file_invalid(multi_unit_conflicted_repo):
     # the per-unit context but a SyntaxError when juxtaposed at module scope.
     bad = _make_resolved_payload("return 1")
     cfg = _config(repo)
+    # The first-empty fast-fail would rescue the empty candidates (7b6ae57) —
+    # disable it so this test's mechanism decides the outcome.
+    cfg.future.enable_empty_fast_fail = False
     # The ``return 1`` candidate deliberately drops both sides' content — it's
     # not a real merge. This test is about Phase B (whole-file juxtaposition),
     # so relax the Phase A both-sides-represented check so the candidate passes
@@ -1359,9 +1381,15 @@ def test_run_escalates_when_whole_file_invalid(multi_unit_conflicted_repo):
         out=lambda *_a, **_k: None,
     )
     result = orch.run()
-    assert result.escalated
-    # New behavior: repair was attempted, then failed → escalate.
-    assert "whole-file" in (result.reason or "")
+    # The LLM repair exhausts (FakeClient has no responses left), but the
+    # final deterministic-only repair pass (_whole_file_repair's brace/
+    # boundary beam — landed after this test was written) recovers a
+    # compiling file, so escalation is no longer the terminal outcome.
+    # Phase B still caught the juxtaposition: the journal shows
+    # file_validated(passed=False) + whole_file_repair before the recovery.
+    assert not result.escalated, result.reason
+    import py_compile as _pc
+    _pc.compile(str(repo / "cfg.py"), doraise=True)  # recovered file compiles
 
 
 def test_whole_file_repair_recovers_and_accepts(multi_unit_conflicted_repo):
@@ -1616,6 +1644,9 @@ def test_verifier_blocks_accept_when_it_flags_dropped_intent(distinct_additions_
                     "reason": "dropped import sys", "confidence": 0.9}),
     ])
     cfg = _verifier_config(repo)
+    # The first-empty fast-fail would rescue the empty candidates (7b6ae57) —
+    # disable it so this test's mechanism decides the outcome.
+    cfg.future.enable_empty_fast_fail = False
     cfg.validation.verifier_severity = "error"
     engine = ResolutionEngine(cfg.model, client=client)
     orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
