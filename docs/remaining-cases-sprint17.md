@@ -118,3 +118,11 @@ Nine stale tests fixed; two were real bugs found underneath:
 - sea-orm-0027 (sim 0.682) — the one genuine quality divergence.
 - Resurrection guard false-positive tuning (axum-0017, tokio-0037/0046).
 - Fast-path band extension [0.75, 0.90) — journal-only calibration first.
+- Pre-existing test debt outside this sprint's suites: ~31 failures across
+  entity_resolution (7), interactive_fallback (7), modify_delete_rebase (5),
+  rebase_command (3), classifier/history_regressions/dryrun/others — all
+  verified failing identically at 1df1271 (pre-sprint-17); likely the same
+  stale-expectation family as the nine fixed here. The full suite also
+  contains two long dataset-marathon files (realworld_conflicts ~200 real
+  builds; rebase_scenarios clones per case) plus live-endpoint adapter
+  tests — excluded from sprint-loop runs by design.
