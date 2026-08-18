@@ -175,9 +175,19 @@ def test_each_resolution_site_stamps_a_known_provenance():
             # _failed_candidate builds technical-failure candidates that are
             # never accepted/recorded — they may omit provenance (legacy "").
             is_failed = "needs_human=True" in body and "failure_kind=" in body
+            # f-string provenance (e.g. f"deterministic_source_{side}_only"):
+            # validate the STATIC head — the interpolation must produce a
+            # valid value (checked at runtime by the registration test).
             pm = re.search(r'provenance\s*=\s*"([^"]*)"', body)
+            pfm = re.search(r'provenance\s*=\s*f"([^"\{]*)', body)
             if pm:
                 assert is_valid(pm.group(1)), f"{f.name}: invalid provenance {pm.group(1)!r}"
+            elif pfm:
+                head = pfm.group(1)
+                assert any(v.startswith(head) for v in PROVENANCE_VALUES), (
+                    f"{f.name}: f-string provenance head {head!r} matches no "
+                    f"registered value")
+            
             elif re.search(r'provenance\s*=\s*\w+\.(?:get|__getitem__)', body):
                 # Dynamic lookup (e.g. _PROV_MAP.get(cand_id)) — the values
                 # are validated at runtime via PROVENANCE_VALUES registration.

@@ -54,6 +54,14 @@ def _config(repo: Path) -> Config:
     cfg.model.model = "fake"
     cfg.tests.required = False  # relax the test gate; we're testing the menu
     cfg.validation.enable_per_unit_syntax_check = False  # fragmentary fake candidates
+    # These tests exercise the interactive MENU, which engages only after an
+    # escalation. The fixture's conflict is a same-target value conflict that
+    # the source portfolio now resolves deterministically (current's value,
+    # value-resolution policy) — no escalation, no menu. Disable the
+    # deterministic layers so the FailingClient escalation (the behavior
+    # under test) is what decides the outcome.
+    cfg.future.enable_source_portfolio = False
+    cfg.future.enable_structural_resolver = False
     return cfg
 
 

@@ -48,6 +48,12 @@ def _config(repo: Path) -> Config:
     cfg.tests.required = True
     cfg.tests.pre_continue = "true"
     cfg.tests.final = "true"
+    # The shared fixture's conflict is a same-target value conflict the source
+    # portfolio resolves deterministically (zero LLM calls). These tests
+    # exercise the ESCALATION reporting path, so disable the deterministic
+    # layers to let the FailingClient decide.
+    cfg.future.enable_source_portfolio = False
+    cfg.future.enable_structural_resolver = False
     return cfg
 
 

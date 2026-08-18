@@ -1633,10 +1633,16 @@ def _rebase_continue_empty(cont) -> bool:
     """True when ``git rebase --continue`` failed because the pick is empty.
 
     git's phrasings vary by version and land on either stream: "nothing to
-    commit", "The previous cherry pick commit is now empty ... use git
-    rebase --skip", "no changes". A fully-superseded resolution (e.g. the
-    whole-file fast path taking the rewriting side verbatim) produces
-    exactly this — and without --skip the rebase stays wedged mid-flight.
+    commit", "The previous cherry pick commit is now empty", "no changes". A
+    fully-superseded resolution (e.g. the whole-file fast path taking the
+    rewriting side verbatim) produces exactly this — and without --skip the
+    rebase stays wedged mid-flight.
+
+    Deliberately does NOT match "rebase --skip": modern git's CONFLICT hint
+    text ("Resolve all conflicts manually ... or use git rebase --skip to
+    skip this commit") contains it, so matching the hint reads every
+    next-commit conflict as an empty pick and silently --skips a real commit
+    (multistep-rebase regression: step 2's conflict skipped b.py's change).
     """
     text = f"{getattr(cont, 'stdout', '') or ''}\n{getattr(cont, 'stderr', '') or ''}".lower()
     return any(
@@ -1644,7 +1650,6 @@ def _rebase_continue_empty(cont) -> bool:
         for p in (
             "nothing to commit",
             "is now empty",
-            "rebase --skip",
             "no changes",
         )
     )
@@ -5191,6 +5196,22 @@ class Orchestrator:
             core_was_resolved = patched is not None
             if core_was_resolved:
                 cand.resolved_text = patched
+            else:
+                # The contested core could not be resolved. Accepting the
+                # placeholder (core_cur — current's version of lines the
+                # replayed side ALSO changed) silently drops the replayed
+                # side's edit: end-to-end probe of base `return 1` / cur
+                # `return 2` / rep `return 3` shipped `return 2` with no
+                # escalation. Reject the structural candidate; the normal
+                # per-unit flow (LLM, then escalation) decides the contested
+                # lines — a silent one-sided pick is never acceptable.
+                self._record_resolution_attempt(
+                    UnitOutcome(unit=unit), mechanism="structural",
+                    decision="skip",
+                    reason="deferred core unresolved — contested lines "
+                           "kept for the LLM, not silently defaulted",
+                )
+                return None
         else:
             core_was_resolved = False
         self.journal.emit(
@@ -5381,6 +5402,14 @@ class Orchestrator:
         if not cur.strip() and not rep.strip():
             return None
 
+        # Modify/delete guard: exactly ONE empty side is a deletion conflict
+        # (AU/UA). The single-side variants would deterministically keep the
+        # modifier's file — silently dropping the other branch's deletion
+        # intent and pre-empting block-capture, which exists to make the
+        # keep/delete decision. Decline the whole portfolio on this class.
+        if (not cur.strip()) != (not rep.strip()):
+            return None
+
         # Decline when the parent conflict has large side-size asymmetry (one
         # side is a rewrite, the other a small edit). Taking either side
         # verbatim (current_only/replayed_only) ignores the other side's
@@ -5479,8 +5508,20 @@ class Orchestrator:
                     {"candidate_id": cand.candidate_id, "variant": cand_id},
                     step_index=self.step, path=unit.path, unit_id=unit.unit_id,
                 )
-                outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+                outcome = UnitOutcome(unit=unit, validation=validation)
                 outcome.accepted = cand
+                # Uniform attempt record like every other mechanism: the
+                # portfolio's accepts were invisible to resolution_attempt
+                # consumers (only the bespoke source_portfolio_accepted event
+                # existed), so an accepted-by-portfolio unit journaled ZERO
+                # attempts while its skipped-by-structural sibling journaled
+                # one. _record_resolution_attempt appends the candidate to
+                # outcome.attempts for backward compat.
+                self._record_resolution_attempt(
+                    outcome, mechanism="source_portfolio", candidate=cand,
+                    validation=validation, decision="accept",
+                    reason=f"source-derived candidate ({cand_id}) passed validation",
+                )
                 return outcome
         return None  # no source candidate passed; fall through to LLM
 
@@ -11578,6 +11619,14 @@ class Orchestrator:
                 and retry_count == 0
                 and not (cand.resolved_text or "").strip()
                 and getattr(context, "token_estimate", 0) < 1500
+                # A needs_human REFUSAL is not an empty-response failure: the
+                # model explicitly asked for a human (block-capture's
+                # keep/delete verdicts route through here). Converting it to
+                # a deterministic side pick would silently drop the other
+                # side's intent AND override the refusal (AU needs_human:
+                # replayed_only shipped, deletion intent gone).
+                and "needs_human" not in (cand.failure_kind or "")
+                and not getattr(cand, "needs_human", False)
             ):
                 _unit_kind = "sub" if "#s" in unit.unit_id else "top"
                 self.journal.emit(

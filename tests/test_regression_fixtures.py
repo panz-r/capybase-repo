@@ -146,6 +146,12 @@ def test_escalation_fixture(case, tmp_path: Path):
     cfg.tests.required = False
     cfg.tests.pre_continue = "true"
     cfg.tests.final = "true"
+    # The escalation contract is about the LLM path: a marker-leaking client
+    # must drive escalation, never a guessed merge. The deterministic layers
+    # resolve this fixture's same-target value conflict before the client is
+    # ever called — disable them so the LeakingClient decides the outcome.
+    cfg.future.enable_source_portfolio = False
+    cfg.future.enable_structural_resolver = False
 
     class _LeakingClient:
         """Always returns leaked conflict markers → forces escalation."""

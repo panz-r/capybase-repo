@@ -54,14 +54,27 @@ def test_direction_whole_file_delete_replayed():
 
 
 def test_structural_delete_side_declines_when_keeper_modified():
-    """A real modify/delete (keeper MODIFIED) is NOT auto-resolved — it routes
-    to block-capture so the model decides. This is why the structural rule
-    declines and block-capture exists."""
+    """A modify/delete's auto-accept depends on HOW MUCH the keeper modified.
+
+    A SUBSTANTIALLY modified keeper (>2 changed lines) is never auto-resolved
+    — accepting the deletion could drop real work, so the rule declines and
+    block-capture/the LLM decides. A keeper with only a minor tweak (≤2
+    changed lines) IS superseded by a substantial deletion (≥5 removed base
+    lines): the deletion is the dominant intent and the keeper's tweak is
+    collateral the deleting branch accounted for (protobuf-0053: a 1-line
+    _WIN32→_MSC_VER rename used to block a 23-line include-block cleanup).
+    """
     base = "def alpha():\n    return 1\n\ndef beta():\n    return 2\n"
-    current = ""  # deleted
-    replayed = "def alpha():\n    return 11\n\ndef beta():\n    return 2\n"  # modified
-    # decline → None (the keeper modified, so accepting the deletion could drop work)
-    assert _accept_deletion(base, current, replayed) is None
+    current = ""  # deleted (5 base lines removed)
+    # Minor keeper modification: 1 changed line ≤ 2 → relaxation accepts.
+    minor = "def alpha():\n    return 11\n\ndef beta():\n    return 2\n"
+    assert _accept_deletion(base, current, minor) == current
+    # Substantial keeper modification: 3 changed lines > 2 → decline (None);
+    # the deletion intent and the modification intent need a real decision.
+    major = (
+        "def alpha():\n    return 11\n    extra = 2\n\ndef beta():\n    return 22\n"
+    )
+    assert _accept_deletion(base, current, major) is None
 
 
 def test_structural_delete_side_accepts_when_keeper_unchanged():

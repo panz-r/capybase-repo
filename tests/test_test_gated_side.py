@@ -134,6 +134,10 @@ def test_test_gated_side_declines_when_no_test_configured(repo):
     # source portfolio resolves the conflict before the LLM is called.
     cfg.future.enable_structural_resolver = False
     cfg.future.enable_source_portfolio = False
+    # The empty fast-fail's deterministic side fallback would rescue the
+    # escalation (no client → empty response → side picked). This test's
+    # contract is the DECLINE → escalate chain, so the fallback must be off.
+    cfg.future.enable_empty_fast_fail = False
     orch = Orchestrator(cfg, repo=str(repo), out=lambda *_a, **_k: None)
     # The side picker should NOT fire (no real test). The LLM (fake client, none
     # configured) will fail → escalate. The key assertion: no side was picked.

@@ -141,7 +141,10 @@ def test_both_sides_rename_same_entity_differently_declines():
     cur = "class S:\n    def fetchData(self):\n        return self.fetch()"
     rep = "class S:\n    def pullData(self):\n        return self.fetch()"
     r = resolve_structurally(_unit(base, cur, rep))
-    assert not r.resolved
+    # partial_disjoint_merge may resolve the deterministic tails; the
+    # contested rename must be EXPLICITLY deferred (deferred_core) or the
+    # rule declines — never a silent one-sided pick.
+    assert (not r.resolved) or (r.deferred_core is not None)
 
 
 @needs_ts

@@ -142,6 +142,13 @@ def test_multistep_rebase_resolves_conflicts_at_different_commits(repo: Path):
     assert scenario.conflicts_at == [1]
 
     cfg = _base_cfg(repo)
+    # The conflicted hunks are same-target value conflicts the source
+    # portfolio now resolves deterministically (current's value); this
+    # test scripts the client's per-file merges and counts LLM accepts,
+    # so disable the deterministic layers.
+    cfg.future.enable_source_portfolio = False
+    cfg.future.enable_structural_resolver = False
+
     # capybase splices the candidate's resolved_text into the conflict BLOCK. Here
     # the block is just the `return` line (the `def a():` header is outside the
     # marker hunk), so the resolution is the changed body line — matching the feat
@@ -351,6 +358,13 @@ def test_history_augmented_llm_provenance_restamping(repo: Path):
         stop_early=True,
     )
     cfg = _base_cfg(repo)
+    # The conflicted hunks are same-target value conflicts the source
+    # portfolio now resolves deterministically (current's value); this
+    # test scripts the client's per-file merges and counts LLM accepts,
+    # so disable the deterministic layers.
+    cfg.future.enable_source_portfolio = False
+    cfg.future.enable_structural_resolver = False
+
     cfg.memory.enabled = True  # record the Experience for the provenance check
     cfg.future.enable_rag = True
     from tests.test_rust_cross_file import PathAwareClient

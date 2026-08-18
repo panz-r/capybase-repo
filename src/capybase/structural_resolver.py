@@ -401,6 +401,34 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         lint_base = "\n".join(_lines)
     lint_res = _try_lint_vs_refactor(lint_base, current, replayed, lang=lang)
     if lint_res is not None:
+        # lint_res is the SEMANTIC side taken verbatim; the other side is pure
+        # lint. Verbatim drops the lint branch's intent — its project-wide
+        # token migration (and→&&, NULL→nullptr) is undone in the merged
+        # file. When the lint side's substitutions are detectable — the
+        # file-level analysis already validated the aggregate, or the same
+        # transform appears ≥5× in this unit's lint side — apply them to the
+        # taken side instead: word-boundary, semantics-preserving. Falls
+        # back to verbatim when nothing is detectable.
+        transforms = list(
+            unit.structural_metadata.get("file_level_lint_transforms") or []
+        )
+        if not transforms:
+            lint_side = replayed if lint_res is current else current
+            from capybase.diff import line_matcher as _lm_lv
+            bt = _tokenize_with_macros(lint_base)[0]
+            lt = _tokenize_with_macros(lint_side)[0]
+            raw_ops = [
+                (i1, i2, lt[j1:j2])
+                for tag, i1, i2, j1, j2 in _lm_lv(bt, lt).get_opcodes()
+                if tag != "equal"
+            ]
+            from collections import Counter as _Counter_lv
+            _counts = _Counter_lv(_detect_lint_transforms_from_ops(raw_ops))
+            transforms = [t for t, c in _counts.items() if c >= 5]
+        if transforms:
+            applied = _apply_lint_transforms(lint_res, transforms)
+            if applied != lint_res:
+                return StructuralResolution(rule="lint_transform", text=applied)
         return StructuralResolution(rule="lint_vs_refactor", text=lint_res)
 
     # Rule 3: one-sided change. Only one side diverged from base → take it.
@@ -622,12 +650,17 @@ def deterministically_mergeable(unit: ConflictUnit) -> bool:
     """Whether the structural resolver can merge ``unit`` with zero LLM calls.
 
     A pure feasibility probe: runs :func:`resolve_structurally` and reports
-    whether it produced a resolution, WITHOUT committing to it. Used by
-    :mod:`classifier` to mark union-combine / one-sided / identical conflicts
-    ``trivial`` (they need no model judgment) and available to any caller that
-    wants to ask "can this skip the LLM?" cheaply.
+    whether it produced a COMPLETE resolution, WITHOUT committing to it.
+    Used by :mod:`classifier` to mark union-combine / one-sided / identical
+    conflicts ``trivial`` (they need no model judgment) and available to any
+    caller that wants to ask "can this skip the LLM?" cheaply.
+
+    A partial resolution with a DEFERRED CORE does not count: the contested
+    lines still need an LLM call (partial_disjoint_merge's split mode), so
+    routing such units to the cheap path would starve them.
     """
-    return resolve_structurally(unit).resolved
+    res = resolve_structurally(unit)
+    return bool(res.resolved) and res.deferred_core is None
 
 
 def _accept_deletion(base: str, current: str, replayed: str) -> str | None:
@@ -1086,6 +1119,14 @@ def _try_token_disjoint(base: str, current: str, replayed: str) -> str | None:
     if total_lines > TOKEN_DISJOINT_MAX_LINES:
         return None
 
+    # Modify/delete guard: an EMPTY side is a deletion. Treating the empty
+    # side as "no token additions" makes every add look disjoint and the
+    # splice silently keeps the modified file — dropping the other side's
+    # deletion intent (the AU/UA whole-file class that block-capture and
+    # _accept_deletion own). Decline so the modify/delete flow decides.
+    if not current.strip() or not replayed.strip():
+        return None
+
     # Macro-atomic tokenization: replace ALL-CAPS macro invocations with
     # single atomic tokens so the diff can't interleave inside them.
     bt, _macro_lookup = _tokenize_with_macros(base)
@@ -1284,6 +1325,18 @@ def _try_mechanical_reapply_merge(
     rep_mech = _is_mechanical_side(rep_ops, len(bt), base, replayed)
     # Require exactly one mechanical side.
     if cur_mech == rep_mech:
+        return None
+
+    # Modify/delete span guard (the r10 blind-spot family): when one side
+    # DELETED a base line that the other side CHANGED, the conflict is
+    # genuine — reapplying the mechanical transform here drops the other
+    # side's edit and can over-apply the transformation past its anchor
+    # (the span-intersection shape zealous_merge already declines).
+    _bl = base.split("\n")
+    _cur_del = _base_deleted_lines(_bl, current.split("\n"))
+    _rep_del = _base_deleted_lines(_bl, replayed.split("\n"))
+    if (_cur_del & _base_changed_lines(_bl, replayed.split("\n"))) or (
+            _rep_del & _base_changed_lines(_bl, current.split("\n"))):
         return None
 
     if cur_mech:

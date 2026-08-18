@@ -83,11 +83,18 @@ def test_rust_rebase_resolves_and_compiles(rust_conflicted_repo):
         '        format!("[{}] (retries={}, timeout={})", self.name, '
         "self.max_retries, self.timeout_ms)"
     )
+    # This test scripts the client's two-hunk merge; the deterministic layers
+    # would resolve the disjoint struct-field hunk themselves and value-pick
+    # the format-string hunk (current's spelling, dropping the scripted
+    # combined string). Disable them so the scripted merge is used.
+    cfg = _config(repo)
+    cfg.future.enable_source_portfolio = False
+    cfg.future.enable_structural_resolver = False
     engine = ResolutionEngine(
-        _config(repo).model, client=CyclingClient([_payload(r_new), _payload(r_label)])
+        cfg.model, client=CyclingClient([_payload(r_new), _payload(r_label)])
     )
     orch = Orchestrator(
-        _config(repo), repo=str(repo), resolution_engine=engine,
+        cfg, repo=str(repo), resolution_engine=engine,
         out=lambda *_a, **_k: None,
     )
     result = orch.run()

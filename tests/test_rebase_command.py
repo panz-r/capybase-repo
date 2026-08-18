@@ -67,6 +67,13 @@ def _config(repo, *, tests_required: bool = True) -> Config:
     cfg.tests.required = tests_required
     cfg.tests.pre_continue = "true"
     cfg.tests.final = "true"
+    # The fixture's conflict is a same-target value conflict the source
+    # portfolio now resolves deterministically (current's value — the
+    # value-resolution policy). These tests exercise the ESCALATION and
+    # client-merge paths, so disable the deterministic layers to let the
+    # scripted fake client decide the outcome.
+    cfg.future.enable_source_portfolio = False
+    cfg.future.enable_structural_resolver = False
     # Per-unit syntax validators false-fail on the fake client's partial snippets;
     # disable in the hermetic loop-mechanics tests (the validators have dedicated
     # tests with complete code).
@@ -471,6 +478,11 @@ def test_rebase_rust_resolves_and_compiles(repo):
     cfg.tests.pre_continue = None
     cfg.tests.final = None
     cfg.validation.enable_per_unit_syntax_check = False  # partial snippets
+    # This test scripts the client's two-hunk merge; the deterministic layers
+    # would resolve the disjoint struct-field hunk themselves and value-pick
+    # the format-string hunk. Disable them so the scripted merge is used.
+    cfg.future.enable_source_portfolio = False
+    cfg.future.enable_structural_resolver = False
     engine = ResolutionEngine(
         cfg.model, client=CyclingClient([_payload(r_new), _payload(r_label)])
     )

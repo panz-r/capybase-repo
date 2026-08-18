@@ -62,6 +62,12 @@ def test_llm_accept_records_resolution_attempt(repo: Path):
     from tests.test_rust_cross_file import PathAwareClient
     from capybase.resolution_engine import ResolutionEngine
     cfg = _base_cfg(repo)
+    # The fixture's conflict is a same-target value conflict the source
+    # portfolio now resolves deterministically (current's value) — the LLM
+    # would never run and record its accept. Disable the deterministic layers
+    # so the PathAwareClient accept is the outcome under test.
+    cfg.future.enable_source_portfolio = False
+    cfg.future.enable_structural_resolver = False
     client = PathAwareClient({"cfg.py": "    return 2\n"})
     engine = ResolutionEngine(cfg.model, client=client)
     orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
