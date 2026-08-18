@@ -781,6 +781,16 @@ class FutureConfig(BaseModel):
     # unparseable/absent response, or no endpoint accepts the merge — the
     # conservative direction, mirroring the takeover's own gating.
     enable_side_collapse_guard: bool = True
+    # Empty-response oversized floor (WS5): when a FRESH unit's first LLM
+    # response is empty and its prompt is at/above this token estimate
+    # (or >= 90% of a configured context window), skip the retries — the
+    # endpoint returns empty for prompts past its effective limit, so
+    # every retry of the same oversized prompt is a guaranteed 30-60s
+    # dead burn. Recovery goes straight to the deterministic fallback /
+    # portfolio; escalation if that declines. The propose-time oversized
+    # check only catches the extreme class (> window AND > 10K tokens) —
+    # this floor covers the 6K gray zone the pre-check tolerates.
+    empty_oversized_token_floor: int = 6000
     # Wholesale winner floor: a wholesale-band file (churn_ratio >= 0.90,
     # dominant churn) must never END with its dominant rewrite wiped. The
     # fast path normally installs the winner, but it declines on an

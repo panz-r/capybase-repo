@@ -2495,7 +2495,12 @@ def _detect_side_collapse(
     ctx = full_file_context(base_text, current_text, replayed_text)
     if ctx["churn_ratio"] >= 0.90:
         return None
-    floor = 0.25 * max(ctx["base_lines"], 1)
+    # Both sides must have REWRITTEN: >= 25% of base AND >= 20 lines each.
+    # The absolute floor matters more than it looks: on a 6-line file a
+    # 2-line edit is 33% of base — a value conflict, not a rewrite, and a
+    # reused/one-sided resolution of it is routinely correct (the exact-reuse
+    # loop's fixture). sea-orm-0027: 147/279 changed lines.
+    floor = max(0.25 * max(ctx["base_lines"], 1), 20)
     if ctx["current_churn"] < floor or ctx["replayed_churn"] < floor:
         return None
 
@@ -12107,27 +12112,53 @@ class Orchestrator:
                     )
                     return outcome
 
-            # First-empty fast-fail (reviewer-consensus hardening): for a
-            # SMALL fresh unit, an empty first response means the model
-            # can't handle this fragment's prompt shape — retrying the same
-            # prompt statistically won't change that but burns 30-60s per
-            # retry of the Phase-1 budget (protobuf-0043's empty-LLM
-            # sub-units starved every downstream recovery). Recover
-            # deterministically instead; fall through to the normal retry
-            # policy when even that declines (no behavior loss).
+            # First-empty fast-fail (reviewer-consensus hardening): recover
+            # deterministically instead of retrying when the empty response
+            # was never going to change. Two arms:
+            #
+            # 1. SMALL fresh unit (< 1500 tokens): the model can't handle
+            #    this fragment's prompt shape — retrying the same prompt
+            #    statistically won't change that but burns 30-60s per retry
+            #    of the Phase-1 budget (protobuf-0043's empty-LLM sub-units
+            #    starved every downstream recovery).
+            # 2. OVERSIZED prompt (>= empty_oversized_token_floor, or >= 90%
+            #    of a known context window): the endpoint returns empty for
+            #    prompts past its effective limit — every retry of the SAME
+            #    oversized prompt is a guaranteed 30-60s dead burn. The
+            #    oversized check at propose-time catches the extreme class
+            #    (> window AND > 10K tokens); this arm catches the 6K-window
+            #    gray zone the pre-check deliberately tolerates.
+            #
+            # Fall through to the normal retry policy when recovery declines
+            # (no behavior loss).
+            _tok_est = getattr(context, "token_estimate", 0)
+            _llm_window = int(getattr(self.config.model, "context_window", 0) or 0)
+            _empty_oversized = (
+                _tok_est >= getattr(
+                    self.config.future, "empty_oversized_token_floor", 6000)
+                or (_llm_window > 0 and _tok_est >= 0.9 * _llm_window)
+            )
+            # Refusal guard: a needs_human REFUSAL is not an empty-response
+            # failure (block-capture's keep/delete verdicts route here);
+            # converting it to a deterministic side pick would drop the other
+            # side's intent. EXCEPTION: an oversized prompt whose response is
+            # UNPARSEABLE (failure_kind=parse_failed, empty text, coerced
+            # needs_human=True) is the endpoint choking on the prompt — not a
+            # considered refusal. The oversized arm must see it.
+            _refusal = (
+                "needs_human" in (cand.failure_kind or "")
+                or getattr(cand, "needs_human", False)
+            )
+            _oversized_parse_fail = (
+                _empty_oversized and _tok_est >= 1500
+                and (cand.failure_kind or "") == "parse_failed"
+            )
             if (
                 failures is None
                 and retry_count == 0
                 and not (cand.resolved_text or "").strip()
-                and getattr(context, "token_estimate", 0) < 1500
-                # A needs_human REFUSAL is not an empty-response failure: the
-                # model explicitly asked for a human (block-capture's
-                # keep/delete verdicts route through here). Converting it to
-                # a deterministic side pick would silently drop the other
-                # side's intent AND override the refusal (AU needs_human:
-                # replayed_only shipped, deletion intent gone).
-                and "needs_human" not in (cand.failure_kind or "")
-                and not getattr(cand, "needs_human", False)
+                and (_tok_est < 1500 or _empty_oversized)
+                and (not _refusal or _oversized_parse_fail)
             ):
                 _unit_kind = "sub" if "#s" in unit.unit_id else "top"
                 self.journal.emit(
@@ -12135,7 +12166,8 @@ class Orchestrator:
                     {"token_estimate": context.token_estimate,
                      "unit_kind": _unit_kind,
                      "failure_kind": cand.failure_kind or "",
-                     "unit_id": unit.unit_id},
+                     "unit_id": unit.unit_id,
+                     "oversized": _empty_oversized and _tok_est >= 1500},
                     step_index=self.step, path=unit.path, unit_id=unit.unit_id,
                 )
                 _ef = (

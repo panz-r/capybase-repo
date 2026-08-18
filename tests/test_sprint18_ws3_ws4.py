@@ -280,3 +280,70 @@ def test_collapse_guard_disabled_by_flag(tmp_path: Path):
     res = _StepResult()
     assert not orch._check_side_collapse("app.py", "python", [unit],
                                          COLLAPSE_REP, res)
+
+
+# ---------------------------------------------------------------------------
+# Sprint 18 WS5: oversized empty fast-fail (skip dead retries)
+# ---------------------------------------------------------------------------
+
+def test_first_empty_oversized_prompt_skips_retries(tmp_path: Path):
+    """A >= 6K-token prompt whose first LLM response is EMPTY goes straight
+    to deterministic recovery — one model call total, not 30-60s of retries
+    on a prompt the endpoint will never answer."""
+    import json as _json
+    from capybase.adapters.llm_openai import LLMResponse
+    from capybase.resolution_engine import ResolutionEngine
+
+    class _EmptyClient:
+        calls = 0
+
+        def complete(self, messages, **kw):
+            type(self).calls += 1
+            return LLMResponse(text="")
+
+    # The CONFLICT BLOCK must be huge (the estimator measures the block,
+    # not the file): both sides rewrite all ~700 long lines so the whole
+    # file is one marker hunk ≈ 40K chars ≈ 10K estimated tokens.
+    base = "\n".join(
+        f'value_{i:04d} = "x" * 40 + "{i}"' for i in range(700)) + "\n"
+    rep = "\n".join(
+        f'repval_{i:04d} = "y" * 40 + "{i}"' for i in range(700)) + "\n"
+    cur = "\n".join(
+        f'curval_{i:04d} = "z" * 40 + "{i}"' for i in range(700)) + "\n"
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    build_multistep_rebase(
+        repo,
+        base_files={"app.py": base},
+        feat_commits=[CommitEdit("feat: rewrite", {"app.py": rep})],
+        main_commits=[CommitEdit("main: rewrite", {"app.py": cur})],
+        stop_early=True,
+    )
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.tests.required = False
+    cfg.tests.pre_continue = "true"
+    cfg.tests.final = "true"
+    cfg.future.enable_source_portfolio = False      # reach the LLM path
+    cfg.future.enable_structural_resolver = False
+    engine = ResolutionEngine(cfg.model, client=_EmptyClient())
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    # The oversized empty fast-fail fired and recovered deterministically.
+    empties = [e.payload for e in orch.journal.read_events()
+               if e.event_type == "llm_empty_fragment"]
+    assert empties and empties[0]["oversized"] is True
+    assert empties[0]["token_estimate"] >= 6000
+    # Exactly ONE generation round — count context_built events (client
+    # calls also include the side-collapse guard's adjudication of the
+    # recovered verbatim side, which is a legitimate consult). The pre-fix
+    # flow burned a full retry ladder: 3 rounds of regeneration.
+    rounds = [e for e in orch.journal.read_events()
+              if e.event_type == "context_built"]
+    assert len(rounds) == 1, (
+        f"retries must be skipped on the oversized arm; saw {len(rounds)} "
+        f"generation rounds")
+    assert not result.escalated
