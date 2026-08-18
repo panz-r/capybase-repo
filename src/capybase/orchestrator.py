@@ -12474,6 +12474,39 @@ class Orchestrator:
             else:
                 trigger = "phase1_fast_path"
                 asym_winner = ctx["asymmetry_side"]
+                # Small-conflict confirmation (sea-orm-0009 regression,
+                # found in the cross-language regression sweep): the
+                # wholesale gates were calibrated on C++ corpora where the
+                # oracle is the winner verbatim; rust/python counter-
+                # examples exist where the oracle WEAVES the loser's
+                # changes (winner token-Jaccard 0.799 vs the cascade's
+                # 0.98). The separating signal is the live unit count —
+                # the C++ timeout class (jsonc 0013/0014/0016, dozens of
+                # fragment calls) needs the fast path; a 1-3 unit file has
+                # a CHEAP cascade that can produce the better merge. For
+                # those, ask the subsumption adjudication before firing:
+                # cosmetic/covered losers still fire (2s PASS), real
+                # features fall back to the cascade.
+                if len(units) < 4:
+                    adj_enabled = bool(getattr(
+                        self.config.future,
+                        "enable_midband_subsumption_takeover", False))
+                    adj = None
+                    if adj_enabled:
+                        adj = self._adjudicate_subsumption(
+                            path, language, base_text, sides, asym_winner)
+                    adj_fires = bool(
+                        adj is not None
+                        and adj["verdict"] == "superseded"
+                        and adj["confidence"] >= 0.70)
+                    self.journal.emit(
+                        "phase1_fast_path_adjudication",
+                        {"n_units": len(units), "enabled": adj_enabled,
+                         "adjudication": adj, "fires": adj_fires},
+                        step_index=self.step, path=path,
+                    )
+                    if adj_enabled and not adj_fires:
+                        return None
         elif not dupes:
             from capybase.merge_intent import asymmetry_takeover_gates
 
@@ -12556,6 +12589,37 @@ class Orchestrator:
         # sequential per-file builds). The post-swap Phase 2 iteration
         # re-validates the final buffer anyway.
         for side, text, val in [(c, sides[c], v) for c, _, v in verified if c == choice]:
+            # Fail-fast build for the pre-cascade triggers (redis-0010
+            # regression): when the swapped-in winner fails the per-file
+            # build for merge-relevant reasons, declining here lets the
+            # per-unit cascade run in its place — the correct recovery.
+            # The alternative flow (accept the swap, let Phase 2's build
+            # check fail it, repair) is doomed: whole-file repair prompts
+            # on a true_side_stage unit are oversized by construction
+            # (the "unit" is the entire file), so the case escalates
+            # despite oracle-equal content. Environmental failures
+            # (sibling-file errors, missing build targets) proceed —
+            # consistent with Phase 2's environmental accept semantics.
+            if trigger in ("phase1_fast_path", "midband_subsumption"):
+                _fb_cmd = self._resolve_per_file_build(path)
+                if _fb_cmd:
+                    self._write_worktree_only(path, text, accepted=None)
+                    _fb_ok, _fb_out = self._run_raw_test(_fb_cmd)
+                    if not _fb_ok:
+                        _fb_errors = [
+                            ln for ln in (_fb_out or "").splitlines()
+                            if "error" in ln.lower()
+                        ][:5]
+                        _fb_merge, _fb_env = _classify_build_error_lines(
+                            _fb_errors, path)
+                        if _fb_merge:
+                            self.journal.emit(
+                                "phase1_fast_path_declined",
+                                {"reason": "build", "cmd": _fb_cmd,
+                                 "errors": _fb_merge[:3]},
+                                step_index=self.step, path=path,
+                            )
+                            return None
             from capybase.conflict_model import (
                 CandidateResolution as _TS_CR,
                 ConflictSide as _TS_CS,

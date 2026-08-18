@@ -573,6 +573,14 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     cfg.model.api_key = os.environ.get("CAPYBASE_API_KEY", "sk-local")
     cfg.model.model = os.environ.get("CAPYBASE_MODEL", "chat")
     cfg.model.temperature = 0.2
+    # A/B kill switch for the whole-file takeover mechanisms (regression
+    # attribution): setting CAPYBASE_DISABLE_TAKEOVER=1 runs the pre-af41b2e
+    # resolution flow (no Phase-1 fast path, no asymmetry takeover, no
+    # mid-band subsumption) so a failing case can be rerun to decide whether
+    # the takeover or the underlying cascade is at fault.
+    if os.environ.get("CAPYBASE_DISABLE_TAKEOVER", "") == "1":
+        cfg.future.enable_true_side_asymmetry_takeover = False
+        cfg.future.enable_midband_subsumption_takeover = False
     # Output token cap proportional to conflict size: a 3-line conflict doesn't
     # need 8K tokens of generation headroom (the model would hallucinate
     # boilerplate, wasting time on the slow endpoint). Cap at 16× the conflict's

@@ -217,12 +217,16 @@ class _SupersededEngine(_FakeEngine):
             '{"verdict": "superseded", "confidence": 0.95, "reason": "cosmetic"}')
 
 
-def _wiring_orchestrator(engine) -> Orchestrator:
+# The 0013 shape: wholesale churn ratio (>= 0.90 + dominance) on a small base.
+_BASE_W, _CUR_W, _REP_W = _texts(400, 4, 300)
+
+
+def _wiring_orchestrator(engine, base=None, cur=None, rep=None) -> Orchestrator:
     orch = object.__new__(Orchestrator)
     orch.resolution_engine = engine
     orch.journal = _RecJournal()
     orch.step = 1
-    orch.git = _FakeGit({1: _BASE, 2: _CUR, 3: _REP})
+    orch.git = _FakeGit({1: base or _BASE, 2: cur or _CUR, 3: rep or _REP})
     orch.verification = _AlwaysPassVerification()
     orch.config = SimpleNamespace(
         future=SimpleNamespace(
@@ -230,23 +234,27 @@ def _wiring_orchestrator(engine) -> Orchestrator:
             enable_midband_subsumption_takeover=True),
     )
     orch._write_worktree_only = lambda *a, **k: None
+    # No per-file build target by default; the build fail-fast tests
+    # override these.
+    orch._resolve_per_file_build = lambda path: ""
+    orch._run_raw_test = lambda cmd: (True, "")
     return orch
 
 
 _BASE, _CUR, _REP = _texts(200, 52, 243)  # the 0004 shape: ratio 0.74, mult 3.8
 
 
-def _units():
+def _units(n=1, base=_BASE, cur=_CUR, rep=_REP):
     from capybase.conflict_model import ConflictSide, ConflictUnit
     return [ConflictUnit(
         session_id="s", step_index=1, path="f.c", language="c",
-        unit_id="f.c:1:0", unit_kind="text_marker_block",
-        base=ConflictSide(label="BASE", text=_BASE),
-        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=_CUR),
-        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=_REP),
-        original_worktree_text=_CUR,
+        unit_id=f"f.c:{i}:0", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=cur),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=rep),
+        original_worktree_text=cur,
         marker_span=(0, 1),
-    )]
+    ) for i in range(n)]
 
 
 def test_midband_keep_declines_to_cascade():
@@ -285,3 +293,78 @@ def test_midband_disabled_flag_skips_adjudication():
     gates = [e for e in orch.journal.events
              if e[0] == "midband_subsumption_gate"]
     assert gates and gates[0][1]["enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# Wholesale small-unit confirmation + build fail-fast (regression fixes)
+# ---------------------------------------------------------------------------
+
+def test_wholesale_many_units_fires_without_adjudication():
+    # The timeout class (jsonc-0013 live: dozens of units): fire immediately,
+    # no LLM call — the cascade is the thing we're protecting against.
+    orch = _wiring_orchestrator(_KeepEngine(), _BASE_W, _CUR_W, _REP_W)
+    out = orch._try_true_side_portfolio(
+        "f.c", "c", _CUR_W, _units(n=12, base=_BASE_W, cur=_CUR_W, rep=_REP_W),
+        phase1_fast_path=True)
+    assert out is not None
+    assert out[1] == _CUR_W
+    assert not orch.resolution_engine.calls  # no adjudication ran
+
+
+def test_wholesale_few_units_keep_declines_to_cascade():
+    # sea-orm-0009: 1 live unit, loser carries real features — the cascade
+    # is cheap and produces the better merge, so a "keep" verdict declines.
+    orch = _wiring_orchestrator(_KeepEngine(), _BASE_W, _CUR_W, _REP_W)
+    out = orch._try_true_side_portfolio(
+        "f.c", "c", _CUR_W, _units(n=1, base=_BASE_W, cur=_CUR_W, rep=_REP_W),
+        phase1_fast_path=True)
+    assert out is None
+    adj = [e for e in orch.journal.events
+           if e[0] == "phase1_fast_path_adjudication"]
+    assert adj and adj[0][1]["n_units"] == 1 and adj[0][1]["fires"] is False
+
+
+def test_wholesale_few_units_superseded_fires():
+    orch = _wiring_orchestrator(_SupersededEngine(), _BASE_W, _CUR_W, _REP_W)
+    out = orch._try_true_side_portfolio(
+        "f.c", "c", _CUR_W, _units(n=1, base=_BASE_W, cur=_CUR_W, rep=_REP_W),
+        phase1_fast_path=True)
+    assert out is not None and out[1] == _CUR_W
+
+
+def test_wholesale_few_units_flag_off_preserves_old_behavior():
+    # Without the adjudication flag the pre-regression behavior stands
+    # (fire on numbers alone) — deployments that opt out keep af41b2e.
+    orch = _wiring_orchestrator(_KeepEngine(), _BASE_W, _CUR_W, _REP_W)
+    orch.config.future.enable_midband_subsumption_takeover = False
+    out = orch._try_true_side_portfolio(
+        "f.c", "c", _CUR_W, _units(n=1, base=_BASE_W, cur=_CUR_W, rep=_REP_W),
+        phase1_fast_path=True)
+    assert out is not None
+
+
+def test_fastpath_declines_when_winner_fails_build():
+    # redis-0010: the winner fails the per-file build for merge-relevant
+    # reasons — decline the swap so the cascade runs, instead of accepting
+    # and dying in oversized whole-file repair.
+    orch = _wiring_orchestrator(_SupersededEngine(), _BASE_W, _CUR_W, _REP_W)
+    orch._resolve_per_file_build = lambda path: "make f.o"
+    orch._run_raw_test = lambda cmd: (False, "f.c:12:5: error: use of undeclared identifier 'x'")
+    out = orch._try_true_side_portfolio(
+        "f.c", "c", _CUR_W, _units(n=1, base=_BASE_W, cur=_CUR_W, rep=_REP_W),
+        phase1_fast_path=True)
+    assert out is None
+    declined = [e for e in orch.journal.events
+                if e[0] == "phase1_fast_path_declined"]
+    assert declined and declined[0][1]["reason"] == "build"
+
+
+def test_fastpath_build_environmental_failure_proceeds():
+    # Sibling-file errors are infrastructure, not a verdict on the winner.
+    orch = _wiring_orchestrator(_SupersededEngine(), _BASE_W, _CUR_W, _REP_W)
+    orch._resolve_per_file_build = lambda path: "make f.o"
+    orch._run_raw_test = lambda cmd: (False, "other.c:9:1: error: syntax error")
+    out = orch._try_true_side_portfolio(
+        "f.c", "c", _CUR_W, _units(n=1, base=_BASE_W, cur=_CUR_W, rep=_REP_W),
+        phase1_fast_path=True)
+    assert out is not None
