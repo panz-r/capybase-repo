@@ -231,7 +231,8 @@ def _wiring_orchestrator(engine, base=None, cur=None, rep=None) -> Orchestrator:
     orch.config = SimpleNamespace(
         future=SimpleNamespace(
             enable_true_side_asymmetry_takeover=True,
-            enable_midband_subsumption_takeover=True),
+            enable_midband_subsumption_takeover=True,
+            enable_wholesale_winner_floor=True),
     )
     orch._write_worktree_only = lambda *a, **k: None
     # No per-file build target by default; the build fail-fast tests
@@ -368,3 +369,73 @@ def test_fastpath_build_environmental_failure_proceeds():
         "f.c", "c", _CUR_W, _units(n=1, base=_BASE_W, cur=_CUR_W, rep=_REP_W),
         phase1_fast_path=True)
     assert out is not None
+# ---------------------------------------------------------------------------
+# Wholesale winner floor — the sea-orm-0010/0024 + clap-0004 class
+# ---------------------------------------------------------------------------
+
+def test_floor_fires_on_degenerate_output():
+    # sea-orm-0010 shape: the wholesale gates fired but every fast-path
+    # route declined, and the cascade's output kept the loser's small edit
+    # while dropping the dominant rewrite (winner preservation ~0.0).
+    orch = _wiring_orchestrator(_KeepEngine(), _BASE_W, _CUR_W, _REP_W)
+    units = _units(1, base=_BASE_W, cur=_CUR_W, rep=_REP_W)
+    out = orch._wholesale_winner_floor("f.c", "c", units, buffer=_REP_W)
+    assert out is not None
+    (unit, cand), = out
+    assert cand.resolved_text == _CUR_W  # the gate winner, not the buffer
+    assert unit.unit_kind == "whole_file"
+    assert cand.provenance == "deterministic_wholesale_floor_current"
+    ev = [e for e in orch.journal.events if e[0] == "wholesale_winner_floor"]
+    assert ev and ev[0][1]["winner"] == "current"
+
+
+def test_floor_silent_on_weaving_output():
+    # sea-orm-0009: the oracle weaves the loser's real features INTO the
+    # winner; a weaving output preserves the winner's changes and the
+    # floor must stay silent.
+    orch = _wiring_orchestrator(_KeepEngine(), _BASE_W, _CUR_W, _REP_W)
+    units = _units(1, base=_BASE_W, cur=_CUR_W, rep=_REP_W)
+    assert orch._wholesale_winner_floor("f.c", "c", units, buffer=_CUR_W) is None
+
+
+def test_floor_fires_without_buffer_on_escalation():
+    # clap-0004: the cascade gave up with markers unresolved — buffer=None
+    # means "about to escalate"; the gate winner is the only whole-file
+    # answer left.
+    orch = _wiring_orchestrator(_KeepEngine(), _BASE_W, _CUR_W, _REP_W)
+    units = _units(1, base=_BASE_W, cur=_CUR_W, rep=_REP_W)
+    out = orch._wholesale_winner_floor("f.c", "c", units, buffer=None)
+    assert out is not None and out[0][1].resolved_text == _CUR_W
+
+
+def test_floor_out_of_band_is_silent():
+    # The 0004 mid-band shape: no wholesale rewrite, the cascade owns the
+    # file and the floor has no opinion.
+    orch = _wiring_orchestrator(_KeepEngine())
+    units = _units(1)  # base=_BASE, cur=_CUR, rep=_REP — ratio 0.74
+    assert orch._wholesale_winner_floor("f.c", "c", units, buffer=_REP) is None
+
+
+def test_floor_respects_flag_off():
+    orch = _wiring_orchestrator(_KeepEngine())
+    orch.config.future.enable_wholesale_winner_floor = False
+    units = _units(1, base=_BASE_W, cur=_CUR_W, rep=_REP_W)
+    assert orch._wholesale_winner_floor("f.c", "c", units, buffer=_REP_W) is None
+
+
+def test_floor_declines_unbalanced_winner():
+    # Never floor to a side that can't even pass brace balance — the one
+    # sanity check the fast path's full verification would have caught.
+    orch = _wiring_orchestrator(_KeepEngine())
+    bad_cur = _CUR_W + "\nint unbalanced(int x {;\n"
+    units = _units(1, base=_BASE_W, cur=bad_cur, rep=_REP_W)
+    assert orch._wholesale_winner_floor("f.c", "c", units, buffer=_REP_W) is None
+
+
+def test_floor_uses_merge_stages_not_unit_sides():
+    # The stage blobs are the pristine sides; unit side texts can go stale
+    # after earlier writes. Give the unit sides junk and the stages truth.
+    orch = _wiring_orchestrator(_KeepEngine(), _BASE_W, _CUR_W, _REP_W)
+    units = _units(1, base="stale base\n", cur="stale cur\n", rep="stale rep\n")
+    out = orch._wholesale_winner_floor("f.c", "c", units, buffer=_REP_W)
+    assert out is not None and out[0][1].resolved_text == _CUR_W

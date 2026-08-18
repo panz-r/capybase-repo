@@ -1307,6 +1307,46 @@ def _true_stage_sides(git_backend, path: str):
     return out, base_text
 
 
+def _side_preservation(base_text: str, side_text: str, output_text: str) -> float | None:
+    """Share of one side's changes the output preserves (0.0-1.0).
+
+    Added/changed lines (the side's side of the base diff) count as
+    preserved when present in the output; deleted base lines count as
+    preserved when absent from it. Whitespace-normalized line-set
+    membership, so indentation drift doesn't dent the fraction. Returns
+    None when the side made no changes vs base (nothing to preserve).
+    Mirrors the live eval's post-hoc judge so the orchestrator's floor
+    decision and the eval's census speak the same numbers.
+    """
+    import difflib as _dl
+
+    b, s = base_text.splitlines(), side_text.splitlines()
+    added: list[str] = []
+    deleted: list[str] = []
+    for tag, i1, i2, j1, j2 in _dl.SequenceMatcher(
+            None, b, s, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "delete":
+            added.extend(s[j1:j2])
+        if tag != "insert":
+            deleted.extend(b[i1:i2])
+    if not added and not deleted:
+        return None
+    out = {ln.strip() for ln in output_text.splitlines() if ln.strip()}
+    n_ok = 0
+    n_tot = 0
+    for ln in added:
+        if ln.strip():
+            n_tot += 1
+            n_ok += ln.strip() in out
+    for ln in deleted:
+        if ln.strip():
+            n_tot += 1
+            n_ok += ln.strip() not in out
+    return n_ok / n_tot if n_tot else None
+
+
 def _shared_context_duplicate_definitions(
     original: str, language: str | None,
 ) -> list[str]:
@@ -8266,6 +8306,17 @@ class Orchestrator:
                         step_index=result.step_index, path=path,
                     )
             if escalated_units:
+                # Wholesale winner floor — escalation rescue (clap-0004
+                # class): a wholesale-rewrite file whose cascade gave up
+                # still has its correct whole-file answer in the merge index
+                # (the gate winner). Escalate only when the floor can't
+                # apply (out-of-band file, unbalanced winner, flag off).
+                _floor = self._wholesale_winner_floor(
+                    path, units[0].language, units, buffer=None)
+                if _floor is not None:
+                    accepted = _floor
+                    escalated_units = []
+            if escalated_units:
                 escalated_unit = escalated_units[0]
                 result.escalated = True
                 # Prefer the outcome's specific reason (e.g. "unit exceeded
@@ -8834,33 +8885,44 @@ class Orchestrator:
                                 path, language, original, _spans,
                                 repo_root=str(self.git.repo),
                             )
+                    _floor = None
                     if file_validation is None or not file_validation.passed:
-                        result.escalated = True
-                    if file_validation is None:
-                        result.reason = (
-                            f"whole-file repair could not re-resolve a unit in {path}"
-                        )
+                        # Wholesale winner floor — repair-exhaustion rescue:
+                        # Phase 2 failed on a wholesale file, but the gate
+                        # winner is still the best available whole answer.
+                        _floor = self._wholesale_winner_floor(
+                            path, language, units, buffer=None)
+                    if _floor is not None:
+                        accepted = _floor
+                        buffer = _floor[0][1].resolved_text
                     else:
-                        result.reason = (
-                            f"whole-file validation failed for {path}: "
-                            + "; ".join(f.message for f in file_validation.hard_failures)
+                        if file_validation is None:
+                            result.escalated = True
+                            result.reason = (
+                                f"whole-file repair could not re-resolve a unit in {path}"
+                            )
+                        else:
+                            result.escalated = True
+                            result.reason = (
+                                f"whole-file validation failed for {path}: "
+                                + "; ".join(f.message for f in file_validation.hard_failures)
+                            )
+                        self._record_outcomes_to_memory(result)
+                        # Enrich the bundle with the unit/candidate/validation so the
+                        # human (and the interactive fallback) can see what was tried
+                        # and why cargo rejected it — not just the bare reason.
+                        _unit = accepted[0][0] if accepted else None
+                        _cand = accepted[0][1] if accepted else None
+                        write_review_bundle(
+                            self.paths,
+                            reason=result.reason,
+                            step_index=result.step_index,
+                            unit=_unit,
+                            candidate=_cand,
+                            validation=file_validation if file_validation is not None else None,
+                            advisories=self._recent_advisories(),
                         )
-                    self._record_outcomes_to_memory(result)
-                    # Enrich the bundle with the unit/candidate/validation so the
-                    # human (and the interactive fallback) can see what was tried
-                    # and why cargo rejected it — not just the bare reason.
-                    _unit = accepted[0][0] if accepted else None
-                    _cand = accepted[0][1] if accepted else None
-                    write_review_bundle(
-                        self.paths,
-                        reason=result.reason,
-                        step_index=result.step_index,
-                        unit=_unit,
-                        candidate=_cand,
-                        validation=file_validation if file_validation is not None else None,
-                        advisories=self._recent_advisories(),
-                    )
-                    return result
+                        return result
             # Phase 3: Comment reconciliation (deferred-comment system). After
             # the code passes Phase-B validation, reconcile deferred (prose)
             # comments in a second CEGIS pass. The comment pass can ONLY modify
@@ -8888,6 +8950,18 @@ class Orchestrator:
                     )
             # Stage the validated file (it was already written to the worktree
             # in Phase 1; re-write in case the CEGIS loop changed it, then stage).
+            # Wholesale winner floor — degenerate-output guard: every fast-path
+            # decline (adjudication "keep", winner failed standalone verify)
+            # funnels the file through the cascade, whose wholesale-file
+            # failure mode is dropping the dominant rewrite (sea-orm-0010/0024:
+            # winner preservation 0.0-0.01 on files whose oracles equal the
+            # winner at 0.99-1.0). A woven merge preserves the winner and the
+            # floor stays silent.
+            _floor = self._wholesale_winner_floor(
+                path, language, units, buffer=buffer)
+            if _floor is not None:
+                accepted = _floor
+                buffer = _floor[0][1].resolved_text
             self._write_and_stage(path, buffer, result, accepted=accepted)
         # After staging: assert no unmerged paths remain for our files.
         if self.git.has_unmerged_paths():
@@ -12354,6 +12428,112 @@ class Orchestrator:
         postmerge_passing = parse_passing_node_ids(postmerge_stdout or "", tool)
         regressed = sorted(baseline - postmerge_passing)
         return regressed
+
+    def _wholesale_winner_floor(
+        self,
+        path: str,
+        language: str | None,
+        units: list,
+        buffer: str | None,
+    ):
+        """Last-resort floor for wholesale-rewrite files: never let the
+        file's final resolution wipe the dominant side.
+
+        The wholesale gates (churn_ratio >= 0.90, dominant churn >= 30% of
+        base) encode that one side rewrote the file. The Phase-1 fast path
+        installs that winner directly, but two declines send the file back
+        to the per-unit cascade instead — the subsumption adjudication's
+        "keep" (sea-orm-0010: oracle = winner 0.99, cascade output 0.15,
+        winner preservation 0.01) and a winner that fails standalone
+        verification (sea-orm-0024: oracle = winner 1.0, cascade output
+        0.71, winner preservation 0.0). On wholesale files the cascade's
+        catastrophic mode is keeping the loser's small edit and dropping
+        the rewrite. This floor fires only when the output is degenerate
+        (preserves < 0.5 of the winner's churn) or when there is no output
+        at all (the cascade is about to escalate with markers unresolved,
+        clap-0004). A woven merge — sea-orm-0009, where the oracle
+        interleaves the loser's real features into the winner — preserves
+        the winner and never floors.
+
+        Returns ``[(unit, candidate)]`` accepting the winner's whole-file
+        text (the same synthetic whole_file shape the true-side portfolio
+        stages), or None when the floor doesn't apply.
+        """
+        if not getattr(self.config.future, "enable_wholesale_winner_floor", False):
+            return None
+        if not units:
+            return None
+        try:
+            _staged = _true_stage_sides(self.git, path)
+        except Exception:
+            _staged = None
+        if _staged is not None:
+            sides, base_text = _staged
+        else:
+            # Merge stages unreadable (stubbed git in wiring tests, or the
+            # path already staged): whole-file marker units carry the sides.
+            base_text = units[0].base.text if units[0].base is not None else ""
+            sides = {
+                "current": (units[0].current.text
+                            if units[0].current is not None else ""),
+                "replayed": (units[0].replayed.text
+                             if units[0].replayed is not None else ""),
+            }
+        cur = sides.get("current", "")
+        rep = sides.get("replayed", "")
+        if not cur or not rep:
+            return None
+        from capybase.merge_intent import full_file_context as _ffc
+
+        ctx = _ffc(base_text, cur, rep)
+        if not (ctx["churn_ratio"] >= 0.90
+                and ctx["dominant_churn"] >= 0.30 * max(ctx["base_lines"], 1)):
+            return None
+        winner = "current" if ctx["current_churn"] >= ctx["replayed_churn"] else "replayed"
+        wtext = sides[winner]
+        try:
+            if language and not _braces_balanced(wtext, language):
+                return None
+        except Exception:
+            pass
+        pres = None
+        if buffer:
+            pres = _side_preservation(base_text, wtext, buffer)
+            if pres is not None and pres >= 0.5:
+                return None  # the output weaves the winner — not degenerate
+        self.journal.emit(
+            "wholesale_winner_floor",
+            {"winner": winner,
+             "winner_preservation": pres if pres is not None else "n/a",
+             "had_buffer": bool(buffer)},
+            step_index=self.step, path=path,
+        )
+        from capybase.conflict_model import (
+            CandidateResolution as _FL_CR,
+            ConflictSide as _FL_CS,
+        )
+        unit = ConflictUnit(
+            session_id=units[0].session_id,
+            step_index=units[0].step_index,
+            path=path,
+            language=units[0].language,
+            unit_id=f"{path}:wholesale_winner_floor",
+            unit_kind="whole_file",
+            base=_FL_CS(label="BASE", text=base_text),
+            current=_FL_CS(label="CURRENT_UPSTREAM_SIDE", text=cur),
+            replayed=_FL_CS(label="REPLAYED_COMMIT_SIDE", text=rep),
+            original_worktree_text=units[0].original_worktree_text,
+            marker_span=None,
+        )
+        cand = _FL_CR(
+            candidate_id=f"{unit.unit_id}:{winner}",
+            unit_id=unit.unit_id,
+            model_name="wholesale_winner_floor",
+            resolved_text=wtext,
+            provenance=f"deterministic_wholesale_floor_{winner}",
+            prompt_version="wholesale_winner_floor.v1",
+        )
+        return [(unit, cand)]
 
     def _try_true_side_portfolio(
         self,

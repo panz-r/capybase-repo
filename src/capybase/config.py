@@ -763,6 +763,18 @@ class FutureConfig(BaseModel):
     # proceeds unchanged. Offline validation on the 45 active-corpus
     # mid-band cases: zero false-superseded on the risky set.
     enable_midband_subsumption_takeover: bool = True
+    # Wholesale winner floor: a wholesale-band file (churn_ratio >= 0.90,
+    # dominant churn) must never END with its dominant rewrite wiped. The
+    # fast path normally installs the winner, but it declines on an
+    # adjudication "keep" or a winner that fails standalone verification —
+    # and the per-unit cascade's catastrophic mode on such files is keeping
+    # the loser's small edit and dropping the rewrite (sea-orm-0010:
+    # winner preservation 0.01, sim 0.15 vs the winner's 0.99). The floor
+    # is last-resort: it fires only when the final output preserves < 0.5
+    # of the winner's churn, or when the cascade is about to escalate with
+    # markers unresolved. Woven merges (sea-orm-0009) preserve the winner
+    # and never floor.
+    enable_wholesale_winner_floor: bool = True
     # Phase 4 comment jury (design §5). An untrusted semantic sensor that
     # evaluates comment claims produced by the comment pass. Three operating
     # modes:

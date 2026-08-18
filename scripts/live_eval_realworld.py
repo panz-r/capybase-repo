@@ -581,6 +581,7 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     if os.environ.get("CAPYBASE_DISABLE_TAKEOVER", "") == "1":
         cfg.future.enable_true_side_asymmetry_takeover = False
         cfg.future.enable_midband_subsumption_takeover = False
+        cfg.future.enable_wholesale_winner_floor = False
     # Output token cap proportional to conflict size: a 3-line conflict doesn't
     # need 8K tokens of generation headroom (the model would hallucinate
     # boilerplate, wasting time on the slow endpoint). Cap at 16× the conflict's
