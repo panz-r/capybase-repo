@@ -1,5 +1,32 @@
 # AGENTS.md — operating instructions for the capybase agent
 
+## Model endpoints & provider configs
+
+Live LLM endpoints (the eval harnesses `scripts/live_eval*.py`,
+`scripts/run-live-test.sh`, anything making real model calls) are resolved
+**exclusively through provider configs** — named JSONs under
+`~/.config/capybase/providers/` that carry host+model for the LLM (and
+optionally a separate embeddings host+model) plus the REQUIRED calibration
+profile. Full reference: `docs/PROVIDER_CONFIG.md`.
+
+- **Never probe ad-hoc URLs to decide an endpoint is "down."** A sprint-18
+  session blocked live validation on exactly that false diagnosis (it probed
+  a stale repo-toml URL while the real server was serving). The repo's
+  `capybase.toml` is a template with NO endpoint. To check connectivity:
+  `capybase provider list`, then `capybase provider show <name>` (a full
+  resolution check, no guessing).
+- **Never put a host, IP, or machine name in any tracked file.**
+  `hooks/pre-commit` blocks non-loopback IPv4 literals, `*.local` hostnames,
+  and machine-name patterns from staged additions. If an exception is truly
+  intentional, mark the line `# endpoint-guard: allow` (greppable).
+- **A live run without a calibration profile is an error — by design.** Do
+  not add fallbacks, default endpoints, or auto-create profiles; they are
+  expensive and never substituted. Profiles are host-free and may be reused
+  across hosts/models (explicit selection ⇒ `apply_profile(force=True)`).
+- Resolution precedence per field: CLI flag → `CAPYBASE_*` env → provider
+  file. Invoke evals as `--provider <name>` (or `CB_PROVIDER` for
+  run-live-test.sh).
+
 ## Git workflow
 
 ### Never push. That is the user's job.

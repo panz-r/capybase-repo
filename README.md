@@ -121,8 +121,9 @@ CB_PROVIDER=<name> ./scripts/run-live-test.sh
 Precedence per field: CLI flag → `CAPYBASE_*` env var → provider file.
 Profiles carry NO host information (one calibration can be reused against a
 different host or model), running without a calibration profile is a hard
-error, and nothing auto-creates or silently substitutes one. Schema:
-`src/capybase/provider_config.py`.
+error, and nothing auto-creates or silently substitutes one. Full reference
+— schema, refusal contract, reuse semantics, rerun recipes:
+**[docs/PROVIDER_CONFIG.md](docs/PROVIDER_CONFIG.md)**.
 
 **Repo hygiene hook.** `hooks/pre-commit` blocks commits that would introduce
 IPv4 literals (non-loopback), `*.local` mDNS hostnames, or machine names into
