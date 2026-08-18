@@ -772,6 +772,15 @@ class FutureConfig(BaseModel):
     # proceeds unchanged. Offline validation on the 45 active-corpus
     # mid-band cases: zero false-superseded on the risky set.
     enable_midband_subsumption_takeover: bool = True
+    # Side-collapse guard (sea-orm-0027 class): when BOTH sides rewrote
+    # >= 25% of the file (churn ratio < 0.90 — outside the side-pick
+    # regimes) but the merged buffer is one side verbatim, the other
+    # side's entire rewrite was silently dropped. The rejection is
+    # LLM-gated (subsumption adjudication): escalate only when the dropped
+    # rewrite is adjudicated not-superseded. A superseded verdict, an
+    # unparseable/absent response, or no endpoint accepts the merge — the
+    # conservative direction, mirroring the takeover's own gating.
+    enable_side_collapse_guard: bool = True
     # Wholesale winner floor: a wholesale-band file (churn_ratio >= 0.90,
     # dominant churn) must never END with its dominant rewrite wiped. The
     # fast path normally installs the winner, but it declines on an

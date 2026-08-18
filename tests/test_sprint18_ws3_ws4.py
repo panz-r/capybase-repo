@@ -125,3 +125,158 @@ def test_no_swap_when_detection_disabled(tmp_path: Path):
     buffer = CUR.replace("tail = 2", f"\n{DEAD_BLOCK}\ntail = 2")
     assert orch._try_deletion_respect_swap(
         "app.py", "python", [unit], buffer) is None
+
+
+# ---------------------------------------------------------------------------
+# Sprint 18 WS4: side-collapse guard (sea-orm-0027 class)
+# ---------------------------------------------------------------------------
+
+COLLAPSE_BASE = "\n".join(f"orig_{i} = {i}" for i in range(40)) + "\n"
+COLLAPSE_CUR = "\n".join(f"cur_{i} = {i}" for i in range(30)) + "\n" + \
+    "\n".join(f"orig_{i} = {i}" for i in range(30, 40)) + "\n"   # rewrote 75%
+COLLAPSE_REP = "\n".join(f"rep_{i} = {i}" for i in range(28)) + "\n" + \
+    "\n".join(f"orig_{i} = {i}" for i in range(28, 40)) + "\n"   # rewrote 70%
+
+
+def _collapse_repo(repo: Path) -> None:
+    """Both sides rewrote most of a 40-line file (deep in the woven band);
+    git stops at the conflict."""
+    git(repo, "init", "-q", "-b", "main")
+    build_multistep_rebase(
+        repo,
+        base_files={"app.py": COLLAPSE_BASE},
+        feat_commits=[CommitEdit("feat: rewrite most", {"app.py": COLLAPSE_REP})],
+        main_commits=[CommitEdit("main: rewrite more", {"app.py": COLLAPSE_CUR})],
+        stop_early=True,
+    )
+
+
+def _collapse_unit(repo: Path) -> ConflictUnit:
+    return ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="app.py:1:0", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=COLLAPSE_BASE),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=COLLAPSE_CUR),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=COLLAPSE_REP),
+        original_worktree_text=(repo / "app.py").read_text(),
+        marker_span=(0, 5),
+    )
+
+
+def test_detect_side_collapse_fires_on_verbatim_side():
+    from capybase.orchestrator import _detect_side_collapse
+    det = _detect_side_collapse(COLLAPSE_BASE, COLLAPSE_CUR, COLLAPSE_REP,
+                                COLLAPSE_REP)  # buffer = replayed verbatim
+    assert det is not None and det["collapsed_to"] == "replayed"
+    assert det["current_new_kept"] <= 0.10
+
+
+def test_detect_side_collapse_declines_on_woven_merge():
+    from capybase.orchestrator import _detect_side_collapse
+    woven = ("\n".join(f"cur_{i} = {i}" for i in range(15)) + "\n"
+             + "\n".join(f"rep_{i} = {i}" for i in range(14)) + "\n"
+             + "\n".join(f"orig_{i} = {i}" for i in range(28, 40)) + "\n")
+    assert _detect_side_collapse(COLLAPSE_BASE, COLLAPSE_CUR, COLLAPSE_REP,
+                                 woven) is None
+
+
+def test_detect_side_collapse_declines_outside_both_rewrite():
+    """One side barely touched the file (small loser churn): verbatim winner
+    picks are frequently correct there (79 corpus cases) — no collapse."""
+    from capybase.orchestrator import _detect_side_collapse
+    small_edit = COLLAPSE_BASE.replace("orig_0 = 0", "orig_0 = 42")
+    det = _detect_side_collapse(COLLAPSE_BASE, COLLAPSE_REP, small_edit,
+                                COLLAPSE_REP)
+    assert det is None
+
+
+class _AdjClient:
+    """Engine client whose subsumption adjudication verdict is scripted."""
+
+    def __init__(self, payload: str):
+        self._payload = payload
+
+    def complete(self, messages, **kw):
+        from capybase.adapters.llm_openai import LLMResponse
+        return LLMResponse(text=self._payload)
+
+
+def _collapse_orch(repo: Path, adj_payload: str | None):
+    from capybase.resolution_engine import ResolutionEngine
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.tests.required = False
+    cfg.tests.pre_continue = "true"
+    cfg.tests.final = "true"
+    engine = (ResolutionEngine(cfg.model, client=_AdjClient(adj_payload))
+              if adj_payload is not None else None)
+    return Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+
+
+class _StepResult:
+    escalated = False
+    reason: str | None = None
+    step_index = 1
+
+
+def test_collapse_guard_escalates_on_keep_verdict(tmp_path: Path):
+    import json as _json
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _collapse_repo(repo)
+    orch = _collapse_orch(
+        repo, _json.dumps({"verdict": "keep", "confidence": 0.9,
+                           "reason": "current's rewrite adds real API"}))
+    unit = _collapse_unit(repo)
+    res = _StepResult()
+    fired = orch._check_side_collapse("app.py", "python", [unit],
+                                      COLLAPSE_REP, res)
+    assert fired and res.escalated
+    assert "side collapse" in res.reason and "current" in res.reason
+    events = [e.event_type for e in orch.journal.read_events()]
+    assert "side_collapse_probe" in events
+    assert "side_collapse_adjudication" in events
+
+
+def test_collapse_guard_accepts_on_superseded_verdict(tmp_path: Path):
+    import json as _json
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _collapse_repo(repo)
+    orch = _collapse_orch(
+        repo, _json.dumps({"verdict": "superseded", "confidence": 0.9,
+                           "reason": "replayed subsumes current"}))
+    unit = _collapse_unit(repo)
+    res = _StepResult()
+    assert not orch._check_side_collapse("app.py", "python", [unit],
+                                         COLLAPSE_REP, res)
+    assert not res.escalated
+
+
+def test_collapse_guard_accepts_without_endpoint(tmp_path: Path):
+    """No endpoint → adjudication unavailable → conservative accept (the
+    guard must not hard-escalate on churn numbers alone)."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _collapse_repo(repo)
+    orch = _collapse_orch(repo, adj_payload=None)
+    unit = _collapse_unit(repo)
+    res = _StepResult()
+    assert not orch._check_side_collapse("app.py", "python", [unit],
+                                         COLLAPSE_REP, res)
+    assert not res.escalated
+
+
+def test_collapse_guard_disabled_by_flag(tmp_path: Path):
+    import json as _json
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _collapse_repo(repo)
+    orch = _collapse_orch(
+        repo, _json.dumps({"verdict": "keep", "confidence": 0.9}))
+    orch.config.future.enable_side_collapse_guard = False
+    unit = _collapse_unit(repo)
+    res = _StepResult()
+    assert not orch._check_side_collapse("app.py", "python", [unit],
+                                         COLLAPSE_REP, res)

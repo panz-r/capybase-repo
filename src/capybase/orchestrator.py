@@ -2471,6 +2471,66 @@ def _dup_eradication_regions(lines: list[str], name: str) -> list[tuple[int, int
     return regions
 
 
+def _detect_side_collapse(
+    base_text: str, current_text: str, replayed_text: str, buffer: str,
+) -> dict | None:
+    """Detect that a merged buffer is one side VERBATIM in a both-rewrite file.
+
+    The sea-orm-0027 class: both sides rewrote substantially (churn ratio far
+    below the wholesale band, so no side-pick regime applies), the oracle is a
+    woven merge, but the model returned one side unchanged — a silent drop of
+    the other side's entire rewrite. Runtime-detectable without the oracle:
+    the buffer's line content is >= 0.9 contained in one side while <= 0.1 of
+    the OTHER side's new (changed-vs-base) lines survive.
+
+    Returns the detection dict (collapsed_to, containment figures, churn
+    context) or None. Conservative: only fires OUTSIDE the wholesale band
+    (>= 0.90 owns verbatim picks) and only when BOTH sides churned >= 25% of
+    base — corpus-calibrated; below that, legit winner-verbatim oracles
+    overlap the shape (79 corpus cases with oracle ~= winner at ratio < 0.90;
+    their losers churn far less), so churn mass is the discriminator.
+    """
+    from capybase.merge_intent import full_file_context
+
+    ctx = full_file_context(base_text, current_text, replayed_text)
+    if ctx["churn_ratio"] >= 0.90:
+        return None
+    floor = 0.25 * max(ctx["base_lines"], 1)
+    if ctx["current_churn"] < floor or ctx["replayed_churn"] < floor:
+        return None
+
+    def _lset(t: str) -> set[str]:
+        return {"".join(ln.split()) for ln in t.splitlines() if ln.strip()}
+
+    buf, cs, rs, bs = (_lset(buffer), _lset(current_text),
+                       _lset(replayed_text), _lset(base_text))
+    if not buf or not cs or not rs:
+        return None
+    in_cur = len(buf & cs) / len(buf)
+    in_rep = len(buf & rs) / len(buf)
+    cur_new, rep_new = cs - bs, rs - bs
+    rep_kept = len(buf & rep_new) / max(len(rep_new), 1)
+    cur_kept = len(buf & cur_new) / max(len(cur_new), 1)
+    collapsed = None
+    if in_cur >= 0.90 and rep_kept <= 0.10:
+        collapsed = "current"
+    elif in_rep >= 0.90 and cur_kept <= 0.10:
+        collapsed = "replayed"
+    if collapsed is None:
+        return None
+    return {
+        "collapsed_to": collapsed,
+        "buffer_in_current": round(in_cur, 4),
+        "buffer_in_replayed": round(in_rep, 4),
+        "current_new_kept": round(cur_kept, 4),
+        "replayed_new_kept": round(rep_kept, 4),
+        "churn_ratio": ctx["churn_ratio"],
+        "current_churn": ctx["current_churn"],
+        "replayed_churn": ctx["replayed_churn"],
+        "base_lines": ctx["base_lines"],
+    }
+
+
 def _phase2_fallback_build_cmd(pre_continue: str, *, enabled: bool = True) -> str:
     """The pre_continue command used as the Phase-2 build gate, if it IS a build.
 
@@ -9263,6 +9323,13 @@ class Orchestrator:
             if _drs is not None:
                 accepted = _drs
                 buffer = _drs[0][1].resolved_text
+            # Sprint-18 WS4: a both-rewrite file resolved to one side
+            # verbatim is a silent drop of the other side's rewrite
+            # (sea-orm-0027). LLM-gated rejection — escalate only when the
+            # dropped side is adjudicated not-superseded.
+            if self._check_side_collapse(path, language, units, buffer, result):
+                self._record_outcomes_to_memory(result)
+                return result
             self._write_and_stage(path, buffer, result, accepted=accepted)
         # After staging: assert no unmerged paths remain for our files.
         if self.git.has_unmerged_paths():
@@ -13155,6 +13222,87 @@ class Orchestrator:
             step_index=self.step, path=path,
         )
         return [(unit, cand)]
+
+    def _check_side_collapse(
+        self,
+        path: str,
+        language: str | None,
+        units: list,
+        buffer: str,
+        result,
+    ) -> bool:
+        """Reject a both-rewrite file resolved to one side verbatim (WS4).
+
+        sea-orm-0027 (unanimous, 3 runs): both sides rewrote ~36-69% of a
+        407-line file, the oracle is a woven merge closest to current, and
+        the model returned replayed verbatim — accepted because a one-side
+        file compiles, is marker-free, and passes every structural gate. The
+        eval's winner-preservation telemetry (0.055) exposed it; runtime had
+        no signal.
+
+        Churn mass alone cannot order a rejection (corpus: 79 woven-band
+        cases where one side verbatim IS the oracle), so the rejection is
+        LLM-GATED with the same subsumption adjudication the mid-band
+        takeover uses: escalate only when the adjudicator says the dropped
+        side's rewrite is NOT superseded (or confidently refuses). A
+        superseded verdict, an unparseable response, or no endpoint → accept
+        (the status quo; conservative direction, mirroring the takeover's
+        own gating).
+
+        Returns True when the step should escalate (reason set, bundle
+        written); False to continue staging.
+        """
+        if not getattr(self.config.future, "enable_side_collapse_guard", True):
+            return False
+        if not units or not buffer:
+            return False
+        try:
+            _staged = _true_stage_sides(self.git, path)
+        except Exception:  # noqa: BLE001
+            return False
+        if _staged is None:
+            return False
+        sides, base_text = _staged
+        cur = sides.get("current", "") or ""
+        rep = sides.get("replayed", "") or ""
+        if not cur.strip() or not rep.strip():
+            return False
+        det = _detect_side_collapse(base_text, cur, rep, buffer)
+        if det is None:
+            return False
+        self.journal.emit("side_collapse_probe", det,
+                          step_index=self.step, path=path)
+        adj = self._adjudicate_subsumption(
+            path, language, base_text, sides, det["collapsed_to"])
+        self.journal.emit(
+            "side_collapse_adjudication",
+            {"collapsed_to": det["collapsed_to"], "adjudication": adj},
+            step_index=self.step, path=path,
+        )
+        # Conservative direction, mirroring the takeover's own gating: accept
+        # unless the adjudicator POSITIVELY says the dropped rewrite matters
+        # ("keep"), or a "superseded" verdict is too weak to trust (< 0.70).
+        # None (unparseable/absent/no endpoint) accepts — churn numbers alone
+        # never escalate.
+        if adj is None or (adj.get("verdict") == "superseded"
+                           and adj.get("confidence", 0.0) >= 0.70):
+            return False
+        dropped = ("current" if det["collapsed_to"] == "replayed" else "replayed")
+        dropped_churn = (det["current_churn"] if dropped == "current"
+                         else det["replayed_churn"])
+        result.escalated = True
+        result.reason = (
+            f"side collapse in {path}: the merged file is the "
+            f"{det['collapsed_to']} side verbatim; the {dropped} side's "
+            f"rewrite ({dropped_churn} changed lines) was dropped "
+            f"(adjudication: {adj['verdict'] if adj else 'unavailable'})"
+        )
+        write_review_bundle(
+            self.paths, reason=result.reason, step_index=result.step_index,
+            unit=units[0], candidate=None, validation=None,
+            advisories=self._recent_advisories(),
+        )
+        return True
 
     def _try_true_side_portfolio(
         self,
