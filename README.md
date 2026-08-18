@@ -140,26 +140,41 @@ runs the full validation pipeline before it's applied.
 1. **Structural resolver** (default on) — model-free rules for identical sides,
    one-sided changes, disjoint line edits, clean deletions, collection unions
    (list, dict, brace, insertion), C preprocessor directive dedup, token-level
-   disjoint edits, entity-disjoint merges, and refactoring-aware composition.
-   Zero LLM calls.
+   disjoint edits, entity-disjoint merges, refactoring-aware composition, and
+   additive line-union for non-code files (markdown/prose: both sides added
+   content — CHANGELOG-class merges resolve deterministically without a
+   model call). Zero LLM calls.
 2. **Source-derived candidate portfolio** (default on) — before invoking the
    model, five deterministic candidates are assembled from the exact source
    lines (current-only, replayed-only, both orders, shared+distinct) and
    validated through the full pipeline. When one passes, the conflict resolves
    with zero model calls.
-3. **Combination search** (default on) — enumerates order-preserving
+3. **Whole-file fast path** (default on) — when the full-file context says one
+   side rewrote the file wholesale (churn ratio ≥ 0.90 with dominant churn),
+   that side's pristine merge-index stage file is taken directly. Files with
+   few conflict units require an LLM subsumption adjudication first (the
+   loser may carry features worth weaving); a build fail-fast declines the
+   swap when the winner fails the per-file build for merge-relevant reasons.
+   A wholesale winner floor additionally guarantees the final resolution
+   never drops the dominant rewrite, whichever path resolved the file. A
+   mid-band variant (churn ratio 0.55–0.90 with ≥ 2.5× dominance) fires the
+   same swap only when the adjudication confirms the winner subsumes the
+   loser.
+4. **Combination search** (default on) — enumerates order-preserving
    interleavings of the two sides for the best combination.
-4. **Block-capture** (default on) — for large modify/delete conflicts: makes a
+5. **Block-capture** (default on) — for large modify/delete conflicts: makes a
    keep/delete/escalate decision and splices the chosen side verbatim.
-5. **LLM resolution** — the model resolves conflicts the pre-LLM layers
+6. **LLM resolution** — the model resolves conflicts the pre-LLM layers
    declined, grounded in base + both sides + structural context + RAG few-shot.
    For oversized files, a lightweight file skeleton (extracted entity names)
    gives the model global awareness the windowed conflict region can't provide.
-6. **CEGIS repair** — failures feed back as counterexamples; the model
+   An empty first response fast-fails to verified single-side candidates
+   instead of burning retries.
+7. **CEGIS repair** — failures feed back as counterexamples; the model
    re-resolves with the broken output + the specific failure, bounded by retry
    policy. Failed-patch memory carries summaries of prior attempts so the
    model doesn't repeat the same fix.
-7. **Deterministic repair beam** — seven model-free repair mechanisms run
+8. **Deterministic repair beam** — seven model-free repair mechanisms run
    before re-invoking the LLM: gcc-diagnostic-driven repair (missing `;`,
    missing `}`, stray characters), side-consistency restore, brace/semicolon
    consensus, and others. For C/C++, the compiler's own diagnostics drive the
@@ -175,7 +190,12 @@ Every accepted resolution passes through:
   resolution. Python: `py_compile`. Rust: `cargo check` or `rustc`. C/C++:
   per-unit `gcc`/`g++ -fsyntax-only` plus an optional whole-tree build
   (`make`/`cmake`) when configured — the authoritative oracle that resolves
-  sibling headers standalone `gcc` can't.
+  sibling headers standalone `gcc` can't. Compiler gates compare errors
+  against a pre-conflict baseline (a merge fails only on errors it
+  introduces) and abstain when the baseline check cannot run — an
+  undecidable delta never fails a merge. Non-code files (markdown,
+  lockfiles, prose) are exempt from the structural compile gates; they are
+  judged by marker-free-ness and content checks.
 - **Syntax / AST preservation** — the merge didn't drop unchanged structure.
 - **Both-sides-represented** — a side's additions weren't silently dropped.
 - **Verifier-model critic** (default on) — an LLM judge checks the resolution
@@ -218,12 +238,35 @@ emit long thinking chains. Three knobs matter:
 
 ## Status
 
-Python, Rust, and C/C++ are supported end to end. The verifier-model critic is
-wired and default-on. RAG experience replay (`[memory]`) and self-consistency
-are wired but off by default. The deterministic resolution layers (structural
-rules, source-derived candidate portfolio, SBCR combination search,
-refactoring-aware merge, gcc-diagnostic repair) run model-free before the LLM
-and resolve a meaningful fraction of conflicts with zero model calls. The C
-corpus (205 cases mined from redis, sqlite, and json-c) drives live-eval
-measurement against gemma-4-E4B; 64 of 73 evaluable cases reach oracle
-similarity ≥ 0.95. Mutation testing is a stub.
+Python, Rust, and C/C++ are supported end to end. The deterministic layers
+(structural rules, source-derived candidate portfolio, SBCR combination
+search, whole-file fast path, wholesale winner floor, refactoring-aware
+merge, gcc-diagnostic repair) run model-free before the LLM. The
+verifier-model critic is wired and default-on. RAG experience replay
+(`[memory]`) and self-consistency are wired but off by default. Mutation
+testing is a stub.
+
+### Corpus census
+
+677 real-world rebase conflicts mined from upstream histories — each case
+carries both sides, the merge base, and the actual human resolution as the
+oracle — replayed live end to end against a local gemma-4-E4B endpoint
+(8192-token context). PASS = marker-free, passes the compile/structural
+gate, and matches the human resolution at token similarity ≥ 0.90.
+
+- **Rust** (tokio, axum, sea-orm, clap, serde; 194 cases): 174 PASS
+  (2026-08-18 census including the winner floor and sprint-17 fixes, each
+  flipped case validated by majority-of-3 rerun). Remaining: guard/budget
+  stops, oversized-file limits, one genuine divergence.
+- **C/C++** (protobuf, clickhouse, nlohmann-json, fmt; 167 cases): 143
+  PASS, 12 git-resolved skips (2026-08-17/18 census). Remaining: 3
+  oversized-file timeouts, 5 guard/budget stops, 2 content micro-defects
+  at sim ≥ 0.996 whose oracles pass the same build gate.
+- **C** (redis, sqlite, json-c; 205 cases): json-c subset measured — 16 of
+  17 PASS; full redis/sqlite censuses pending.
+- **Python** (flask, zenodo, requests; 111 cases): partial census (first
+  30 cases) — 25 PASS.
+
+Single-run census noise on this endpoint is ±5 cases (bimodal
+empty-response lottery); regression attribution reruns non-PASS cases and
+keeps the majority verdict (`--repeat-nonpass`).
