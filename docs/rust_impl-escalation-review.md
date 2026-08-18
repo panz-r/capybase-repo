@@ -81,9 +81,9 @@ loop: the model can't fix an error that doesn't exist in its code.
 ## Verbatim prompt sequence
 
 Captured via `CAPYBASE_LOG_PROMPTS` from a live eval run against gemma-4-E4B
-(`..\\gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf` on DESKTOP-NOVA:8086, embeddings on
-:8085). The model is `gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf`, temperature 0.2,
-json_mode on.
+(Q4_K_XL quant on the local llama-server — endpoint via a provider config in
+`~/.config/capybase/providers/`, embeddings served separately). The model is
+gemma-4-E4B, temperature 0.2, json_mode on.
 
 ### Prompt 1 — first resolution attempt (`cegis_retry.v5`)
 

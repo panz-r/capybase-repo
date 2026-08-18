@@ -95,6 +95,43 @@ If your endpoint serves `/v1/embeddings`, `capybase calibrate` detects it and
 enables semantic retrieval. `capybase calibrate-embeddings` fits the similarity
 floor for your model.
 
+### 5. Provider configs for live runs (canonical endpoint mechanism)
+
+No host, IP, or machine name is tracked in this repository. Live runners
+(the `scripts/live_eval*.py` harnesses, `scripts/run-live-test.sh`) resolve
+their endpoint exclusively through a **provider config** — a small JSON under
+`~/.config/capybase/providers/` (outside any repo) that bundles the host+model
+pair for the LLM, optionally a SEPARATE host+model for embeddings, and the
+REQUIRED calibration profile:
+
+```json
+{
+  "profile": "e2b",
+  "llm":       { "base_url": "http://your-server:8086/v1", "model": "chat" },
+  "embeddings": { "base_url": "http://your-server:8085/v1", "model": "embed" }
+}
+```
+
+```bash
+capybase provider list                    # what's configured
+.venv/bin/python scripts/live_eval_realworld.py --provider <name> ...
+CB_PROVIDER=<name> ./scripts/run-live-test.sh
+```
+
+Precedence per field: CLI flag → `CAPYBASE_*` env var → provider file.
+Profiles carry NO host information (one calibration can be reused against a
+different host or model), running without a calibration profile is a hard
+error, and nothing auto-creates or silently substitutes one. Schema:
+`src/capybase/provider_config.py`.
+
+**Repo hygiene hook.** `hooks/pre-commit` blocks commits that would introduce
+IPv4 literals (non-loopback), `*.local` mDNS hostnames, or machine names into
+tracked files. Enable it once per clone:
+
+```bash
+git config core.hooksPath hooks
+```
+
 ## Use
 
 ### Safety-first rebase

@@ -527,13 +527,22 @@ PROFILE_KNOBS = (
 
 
 def apply_profile(
-    model_cfg: ModelConfig, profile: "ModelProfile | None"
+    model_cfg: ModelConfig,
+    profile: "ModelProfile | None",
+    *,
+    force: bool = False,
 ) -> tuple[ModelConfig, list[str]]:
     """Return a new ``ModelConfig`` with the profile's knobs overlaid.
 
     "Profile wins" — but ONLY when ``profile.model`` matches ``model_cfg.model``.
     On a name mismatch the profile is ignored (it was fit for a different model)
     and a warning is emitted so the user knows to ``capybase recalibrate``.
+
+    ``force=True`` disables the name-match gate: the caller selected this
+    profile EXPLICITLY (a provider config's ``profile`` field), which is the
+    documented way to reuse a calibration against a different host or model.
+    A forced application of a mismatched name still emits a warning note —
+    visible, but not ignored.
 
     Returns ``(new_config, overridden_knobs)`` where ``overridden_knobs`` lists
     the knob names actually changed by the overlay (empty when no profile or a
@@ -543,13 +552,19 @@ def apply_profile(
         return model_cfg, []
 
     if profile.model != model_cfg.model:
+        if not force:
+            warnings.warn(
+                f"Model profile is for {profile.model!r} but active model is "
+                f"{model_cfg.model!r}; ignoring the profile. Run "
+                f"`capybase recalibrate` to fit it for the current model.",
+                stacklevel=2,
+            )
+            return model_cfg, []
         warnings.warn(
-            f"Model profile is for {profile.model!r} but active model is "
-            f"{model_cfg.model!r}; ignoring the profile. Run "
-            f"`capybase recalibrate` to fit it for the current model.",
+            f"Applying profile for {profile.model!r} to model "
+            f"{model_cfg.model!r} (explicitly selected — intentional reuse).",
             stacklevel=2,
         )
-        return model_cfg, []
 
     updates: dict[str, Any] = {
         "max_tokens": profile.max_tokens,

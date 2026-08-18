@@ -3,11 +3,19 @@
 # run-live-test.sh — set up a fixture conflict and run capybase against it,
 # logging everything to timestamped files under logs/.
 #
-# The model endpoint is NOT hardcoded. Configure it via env vars (or a
-# capybase.local.toml you place at the repo root). Defaults below point at a
-# local llama-server; override on the command line, e.g.:
+# The model endpoint is NOT hardcoded anywhere in this repo. Resolve it from
+# a provider config (canonical; JSON under ~/.config/capybase/providers/,
+# listed by `capybase provider list`):
 #
-#   CB_BASE_URL=http://host:8085/v1 CB_MODEL=my-model ./scripts/run-live-test.sh
+#   CB_PROVIDER=nova-gemma4 ./scripts/run-live-test.sh
+#
+# or give an explicit endpoint on the command line:
+#
+#   CB_BASE_URL=http://host:8085/v1 CB_MODEL=my-model CB_PROFILE=e2b \
+#     ./scripts/run-live-test.sh
+#
+# A calibration profile is REQUIRED (provider configs reference one); live
+# runs never proceed on uncalibrated defaults.
 #
 # Usage:
 #   ./scripts/run-live-test.sh                 # default fixture: python-uu
@@ -22,12 +30,16 @@
 set -euo pipefail
 
 # --------------------------------------------------------------------------
-# Config (env-overridable). No hardcoded endpoint in the repo — these are
-# convenience defaults for a local OpenAI-compatible server.
+# Config (env-overridable). No endpoint or model default lives here — a
+# provider config (CB_PROVIDER / CAPYBASE_PROVIDER) or explicit CB_BASE_URL +
+# CB_MODEL + CB_PROFILE must supply them.
 # --------------------------------------------------------------------------
-CB_BASE_URL="${CB_BASE_URL:-http://DESKTOP-NOVA.local:8085/v1}"
-CB_API_KEY="${CB_API_KEY:-sk-local}"
-CB_MODEL="${CB_MODEL:-..\\VibeThinker-3B.Q5_K_M.gguf}"
+CB_PROVIDER="${CB_PROVIDER:-${CAPYBASE_PROVIDER:-}}"
+CB_BASE_URL="${CB_BASE_URL:-${CAPYBASE_BASE_URL:-}}"
+CB_API_KEY="${CB_API_KEY:-${CAPYBASE_API_KEY:-}}"
+CB_MODEL="${CB_MODEL:-${CAPYBASE_MODEL:-}}"
+CB_PROFILE="${CB_PROFILE:-${CAPYBASE_PROFILE:-}}"
+CB_PROFILE_PATH="${CB_PROFILE_PATH:-${CAPYBASE_PROFILE_PATH:-}}"
 CB_MAX_TOKENS="${CB_MAX_TOKENS:-8192}"
 CB_REQUEST_TIMEOUT="${CB_REQUEST_TIMEOUT:-600}"
 CB_GENERATION_TIMEOUT="${CB_GENERATION_TIMEOUT:-180}"
@@ -77,6 +89,35 @@ if [ ! -x "$CAPYBASE" ]; then
   exit 2
 fi
 
+# --------------------------------------------------------------------------
+# Provider resolution: a named provider config fills any endpoint field the
+# caller did not set explicitly (CB_* / CAPYBASE_* exports from `capybase
+# provider show --shell`). Explicit variables always win. A calibration
+# profile is required — refuse to run uncalibrated.
+# --------------------------------------------------------------------------
+if [ -n "$CB_PROVIDER" ]; then
+  eval "$("$CAPYBASE" provider show "$CB_PROVIDER" --shell)"
+fi
+if [ -z "$CB_BASE_URL" ] || [ -z "$CB_MODEL" ]; then
+  echo "ERROR: no model endpoint configured." >&2
+  echo "  set CB_PROVIDER=<name>   (see: capybase provider list)" >&2
+  echo "  or CB_BASE_URL=... CB_MODEL=... CB_PROFILE=<calibration profile>" >&2
+  exit 2
+fi
+if [ -z "$CB_PROFILE" ]; then
+  echo "ERROR: no calibration profile configured — live runs never proceed" >&2
+  echo "  uncalibrated. Reference one in the provider config or set CB_PROFILE." >&2
+  exit 2
+fi
+CB_API_KEY="${CB_API_KEY:-sk-local}"
+# Resolve a bare profile name (e.g. "e2b") to its file path so the generated
+# config can reference it explicitly.
+if [ -z "$CB_PROFILE_PATH" ]; then
+  CB_PROFILE_PATH="$("$PYTHON" -c \
+    'import sys; from capybase.provider_config import profile_path_for; print(profile_path_for(sys.argv[1] if len(sys.argv) > 1 else ""))' \
+    "$CB_PROFILE")"
+fi
+
 if [ ! -d "$FIXTURES/.git" ] && [ ! -f "$FIXTURES/.git" ]; then
   echo "ERROR: fixtures submodule not checked out at $FIXTURES" >&2
   echo "       run: git -c protocol.file.allow=always submodule update --init" >&2
@@ -107,6 +148,7 @@ toml_str() { printf '%s' "$1" | sed 's/\\/\\\\/g'; }
 M_ESC="$(toml_str "$CB_MODEL")"
 U_ESC="$(toml_str "$CB_BASE_URL")"
 K_ESC="$(toml_str "$CB_API_KEY")"
+P_ESC="$(toml_str "$CB_PROFILE_PATH")"
 
 cat > "$CFG_FILE" <<EOF
 [model]
@@ -121,6 +163,9 @@ samples = $CB_SAMPLES
 sampling_temperature = $CB_SAMPLING_TEMP
 two_pass = $CB_TWO_PASS
 parallel_samples = $CB_PARALLEL_SAMPLES
+
+[calibration]
+model_profile_path = "$P_ESC"
 
 [policy]
 max_retries_per_unit = $CB_MAX_RETRIES

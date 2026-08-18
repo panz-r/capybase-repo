@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+#
+# pre-commit guard — no environment-specific endpoint identifiers in tracked
+# files. Blocks STAGED ADDITIONS containing:
+#
+#   - IPv4 literals other than the loopback/any/broadcast allowlist
+#     (127.0.0.1, 0.0.0.0, 255.255.255.255)
+#   - mDNS machine hostnames (*.local) and Windows-style hyphenated
+#     desktop-PC machine names
+#
+# Intentional exceptions (e.g. the guard's own test fixtures) mark the line:
+#     something-with-an-ip  # endpoint-guard: allow
+#
+# Hosts, IPs, and machine names belong in provider configs under
+# ~/.config/capybase/providers/ (see src/capybase/provider_config.py) or the
+# user-level capybase.toml — never inside the repository.
+#
+# Install once per clone:  git config core.hooksPath hooks
+#
+set -uo pipefail
+
+ALLOWED_IPS=" 127.0.0.1 0.0.0.0 255.255.255.255 "
+
+violations=0
+file=""
+while IFS= read -r line; do
+    case "$line" in
+        "+++ b/"*) file="${line#"+++ b/"}"; continue ;;
+        +*) ;; # an added line — inspect its content
+        *) continue ;;
+    esac
+    content="${line#+}"
+
+    # Explicit, auditable per-line opt-out (guard fixtures, docs quoting an
+    # endpoint deliberately). The marker itself is greppable for review.
+    case "$content" in
+        *endpoint-guard:*allow*) continue ;;
+    esac
+
+    # IPv4 literals, minus the allowlist.
+    for ip in $(printf '%s\n' "$content" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' || true); do
+        case "$ALLOWED_IPS" in
+            *" $ip "*) ;; # allowlisted (loopback/any) — not infra-specific
+            *)
+                echo "pre-commit: IPv4 literal '$ip' staged in $file" >&2
+                violations=1
+                ;;
+        esac
+    done
+
+    # mDNS hostnames (host.local[:port]/path) — LAN machine identity.
+    if printf '%s\n' "$content" | grep -qiE '[a-z0-9-]+\.local([:/[:space:]]|$)'; then
+        echo "pre-commit: mDNS hostname (*.local) staged in $file" >&2
+        violations=1
+    fi
+
+    # Windows-style machine names (hyphenated desktop-PC hostnames).
+    if printf '%s\n' "$content" | grep -qE '[[:space:](/]DESKTOP-[A-Z0-9-]+' \
+        || printf '%s\n' "$content" | grep -qE '^DESKTOP-[A-Z0-9-]+'; then
+        echo "pre-commit: machine name (DESKTOP-*) staged in $file" >&2
+        violations=1
+    fi
+done < <(git diff --cached --no-color -U0)
+
+if [ "$violations" -ne 0 ]; then
+    echo >&2
+    echo "Refusing commit: environment-specific endpoints must not enter the repo." >&2
+    echo "Put hosts in ~/.config/capybase/providers/<name>.json (provider configs)" >&2
+    echo "or the user-level capybase.toml — see src/capybase/provider_config.py." >&2
+    exit 1
+fi
+exit 0

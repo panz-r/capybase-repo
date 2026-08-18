@@ -260,6 +260,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="show per-mechanism quality metrics from the experience store",
     )
 
+    prov_p = sub.add_parser(
+        "provider",
+        help="inspect provider configs (endpoint host+model + required "
+             "calibration profile); provider JSONs live in the shared config "
+             "dir, never in the repo",
+    )
+    prov_sub = prov_p.add_subparsers(dest="provider_cmd", metavar="CMD")
+    prov_show = prov_sub.add_parser(
+        "show", help="resolve and print one provider config"
+    )
+    prov_show.add_argument(
+        "name",
+        help="provider name under <config-dir>/providers/ or an explicit JSON path",
+    )
+    prov_show.add_argument(
+        "--shell",
+        action="store_true",
+        help="print CAPYBASE_* export lines (for `eval` in shell scripts)",
+    )
+    prov_sub.add_parser(
+        "list", help="list provider configs found in the shared config dir"
+    )
+
     emb_p = sub.add_parser(
         "calibrate-embeddings",
         help="calibrate the embedding-retrieval similarity floor for this model",
@@ -768,6 +791,67 @@ def _run_status(
     return 0
 
 
+def _run_provider(args) -> int:
+    """`capybase provider list|show` — inspect provider configs.
+
+    Provider configs are the canonical host+model identity for live runs
+    (completion endpoint, optional separate embeddings endpoint, and the
+    REQUIRED calibration profile). They live under <config-dir>/providers/,
+    outside any repository. `show` fully resolves the config (including the
+    profile) — a provider that does not resolve is an error, not a warning.
+    """
+    import dataclasses
+    import json as _json
+    import shlex
+
+    from capybase.provider_config import ProviderError, providers_dir, resolve_provider
+
+    if args.provider_cmd == "list":
+        d = providers_dir()
+        found = sorted(d.glob("*.json")) if d.is_dir() else []
+        if not found:
+            print(f"no provider configs in {d}")
+            print("create one (schema in src/capybase/provider_config.py):")
+            print(f'  {{"profile": "<name>", "llm": {{"base_url": ..., "model": ...}}}}')
+            return 0
+        for f in found:
+            print(f.stem)
+        return 0
+
+    assert args.provider_cmd == "show"
+    try:
+        resolved = resolve_provider(provider=args.name)
+    except ProviderError as exc:
+        print(f"capybase: error: {exc}", file=sys.stderr)
+        return 2
+    p = resolved.provider
+    if args.shell:
+        lines = [
+            f"export CAPYBASE_BASE_URL={shlex.quote(p.base_url)}",
+            f"export CAPYBASE_MODEL={shlex.quote(p.model)}",
+            f"export CAPYBASE_API_KEY={shlex.quote(p.api_key)}",
+            f"export CAPYBASE_PROFILE={shlex.quote(p.profile)}",
+        ]
+        if resolved.profile_path is not None:
+            lines.append(
+                f"export CAPYBASE_PROFILE_PATH={shlex.quote(str(resolved.profile_path))}"
+            )
+        if p.embeddings_base_url:
+            lines.append(
+                f"export CAPYBASE_EMBEDDINGS_BASE_URL={shlex.quote(p.embeddings_base_url)}"
+            )
+        if p.embeddings_model:
+            lines.append(
+                f"export CAPYBASE_EMBEDDINGS_MODEL={shlex.quote(p.embeddings_model)}"
+            )
+        print("\n".join(lines))
+        return 0
+    out = dataclasses.asdict(p)
+    out["profile_model"] = resolved.profile.model if resolved.profile else None
+    print(_json.dumps(out, indent=2))
+    return 0
+
+
 def _run_metrics(config: Config, repo: str, *, out=sys.stdout) -> int:
     """Per-mechanism quality metrics from the experience store (#9 step 9).
 
@@ -862,6 +946,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_status(config, repo=args.repo, session_id=args.session)
     if args.command == "metrics":
         return _run_metrics(config, repo=args.repo)
+    if args.command == "provider":
+        return _run_provider(args)
 
     try:
         session = getattr(args, "session", None) or getattr(args, "resume", None)

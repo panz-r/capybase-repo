@@ -7,11 +7,17 @@ extracted-testdata/realworld/. Each case is materialized as a real git repo
 with the conflict markers on disk, then `orch.run()` resolves it end-to-end
 (extraction → resolution → file write → test gate) — the authentic system path.
 
-NOT part of the hermetic test suite — makes real network calls. Run:
+NOT part of the hermetic test suite — makes real network calls. The endpoint
+is NEVER hardcoded in this file. Resolve it with a provider config — the
+canonical mechanism (JSON under ~/.config/capybase/providers/, outside the
+repo; `capybase provider list` shows what's configured):
 
-    CAPYBASE_BASE_URL=http://host:8086/v1 \\
-    CAPYBASE_MODEL='<gguf-id>' \\
-    .venv/bin/python scripts/live_eval_realworld.py [--limit N] [--lang rust|python]
+    .venv/bin/python scripts/live_eval_realworld.py --provider <name> ...
+
+Explicit per-field overrides: --base-url / --model / --api-key / --profile
+flags, or the CAPYBASE_BASE_URL / CAPYBASE_MODEL / CAPYBASE_API_KEY /
+CAPYBASE_PROFILE env vars. A run without a calibration profile is an ERROR —
+profiles are expensive and never auto-created or substituted.
 
 Verdict per case:
   PASS       — orch.run() did not escalate; resolved file is marker-free,
@@ -74,6 +80,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from capybase.adapters.llm_openai import OpenAICompatibleClient  # noqa: E402
 from capybase.config import Config  # noqa: E402
 from capybase.orchestrator import Orchestrator  # noqa: E402
+from capybase.provider_config import (  # noqa: E402
+    ProviderError,
+    ResolvedProvider,
+    apply_to_config,
+    resolve_provider,
+)
 from capybase.resolution_engine import ResolutionEngine  # noqa: E402
 from tests._realworld_build import C_BUILD_COMMANDS  # noqa: E402
 from capybase.verification import _ccache_enabled, _ccache_env  # noqa: E402
@@ -587,11 +599,33 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
             pass
 
 
+# The resolved provider (endpoint host+model + required calibration profile),
+# set once in main() from CLI flags > env > provider file. No endpoint default
+# lives in this file; a run without a resolution refuses to start.
+_PROVIDER: ResolvedProvider | None = None
+
+
+def _require_provider() -> ResolvedProvider:
+    if _PROVIDER is None:
+        raise SystemExit(
+            "no provider resolved: pass --provider NAME (see `capybase provider "
+            "list`), set CAPYBASE_PROVIDER, or give explicit --base-url/--model "
+            "/--profile flags"
+        )
+    return _PROVIDER
+
+
 def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     cfg = Config()
-    cfg.model.base_url = os.environ.get("CAPYBASE_BASE_URL", "http://192.168.50.235:8086/v1")
-    cfg.model.api_key = os.environ.get("CAPYBASE_API_KEY", "sk-local")
-    cfg.model.model = os.environ.get("CAPYBASE_MODEL", "chat")
+    # Endpoint + calibration profile, resolved once in main() from
+    # CLI flags > env > provider file (see provider_config.resolve_provider).
+    # Layering: the profile's capability/quality knobs apply FIRST (explicitly
+    # selected, so name-mismatch reuse is allowed); the harness's corpus-tuned
+    # values below (max_tokens sizing, context window, timeouts) then override
+    # the knobs the harness knows better empirically; CAPYBASE_CONTEXT_WINDOW
+    # and friends remain the final per-run env overrides.
+    resolved = _require_provider()
+    cfg, _profile_knobs = apply_to_config(cfg, resolved)
     cfg.model.temperature = 0.2
     # A/B kill switch for the whole-file takeover mechanisms (regression
     # attribution): setting CAPYBASE_DISABLE_TAKEOVER=1 runs the pre-af41b2e
@@ -1262,6 +1296,24 @@ def main():
     atexit.register(_kill_stale_build_processes)
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument(
+        "--provider", default=None, metavar="NAME_OR_PATH",
+        help="provider config: a name under ~/.config/capybase/providers/ or a "
+             "JSON path (canonical endpoint mechanism; env: CAPYBASE_PROVIDER)",
+    )
+    ap.add_argument("--base-url", default=None,
+                    help="explicit LLM endpoint override (env: CAPYBASE_BASE_URL)")
+    ap.add_argument("--model", default=None,
+                    help="explicit model id override (env: CAPYBASE_MODEL)")
+    ap.add_argument("--api-key", default=None,
+                    help="explicit API key override (env: CAPYBASE_API_KEY)")
+    ap.add_argument("--profile", default=None,
+                    help="calibration profile name/path override (a run without "
+                         "a profile is an error; env: CAPYBASE_PROFILE)")
+    ap.add_argument("--embeddings-base-url", default=None,
+                    help="explicit embeddings endpoint override")
+    ap.add_argument("--embeddings-model", default=None,
+                    help="explicit embeddings model override")
     ap.add_argument("--lang", choices=("rust", "python", "c", "cpp", "c++"), default=None)
     ap.add_argument("--case", action="append", default=None, metavar="CASE_ID",
                     help="Select a specific case id (repeatable). Enables targeted "
@@ -1341,6 +1393,22 @@ def main():
             print(f"resume: loaded {len(done_ids)} prior results from {out}; skipping those ids")
         except Exception as exc:
             print(f"resume: could not load prior results ({exc}); starting fresh")
+
+    global _PROVIDER
+    try:
+        _PROVIDER = resolve_provider(
+            provider=args.provider,
+            base_url=args.base_url,
+            model=args.model,
+            api_key=args.api_key,
+            profile=args.profile,
+            embeddings_base_url=args.embeddings_base_url,
+            embeddings_model=args.embeddings_model,
+        )
+    except ProviderError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(_PROVIDER.provider.describe())
 
     cfg0 = _config_for(cases[0])
     client = OpenAICompatibleClient(cfg0.model)

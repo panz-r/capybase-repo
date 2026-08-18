@@ -163,8 +163,9 @@ was a product bug):
 
 ## gemma-4-e4b enforcement live run
 
-A full 98-case Python live run against `gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf`
-on DESKTOP-NOVA (`192.168.50.235:8086`), `CAPYBASE_JURY_MODE=enforce`,
+A full 98-case Python live run against gemma-4-E4B (Q4_K_XL) on the local
+llama-server (endpoint via a provider config — hostnames/IPs live in
+`~/.config/capybase/providers/`, never in this repo), `CAPYBASE_JURY_MODE=enforce`,
 179 minutes:
 
 | Metric | Shadow corpus | gemma-4-e4b enforce |

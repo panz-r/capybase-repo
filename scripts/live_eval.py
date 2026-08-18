@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Live-model evaluation harness.
 
-Drives the capybase Orchestrator with a REAL OpenAICompatibleClient against the
-configured local model (VibeThinker-3B via llama-server), on genuine git rebase
-conflicts built in temp repos. Reports per-scenario correctness, provenance,
-escalation status, and timing.
+Drives the capybase Orchestrator with a REAL OpenAICompatibleClient against a
+provider-configured model endpoint, on genuine git rebase conflicts built in
+temp repos. Reports per-scenario correctness, provenance, escalation status,
+and timing.
 
-NOT part of the hermetic test suite — this makes real network calls. Run:
+NOT part of the hermetic test suite — this makes real network calls. The
+endpoint is NEVER hardcoded here: resolve it with a provider config (canonical;
+JSON under ~/.config/capybase/providers/, see `capybase provider list`) via
+--provider, or explicit --base-url/--model/--profile flags / CAPYBASE_* env
+overrides. A run without a calibration profile is an ERROR. Run:
 
-    .venv/bin/python scripts/live_eval.py
+    .venv/bin/python scripts/live_eval.py --provider <name>
 
 Scenarios mirror tests/conftest.py fixtures so the model is judged on the same
 conflicts the fake-client tests assert against. A scenario "passes" when the
@@ -18,6 +22,7 @@ preserved).
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -33,6 +38,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from capybase.adapters.llm_openai import OpenAICompatibleClient  # noqa: E402
 from capybase.config import Config  # noqa: E402
 from capybase.orchestrator import Orchestrator  # noqa: E402
+from capybase.provider_config import (  # noqa: E402
+    ProviderError,
+    ResolvedProvider,
+    apply_to_config,
+    resolve_provider,
+)
 from capybase.resolution_engine import ResolutionEngine  # noqa: E402
 
 
@@ -212,14 +223,31 @@ def scenario_rust_port_test() -> Scenario:
 # run harness
 # ---------------------------------------------------------------------------
 
+# The resolved provider (endpoint host+model + required calibration profile),
+# set once in main() from CLI flags > env > provider file. No endpoint default
+# lives in this file; a run without a resolution refuses to start.
+_PROVIDER: ResolvedProvider | None = None
+
+
+def _require_provider() -> ResolvedProvider:
+    if _PROVIDER is None:
+        raise SystemExit(
+            "no provider resolved: pass --provider NAME (see `capybase provider "
+            "list`), set CAPYBASE_PROVIDER, or give explicit --base-url/--model "
+            "/--profile flags"
+        )
+    return _PROVIDER
+
+
 def _config_for(scenario: Scenario, *, critic_enabled: bool = True) -> Config:
     cfg = Config()
-    # Use the live model endpoint from capybase.toml defaults (DESKTOP-NOVA chat).
-    cfg.model.base_url = os.environ.get("CAPYBASE_BASE_URL", "http://DESKTOP-NOVA.local:8085/v1")
-    cfg.model.api_key = os.environ.get("CAPYBASE_API_KEY", "sk-local")
-    cfg.model.model = os.environ.get("CAPYBASE_MODEL", "chat")
+    # Endpoint + calibration profile via the canonical provider resolution
+    # (provider_config.resolve_provider); the harness tuning below layers on
+    # top of the profile's knobs.
+    resolved = _require_provider()
+    cfg, _profile_knobs = apply_to_config(cfg, resolved)
     cfg.model.temperature = 0.2
-    cfg.model.max_tokens = 8192  # VibeThinker-3B needs headroom for its <think> chain
+    cfg.model.max_tokens = 8192  # headroom for <think>-style reasoning chains
     cfg.model.json_mode = True
     cfg.model.request_timeout_seconds = 600
     cfg.model.generation_timeout_seconds = 240
@@ -260,9 +288,13 @@ def _config_for(scenario: Scenario, *, critic_enabled: bool = True) -> Config:
         cfg.memory.enabled = True
         cfg.future.enable_rag = True
         cfg.memory.retriever = "hybrid"  # BM25 + dense fusion
-        cfg.memory.embeddings_model = os.environ.get("CAPYBASE_EMBED_MODEL", "embed")
+        # Provider config supplies the embeddings identity when it defines one;
+        # the legacy env names remain per-run overrides.
+        cfg.memory.embeddings_model = os.environ.get(
+            "CAPYBASE_EMBED_MODEL", cfg.memory.embeddings_model or "embed"
+        )
         cfg.memory.embeddings_base_url = os.environ.get(
-            "CAPYBASE_EMBED_BASE_URL", ""
+            "CAPYBASE_EMBED_BASE_URL", cfg.memory.embeddings_base_url
         )  # empty → reuse completion base_url
         cfg.memory.enable_drift_detection = True
         # A SHARED experience store across all scenarios (each scenario builds a
@@ -445,19 +477,20 @@ def run_scenario(builder, out_dir: Path, *, critic_enabled: bool = True) -> Resu
 
 def _probe_endpoint() -> bool:
     print("Probing model endpoint...", flush=True)
-    target_model = os.environ.get("CAPYBASE_MODEL", "chat")
+    resolved = _require_provider()
+    target_model = resolved.provider.model
+    base_url = resolved.provider.base_url
     try:
         import urllib.request
-        resp = urllib.request.urlopen(
-            os.environ.get("CAPYBASE_BASE_URL", "http://DESKTOP-NOVA.local:8085/v1") + "/models",
-            timeout=15,
-        )
+        resp = urllib.request.urlopen(base_url + "/models", timeout=15)
         models = json.loads(resp.read())
         all_ids = [m["id"] for m in models.get("data", [])]
-        # Some servers (the DESKTOP-NOVA llama.cpp build) report a per-model
-        # ``status.value == "loaded"``; others (LM Studio) just list available
-        # models with no status field. When statuses are reported, require the
-        # target to be loaded; otherwise settle for it being listed.
+        # Some llama.cpp builds report a per-model ``status.value == "loaded"``;
+        # others (LM Studio) just list available models with no status field.
+        # When statuses are reported, prefer requiring the target to be loaded;
+        # otherwise settle for it being listed. Single-model servers may list
+        # only the underlying GGUF id while accepting the configured alias — a
+        # miss here is a warning, not a refusal.
         with_status = [m for m in models.get("data", []) if m.get("status")]
         if with_status:
             loaded = [m["id"] for m in with_status if m.get("status", {}).get("value") == "loaded"]
@@ -490,6 +523,35 @@ def _selected_builders() -> list:
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--provider", default=None, metavar="NAME_OR_PATH",
+                    help="provider config: a name under ~/.config/capybase/providers/ "
+                         "or a JSON path (canonical; env: CAPYBASE_PROVIDER)")
+    ap.add_argument("--base-url", default=None,
+                    help="explicit LLM endpoint override (env: CAPYBASE_BASE_URL)")
+    ap.add_argument("--model", default=None,
+                    help="explicit model id override (env: CAPYBASE_MODEL)")
+    ap.add_argument("--api-key", default=None,
+                    help="explicit API key override (env: CAPYBASE_API_KEY)")
+    ap.add_argument("--profile", default=None,
+                    help="calibration profile name/path override (a run without "
+                         "a profile is an error; env: CAPYBASE_PROFILE)")
+    args = ap.parse_args()
+
+    global _PROVIDER
+    try:
+        _PROVIDER = resolve_provider(
+            provider=args.provider,
+            base_url=args.base_url,
+            model=args.model,
+            api_key=args.api_key,
+            profile=args.profile,
+        )
+    except ProviderError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(_PROVIDER.provider.describe())
+
     builders = _selected_builders()
     if not _probe_endpoint():
         return 2

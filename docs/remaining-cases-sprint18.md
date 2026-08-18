@@ -6,13 +6,18 @@ gaps and hardening acceptance gates — with every threshold change backed by
 corpus calibration first. Six commits on `dev`; live artifacts in
 `/tmp/capybase-live/s18/`.
 
-**Live validation status: BLOCKED — the model endpoint (localhost:1234) is
-down this session.** All mechanisms are built, unit-tested (hermetic suite:
-3717+ passing), and calibration was done OFFLINE where the math allows (WS2
-entirely; WS3/WS4 root-cause from preserved flight journals). The validation
-batch is scripted and ready: `/tmp/capybase-live/s18/run_ws1_val.sh`
-(majority-of-3, targets + PASS controls). Run it when the endpoint returns;
-verdicts below marked [pending-live] depend on it.
+**Live validation status: RESOLVED — the endpoint was never down.** The
+earlier "endpoint down" call was a measurement error: a stale repo-toml URL
+(a dead localhost tunnel) was probed instead of the live server, which had
+served every prior run. Endpoint selection is now canonical and
+host-free-in-repo: provider configs under `~/.config/capybase/providers/`
+(host+model for LLM and embeddings + the REQUIRED calibration profile),
+resolved by the eval scripts via `--provider` (no fallbacks; running without
+a calibration profile is an error), with a pre-commit hook blocking
+IPs/hostnames from entering tracked files. The validation batch
+(`/tmp/capybase-live/s18/run_ws1_val.sh`, majority-of-3, targets + PASS
+controls) runs under `--provider nova-gemma4`; verdicts below marked
+[pending-live] depend on it.
 
 ## WS0 — CI unblock + quick wins (66ca8b2, 18e5573)
 
