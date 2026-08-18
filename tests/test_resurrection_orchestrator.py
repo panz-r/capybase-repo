@@ -150,3 +150,48 @@ def test_scan_disabled_when_feature_off():
             result_oid=ctx["result_oid"], backup_ref="capybase/backup/x",
         )
         assert findings == []
+
+
+def test_lockfiles_are_exempt_from_resurrection_scanning():
+    """Cargo.lock/go.sum 'resurrections' are dependency entries reappearing
+    after a version bump — mechanical merge noise, not silently-undone code
+    deletion (axum-0017: 103-marker Cargo.lock conflict SAFE_STOPped the
+    rebase on 143 lines of version pins). The scan must not produce findings
+    for a lockfile, while the SAME content shape in a code file still does.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        # Build the genuine-resurrection shape twice: as Cargo.lock
+        # (exempt) and as app.py (flagged).
+        for fname, expect_findings in (("Cargo.lock", False), ("app.py", True)):
+            repo = Path(d) / fname
+            repo.mkdir(parents=True)
+            git(repo, "init", "-q", "-b", "main")
+            base = (
+                "[[package]]\nname = \"a\"\n"
+                "def dead():\n    do_thing()\n    cleanup()\n" * 3
+            )
+            (repo / fname).write_text(base)
+            git(repo, "add", "-A"); git(repo, "commit", "-q", "-m", "base")
+            base_oid = git(repo, "rev-parse", "HEAD").stdout.strip()
+            git(repo, "branch", "feat")
+            (repo / fname).write_text("[[package]]\nname = \"a\"\n" * 3)
+            git(repo, "add", "-A"); git(repo, "commit", "-q", "-m", "main: delete")
+            main_oid = git(repo, "rev-parse", "HEAD").stdout.strip()
+            git(repo, "checkout", "-q", "feat")
+            (repo / fname).write_text(base.replace("cleanup()", "cleanup2()"))
+            git(repo, "add", "-A"); git(repo, "commit", "-q", "-m", "replayed: delete too + edit")
+            start_oid = git(repo, "rev-parse", "HEAD").stdout.strip()
+            (repo / fname).write_text(base)  # resurrect dead() wholesale
+            git(repo, "add", "-A"); git(repo, "commit", "-q", "-m", "result: resurrect")
+            result_oid = git(repo, "rev-parse", "HEAD").stdout.strip()
+            cfg = Config()
+            cfg.validation.enable_resurrection_detection = True
+            cfg.validation.resurrection_policy = "stop"
+            orch = Orchestrator(cfg, repo=str(repo), out=lambda *_a, **_k: None)
+            orch.paths = SessionPaths("t", repo_root=repo)
+            findings = orch._resurrection_scan(
+                start_oid=start_oid, onto_oid=main_oid,
+                result_oid=result_oid, backup_ref="capybase/backup/x",
+            )
+            assert bool(findings) is expect_findings, (
+                f"{fname}: expected findings={expect_findings}, got {findings}")

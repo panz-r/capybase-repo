@@ -31,6 +31,9 @@ from capybase.merge_intent import (
     detect_resurrection,
 )
 
+#: Lockfile suffixes exempt from resurrection scanning (see scan_resurrections).
+_LOCKFILE_SUFFIXES = (".lock", ".sum")
+
 if TYPE_CHECKING:
     from capybase.git_backend import GitBackend
 
@@ -107,6 +110,14 @@ def scan_resurrections(
         candidate_paths = _changed_paths(git, base_oid, side_oid)
         for path in candidate_paths:
             if path in excluded:
+                continue
+            # Lockfiles (Cargo.lock, go.sum, ...): a "resurrection" here is a
+            # dependency entry reappearing after a version bump — mechanical
+            # merge noise, not silently-undone code deletion. The guard's
+            # semantics don't apply, and stopping a whole rebase on version
+            # pins is a false positive (axum-0017: a 103-marker Cargo.lock
+            # conflict SAFE_STOPped on 143 lines of pins).
+            if path.lower().endswith(_LOCKFILE_SUFFIXES):
                 continue
             base_blob = _blob_text(git, base_oid, path)
             side_blob = _blob_text(git, side_oid, path)
