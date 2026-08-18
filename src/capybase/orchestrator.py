@@ -9250,6 +9250,19 @@ class Orchestrator:
             if _floor is not None:
                 accepted = _floor
                 buffer = _floor[0][1].resolved_text
+            # Sprint-18 WS3: git's auto-merge can resurrect upstream-deleted
+            # content OUTSIDE the marker blocks — the resolver only controls
+            # the blocks (tokio-0037/0046: every unit correctly resolved
+            # current_only; git's own context resolution re-added 12 dead
+            # lines; the end-of-rebase scan then stopped the rebase, correct
+            # but too late to repair). Pre-stage, the merge-index stages are
+            # still available: when the buffer carries upstream-deleted
+            # blocks and the upstream side verifies clean as a whole file,
+            # swap to it.
+            _drs = self._try_deletion_respect_swap(path, language, units, buffer)
+            if _drs is not None:
+                accepted = _drs
+                buffer = _drs[0][1].resolved_text
             self._write_and_stage(path, buffer, result, accepted=accepted)
         # After staging: assert no unmerged paths remain for our files.
         if self.git.has_unmerged_paths():
@@ -13022,6 +13035,124 @@ class Orchestrator:
             resolved_text=wtext,
             provenance=f"deterministic_wholesale_floor_{winner}",
             prompt_version="wholesale_winner_floor.v1",
+        )
+        return [(unit, cand)]
+
+    def _try_deletion_respect_swap(
+        self,
+        path: str,
+        language: str | None,
+        units: list,
+        buffer: str,
+    ) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+        """Swap in the upstream side when the buffer resurrects its deletions.
+
+        Complements the end-of-rebase resurrection scan: the scan is a SAFE_STOP
+        with no repair possible (the rebase already continued); this runs
+        PRE-STAGE, while the merge-index stages are still readable and the
+        whole-file machinery can still act.
+
+        Fires only when ALL hold:
+
+        - the merge-index stages are readable and both sides non-degenerate;
+        - ``detect_resurrection(base, upstream_stage, buffer)`` finds blocks
+          (>= 3 non-blank lines at >= 0.85 coverage) — the buffer carries
+          content the upstream parent deleted;
+        - the buffer is OTHERWISE the upstream side: >= 0.90 of the buffer's
+          non-blank line content is present in the upstream stage. A woven
+          merge carrying real replayed-side features fails this and is left
+          alone (the end-of-rebase scan decides);
+        - the upstream side verbatim verifies clean whole-file.
+
+        Returns the whole-file acceptance list, or None (the scan remains the
+        backstop — SAFE_STOP is still the honest outcome for anything this
+        declines).
+        """
+        if not units or not buffer:
+            return None
+        if not getattr(self.config.validation, "enable_resurrection_detection",
+                       True):
+            return None  # user disabled resurrection detection: not our call
+        try:
+            _staged = _true_stage_sides(self.git, path)
+        except Exception:  # noqa: BLE001 - stages already gone (rebase moved on)
+            return None
+        if _staged is None:
+            return None
+        sides, base_text = _staged
+        cur = sides.get("current", "") or ""
+        rep = sides.get("replayed", "") or ""
+        if not cur.strip() or not rep.strip() or not base_text.strip():
+            return None
+        from capybase.merge_intent import detect_resurrection
+
+        findings = detect_resurrection(base_text, cur, buffer)
+        if not findings:
+            return None
+
+        def _line_set(text: str) -> set[str]:
+            return {"".join(ln.split()) for ln in text.splitlines() if ln.strip()}
+
+        buf_set, cur_set = _line_set(buffer), _line_set(cur)
+        if not buf_set or not cur_set:
+            return None
+        containment = len(buf_set & cur_set) / len(buf_set)
+        self.journal.emit(
+            "deletion_respect_swap_probe",
+            {"blocks": [f.block_line_count for f in findings],
+             "coverage": [f.coverage for f in findings],
+             "buffer_in_current": round(containment, 4)},
+            step_index=self.step, path=path,
+        )
+        if containment < 0.90:
+            return None  # a woven merge, not a context resurrection
+        try:
+            if (language and structural_gate_applies(path)
+                    and not _braces_balanced(cur, language)):
+                return None
+        except Exception:  # noqa: BLE001
+            return None
+        self._write_worktree_only(path, cur, accepted=None)
+        val = self.verification.verify_file(
+            path, language, units[0].original_worktree_text or base_text, [],
+            repo_root=str(self.git.repo), whole_text=cur)
+        if not val.passed:
+            return None
+        from capybase.conflict_model import (
+            CandidateResolution as _DRS_CR,
+            ConflictSide as _DRS_CS,
+        )
+        unit = ConflictUnit(
+            session_id=units[0].session_id,
+            step_index=units[0].step_index,
+            path=path,
+            language=units[0].language,
+            unit_id=f"{path}:deletion_respect_swap",
+            unit_kind="whole_file",
+            base=_DRS_CS(label="BASE", text=base_text),
+            current=_DRS_CS(label="CURRENT_UPSTREAM_SIDE", text=cur),
+            replayed=_DRS_CS(label="REPLAYED_COMMIT_SIDE", text=rep),
+            original_worktree_text=units[0].original_worktree_text,
+            marker_span=None,
+        )
+        cand = _DRS_CR(
+            candidate_id=f"{unit.unit_id}:current",
+            unit_id=unit.unit_id,
+            model_name="deletion_respect_swap",
+            resolved_text=cur,
+            provenance="deterministic_source_current_only",
+            prompt_version="deletion_respect_swap.v1",
+            explanation=(f"buffer resurrected {len(findings)} upstream-deleted "
+                         f"block(s) ({sum(f.block_line_count for f in findings)} "
+                         f"lines) via git auto-merge context; swapped to the "
+                         f"verified upstream side"),
+        )
+        self.journal.emit(
+            "deletion_respect_swap",
+            {"blocks": len(findings),
+             "resurrected_lines": sum(f.block_line_count for f in findings),
+             "buffer_in_current": round(containment, 4)},
+            step_index=self.step, path=path,
         )
         return [(unit, cand)]
 
