@@ -14558,6 +14558,11 @@ class Orchestrator:
         )
         if _attributed:
             self._last_tests_compiler_indictment = True
+            # Sprint-20 S20.6: stash the indictment context so the run
+            # loop's micro-CEGIS rung (before the compiler-authority
+            # escalate) can repair from the SAME attributed errors.
+            self._last_gate_cmd = cmd
+            self._last_attributed_merge_errors = list(_attributed)
             self.journal.emit(
                 "compiler_authority_override",
                 {"label": label, "command": cmd,

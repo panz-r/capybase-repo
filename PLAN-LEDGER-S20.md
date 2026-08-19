@@ -191,3 +191,39 @@ zero oracle-divergent merges.
   identical content (three distinct worktrees); no sloppiness tuning
   warranted; case wall 70s → 11s warm. 33 tests green across the S20.5
   files.
+- 2026-08-20 02:0x: **S20.6 investigation + design complete; enabling
+  pieces landed; implementation next session.** Findings:
+  - Hook point: the run-loop compiler-authority escalate
+    (orchestrator.py ~8362: `not test_ok and (tests.required or
+    _last_tests_compiler_indictment)`). 0065's errors surface THERE,
+    not in Phase-2 file validation (P3 had degraded the session to
+    SYNTAX_ONLY, so `_whole_file_repair` never engaged) — micro-CEGIS
+    must intercept between the failed gate and the escalate.
+  - **fmt-0003 reclassified to S20.7**: its sim-1.0 escalation is a
+    brace/macro-imbalance class (unbalanced braces at line 312;
+    unterminated EXPECT_THROW macro) — skeleton-aware multi-brace
+    repair territory, NOT redefinition/missing-symbol. S20.6's live
+    acceptance is 0065 alone (missing-symbol stage).
+  - Enabling pieces landed: `_run_tests` now stashes
+    `_last_gate_cmd` + `_last_attributed_merge_errors` on self;
+    `future.enable_micro_cegis = True` declared in config.
+  - Design: `_try_micro_cegis(result)` called in the run loop before
+    the escalate; operates on the resolved FILE BUFFERS directly (no
+    unit re-splice — the merge index may be gone). Stage 1
+    (deterministic): parse `redefinition of 'X'` from the stashed
+    errors; extract the duplicate's brace block at the error line;
+    provenance via `_true_stage_sides` (delete the copy whose exact
+    text is base-verbatim AND absent from one parent side = that side
+    deleted it). Stage 2 (micro-patch): distinct symbols from
+    `'(X)' does not name a type` / `was not declared` / `is not a
+    member` errors (≤3); one tiny prompt per symbol (error lines + 5
+    buffer-context lines + the symbol's declaration lines found in
+    base/current/replayed); model returns SEARCH/REPLACE applied to
+    the buffer (reuse the CEGIS patch parser). After each round:
+    re-run `_run_tests("pre_continue", result)` — the same gate
+    (command from `_last_gate_cmd`); clean → proceed (do NOT
+    escalate); no progress → escalate exactly as before. Journal
+    micro_cegis_started / micro_cegis_patch / micro_cegis_succeeded /
+    micro_cegis_declined throughout. Acceptance: protobuf-0065
+    majority-of-3 — PASS or honest escalate through the rung; no
+    behavior change on unattributed/advisory failures (unit tests).

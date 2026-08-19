@@ -781,6 +781,16 @@ class FutureConfig(BaseModel):
     # declines to the per-unit path. Name-scoped, not suffix-scoped — extend
     # only with per-format oracle evidence.
     enable_lockfile_takeover: bool = True
+    # Micro-CEGIS at the compiler-authority gate (sprint-20 S20.6): when the
+    # pre_continue build fails with errors positively attributed to merged
+    # files (the P4 override shape, protobuf-0065: buffer at sim 0.996 to the
+    # oracle), attempt a bounded micro-repair before escalating —
+    # deterministic duplicate deletion for 'redefinition of X' (provenance:
+    # the base-verbatim copy a parent side deleted) and a tiny LLM
+    # SEARCH/REPLACE patch for missing-symbol errors. Compiler-gated: every
+    # patch re-runs the same gate; no gate progress escalates exactly as
+    # before. One round, <=3 patches.
+    enable_micro_cegis: bool = True
     # Mid-band subsumption takeover (jsonc-0004 class): one side's churn
     # dominates the other's >= 2.5x while the normalized asymmetry sits in
     # [0.55, 0.90) — below the wholesale band where taking the winner is
