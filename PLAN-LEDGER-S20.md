@@ -38,7 +38,7 @@ branch `dev`. Never push (user's job).
 | S20.1 | Resolver R10 xfail: anchor-scoped `mechanical_reapply_merge` | DONE (9d03e3f) | the xfail'd test passes strict (no xfail); 543 resolver-related tests green; full suite gate launched (suite-s20-r1) |
 | S20.2 | Toolchain-era preflight probe (`ESCALATE_TOOLCHAIN`) | DONE | live acceptance: tokio-0109 classified in **8.9s** as ESCALATE_TOOLCHAIN, unanimous 3/3 via the probe cache (D7 burned full majority-of-3 pipelines on it); strict conditions (all three texts fail the real gate, real compile errors, identical side signatures); python/crateless-rust/degraded-gate skip |
 | S20.3 | queue.rs resurrection fingerprint investigation | DONE — verdict: no policy change | 0037/0046 are byte-identical conflicts (same base/cur/rep, two merge SHAs) whose HUMAN oracles resolve the replayed deletion oppositely (0037 keeps 6/7 deleted lines, 0046 keeps 0/7) — the backstop's stop is the correct conservative disposition on genuinely ambiguous ground truth. Offline census: 645 distinct groups; 30 dupe groups / 62 cases; only this pair diverges |
-| S20.4 | Empty-resolution bounded retry | TODO | flask-0006: exactly one retry with reformulated constrained prompt; escalation path unchanged when the retry also empties |
+| S20.4 | Empty-resolution bounded retry | DONE | live-accepted on flask-0006: `recovery_retry=2` fired in every run (reframed prompt via the existing build_recovery_prompt path); all reframes ALSO came back empty → disposition honestly unchanged (ESCALATE / MODEL_NEEDS_HUMAN) — the model is a proven hard limit on this shape (9/9 empties incl. reframes); escalation path preserved exactly |
 | S20.5 | Hygiene pack: lockfile exemptions, sweep centralization, `longrun` wrapper, ccache sloppiness measurement | TODO | cross-worktree hit rate measured on a protobuf case pair; stale-process sweep runs from every entry point |
 | S20.6 | Micro-CEGIS: provenance-aware duplicate repair + missing-symbol micro-patch | TODO | 0065-class: `redefinition of X` → deterministic delete when one copy is base-verbatim and its parent deleted it; missing-symbol → 5-line-context LLM micro-patch; strictly compiler-gated, escalates on ambiguity |
 | S20.7 | Skeleton-aware multi-brace repair | TODO | brace insertion at skeleton entity boundaries instead of EOF; nlohmann-0033-family fixtures pass |
@@ -148,3 +148,25 @@ zero oracle-divergent merges.
   3/3 in 8.9s wall (vs full-pipeline burns); census/terminal categories
   carry TOOLCHAIN_ERA; probe dicts recorded on results for the harvest
   audit even when classification declines.
+- 2026-08-20 01:3x: **S20.4 DONE — empty-resolution recovery retry,
+  live-accepted on flask-0006** (risk.py + 4 tests in
+  test_recovery_retry.py; 69 tests green across risk/policy/attempt
+  files). Root cause of the flask-0006 waste: empty candidates surface
+  as failure_kind=parse_failed (NOT model_refusal), so the existing
+  needs_human recovery branch never matched and the loop re-asked the
+  IDENTICAL prompt three times (3 identical empties, unanimous).
+  Fix: risk.decide grants `__recovery_retry__` when
+  features.empty_resolution is set (NonEmptyResolutionValidator's flag)
+  and the recovery budget remains — routed BEFORE the technical/retryable
+  branches so the empty class reaches it; same separate budget/switch as
+  the needs_human path (bounded once per unit by default; the eval
+  override of 2 applies); no_op_repair/suspected_validator_error
+  immediate-escalates keep priority. Live: recovery_retry=2 fired in
+  every run; both reframed asks also returned empty → honest
+  MODEL_NEEDS_HUMAN escalate preserved (acceptance: "escalation path
+  unchanged when the retry also empties"). flask-0006 itself is now a
+  PROVEN model-limit datum: one-side oracle (current = 21-line import
+  cleanup, oracle == current verbatim; replayed adds one import inside
+  the deleted region → structural rules decline), 9/9 empties including
+  reframes. Harvest note: this shape (big one-side cleanup + tiny
+  in-deletion addition) is a candidate for the S20.6 deterministic class.

@@ -187,6 +187,31 @@ class RiskEngine:
                 "candidate preserved for human review (suspected_validator_error=True)",
             ])
 
+        # --- recovery retry for empty resolutions (sprint-20 S20.4) ---
+        # flask-0006 class: the model returns empty text (often WITH a
+        # needs_human self-report that surfaces as failure_kind=parse_failed,
+        # not model_refusal — so the needs_human recovery branch below never
+        # matches). NonEmptyResolutionValidator flags it
+        # (features.empty_resolution); the technical/retryable branches would
+        # re-ask the IDENTICAL prompt shape and get the identical empty back
+        # (observed 3×, unanimously). Route the first such failure into the
+        # same reframed recovery prompt the needs_human path uses
+        # (build_recovery_prompt: escape hatch stripped, highly constrained
+        # output contract) — the SAME separate budget and switch, so it is
+        # bounded exactly once per unit by default and escalates unchanged
+        # when the reframed ask also comes back empty.
+        if (
+            feats.get("empty_resolution")
+            and self.enable_recovery_retry
+            and recovery_retry_count < self.max_recovery_retries_per_unit
+        ):
+            return RiskDecision(
+                action="retry",
+                reasons=["empty resolution; recovery retry with reframed prompt"],
+                required_followups=["__recovery_retry__"],
+                risk_score=None,
+            )
+
         # --- technical failures: retry, then escalate ---
         # Includes LSP/type-check failures: a candidate that introduces new
         # type errors is almost always a small localized mistake the model can

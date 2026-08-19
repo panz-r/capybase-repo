@@ -149,3 +149,72 @@ def test_recovery_prompt_carries_prior_failures():
     failures = [VerificationFailure(validator="syntax", message="unclosed bracket on line 3")]
     prompt = build_recovery_prompt(unit, ctx, failures=failures)
     assert "unclosed bracket" in prompt  # prior failure surfaced as context
+
+
+# ---------------------------------------------------------------------------
+# sprint-20 S20.4: empty-resolution recovery retry (the flask-0006 class)
+# ---------------------------------------------------------------------------
+
+
+def _empty_result() -> VerificationResult:
+    """The flask-0006 shape: empty text routed as a parse/technical failure.
+
+    NonEmptyResolutionValidator flags features.empty_resolution; the
+    candidate's needs_human self-report does NOT surface as
+    failure_kind=model_refusal, so the needs_human recovery branch never
+    matched and the loop re-asked the identical prompt three times."""
+    return VerificationResult(
+        candidate_id="c", unit_id="u", passed=False,
+        features={"empty_resolution": True},
+    )
+
+
+def test_empty_resolution_grants_recovery_retry():
+    """Empty candidate + recovery budget → reframed retry, not the plain
+    technical retry that re-asks the identical prompt."""
+    engine = RiskEngine(max_recovery_retries_per_unit=1, enable_recovery_retry=True)
+    decision = engine.decide(
+        _empty_result(), retry_count=0, failure_kind="parse_failed",
+        recovery_retry_count=0,
+    )
+    assert decision.action == "retry"
+    assert "__recovery_retry__" in decision.required_followups
+    assert "empty resolution" in decision.reasons[0]
+
+
+def test_empty_resolution_recovery_respects_switch():
+    engine = RiskEngine(enable_recovery_retry=False)
+    decision = engine.decide(
+        _empty_result(), retry_count=0, failure_kind="parse_failed",
+        recovery_retry_count=0,
+    )
+    assert "__recovery_retry__" not in (decision.required_followups or [])
+
+
+def test_empty_resolution_recovery_exhausted_falls_through():
+    """Recovery budget spent → the pre-existing plain-retry/escalate path
+    is unchanged (technical failure with retry budget left → plain retry)."""
+    engine = RiskEngine(max_recovery_retries_per_unit=1, enable_recovery_retry=True)
+    decision = engine.decide(
+        _empty_result(), retry_count=0, failure_kind="parse_failed",
+        recovery_retry_count=1,
+    )
+    assert decision.action == "retry"
+    assert decision.required_followups != ["__recovery_retry__"]
+    # and with the retry budget also gone: escalate, as before
+    decision2 = engine.decide(
+        _empty_result(), retry_count=99, failure_kind="parse_failed",
+        recovery_retry_count=1,
+    )
+    assert decision2.action == "escalate"
+
+
+def test_empty_resolution_grant_does_not_shadow_immediate_escalates():
+    """no_op_repair stays the higher-priority immediate escalate even when
+    the candidate is also empty."""
+    engine = RiskEngine(max_recovery_retries_per_unit=1, enable_recovery_retry=True)
+    decision = engine.decide(
+        _empty_result(), retry_count=0, failure_kind="no_op_repair",
+        recovery_retry_count=0,
+    )
+    assert decision.action == "escalate"
