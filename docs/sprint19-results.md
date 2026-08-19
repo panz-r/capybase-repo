@@ -123,18 +123,36 @@ jaccard:
   the unit-level truth (file-level counterexamples exist: flask-0006/7,
   sqlite-0012).
 
-## Live validation (D7) — in flight
+## Live validation (D7)
 
-Batch 1 (no new mechanisms needed; post-66b780b transport fix):
-sea-orm-0027 (expect honest ESCALATE or woven PASS — the collapse
-detector finally paired with a live adjudication) and tokio-0109 (true
-disposition unknown; worktrees preserved mid-flight to localize the
-unexplained error tokens). Majority-of-3 under `--provider nova-gemma4`.
+### Batch 1 — the no-new-mechanisms reruns (DONE, unanimous 3/3 each)
 
-Batch 2 (P1-P4 mechanisms): protobuf-0067/0071 (budget restoration),
-0065 (escalate on attributed defect or PASS via repair), tokio-0037
-(churn-aware/Best-of-N), protobuf-0055 (journal-only measurement
-lands in the flights). Results appended here as they complete.
+- **sea-orm-0027 → ESCALATE** ("side collapse in src/executor/query.rs;
+  the replayed side's rewrite (279 changed lines) was dropped
+  (adjudication: keep)"). The WS4 collapse detector finally PAIRED with
+  a live subsumption adjudication — in sprint-18 the adjudication call
+  died on transport in all six runs. Every run: the model produced a
+  current-verbatim buffer, the detector fired, the live adjudication
+  ruled replayed's TryGetError work essential at 0.95 → escalate. The
+  silent one-side ORACLE_DIVERGENT is gone, converted into the
+  always-acceptable honest ESCALATE.
+- **tokio-0109 → ESCALATE**, and the previously-unexplained error
+  provenance is SOLVED by the P1 rung's probes: `whole_side_probe` fired
+  in every run and BOTH pristine merge-index sides failed cargo check
+  with the SAME two errors (`#[deprecated]` on trait impl blocks;
+  `std::mem::drop` on a `ManuallyDrop`) at ~3s per probe. The errors are
+  toolchain-era artifacts — the historical tokio code, in every side
+  including the oracle (== current verbatim), does not compile under the
+  eval's newer rustc. Not a splice artifact, not a model defect, not a
+  mechanism gap: the case is un-passable under this toolchain, and the
+  honest disposition is exactly what the pipeline produced (the rung
+  correctly declined — no_side_verifies — rather than substituting a
+  side that also wouldn't compile).
+
+### Batch 2 — the mechanism targets (protobuf-0067/0071/0065,
+tokio-0037, protobuf-0055)
+
+In flight; results appended on completion.
 
 ## Hermetic suite
 

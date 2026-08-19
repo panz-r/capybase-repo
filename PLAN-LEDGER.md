@@ -313,3 +313,25 @@ Resolutions of reviewer disagreements (final):
   <P6-sha>.
 - NEXT: D7 rerun matrix (sea-orm-0027 + tokio-0109 live under provider;
   then 0067/0071/0065/0055 after P1-P4), full suite re-run, docs.
+- 2026-08-19 16:05: **D7 batch-1 DONE** (majority-of-3, nova-gemma4,
+  /tmp/capybase-live/s19/val/d7-b1.json):
+  - sea-orm-0027 → **ESCALATE (unanimous)**, reason: "side collapse ...
+    adjudication: keep". The collapse detector finally PAIRED with a live
+    adjudication (sprint-18: the call always died on transport). All 3
+    runs: buffer collapsed to current, adjudication says replayed's
+    TryGetError rewrite is essential (conf 0.95) → honest escalate. The
+    silent one-side ORACLE_DIVERGENT is gone — converted to the
+    always-acceptable ESCALATE.
+  - tokio-0109 → **ESCALATE (unanimous)**, and the **unexplained-error
+    mystery is SOLVED by the P1 probes**: whole_side_probe ran in every
+    run (the rung fired on the compile failure, as designed); BOTH
+    pristine stage sides fail cargo check with the SAME two errors
+    (`#[deprecated]` on trait impl blocks; ManuallyDrop misuse) at ~3s
+    per probe → the rung correctly declined (no_side_verifies) and the
+    case escalated. The errors are TOOLCHAIN-ERA artifacts: the
+    historical tokio code (all sides incl. the oracle == current) does
+    not compile under the eval's newer rustc. Not a splice artifact, not
+    a model defect, not a mechanism gap — the case is un-passable under
+    this toolchain. Census correction #3 for 0109.
+  - Batch-2 (0067/0071/0065/0037/0055) launched 16:0x, logs at
+    /tmp/capybase-live/s19/val/d7-b2-*.log.
