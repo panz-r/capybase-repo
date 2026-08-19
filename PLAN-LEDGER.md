@@ -48,10 +48,34 @@ Resolutions of reviewer disagreements (final):
 | P1 | Whole-side repair rung on compile failure | DONE (impl+tests) | see P1 detail below; D5 carve-out extension included |
 | P2 | Churn-aware preservation heuristic + Best-of-N recovery | DONE (impl+tests) | see P2 detail below |
 | P3 | Build state machine + conditional retry (+ccache/-j$(nproc)) | DONE (impl+tests) | see P3 section; D2 prewarming deferred |
-| P4 | Compiler-authority override at final gate | TODO | fixes protobuf-0065 ship-broken |
+| P4 | Compiler-authority override at final gate | DONE (impl+tests) | see P4 section; fixes protobuf-0065 |
 | P5 | Class-with-methods entity splitting (journal-only first) | TODO | protobuf-0055 |
 | P6 | Near-verbatim band calibration (measure-only) | TODO | informs future fast-path |
 | D7 | Post-fix live rerun matrix (sea-orm-0027, tokio-0109 first) | TODO | needs no new mechanisms for 0027/0109 |
+
+## P4 design (as implemented, 2026-08-19)
+
+- `orchestrator.py` `_run_tests`:
+  - D4.1: error-carrying lines from the command output are extracted and
+    surfaced in `tests_finished` (`diagnostics` falls back to them when
+    the verdict parser found none; `build_gate` + `attributed_merge_errors`
+    fields added).
+  - D4.2 compiler-authority attribution: when the gate command is a build
+    (`_phase2_fallback_build_cmd` recognition), it failed, didn't time
+    out, and error lines POSITIVELY parse (`_parse_cc_error_location`) to
+    a stem matching a merged file (`result.units_by_path`) →
+    `compiler_authority_override` journal event, warning, gate returns
+    False regardless of tests.required. Strict positive attribution only:
+    sibling errors, driver summaries, unparseable lines, and timeouts
+    keep advisory behavior.
+- Caller (run loop, pre_continue): escalates when
+  `not test_ok and (tests.required or _last_tests_compiler_indictment)`
+  with a distinct reason for the override path.
+- Tests: `tests/test_compiler_authority.py` (8) — build recognition,
+  attributed escalation under advisory (0065 shape incl. diagnostics
+  surfacing), sibling/unparseable/timeout/non-build exemptions, passing
+  and required-gate baselines.
+- Regression: 100 tests green.
 
 ## P3 design (as implemented, 2026-08-19)
 
@@ -215,4 +239,7 @@ Resolutions of reviewer disagreements (final):
   wrapper; see P2 section). 296+88+10 tests green. COMMITTED as 7dff022.
 - 2026-08-19: **P3 implemented** (BuildStateTracker + conditional retry +
   probe journaling + Phase-2 fallback skip + -j$(nproc); see P3 section).
-  258+160 tests green. COMMITTED as <P3-sha>.
+  258+160 tests green. COMMITTED as 0e83374.
+- 2026-08-19: **P4 implemented** (compiler-authority override at the
+  pre_continue gate + make-output diagnostics; see P4 section). 100
+  tests green. COMMITTED as <P4-sha>.

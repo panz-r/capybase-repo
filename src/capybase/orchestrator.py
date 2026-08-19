@@ -8327,9 +8327,23 @@ class Orchestrator:
                 break
             # Tests gate continue.
             test_ok = self._run_tests("pre_continue", result)
-            if not test_ok and self.config.tests.required:
+            if not test_ok and (
+                    self.config.tests.required
+                    or getattr(self, "_last_tests_compiler_indictment",
+                               False)):
+                # Sprint-19 P4: a positively-attributed in-file compile
+                # error escalates even under advisory gates (compiler
+                # authority); unattributable failures keep the advisory
+                # behavior (protobuf-0065 shipped a build-broken merge at
+                # sim 0.997 because rc=2 parsed as unknown with empty
+                # diagnostics and tests.required=False let it through).
                 result.escalated = True
-                result.reason = "pre-continue tests failed"
+                result.reason = (
+                    "pre-continue tests failed"
+                    if self.config.tests.required
+                    else "compiler authority: pre-continue build failed with "
+                         "errors attributed to a merged file"
+                )
                 break
             # Drift observation (behavioral-regression redesign): runs AFTER the
             # test gate so the step's regressions are known. Mechanism-gated:
@@ -14408,6 +14422,13 @@ class Orchestrator:
         is_default_cmd = cmd.strip() == "pytest"
         cmd = self._resolve_test_command(cmd)
         self.journal.emit("tests_started", {"label": label, "command": cmd}, step_index=self.step)
+        # Sprint-19 P4 (D4.1): make-output parsing. The runner's verdict
+        # parser misses compile errors in raw make output (protobuf-0065:
+        # rc=2, verdict unknown, diagnostics [] — the merge's real defect
+        # invisible at the gate). Extract the error-carrying lines so they
+        # surface in the journal and feed the attribution below.
+        self._last_tests_compiler_indictment = False
+        _is_build_gate = bool(_phase2_fallback_build_cmd(cmd))
         # For ``cargo test`` in a workspace (no root Cargo.toml), cargo must run
         # from a member crate's directory — it can't discover the project from
         # the workspace root. Anchor on the first conflicted file's nearest crate
@@ -14435,6 +14456,31 @@ class Orchestrator:
                 f"[tests] {label} to your suite's command to enable it."
             )
             return True
+        # Sprint-19 P4 (D4.2): compiler-authority attribution. When the gate
+        # command IS a build and it failed with error lines that positively
+        # locate in a file this session wrote, the compiler is indicting the
+        # merge itself — that escalates regardless of tests.required (a
+        # silent wrong merge is the worst outcome); advisory config covers
+        # unattributable failures — sibling/environmental/unknown — which
+        # keep today's non-blocking behavior). Strict positive attribution
+        # only: unparseable lines never trigger the override.
+        _error_lines = [
+            ln for ln in ((run.stdout or "") + (run.stderr or "")).splitlines()
+            if "error" in ln.lower()
+        ][:20]
+        _attributed: list[str] = []
+        if _is_build_gate and not run.passed and _error_lines and not run.timed_out:
+            from capybase.verification import _parse_cc_error_location
+
+            _merged_paths = list(getattr(result, "units_by_path", {}) or {})
+            _merged_stems = {Path(p).stem for p in _merged_paths}
+            for ln in _error_lines:
+                if ln.startswith(("make[", "make:", "ninja:")) or "CMake Error" in ln:
+                    continue  # build-driver summaries carry no file:line
+                stem, _ = _parse_cc_error_location(ln)
+                if stem is not None and stem in _merged_stems:
+                    _attributed.append(ln)
+            _attributed = _attributed[:5]
         self.journal.emit(
             "tests_finished",
             {
@@ -14444,12 +14490,32 @@ class Orchestrator:
                 "timed_out": run.timed_out,
                 "verdict": run.verdict.kind,
                 "verdict_summary": run.verdict.summary,
-                "diagnostics": run.verdict.diagnostics[:5],
+                "diagnostics": (
+                    run.verdict.diagnostics[:5] or _error_lines[:5]
+                ),
+                "build_gate": _is_build_gate,
+                "attributed_merge_errors": _attributed,
                 "stdout_tail": run.stdout[-1000:],
                 "stderr_tail": run.stderr[-1000:],
             },
             step_index=self.step,
         )
+        if _attributed:
+            self._last_tests_compiler_indictment = True
+            self.journal.emit(
+                "compiler_authority_override",
+                {"label": label, "command": cmd,
+                 "attributed_merge_errors": _attributed,
+                 "tests_required": bool(getattr(
+                     self.config.tests, "required", False))},
+                step_index=self.step,
+            )
+            self.out(
+                "  " + self._warn(
+                    f"! {label} build failed with errors attributed to merged "
+                    f"file(s) — escalating (compiler authority)"
+                )
+            )
         result.tests_passed = run.passed
         # Stash the parsed verdict for the accept report (the report is written
         # after this call returns, in run()'s loop, and needs the human-readable
