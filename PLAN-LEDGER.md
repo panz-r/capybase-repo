@@ -65,11 +65,11 @@ livelock). Both fixed in f836488 (with regression tests). D8 items:
 | # | Item | Status | Notes |
 |---|------|--------|-------|
 | D8.0 | Build-process hygiene (tree-kill + ccache recursion) | DONE (f836488 + follow-up) | `_run_shell_tree` (session + killpg) at every shell build site; shims exec absolute compilers, no CC/CXX double-wrap; stale-process sweep matches by worktree cwd. Follow-up (same day): `CCACHE_NOHASHDIR=1` + `CCACHE_BASEDIR=/var/tmp` (cross-worktree hits — verified live: default env MISSES identical content across two worktrees, NOHASHDIR HITS), `CCACHE_TEMPDIR` on disk (off the 6G /run tmpfs the orphans filled), `CCACHE_MAXSIZE=20G`, and the live script now exports `_ccache_env()` into the process env so orchestrator/TestRunner gate builds inherit it (their counters were frozen). 7 tests in test_build_process_hygiene.py. |
-| D8.1 | Full suite rerun over s19 changes (r2, post-fix) | IN FLIGHT | detached (setsid, survives zcode restarts), pid 1551158, log `/tmp/capybase-live/s19/val/suite-s19-r2.log`; r1's 66% showed 0 failures before the restart killed it. |
-| D8.2 | P6 live deletion-carveout census | QUEUED (chained after suite) | majority-of-3 over axum-history-0006, tokio-history-0046, jsonc-history-0002 + deliberate file-level counterexample flask-history-0006; census `preservation_result="deletion_superseded"` events. Artifacts: `d8-p6-census.*`. |
-| D8.3 | P5 oversized-distribution batch | QUEUED (chained after D8.2) | majority-of-3 over protobuf-history-0053 (3720-line densest hunk in corpus) + protobuf-history-0073 (626); journal `class_member_split_candidate` distribution. Artifacts: `d8-p5-dist.*`. Chain script: `/tmp/capybase-live/s19/val/run-d8-after-suite.sh`. |
-| D8.4 | Ledger/docs hygiene | DONE | SHA backfills (P1=4dcdd3f, P6=125323e), D7 status, ccache-claim corrections (P3 sections + results doc), untracked design docs committed. |
-| D8.5 | Closing entry (suite tally + census/dist dispositions + P5 enabling call) | PENDING | on D8.1-D8.3 landing. |
+| D8.1 | Full suite rerun over s19 changes (r2, post-fix) | DONE — GREEN | 6159 passed / 2115 skipped / 1 xfailed / **0 failed** in 54m52s (baseline 5h41m; char_ratio flake did not recur on the idle box; +67 passed vs s18 = s19's new tests). Log: suite-s19-r2.log. |
+| D8.2 | P6 live deletion-carveout census | DONE — honest zero-event | 8 journals, **0 `deletion_superseded` events — the carveout path was never entered**: the easy pure-deletion cases resolve upstream (axum-0006 PASS 15s + jsonc-0002 PASS 20s, structural/portfolio, no preservation events) and the hard ones escalated through other nets (flask-0006: model empty resolutions, 3/3; tokio-0046: resurrection backstop caught 12 resurrected lines in queue.rs, 3/3 — the deletion-direction safety net live-validated). Carveout stays ON, unit-test-validated. |
+| D8.3 | P5 oversized-distribution batch | DONE — stays OFF | 2/2 PASS (0053 sim1.00 96s `structurally_resolved`; 0073 sim1.00 70s `true_side_portfolio`) with ZERO oversized-skip events and ZERO candidate stamps: the corpus's densest hunks are one-side-dominated and never reach the LLM. **dense-hunk ≠ oversized-prone**; the only live distribution remains 0055. Enabling stays OFF; sprint-20 selection must come from live `llm_skipped_oversized` census firings, and enabling needs the statement-level splitter beneath (0055's member fragments alone are 150-250 lines, over-window). |
+| D8.4 | Ledger/docs hygiene | DONE | SHA backfills (P1=4dcdd3f, P6=125323e), D7 status, ccache-claim corrections (P3 sections + results doc), untracked design docs committed (bab4c21). |
+| D8.5 | Closing entry (suite tally + census/dist dispositions + P5 enabling call) | DONE | see work log; ccache production evidence: 776 cacheable / 44 hits / 0.2 GiB in the D8 legs (vs 995/995 uncacheable pre-fix), incl. cross-worktree hits. |
 
 Acceptance for D8: suite r2 green-or-known-flake (char_ratio load-flake
 baseline); census produces a measured unit-level carveout rate (or an
@@ -435,3 +435,49 @@ accumulated distribution; no regressions in either batch's must-holds.
   gate + TestRunner pre_continue builds inherit the wiring (suite build
   tests showed frozen counters — those paths pass no env). New tests:
   cross-worktree hit + env keys (7 total in the hygiene file).
+  COMMITTED as aa10db0.
+- 2026-08-19 23:55: **D8.1 suite r2 DONE — GREEN**: `6159 passed,
+  2115 skipped, 1 xfailed, 0 failed` in **54m52s** (s18 baseline
+  5h41m; the char_ratio load-flake did not recur on the idle, leak-free
+  box; +67 passed vs s18's 6092 = sprint-19's new tests). The "Suite:
+  full pytest run must stay green" must-hold is MET.
+- 2026-08-20 00:03: **D8.2 P6 census DONE** (majority-of-3,
+  d8-p6-census.json): axum-history-0006 **PASS** sim1.00 15s and
+  jsonc-history-0002 **PASS** sim1.00 20s — both resolved UPSTREAM of
+  the preservation path (portfolio/structural; zero preservation events
+  in journals). flask-history-0006 **ESCALATE 3/3** (sim 0.54; model
+  produced empty resolutions every run — honest). tokio-history-0046
+  **ESCALATE 3/3** (sim 0.88; end-of-rebase scan caught 12 resurrected
+  lines in queue.rs → policy stop — the deletion-direction safety net,
+  live-validated 3/3). **Census result: 0 `deletion_superseded` events
+  across all 8 journals — the carveout path was never entered.** The
+  unit shape it guards (verbatim candidate + loser-side pure-deletion
+  obligations reaching validation) did not occur: easy pure-deletion
+  cases are consumed by structural resolution before an LLM candidate
+  exists. Honest zero-event reading (explicitly allowed by D8
+  acceptance); the carveout stays ON — it is zero-risk (it only rescues
+  candidates the heuristic would wrongly reject) — and remains
+  unit-test-validated (tests/test_preservation_bestof_n.py).
+- 2026-08-20 00:06: **D8.3 P5 distribution DONE** (majority-of-3,
+  d8-p5-dist.json): **2/2 PASS** — protobuf-history-0053 sim1.00 in 96s
+  via `structurally_resolved` and 0073 sim1.00 in 70s via
+  `true_side_portfolio`, with **zero oversized-skip events and zero
+  class_member_split_candidate stamps**. Finding: the corpus's densest
+  conflict hunks are one-side-dominated and resolve mechanically — they
+  never reach the LLM, so they can never hit the oversized site.
+  **dense-hunk ≠ oversized-prone** (offline churn/density proxies —
+  including the one that selected this batch — over-select). The only
+  live oversized distribution across ALL sprint-19 runs remains 0055's
+  (3 repeats, 520-line region, member points 3-vs-0, declined
+  fragments_below_min_sub_lines). **P5 enabling call: stays OFF.**
+  Sprint-20 criteria sharpened: (1) select candidate cases from live
+  `llm_skipped_oversized` firings in full-corpus runs, not offline
+  proxies; (2) enabling requires the statement-level splitter beneath
+  the member split (0055's member fragments alone are 150-250 lines,
+  still over an 8K window).
+- 2026-08-20 00:1x: **D8.5 — SPRINT-19 COMPLETE.** All D8 items closed;
+  every acceptance line of the sprint met or honestly dispositioned.
+  ccache production evidence from the D8 legs: 776 cacheable calls /
+  44 hits / 0.2 GiB cached (vs 995/995 uncacheable pre-fix), including
+  cross-worktree hits that were structurally impossible before. `dev`
+  holds the sprint's commits locally — push is the user's job.

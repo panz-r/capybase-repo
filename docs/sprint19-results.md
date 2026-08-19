@@ -1,9 +1,9 @@
 # Sprint-19 results — mechanisms for the one-side-oracle class
 
-Status: implementation complete (P1-P6); live validation (D7) complete —
-batch 1, batch 2, and the fixed-gate 0065 rerun all landed (2026-08-19);
-post-D7 build-hygiene fixes landed (f836488) with the suite rerun (r2)
-and the D8 measurement batches (P6 census, P5 distribution) in flight.
+Status: **sprint-19 COMPLETE** (2026-08-20). Implementation (P1-P6),
+live validation (D7), the post-D7 build-hygiene fixes (f836488,
+aa10db0), the green suite rerun (r2), and the D8 measurement batches
+(P6 census, P5 distribution) all landed; dispositions below.
 This doc records what was built, the calibration findings, and the live
 results. Companion: `PLAN-LEDGER.md` (working log),
 `docs/sprint19-failing-cases-diagnosis.md` (D1-D7 designs),
@@ -251,25 +251,66 @@ process tree (274 orphans spinning inside deleted worktrees since
 cacheable — a one-line TU livelocked in repro). Both fixed in f836488
 (`_run_shell_tree` session+killpg teardown at every shell build site;
 absolute-compiler shims; stale-process sweep by worktree cwd; 5 new
-regression tests). The rerun (r2) is running detached from the session
-(log `/tmp/capybase-live/s19/val/suite-s19-r2.log`) — it passed 66% in
-~10 minutes where r1 took ~5h under the leaked load.
+regression tests). the rerun (r2) was launched detached from the session and finished
+**GREEN**: 6159 passed / 2115 skipped / 1 xfailed / 0 failed in 54m52s
+(log `/tmp/capybase-live/s19/val/suite-s19-r2.log`) — it covered in
+~55 minutes what r1 couldn't reach in 5 hours under the leaked load.
 
-## D8 — sprint-19 extension (in flight)
+## D8 — sprint-19 extension (COMPLETE, 2026-08-20)
 
 No deferrals: the two measurement debts rejoin the sprint, chained
-after the r2 suite (`run-d8-after-suite.sh`, detached):
+after the r2 suite (`run-d8-after-suite.sh`, detached). All landed.
 
-- **P6 live census** (D8.2): majority-of-3 over pure-deletion-side
-  corpus cases axum-history-0006, tokio-history-0046, jsonc-history-0002
-  plus a deliberate file-level counterexample (flask-history-0006);
-  census `preservation_result="deletion_superseded"` events for the
-  unit-level carveout rate the P6 section called for.
-- **P5 distribution** (D8.3): majority-of-3 over the corpus's densest
-  cpp conflict regions — protobuf-history-0053 (3720-line single hunk)
-  and protobuf-history-0073 (626) — selected by a densest-hunk probe
-  that reproduces 0055's known 517-line region; journal
-  `class_member_split_candidate` distribution feeds the enabling call.
+**Suite r2 — GREEN**: `6159 passed, 2115 skipped, 1 xfailed, 0 failed`
+in **54m52s** (the sprint-18 baseline was 5h41m; the char_ratio
+load-flake did not recur on the idle, leak-free box; +67 passed vs s18
+= sprint-19's new tests). The "full pytest run must stay green"
+must-hold is met. Ccache production evidence from these legs: 776
+cacheable calls / 44 hits / 0.2 GiB cached (vs 995/995 uncacheable
+before f836488/aa10db0), including cross-worktree hits.
+
+**P6 live census (D8.2)** — majority-of-3 over pure-deletion-side
+corpus cases axum-history-0006, tokio-history-0046, jsonc-history-0002,
+plus the deliberate file-level counterexample flask-history-0006
+(artifacts `d8-p6-census.*`):
+
+- axum-0006 **PASS** (sim 1.00, 15s) and jsonc-0002 **PASS** (sim 1.00,
+  20s) — both resolved upstream of the preservation path (portfolio /
+  structural; zero preservation events in the journals).
+- flask-0006 **ESCALATE 3/3** (sim 0.54; empty model resolutions every
+  run — honest) and tokio-0046 **ESCALATE 3/3** (sim 0.88; the
+  end-of-rebase scan caught 12 resurrected lines in queue.rs — the
+  deletion-direction safety net, live-validated unanimously).
+- **Census result: 0 `deletion_superseded` events across all 8
+  journals — the carveout path was never entered.** The unit shape it
+  guards (verbatim candidate + loser-side pure-deletion obligations
+  reaching validation) didn't occur: easy pure-deletion cases are
+  consumed by structural resolution before an LLM candidate exists.
+  This is the honest zero-event reading the extension's acceptance
+  allowed; the carveout stays ON (zero-risk — it only rescues
+  candidates the heuristic would wrongly reject) and remains
+  unit-test-validated.
+
+**P5 distribution (D8.3)** — majority-of-3 over the corpus's densest
+cpp conflict regions, protobuf-history-0053 (3720-line hunk) and 0073
+(626), selected by a densest-hunk probe that reproduces 0055's known
+region size (artifacts `d8-p5-dist.*`):
+
+- **2/2 PASS**: 0053 sim 1.00 in 96s via `structurally_resolved`; 0073
+  sim 1.00 in 70s via `true_side_portfolio`. Zero oversized-skip events
+  and zero `class_member_split_candidate` stamps — neither case reached
+  the LLM at all.
+- **Finding: dense-hunk ≠ oversized-prone.** The corpus's largest
+  conflict regions are one-side-dominated and resolve mechanically;
+  the oversized site is only reachable when both sides are substantially
+  interleaved AND the model must be consulted — across all sprint-19
+  live runs, only 0055 has that shape. Offline churn/density proxies
+  (including the one that selected this batch) over-select.
+- **P5 enabling call: stays OFF.** Sprint-20 criteria sharpened:
+  select candidates from live `llm_skipped_oversized` firings in
+  full-corpus runs, and pair enabling with the statement-level splitter
+  beneath the member split (0055's member fragments alone are 150-250
+  lines — still over an 8K window).
 
 ## Must-holds (validated by the D7 matrix + suite)
 
