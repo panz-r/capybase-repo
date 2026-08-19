@@ -37,7 +37,7 @@ branch `dev`. Never push (user's job).
 |---|------|--------|-------------------------|
 | S20.1 | Resolver R10 xfail: anchor-scoped `mechanical_reapply_merge` | DONE (9d03e3f) | the xfail'd test passes strict (no xfail); 543 resolver-related tests green; full suite gate launched (suite-s20-r1) |
 | S20.2 | Toolchain-era preflight probe (`ESCALATE_TOOLCHAIN`) | TODO | tokio-0109 classified by one pristine-side probe pair (cacheable across repeats, ~seconds); passable cases behavior-identical |
-| S20.3 | queue.rs resurrection fingerprint investigation | TODO | 0037+0046 journals/diffs read; explicit policy verdict documented (true positive vs test-file false positive) |
+| S20.3 | queue.rs resurrection fingerprint investigation | DONE — verdict: no policy change | 0037/0046 are byte-identical conflicts (same base/cur/rep, two merge SHAs) whose HUMAN oracles resolve the replayed deletion oppositely (0037 keeps 6/7 deleted lines, 0046 keeps 0/7) — the backstop's stop is the correct conservative disposition on genuinely ambiguous ground truth. Offline census: 645 distinct groups; 30 dupe groups / 62 cases; only this pair diverges |
 | S20.4 | Empty-resolution bounded retry | TODO | flask-0006: exactly one retry with reformulated constrained prompt; escalation path unchanged when the retry also empties |
 | S20.5 | Hygiene pack: lockfile exemptions, sweep centralization, `longrun` wrapper, ccache sloppiness measurement | TODO | cross-worktree hit rate measured on a protobuf case pair; stale-process sweep runs from every entry point |
 | S20.6 | Micro-CEGIS: provenance-aware duplicate repair + missing-symbol micro-patch | TODO | 0065-class: `redefinition of X` → deterministic delete when one copy is base-verbatim and its parent deleted it; missing-symbol → 5-line-context LLM micro-patch; strictly compiler-gated, escalates on ambiguity |
@@ -108,3 +108,25 @@ zero oracle-divergent merges.
   strict; 543 resolver-related tests green. Full suite gate: detached,
   log /tmp/capybase-live/s20/val/suite-s20-r1.log, tally lands via the
   progress.log recorder.
+- 2026-08-20 00:4x: **S20.3 DONE — queue.rs resurrection verdict: no
+  policy change; corpus duplication found instead.** The identical
+  fingerprint (12 resurrected lines, queue.rs, unanimous 3/3 in both
+  D7-b2-mech and D8-census) is NOT a scanner pattern across independent
+  cases: `tokio-history-0037` and `tokio-history-0046` carry
+  byte-identical base/current/replayed (same upstream conflict,
+  conflict_path tokio/src/runtime/tests/queue.rs, two different
+  downstream merge SHAs). The replayed side deletes 7 non-blank lines
+  (a `struct Runtime;` stub + its `impl Schedule` block — dead test
+  scaffolding). The two HUMAN oracles resolve that deletion
+  OPPOSITELY: 0037's oracle keeps 6/7 of the deleted lines (293-line
+  resolution, matching current), 0046's keeps 0/7 (273-line resolution,
+  matching replayed). A conservative system cannot pass both twins:
+  the D7 buffer was sim 1.0 against 0037's oracle — the stop cost that
+  PASS — but the same buffer diverges from 0046's oracle; escalating
+  both is exactly the designed behavior. Offline corpus census
+  (content-hash over base+cur+rep): 677 cases → 645 distinct conflict
+  groups; 30 duplicate groups covering 62 cases (mostly benign
+  double-counting — identical oracles); EXACTLY ONE divergent-oracle
+  pair (0037/0046). Harvest/sprint-21 note: dedupe or pair-treat in
+  metrics — a deterministic resolver can PASS at most one twin of a
+  divergent pair, so the pair bounds the achievable corpus PASS rate.
