@@ -3754,11 +3754,29 @@ def _ccache_env(shim_dir: Path | None = None) -> dict[str, str]:
     deliberately NOT set to ``ccache gcc``/``ccache g++``: the double
     wrap re-triggers the same loop, and the PATH shim alone already
     covers every invocation style.
+
+    Cross-worktree hits: the eval re-materializes a fresh
+    ``/var/tmp/capy-rw-*`` worktree per case and per majority repeat,
+    and ccache's default hash includes the compilation directory — so
+    identical content in two worktrees would MISS (verified live).
+    ``CCACHE_NOHASHDIR`` removes the directory from the hash (verified:
+    cross-worktree hit) and ``CCACHE_BASEDIR`` rewrites the few absolute
+    paths that do appear. Temp files go to disk, not the 6G
+    ``/run/user/<uid>`` tmpfs a dozen parallel big-TU preprocessings can
+    exhaust. All via setdefault — an explicit env always wins.
     """
     env = os.environ.copy()
     if not _ccache_enabled():
         return env
     env.setdefault("CCACHE_DIR", "/var/tmp/capybase-ccache")
+    env.setdefault("CCACHE_NOHASHDIR", "1")
+    env.setdefault("CCACHE_BASEDIR", "/var/tmp")
+    env.setdefault("CCACHE_TEMPDIR", "/var/tmp/capybase-ccache-tmp")
+    env.setdefault("CCACHE_MAXSIZE", "20G")
+    try:
+        Path(env["CCACHE_TEMPDIR"]).mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass  # fall back to ccache's default temp dir
     if shim_dir is None:
         shim_dir = Path("/var/tmp/capybase-ccache-shim")
     # Resolve the real compilers with the shim dir stripped from PATH so a

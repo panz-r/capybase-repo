@@ -64,7 +64,7 @@ livelock). Both fixed in f836488 (with regression tests). D8 items:
 
 | # | Item | Status | Notes |
 |---|------|--------|-------|
-| D8.0 | Build-process hygiene (tree-kill + ccache recursion) | DONE (f836488) | `_run_shell_tree` (session + killpg) at every shell build site; shims exec absolute compilers, no CC/CXX double-wrap; stale-process sweep matches by worktree cwd. 5 new + 4 retargeted tests. |
+| D8.0 | Build-process hygiene (tree-kill + ccache recursion) | DONE (f836488 + follow-up) | `_run_shell_tree` (session + killpg) at every shell build site; shims exec absolute compilers, no CC/CXX double-wrap; stale-process sweep matches by worktree cwd. Follow-up (same day): `CCACHE_NOHASHDIR=1` + `CCACHE_BASEDIR=/var/tmp` (cross-worktree hits — verified live: default env MISSES identical content across two worktrees, NOHASHDIR HITS), `CCACHE_TEMPDIR` on disk (off the 6G /run tmpfs the orphans filled), `CCACHE_MAXSIZE=20G`, and the live script now exports `_ccache_env()` into the process env so orchestrator/TestRunner gate builds inherit it (their counters were frozen). 7 tests in test_build_process_hygiene.py. |
 | D8.1 | Full suite rerun over s19 changes (r2, post-fix) | IN FLIGHT | detached (setsid, survives zcode restarts), pid 1551158, log `/tmp/capybase-live/s19/val/suite-s19-r2.log`; r1's 66% showed 0 failures before the restart killed it. |
 | D8.2 | P6 live deletion-carveout census | QUEUED (chained after suite) | majority-of-3 over axum-history-0006, tokio-history-0046, jsonc-history-0002 + deliberate file-level counterexample flask-history-0006; census `preservation_result="deletion_superseded"` events. Artifacts: `d8-p6-census.*`. |
 | D8.3 | P5 oversized-distribution batch | QUEUED (chained after D8.2) | majority-of-3 over protobuf-history-0053 (3720-line densest hunk in corpus) + protobuf-history-0073 (626); journal `class_member_split_candidate` distribution. Artifacts: `d8-p5-dist.*`. Chain script: `/tmp/capybase-live/s19/val/run-d8-after-suite.sh`. |
@@ -422,3 +422,16 @@ accumulated distribution; no regressions in either batch's must-holds.
   /tmp/capybase-live/s19/val/suite-s19-r2.log). At 66% within ~10 min on
   the idle box (r1 took ~5h to the same point). D8 census/dist batches
   chained behind it via run-d8-after-suite.sh (also detached).
+- 2026-08-19 23:5x: **ccache setup COMPLETED for real workloads**: the
+  recursion fix alone wasn't sufficient — ccache's default hash includes
+  the compilation directory, and the eval re-materializes a fresh
+  /var/tmp/capy-rw-* worktree per case AND per majority repeat, so
+  cross-run hits were structurally zero (demonstrated: same content,
+  two worktrees, default env → MISS). Added CCACHE_NOHASHDIR=1 +
+  CCACHE_BASEDIR=/var/tmp (verified cross-worktree HIT), temp on disk
+  (/var/tmp/capybase-ccache-tmp — the 6G /run tmpfs was 77% full of
+  orphan cpp_stdout files during the incident), MAXSIZE 20G, and
+  os.environ.update(_ccache_env()) in the eval main so the orchestrator
+  gate + TestRunner pre_continue builds inherit the wiring (suite build
+  tests showed frozen counters — those paths pass no env). New tests:
+  cross-worktree hit + env keys (7 total in the hygiene file).

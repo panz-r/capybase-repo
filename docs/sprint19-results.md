@@ -87,7 +87,16 @@ resolve its own shim and re-enter itself (995/995 uncacheable calls; a
 one-line TU livelocked in repro), fixed post-D7 in f836488 (shims now
 exec absolute compilers; verified miss-then-hit live). The budget
 restoration below therefore stands on the state machine + parallel make
-alone; the D8 rerun of the affected flows gets real cache.
+alone; the D8 rerun of the affected flows gets real cache). The
+follow-up closed the remaining gap for the eval's actual access
+pattern: a fresh `/var/tmp/capy-rw-*` worktree per case and per
+majority repeat means ccache's default directory-in-hash made every
+cross-run compile a miss — `CCACHE_NOHASHDIR=1` +
+`CCACHE_BASEDIR=/var/tmp` (verified live: default env misses identical
+content across worktrees, the fix hits), temp files on disk instead of
+the 6G `/run/user` tmpfs, a 20G cache cap, and the eval process itself
+now exports the ccache env so the Phase-2 gate and TestRunner pre_continue
+builds inherit it instead of compiling cold.
 
 Expected on protobuf-0067: ~720s of the ~1020s build blowout skipped,
 content decisions unchanged. Actual (D7 batch-2): 1337s → 480s; 0071

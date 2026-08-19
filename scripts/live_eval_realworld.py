@@ -1379,6 +1379,15 @@ def main():
     for _stale in _glob.glob("/var/tmp/capy-rw-*"):
         _shutil_sweep.rmtree(_stale, ignore_errors=True)
 
+    # Export the ccache wiring into the eval process itself so EVERY child
+    # build inherits it — not just the paths that pass _ccache_env()
+    # explicitly. The orchestrator's Phase-2 build gate (_run_raw_test) and
+    # the TestRunner's pre_continue run `make` with the inherited
+    # environment; without this they compile cold (observed: cache counters
+    # frozen during build-heavy runs). The PATH shim prefix is idempotent.
+    if _ccache_enabled():
+        os.environ.update(_ccache_env())
+
     if args.census:
         _print_census(args.census)
         return

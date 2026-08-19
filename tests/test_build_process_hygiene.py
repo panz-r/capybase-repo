@@ -97,6 +97,51 @@ class TestCcacheEnv:
         assert not shim_dir.exists()
         assert env == os.environ.copy()
 
+    def test_cross_worktree_keys_present(self, tmp_path, monkeypatch):
+        # The eval re-materializes a fresh /var/tmp/capy-rw-* worktree per
+        # case and per majority repeat; without NOHASHDIR the compilation
+        # directory poisons the hash and every worktree misses (verified
+        # live). Temp must also leave the 6G /run/user tmpfs.
+        monkeypatch.setattr("capybase.verification._ccache_available", True)
+        env = _ccache_env(shim_dir=tmp_path / "shim")
+        assert env.get("CCACHE_NOHASHDIR") == "1"
+        assert env.get("CCACHE_BASEDIR") == "/var/tmp"
+        assert str(env.get("CCACHE_TEMPDIR", "")).startswith("/var/tmp")
+
+    @pytest.mark.skipif(
+        shutil.which("ccache") is None or shutil.which("g++") is None,
+        reason="needs ccache and g++ on PATH",
+    )
+    def test_cross_worktree_cache_hit(self, tmp_path, monkeypatch):
+        """Same content, two worktree dirs, -g build: the second must HIT.
+
+        This is the property the eval's economics depend on (fresh
+        worktree per case/repeat). Fails without CCACHE_NOHASHDIR.
+        """
+        monkeypatch.setenv("CCACHE_DIR", str(tmp_path / "ccache"))
+        env = _ccache_env(shim_dir=tmp_path / "shim")
+        env["CCACHE_BASEDIR"] = str(tmp_path)  # cover this test's trees
+        for wt in ("wt-a", "wt-b"):
+            src = tmp_path / wt / "src"
+            src.mkdir(parents=True)
+            (src / "t.cc").write_text("int f() { return 41; }\n")
+        first = subprocess.run(
+            ["g++", "-g", "-O2", "-c", "t.cc", "-o", "t.o"],
+            cwd=tmp_path / "wt-a" / "src", env=env,
+            capture_output=True, text=True, timeout=120,
+        )
+        assert first.returncode == 0, first.stderr
+        env["CCACHE_LOGFILE"] = str(tmp_path / "second.log")
+        env["CCACHE_DEBUG"] = "1"
+        second = subprocess.run(
+            ["g++", "-g", "-O2", "-c", "t.cc", "-o", "t.o"],
+            cwd=tmp_path / "wt-b" / "src", env=env,
+            capture_output=True, text=True, timeout=120,
+        )
+        assert second.returncode == 0, second.stderr
+        log = (tmp_path / "second.log").read_text()
+        assert "Succeeded getting cached result" in log, log[-2000:]
+
     @pytest.mark.skipif(
         shutil.which("ccache") is None or shutil.which("g++") is None,
         reason="needs ccache and g++ on PATH",
