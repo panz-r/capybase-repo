@@ -74,6 +74,18 @@ Targets:
   `_is_build_test` carve-out doesn't recognize validator `syntax`).
   Verdict is contamination-shaped; rerun post-66b780b (sprint-19 doc, D5).
 
+  **Sprint-19 D7 rerun verdict (unanimous ESCALATE, clean runs): the
+  case is un-passable under the eval toolchain.** The P1 whole-side
+  probes fired in every run and BOTH pristine merge-index sides fail
+  `cargo check` with the same two errors (`#[deprecated]` on trait impl
+  blocks; `std::mem::drop` on a `ManuallyDrop`) — the tokens absent from
+  every side of the conflicted file enter through rustc-version drift:
+  the historical tokio code, in every side including the oracle
+  (== current verbatim), does not compile under the newer rustc. Not a
+  splice artifact, not a model defect, not a mechanism gap; the honest
+  disposition is exactly what the pipeline produced (the rung declined —
+  no side verifies — and the unit escalated).
+
 **Infrastructure findings (both fixed or pinned):** (1) the provider's mDNS
 hostname resolved intermittently from Python — 24 LLM calls failed with DNS
 errors in batch 1; the provider now pins the raw IP (what all 85 historical
