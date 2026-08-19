@@ -58,10 +58,15 @@ Targets:
 - **tokio-0037/0046: ESCALATE 3/3** — clean rerun: 0037's units got real
   model responses this time; one unit's candidate was syntactically broken
   Rust and CEGIS could not repair it within budget (honest escalation,
-  sim 0.969). The deletion-respect swap remains unprobed on this case —
-  the file never reached the pre-stage path because a UNIT escalated
-  first. 0046 still stops via the end-of-rebase scan (the backstop
-  working as designed).
+  sim 0.969). Post-hoc refinement (sprint-19 diagnosis addendum): the
+  oracle is `current` verbatim, and unit 1:1's FIRST candidate was
+  current-verbatim — oracle-correct — but the `preservation_heuristic`
+  rejected it and the forced retries degraded into the syntax errors.
+  Self-inflicted escalation, not purely model-bound (reviewer question
+  Q1). The deletion-respect swap remains unprobed on this case — the
+  file never reached the pre-stage path because a UNIT escalated first.
+  0046 still stops via the end-of-rebase scan (the backstop working as
+  designed).
 - **tokio-0109: ESCALATE** — all 3 runs from the DNS-era batch, never
   clean-rerun: unit 1:2's LLM call died `request_failed` → the (now-fixed)
   empty-fallback side-pick, then the whole-file repair skipped itself on

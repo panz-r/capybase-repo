@@ -263,6 +263,36 @@ consecutive failures without touching the escalation threshold.
 Run 0027 + 0109 first — they need no new mechanisms, only the already-fixed
 transport carve-out, and 0109's true disposition is unknown.
 
+## Addendum — oracle-shape measurements (post-draft finding)
+
+Measured across all 676 corpus cases with oracles: **68.5% woven, 23.8%
+== current verbatim, 7.7% == replayed verbatim.** Five of the seven
+failing cases are `== current` (0065, 0067, 0071, 0037, 0109) — the
+correct whole-file answer was verbatim at a stage in every one. Two
+consequences that refine the diagnoses above:
+
+- **tokio-0037's escalation was self-inflicted, not purely model-bound.**
+  The oracle is `current` verbatim (it keeps the dead test struct
+  replayed deleted). Unit 1:1's FIRST candidate was current-verbatim —
+  oracle-correct, validation-passing (confidence 0.95) — and the
+  `preservation_heuristic` rejected it ("copies CURRENT verbatim, but
+  REPLAYED has unaccounted changes (deletion)"; risk.py:268 retry
+  trigger), after which retries degraded into syntax errors. The
+  heuristic is the sea-orm-0027 defense firing on a case where verbatim
+  was right; it lacks the context the file-level WS4 adjudication has.
+- **tokio-0109's ideal outcome was stage-available; no mechanism reaches
+  it.** Oracle == current (jaccard 1.0); the true-side portfolio only
+  engages on dup-pathology/asymmetric-churn triggers (churn here 0.18).
+  Additionally, 0109's two cargo errors reference tokens present in NO
+  side of the conflicted file — their provenance (replay-series
+  worktree context vs. a splice artifact) is unreproduced; the rerun
+  preserves worktrees to localize it.
+
+Both are framed as reviewer questions in
+`docs/sprint19-open-questions-for-review.md` (Q1-Q3), alongside the
+whole-side-availability class question the 31.5% one-side-oracle
+measurement raises.
+
 ## Non-goals
 
 - No relaxation of the collapse/resurrection guards (WS3/WS4 calibration
