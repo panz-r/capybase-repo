@@ -124,6 +124,11 @@ C_PREPARE_COMMANDS: dict[str, str] = {
 # probes the extracted tree's build system. _config_for reads from here so the
 # in-loop build gate matches whatever prepare actually ran. Keyed by case.id.
 _DETECTED_BUILD_CMD: dict[str, str] = {}
+# Sprint-20 S20.2: toolchain-era preflight cache (case_id -> probe dict,
+# None when no usable gate). Populated on the first run of a case; the
+# majority repeats reuse it (pristine sides and the oracle are identical
+# across repeats — re-probing would only burn build time).
+_TOOLCHAIN_PROBE_CACHE: dict[str, dict | None] = {}
 
 
 @dataclass
@@ -158,7 +163,7 @@ class CaseResult:
     matches_oracle: float = 0.0
     elapsed: float = 0.0
     reason: str = ""
-    verdict: str = ""  # PASS | WORKING | NEAR_MATCH | ORACLE_DIVERGENT | ESCALATE
+    verdict: str = ""  # PASS | WORKING | NEAR_MATCH | ORACLE_DIVERGENT | ESCALATE | ESCALATE_TOOLCHAIN | GATE_UNAVAILABLE
     compiles_cargo: bool | None = None  # None when cargo didn't run
     terminal_reason: str = ""  # disjoint escalation classification
     conflict_region_count: int = 0  # number of <<<<<<< regions (for timeout classification)
@@ -185,6 +190,12 @@ class CaseResult:
     # verdict => GATE_UNAVAILABLE: the case measures the sandbox, not the
     # resolver. Probed only for cases heading to a non-clean verdict.
     oracle_builds: bool | None = None
+    # Sprint-20 S20.2: toolchain-era preflight — both pristine sides AND
+    # the oracle fail the real gate with identical compile-error
+    # signatures (un-passable under this toolchain; the tokio-0109
+    # class). toolchain_probe carries the per-side rc/signature audit.
+    toolchain_dead: bool = False
+    toolchain_probe: dict = None
 
 
 def _classify_terminal_reason(reason: str) -> str:
@@ -200,9 +211,14 @@ def _classify_terminal_reason(reason: str) -> str:
       TIMEOUT_THROUGHPUT  — per-case timeout on a many-region file (>20 units)
       TIMEOUT_CAPABILITY  — per-case timeout on a small file (model can't solve it)
       REPAIR_FAILURE      — whole-file repair couldn't resolve a unit
+      TOOLCHAIN_ERA       — preflight: sides+oracle all fail the gate identically
       OTHER               — uncategorized
     """
     r = (reason or "").lower()
+    # Sprint-20 S20.2: the preflight classification (un-passable case, not
+    # a resolver outcome).
+    if "toolchain-era" in r:
+        return "TOOLCHAIN_ERA"
     # Safety stops (true-positive catches) — highest priority classification.
     if "resurrection" in r:
         return "SAFE_STOP"
@@ -907,6 +923,121 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
         return None
 
 
+_CC_ERROR_LINE_RE = re.compile(r"^\S+?:\d+:\d+:\s*(error:.*)$")
+
+
+def _compile_error_signature(output: str, language: str) -> list[str]:
+    """Normalized compile-error messages from a gate/cargo output.
+
+    rustc/cargo top-level error lines carry no location prefix
+    (``error[E0308]: msg``) and are kept whole; gcc/clang lines carry
+    ``file:line:col:`` prefixes that are stripped (the same conflict
+    file is compiled in every probe — locations carry no signal).
+    Sorted+deduped so outputs compare by content, not position. An
+    EMPTY signature means "no real compile errors" (usage text, make
+    driver noise, environment output) and can never classify a case —
+    the cf50f4b broken-gate class produces no signature.
+    """
+    sig: set[str] = set()
+    for ln in (output or "").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        if language == "rust":
+            if ln.startswith("error[") or ln.startswith("error:"):
+                # Cargo/rustc driver summaries carry counts that vary with
+                # warning totals ("...due to 6 previous errors; 71 warnings
+                # emitted") — not error content, and they break signature
+                # equality between sides that differ by a single warning
+                # (tokio-0109: 71 vs 70). Exclude them.
+                if (ln.startswith("error: could not compile")
+                        or ln.startswith("error: aborting due to")):
+                    continue
+                sig.add(ln)
+        else:
+            m = _CC_ERROR_LINE_RE.match(ln)
+            if m:
+                sig.add(m.group(1).strip())
+    return sorted(sig)
+
+
+def _toolchain_era_probe(repo: Path, case: "Case", *, has_crate: bool) -> dict | None:
+    """Sprint-20 S20.2: compile both pristine sides + the oracle in the
+    materialized worktree BEFORE the resolution pipeline runs.
+
+    tokio-0109 lesson: when historical code (both sides AND the oracle)
+    doesn't compile under the eval's newer toolchain, the case is
+    un-passable — the full majority-of-3 pipeline can only ever produce
+    an honest escalate, at full budget cost. Classification is strict:
+    all three texts fail the REAL gate command, the failures carry real
+    compile errors, and the two sides' normalized error signatures are
+    IDENTICAL (era-intrinsic, not content-dependent). Anything less
+    returns toolchain_dead=False and the case runs normally.
+
+    Returns a probe dict (cached per case id across majority repeats —
+    the pristine sides and the oracle don't change between runs) or
+    None when no usable in-crate gate exists: python (no era class),
+    rust without a crate (standalone rustc on one file fails on
+    ``use crate::`` paths for era-independent reasons — not evidence),
+    or a degraded/absent C gate command.
+    """
+    if case.language == "python":
+        return None
+    if case.language == "rust" and not has_crate:
+        return None
+    if case.language == "rust":
+        gate = "cargo check"
+    else:
+        gate = (_DETECTED_BUILD_CMD.get(case.id)
+                or C_BUILD_COMMANDS.get(case.dataset, ""))
+    if not gate or gate == "true":
+        return None
+    target = repo / case.path
+    if not target.exists():
+        return None
+    saved = target.read_bytes()
+    probes: dict[str, dict] = {}
+    try:
+        for name, text in (("current", case.current),
+                           ("replayed", case.replayed),
+                           ("oracle", case.expected_resolved)):
+            target.write_text(text, encoding="utf-8")
+            try:
+                proc = _run_shell_tree(gate, cwd=str(repo), timeout=240)
+                out = (proc.stderr or "") + (proc.stdout or "")
+                probes[name] = {
+                    "rc": proc.returncode,
+                    "sig": _compile_error_signature(out, case.language),
+                }
+            except Exception as exc:  # noqa: BLE001 — probe is best-effort
+                probes[name] = {
+                    "rc": None, "sig": [],
+                    "error": f"{type(exc).__name__}: {str(exc)[:120]}",
+                }
+    finally:
+        target.write_bytes(saved)  # restore the conflicted content exactly
+    dead = (
+        probes["current"]["rc"] not in (0, None)
+        and probes["replayed"]["rc"] not in (0, None)
+        and probes["oracle"]["rc"] not in (0, None)
+        and bool(probes["current"]["sig"])
+        and probes["current"]["sig"] == probes["replayed"]["sig"]
+    )
+    return {"toolchain_dead": dead, "gate": gate, "probes": probes}
+
+
+def _mark_toolchain_dead(res: "CaseResult", probe: dict, t0: float) -> "CaseResult":
+    res.elapsed = time.time() - t0
+    res.escalated = True
+    res.toolchain_dead = True
+    res.toolchain_probe = probe
+    res.reason = (
+        "toolchain-era: both pristine sides and the oracle fail the gate "
+        f"with identical compile errors ({probe.get('gate', '')})"
+    )
+    return res
+
+
 def _oracle_builds(repo: Path, case: Case, crate_source: Path | None) -> bool | None:
     """Does the ORACLE (expected_resolved) pass the same gate the merge faced?
 
@@ -1048,7 +1179,11 @@ def _verdict_chain(r: "CaseResult") -> str:
     ESCALATE / PASS / WORKING / NEAR_MATCH / ORACLE_DIVERGENT per the fields,
     then the GATE_UNAVAILABLE override: a sim >= 0.95 gate rejection where
     the ORACLE fails the same gate (oracle_builds probed on the live tree) is
-    a sandbox artifact, not a resolver failure."""
+    a sandbox artifact, not a resolver failure. ESCALATE_TOOLCHAIN comes
+    first: the preflight proved all three texts (both sides + oracle) fail
+    the gate identically — the case is un-passable by construction."""
+    if getattr(r, "toolchain_dead", False):
+        return "ESCALATE_TOOLCHAIN"
     if r.escalated:
         verdict = "ESCALATE"
     elif r.marker_free and r.compiles:
@@ -1082,6 +1217,12 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
     res = CaseResult(id=case.id, language=case.language, dataset=case.dataset)
     res.conflict_region_count = case.marker_original.count("<<<<<<<")
     t0 = time.time()
+    # Sprint-20 S20.2: a case already classified toolchain-era by an
+    # earlier repeat skips even materialization — the pristine sides and
+    # the oracle are identical across repeats by construction.
+    _cached_probe = _TOOLCHAIN_PROBE_CACHE.get(case.id)
+    if _cached_probe is not None and _cached_probe.get("toolchain_dead"):
+        return _mark_toolchain_dead(res, _cached_probe, t0)
     owns_td = td is None
     if owns_td:
         td = tempfile.mkdtemp(prefix="capy-rw-", dir="/var/tmp")
@@ -1099,6 +1240,22 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
             res.reason = f"setup failed: {type(exc).__name__}: {str(exc)[:100]}"
             res.escalated = True
             return res
+        # Sprint-20 S20.2: toolchain-era preflight — one probe triple per
+        # case (cached across repeats), strictly before the pipeline
+        # spends any budget. Declines to classify on anything short of
+        # identical real compile errors on both sides AND an oracle
+        # failure; passable cases are behavior-identical (the probes
+        # restore the conflicted file byte-exact and warm the build).
+        if _cached_probe is None:
+            _cached_probe = _toolchain_era_probe(
+                repo, case, has_crate=crate_source is not None)
+            _TOOLCHAIN_PROBE_CACHE[case.id] = _cached_probe
+        if _cached_probe is not None and _cached_probe.get("toolchain_dead"):
+            return _mark_toolchain_dead(res, _cached_probe, t0)
+        if _cached_probe is not None:
+            # Declined classification — still recorded for the audit trail
+            # (the harvest census reads per-case probe outcomes).
+            res.toolchain_probe = _cached_probe
         cfg = _config_for(case, has_crate=crate_source is not None)
         engine = ResolutionEngine(cfg.model, client=client)
         orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
@@ -1211,6 +1368,10 @@ def _print_census(results_path: str) -> None:
         terminal = r.get("terminal_reason", "")
         if not r.get("escalated"):
             return "RESOLVED"
+        # Sprint-20 S20.2: un-passable under this toolchain — not a
+        # resolver failure, budget was never spent.
+        if r.get("toolchain_dead") or "toolchain-era" in reason:
+            return "toolchain_era"
         # Try gcc parse-error classification first
         cat = _classify_ccs_parse_error(reason)
         if cat:

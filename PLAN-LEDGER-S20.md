@@ -36,7 +36,7 @@ branch `dev`. Never push (user's job).
 | # | Item | Status | Case-by-case acceptance |
 |---|------|--------|-------------------------|
 | S20.1 | Resolver R10 xfail: anchor-scoped `mechanical_reapply_merge` | DONE (9d03e3f) | the xfail'd test passes strict (no xfail); 543 resolver-related tests green; full suite gate launched (suite-s20-r1) |
-| S20.2 | Toolchain-era preflight probe (`ESCALATE_TOOLCHAIN`) | TODO | tokio-0109 classified by one pristine-side probe pair (cacheable across repeats, ~seconds); passable cases behavior-identical |
+| S20.2 | Toolchain-era preflight probe (`ESCALATE_TOOLCHAIN`) | DONE | live acceptance: tokio-0109 classified in **8.9s** as ESCALATE_TOOLCHAIN, unanimous 3/3 via the probe cache (D7 burned full majority-of-3 pipelines on it); strict conditions (all three texts fail the real gate, real compile errors, identical side signatures); python/crateless-rust/degraded-gate skip |
 | S20.3 | queue.rs resurrection fingerprint investigation | DONE — verdict: no policy change | 0037/0046 are byte-identical conflicts (same base/cur/rep, two merge SHAs) whose HUMAN oracles resolve the replayed deletion oppositely (0037 keeps 6/7 deleted lines, 0046 keeps 0/7) — the backstop's stop is the correct conservative disposition on genuinely ambiguous ground truth. Offline census: 645 distinct groups; 30 dupe groups / 62 cases; only this pair diverges |
 | S20.4 | Empty-resolution bounded retry | TODO | flask-0006: exactly one retry with reformulated constrained prompt; escalation path unchanged when the retry also empties |
 | S20.5 | Hygiene pack: lockfile exemptions, sweep centralization, `longrun` wrapper, ccache sloppiness measurement | TODO | cross-worktree hit rate measured on a protobuf case pair; stale-process sweep runs from every entry point |
@@ -130,3 +130,21 @@ zero oracle-divergent merges.
   pair (0037/0046). Harvest/sprint-21 note: dedupe or pair-treat in
   metrics — a deterministic resolver can PASS at most one twin of a
   divergent pair, so the pair bounds the achievable corpus PASS rate.
+- 2026-08-20 01:2x: **S20.2 DONE — toolchain-era preflight live-accepted
+  on tokio-0109** (scripts/live_eval_realworld.py +
+  tests/test_live_eval_toolchain.py, 12 tests). `_toolchain_era_probe`
+  compiles both pristine sides AND the oracle in the materialized
+  worktree (the REAL gate: cargo check / the detected C build), before
+  the pipeline spends budget; classifies only when all three fail with
+  real compile errors and the sides' normalized signatures are
+  IDENTICAL; probe cached per case across majority repeats (repeats
+  skip even materialization). Python, crateless rust (standalone rustc
+  on one file fails on `use crate::` for era-independent reasons), and
+  degraded gates skip entirely; empty signatures (driver noise — the
+  cf50f4b broken-gate class) never classify. Live discovery: cargo's
+  summary line ("...due to 6 previous errors; 71 warnings emitted")
+  differs between sides by the warning COUNT (0109: 71 vs 70) — driver
+  summaries are excluded from signatures. Acceptance: ESCALATE_TOOLCHAIN
+  3/3 in 8.9s wall (vs full-pipeline burns); census/terminal categories
+  carry TOOLCHAIN_ERA; probe dicts recorded on results for the harvest
+  audit even when classification declines.
