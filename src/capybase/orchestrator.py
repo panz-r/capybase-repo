@@ -12159,6 +12159,16 @@ class Orchestrator:
                 and not (cand.resolved_text or "").strip()
                 and (_tok_est < 1500 or _empty_oversized)
                 and (not _refusal or _oversized_parse_fail)
+                # A TRANSPORT failure (request never completed) is not a
+                # model verdict — the endpoint said nothing about this
+                # conflict, so there is no basis for the deterministic side
+                # pick. Same class as the refusal carve-out: infrastructure
+                # weather must not decide merge semantics. A genuine empty
+                # 200-response coerces to parse_failed, which still
+                # fast-fails; request_failed falls to risk.decide's
+                # technical-retry ladder instead (s18 validation: sea-orm-0027
+                # shipped a one-side merge during a transient outage).
+                and (cand.failure_kind or "") != "request_failed"
             ):
                 _unit_kind = "sub" if "#s" in unit.unit_id else "top"
                 self.journal.emit(

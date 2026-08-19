@@ -347,3 +347,55 @@ def test_first_empty_oversized_prompt_skips_retries(tmp_path: Path):
         f"retries must be skipped on the oversized arm; saw {len(rounds)} "
         f"generation rounds")
     assert not result.escalated
+
+
+# ---------------------------------------------------------------------------
+# Sprint 18 (post-validation): transport failures never feed the side pick
+# ---------------------------------------------------------------------------
+
+def test_transport_failure_does_not_become_a_side_pick(tmp_path: Path):
+    """A request that never completed (failure_kind=request_failed) must NOT
+    trigger the first-empty fast-fail's deterministic side pick — the endpoint
+    expressed no opinion about the conflict. s18 validation: sea-orm-0027
+    shipped a one-side merge (ORACLE_DIVERGENT) during a transient network
+    outage because the empty-fallback mistook "no route to host" for an empty
+    model verdict. Expected now: escalate honestly after the retry ladder."""
+    from capybase.resolution_engine import ResolutionEngine
+
+    class _DeadClient:
+        def complete(self, messages, **kw):
+            raise ConnectionError("no route to host (simulated outage)")
+
+    base = "def parse():\n    return 1\n"
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    build_multistep_rebase(
+        repo,
+        base_files={"cfg.py": base},
+        feat_commits=[CommitEdit("feat: bump", {"cfg.py": "def parse():\n    return 2\n"})],
+        main_commits=[CommitEdit("main: bump too", {"cfg.py": "def parse():\n    return 99\n"})],
+        stop_early=True,
+    )
+    cfg = Config()
+    cfg.model.model = "fake"
+    cfg.tests.required = False
+    cfg.tests.pre_continue = "true"
+    cfg.tests.final = "true"
+    cfg.future.enable_source_portfolio = False      # reach the LLM path
+    cfg.future.enable_structural_resolver = False
+    engine = ResolutionEngine(cfg.model, client=_DeadClient())
+    orch = Orchestrator(cfg, repo=str(repo), resolution_engine=engine,
+                        out=lambda *_a, **_k: None)
+    result = orch.run()
+    # No deterministic side pick happened on a transport failure...
+    accepts = [e.payload for e in orch.journal.read_events()
+               if e.event_type == "candidate_accepted"]
+    assert not any(a.get("via") == "empty_fast_fail" for a in accepts), (
+        "a transport failure must never be converted into a side pick")
+    # ...and the empty-fragment journal (if any) records the true cause.
+    frags = [e.payload for e in orch.journal.read_events()
+             if e.event_type == "llm_empty_fragment"]
+    assert all(f.get("failure_kind") == "request_failed" for f in frags)
+    # The honest outcome during an outage: escalation, not a silent merge.
+    assert result.escalated

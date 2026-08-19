@@ -42,25 +42,39 @@ Targets:
   journaled `phase2_build_inconclusive` (timeout ≠ merge defect, by
   design). Finding: 120s is too small for a cold full protobuf tree;
   warm-the-build or raise the cap for the whole-tree fallback — sprint-19.
-- **sea-orm-0027: ORACLE_DIVERGENT 3/3** (sim 0.793) — CONTAMINATED: the
-  side-collapse detector FIRED correctly (buffer 100% contained in one
-  side, 0% of the other's new lines kept), but the adjudication LLM call
-  died on DNS (`Name or service not known`) → null → the designed
-  conservative accept. Clean rerun in flight.
-- **tokio-0037/0046: ESCALATE 3/3** ("suspected silent resurrection") —
-  0037's units resolved current_only with sim 1.0 (correct content), but
-  via the DNS-empty fallback; the deletion-respect swap never probed and
-  the end-of-rebase scan stopped the rebase. Contaminated; clean rerun in
-  flight will show the swap's real behavior.
+- **sea-orm-0027: ORACLE_DIVERGENT 3/3** (sim 0.793) — root cause now fully
+  diagnosed and FIXED. Across both batches (6 runs), the side-collapse
+  detector FIRED correctly every time (buffer 100% contained in one side,
+  0% of the other's new lines kept) — but every adjudication LLM call died
+  on a transient transport failure (mDNS name resolution in batch 1,
+  "No route to host" in the clean rerun) → null → the designed
+  conservative accept. The real defect: a TRANSPORT failure
+  (`failure_kind=request_failed`) coerced into the first-empty fast-fail's
+  deterministic side pick — network weather decided merge semantics (the
+  same class as the WS0a refusal fix). Fixed: request_failed candidates no
+  longer feed the side pick; they take risk.decide's technical-retry
+  ladder and escalate honestly during an outage. Guard machinery itself
+  was never wrong — it never once received a usable adjudication.
+- **tokio-0037/0046: ESCALATE 3/3** — clean rerun: 0037's units got real
+  model responses this time; one unit's candidate was syntactically broken
+  Rust and CEGIS could not repair it within budget (honest escalation,
+  sim 0.969). The deletion-respect swap remains unprobed on this case —
+  the file never reached the pre-stage path because a UNIT escalated
+  first. 0046 still stops via the end-of-rebase scan (the backstop
+  working as designed).
 - **tokio-0109: ESCALATE** (whole-file repair could not re-resolve a unit).
 
-**Infrastructure finding (fixed):** the provider initially used the mDNS
-hostname; it resolved intermittently from Python — 24 LLM calls failed with
-DNS errors, concentrated on sea-orm-0027 (12), protobuf-0071 (4), and
-sea-orm-0009/0010 (4 each; both still PASSED). The historical runs all used
-the raw IP (no DNS). The provider config now pins the IP, and
-`/tmp/capybase-live/s18/run_dnsfix_rerun.sh` reruns the four contaminated
-cases (0027, 0037, 0067, 0071) cleanly.
+**Infrastructure findings (both fixed or pinned):** (1) the provider's mDNS
+hostname resolved intermittently from Python — 24 LLM calls failed with DNS
+errors in batch 1; the provider now pins the raw IP (what all 85 historical
+runs used). (2) A separate transient ("No route to host") hit the clean
+rerun's sea-orm-0027 runs — exposing the transport-failure→side-pick bug
+fixed above. (3) protobuf-0067/0071's ESCALATE timeouts are GENUINE: the
+clean rerun had zero transport failures; the model does not converge on
+these two cases within the 1200s cap now that each CEGIS round includes a
+protobuf full-tree build (sprint-19: build-budget/warm-build work).
+Artifacts: `/tmp/capybase-live/s18/val/` (`ws1.json`, `guards.json`,
+`*-dnsfix.json`, `flights*/`).
 
 ## WS0 — CI unblock + quick wins (66ca8b2, 18e5573)
 
@@ -197,9 +211,9 @@ not a considered refusal — the small arm keeps the strict exclusion.
 | C++ micro-repair cases | 3/3 PASS | mixed live: fmt-0003 ESCALATE (expected); 0055 ESCALATE (honest, oversized-skip precedes micro-patch); 0065 divergent (Phase-2 build timeout inconclusive — 120s too small) |
 | Fast-path band | [0.80, 1.0] if clean | **keep 0.90** (calibration: nothing to gain) |
 | axum-0017 | PASS | **WORKING 3/3** — completes; no more pin-file SAFE_STOP |
-| tokio-0037/0046 | 0-2 PASS w/o weakening safety | ESCALATE 3/3; guard NOT weakened; DNS-contaminated, clean rerun in flight |
-| sea-orm-0027 | PASS or safe escalate | detector FIRED; adjudication DNS-failed → conservative accept; clean rerun in flight |
-| Regressions on passing cases | 0 | hermetic suite green; live: protobuf-0067/0071 flipped (DNS-contaminated, rerunning); all other must-holds held |
+| tokio-0037/0046 | 0-2 PASS w/o weakening safety | ESCALATE 3/3; guard NOT weakened; honest unit-level failures; swap still unprobed on 0037 |
+| sea-orm-0027 | PASS or safe escalate | detector fired 6/6; adjudication transport-killed 6/6 → transport-failure side-pick bug found + fixed |
+| Regressions on passing cases | 0 | hermetic suite green; protobuf-0067/0071 timeouts genuine (build-budget convergence, sprint-19); all other must-holds held |
 
 ## Remaining after sprint 18
 
