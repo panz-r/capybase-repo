@@ -9,6 +9,7 @@ resolution into the file precisely.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 from capybase.adapters.parsers import MarkerBlock, parse_marker_blocks
@@ -526,6 +527,130 @@ def _blob_provenance(git: object, blob_oid: str | None) -> dict:
 # split inside the marker scaffolding (the ``<<<<<<<`` / ``=======`` /
 # ``>>>>>>>`` lines) — split points are content lines.
 
+#: C++ access specifiers — a context boundary inside a class body.
+_CC_ACCESS_SPEC_RE = re.compile(r"^\s*(public|protected|private)\s*:\s*$")
+#: Control keywords that look like signatures but never start a member fn.
+_CC_MEMBER_SKIP_WORDS = frozenset({
+    "if", "for", "while", "switch", "catch", "do", "else", "return",
+    "sizeof", "typeof", "static_assert", "using", "namespace", "template",
+    "operator", "delete", "new",
+})
+
+
+def _class_member_split_points(side_text: str, language: str) -> list[int]:
+    """Member-function boundaries inside a C++ class/struct body (depth-2).
+
+    Sprint-19 P5, journal-only stage: the v3 entity splitter's top-level
+    parser sees a class-with-methods as ONE entity, so an oversized region
+    dominated by a single class yields one giant fragment and the unit
+    escalates as oversized (protobuf-0055). This measures what a
+    member-boundary split WOULD produce: the 0-based line offsets at
+    which a member function definition starts (a signature-shaped line at
+    the class's own body depth that opens a body), plus access-specifier
+    resets. Depth is tracked RELATIVE to the enclosing class via an
+    opener stack, so classes nested inside namespaces register. A later,
+    calibrated stage may split on these points; today they are only
+    measured and journaled.
+
+    Best-effort heuristics (string/comment lines skipped via a running
+    ignore-state); returns [] for non-C++ or unparseable input.
+    """
+    if language not in ("cpp", "c++", "cc", "cxx", "hpp", "h"):
+        return []
+    if not side_text or not side_text.strip():
+        return []
+    lines = side_text.split("\n")
+    points: list[int] = []
+    # Opener stack: each entry is the brace depth INSIDE that opener's
+    # body (depth after its '{'), plus whether it opened a class/struct.
+    openers: list[tuple[int, bool]] = []
+    in_string: str | None = None
+    in_comment = False
+
+    def _in_class_body() -> bool:
+        return bool(openers) and openers[-1][1]
+
+    def _class_body_depth() -> int:
+        return openers[-1][0] if openers else -1
+
+    for i, raw in enumerate(lines):
+        if in_comment:
+            if "*/" in raw:
+                in_comment = False
+            continue
+        if in_string:
+            if in_string in raw:
+                in_string = None
+            continue
+        stripped = raw.strip()
+        if not stripped or stripped.startswith(("//", "#")):
+            continue
+        # Class-body classification BEFORE brace tracking so the opener's
+        # own line is never a split point. While the INNERMOST opener is
+        # the class, every line is directly in its body (a method body
+        # would have pushed its own non-class opener on top).
+        if _in_class_body():
+            if _CC_ACCESS_SPEC_RE.match(raw):
+                points.append(i)
+            else:
+                first_word = ""
+                if "(" in stripped:
+                    head = stripped.split("(", 1)[0].split()
+                    first_word = head[-1] if head else ""
+                if (
+                    "(" in stripped
+                    and first_word not in _CC_MEMBER_SKIP_WORDS
+                    and not stripped.endswith((";", ","))
+                    and not stripped.startswith("}")
+                ):
+                    # Body must open within this line or the next two
+                    # non-blank lines, with no ';' before that '{'.
+                    window = stripped
+                    j = i + 1
+                    while ("{" not in window and ";" not in window
+                           and j < len(lines) and j <= i + 2):
+                        nxt = lines[j].strip()
+                        if nxt:
+                            window += " " + nxt
+                        j += 1
+                    if "{" in window and ";" not in window.split("{", 1)[0]:
+                        points.append(i)
+        # Brace tracking (after classification).
+        if "/*" in raw and "*/" not in raw:
+            in_comment = True
+            continue
+        if '"' in raw.replace('\\"', ""):
+            in_string = '"'
+        is_class_opener = bool(re.search(r"\b(class|struct)\b", raw)) and (
+            "{" in raw or _opens_soon(lines, i))
+        for _ch in raw:
+            if _ch == "{":
+                openers.append((len(openers) + 1, is_class_opener))
+            elif _ch == "}" and openers:
+                openers.pop()
+    # A multi-line signature flags at most its last line (continuation
+    # lines end with ',' or carry no '('), so no adjacency dedup is
+    # needed — specifiers may legitimately neighbor member starts.
+    return sorted({p for p in points if p > 0})
+
+
+def _depth_of_line(raw: str) -> int:
+    """Indentation depth proxy: leading 2-space units (class-member style)."""
+    return (len(raw) - len(raw.lstrip(" "))) // 2
+
+
+def _opens_soon(lines: list[str], i: int, lookahead: int = 2) -> bool:
+    """Whether a '{' appears within the next few non-blank lines (no ';')."""
+    window = ""
+    j = i + 1
+    while j < len(lines) and j <= i + lookahead:
+        nxt = lines[j].strip()
+        if nxt:
+            window += " " + nxt
+        j += 1
+    return "{" in window and ";" not in window.split("{", 1)[0]
+
+
 def _side_entity_split_points(side_text: str, language: str) -> list[int]:
     """Content-line offsets (0-based) at which a top-level entity starts in ``side_text``.
 
@@ -635,6 +760,42 @@ def _build_sub_unit(
         severity=parent.severity,
         structural_metadata=meta,
     )
+
+
+def _stamp_class_member_candidate(
+    unit: ConflictUnit,
+    cur_text: str,
+    rep_text: str,
+    lang: str,
+    reason: str,
+) -> None:
+    """Sprint-19 P5 (journal-only): record a would-split member-boundary measurement.
+
+    Stamps ``structural_metadata["class_member_split_candidate"]`` when the
+    entity-level split declined but a C++ class body carries >= 2 member-
+    function boundaries — the protobuf-0055 class. Pure measurement: no
+    behavior change; the orchestrator journals it at the oversized-skip
+    sites so live runs quantify the addressable set before any enabling
+    decision (the sprint-18 discipline: calibrate before gating).
+    """
+    if lang not in ("cpp", "c++", "cc", "cxx", "hpp", "h"):
+        return
+    try:
+        cur_pts = _class_member_split_points(cur_text, lang)
+        rep_pts = _class_member_split_points(rep_text, lang)
+    except Exception:  # noqa: BLE001 — measurement must never break extraction
+        return
+    if max(len(cur_pts), len(rep_pts)) < 2:
+        return
+    unit.structural_metadata["class_member_split_candidate"] = {
+        "decline_reason": reason,
+        "current_member_points": len(cur_pts),
+        "replayed_member_points": len(rep_pts),
+        "current_offsets": cur_pts[:12],
+        "replayed_offsets": rep_pts[:12],
+        "region_lines": (unit.marker_span[1] - unit.marker_span[0] + 1)
+        if unit.marker_span else 0,
+    }
 
 
 def _compute_parent_deletion_meta(unit: ConflictUnit) -> dict:
@@ -758,7 +919,13 @@ def _split_unit_at_entities(
         rep_frags = _fragment_at_points(rep_text, rep_pts)
         cur_frags = _broadcast_fragment(cur_text, len(rep_frags))
     else:
-        # Neither side has interior entity boundaries — nothing useful to split.
+        # Neither side has interior entity boundaries — nothing useful to
+        # split at the entity level. Sprint-19 P5 (journal-only): when the
+        # region is dominated by a C++ class with member-function
+        # boundaries, measure what a depth-2 split would produce and stamp
+        # it on the unit for the oversized-skip journal.
+        _stamp_class_member_candidate(unit, cur_text, rep_text, lang,
+                                      "no_top_level_boundary")
         return [unit]
 
     # Defensive parity: fragments must align in count.
@@ -770,6 +937,8 @@ def _split_unit_at_entities(
     # its predecessor. Build the keep-mask over the fragment list.
     keep = _merge_tiny_fragments(cur_frags, rep_frags, min_sub_lines)
     if sum(keep) < 2:
+        _stamp_class_member_candidate(unit, cur_text, rep_text, lang,
+                                      "fragments_below_min_sub_lines")
         return [unit]
     # Re-extract the kept fragments (merging absorbed ones' text).
     cur_kept, rep_kept = _apply_keep(cur_frags, rep_frags, keep)

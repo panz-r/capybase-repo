@@ -5157,6 +5157,27 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 - advisory for the strictness gate
             return None
 
+    def _journal_class_member_candidate(self, unit: ConflictUnit) -> None:
+        """Sprint-19 P5 (journal-only): surface a measured member-boundary split.
+
+        When the extractor stamped ``class_member_split_candidate`` (an
+        oversized C++ class region whose entity-level split declined but
+        whose class body carries member-function boundaries), journal it
+        alongside the oversized skip so live runs quantify the addressable
+        set (the protobuf-0055 class) before any enabling decision.
+        """
+        cand = (unit.structural_metadata or {}).get("class_member_split_candidate")
+        if not isinstance(cand, dict):
+            return
+        self.journal.emit(
+            "class_member_split_candidate",
+            {**cand,
+             "enabled": bool(getattr(
+                 self.config.future, "enable_class_member_splitting",
+                 False))},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+
     def _llm_oversized_for_window(self, unit: ConflictUnit) -> tuple[bool, int, int]:
         """Whether the conflict's essential content exceeds the model's window.
 
@@ -11583,6 +11604,7 @@ class Orchestrator:
                     {"essential_tokens": essential_t, "available_tokens": available_t},
                     step_index=self.step, path=unit.path, unit_id=unit.unit_id,
                 )
+                self._journal_class_member_candidate(unit)
                 return outcome
 
         _dup_def_retried = False  # one duplicate-def CEGIS retry per unit
@@ -11733,6 +11755,10 @@ class Orchestrator:
                              "prompt_chars": len(prompt)},
                             step_index=self.step, path=unit.path, unit_id=unit.unit_id,
                         )
+                        # Sprint-19 P5 (journal-only): correlate the skip
+                        # with a measured class-member split candidate when
+                        # one exists (the protobuf-0055 class).
+                        self._journal_class_member_candidate(unit)
                         outcome.escalated = True
                         outcome.retry_count = retry_count
                         outcome.reason = (

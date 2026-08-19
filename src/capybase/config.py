@@ -845,6 +845,18 @@ class FutureConfig(BaseModel):
     # fires, retries still run, and an equal-or-better retry is used (the
     # rescue never preempts a real acceptance).
     enable_preservation_bestof_n: bool = True
+    # Class-with-methods splitting (sprint-19 P5): the v3 entity splitter
+    # sees a C++ class as ONE top-level entity, so an oversized region
+    # dominated by a single class yields one giant fragment and the unit
+    # escalates as oversized (protobuf-0055: 16.3K-token prompt vs an 8K
+    # window before any candidate exists). Member-function boundaries
+    # inside the class body are measurable (depth-2 entities, access-
+    # specifier aware); this flag is JOURNAL-ONLY until the corpus
+    # calibration confirms the split is splice-safe and brings such
+    # regions under the window — the measurement stamps
+    # class_member_split_candidate metadata and journals it at the
+    # oversized-skip sites.
+    enable_class_member_splitting: bool = False
     # Phase 4 comment jury (design §5). An untrusted semantic sensor that
     # evaluates comment claims produced by the comment pass. Three operating
     # modes:

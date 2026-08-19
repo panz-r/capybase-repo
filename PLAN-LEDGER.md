@@ -49,9 +49,41 @@ Resolutions of reviewer disagreements (final):
 | P2 | Churn-aware preservation heuristic + Best-of-N recovery | DONE (impl+tests) | see P2 detail below |
 | P3 | Build state machine + conditional retry (+ccache/-j$(nproc)) | DONE (impl+tests) | see P3 section; D2 prewarming deferred |
 | P4 | Compiler-authority override at final gate | DONE (impl+tests) | see P4 section; fixes protobuf-0065 |
-| P5 | Class-with-methods entity splitting (journal-only first) | TODO | protobuf-0055 |
+| P5 | Class-with-methods entity splitting (journal-only first) | DONE (journal-only stage) | flag default OFF; enabling awaits live calibration |
 | P6 | Near-verbatim band calibration (measure-only) | TODO | informs future fast-path |
 | D7 | Post-fix live rerun matrix (sea-orm-0027, tokio-0109 first) | TODO | needs no new mechanisms for 0027/0109 |
+
+## P5 design (as implemented, 2026-08-19 — journal-only stage)
+
+- `config.py`: `future.enable_class_member_splitting = False` (journal-only).
+- `conflict_extractor.py`:
+  - `_class_member_split_points(side, lang)`: depth-2 boundary detector —
+    an opener STACK tracks class-body depth (namespace-nesting safe);
+    member-fn starts = signature lines directly inside the class opener
+    that open a body within 2 lines with no ';' first; access specifiers
+    (public:/protected:/private:) count as boundaries; declarations
+    (ending ';'), data members, control keywords, and ','-continuation
+    lines (initializer lists) are excluded.
+  - `_stamp_class_member_candidate()`: on the entity-splitter's decline
+    paths (no top-level boundary / fragments below min), stamps
+    structural_metadata["class_member_split_candidate"] with per-side
+    point counts + offsets + region lines. Pure measurement.
+- `orchestrator.py`: `_journal_class_member_candidate()` journals the
+  stamp (with the flag's enabled state) at BOTH oversized-skip sites
+  (`llm_skipped_oversized`, `llm_skipped_oversized_prompt`).
+- Tests: `tests/test_class_member_split.py` (11).
+- Offline calibration data point (protobuf-history-0055): the single
+  marker block is cur=516 lines / rep=0 (one-sided region); detector
+  finds 3 member points in the current side (access specifier, ctor
+  continuation, GenerateParserLoop). A member split alone yields ~2-3
+  fragments of 150-250 lines — still over an 8K window alone; the
+  enabling stage would need the statement-level splitter
+  (`_find_statement_split_points`, already in the ladder) beneath it.
+  Live runs will journal the real distribution before any enabling
+  decision (sprint-18 discipline).
+- Must-hold when enabling later: sqlite entity-splitting cases; splice
+  safety (non-overlapping spans, no reordering, access specifiers
+  preserved per fragment).
 
 ## P4 design (as implemented, 2026-08-19)
 
