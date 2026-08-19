@@ -157,7 +157,7 @@ def test_timeout_degrades_and_next_call_skips(monkeypatch):
     monkeypatch.setattr(V, "_compile_ccs",
                         lambda whole, **kw: (True, "ok"))
     monkeypatch.setattr(
-        V.subprocess, "run", fake_run)
+        V, "_run_shell_tree", fake_run)
 
     code = "int main(void) { return 0; }\n"
     r1 = eng.verify_file(
@@ -193,7 +193,7 @@ def test_recoverable_timeout_retries_at_double_cap(monkeypatch):
                 output=b"cargo: Blocking waiting for file lock")
         return SimpleNamespace(returncode=0, stderr="", stdout="")
 
-    monkeypatch.setattr(V.subprocess, "run", fake_run)
+    monkeypatch.setattr(V, "_run_shell_tree", fake_run)
     code = "int x;\n"
     eng.verify_file("a.c", "c", code, [], repo_root="/tmp", whole_text=code)
     # retried once at 2x cap, then succeeded
@@ -217,7 +217,7 @@ def test_second_recoverable_timeout_degrades(monkeypatch):
             cmd, kw.get("timeout"),
             output=b"internal compiler error")
 
-    monkeypatch.setattr(V.subprocess, "run", fake_run)
+    monkeypatch.setattr(V, "_run_shell_tree", fake_run)
     code = "int x;\n"
     eng.verify_file("a.c", "c", code, [], repo_root="/tmp", whole_text=code)
     # attempt 1 at 300 (recoverable) -> retry at 600 -> still timeout -> degrade
@@ -234,7 +234,7 @@ def test_targeted_build_timeout_does_not_degrade(monkeypatch):
     eng.build_state = BuildStateTracker()
     monkeypatch.setattr(V, "_compile_ccs", lambda whole, **kw: (True, "ok"))
     monkeypatch.setattr(
-        V.subprocess, "run",
+        V, "_run_shell_tree",
         lambda cmd, **kw: (_ for _ in ()).throw(
             subprocess.TimeoutExpired(cmd, kw.get("timeout"))))
 

@@ -88,7 +88,11 @@ from capybase.provider_config import (  # noqa: E402
 )
 from capybase.resolution_engine import ResolutionEngine  # noqa: E402
 from tests._realworld_build import C_BUILD_COMMANDS  # noqa: E402
-from capybase.verification import _ccache_enabled, _ccache_env  # noqa: E402
+from capybase.verification import (  # noqa: E402
+    _ccache_enabled,
+    _ccache_env,
+    _run_shell_tree,
+)
 
 TESTDATA = Path(__file__).resolve().parent.parent / "extracted-testdata" / "realworld"
 
@@ -529,10 +533,9 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
             # absolute paths (TOP=/var/tmp/capy-rw-OLD/r) that break when
             # restored into a different temp dir.
             try:
-                import subprocess as _sp
                 _prepare_timeout = 300 if "autoreconf" in prepare else 180
-                proc = _sp.run(prepare, shell=True, cwd=str(repo),
-                               capture_output=True, timeout=_prepare_timeout)
+                proc = _run_shell_tree(prepare, cwd=str(repo),
+                                       timeout=_prepare_timeout)
                 prepare_ok = proc.returncode == 0
             except Exception:  # noqa: BLE001 — best-effort
                 prepare_ok = False
@@ -571,16 +574,14 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
             and (repo / "Makefile").exists()
         ):
             try:
-                import subprocess as _sp_hdr
                 # Build lemon, then the derived headers. These are the
                 # prerequisite targets for compiling any sqlite source file.
-                _sp_hdr.run(
+                _run_shell_tree(
                     "make lemon sqlite3.h >/dev/null 2>&1 && "
                     "make parse.h >/dev/null 2>&1 && "
                     "make keywordhash.h >/dev/null 2>&1 && "
                     "make opcodes.h >/dev/null 2>&1",
-                    shell=True, cwd=str(repo),
-                    capture_output=True, timeout=120,
+                    cwd=str(repo), timeout=120,
                     env=_ccache_env() if _ccache_enabled() else None,
                 )
             except Exception:  # noqa: BLE001 — header generation is advisory
@@ -853,7 +854,6 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
     'divergent' solely because redis's vendored hiredis/junkalloc header
     defines globals that multiply-define under -fno-common.
     """
-    import subprocess as _sp
     # Prefer the adaptively-detected build command (set by _materialize_conflict
     # via _resolve_c_build), which matches whatever prepare actually ran. Falls
     # back to the static per-dataset default.
@@ -861,8 +861,7 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
     if not cmd or cmd == "true":
         return None
     try:
-        proc = _sp.run(cmd, shell=True, cwd=str(repo),
-                       capture_output=True, text=True, timeout=300)
+        proc = _run_shell_tree(cmd, cwd=str(repo), timeout=300)
         if proc.returncode == 0:
             return True
         stderr = (proc.stderr or "") + (proc.stdout or "")
@@ -1281,8 +1280,13 @@ def _kill_stale_build_processes():
 
     Eval runs launch cmake/make/gcc/ccache subprocesses that can outlive the
     parent Python process (especially when killed via timeout or SIGKILL).
-    Uses /proc scanning (not pkill, which can hang on large process tables)
-    with a hard 5s budget. Best-effort — never blocks the eval.
+    Matches on BOTH cmdline markers and the process working directory: the
+    leaked population is mostly ``make``/``ccache g++``/libtool command
+    lines that carry no marker string, but every one of them runs with its
+    cwd inside a /var/tmp/capy-rw-* eval worktree (which outlives the
+    worktree itself — the dir shows as deleted). Uses /proc scanning (not
+    pkill, which can hang on large process tables) with a hard 5s budget.
+    Best-effort — never blocks the eval.
     """
     import os
     import signal
@@ -1296,10 +1300,16 @@ def _kill_stale_build_processes():
         try:
             with open(f"/proc/{pid_dir}/cmdline", "rb") as f:
                 cmdline = f.read().decode("utf-8", errors="replace")
-            if "capybase-ccache-shim" in cmdline or "capy-rw-" in cmdline:
-                os.kill(int(pid_dir), signal.SIGKILL)
+            cwd = os.readlink(f"/proc/{pid_dir}/cwd")
         except (OSError, ValueError):
             continue
+        if (
+            "capybase-ccache-shim" in cmdline
+            or "capy-rw-" in cmdline
+            or "ccache-tmp/cpp_stdout" in cmdline
+            or cwd.startswith("/var/tmp/capy-rw-")
+        ):
+            os.kill(int(pid_dir), signal.SIGKILL)
 
 
 def main():

@@ -3741,33 +3741,93 @@ def _ccache_enabled() -> bool:
     return _ccache_available
 
 
-def _ccache_env() -> dict[str, str]:
+def _ccache_env(shim_dir: Path | None = None) -> dict[str, str]:
     """Build an environment dict with ccache wired in, or the base env if absent.
 
-    Sets CC=ccache gcc / CXX=ccache g++ and a PATH shim so Makefiles that
-    hardcode 'gcc' (ignoring $(CC)) also get cached. The shim scripts are
-    created once and reused.
+    A PATH shim (gcc/g++ -> ``ccache <absolute-compiler>``) routes both
+    $(CC)-style and hardcoded compiler calls through the cache. The shim
+    MUST reference the compiler by absolute path: ccache resolves a bare
+    name through PATH, finds its own shim, marks the call uncacheable,
+    then "falls back" to executing that shim — re-entering ccache in an
+    infinite loop (observed live: 995/995 uncacheable calls and compile
+    trees spinning for hours inside deleted worktrees). CC/CXX are
+    deliberately NOT set to ``ccache gcc``/``ccache g++``: the double
+    wrap re-triggers the same loop, and the PATH shim alone already
+    covers every invocation style.
     """
     env = os.environ.copy()
     if not _ccache_enabled():
         return env
     env.setdefault("CCACHE_DIR", "/var/tmp/capybase-ccache")
-    env.setdefault("CC", "ccache gcc")
-    env.setdefault("CXX", "ccache g++")
-    # PATH shim: some Makefiles call gcc/g++ directly instead of $(CC).
-    shim_dir = Path("/var/tmp/capybase-ccache-shim")
-    shim_dir.mkdir(parents=True, exist_ok=True)
-    gcc_shim = shim_dir / "gcc"
-    gxx_shim = shim_dir / "g++"
-    if not gcc_shim.exists():
-        gcc_shim.write_text("#!/bin/sh\nexec ccache gcc \"$@\"\n")
-        gcc_shim.chmod(0o755)
-    if not gxx_shim.exists():
-        gxx_shim.write_text("#!/bin/sh\nexec ccache g++ \"$@\"\n")
-        gxx_shim.chmod(0o755)
+    if shim_dir is None:
+        shim_dir = Path("/var/tmp/capybase-ccache-shim")
+    # Resolve the real compilers with the shim dir stripped from PATH so a
+    # stale self-referential shim can't resolve to itself.
+    _clean_path = env.get("PATH", "")
+    _shim_prefix = f"{shim_dir}:"
+    if _clean_path.startswith(_shim_prefix):
+        _clean_path = _clean_path[len(_shim_prefix):]
+    try:
+        shim_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return env  # unwritable shim dir -> plain uncached compilers
+    for _tool in ("gcc", "g++"):
+        _real = shutil.which(_tool, path=_clean_path)
+        if _real is None:
+            continue
+        _shim = shim_dir / _tool
+        _content = f'#!/bin/sh\nexec ccache "{_real}" "$@"\n'
+        try:
+            _current = _shim.read_text()
+        except OSError:
+            _current = None  # missing (or unreadable) -> create fresh
+        if _current != _content:
+            try:
+                _shim.write_text(_content)
+                _shim.chmod(0o755)
+            except OSError:
+                continue
     if str(shim_dir) not in env.get("PATH", ""):
         env["PATH"] = f"{shim_dir}:{env.get('PATH', '')}"
     return env
+
+
+def _run_shell_tree(
+    cmd: str,
+    cwd: str,
+    timeout: float,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run a shell build command, reaping the WHOLE process tree on timeout.
+
+    ``subprocess.run(shell=True, timeout=...)`` kills only the direct child
+    (the shell); make/libtool/ccache descendants survive, get reparented to
+    the session reaper, and keep compiling in worktrees the harness later
+    deletes — observed as multi-hour spinning orphan trees pinning the box
+    at load ~90. Running the child in its own session and SIGKILLing the
+    process group on timeout reaps every descendant at once. On timeout,
+    raises ``subprocess.TimeoutExpired`` with the partial output attached,
+    preserving ``subprocess.run``'s contract for existing callers.
+    """
+    import signal
+    proc = subprocess.Popen(
+        cmd, shell=True, cwd=cwd, env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout=out, stderr=err)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # pid == pgid (own session)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        try:
+            exc.stdout, exc.stderr = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            exc.stdout = exc.stderr = None
+        raise
 
 
 # ccache can fail on some repos (incompatible flags, corrupted cache, version
@@ -4696,9 +4756,8 @@ class VerificationEngine:
                         while proc is None:
                             _build_attempts += 1
                             try:
-                                proc = _sp_build.run(
-                                    build_cmd, shell=True, cwd=str(repo_root),
-                                    capture_output=True, text=True,
+                                proc = _run_shell_tree(
+                                    build_cmd, cwd=str(repo_root),
                                     timeout=_build_timeout, env=_build_env,
                                 )
                             except _sp_build.TimeoutExpired as _to_exc:
@@ -4761,9 +4820,8 @@ class VerificationEngine:
                                 and _ccache_enabled()
                                 and _is_ccache_failure((proc.stderr or "") + (proc.stdout or ""))
                             ):
-                                proc = _sp_build.run(
-                                    build_cmd, shell=True, cwd=str(repo_root),
-                                    capture_output=True, text=True, timeout=300,
+                                proc = _run_shell_tree(
+                                    build_cmd, cwd=str(repo_root), timeout=300,
                                 )
                             # Targeted-build fallback: if the Makefile doesn't have
                             # a rule for this target (e.g. cmake projects), retry
@@ -4776,9 +4834,8 @@ class VerificationEngine:
                                 and _full_cmd != build_cmd
                                 and "No rule to make target" in (proc.stderr or "")
                             ):
-                                proc = _sp_build.run(
-                                    _full_cmd, shell=True, cwd=str(repo_root),
-                                    capture_output=True, text=True, timeout=300,
+                                proc = _run_shell_tree(
+                                    _full_cmd, cwd=str(repo_root), timeout=300,
                                     env=_build_env,
                                 )
                                 build_cmd = _full_cmd  # for the journal/detail

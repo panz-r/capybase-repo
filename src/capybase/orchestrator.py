@@ -14400,13 +14400,12 @@ class Orchestrator:
         missing build system ("no makefile found") is likewise N/A — a
         rebase worktree doesn't carry generated build artifacts.
         """
-        import subprocess as _sp
-        from capybase.verification import _is_missing_build_system
+        from capybase.verification import (
+            _is_missing_build_system,
+            _run_shell_tree,
+        )
         try:
-            proc = _sp.run(
-                cmd, shell=True, cwd=str(self.git.repo),
-                capture_output=True, text=True, timeout=120,
-            )
+            proc = _run_shell_tree(cmd, cwd=str(self.git.repo), timeout=120)
             output = (proc.stderr or "") + (proc.stdout or "")
             if proc.returncode != 0 and (
                 "No rule to make target" in output
