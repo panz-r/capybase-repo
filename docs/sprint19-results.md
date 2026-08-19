@@ -2,7 +2,8 @@
 
 Status: implementation complete (P1-P6); live validation (D7) complete —
 batch 1, batch 2, and the fixed-gate 0065 rerun all landed (2026-08-19);
-fresh full suite over the sprint-19 changes in flight.
+post-D7 build-hygiene fixes landed (f836488) with the suite rerun (r2)
+and the D8 measurement batches (P6 census, P5 distribution) in flight.
 This doc records what was built, the calibration findings, and the live
 results. Companion: `PLAN-LEDGER.md` (working log),
 `docs/sprint19-failing-cases-diagnosis.md` (D1-D7 designs),
@@ -80,7 +81,13 @@ failures (lock contention / compiler crash / network) get ONE retry at
 gone. Targeted (`make {stem}.o`) timeouts never degrade the session.
 The eval harness job count is resolved in Python (`-j12`; a literal
 `-j$(nproc)` was invalid — TestRunner runs the gate without a shell,
-fixed in cf50f4b); ccache was already wired.
+fixed in cf50f4b). ccache CORRECTION: it was wired but 100% inert
+during all D7 legs — the CC/CXX double-wrap plus PATH shim made ccache
+resolve its own shim and re-enter itself (995/995 uncacheable calls; a
+one-line TU livelocked in repro), fixed post-D7 in f836488 (shims now
+exec absolute compilers; verified miss-then-hit live). The budget
+restoration below therefore stands on the state machine + parallel make
+alone; the D8 rerun of the affected flows gets real cache.
 
 Expected on protobuf-0067: ~720s of the ~1020s build blowout skipped,
 content decisions unchanged. Actual (D7 batch-2): 1337s → 480s; 0071
@@ -175,8 +182,8 @@ the compiler gate inoperative for that leg only.
   journal: first full `build_probe` timed out at the 300s cap →
   `build_state SYNTAX_ONLY` → subsequent full-build probes skipped →
   `phase2_build_fallback_skipped`; the one retry that ran passed at
-  ~300s (warm tree + ccache + parallel make). Under the 1200s budget
-  with ~850s of the blowout gone.
+  ~300s (warm tree + parallel make — ccache was inert that day, see the
+  P3 correction). Under the 1200s budget with ~850s of the blowout gone.
 - **protobuf-0071 → PASS** (sim 0.910, 689s; same restoration, same
   journal shape). Acceptance "0067/0071 under budget": met.
 - **protobuf-0065 → ESCALATE (unanimous 3/3, sim 0.996)** — the P4
@@ -227,9 +234,33 @@ The sprint-18 full suite finished green (6092 passed / 2115 skipped /
 1 xfailed; the single failure was `test_char_ratio_performance` — a
 wall-clock flake under load, passes in 4.3s isolated). The fresh full
 suite over the sprint-19 changes launched 2026-08-19 after the live
-batches (`.venv/bin/python -m pytest tests/ -q`, log at
-`/tmp/capybase-live/s19/val/suite-s19.log`; the sprint-18 baseline took
-5h41m).
+batches; that first run (r1) was killed at 66% — zero failures to that
+point — by a zcode restart, and the post-mortem surfaced a load-92
+incident: every timed-out full build had leaked its make/libtool/ccache
+process tree (274 orphans spinning inside deleted worktrees since
+02:38), and ccache itself was 100% inert (shim self-recursion, 0/995
+cacheable — a one-line TU livelocked in repro). Both fixed in f836488
+(`_run_shell_tree` session+killpg teardown at every shell build site;
+absolute-compiler shims; stale-process sweep by worktree cwd; 5 new
+regression tests). The rerun (r2) is running detached from the session
+(log `/tmp/capybase-live/s19/val/suite-s19-r2.log`) — it passed 66% in
+~10 minutes where r1 took ~5h under the leaked load.
+
+## D8 — sprint-19 extension (in flight)
+
+No deferrals: the two measurement debts rejoin the sprint, chained
+after the r2 suite (`run-d8-after-suite.sh`, detached):
+
+- **P6 live census** (D8.2): majority-of-3 over pure-deletion-side
+  corpus cases axum-history-0006, tokio-history-0046, jsonc-history-0002
+  plus a deliberate file-level counterexample (flask-history-0006);
+  census `preservation_result="deletion_superseded"` events for the
+  unit-level carveout rate the P6 section called for.
+- **P5 distribution** (D8.3): majority-of-3 over the corpus's densest
+  cpp conflict regions — protobuf-history-0053 (3720-line single hunk)
+  and protobuf-history-0073 (626) — selected by a densest-hunk probe
+  that reproduces 0055's known 517-line region; journal
+  `class_member_split_candidate` distribution feeds the enabling call.
 
 ## Must-holds (validated by the D7 matrix + suite)
 

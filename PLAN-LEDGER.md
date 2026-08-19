@@ -51,7 +51,30 @@ Resolutions of reviewer disagreements (final):
 | P4 | Compiler-authority override at final gate | DONE (impl+tests) | see P4 section; fixes protobuf-0065 |
 | P5 | Class-with-methods entity splitting (journal-only first) | DONE (journal-only stage) | flag default OFF; enabling awaits live calibration |
 | P6 | Near-verbatim band calibration (measure-only) | DONE | script + results below |
-| D7 | Post-fix live rerun matrix (sea-orm-0027, tokio-0109 first) | TODO | needs no new mechanisms for 0027/0109 |
+| D7 | Post-fix live rerun matrix (sea-orm-0027, tokio-0109 first) | DONE | all batches + 0065 fixed-gate rerun landed 2026-08-19 |
+
+## Sprint-19 extension (replan, 2026-08-19 evening — user directive:
+## no deferrals; remaining work rejoins this sprint as D8)
+
+Context: the fresh s19 suite (r1) was killed at 66% by a zcode restart —
+and the investigation that followed found the box at load ~92 from ~274
+build processes leaked by every timed-out full build since 02:38, plus a
+fully-broken ccache wiring (995/995 calls uncacheable, self-recursion
+livelock). Both fixed in f836488 (with regression tests). D8 items:
+
+| # | Item | Status | Notes |
+|---|------|--------|-------|
+| D8.0 | Build-process hygiene (tree-kill + ccache recursion) | DONE (f836488) | `_run_shell_tree` (session + killpg) at every shell build site; shims exec absolute compilers, no CC/CXX double-wrap; stale-process sweep matches by worktree cwd. 5 new + 4 retargeted tests. |
+| D8.1 | Full suite rerun over s19 changes (r2, post-fix) | IN FLIGHT | detached (setsid, survives zcode restarts), pid 1551158, log `/tmp/capybase-live/s19/val/suite-s19-r2.log`; r1's 66% showed 0 failures before the restart killed it. |
+| D8.2 | P6 live deletion-carveout census | QUEUED (chained after suite) | majority-of-3 over axum-history-0006, tokio-history-0046, jsonc-history-0002 + deliberate file-level counterexample flask-history-0006; census `preservation_result="deletion_superseded"` events. Artifacts: `d8-p6-census.*`. |
+| D8.3 | P5 oversized-distribution batch | QUEUED (chained after D8.2) | majority-of-3 over protobuf-history-0053 (3720-line densest hunk in corpus) + protobuf-history-0073 (626); journal `class_member_split_candidate` distribution. Artifacts: `d8-p5-dist.*`. Chain script: `/tmp/capybase-live/s19/val/run-d8-after-suite.sh`. |
+| D8.4 | Ledger/docs hygiene | DONE | SHA backfills (P1=4dcdd3f, P6=125323e), D7 status, ccache-claim corrections (P3 sections + results doc), untracked design docs committed. |
+| D8.5 | Closing entry (suite tally + census/dist dispositions + P5 enabling call) | PENDING | on D8.1-D8.3 landing. |
+
+Acceptance for D8: suite r2 green-or-known-flake (char_ratio load-flake
+baseline); census produces a measured unit-level carveout rate (or an
+honest zero-event reading); P5 enabling decision recorded ON/OFF with the
+accumulated distribution; no regressions in either batch's must-holds.
 
 ## P6 results (2026-08-19, scripts/calibrate_near_verbatim.py)
 
@@ -163,7 +186,11 @@ Resolutions of reviewer disagreements (final):
   - Phase-2 build test (`_run_raw_test` call) now timed + journaled as a
     probe; a detected timeout ("timed out after") degrades the tracker.
 - `scripts/live_eval_realworld.py`: all `make -j4` → `make -j$(nproc)`
-  (5 sites). ccache was already wired (persistent CCACHE_DIR).
+  (5 sites). ccache was wired but CORRECTION (f836488 archaeology): it
+  was 100% inert — CC/CXX=ccache + PATH shim made ccache resolve its own
+  shim and re-enter itself (995/995 uncacheable). Fixed 2026-08-19
+  evening; the D7-leg builds below ran uncached (the -jN effect stood
+  alone).
 - Deferred: per-case prewarming build at preflight (D2 optional; ccache +
   nproc + state machine cover the economics; prewarm runs in the eval
   process, outside the tracker).
@@ -294,7 +321,7 @@ Resolutions of reviewer disagreements (final):
   isolated. Functionally: all green.
 - 2026-08-19: **P1 implemented** (whole-side repair rung + D5 carve-out;
   see P1 section). tests/test_whole_side_repair.py 19 tests +
-  457 regression tests green. COMMITTED as <P1-sha>.
+  457 regression tests green. COMMITTED as 4dcdd3f.
 - 2026-08-19: P2 started — studying risk.py preservation_heuristic seam.
 - 2026-08-19: **P2 implemented** (churn-aware carve-out + Best-of-N
   wrapper; see P2 section). 296+88+10 tests green. COMMITTED as 7dff022.
@@ -310,7 +337,7 @@ Resolutions of reviewer disagreements (final):
 - 2026-08-19: **P6 DONE** (scripts/calibrate_near_verbatim.py; results in
   P6 section — jaccard band NOT clean; deletion-carveout premise 56% at
   file level, unit-level census needed from live runs). COMMITTED as
-  <P6-sha>.
+  125323e.
 - NEXT: D7 rerun matrix (sea-orm-0027 + tokio-0109 live under provider;
   then 0067/0071/0065/0055 after P1-P4), full suite re-run, docs.
 - 2026-08-19 16:05: **D7 batch-1 DONE** (majority-of-3, nova-gemma4,
@@ -339,7 +366,8 @@ Resolutions of reviewer disagreements (final):
   - protobuf-0067 → **PASS** (was budget-blowout ESCALATE). Journal:
     build_probe timeout 300.1s → build_state SYNTAX_ONLY → later probes
     "skipped" → phase2_build_fallback_skipped — the P3 machine worked;
-    the one retry that ran passed at ~300s (warm tree + ccache + -jN).
+    the one retry that ran passed at ~300s (warm tree + -jN; CORRECTION:
+    ccache was inert that day — see f836488 in the work log).
   - protobuf-0071 → **PASS** (same restoration).
   - protobuf-0065 → ORACLE_DIVERGENT — BUT this leg ran with the broken
     `-j$(nproc)` gate command (TestRunner has no shell → invalid make
@@ -378,3 +406,19 @@ Resolutions of reviewer disagreements (final):
 - 2026-08-19 23:0x: fresh full suite over sprint-19 changes LAUNCHED
   (`.venv/bin/python -m pytest tests/ -q`, log
   /tmp/capybase-live/s19/val/suite-s19.log; baseline 5h41m).
+- 2026-08-19 ~22:4x: **r1 suite KILLED at 66% by a zcode restart**
+  (0 failures to that point — the restart killed the background task).
+  The post-mortem found the real story: **load-92 incident** — every
+  timed-out full build since 02:38 had leaked its make/libtool/ccache
+  tree (~274 processes alive at 22:45, spinning for hours inside deleted
+  /var/tmp/capy-rw-* worktrees), because `subprocess.run(shell=True,
+  timeout=...)` kills only the direct child. Compounding it, ccache was
+  fully broken (shim self-recursion; 0/995 cacheable; a 1-line TU
+  livelocked >90s in repro) — so every build ran cold while leaked trees
+  burned the CPUs. The "slow 65% region" and the wedged session were
+  both this starvation. Both bugs FIXED in f836488 (+5 tests).
+- 2026-08-19 23:04: **suite r2 RELAUNCHED post-fix, detached**
+  (setsid — survives zcode restarts; pid 1551158; log
+  /tmp/capybase-live/s19/val/suite-s19-r2.log). At 66% within ~10 min on
+  the idle box (r1 took ~5h to the same point). D8 census/dist batches
+  chained behind it via run-d8-after-suite.sh (also detached).
