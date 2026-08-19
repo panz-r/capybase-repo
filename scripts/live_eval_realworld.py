@@ -110,7 +110,7 @@ PASS_THRESHOLD = float(os.environ.get("CAPYBASE_PASS_THRESHOLD", "0.90"))
 C_PREPARE_COMMANDS: dict[str, str] = {
     "redis-history": "",
     "jsonc-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-    "sqlite-history": "./configure && make -j$(nproc)",
+    "sqlite-history": "./configure && make -j{jobs}",
     "nlohmann-json-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
     "clickhouse-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
     "protobuf-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -Dprotobuf_BUILD_TESTS=OFF",
@@ -336,14 +336,21 @@ def _resolve_c_build(repo: Path, dataset: str, default_prepare: str) -> tuple[st
         # headers only (not the full project — that takes too long for the
         # case budget). The headers (parse.h, opcodes.h, sqlite3.h, etc.)
         # are needed for gcc -fsyntax-only verification. The build_cmd stays
-        # "make -j$(nproc)" so verify_file can do targeted builds (.lo/.o).
+        # "make -j{jobs}" so verify_file can do targeted builds (.lo/.o).
+        # The job count is resolved in Python (not $(nproc)) because the
+        # TestRunner invokes the pre_continue command WITHOUT a shell —
+        # a literal -j$(nproc) argument is an invalid make option (usage
+        # text, rc=2, no attributable error lines).
+        _jobs = max(4, (os.cpu_count() or 4))
         return ("autoreconf -fi >/dev/null 2>&1; ./configure >/dev/null 2>&1",
-                "make -j$(nproc)")
+                f"make -j{_jobs}")
     if has_configure:
+        _jobs = max(4, (os.cpu_count() or 4))
         return ("./configure >/dev/null 2>&1",
-                "make -j$(nproc)")
+                f"make -j{_jobs}")
     if has_makefile:
-        return ("", "make -j$(nproc)")
+        _jobs = max(4, (os.cpu_count() or 4))
+        return ("", f"make -j{_jobs}")
     # Unknown build system — no whole-tree gate. The CcsSyntaxValidator
     # (gcc -fsyntax-only) still gates per-unit; brace-balance is the only
     # whole-file check. This is honest (we can't build what we can't detect).
@@ -481,6 +488,12 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
     # can set the matching in-loop gate.
     if case.language in ("c", "cpp", "c++"):
         default_prepare = C_PREPARE_COMMANDS.get(case.dataset, "")
+        if "{jobs}" in default_prepare:
+            # Resolve here (not $(nproc)): some runners invoke commands
+            # without a shell, where a literal -j$(nproc) is an invalid
+            # make option (usage text, rc=2, no attributable errors).
+            default_prepare = default_prepare.format(
+                jobs=max(4, (os.cpu_count() or 4)))
         prepare, build_cmd = _resolve_c_build(repo, case.dataset, default_prepare)
         prepare_ok = True
 
