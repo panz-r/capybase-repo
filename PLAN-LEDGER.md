@@ -335,3 +335,46 @@ Resolutions of reviewer disagreements (final):
     this toolchain. Census correction #3 for 0109.
   - Batch-2 (0067/0071/0065/0037/0055) launched 16:0x, logs at
     /tmp/capybase-live/s19/val/d7-b2-*.log.
+- 2026-08-19 16:33: **D7 batch-2 cpp leg DONE**:
+  - protobuf-0067 → **PASS** (was budget-blowout ESCALATE). Journal:
+    build_probe timeout 300.1s → build_state SYNTAX_ONLY → later probes
+    "skipped" → phase2_build_fallback_skipped — the P3 machine worked;
+    the one retry that ran passed at ~300s (warm tree + ccache + -jN).
+  - protobuf-0071 → **PASS** (same restoration).
+  - protobuf-0065 → ORACLE_DIVERGENT — BUT this leg ran with the broken
+    `-j$(nproc)` gate command (TestRunner has no shell → invalid make
+    option → usage text rc=2, NOTHING attributable → P4 couldn't fire;
+    the "failure" wasn't even a compile). Fixed in cf50f4b (job count
+    resolved in Python); majority-of-3 rerun queued
+    (/tmp/capybase-live/s19/val/d7-0065-retry.*).
+- 2026-08-19 16:48: **D7 batch-2 mech leg DONE** (majority-of-3,
+  /tmp/capybase-live/s19/val/d7-b2-mech.json):
+  - tokio-0037 → **ESCALATE (unanimous 3/3, sim 1.0)** — via the
+    resurrection backstop, NOT P2's paths: this sampling candidates
+    were accepted plain-LLM with zero preservation forcing (no
+    preservation events in any journal); end-of-rebase scan found 12
+    resurrected lines in tokio/src/runtime/tests/queue.rs → policy
+    stop. Sprint-18's sampling (oracle-correct first candidate
+    force-retried) did not recur; P2 stays unit-test-validated.
+  - protobuf-0055 → **ESCALATE (unanimous 3/3)** — 2/3 stopped at
+    oversized-prompt (16286t/15508t > 8192t); 1/3 wrote the file and
+    P4 fired on an attributed error (cpp_helpers.cc:1470
+    'HasInternalAccessors'). P5 journaling LIVE at every skip site:
+    region 520 lines, member points 3 vs 0, declined
+    fragments_below_min_sub_lines — matches the offline probe; first
+    live distribution data recorded in sprint19-results.md.
+- 2026-08-19 17:18: **D7 0065 fixed-gate rerun DONE — P4 acceptance
+  CLEAN** (majority-of-3, /tmp/capybase-live/s19/val/d7-0065-retry.json):
+  **ESCALATE unanimous 3/3, sim 0.996.** Pre_continue `make -j12`
+  completed rc=2 with 5 error lines all in merged text_format.cc
+  ('tokenizer_' ×3 + 2 follow-ons), all positively attributed;
+  tests_required=false and compiler_authority_override fired anyway.
+  The buffer is 0.996 to oracle — the defect lives in the 0.4% delta
+  no sim gate can catch. Sprint-18's shipped build-broken merge is now
+  the honest escalate. P3 composed around it (full-build timeout →
+  SYNTAX_ONLY → phase2 fallback skipped; warm-tree gate build surfaced
+  the errors). **D7 complete** — all batches + rerun landed; results
+  in docs/sprint19-results.md.
+- 2026-08-19 23:0x: fresh full suite over sprint-19 changes LAUNCHED
+  (`.venv/bin/python -m pytest tests/ -q`, log
+  /tmp/capybase-live/s19/val/suite-s19.log; baseline 5h41m).

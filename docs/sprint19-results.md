@@ -1,8 +1,10 @@
 # Sprint-19 results — mechanisms for the one-side-oracle class
 
-Status: implementation complete (P1-P6); live validation (D7) in flight.
+Status: implementation complete (P1-P6); live validation (D7) complete —
+batch 1, batch 2, and the fixed-gate 0065 rerun all landed (2026-08-19);
+fresh full suite over the sprint-19 changes in flight.
 This doc records what was built, the calibration findings, and the live
-results as they land. Companion: `PLAN-LEDGER.md` (working log),
+results. Companion: `PLAN-LEDGER.md` (working log),
 `docs/sprint19-failing-cases-diagnosis.md` (D1-D7 designs),
 `docs/sprint19-open-questions-for-review.md` (Q1-Q6).
 
@@ -76,10 +78,13 @@ failures (lock contention / compiler crash / network) get ONE retry at
 2× cap. Every build probes and transitions journal (`build_probe` /
 `build_state` / `build_retry`) — the sprint-18 300s silent gaps are
 gone. Targeted (`make {stem}.o`) timeouts never degrade the session.
-The eval harness now uses `make -j$(nproc)`; ccache was already wired.
+The eval harness job count is resolved in Python (`-j12`; a literal
+`-j$(nproc)` was invalid — TestRunner runs the gate without a shell,
+fixed in cf50f4b); ccache was already wired.
 
 Expected on protobuf-0067: ~720s of the ~1020s build blowout skipped,
-content decisions unchanged.
+content decisions unchanged. Actual (D7 batch-2): 1337s → 480s; 0071
+came in at 689s — both far under the 1200s budget.
 
 ### P4 — compiler authority at the final gate
 
@@ -102,7 +107,13 @@ oversized-skip sites. Offline probe on protobuf-0055: the region is
 one-sided (cur 516 / rep 0) with 3 member points — member splitting
 alone leaves 150-250-line fragments, so the enabling stage needs the
 existing statement-level splitter beneath it. Enabling awaits the live
-journal distribution.
+journal distribution — first live data (D7 batch-2, protobuf-0055): the
+candidate fired at every oversized-skip site in all 3 repeats with
+region_lines=520, current_member_points=3, replayed_member_points=0,
+decline_reason=`fragments_below_min_sub_lines` — matching the offline
+probe exactly (member points exist but are concentrated; the replayed
+side has none). The distribution is now flowing; enabling stays
+deferred until more of it accumulates.
 
 ### P6 — calibration findings (measure-only)
 
@@ -150,21 +161,87 @@ jaccard:
   side that also wouldn't compile).
 
 ### Batch 2 — the mechanism targets (protobuf-0067/0071/0065,
-tokio-0037, protobuf-0055)
+tokio-0037, protobuf-0055) (DONE; 0065 under its fixed-gate rerun)
 
-In flight; results appended on completion.
+Toolchain caveat: this leg launched before cf50f4b, so the cpp cases'
+compiler gate ran the broken `-j$(nproc)` literal (make usage text,
+rc=2, nothing attributable → the gate was an advisory no-op). 0065 —
+P4's acceptance case — got its own majority-of-3 rerun after the fix;
+the 0067/0071 PASSes below stand on sim + oracle-verified buffers, with
+the compiler gate inoperative for that leg only.
+
+- **protobuf-0067 → PASS** (sim 1.0, 480s wall — was a 1337s
+  budget-blowout ESCALATE in sprint-18). P3's machine is visible in the
+  journal: first full `build_probe` timed out at the 300s cap →
+  `build_state SYNTAX_ONLY` → subsequent full-build probes skipped →
+  `phase2_build_fallback_skipped`; the one retry that ran passed at
+  ~300s (warm tree + ccache + parallel make). Under the 1200s budget
+  with ~850s of the blowout gone.
+- **protobuf-0071 → PASS** (sim 0.910, 689s; same restoration, same
+  journal shape). Acceptance "0067/0071 under budget": met.
+- **protobuf-0065 → ESCALATE (unanimous 3/3, sim 0.996)** — the P4
+  acceptance case, clean. The pre_continue gate (`make -j12`, job count
+  now resolved in Python) completed rc=2 with five error lines ALL in
+  the merged `google/protobuf/text_format.cc` (`'tokenizer_' does not
+  name a type` ×3 plus two follow-on syntax errors), every one
+  positively attributed; `tests_required` was false and
+  `compiler_authority_override` fired anyway — exactly the sprint-18
+  counterexample (build-broken merge shipped at sim 0.997) converted to
+  the honest escalate. The kicker: the buffer is 0.996 to the oracle —
+  the defect lives inside the 0.4% delta no similarity gate could ever
+  catch; only the compiler sees it. P3 composed correctly around it
+  (first full build timed out → session degraded to syntax-only →
+  Phase-2 fallback skipped; the warm-tree gate build then completed
+  fast enough to surface the errors P4 needed).
+- **tokio-0037 → ESCALATE (unanimous 3/3, sim 1.0)** — honest, but via
+  the resurrection backstop rather than P2's paths: this sampling the
+  model's candidates were accepted through the plain LLM path with zero
+  preservation forcing (no preservation events in any of the three
+  journals), and the end-of-rebase scan found 12 resurrected lines in
+  `tokio/src/runtime/tests/queue.rs` → policy stop. The sprint-18
+  failure sampling (oracle-correct first candidate force-retried into
+  syntax errors) did not recur, so P2's carve-out and Best-of-N
+  recovery remain validated by their unit tests; the sea-orm-0027
+  defense is untouched (batch-1 exercised it live). Either way the case
+  escalates for the right reason — silent resurrection was caught.
+- **protobuf-0055 → ESCALATE (unanimous 3/3)** — two repeats stopped at
+  the oversized-prompt skip (16286t / 15508t > the 8192t window; P5 is
+  journal-only by design, so no prompt reduction was expected); the
+  third got a unit through block capture, wrote the file, and P4 fired
+  on a positively-attributed error
+  (`cpp_helpers.cc:1470: 'HasInternalAccessors' was not declared in
+  this scope`). P5's candidate journaled at every skip site in every
+  repeat (see the P5 section for the first live distribution).
+
+Batch-2 acceptance scorecard: P3 under budget ✓ (0067/0071); P4
+escalates on attributed defect ✓ (0065 3/3, plus a bonus live firing on
+0055); P2's case escalates honestly ✓ (via the backstop; P2 paths
+unexercised this sampling); P5 journal distribution flowing ✓ (still
+over-window, as designed); oracle-divergent merges with a working gate:
+zero ✓ (the leg's single ORACLE_DIVERGENT was the gate-command bug,
+superseded by the 3/3 rerun).
 
 ## Hermetic suite
 
 The sprint-18 full suite finished green (6092 passed / 2115 skipped /
 1 xfailed; the single failure was `test_char_ratio_performance` — a
-wall-clock flake under load, passes in 4.3s isolated). A fresh full
-suite run over the sprint-19 changes is queued after the live batches.
+wall-clock flake under load, passes in 4.3s isolated). The fresh full
+suite over the sprint-19 changes launched 2026-08-19 after the live
+batches (`.venv/bin/python -m pytest tests/ -q`, log at
+`/tmp/capybase-live/s19/val/suite-s19.log`; the sprint-18 baseline took
+5h41m).
 
-## Must-holds (validated by the batch-2 matrix + suite)
+## Must-holds (validated by the D7 matrix + suite)
 
-- All currently-passing cases stay passing (no guard relaxation).
-- The sea-orm-0027 defense (additions → heuristic fires) intact.
-- sqlite entity-splitting cases unaffected by the P5 measurement.
-- Oracle-divergent merges: zero (the rung's adjudication gates + the
-  collapse guard + P4's attribution are the three independent nets).
+- All currently-passing cases stay passing (no guard relaxation) — the
+  batch-2 mechanism targets moved ESCALATE→PASS (0067/0071) with no
+  regression elsewhere in the matrix; the suite run is the full check.
+- The sea-orm-0027 defense (additions → heuristic fires) intact —
+  exercised live in batch-1 (detector + adjudication both fired;
+  honest escalate).
+- sqlite entity-splitting cases unaffected by the P5 measurement — P5
+  is journal-only and OFF; covered by the suite run.
+- Oracle-divergent merges: zero under a working gate (the rung's
+  adjudication gates + the collapse guard + P4's attribution are the
+  three independent nets; batch-2's single ORACLE_DIVERGENT was the
+  `-j$(nproc)` gate-command bug, superseded by the 3/3 ESCALATE rerun).
