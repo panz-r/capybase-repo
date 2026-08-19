@@ -62,17 +62,26 @@ Targets:
   the file never reached the pre-stage path because a UNIT escalated
   first. 0046 still stops via the end-of-rebase scan (the backstop
   working as designed).
-- **tokio-0109: ESCALATE** (whole-file repair could not re-resolve a unit).
+- **tokio-0109: ESCALATE** — all 3 runs from the DNS-era batch, never
+  clean-rerun: unit 1:2's LLM call died `request_failed` → the (now-fixed)
+  empty-fallback side-pick, then the whole-file repair skipped itself on
+  tiered fault attribution (`cargo check` errors outside unit spans — the
+  `_is_build_test` carve-out doesn't recognize validator `syntax`).
+  Verdict is contamination-shaped; rerun post-66b780b (sprint-19 doc, D5).
 
 **Infrastructure findings (both fixed or pinned):** (1) the provider's mDNS
 hostname resolved intermittently from Python — 24 LLM calls failed with DNS
 errors in batch 1; the provider now pins the raw IP (what all 85 historical
 runs used). (2) A separate transient ("No route to host") hit the clean
 rerun's sea-orm-0027 runs — exposing the transport-failure→side-pick bug
-fixed above. (3) protobuf-0067/0071's ESCALATE timeouts are GENUINE: the
-clean rerun had zero transport failures; the model does not converge on
-these two cases within the 1200s cap now that each CEGIS round includes a
-protobuf full-tree build (sprint-19: build-budget/warm-build work).
+fixed above. (3) protobuf-0067/0071's ESCALATE timeouts are GENUINE (zero
+transport failures in the clean rerun) but NOT model failures — journal
+archaeology (`docs/sprint19-failing-cases-diagnosis.md`) shows the model
+was never called on 0067: ~1020s of the case budget went to sequential
+cold full-tree builds (three 300s `verify_file` caps, the 120s Phase-2
+fallback, a 300s pre_continue), none of which can complete on a cold
+protobuf tree under `-j4` (sprint-19: D1 build-budget triage, D2
+ccache/parallelism).
 Artifacts: `/tmp/capybase-live/s18/val/` (`ws1.json`, `guards.json`,
 `*-dnsfix.json`, `flights*/`).
 
