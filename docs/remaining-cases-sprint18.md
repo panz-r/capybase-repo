@@ -6,18 +6,61 @@ gaps and hardening acceptance gates — with every threshold change backed by
 corpus calibration first. Six commits on `dev`; live artifacts in
 `/tmp/capybase-live/s18/`.
 
-**Live validation status: RESOLVED — the endpoint was never down.** The
-earlier "endpoint down" call was a measurement error: a stale repo-toml URL
-(a dead localhost tunnel) was probed instead of the live server, which had
-served every prior run. Endpoint selection is now canonical and
-host-free-in-repo: provider configs under `~/.config/capybase/providers/`
-(host+model for LLM and embeddings + the REQUIRED calibration profile),
-resolved by the eval scripts via `--provider` (no fallbacks; running without
-a calibration profile is an error), with a pre-commit hook blocking
-IPs/hostnames from entering tracked files. The validation batch
-(`/tmp/capybase-live/s18/run_ws1_val.sh`, majority-of-3, targets + PASS
-controls) runs under `--provider nova-gemma4`; verdicts below marked
-[pending-live] depend on it.
+**Live validation status: RAN (under `--provider nova-gemma4`), controls held,
+targets mixed — with an infrastructure contamination identified and a clean
+rerun in flight.** The earlier "endpoint down" call was a measurement error: a
+stale repo-toml URL (a dead localhost tunnel) was probed instead of the live
+server. Endpoint selection is now canonical and host-free-in-repo: provider
+configs under `~/.config/capybase/providers/` (host+model for LLM and
+embeddings + the REQUIRED calibration profile), resolved via `--provider`
+(no fallbacks; running without a calibration profile is an error), with a
+pre-commit hook blocking IPs/hostnames from tracked files. Results below;
+`/tmp/capybase-live/s18/val/` holds the artifacts.
+
+## Live validation results (majority-of-3, gemma-4-E4B via provider)
+
+Must-holds: **7/9 held** — fmt-0002/0004/0006, protobuf-0061/0053,
+nlohmann-json-0020 (sim 0.991 — the WS2 holdout now passes through the
+resolver), plus sea-orm-0009/0010 and tokio-0035/0044 in the guards block.
+The two exceptions (protobuf-0067/0071 → ESCALATE) are DNS-contaminated
+(see below).
+
+Targets:
+
+- **fmt-0003: ESCALATE 3/3** — exactly the expected verdict (sibling-splice
+  class; the honest outcome).
+- **axum-0017: WORKING 3/3** — the lockfile exemption works: the rebase
+  completes instead of SAFE_STOPping on 143 lines of version pins.
+- **protobuf-0055: ESCALATE 3/3** (was: silent accept of a build-broken
+  merge) — the deferred-core fix routes the contested core honestly, but the
+  unit is skipped as oversized (16.3K tokens > 8K window) BEFORE the
+  whole-file repair path where the WS1 micro-patch lives. Safe outcome, not
+  the targeted PASS: mechanism-order gap (oversized-skip precedes
+  micro-patch) — sprint-19 item.
+- **protobuf-0065: ORACLE_DIVERGENT 3/3** (sim 0.997, build-broken) — the
+  Phase-2 full-build fallback DID run `make -j4`, hit its 120s cap, and
+  journaled `phase2_build_inconclusive` (timeout ≠ merge defect, by
+  design). Finding: 120s is too small for a cold full protobuf tree;
+  warm-the-build or raise the cap for the whole-tree fallback — sprint-19.
+- **sea-orm-0027: ORACLE_DIVERGENT 3/3** (sim 0.793) — CONTAMINATED: the
+  side-collapse detector FIRED correctly (buffer 100% contained in one
+  side, 0% of the other's new lines kept), but the adjudication LLM call
+  died on DNS (`Name or service not known`) → null → the designed
+  conservative accept. Clean rerun in flight.
+- **tokio-0037/0046: ESCALATE 3/3** ("suspected silent resurrection") —
+  0037's units resolved current_only with sim 1.0 (correct content), but
+  via the DNS-empty fallback; the deletion-respect swap never probed and
+  the end-of-rebase scan stopped the rebase. Contaminated; clean rerun in
+  flight will show the swap's real behavior.
+- **tokio-0109: ESCALATE** (whole-file repair could not re-resolve a unit).
+
+**Infrastructure finding (fixed):** the provider initially used the mDNS
+hostname; it resolved intermittently from Python — 24 LLM calls failed with
+DNS errors, concentrated on sea-orm-0027 (12), protobuf-0071 (4), and
+sea-orm-0009/0010 (4 each; both still PASSED). The historical runs all used
+the raw IP (no DNS). The provider config now pins the IP, and
+`/tmp/capybase-live/s18/run_dnsfix_rerun.sh` reruns the four contaminated
+cases (0027, 0037, 0067, 0071) cleanly.
 
 ## WS0 — CI unblock + quick wins (66ca8b2, 18e5573)
 
@@ -151,12 +194,12 @@ not a considered refusal — the small arm keeps the strict exclusion.
 | Metric | Plan target | Status |
 |---|---|---|
 | Test failures | 0 | **0** (done, committed) |
-| C++ micro-repair cases | 3/3 PASS | built; [pending-live] |
+| C++ micro-repair cases | 3/3 PASS | mixed live: fmt-0003 ESCALATE (expected); 0055 ESCALATE (honest, oversized-skip precedes micro-patch); 0065 divergent (Phase-2 build timeout inconclusive — 120s too small) |
 | Fast-path band | [0.80, 1.0] if clean | **keep 0.90** (calibration: nothing to gain) |
-| axum-0017 | PASS | exemption in; [pending-live] |
-| tokio-0037/0046 | 0-2 PASS w/o weakening safety | swap mechanism in; guard NOT weakened (verified correct); [pending-live] |
-| sea-orm-0027 | PASS or safe escalate | guard in; expected ESCALATE; [pending-live] |
-| Regressions on passing cases | 0 | hermetic suite green; live must-holds scripted |
+| axum-0017 | PASS | **WORKING 3/3** — completes; no more pin-file SAFE_STOP |
+| tokio-0037/0046 | 0-2 PASS w/o weakening safety | ESCALATE 3/3; guard NOT weakened; DNS-contaminated, clean rerun in flight |
+| sea-orm-0027 | PASS or safe escalate | detector FIRED; adjudication DNS-failed → conservative accept; clean rerun in flight |
+| Regressions on passing cases | 0 | hermetic suite green; live: protobuf-0067/0071 flipped (DNS-contaminated, rerunning); all other must-holds held |
 
 ## Remaining after sprint 18
 
