@@ -47,11 +47,48 @@ Resolutions of reviewer disagreements (final):
 |---|------|--------|-------|
 | P1 | Whole-side repair rung on compile failure | DONE (impl+tests) | see P1 detail below; D5 carve-out extension included |
 | P2 | Churn-aware preservation heuristic + Best-of-N recovery | DONE (impl+tests) | see P2 detail below |
-| P3 | Build state machine + conditional retry (+ccache/-j$(nproc)) | TODO | fixes protobuf-0067/0071 budget blowout |
+| P3 | Build state machine + conditional retry (+ccache/-j$(nproc)) | DONE (impl+tests) | see P3 section; D2 prewarming deferred |
 | P4 | Compiler-authority override at final gate | TODO | fixes protobuf-0065 ship-broken |
 | P5 | Class-with-methods entity splitting (journal-only first) | TODO | protobuf-0055 |
 | P6 | Near-verbatim band calibration (measure-only) | TODO | informs future fast-path |
 | D7 | Post-fix live rerun matrix (sea-orm-0027, tokio-0109 first) | TODO | needs no new mechanisms for 0027/0109 |
+
+## P3 design (as implemented, 2026-08-19)
+
+- `verification.py`:
+  - `BuildStateTracker` (session-scoped; `VerificationEngine.build_state`,
+    re-attached by the orchestrator with a journaling event sink):
+    FULL_BUILD_AVAILABLE → SYNTAX_ONLY on generic full-build timeout (or
+    any kind once the recoverable retry was spent). All probes/transitions
+    journaled (`build_probe` / `build_state` / `build_retry`) — the
+    sprint-18 300s gaps were silent builds.
+  - `_classify_build_failure_kind(output)`: lock_contention /
+    compiler_crash / network_transient / generic from the build output.
+  - `verify_file` C build branch: degraded session → skip straight to the
+    shared `_syntax_only_fallback` (journaled "skipped" probe); timeout →
+    recoverable kinds retry ONCE at 2× cap, generic degrades immediately;
+    targeted (`make {stem}.o`) timeouts do NOT degrade the session;
+    pass/fail recorded as probes. detail.source=whole_file_build kept.
+  - The old inline timeout-fallback body was extracted into
+    `_syntax_only_fallback` (shared by timeout + degraded paths).
+- `orchestrator.py`:
+  - tracker wired to the journal at construction.
+  - Phase-2 full-build fallback skipped (journaled
+    `phase2_build_fallback_skipped`) when the session is degraded.
+  - Phase-2 build test (`_run_raw_test` call) now timed + journaled as a
+    probe; a detected timeout ("timed out after") degrades the tracker.
+- `scripts/live_eval_realworld.py`: all `make -j4` → `make -j$(nproc)`
+  (5 sites). ccache was already wired (persistent CCACHE_DIR).
+- Deferred: per-case prewarming build at preflight (D2 optional; ccache +
+  nproc + state machine cover the economics; prewarm runs in the eval
+  process, outside the tracker).
+- Tests: `tests/test_build_state_machine.py` (13) — classifier, tracker
+  transitions, sink robustness, verify_file degrade+skip, 2×-cap retry,
+  second-timeout degrade, targeted exemption.
+- Regression: 258+160 tests green.
+- Expected effect on protobuf-0067: verify_file#2/#3 (~600s) + Phase-2
+  fallback (120s) skipped post-degradation; case completes under budget
+  with identical content decisions (first build + pre_continue still run).
 
 ## P2 design (as implemented, 2026-08-19)
 
@@ -175,4 +212,7 @@ Resolutions of reviewer disagreements (final):
   457 regression tests green. COMMITTED as <P1-sha>.
 - 2026-08-19: P2 started — studying risk.py preservation_heuristic seam.
 - 2026-08-19: **P2 implemented** (churn-aware carve-out + Best-of-N
-  wrapper; see P2 section). 296+88+10 tests green. COMMITTED as <P2-sha>.
+  wrapper; see P2 section). 296+88+10 tests green. COMMITTED as 7dff022.
+- 2026-08-19: **P3 implemented** (BuildStateTracker + conditional retry +
+  probe journaling + Phase-2 fallback skip + -j$(nproc); see P3 section).
+  258+160 tests green. COMMITTED as <P3-sha>.

@@ -4443,6 +4443,20 @@ class Orchestrator:
         if _target_tmpl:
             _val_cfg.cc_build_target_template = _target_tmpl
         self.verification = VerificationEngine.default(_val_cfg)
+        # Sprint-19 P3: the session build-state tracker journals every
+        # build probe/transition into the flight journal (the 300s silent
+        # gaps in every sprint-18 protobuf journal were unjournaled
+        # builds). The sink is best-effort — a journaling failure must
+        # never break a build.
+        from capybase.verification import BuildStateTracker
+
+        def _build_event_sink(event: str, payload: dict) -> None:
+            _p = payload.pop("path", None)
+            self.journal.emit(
+                event, payload, step_index=self.step, path=_p)
+
+        self.verification.build_state = BuildStateTracker(
+            event_sink=_build_event_sink)
         # Verifier-model critic: when enabled (the default —
         # opt-out), register an LLM judge that checks the resolution preserves
         # both sides' semantic intent — the failure mode the syntactic
@@ -9073,6 +9087,26 @@ class Orchestrator:
                                         self.config.validation,
                                         "cc_phase2_full_build_fallback", True),
                                 )
+                                # Sprint-19 P3: a full build already timed
+                                # out this session — re-running the full-
+                                # tree fallback at the same 120s cap adds
+                                # zero information while burning the case
+                                # budget (protobuf-0067: 120s of the 1020s
+                                # blowout was exactly this re-run). Syntax
+                                # checks remain the strongest available
+                                # signal on a tree that cannot complete.
+                                _bs_state = getattr(
+                                    getattr(self.verification, "build_state", None),
+                                    "full_build_available", True)
+                                if _build_cmd and not _bs_state:
+                                    self.journal.emit(
+                                        "phase2_build_fallback_skipped",
+                                        {"reason": "prior full-build timeout "
+                                                   "(session degraded to syntax-only)",
+                                         "command": _build_cmd},
+                                        step_index=self.step, path=path,
+                                    )
+                                    _build_cmd = ""
                                 if _build_cmd:
                                     self.journal.emit(
                                         "phase2_build_fallback_full",
@@ -9081,7 +9115,31 @@ class Orchestrator:
                                     )
                             if _build_cmd:
                                 self._write_worktree_only(path, buffer, accepted=accepted)
+                                import time as _p2bt_time
+
+                                _p2bt_t0 = _p2bt_time.monotonic()
                                 _build_ok, _build_output = self._run_raw_test(_build_cmd)
+                                _p2bt_dur = _p2bt_time.monotonic() - _p2bt_t0
+                                # Sprint-19 P3: journal the Phase-2 build as a
+                                # probe and let a timeout degrade the session
+                                # (the ~120-300s gaps were previously silent).
+                                _p2_bs = getattr(self.verification, "build_state", None)
+                                _p2_timed_out = (
+                                    not _build_ok
+                                    and "timed out after" in (_build_output or "")
+                                )
+                                if _p2_bs is not None:
+                                    _p2_bs.record_probe(
+                                        _build_cmd, _p2bt_dur,
+                                        "timeout" if _p2_timed_out
+                                        else ("pass" if _build_ok else "fail"),
+                                        path=path)
+                                    if _p2_timed_out:
+                                        # _run_raw_test's 120s cap on a
+                                        # full-tree command — same class as
+                                        # verify_file's full-build timeout.
+                                        _p2_bs.note_timeout(
+                                            "generic", _build_cmd, 120)
                                 _error_probe = [
                                     ln for ln in (_build_output or "").splitlines()
                                     if "error" in ln.lower()

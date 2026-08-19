@@ -3623,6 +3623,111 @@ def _compile_ccs(
 _ccache_available: bool | None = None
 
 
+# ---------------------------------------------------------------------------
+# Session build state (sprint-19 P3 / D1): one doomed full build per session.
+# ---------------------------------------------------------------------------
+
+#: Recoverable failure signatures — a retry at 2× the cap can succeed where
+#: the same-cap retry cannot (the failure burns wall clock, not capability).
+_RECOVERABLE_BUILD_KINDS = {
+    "lock_contention": (
+        "waiting for file lock", "blocking waiting for file lock",
+        "failed to lock", "another ninja instance", "lock file exists",
+    ),
+    "compiler_crash": (
+        "internal compiler error", "clang: error: unable to execute command",
+        "please submit a full bug report", "compiler crashed",
+    ),
+    "network_transient": (
+        "could not resolve host", "failed to fetch", "connection reset",
+        "connection refused", "temporary failure in name resolution",
+    ),
+}
+
+
+def _classify_build_failure_kind(output: str) -> str:
+    """Classify a build failure's recoverability from its output.
+
+    Returns one of ``_RECOVERABLE_BUILD_KINDS``'s keys or ``"generic"``.
+    A generic timeout is zero-information at the same cap (the cap is the
+    binding constraint, not the tree), so the session degrades to
+    syntax-only rather than re-paying it; recoverable kinds get ONE
+    retry at double the cap (sprint-19 P3, R1+R2 resolution).
+    """
+    text = (output or "").lower()
+    for kind, patterns in _RECOVERABLE_BUILD_KINDS.items():
+        if any(p in text for p in patterns):
+            return kind
+    return "generic"
+
+
+class BuildStateTracker:
+    """Session-scoped full-build economics (the P3 build state machine).
+
+    ``FULL_BUILD_AVAILABLE → SYNTAX_ONLY``: after the first generic
+    full-build timeout, subsequent full builds are skipped in favor of
+    the syntax-only fallback — re-running a build that just timed out at
+    the same cap adds zero information while burning the case budget
+    (protobuf-0067: ~1020 of 1337s went to four sequential doomed
+    full-tree builds). Recoverable failures (lock contention, compiler
+    crash, network weather) get one retry at 2× the cap before the
+    degradation fires. Every probe and transition is journaled through
+    the attached event sink (``build_probe`` / ``build_state``).
+    """
+
+    def __init__(self, event_sink=None) -> None:
+        self.full_build_available = True
+        self.timeout_count = 0
+        self.recoverable_retry_count = 0
+        self.degrade_reason = ""
+        self._event_sink = event_sink
+
+    def emit(self, event: str, payload: dict) -> None:
+        if self._event_sink is None:
+            return
+        try:
+            self._event_sink(event, payload)
+        except Exception:  # noqa: BLE001 — journaling must never break builds
+            pass
+
+    def record_probe(self, cmd: str, duration_s: float, outcome: str,
+                     **extra) -> None:
+        self.emit("build_probe", {
+            "cmd": (cmd or "")[:200],
+            "duration_s": round(duration_s, 1),
+            "outcome": outcome,
+            **extra,
+        })
+
+    def note_recoverable_retry(self, kind: str, cmd: str,
+                               prior_cap: float) -> None:
+        self.recoverable_retry_count += 1
+        self.emit("build_retry", {
+            "kind": kind, "prior_cap_s": prior_cap,
+            "new_cap_s": prior_cap * 2,
+            "cmd": (cmd or "")[:200],
+        })
+
+    def note_timeout(self, kind: str, cmd: str, cap: float) -> None:
+        self.timeout_count += 1
+        # Degrade on a generic timeout, or on ANY kind once the
+        # recoverable retry was spent (the state machine's "second
+        # timeout → SYNTAX_ONLY" transition).
+        if self.full_build_available and (
+                kind == "generic" or self.recoverable_retry_count > 0):
+            self.full_build_available = False
+            self.degrade_reason = (
+                f"full build timed out ({cap:g}s cap) — session degrades to "
+                f"syntax-only for further full builds"
+            )
+            self.emit("build_state", {
+                "state": "SYNTAX_ONLY",
+                "reason": self.degrade_reason,
+                "cmd": (cmd or "")[:200],
+                "timeout_count": self.timeout_count,
+            })
+
+
 def _ccache_enabled() -> bool:
     """True when ccache is installed and should be used.
 
@@ -4021,6 +4126,10 @@ class VerificationEngine:
     def __init__(self, validators: list[Validator], config: ValidationConfig) -> None:
         self.validators = validators
         self.config = config
+        # Sprint-19 P3: session build economics. Attached at construction
+        # (optionally re-attached by the orchestrator with a journaling
+        # event sink); verify_file consults it before running full builds.
+        self.build_state = BuildStateTracker()
 
     @classmethod
     def default(
@@ -4505,242 +4614,322 @@ class VerificationEngine:
                 # (which may reveal cross-file issues or better diagnostics).
             if not _cc_skip_build and build_cmd:
                 import subprocess as _sp_build
+                import time as _bs_time
+
+                _bs = getattr(self, "build_state", None)
+                # Full build vs targeted per-file build (make {stem}.o):
+                # only FULL builds degrade the session — a targeted
+                # timeout says the .o has deep dependencies, not that the
+                # tree can't finish under any cap we're willing to pay.
+                _is_full_build = not target_tmpl
                 target_path = Path(repo_root) / path
                 saved = target_path.read_bytes() if target_path.exists() else None
                 msg = ""
                 _build_env = _ccache_env()
-                try:
-                    target_path.parent.mkdir(parents=True, exist_ok=True)
-                    target_path.write_text(whole, encoding="utf-8")
-                    syntax_checked = True
-                    # Targeted builds (make {stem}.o) get a shorter timeout:
-                    # a single .o should compile in <30s. If it takes longer,
-                    # it's building deep dependencies (hiredis, lua, sqlite
-                    # amalgamation) and will likely hit the full timeout.
-                    # Fall back to gcc -fsyntax-only immediately.
-                    _build_timeout = 30 if target_tmpl else 300
+
+                def _syntax_only_fallback(reason: str) -> tuple[bool, str]:
+                    """Standalone gcc -fsyntax-only parse of ``whole``.
+
+                    Shared by the timeout path and the degraded-session
+                    skip: strictly less authoritative than a full build
+                    (no sibling #include resolution) but completes in
+                    seconds and never rejects on infrastructure.
+                    """
+                    from capybase.adapters.lsp import _resolve as _resolve_cc_fb
+                    _cc_fb = _resolve_cc_fb(
+                        getattr(self.config, "cxx_path", "g++")
+                        if language in ("cpp", "c++")
+                        else getattr(self.config, "cc_path", "gcc")
+                    )
+                    if _cc_fb is None:
+                        return False, f"{reason}: no fallback compiler"
+                    _std_fb = (getattr(self.config, "cpp_std", "c++17")
+                               if language in ("cpp", "c++")
+                               else getattr(self.config, "c_std", "c11"))
+                    _suffix_fb = ".cpp" if language in ("cpp", "c++") else ".c"
+                    _inc_fb = [str(repo_root)]
+                    _fdir = (Path(repo_root) / path).parent
+                    if str(_fdir) != str(repo_root):
+                        _inc_fb.append(str(_fdir))
                     try:
-                        proc = _sp_build.run(
-                            build_cmd, shell=True, cwd=str(repo_root),
-                            capture_output=True, text=True, timeout=_build_timeout,
-                            env=_build_env,
+                        ok_fb, msg_fb = _compile_ccs(
+                            whole, cc_path=_cc_fb, std=_std_fb,
+                            suffix=_suffix_fb, include_paths=_inc_fb,
                         )
-                        # ccache fallback: if ccache itself failed (corrupted
-                        # cache, version mismatch, incompatible flags), retry
-                        # without ccache so the build isn't blocked by a
-                        # tooling issue. This prevents ccache from introducing
-                        # a new failure category.
-                        if (
-                            proc.returncode != 0
-                            and _ccache_enabled()
-                            and _is_ccache_failure((proc.stderr or "") + (proc.stdout or ""))
-                        ):
-                            proc = _sp_build.run(
-                                build_cmd, shell=True, cwd=str(repo_root),
-                                capture_output=True, text=True, timeout=300,
-                            )
-                        # Targeted-build fallback: if the Makefile doesn't have
-                        # a rule for this target (e.g. cmake projects), retry
-                        # with the full build command.
-                        _full_cmd = getattr(self.config, "cc_build_command", "") or ""
-                        if (
-                            proc.returncode != 0
-                            and target_tmpl
-                            and _full_cmd
-                            and _full_cmd != build_cmd
-                            and "No rule to make target" in (proc.stderr or "")
-                        ):
-                            proc = _sp_build.run(
-                                _full_cmd, shell=True, cwd=str(repo_root),
-                                capture_output=True, text=True, timeout=300,
-                                env=_build_env,
-                            )
-                            build_cmd = _full_cmd  # for the journal/detail
-                        syntax_ok = proc.returncode == 0
-                        if not syntax_ok:
-                            stderr = (proc.stderr or "").strip()
-                            err_lines = stderr.splitlines()
-                            # Distinguish linker errors from compile errors.
-                            # Linker errors (collect2, ld returned, undefined
-                            # reference) are infrastructure failures — the
-                            # model's code compiled fine but the full-project
-                            # link failed due to missing deps/sibling objects.
-                            # These are NOT model defects; treat as a pass so
-                            # the merge isn't rejected on a linker issue the
-                            # model can't control.
-                            is_linker_error = any(
-                                "collect2" in ln or "ld returned" in ln
-                                or "undefined reference" in ln
-                                for ln in err_lines
-                            )
-                            if is_linker_error:
-                                syntax_ok = True  # compile passed; link is infra
-                                msg = "build: linker error (not a model defect; compile succeeded)"
-                            elif _is_missing_build_system(
-                                    (proc.stderr or "") + (proc.stdout or "")):
-                                # The build system isn't materialized in this
-                                # context (no Makefile — e.g. a rebase worktree
-                                # carries tracked sources but not generated
-                                # build artifacts). The build check is
-                                # UNAVAILABLE, not failed: treating it as a
-                                # failure poisons every downstream candidate
-                                # and feeds garbage feedback to the repair
-                                # loop (protobuf-0043: the LLM declined the
-                                # meaningless "make: No targets specified"
-                                # feedback three times and the rebase
-                                # escalated). Fall back to the syntax/dup
-                                # checks that DID run.
-                                syntax_ok = True
-                                features["build_unavailable"] = True
+                    except FileNotFoundError:
+                        return True, "fallback compiler not available"
+                    if not ok_fb and _CCS_SEMANTIC_RE.search(msg_fb):
+                        return True, (f"cc fallback: semantic pattern skipped "
+                                      f"({msg_fb[:50]})")
+                    if not ok_fb and _is_cc_werror_warning(msg_fb):
+                        return True, f"cc fallback: -Werror skipped ({msg_fb[:50]})"
+                    return ok_fb, msg_fb
+
+                if _bs is not None and _is_full_build and not _bs.full_build_available:
+                    # Sprint-19 P3: a full build already timed out this
+                    # session — re-running it at the same cap adds zero
+                    # information while burning the case budget. Skip
+                    # straight to the syntax-only fallback (journaled).
+                    features["build_skipped_prior_timeout"] = True
+                    _bs.record_probe(build_cmd, 0.0, "skipped",
+                                     path=path,
+                                     reason="prior full-build timeout (session degraded)")
+                    _sk_reason = (f"build skipped (prior full-build timeout): "
+                                  f"{build_cmd}")
+                    syntax_ok, _sk_fb = _syntax_only_fallback(_sk_reason)
+                    msg = f"{_sk_reason}; gcc -fsyntax-only: {_sk_fb}"
+                    syntax_checked = True
+                else:
+                    _bs_t0 = _bs_time.monotonic()
+                    try:
+                        target_path.parent.mkdir(parents=True, exist_ok=True)
+                        target_path.write_text(whole, encoding="utf-8")
+                        syntax_checked = True
+                        # Targeted builds (make {stem}.o) get a shorter timeout:
+                        # a single .o should compile in <30s. If it takes longer,
+                        # it's building deep dependencies (hiredis, lua, sqlite
+                        # amalgamation) and will likely hit the full timeout.
+                        # Fall back to gcc -fsyntax-only immediately.
+                        _build_timeout = 30 if target_tmpl else 300
+                        _build_attempts = 0
+                        proc = None
+                        while proc is None:
+                            _build_attempts += 1
+                            try:
+                                proc = _sp_build.run(
+                                    build_cmd, shell=True, cwd=str(repo_root),
+                                    capture_output=True, text=True,
+                                    timeout=_build_timeout, env=_build_env,
+                                )
+                            except _sp_build.TimeoutExpired as _to_exc:
+                                _to_out = ""
+                                for _attr in ("stderr", "stdout"):
+                                    _chunk = getattr(_to_exc, _attr, None)
+                                    if _chunk:
+                                        if isinstance(_chunk, bytes):
+                                            _chunk = _chunk.decode(
+                                                "utf-8", errors="replace")
+                                        _to_out += _chunk
+                                _kind = _classify_build_failure_kind(_to_out)
+                                if (
+                                    _bs is not None and _is_full_build
+                                    and _kind != "generic"
+                                    and _build_attempts < 2
+                                ):
+                                    # Recoverable (lock contention, compiler
+                                    # crash, network): ONE retry at 2× the
+                                    # cap — the failure burned wall clock,
+                                    # not capability.
+                                    _bs.note_recoverable_retry(
+                                        _kind, build_cmd, _build_timeout)
+                                    _build_timeout *= 2
+                                    continue
+                                if _bs is not None:
+                                    _bs.record_probe(
+                                        build_cmd,
+                                        _bs_time.monotonic() - _bs_t0,
+                                        "timeout", path=path, kind=_kind)
+                                    if _is_full_build:
+                                        _bs.note_timeout(
+                                            _kind, build_cmd, _build_timeout)
+                                # Build timed out — the targeted/full build's
+                                # dependency chain (hiredis, lua, jemalloc,
+                                # sqlite amalgamation) can take >300s even for
+                                # a single .o target. Fall back to standalone
+                                # gcc -fsyntax-only which only PARSES the file
+                                # (no dependency compilation, completes in
+                                # seconds). This is strictly less authoritative
+                                # than a full build (can't resolve sibling
+                                # #include headers), but it's better than a
+                                # timeout that rejects a correct merge.
+                                syntax_ok, _fb_msg = _syntax_only_fallback(
+                                    "build timed out")
                                 msg = (
-                                    "build: build system not materialized "
-                                    "(no Makefile) — check skipped"
+                                    f"build timed out ({_build_timeout:g}s): "
+                                    f"{build_cmd}; fell back to gcc "
+                                    f"-fsyntax-only: {_fb_msg}"
                                 )
-                            else:
-                                # Error localization (research §9): classify each
-                                # gcc error line by WHERE it occurs. A whole-tree
-                                # build (make/cmake) compiles many translation
-                                # units; a pre-existing error in a SIBLING file
-                                # (tool/lemon.c, deps/hiredis.c) is NOT caused by
-                                # the merge and must not reject a correct resolution.
-                                # Similarly, -Werror warning promotions (strict
-                                # flags turning warnings into errors) are not real
-                                # compile failures. Only a genuine error IN the
-                                # conflict file is a model defect.
-                                conflict_stem = Path(path).stem
-                                real_errors = []      # in conflict file, real
-                                sibling_errors = []   # in other files, infra
-                                werror_lines = []     # -Werror promotions, infra
-                                # make/cmake driver lines: ``make[2]: ***``,
-                                # ``CMake Error``, ``ninja: error``. These are
-                                # build-system summaries, not gcc diagnostics —
-                                # they don't carry a file:line:col: location and
-                                # shouldn't be attributed to the conflict file.
-                                # The actual gcc error line(s) appear separately
-                                # and ARE classified below.
-                                _is_build_driver_line = (
-                                    lambda ln: (
-                                        ln.startswith("make[")
-                                        or ln.startswith("make:")
-                                        or "CMake Error" in ln
-                                        or ln.startswith("ninja:")
-                                        or ln.startswith("*** ")
-                                        or "Error 1" in ln
-                                        or "Error 2" in ln
-                                    )
+                                break
+                        if proc is not None:
+                            # ccache fallback: if ccache itself failed (corrupted
+                            # cache, version mismatch, incompatible flags), retry
+                            # without ccache so the build isn't blocked by a
+                            # tooling issue. This prevents ccache from introducing
+                            # a new failure category.
+                            if (
+                                proc.returncode != 0
+                                and _ccache_enabled()
+                                and _is_ccache_failure((proc.stderr or "") + (proc.stdout or ""))
+                            ):
+                                proc = _sp_build.run(
+                                    build_cmd, shell=True, cwd=str(repo_root),
+                                    capture_output=True, text=True, timeout=300,
                                 )
-                                for ln in err_lines:
-                                    if "error" not in ln.lower():
-                                        continue
-                                    # Skip make/cmake/ninja driver summary lines
-                                    # — they reference build targets, not source
-                                    # files. The gcc diagnostic lines are what
-                                    # carry the file:line:col: location.
-                                    if _is_build_driver_line(ln):
-                                        continue
-                                    # -Werror warning promotion?
-                                    if _is_cc_werror_warning(ln):
-                                        werror_lines.append(ln)
-                                        continue
-                                    file_stem, _ = _parse_cc_error_location(ln)
-                                    if file_stem is not None and file_stem != conflict_stem:
-                                        sibling_errors.append(ln)
-                                    elif file_stem == conflict_stem:
-                                        # Positively identified as in the conflict
-                                        # file → genuine defect.
-                                        real_errors.append(ln)
-                                    # else: file_stem is None (unparseable gcc
-                                    # line) — don't classify yet; we may find a
-                                    # parseable line later. If ALL error lines
-                                    # are unparseable, we fall through to the
-                                    # conservative fallback below.
-                                if real_errors:
-                                    # Genuine error in the conflict file → hard fail.
-                                    msg = real_errors[0]
-                                elif sibling_errors or werror_lines:
-                                    # All errors are in sibling files or -Werror
-                                    # promotions → the merge compiled fine; the
-                                    # build failure is pre-existing infrastructure.
+                            # Targeted-build fallback: if the Makefile doesn't have
+                            # a rule for this target (e.g. cmake projects), retry
+                            # with the full build command.
+                            _full_cmd = getattr(self.config, "cc_build_command", "") or ""
+                            if (
+                                proc.returncode != 0
+                                and target_tmpl
+                                and _full_cmd
+                                and _full_cmd != build_cmd
+                                and "No rule to make target" in (proc.stderr or "")
+                            ):
+                                proc = _sp_build.run(
+                                    _full_cmd, shell=True, cwd=str(repo_root),
+                                    capture_output=True, text=True, timeout=300,
+                                    env=_build_env,
+                                )
+                                build_cmd = _full_cmd  # for the journal/detail
+                            syntax_ok = proc.returncode == 0
+                            if not syntax_ok:
+                                stderr = (proc.stderr or "").strip()
+                                err_lines = stderr.splitlines()
+                                # Distinguish linker errors from compile errors.
+                                # Linker errors (collect2, ld returned, undefined
+                                # reference) are infrastructure failures — the
+                                # model's code compiled fine but the full-project
+                                # link failed due to missing deps/sibling objects.
+                                # These are NOT model defects; treat as a pass so
+                                # the merge isn't rejected on a linker issue the
+                                # model can't control.
+                                is_linker_error = any(
+                                    "collect2" in ln or "ld returned" in ln
+                                    or "undefined reference" in ln
+                                    for ln in err_lines
+                                )
+                                if is_linker_error:
+                                    syntax_ok = True  # compile passed; link is infra
+                                    msg = "build: linker error (not a model defect; compile succeeded)"
+                                elif _is_missing_build_system(
+                                        (proc.stderr or "") + (proc.stdout or "")):
+                                    # The build system isn't materialized in this
+                                    # context (no Makefile — e.g. a rebase worktree
+                                    # carries tracked sources but not generated
+                                    # build artifacts). The build check is
+                                    # UNAVAILABLE, not failed: treating it as a
+                                    # failure poisons every downstream candidate
+                                    # and feeds garbage feedback to the repair
+                                    # loop (protobuf-0043: the LLM declined the
+                                    # meaningless "make: No targets specified"
+                                    # feedback three times and the rebase
+                                    # escalated). Fall back to the syntax/dup
+                                    # checks that DID run.
                                     syntax_ok = True
-                                    parts = []
-                                    if sibling_errors:
-                                        sib = sibling_errors[0]
-                                        sib_stem, _ = _parse_cc_error_location(sib)
-                                        parts.append(
-                                            f"sibling-file error in {sib_stem or '?'}"
-                                            f" (not the resolved file {conflict_stem})"
-                                        )
-                                    if werror_lines:
-                                        parts.append(
-                                            f"{len(werror_lines)} -Werror warning(s)"
-                                        )
+                                    features["build_unavailable"] = True
                                     msg = (
-                                        "build: infrastructure failure, not a merge "
-                                        f"defect ({'; '.join(parts)})"
+                                        "build: build system not materialized "
+                                        "(no Makefile) — check skipped"
                                     )
                                 else:
-                                    # No parseable error lines at all — fall back
-                                    # to the first error-containing line.
-                                    msg = next(
-                                        (ln for ln in err_lines if "error" in ln.lower()),
-                                        err_lines[0] if err_lines else "build failed",
+                                    # Error localization (research §9): classify each
+                                    # gcc error line by WHERE it occurs. A whole-tree
+                                    # build (make/cmake) compiles many translation
+                                    # units; a pre-existing error in a SIBLING file
+                                    # (tool/lemon.c, deps/hiredis.c) is NOT caused by
+                                    # the merge and must not reject a correct resolution.
+                                    # Similarly, -Werror warning promotions (strict
+                                    # flags turning warnings into errors) are not real
+                                    # compile failures. Only a genuine error IN the
+                                    # conflict file is a model defect.
+                                    conflict_stem = Path(path).stem
+                                    real_errors = []      # in conflict file, real
+                                    sibling_errors = []   # in other files, infra
+                                    werror_lines = []     # -Werror promotions, infra
+                                    # make/cmake driver lines: ``make[2]: ***``,
+                                    # ``CMake Error``, ``ninja: error``. These are
+                                    # build-system summaries, not gcc diagnostics —
+                                    # they don't carry a file:line:col: location and
+                                    # shouldn't be attributed to the conflict file.
+                                    # The actual gcc error line(s) appear separately
+                                    # and ARE classified below.
+                                    _is_build_driver_line = (
+                                        lambda ln: (
+                                            ln.startswith("make[")
+                                            or ln.startswith("make:")
+                                            or "CMake Error" in ln
+                                            or ln.startswith("ninja:")
+                                            or ln.startswith("*** ")
+                                            or "Error 1" in ln
+                                            or "Error 2" in ln
+                                        )
                                     )
-                    except _sp_build.TimeoutExpired:
-                        # Build timed out — the targeted/full build's dependency
-                        # chain (hiredis, lua, jemalloc, sqlite amalgamation)
-                        # can take >300s even for a single .o target. Fall back
-                        # to standalone gcc -fsyntax-only which only PARSES the
-                        # file (no dependency compilation, completes in seconds).
-                        # This is strictly less authoritative than a full build
-                        # (can't resolve sibling #include headers), but it's
-                        # better than a timeout that rejects a correct merge.
-                        from capybase.adapters.lsp import _resolve as _resolve_cc_fb
-                        _cc_fb = _resolve_cc_fb(
-                            getattr(self.config, "cxx_path", "g++")
-                            if language in ("cpp", "c++")
-                            else getattr(self.config, "cc_path", "gcc")
-                        )
-                        if _cc_fb is not None:
-                            _std_fb = (getattr(self.config, "cpp_std", "c++17")
-                                       if language in ("cpp", "c++")
-                                       else getattr(self.config, "c_std", "c11"))
-                            _suffix_fb = ".cpp" if language in ("cpp", "c++") else ".c"
-                            _inc_fb = [str(repo_root)]
-                            _fdir = (Path(repo_root) / path).parent
-                            if str(_fdir) != str(repo_root):
-                                _inc_fb.append(str(_fdir))
-                            try:
-                                ok_fb, msg_fb = _compile_ccs(
-                                    whole, cc_path=_cc_fb, std=_std_fb,
-                                    suffix=_suffix_fb, include_paths=_inc_fb,
-                                )
-                            except FileNotFoundError:
-                                ok_fb, msg_fb = True, "fallback compiler not available"
-                            if not ok_fb and _CCS_SEMANTIC_RE.search(msg_fb):
-                                ok_fb = True
-                                msg_fb = f"cc fallback: semantic pattern skipped ({msg_fb[:50]})"
-                            if not ok_fb and _is_cc_werror_warning(msg_fb):
-                                ok_fb = True
-                                msg_fb = f"cc fallback: -Werror skipped ({msg_fb[:50]})"
-                            syntax_ok = ok_fb
-                            msg = (f"build timed out (300s): {build_cmd}; "
-                                   f"fell back to gcc -fsyntax-only: {msg_fb}")
-                        else:
-                            syntax_ok = False
-                            msg = f"build timed out (300s): {build_cmd}"
+                                    for ln in err_lines:
+                                        if "error" not in ln.lower():
+                                            continue
+                                        # Skip make/cmake/ninja driver summary lines
+                                        # — they reference build targets, not source
+                                        # files. The gcc diagnostic lines are what
+                                        # carry the file:line:col: location.
+                                        if _is_build_driver_line(ln):
+                                            continue
+                                        # -Werror warning promotion?
+                                        if _is_cc_werror_warning(ln):
+                                            werror_lines.append(ln)
+                                            continue
+                                        file_stem, _ = _parse_cc_error_location(ln)
+                                        if file_stem is not None and file_stem != conflict_stem:
+                                            sibling_errors.append(ln)
+                                        elif file_stem == conflict_stem:
+                                            # Positively identified as in the conflict
+                                            # file → genuine defect.
+                                            real_errors.append(ln)
+                                        # else: file_stem is None (unparseable gcc
+                                        # line) — don't classify yet; we may find a
+                                        # parseable line later. If ALL error lines
+                                        # are unparseable, we fall through to the
+                                        # conservative fallback below.
+                                    if real_errors:
+                                        # Genuine error in the conflict file → hard fail.
+                                        msg = real_errors[0]
+                                    elif sibling_errors or werror_lines:
+                                        # All errors are in sibling files or -Werror
+                                        # promotions → the merge compiled fine; the
+                                        # build failure is pre-existing infrastructure.
+                                        syntax_ok = True
+                                        parts = []
+                                        if sibling_errors:
+                                            sib = sibling_errors[0]
+                                            sib_stem, _ = _parse_cc_error_location(sib)
+                                            parts.append(
+                                                f"sibling-file error in {sib_stem or '?'}"
+                                                f" (not the resolved file {conflict_stem})"
+                                            )
+                                        if werror_lines:
+                                            parts.append(
+                                                f"{len(werror_lines)} -Werror warning(s)"
+                                            )
+                                        msg = (
+                                            "build: infrastructure failure, not a merge "
+                                            f"defect ({'; '.join(parts)})"
+                                        )
+                                    else:
+                                        # No parseable error lines at all — fall back
+                                        # to the first error-containing line.
+                                        msg = next(
+                                            (ln for ln in err_lines if "error" in ln.lower()),
+                                            err_lines[0] if err_lines else "build failed",
+                                        )
+                        if _bs is not None:
+                            _bs.record_probe(
+                                build_cmd,
+                                _bs_time.monotonic() - _bs_t0,
+                                "pass" if syntax_ok else "fail",
+                                path=path)
                     except FileNotFoundError as exc:
                         # Build tool absent → skip (never a false fail), mirroring
                         # the gcc-absent path below.
                         syntax_ok = True
                         msg = f"build command not available: {exc}"
-                finally:
-                    # Restore the pre-check worktree state immediately; the
-                    # orchestrator writes the final buffer later iff validation
-                    # passes. Mirrors _run_clippy_check's restore dance.
-                    if saved is not None:
-                        target_path.write_bytes(saved)
-                    elif target_path.exists():
-                        target_path.unlink(missing_ok=True)
+                    finally:
+                        # Restore the pre-check worktree state immediately; the
+                        # orchestrator writes the final buffer later iff validation
+                        # passes. Mirrors _run_clippy_check's restore dance.
+                        if saved is not None:
+                            target_path.write_bytes(saved)
+                        elif target_path.exists():
+                            target_path.unlink(missing_ok=True)
                 if not syntax_ok and self.config.require_syntax_if_supported:
                     hard.append(
                         VerificationFailure(

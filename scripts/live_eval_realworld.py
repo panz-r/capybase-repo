@@ -110,7 +110,7 @@ PASS_THRESHOLD = float(os.environ.get("CAPYBASE_PASS_THRESHOLD", "0.90"))
 C_PREPARE_COMMANDS: dict[str, str] = {
     "redis-history": "",
     "jsonc-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-    "sqlite-history": "./configure && make -j4",
+    "sqlite-history": "./configure && make -j$(nproc)",
     "nlohmann-json-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
     "clickhouse-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
     "protobuf-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -Dprotobuf_BUILD_TESTS=OFF",
@@ -336,14 +336,14 @@ def _resolve_c_build(repo: Path, dataset: str, default_prepare: str) -> tuple[st
         # headers only (not the full project — that takes too long for the
         # case budget). The headers (parse.h, opcodes.h, sqlite3.h, etc.)
         # are needed for gcc -fsyntax-only verification. The build_cmd stays
-        # "make -j4" so verify_file can do targeted builds (.lo/.o).
+        # "make -j$(nproc)" so verify_file can do targeted builds (.lo/.o).
         return ("autoreconf -fi >/dev/null 2>&1; ./configure >/dev/null 2>&1",
-                "make -j4")
+                "make -j$(nproc)")
     if has_configure:
         return ("./configure >/dev/null 2>&1",
-                "make -j4")
+                "make -j$(nproc)")
     if has_makefile:
-        return ("", "make -j4")
+        return ("", "make -j$(nproc)")
     # Unknown build system — no whole-tree gate. The CcsSyntaxValidator
     # (gcc -fsyntax-only) still gates per-unit; brace-balance is the only
     # whole-file check. This is honest (we can't build what we can't detect).
