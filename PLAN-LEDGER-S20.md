@@ -35,7 +35,7 @@ branch `dev`. Never push (user's job).
 
 | # | Item | Status | Case-by-case acceptance |
 |---|------|--------|-------------------------|
-| S20.1 | Resolver R10 xfail: anchor-scoped `mechanical_reapply_merge` | TODO | the xfail'd test passes strict (no xfail); full suite green |
+| S20.1 | Resolver R10 xfail: anchor-scoped `mechanical_reapply_merge` | DONE (9d03e3f) | the xfail'd test passes strict (no xfail); 543 resolver-related tests green; full suite gate launched (suite-s20-r1) |
 | S20.2 | Toolchain-era preflight probe (`ESCALATE_TOOLCHAIN`) | TODO | tokio-0109 classified by one pristine-side probe pair (cacheable across repeats, ~seconds); passable cases behavior-identical |
 | S20.3 | queue.rs resurrection fingerprint investigation | TODO | 0037+0046 journals/diffs read; explicit policy verdict documented (true positive vs test-file false positive) |
 | S20.4 | Empty-resolution bounded retry | TODO | flask-0006: exactly one retry with reformulated constrained prompt; escalation path unchanged when the retry also empties |
@@ -89,3 +89,22 @@ zero oracle-divergent merges.
   restructuring directive (case-by-case development; whole-corpus
   data-dependent decisions postponed to the end-of-sprint harvest,
   consumed by sprint-21 planning).
+- 2026-08-20 00:2x: **S20.1 DONE — R10 xfail closed** (9d03e3f). Root
+  cause was two compounding defects on the replace-coalesced
+  modify+delete shape: (1) the modify/delete overlap guard used
+  `_base_deleted_lines` (delete opcodes only) — difflib coalesces
+  "modify line + delete line" into one replace opcode, so the deletion
+  was invisible and the guard passed; (2) mechanical ops were applied
+  wherever their anchor TOKEN CONTENT occurred uniquely in the semantic
+  text — when the rewrite deleted the op's true position, the
+  substitution grafted onto an unrelated look-alike token (fabricated
+  LINE1 from line1's 'line' while dropping replayed's line3 edit →
+  emitted 'LINE1\nLINE2'). Fixes: `_base_removed_lines` (replace spans
+  that net-lose base lines count as removals) wired into the guard, and
+  anchor-scoped application through a base→semantic token alignment
+  (an op applies only at a base position that survived inside an equal
+  region; content-verified; insertions stay skipped; descending base
+  order). The shape now declines honestly. Test un-xfailed, passes
+  strict; 543 resolver-related tests green. Full suite gate: detached,
+  log /tmp/capybase-live/s20/val/suite-s20-r1.log, tally lands via the
+  progress.log recorder.
