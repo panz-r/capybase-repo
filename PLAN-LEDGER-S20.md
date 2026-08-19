@@ -39,7 +39,7 @@ branch `dev`. Never push (user's job).
 | S20.2 | Toolchain-era preflight probe (`ESCALATE_TOOLCHAIN`) | DONE | live acceptance: tokio-0109 classified in **8.9s** as ESCALATE_TOOLCHAIN, unanimous 3/3 via the probe cache (D7 burned full majority-of-3 pipelines on it); strict conditions (all three texts fail the real gate, real compile errors, identical side signatures); python/crateless-rust/degraded-gate skip |
 | S20.3 | queue.rs resurrection fingerprint investigation | DONE — verdict: no policy change | 0037/0046 are byte-identical conflicts (same base/cur/rep, two merge SHAs) whose HUMAN oracles resolve the replayed deletion oppositely (0037 keeps 6/7 deleted lines, 0046 keeps 0/7) — the backstop's stop is the correct conservative disposition on genuinely ambiguous ground truth. Offline census: 645 distinct groups; 30 dupe groups / 62 cases; only this pair diverges |
 | S20.4 | Empty-resolution bounded retry | DONE | live-accepted on flask-0006: `recovery_retry=2` fired in every run (reframed prompt via the existing build_recovery_prompt path); all reframes ALSO came back empty → disposition honestly unchanged (ESCALATE / MODEL_NEEDS_HUMAN) — the model is a proven hard limit on this shape (9/9 empties incl. reframes); escalation path preserved exactly |
-| S20.5 | Hygiene pack: lockfile exemptions, sweep centralization, `longrun` wrapper, ccache sloppiness measurement | TODO | cross-worktree hit rate measured on a protobuf case pair; stale-process sweep runs from every entry point |
+| S20.5 | Hygiene pack: lockfile exemptions, sweep centralization, `longrun` wrapper, ccache sloppiness measurement | DONE | lockfile takeover live-accepted: axum-0015/0017 **PASS sim 1.00 in 18s/23s** (0017 previously burned 103 LLM units for WORKING @ 0.625); lockfile-named cases exempt from the 48K size guard; sweep shared via `process_hygiene` (eval + CLI entry points); `longrun.sh` self-tested (markers, pid guard); ccache cross-worktree hit rate measured **100%** (misses frozen at 732 across two fresh-worktree runs; no sloppiness tuning needed) |
 | S20.6 | Micro-CEGIS: provenance-aware duplicate repair + missing-symbol micro-patch | TODO | 0065-class: `redefinition of X` → deterministic delete when one copy is base-verbatim and its parent deleted it; missing-symbol → 5-line-context LLM micro-patch; strictly compiler-gated, escalates on ambiguity |
 | S20.7 | Skeleton-aware multi-brace repair | TODO | brace insertion at skeleton entity boundaries instead of EOF; nlohmann-0033-family fixtures pass |
 | S20.8 | Move-and-edit transposition (diff-of-diffs) | TODO | journal-only first; deterministic transpose of B's edit onto A's moved block (>70% verbatim match), compiler-gated enable |
@@ -170,3 +170,24 @@ zero oracle-divergent merges.
   the deleted region → structural rules decline), 9/9 empties including
   reframes. Harvest note: this shape (big one-side cleanup + tiny
   in-deletion addition) is a candidate for the S20.6 deterministic class.
+- 2026-08-20 01:4x: **S20.5 DONE — hygiene pack, all four sub-items.**
+  (a) **Lockfile takeover**: offline measurement first (both corpus
+  Cargo.lock cases: oracles ≈ the CURRENT side's regeneration — 21/21
+  current-only pins kept, 0/38 replayed-only, ~99.7% of divergent keys
+  current's — overturning the union-merge hypothesis). Implemented as a
+  pre-cascade trigger in `_try_true_side_portfolio` (name-scoped
+  Cargo.lock, `future.enable_lockfile_takeover` default ON, single-side
+  candidate verified through the standard machinery, declines cleanly);
+  load_cases exempts lockfile-named cases from the 48K size guard (they
+  never build a prompt). Live acceptance: **2/2 PASS at sim 1.00 in
+  18s/23s** — axum-0017's 103-unit WORKING grind is gone. 6 wiring tests.
+  (b) **Sweep centralized**: `capybase.process_hygiene.kill_stale_build_
+  processes` shared by the eval script (startup+atexit) and the CLI
+  main (startup). (c) **`scripts/longrun.sh`**: the detached-runner +
+  progress-marker pattern productized (self-tested: START/DONE markers,
+  pid-lifecycle, active-run guard). (d) **ccache measurement**:
+  protobuf-0073 run twice in fresh worktrees — misses FROZEN at 732
+  while hits grew +389 per run = **100% cross-worktree hit rate** on
+  identical content (three distinct worktrees); no sloppiness tuning
+  warranted; case wall 70s → 11s warm. 33 tests green across the S20.5
+  files.

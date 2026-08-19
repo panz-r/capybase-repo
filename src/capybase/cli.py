@@ -878,6 +878,12 @@ def _run_metrics(config: Config, repo: str, *, out=sys.stdout) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # Startup sweep of stale build processes from prior (killed/timed-out)
+    # runs — defense-in-depth under _run_shell_tree's group-kill teardown
+    # (sprint-20 S20.5b: every entry point shares the same net). Best-effort,
+    # 5s budget, never raises.
+    from capybase.process_hygiene import kill_stale_build_processes
+    kill_stale_build_processes()
     # Configure the cross-session operational logger early. Verbose mirrors
     # debug output to stderr; quiet mutes the console. The rotating file log
     # (always on) is best-effort and never breaks a run.

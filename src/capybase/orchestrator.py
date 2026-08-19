@@ -1271,6 +1271,17 @@ def _try_whole_file_portfolio(
     }
 
 
+#: Whole-file lockfile takeover names (sprint-20 S20.5). Deliberately
+#: name-scoped, NOT suffix-scoped (".lock" would over-match): the oracle
+#: measurement backing the rule is Cargo.lock-specific. Extend only with
+#: per-format evidence.
+_LOCKFILE_TAKEOVER_NAMES = frozenset({"cargo.lock"})
+
+
+def _is_lockfile_path(path: str) -> bool:
+    return (path or "").rsplit("/", 1)[-1].lower() in _LOCKFILE_TAKEOVER_NAMES
+
+
 def _true_stage_sides(git_backend, path: str):
     """Pristine whole-file side texts from the merge index.
 
@@ -13793,7 +13804,27 @@ class Orchestrator:
         trigger = "dup_pathology"
         asym_winner: str | None = None
         dupes = _shared_context_duplicate_definitions(original, language)
-        if phase1_fast_path:
+        if (phase1_fast_path and _is_lockfile_path(path)
+                and bool(getattr(self.config.future,
+                                 "enable_lockfile_takeover", True))):
+            # Sprint-20 S20.5 — lockfile generated-file takeover. Cargo.lock
+            # is a @generated regeneration artifact: the meaningful merge
+            # happens in the manifest, and the real-world lockfile oracle is
+            # the CURRENT side's regeneration in practice (measured on both
+            # corpus Cargo.lock cases: 21/21 current-only pins kept, 0/38
+            # replayed-only, ~99.7% of divergent package keys take current's
+            # block). Take the current pristine side through the same verify
+            # machinery (single-candidate, gate_determined — no adjudication
+            # to suffer merge-guilt weaving stale pins back); a failed verify
+            # declines and the per-unit cascade proceeds exactly as before.
+            self.journal.emit(
+                "lockfile_takeover_gate",
+                {"fires": True, "winner": "current", "n_units": len(units)},
+                step_index=self.step, path=path,
+            )
+            trigger = "lockfile_takeover"
+            asym_winner = "current"
+        elif phase1_fast_path:
             # Pre-cascade whole-file fast path: when one side rewrote the
             # file wholesale, the per-unit cascade is doomed-and-slow —
             # dozens of fragment LLM calls burn the case budget before

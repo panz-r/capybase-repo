@@ -769,6 +769,18 @@ class FutureConfig(BaseModel):
     # (stale 0.2918), zero false positives across the >= 0.90 band and
     # mid-band controls (worst good-merge stale 0.021 vs threshold 0.15).
     enable_true_side_asymmetry_takeover: bool = True
+    # Lockfile generated-file takeover (sprint-20 S20.5): a conflict whose
+    # file is Cargo.lock resolves to the CURRENT side's pristine stage file
+    # before the per-unit cascade — lockfiles are @generated regeneration
+    # artifacts (the meaningful merge happens in the manifest), and the
+    # real-world lockfile oracle IS the current side's regeneration in
+    # practice (measured on both corpus Cargo.lock cases: 21/21 current-only
+    # pins kept, 0/38 replayed-only, ~99.7% of divergent package keys take
+    # current's block; axum-0017 otherwise burns 103 LLM units for a WORKING
+    # at sim 0.625). Verified like every whole-file swap; a failed verify
+    # declines to the per-unit path. Name-scoped, not suffix-scoped — extend
+    # only with per-format oracle evidence.
+    enable_lockfile_takeover: bool = True
     # Mid-band subsumption takeover (jsonc-0004 class): one side's churn
     # dominates the other's >= 2.5x while the normalized asymmetry sits in
     # [0.55, 0.90) — below the wholesale band where taking the winner is

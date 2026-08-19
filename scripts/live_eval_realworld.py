@@ -258,7 +258,8 @@ def load_cases(
 
     ``case_ids`` (when given) selects a subset by exact id match — used by the
     ``--case`` flag for targeted single-case reruns (e.g. verifying a fix
-    against one case in seconds rather than a 5-hour full run)."""
+    against one case in seconds rather than a full 5-hour run)."""
+    from capybase.orchestrator import _LOCKFILE_TAKEOVER_NAMES as _LOCK_NAMES
     cases: list[Case] = []
     for f in sorted(TESTDATA.glob("*.json")):
         try:
@@ -299,8 +300,17 @@ def load_cases(
         # window, so for those cases the guard is a false proxy — lift it via
         # CAPYBASE_SKIP_SIZE_GUARD=1. (Cases it can't help — a single oversized
         # entity, or an un-splittable language — still need the guard.)
+        # Lockfile exemption (sprint-20 S20.5): a Cargo.lock case never builds
+        # an LLM prompt — the lockfile takeover resolves the whole file
+        # deterministically pre-cascade — so the window-size rationale doesn't
+        # apply (both corpus Cargo.lock cases are >48K marker files that were
+        # silently unloadable). If the takeover declines at runtime, the
+        # oversized-prompt guard still protects the per-unit path.
+        _is_lockfile = ((c.path or "").rsplit("/", 1)[-1].lower()
+                        in _LOCK_NAMES)
         _skip_guard = os.environ.get("CAPYBASE_SKIP_SIZE_GUARD", "") == "1"
-        if not _skip_guard and len(c.marker_original) > 48 * 1024:
+        if (not _skip_guard and not _is_lockfile
+                and len(c.marker_original) > 48 * 1024):
             continue
         cases.append(c)
         if limit and len(cases) >= limit:
@@ -1437,40 +1447,15 @@ def _print_census(results_path: str) -> None:
 
 
 def _kill_stale_build_processes():
-    """Kill orphaned compiler/ccache processes from previous eval runs.
+    """Sweep stale build processes via the shared capybase hygiene module.
 
-    Eval runs launch cmake/make/gcc/ccache subprocesses that can outlive the
-    parent Python process (especially when killed via timeout or SIGKILL).
-    Matches on BOTH cmdline markers and the process working directory: the
-    leaked population is mostly ``make``/``ccache g++``/libtool command
-    lines that carry no marker string, but every one of them runs with its
-    cwd inside a /var/tmp/capy-rw-* eval worktree (which outlives the
-    worktree itself — the dir shows as deleted). Uses /proc scanning (not
-    pkill, which can hang on large process tables) with a hard 5s budget.
-    Best-effort — never blocks the eval.
+    Kept as a thin wrapper so the atexit registration and the module's
+    historical call sites stay stable; the implementation (cmdline + cwd
+    matching, /proc scan, 5s budget) lives in capybase.process_hygiene so
+    every entry point shares one net (sprint-20 S20.5b).
     """
-    import os
-    import signal
-    import time
-    _deadline = time.monotonic() + 5.0
-    for pid_dir in os.listdir("/proc"):
-        if not pid_dir.isdigit():
-            continue
-        if time.monotonic() > _deadline:
-            break
-        try:
-            with open(f"/proc/{pid_dir}/cmdline", "rb") as f:
-                cmdline = f.read().decode("utf-8", errors="replace")
-            cwd = os.readlink(f"/proc/{pid_dir}/cwd")
-        except (OSError, ValueError):
-            continue
-        if (
-            "capybase-ccache-shim" in cmdline
-            or "capy-rw-" in cmdline
-            or "ccache-tmp/cpp_stdout" in cmdline
-            or cwd.startswith("/var/tmp/capy-rw-")
-        ):
-            os.kill(int(pid_dir), signal.SIGKILL)
+    from capybase.process_hygiene import kill_stale_build_processes
+    kill_stale_build_processes()
 
 
 def main():
