@@ -854,6 +854,24 @@ def _base_deleted_lines(base: list[str], other: list[str]) -> set[int]:
     return deleted
 
 
+def _base_removed_lines(base: list[str], other: list[str]) -> set[int]:
+    """Base line indices (0-based) that ``other`` no longer carries.
+
+    Superset of ``_base_deleted_lines``: a deletion can hide inside a
+    REPLACE opcode (difflib coalesces "modify line + delete line" into
+    one multi-line replace), which the delete-only helper can't see —
+    r10's blind spot. Replace spans that net-lose base lines count their
+    unmatched tail as removed."""
+    removed: set[int] = set()
+    matcher = line_matcher(base, other)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "delete":
+            removed.update(range(i1, i2))
+        elif tag == "replace" and i2 - i1 > j2 - j1:
+            removed.update(range(i1 + (j2 - j1), i2))
+    return removed
+
+
 def _side_line_fates(base: list[str], side: list[str]):
     """Alignment-aware per-line fate of one side vs the base.
 
@@ -1331,10 +1349,12 @@ def _try_mechanical_reapply_merge(
     # DELETED a base line that the other side CHANGED, the conflict is
     # genuine — reapplying the mechanical transform here drops the other
     # side's edit and can over-apply the transformation past its anchor
-    # (the span-intersection shape zealous_merge already declines).
+    # (the span-intersection shape zealous_merge already declines). Uses
+    # _base_removed_lines, not _base_deleted_lines: a deletion hidden
+    # inside a replace opcode (net line loss) must count too.
     _bl = base.split("\n")
-    _cur_del = _base_deleted_lines(_bl, current.split("\n"))
-    _rep_del = _base_deleted_lines(_bl, replayed.split("\n"))
+    _cur_del = _base_removed_lines(_bl, current.split("\n"))
+    _rep_del = _base_removed_lines(_bl, replayed.split("\n"))
     if (_cur_del & _base_changed_lines(_bl, replayed.split("\n"))) or (
             _rep_del & _base_changed_lines(_bl, current.split("\n"))):
         return None
@@ -1344,54 +1364,44 @@ def _try_mechanical_reapply_merge(
     else:
         mech_ops, sem_text = rep_ops, current
 
-    # Filter mechanical ops to SAFE substitutions only:
-    # - Skip pure insertions (i1==i2): no base anchor to re-apply onto the
-    #   semantic text; the insertion's content can't be placed reliably.
-    # - Skip ambiguous anchors (appear >1× in the semantic text): can't tell
-    #   which occurrence the mechanical op targeted.
-    # - Keep unambiguous substitutions (anchor appears exactly 1×).
-    # Previously the rule DECLINED entirely if ANY op was an insertion or
-    # ambiguous. Now it applies the safe ops and skips the rest — partial
-    # application. This unlocks refactor+bugfix merges where the bugfix has
-    # a mix of unambiguous renames and ambiguous/insertion changes (e.g.,
-    # clickhouse-0024: an API rename that IS unambiguous + a type-cast
-    # wrapping that is an insertion). The unambiguous rename gets applied;
-    # the cast is skipped (the code compiles without it).
+    # Anchor-scoped reapplication (r10): a mechanical op may only be
+    # applied at the base-token position that SURVIVED into the semantic
+    # side — never at a look-alike token sequence elsewhere. The previous
+    # content-anywhere search grafted substitutions onto unrelated
+    # identical tokens when the rewrite had deleted the op's true anchor
+    # position (fabricating LINE1 from the 'line' inside line1 while the
+    # actual anchor, line3's 'line', was gone).
+    #
+    # Ops are scoped via a base->semantic token alignment: an op applies
+    # only when every base token of its anchor sits inside an `equal`
+    # region (mapped to the semantic position); insertions (i1==i2) have
+    # no base anchor to scope and are skipped, as before — the rewrite's
+    # decision to drop that content stands (the tree still compiles
+    # without it; clickhouse-0024's cast-insertion precedent).
     sem_toks = _tokenize(sem_text)
-    safe_ops: list[tuple[int, int, list[str]]] = []
-    for i1_m, i2_m, repl_m in mech_ops:
-        if i1_m == i2_m:
-            continue  # pure insertion — skip
-        anchor_m = bt[i1_m:i2_m]
-        if not anchor_m:
-            continue
-        occurrences = _count_subsequence(sem_toks, anchor_m)
-        if occurrences == 1:
-            safe_ops.append((i1_m, i2_m, repl_m))
-        # occurrences == 0: anchor removed by the rewrite — skip
-        # occurrences > 1: ambiguous — skip
-    if not safe_ops:
-        return None  # no unambiguous substitutions to apply → defer
+    import difflib as _dl_align
+    _pos_map: dict[int, int] = {}
+    for _tag, _a1, _a2, _b1, _b2 in _dl_align.SequenceMatcher(
+            None, bt, sem_toks, autojunk=False).get_opcodes():
+        if _tag == "equal":
+            for _k in range(_a2 - _a1):
+                _pos_map[_a1 + _k] = _b1 + _k
 
-    # Build the semantic side's token sequence. We'll apply mechanical subs
-    # onto it. The semantic side may have completely different tokens, so we
-    # search for the mechanical op's BASE anchor tokens within the semantic
-    # text's token stream.
     applied = list(sem_toks)  # mutable copy
     applied_count = 0
-    for i1, i2, repl in safe_ops:
-        anchor = bt[i1:i2]
-        if not anchor:
-            continue
-        idx = _find_subsequence(applied, anchor)
-        if idx < 0:
-            continue  # anchor not found — the rewrite removed it; skip
-        # Re-check ambiguity in the CURRENT state (a prior op may have
-        # changed the token landscape).
-        next_idx = _find_subsequence(applied[idx + len(anchor):], anchor)
-        if next_idx >= 0:
-            continue  # ambiguous — skip
-        applied[idx:idx + len(anchor)] = repl
+    # Apply in DESCENDING base order: an edit shifts semantic positions
+    # after it, so later-in-file edits go first and the earlier pos_map
+    # entries stay valid.
+    for i1, i2, repl in sorted(mech_ops, key=lambda op: -op[0]):
+        if i1 == i2:
+            continue  # pure insertion — no base anchor to scope to
+        sem_pos = [_pos_map.get(_i) for _i in range(i1, i2)]
+        if any(_p is None for _p in sem_pos):
+            continue  # anchor region didn't survive the rewrite — skip
+        _lo, _hi = sem_pos[0], sem_pos[-1] + 1
+        if applied[_lo:_hi] != bt[i1:i2]:
+            continue  # alignment drift — defensive content verification
+        applied[_lo:_hi] = repl
         applied_count += 1
 
     if applied_count == 0:

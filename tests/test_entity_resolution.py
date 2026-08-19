@@ -1092,15 +1092,6 @@ def test_r9_agreed_rename_comment_only_not_declined():
 # --- D.1 (round 10): zealous_merge must not silently drop a side's edit ---
 
 
-@pytest.mark.xfail(
-    reason="mechanical_reapply_merge over-applies the mechanical transform "
-           "past its anchor (fabricates LINE1) and drops replayed's edit on "
-           "this replace-coalesced span shape — the deletion hides inside a "
-           "replace opcode, so the delete-span guard can't see it. Needs "
-           "anchor-scoped reapplication; tracked for the resolver-hardening "
-           "round.",
-    strict=False,
-)
 def test_r10_zealous_merge_span_intersection_declines():
     r"""zealous_merge's walk only detected overlap when two regions START at the
     same base line. When one side's region SPANS past the other's start (a
