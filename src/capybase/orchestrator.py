@@ -8541,6 +8541,11 @@ class Orchestrator:
         # calls (Phase 1 → Phase 2 re-resolve) so the no-progress guard sees
         # prior compiler errors and doesn't reset its counter on re-entry.
         self._step_failure_sigs: dict[str, list] = {}
+        # Sprint-19 P2: per-step Best-of-N stash, keyed by unit_id. Holds the
+        # preservation-heuristic-rejected candidate (validation-passing) plus
+        # the post-rejection attempts' clean-pass record; consumed by the
+        # _resolve_unit wrapper when the unit would otherwise escalate.
+        self._step_preservation_stash: dict[str, dict] = {}
 
         # ---- Phase 1: resolve + write all files (no staging, no cargo) ----
         import time as _p1time
@@ -9485,7 +9490,8 @@ class Orchestrator:
             # verbatim is a silent drop of the other side's rewrite
             # (sea-orm-0027). LLM-gated rejection — escalate only when the
             # dropped side is adjudicated not-superseded.
-            if self._check_side_collapse(path, language, units, buffer, result):
+            if self._check_side_collapse(path, language, units, buffer,
+                                         result, accepted=accepted):
                 self._record_outcomes_to_memory(result)
                 return result
             self._write_and_stage(path, buffer, result, accepted=accepted)
@@ -11203,6 +11209,74 @@ class Orchestrator:
         wall_deadline: float | None = None,
         max_retries: int | None = None,
     ) -> UnitOutcome:
+        """_resolve_unit_core + the sprint-19 P2 Best-of-N rescue wrapper.
+
+        When the core loop ends WITHOUT an accepted candidate but a
+        preservation-heuristic-rejected candidate was stashed and every
+        heuristic-forced retry validated strictly worse (none passed),
+        restore the stashed candidate instead of escalating — a recovery
+        mechanism, not a policy change: the heuristic still fired, the
+        retries still ran, and an equal-or-better retry was already
+        accepted by the core loop (popping the stash). tokio-0037: the
+        model's first candidate was oracle-correct and validation-passing;
+        the heuristic forced retries that degraded into syntax errors; the
+        case escalated. The restored candidate keeps its
+        flagged_by_preservation_heuristic tag for the file-level guard.
+        """
+        outcome = self._resolve_unit_core(
+            unit, seed_failures=seed_failures,
+            seed_candidate=seed_candidate,
+            wall_deadline=wall_deadline, max_retries=max_retries,
+        )
+        if outcome.accepted is not None:
+            return outcome
+        if not getattr(self.config.future, "enable_preservation_bestof_n",
+                       True):
+            return outcome
+        stash = getattr(self, "_step_preservation_stash", {}).get(
+            unit.unit_id)
+        if stash is None:
+            return outcome
+        later = stash.get("later_attempts") or []
+        # No forced retry ever ran, or at least one retry PASSED
+        # validation (equal-or-better: the core loop had its chance to
+        # accept it) — restoring would preempt a legitimate outcome.
+        if not later or any(later):
+            return outcome
+        cand = stash["candidate"]
+        val = stash["validation"]
+        cand.flagged_by_preservation_heuristic = True
+        outcome.accepted = cand
+        outcome.validation = val
+        outcome.escalated = False
+        outcome.reason = (
+            f"best-of-N recovery: the preservation heuristic rejected a "
+            f"validation-passing candidate; all {len(later)} forced "
+            f"retr{'y' if len(later) == 1 else 'ies'} validated strictly "
+            f"worse — original restored, flagged for the file-level guard"
+        )
+        self._record_resolution_attempt(
+            outcome, mechanism="preservation_bestof_n",
+            candidate=cand, validation=val,
+            decision="accept", reason=outcome.reason,
+        )
+        self.journal.emit(
+            "candidate_accepted",
+            {"candidate_id": cand.candidate_id,
+             "via": "preservation_bestof_n_recovery",
+             "flagged_by_preservation_heuristic": True,
+             "strictly_worse_retries": len(later)},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        self._step_preservation_stash.pop(unit.unit_id, None)
+        return outcome
+
+    def _resolve_unit_core(
+        self, unit: ConflictUnit, *, seed_failures: list | None = None,
+        seed_candidate: "CandidateResolution | None" = None,
+        wall_deadline: float | None = None,
+        max_retries: int | None = None,
+    ) -> UnitOutcome:
         outcome = UnitOutcome(unit=unit)
         # D1: inherit per-step convergence hashes so _whole_file_repair's
         # re-resolve of this unit sees the cosmetic variations already rejected
@@ -11818,6 +11892,17 @@ class Orchestrator:
                         break
             outcome.validation = validation
             outcome.attempts.append(cand)
+            # Sprint-19 P2: track this attempt's quality against a stashed
+            # preservation-rejected candidate. Quality = passed validation
+            # (warnings allowed — an equally-flagged retry is NOT strictly
+            # worse, so the rescue must not fire on it). The stashed
+            # candidate's own iteration records nothing (the stash is
+            # populated later in this same iteration, in the retry branch).
+            _p_stash = getattr(self, "_step_preservation_stash", {}).get(
+                unit.unit_id)
+            if _p_stash is not None:
+                _p_stash["later_attempts"].append(
+                    bool(validation.passed))
             # Enrich duplicate-definition failures IMMEDIATELY so the very
             # first CEGIS retry includes the existing definition's context.
             # Without this, the model retries blindly — it knows a function
@@ -12375,6 +12460,39 @@ class Orchestrator:
                 path=unit.path,
                 unit_id=unit.unit_id,
             )
+            # Sprint-19 P2 (R1 tagging + Best-of-N stash): a
+            # validation-PASSING candidate force-retried by the
+            # preservation heuristic is the Best-of-N baseline. Tag it
+            # (the file-level guard and analysis see the flag) and stash
+            # it; if every forced retry then validates strictly worse and
+            # the unit escalates, the wrapper restores this candidate
+            # instead. Only the FIRST such candidate is stashed (the
+            # highest-confidence original, per tokio-0037's journal).
+            if (
+                decision.action == "retry"
+                and validation.passed
+                and not validation.hard_failures
+                and any(w.validator == "preservation_heuristic"
+                        for w in validation.warnings)
+                and unit.unit_id
+                not in getattr(self, "_step_preservation_stash", {})
+            ):
+                cand.flagged_by_preservation_heuristic = True
+                if not hasattr(self, "_step_preservation_stash"):
+                    self._step_preservation_stash = {}
+                self._step_preservation_stash[unit.unit_id] = {
+                    "candidate": cand,
+                    "validation": validation,
+                    "later_attempts": [],
+                }
+                self.journal.emit(
+                    "preservation_flagged",
+                    {"candidate_id": cand.candidate_id,
+                     "flagged_by_preservation_heuristic": True,
+                     "retry_count": retry_count},
+                    step_index=self.step, path=unit.path,
+                    unit_id=unit.unit_id,
+                )
             if decision.action == "accept":
                 # Strictness gate (#10): in ci/unattended mode, the policy may
                 # override an accept to escalate (e.g. low confidence, a dropped
@@ -12420,6 +12538,10 @@ class Orchestrator:
                 cand = self._try_intent_coverage_repair(unit, cand)
                 outcome.accepted = cand
                 outcome.retry_count = retry_count
+                # Sprint-19 P2: a real acceptance supersedes any stashed
+                # Best-of-N baseline for this unit.
+                if hasattr(self, "_step_preservation_stash"):
+                    self._step_preservation_stash.pop(unit.unit_id, None)
                 self._record_resolution_attempt(
                     outcome, mechanism=cand.provenance or "plain_llm",
                     candidate=cand, validation=validation,
@@ -13437,6 +13559,7 @@ class Orchestrator:
         units: list,
         buffer: str,
         result,
+        accepted: list | None = None,
     ) -> bool:
         """Reject a both-rewrite file resolved to one side verbatim (WS4).
 
@@ -13477,8 +13600,20 @@ class Orchestrator:
         det = _detect_side_collapse(base_text, cur, rep, buffer)
         if det is None:
             return False
-        self.journal.emit("side_collapse_probe", det,
-                          step_index=self.step, path=path)
+        # Sprint-19 P2 (R1 tagging): surface which units' accepted
+        # candidates carry the preservation-heuristic flag (Best-of-N
+        # recoveries and carve-out accepts) so the guard's journal event
+        # carries the unit-level context. Context only — no semantic
+        # change without calibration.
+        _flagged_units = sorted({
+            u.unit_id for u, c in (accepted or [])
+            if getattr(c, "flagged_by_preservation_heuristic", False)
+        }) or None
+        self.journal.emit(
+            "side_collapse_probe",
+            {**det, "flagged_preservation_units": _flagged_units},
+            step_index=self.step, path=path,
+        )
         adj = self._adjudicate_subsumption(
             path, language, base_text, sides, det["collapsed_to"])
         self.journal.emit(

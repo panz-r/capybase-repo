@@ -332,6 +332,15 @@ class ValidationConfig(BaseModel):
     require_exact_splice_scope: bool = True
     require_syntax_if_supported: bool = True
     reject_if_copies_one_side: bool = True
+    # Sprint-19 P2 (churn-aware preservation heuristic): when the ONLY
+    # unaccounted obligation of the non-copied side is a pure DELETION of
+    # base content (no additions, no exclusive choices), a verbatim copy
+    # of the other side passes instead of retrying — a loser churn that
+    # only deletes is more likely superseded than one that adds
+    # functionality (tokio-0037: the oracle was current verbatim; the
+    # heuristic's forced retries degraded into syntax errors). The
+    # file-level gates (side-collapse guard, compile checks) still run.
+    preservation_deletion_carveout: bool = True
     # Both-sides-represented: flag a
     # candidate that drops a side's additions entirely — a tweaked-but-still-
     # one-sided merge the copy heuristic misses. Advisory warning.
@@ -824,6 +833,18 @@ class FutureConfig(BaseModel):
     # compile failure of the reconstruction. Every probe is journaled as
     # whole_side_probe; the swap as whole_side_repair.
     enable_whole_side_repair_rung: bool = True
+    # Best-of-N preservation recovery (sprint-19 P2): when the
+    # preservation heuristic rejects an otherwise-validation-passing
+    # candidate and EVERY heuristic-forced retry then validates strictly
+    # worse (hard failures — syntax errors, empty output), restore the
+    # rejected candidate instead of escalating. The restored candidate is
+    # tagged flagged_by_preservation_heuristic so the file-level
+    # side-collapse guard and post-hoc analysis can see the unit's
+    # acceptance went against the unit-level heuristic's judgment. It is
+    # a RECOVERY mechanism, not a policy change: the heuristic still
+    # fires, retries still run, and an equal-or-better retry is used (the
+    # rescue never preempts a real acceptance).
+    enable_preservation_bestof_n: bool = True
     # Phase 4 comment jury (design §5). An untrusted semantic sensor that
     # evaluates comment claims produced by the comment pass. Three operating
     # modes:

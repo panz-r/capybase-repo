@@ -556,6 +556,46 @@ class PreservationHeuristicValidator:
                 else:
                     conflict_type = "additive"
                     action = "integrate them into the candidate"
+                # Sprint-19 P2, churn-aware heuristic: when the loser side's
+                # ONLY unaccounted churn is a pure deletion of base content
+                # (no additions, no exclusive choices), a verbatim copy of
+                # the other side PASSES — a deletion-only loser churn is
+                # more likely superseded than one adding functionality
+                # (tokio-0037: oracle == current verbatim; the heuristic's
+                # forced retries degraded into syntax errors and the case
+                # escalated). The file-level gates still run: the
+                # side-collapse guard adjudicates both-rewrite shapes and
+                # Phase 2 compiles the spliced buffer. Gated by
+                # validation.preservation_deletion_carveout.
+                if (conflict_type == "deletion"
+                        and getattr(ctx.config,
+                                   "preservation_deletion_carveout", True)):
+                    return VerificationCheckResult(
+                        name=self.name,
+                        passed=True,
+                        severity="warning",
+                        message=(
+                            f"resolved text copies {copied_label} verbatim; "
+                            f"{other_label}'s only unaccounted change is a "
+                            f"pure deletion of base content (likely "
+                            f"superseded)"
+                        ),
+                        detail={
+                            "copied_current": copied_current,
+                            "copied_replayed": copied_replayed,
+                            "deletion_lines": del_lines,
+                            "deletion_count": len(del_lines),
+                            "copied_side": copied_label.lower(),
+                            "conflict_type": conflict_type,
+                        },
+                        features={
+                            "copied_one_side": True,
+                            "copied_current_side": copied_current,
+                            "copied_replayed_side": copied_replayed,
+                            "change_accounted": True,
+                            "preservation_result": "deletion_superseded",
+                        },
+                    )
                 return VerificationCheckResult(
                     name=self.name,
                     passed=False,

@@ -334,6 +334,14 @@ class CandidateResolution(BaseModel):
     # no budget was configured or nothing was trimmed. Carried on the candidate
     # so the orchestrator can journal per-resolution trimming (observability).
     prompt_trims: list[dict[str, Any]] = Field(default_factory=list)
+    # Sprint-19 P2 (R1 metadata tagging): set when the preservation
+    # heuristic rejected this otherwise-validation-passing candidate and
+    # the Best-of-N recovery later restored it (every heuristic-forced
+    # retry validated strictly worse). The file-level side-collapse
+    # guard's journal and post-hoc analysis read this to know the unit's
+    # verbatim-side acceptance went against the unit-level heuristic's
+    # judgment.
+    flagged_by_preservation_heuristic: bool = False
 
 
 @dataclass
