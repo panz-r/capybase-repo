@@ -1,5 +1,8 @@
 # PLAN-LEDGER — Sprint 19 (living document, update as work proceeds)
 
+> **Sprint 19 is COMPLETE** (2026-08-20, through commit fef1d5d) — the
+> active sprint lives in `PLAN-LEDGER-S20.md`. This file is the record.
+
 Purpose: zcode sessions have been crashing mid-sprint. This file is the
 durable plan + progress record. **Read this first on resume.** Update it
 after every unit of work (implementation chunk, validation run, decision).
