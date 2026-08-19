@@ -4706,8 +4706,15 @@ class VerificationEngine:
                         VerificationFailure(
                             validator="syntax",
                             severity="error",
+                            # detail.source tags this as a whole-file BUILD
+                            # failure (vs standalone parse checks) so
+                            # downstream gates can treat compile-flavored
+                            # failures specially (whole-side repair rung,
+                            # repair attribution carve-out) without
+                            # string-matching the message.
+                            detail={"source": "whole_file_build",
+                                    "build_cmd": build_cmd},
                             message=msg or "build failed",
-                            detail={"build_cmd": build_cmd},
                         )
                     )
             else:
@@ -4941,6 +4948,7 @@ class VerificationEngine:
         _append_diagnostic_failure(
             new_errors, hard, self.config,
             validator="syntax", message_prefix="cargo check", tool="cargo",
+            extra_detail={"source": "whole_file_build"},
         )
         return True
 

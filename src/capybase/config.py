@@ -809,6 +809,21 @@ class FutureConfig(BaseModel):
     # their target mechanisms (no-progress guard, transient-failure
     # escalation, whole-file repair) instead of being rescued here.
     enable_empty_fast_fail: bool = True
+    # Whole-side repair rung (sprint-19 P1, the tokio-0109/0037 class):
+    # when the spliced buffer fails a whole-file COMPILE gate (cargo check,
+    # the Phase-2 build test, an attributed build failure), probe both
+    # pristine merge-index stage sides as whole-file candidates. Decision
+    # matrix: neither side verifies → decline (repair proceeds as before);
+    # exactly one verifies → take it only when the subsumption adjudication
+    # confirms the failing side's work is superseded (confidence >= 0.70);
+    # both verify → the repair adjudication must pick a side with
+    # confidence >= 0.70 ("neither" or a low-confidence answer declines —
+    # the woven class keeps its CEGIS repair). NEVER pre-emptive: churn
+    # numbers cannot separate one-side oracles from woven merges (79
+    # corpus counter-examples), so the rung only fires on an actual
+    # compile failure of the reconstruction. Every probe is journaled as
+    # whole_side_probe; the swap as whole_side_repair.
+    enable_whole_side_repair_rung: bool = True
     # Phase 4 comment jury (design §5). An untrusted semantic sensor that
     # evaluates comment claims produced by the comment pass. Three operating
     # modes:

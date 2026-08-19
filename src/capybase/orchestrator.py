@@ -1545,6 +1545,105 @@ Respond with ONLY a JSON object:
 {{"verdict": "keep" or "superseded", "confidence": <0.0-1.0>, "reason": "<one sentence>"}}"""
 
 
+def _clip_side_diff(base_text: str, side_text: str, max_diff_lines: int = 150) -> str:
+    """Unified diff of one side vs the base, clipped (shared by the rung prompts)."""
+    import difflib as _difflib
+
+    body = list(_difflib.unified_diff(
+        base_text.splitlines(), side_text.splitlines(), lineterm="", n=2))[2:]
+    if len(body) <= max_diff_lines:
+        return "\n".join(body)
+    return ("\n".join(body[:max_diff_lines])
+            + f"\n... ({len(body) - max_diff_lines} more diff lines truncated)")
+
+
+def _whole_side_repair_prompt_single(
+    path: str,
+    language: str | None,
+    base_text: str,
+    sides: dict[str, str],
+    ok_side: str,
+) -> str:
+    """One pristine side compiles, the other does not — take or decline?
+
+    The whole-side repair rung's strong-signal branch: the spliced merge
+    failed to compile, exactly one pristine side compiles. Taking that
+    side verbatim is only correct when the FAILING side's changes are
+    superseded by it — the same question the subsumption adjudication
+    asks, so the verdict vocabulary is shared. ``keep`` declines the swap
+    (the failing side carries essential work; repair/escalate instead).
+    """
+    lang = (language or "").strip()
+    bad_side = "replayed" if ok_side == "current" else "current"
+    ok_label = ("CURRENT (upstream, being rebased onto)" if ok_side == "current"
+                else "REPLAYED (the commit being applied on top)")
+    bad_label = ("REPLAYED (the commit being applied on top)" if ok_side == "current"
+                 else "CURRENT (upstream, being rebased onto)")
+    return f"""You are adjudicating a git rebase conflict for `{path}`.
+
+The region-level merge of both sides FAILED to compile. Of the two pristine
+whole-file versions, {ok_label} compiles cleanly and {bad_label} does not.
+
+{ok_label}'s changes vs the common ancestor BASE (this version compiles):
+```{lang}
+{_clip_side_diff(base_text, sides.get(ok_side, ''))}
+```
+
+{bad_label}'s changes vs BASE (this version does NOT compile):
+```{lang}
+{_clip_side_diff(base_text, sides.get(bad_side, ''))}
+```
+
+Decide the correct outcome:
+
+keep        — the non-compiling side's changes add functionality or fixes that the compiling side does not provide; they must be repaired into the merge rather than dropped.
+superseded  — the compiling side already provides the same behavior, deleted the code the other side touched, or the other side's edits are cosmetic; the correct result is the compiling side's file verbatim.
+
+Respond with ONLY a JSON object:
+{{"verdict": "keep" or "superseded", "confidence": <0.0-1.0>, "reason": "<one sentence>"}}"""
+
+
+def _whole_side_repair_prompt_both(
+    path: str,
+    language: str | None,
+    base_text: str,
+    sides: dict[str, str],
+) -> str:
+    """Both pristine sides compile, the spliced merge does not — pick or decline.
+
+    The rung's conservative branch: substituting a pristine side drops the
+    other side's work entirely, so the adjudication gets an explicit
+    ``neither`` escape — when the correct merge weaves both sides (the
+    68.5%-woven class), the repair loop must keep its chance. ``neither``,
+    a low-confidence answer, or an unparseable response declines the swap.
+    """
+    lang = (language or "").strip()
+    return f"""You are adjudicating a git rebase conflict for `{path}`.
+
+The region-level merge that weaves BOTH sides together FAILED to compile.
+Both pristine whole-file versions below compile cleanly. The common
+ancestor (base) is included for context.
+
+CURRENT — upstream, the branch being rebased onto. Its changes vs BASE:
+```{lang}
+{_clip_side_diff(base_text, sides.get("current", ""))}
+```
+
+REPLAYED — the commit being replayed on top of current. Its changes vs BASE:
+```{lang}
+{_clip_side_diff(base_text, sides.get("replayed", ""))}
+```
+
+Decide the correct outcome:
+
+current     — the correct merge is CURRENT's file verbatim; REPLAYED's changes are superseded (already provided, cosmetic, or touching deleted code).
+replayed    — the correct merge is REPLAYED's file verbatim; CURRENT's changes on this file are superseded.
+neither     — the correct merge must weave BOTH sides' changes; the compile failure should be repaired in the woven merge instead of substituting a whole side.
+
+Respond with ONLY a JSON object:
+{{"choice": "current" or "replayed" or "neither", "confidence": <0.0-1.0>, "reason": "<one sentence>"}}"""
+
+
 def _classify_build_error_lines(
     error_lines: list[str], path: str,
 ) -> tuple[list[str], int]:
@@ -1585,6 +1684,31 @@ def _classify_build_error_lines(
             continue
         merge_lines.append(ln)  # conflict-file error, or unparseable
     return merge_lines, env_ct
+
+
+def _is_compile_flavored_failure(hard_failures) -> bool:
+    """True when a failure came from a whole-file COMPILE gate.
+
+    The whole-side repair rung's trigger: cargo check, the Phase-2 build
+    test, or a build-branch failure inside verify_file (all tagged
+    ``detail.source="whole_file_build"`` at emission, the sprint-19 D5
+    rule — no message string-matching for the tagged paths). Standalone
+    parse/splice-coherence failures (brace imbalance, py_compile,
+    standalone rustc) are deliberately excluded: those are the
+    deterministic/CEGIS repairs' territory, and a pristine-side swap must
+    not preempt them.
+    """
+    for f in hard_failures or []:
+        v = getattr(f, "validator", "") or ""
+        d = getattr(f, "detail", None) or {}
+        if isinstance(d, dict) and d.get("source") == "whole_file_build":
+            return True
+        if v == "build_test":
+            return True
+        if v == "syntax" and (getattr(f, "message", "") or "").startswith(
+                "cargo check"):
+            return True
+    return False
 
 
 def _empty_repair_side_fallback(
@@ -8789,6 +8913,7 @@ class Orchestrator:
                 _det_unchanged = False
                 self._p2_build_checked = False  # one build-test attempt per Phase 2
                 _ts_attempted = False  # true-side portfolio: once per file
+                _wsr_attempted = False  # whole-side repair rung: once per file
                 while True:
                     spans_and_texts = [
                         (unit.marker_span, cand.resolved_text) for unit, cand in accepted
@@ -9024,6 +9149,34 @@ class Orchestrator:
                                 break
                         else:
                             break
+                    # Whole-side repair rung (sprint-19 P1): the splice's
+                    # COMPILE gate failed — probe the pristine stage sides
+                    # before spending repair budget on a reconstruction
+                    # that may be fundamentally broken (tokio-0109/0037:
+                    # the oracle sat verbatim at a stage while the splice
+                    # failed). Fires only on compile-flavored failures,
+                    # once per file; adjudication-gated swaps only. A
+                    # decline leaves the repair loop untouched.
+                    if (not file_validation.passed and not _wsr_attempted
+                            and _is_compile_flavored_failure(
+                                file_validation.hard_failures)):
+                        _wsr_attempted = True
+                        _wsr = None
+                        try:
+                            _wsr = self._try_whole_side_repair_rung(
+                                path, language, original, units, buffer,
+                                wall_deadline=_file_wall_deadline)
+                        except Exception:  # noqa: BLE001 — rung is a
+                            # recovery mechanism; never let it break the
+                            # standard repair path.
+                            _wsr = None
+                        if _wsr is not None:
+                            accepted, buffer, file_validation = _wsr
+                            # The swapped-in side is a NEW buffer — its
+                            # build test must run (the once-per-Phase-2
+                            # flag refers to one buffer, not one file).
+                            self._p2_build_checked = False
+                            continue
                     # Whole-file portfolio fallback: when Phase 2 validation
                     # fails with a CROSS-UNIT error pattern (duplicate
                     # definitions, undeclared identifiers — symptoms of the
@@ -10247,13 +10400,25 @@ class Orchestrator:
                 "preprocessor" in (getattr(f, "message", "") or "").lower()
                 for f in failures
             )
-            # Build-test failures (from Phase 2's per-file build check) are
-            # compilation errors caused by a specific unit's resolution.
-            # Don't skip even when attribution fails — the model can fix
-            # these by producing a different candidate. The tiered budget
-            # (_phase2_model_used) already bounds to 1 model call.
+            # Build-test failures (from Phase 2's per-file build check)
+            # are compilation errors caused by a specific unit's
+            # resolution. Don't skip even when attribution fails — the
+            # model can fix these by producing a different candidate.
+            # The tiered budget (_phase2_model_used) already bounds to
+            # 1 model call. Sprint-19 D5: whole-file compile checks
+            # (cargo check, verify_file's build branch) carry
+            # validator="syntax" but are tagged
+            # detail.source="whole_file_build" at emission — they are
+            # build-test failures in this sense too (tokio-0109: an
+            # in-file cargo error whose line fell outside all marker
+            # spans skipped the one bounded repair and escalated).
             _is_build_test = any(
                 getattr(f, "validator", "") == "build_test"
+                or (
+                    isinstance(getattr(f, "detail", None), dict)
+                    and getattr(f, "detail", None).get("source")
+                    == "whole_file_build"
+                )
                 for f in failures
             )
             if (not _is_pp_failure and not _is_build_test
@@ -13647,6 +13812,224 @@ class Orchestrator:
                 "true_side_portfolio",
                 {"side": side, "via": via, "trigger": trigger,
                  "n_units": len(units), "dup_definitions": len(dupes)},
+                step_index=self.step, path=path,
+            )
+            return [(unit, cand)], text, val
+        return None
+
+    def _try_whole_side_repair_rung(
+        self,
+        path: str,
+        language: str | None,
+        original: str,
+        units: list,
+        buffer: str,
+        *,
+        wall_deadline: float | None = None,
+    ):
+        """Pristine-side repair rung for a compile-failed spliced buffer.
+
+        Sprint-19 P1 (the tokio-0109/0037 class; both external reviewers
+        converged on this design): the per-unit splice reconstruction is
+        lossy — when its whole-file COMPILE gate fails, the pristine
+        merge-index stage sides are the only candidates known to be
+        compilable whole files. Probe both (verify_file, sibling-error
+        classification included), then:
+
+        - neither verifies → decline (repair/escalate exactly as before);
+        - exactly one verifies → swap it in only when the subsumption
+          adjudication confirms the failing side's work is superseded
+          (confidence >= 0.70) — ``keep`` or no verdict declines;
+        - both verify → the both-sides repair adjudication must pick a
+          side with confidence >= 0.70; ``neither`` (the woven class)
+          or a low-confidence/unparseable answer declines.
+
+        NEVER pre-emptive: the caller gates on an actual compile-flavored
+        failure (``_is_compile_flavored_failure``); churn numbers alone
+        cannot separate one-side oracles from woven merges. Every probe
+        is journaled (``whole_side_probe``), the swap as
+        ``whole_side_repair``, a decline as ``whole_side_repair_declined``.
+
+        Returns ``(accepted, buffer, validation)`` like
+        ``_try_true_side_portfolio``, or None when the rung declines (the
+        caller proceeds with its repair loop unchanged).
+        """
+        if not getattr(self.config.future, "enable_whole_side_repair_rung",
+                       True):
+            return None
+        if wall_deadline is not None:
+            import time as _wsr_time
+
+            if _wsr_time.monotonic() > wall_deadline - 120:
+                # Each probe runs a whole-file verification build; with
+                # very little wall clock left, don't start probes we
+                # can't finish (same margin the portfolio uses).
+                self.journal.emit(
+                    "whole_side_repair_declined",
+                    {"reason": "wall_deadline"},
+                    step_index=self.step, path=path,
+                )
+                return None
+        try:
+            ts = _true_stage_sides(self.git, path)
+        except Exception:
+            ts = None
+        if not ts:
+            return None
+        sides, base_text = ts
+        if len(sides) < 2:
+            # A single pristine side is the portfolio's territory (its
+            # triggers handle the one-sided index); the repair rung
+            # compares both sides against a failed splice.
+            return None
+        verified: list[tuple[str, str, object]] = []
+        import time as _probe_time
+
+        for side, text in sides.items():
+            _t0 = _probe_time.monotonic()
+            try:
+                # Brace sanity only for code files — prose/config files
+                # have no brace semantics (same gate as the portfolio).
+                if (language and structural_gate_applies(path)
+                        and not _braces_balanced(text, language)):
+                    self.journal.emit(
+                        "whole_side_probe",
+                        {"side": side, "passed": False,
+                         "declined": "braces"},
+                        step_index=self.step, path=path,
+                    )
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+            self._write_worktree_only(path, text, accepted=None)
+            val = self.verification.verify_file(
+                path, language, original, [],
+                repo_root=str(self.git.repo), whole_text=text)
+            self.journal.emit(
+                "whole_side_probe",
+                {"side": side, "passed": bool(val.passed),
+                 "duration_s": round(_probe_time.monotonic() - _t0, 1),
+                 "hard_failures": [
+                     f.message for f in val.hard_failures][:3]},
+                step_index=self.step, path=path,
+            )
+            if val.passed:
+                verified.append((side, text, val))
+
+        def _restore_spliced() -> None:
+            # Leave the worktree holding the spliced buffer we started
+            # from, so the caller's repair loop (and its build test)
+            # operates on the buffer it knows about.
+            try:
+                self._write_worktree_only(path, buffer, accepted=None)
+            except Exception:  # noqa: BLE001
+                pass
+
+        if not verified:
+            self.journal.emit(
+                "whole_side_repair_declined",
+                {"reason": "no_side_verifies"},
+                step_index=self.step, path=path,
+            )
+            _restore_spliced()
+            return None
+        choice: str | None = None
+        via: str | None = None
+        adj_info: dict | None = None
+        if len(verified) == 2:
+            # Both sides compile — substituting either drops the other's
+            # work, so the adjudication gets an explicit "neither"
+            # escape and must be confident (the woven class must keep
+            # its CEGIS repair).
+            import json as _wsr_json
+
+            try:
+                prompt = _whole_side_repair_prompt_both(
+                    path, language, base_text, sides)
+                resp = self.resolution_engine.raw_complete(
+                    prompt, json_mode=True,
+                    max_tokens=max(
+                        2048, self.resolution_engine.config.max_tokens))
+                raw = resp.text if hasattr(resp, "text") else str(resp)
+                parsed = _wsr_json.loads(raw)
+                _choice = str(parsed.get("choice", "")).strip().lower()
+                _conf = float(parsed.get("confidence", 0.0))
+                adj_info = {
+                    "choice": _choice,
+                    "confidence": round(_conf, 2),
+                    "reason": str(parsed.get("reason", ""))[:200],
+                }
+                if _choice in ("current", "replayed") and _conf >= 0.70:
+                    choice, via = _choice, "repair_adjudication"
+            except Exception:
+                adj_info = None
+            self.journal.emit(
+                "whole_side_repair_adjudication",
+                {"branch": "both_compile", "adjudication": adj_info,
+                 "picked": choice},
+                step_index=self.step, path=path,
+            )
+        else:
+            # Exactly one side compiles — the strong-signal branch. The
+            # subsumption adjudication decides whether the FAILING
+            # side's work is essential (keep → decline) or superseded.
+            ok_side = verified[0][0]
+            adj = self._adjudicate_subsumption(
+                path, language, base_text, sides, ok_side)
+            adj_info = adj
+            if (adj is not None and adj.get("verdict") == "superseded"
+                    and float(adj.get("confidence", 0.0)) >= 0.70):
+                choice, via = ok_side, "subsumption_adjudication"
+            self.journal.emit(
+                "whole_side_repair_adjudication",
+                {"branch": "single_compiling_side",
+                 "compiling_side": ok_side, "adjudication": adj,
+                 "picked": choice},
+                step_index=self.step, path=path,
+            )
+        if choice is None:
+            self.journal.emit(
+                "whole_side_repair_declined",
+                {"reason": "adjudication_declined"},
+                step_index=self.step, path=path,
+            )
+            _restore_spliced()
+            return None
+        for side, text, val in verified:
+            if side != choice:
+                continue
+            from capybase.conflict_model import (
+                CandidateResolution as _WSR_CR,
+                ConflictSide as _WSR_CS,
+            )
+            unit = ConflictUnit(
+                session_id=units[0].session_id,
+                step_index=units[0].step_index,
+                path=path,
+                language=units[0].language,
+                unit_id=f"{path}:true_side_stage",
+                unit_kind="whole_file",
+                base=_WSR_CS(label="BASE", text=base_text),
+                current=_WSR_CS(
+                    label="CURRENT_UPSTREAM_SIDE",
+                    text=sides.get("current", "")),
+                replayed=_WSR_CS(
+                    label="REPLAYED_COMMIT_SIDE",
+                    text=sides.get("replayed", "")),
+                original_worktree_text=original,
+                marker_span=None,
+            )
+            cand = _WSR_CR(
+                candidate_id=f"{unit.unit_id}:{side}",
+                unit_id=unit.unit_id,
+                model_name="whole_side_repair",
+                resolved_text=text,
+                provenance=f"deterministic_source_{side}_only_stage",
+                prompt_version="whole_side_repair.v1",
+            )
+            self.journal.emit(
+                "whole_side_repair",
+                {"side": side, "via": via},
                 step_index=self.step, path=path,
             )
             return [(unit, cand)], text, val
