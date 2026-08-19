@@ -50,8 +50,37 @@ Resolutions of reviewer disagreements (final):
 | P3 | Build state machine + conditional retry (+ccache/-j$(nproc)) | DONE (impl+tests) | see P3 section; D2 prewarming deferred |
 | P4 | Compiler-authority override at final gate | DONE (impl+tests) | see P4 section; fixes protobuf-0065 |
 | P5 | Class-with-methods entity splitting (journal-only first) | DONE (journal-only stage) | flag default OFF; enabling awaits live calibration |
-| P6 | Near-verbatim band calibration (measure-only) | TODO | informs future fast-path |
+| P6 | Near-verbatim band calibration (measure-only) | DONE | script + results below |
 | D7 | Post-fix live rerun matrix (sea-orm-0027, tokio-0109 first) | TODO | needs no new mechanisms for 0027/0109 |
+
+## P6 results (2026-08-19, scripts/calibrate_near_verbatim.py)
+
+674 corpus cases; jaccard = the eval harness's token metric.
+
+- **Band census**: ≥0.99-jaccard to one side: 81.6%; verbatim == 30.3%;
+  ≥0.95: 95.8%. The "woven class" (both j < 0.95) is only 4.2% — token
+  jaccard SATURATES on large files, so j≥0.99 does NOT identify "one
+  side plus a thread"; most genuinely-woven merges also sit ≥0.99 to
+  their dominating side.
+- **Churn does not separate the band**: ≥0.99 cases split wholesale 201 /
+  mid 176 / symmetric 173 — the band spans all regimes.
+- **Residual concentration**: of 346 near-verbatim-not-verbatim cases,
+  only 179 are concentrated (≤2 hunks, ≤20 lines) ≈ 26.6% of the corpus;
+  the rest carry large scattered residuals (j=0.999 with 416 changed
+  lines exists).
+- **Conclusion (Q4 answer)**: no special fast-path on jaccard alone —
+  the band is not clean. IF a path is ever built, it must gate on
+  residual concentration (the 179-case subset), compiler verification,
+  and adjudication; even then the woven-dominated class overlaps.
+- **Deletion-carveout band (P2 premise, whole-file proxy)**: 25 cases
+  have a pure-deletion side; oracle ≈ other side (≥0.99) in 14/25 (56%)
+  — NOT a slam-dunk at file level. The unit-level carveout is much
+  narrower (only when ALL missing obligations are non-exclusive dropped
+  deletions in that unit), the file gates still run, and Best-of-N is
+  independent — carveout stays ON but the live round must census
+  `preservation_result="deletion_superseded"` events to measure the
+  unit-level rate (counterexamples like flask-0006/0007,
+  sqlite-0012 exist at file level).
 
 ## P5 design (as implemented, 2026-08-19 — journal-only stage)
 
@@ -274,4 +303,13 @@ Resolutions of reviewer disagreements (final):
   258+160 tests green. COMMITTED as 0e83374.
 - 2026-08-19: **P4 implemented** (compiler-authority override at the
   pre_continue gate + make-output diagnostics; see P4 section). 100
-  tests green. COMMITTED as <P4-sha>.
+  tests green. COMMITTED as 4680852.
+- 2026-08-19: **P5 implemented** (journal-only class-member split
+  measurement; see P5 section). 11 + 144 tests green. COMMITTED as
+  207e4a5.
+- 2026-08-19: **P6 DONE** (scripts/calibrate_near_verbatim.py; results in
+  P6 section — jaccard band NOT clean; deletion-carveout premise 56% at
+  file level, unit-level census needed from live runs). COMMITTED as
+  <P6-sha>.
+- NEXT: D7 rerun matrix (sea-orm-0027 + tokio-0109 live under provider;
+  then 0067/0071/0065/0055 after P1-P4), full suite re-run, docs.
