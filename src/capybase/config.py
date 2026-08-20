@@ -791,6 +791,13 @@ class FutureConfig(BaseModel):
     # patch re-runs the same gate; no gate progress escalates exactly as
     # before. One round, <=3 patches.
     enable_micro_cegis: bool = True
+    # Move-and-edit transposition (sprint-20 S20.8): one side moved a base
+    # block while the other edited it in place — a deterministic transpose
+    # of the editor's delta onto the moved block (compiler-gated) is the
+    # planned enable. JOURNAL-ONLY stage: the shape is detected and
+    # journaled (move_edit_candidate) on every unit; enabling waits for
+    # live distribution data (sprint-18 measure-first discipline).
+    enable_move_edit_transposition: bool = False
     # Mid-band subsumption takeover (jsonc-0004 class): one side's churn
     # dominates the other's >= 2.5x while the normalized asymmetry sits in
     # [0.55, 0.90) — below the wholesale band where taking the winner is

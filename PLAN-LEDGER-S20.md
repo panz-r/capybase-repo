@@ -292,3 +292,28 @@ zero oracle-divergent merges.
   sampling (P2-precedent honesty). Metric note: "sim≈1.0 build
   failures" now resolves as 0065→PASS + fmt-0003→toolchain-dead — the
   class is empty either way.
+- 2026-08-20 03:4x: **S20.8 DONE — move-and-edit transposition,
+  journal-only stage.** `_detect_move_edit_shape` (structural_resolver,
+  pure): a relocated block (delete paired with a >=0.70-verbatim similar
+  insert elsewhere, >=6 lines) whose base span the OTHER side edited —
+  the shape `_try_move_transplant` resolves by taking the mover's text
+  and DROPPING the editor's delta. Journaled at FILE level in Phase 1
+  (the relocation spans units — the first unit-level wiring never fired,
+  live-caught on sqlite-0036; rewired beside the pre-cascade fast path
+  using the merge-index pristine sides). `future.
+  enable_move_edit_transposition = False` (journal-only; the eventual
+  enable is a deterministic transpose of the editor delta onto the moved
+  block, compiler-gated).
+  **Corpus census: 3/677 cases** (protobuf-0059/0060 — twin
+  extractions again — and sqlite-0036, mover=replayed ratio 0.80, 13
+  lines, editor delta 20). The population is narrow; enabling ROI is
+  small unless live distribution disagrees — exactly what the
+  journal-only stage measures.
+  **Live validation: sqlite-0036 journals `move_edit_candidate` with the
+  full payload (mover/base_span/moved_to/ratio) and still PASSes at sim
+  1.00** — measurement-only confirmed (no behavioral change).
+  Measurement boundary documented: a pure order-swap is invisible to a
+  line diff (difflib anchors the longest block — the identical moved
+  copy); the detector catches relocations that left new content behind,
+  which is also the splice-breaking shape. 5 unit tests; 50 green
+  across the S20.8-adjacent files.

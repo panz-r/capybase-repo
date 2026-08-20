@@ -802,6 +802,97 @@ def _base_changed_lines(base: list[str], other: list[str]) -> set[int]:
     return changed
 
 
+def _detect_move_edit_shape(
+    base: str, current: str, replayed: str,
+    *, min_block_lines: int = 6, verbatim_threshold: float = 0.70,
+) -> dict | None:
+    """Sprint-20 S20.8 (journal-only): detect a move-and-edit conflict shape.
+
+    One side MOVED a base block (its content reappears at a different
+    position at >= ``verbatim_threshold`` line-sequence similarity — the
+    plan's ">70% verbatim match") while the OTHER side EDITED the same
+    base block in place. Today's ``_try_move_transplant`` takes the
+    mover's text wholesale — the editor's delta on the moved content is
+    dropped. This detector MEASURES the shape (which side moved, where
+    the block went, what the editor changed) so the enabling decision
+    rests on live distribution data (sprint-18 discipline: journal-only
+    first). Pure measurement — no behavioral change.
+
+    Returns ``{"candidates": [...]}`` (max 3, best verbatim ratio first)
+    or None when no moved-and-edited block pair exists.
+
+    Measurement boundary (documented): a RELOCATION is visible to a line
+    diff only as delete + similar-insert elsewhere — when the moved block
+    is the diff's longest match, difflib anchors ON it and expresses the
+    move as the surrounding blocks relocating (a pure order-inversion is
+    ambiguous to any differ). The detector therefore catches the shape
+    where the mover's diff carries an explicit relocation — typically a
+    move that left new content behind — which is also the splice-breaking
+    shape in practice.
+    """
+    import difflib as _dl
+
+    bl = (base or "").splitlines()
+    if len(bl) < min_block_lines:
+        return None
+    results: list[dict] = []
+    for mover_label, mover_text, editor_text in (
+            ("current", current, replayed), ("replayed", replayed, current)):
+        ml = (mover_text or "").splitlines()
+        deletes: list[tuple[int, int]] = []
+        inserts: list[tuple[int, int]] = []
+        for tag, i1, i2, j1, j2 in _dl.SequenceMatcher(
+                None, bl, ml, autojunk=False).get_opcodes():
+            if tag == "delete":
+                deletes.append((i1, i2))
+            elif tag == "insert":
+                inserts.append((j1, j2))
+            elif tag == "replace":
+                deletes.append((i1, i2))
+                inserts.append((j1, j2))
+        el = (editor_text or "").splitlines()
+        for d_i1, d_i2 in deletes:
+            if d_i2 - d_i1 < min_block_lines:
+                continue
+            del_lines = bl[d_i1:d_i2]
+            best = None
+            for j1, j2 in inserts:
+                if j2 - j1 < min_block_lines:
+                    continue
+                ratio = _dl.SequenceMatcher(
+                    None, del_lines, ml[j1:j2], autojunk=False).ratio()
+                if ratio >= verbatim_threshold and (
+                        best is None or ratio > best[0]):
+                    best = (ratio, j1, j2)
+            if best is None:
+                continue  # deletion without a matching re-insertion
+            ratio, j1, j2 = best
+            # The EDITOR's delta on the same base span (base coordinates).
+            delta_ops = [
+                op for op in _dl.SequenceMatcher(
+                    None, bl, el, autojunk=False).get_opcodes()
+                if op[0] != "equal" and op[2] > op[1]
+                and not (op[2] <= d_i1 or op[1] >= d_i2)
+            ]
+            if not delta_ops:
+                continue  # the editor never touched the moved block
+            delta_lines = sum(
+                (op[2] - op[1]) + (op[4] - op[3]) for op in delta_ops)
+            results.append({
+                "mover": mover_label,
+                "base_span": [d_i1, d_i2],
+                "moved_to": [j1, j2],
+                "verbatim_ratio": round(ratio, 3),
+                "block_lines": d_i2 - d_i1,
+                "editor_delta_ops": len(delta_ops),
+                "editor_delta_lines": delta_lines,
+            })
+    if not results:
+        return None
+    results.sort(key=lambda r: -r["verbatim_ratio"])
+    return {"candidates": results[:3]}
+
+
 def _try_move_transplant(base: str, current: str, replayed: str) -> str | None:
     """Detect when one side moved a code block (the base content appears at a
     DIFFERENT position in the side's text) and the other side modified it.

@@ -8837,6 +8837,37 @@ class Orchestrator:
                     unit.structural_metadata["file_level_lint_transforms"] = (
                         _file_transforms
                     )
+            # Sprint-20 S20.8 (journal-only): move-and-edit shape
+            # measurement at FILE level (the relocation spans units —
+            # per-unit texts can't see it). One side moved a base block
+            # while the other edited it in place; today's
+            # _try_move_transplant takes the mover's text and drops the
+            # editor's delta. Journal the shape so the enabling decision
+            # (deterministic transposition of the editor delta onto the
+            # moved block, compiler-gated) rests on live distribution.
+            # Pure measurement — no behavioral change.
+            if units:
+                try:
+                    from capybase.structural_resolver import (
+                        _detect_move_edit_shape as _detect_move_edit,
+                    )
+                    _me_ts = self._micro_stage_sides(path)
+                    _me = _detect_move_edit(
+                        _me_ts[1] or "",
+                        _me_ts[0].get("current", ""),
+                        _me_ts[0].get("replayed", ""))
+                except Exception:  # noqa: BLE001 — measurement is best-effort
+                    _me = None
+                if _me is not None:
+                    for unit in units:
+                        unit.structural_metadata["move_edit_candidate"] = _me
+                    self.journal.emit(
+                        "move_edit_candidate",
+                        {"candidates": _me["candidates"],
+                         "enabled": bool(getattr(
+                             self.config.future,
+                             "enable_move_edit_transposition", False))},
+                        step_index=self.step, path=path)
             # Phase-1 whole-file fast path (wholesale-rewrite files): when
             # the full-file context says one side rewrote the file, take
             # that side's pristine stage file BEFORE the per-unit cascade —
