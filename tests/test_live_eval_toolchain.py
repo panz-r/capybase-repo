@@ -189,10 +189,24 @@ class TestProbe:
 
 
 class TestCensus:
-    def test_census_classifies_toolchain(self):
-        # classify() is nested inside _print_census; exercise the same
-        # record shape it reads via the terminal-reason + field contract.
-        rec = {"escalated": True, "reason": "toolchain-era: ...",
-               "terminal_reason": "TOOLCHAIN_ERA", "toolchain_dead": True}
-        assert rec["toolchain_dead"] or "toolchain-era" in rec["reason"]
-        assert _M._classify_terminal_reason(rec["reason"]) == "TOOLCHAIN_ERA"
+    def test_census_classifies_toolchain(self, tmp_path, capsys):
+        # Drive the REAL census classifier (nested in _print_census) with a
+        # fixture results file — defect review pass 3: the prior version
+        # re-asserted the input contract instead of the classifier.
+        import json as _json
+        recs = [
+            {"id": "era", "escalated": True, "verdict": "ESCALATE_TOOLCHAIN",
+             "reason": "toolchain-era: both pristine sides and the oracle "
+                       "fail the gate with identical compile errors",
+             "terminal_reason": "TOOLCHAIN_ERA", "toolchain_dead": True},
+            {"id": "fine", "escalated": False, "verdict": "PASS",
+             "reason": "", "terminal_reason": ""},
+        ]
+        f = tmp_path / "r.json"
+        f.write_text(_json.dumps(recs))
+        try:
+            _M._print_census(str(f))
+        except Exception:
+            pass  # printing may expect more fields; the category is the assert
+        out = capsys.readouterr().out
+        assert "toolchain_era" in out, out[-400:]

@@ -204,12 +204,16 @@ def main() -> int:
         elif et == "move_edit_candidate":
             for c in (p.get("candidates") or [])[:1]:
                 move_edit.append({"case": case_id, **c})
-        elif "preservation" in et or et == "candidate_accepted":
-            if et != "candidate_accepted":
-                preservation_events[et] = preservation_events.get(et, 0) + 1
-        if "deletion_superseded" in json.dumps(p):
-            preservation_events["deletion_superseded(feature)"] = \
-                preservation_events.get("deletion_superseded(feature)", 0) + 1
+        elif "preservation" in et:
+            preservation_events[et] = preservation_events.get(et, 0) + 1
+        elif et == "candidate_accepted":
+            # feature-level carveout marker rides accepted-candidate
+            # features — scan only these payloads (defect review pass 3:
+            # the prior json.dumps-per-event scan serialized EVERY event).
+            if "deletion_superseded" in json.dumps(p):
+                preservation_events["deletion_superseded(feature)"] = \
+                    preservation_events.get(
+                        "deletion_superseded(feature)", 0) + 1
 
     report["journal_events"] = journal_counts
     report["oversized_cohort"] = sorted(oversized_cases)

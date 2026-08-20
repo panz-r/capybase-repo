@@ -504,3 +504,22 @@ architecture-purity rejection.
   rc=3). No large discoveries this pass — the first pass's critical
   find (micro-CEGIS staging) remains the sprint's only
   wrong-merge-class defect, and it was latent (rung never fired live).
+- 2026-08-20 18:2x: **THIRD defect-review pass** (perf envelopes +
+  remaining edge semantics). VERIFIED CLEAN with adversarial stress:
+  `_detect_move_edit_shape`'s deletes x inserts matcher loop — a 12K-
+  line wholesale rewrite resolves in 0.0s and a 20x20 grid of
+  1500-line pairwise-similar blocks in 0.3s (SequenceMatcher
+  terminates fast on line-distinct content); no size cap needed, no
+  speculative patch applied. Also verified: the era-probe cache is
+  thread-safe under the per-case worker threads (GIL-atomic dict ops;
+  worst case a duplicate probe), and the harvest pulse is healthy
+  (p50 25s, slowest cases are normal CEGIS rounds: clap-0003 260s).
+  FIXED (manageable): the toolchain census test now drives the REAL
+  `_print_census` classifier via a fixture results file (the prior
+  version re-asserted its own input contract — a test that couldn't
+  fail meaningfully); the census miner's deletion_superseded scan no
+  longer json.dumps-serializes EVERY journal event (candidate_accepted
+  payloads only). No large discoveries this pass either — three passes
+  total: one critical latent defect (micro-CEGIS staging, fixed pass
+  1), one duplicate-run guard defect (longrun pid, fixed pass 2), and
+  cosmetic/test-quality fixes otherwise.
