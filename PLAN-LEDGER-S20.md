@@ -366,9 +366,10 @@ zero oracle-divergent merges.
   jaccard for the sprint-21 metric-design memo.
 - **Sprint-20 development phase COMPLETE (S20.1-S20.11):** 9 built
   (1 deferred-to-harvest by data), every item case-accepted or honestly
-  dispositioned; suite gates green throughout (last full-suite: 6197
-  passed / 0 failed... corrected by the s207 gate run — see its log);
-  era-dead census: tokio-0109, fmt-0003, nlohmann-0033, protobuf-0055.
+  dispositioned; suite gates green throughout (final full-suite gate,
+  s20-suite-s207: 6201 passed / 2115 skipped / 0 failed / 0 xfailed in
+  50m31s); era-dead census: tokio-0109, fmt-0003, nlohmann-0033,
+  protobuf-0055.
   Remaining: S20.12 END-OF-SPRINT DATA HARVEST (the last part, per the
   user directive — full-corpus soak + journal mining + sprint-21
   decision memo).
