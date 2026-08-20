@@ -20,6 +20,7 @@ Three modes share the same inspection core:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -1280,6 +1281,144 @@ _LOCKFILE_TAKEOVER_NAMES = frozenset({"cargo.lock"})
 
 def _is_lockfile_path(path: str) -> bool:
     return (path or "").rsplit("/", 1)[-1].lower() in _LOCKFILE_TAKEOVER_NAMES
+
+
+# Sprint-20 S20.6 — micro-CEGIS at the compiler-authority gate.
+_MICRO_REDEF_RE = re.compile(r"redefinition of ['\"]?([A-Za-z_]\w*)")
+_MICRO_MISSING_RE = re.compile(
+    r"['\"]([A-Za-z_]\w*)['\"] (?:does not name a type|was not declared"
+    r"|is not a member of)")
+
+
+def _micro_extract_brace_block(
+    lines: list[str], anchor_line: int, lookahead: int = 6,
+) -> tuple[int, int] | None:
+    """(start_idx, end_idx) 0-based inclusive span of the brace-delimited
+    block whose definition sits at/near ``anchor_line`` (1-based).
+
+    Walks forward to the first '{' (the error line usually sits at the
+    signature or just inside the body), matches braces to the closer, and
+    extends the start backward over the declaration header (continuation
+    lines that don't close a statement and aren't preprocessor/comment).
+    """
+    n = len(lines)
+    open_idx = None
+    for j in range(max(0, anchor_line - 1), min(n, anchor_line - 1 + lookahead)):
+        if "{" in lines[j]:
+            open_idx = j
+            break
+    if open_idx is None:
+        return None
+    depth = 0
+    close_idx = None
+    for j in range(open_idx, n):
+        depth += lines[j].count("{") - lines[j].count("}")
+        if depth <= 0:
+            close_idx = j
+            break
+    if close_idx is None:
+        return None
+    start = open_idx
+    for _ in range(6):
+        k = start - 1
+        if k < 0:
+            break
+        prev = lines[k].rstrip()
+        if (not prev or prev.endswith((";", "}", "{"))
+                or prev.startswith(("#", "//", "/*", "*"))):
+            break
+        start = k
+    return (start, close_idx)
+
+
+def _micro_delete_span(buffer: str, span: tuple[int, int]) -> str:
+    """Remove the 0-based inclusive line span, collapsing a doubled blank."""
+    lines = buffer.splitlines(keepends=True)
+    end = span[1] + 1
+    # swallow one following blank line when the preceding line is also blank
+    if (span[0] > 0 and end < len(lines)
+            and not lines[end].strip() and not lines[span[0] - 1].strip()):
+        end += 1
+    return "".join(lines[:span[0]] + lines[end:])
+
+
+def _micro_delete_base_verbatim_duplicate(
+    buffer: str,
+    name: str,
+    error_line: int,
+    base_text: str,
+    current_text: str,
+    replayed_text: str,
+) -> tuple[str, str] | None:
+    """Deterministic duplicate repair for one ``redefinition of <name>``.
+
+    Deletes the duplicate copy whose exact text is base-verbatim AND was
+    deleted by a parent side (its text absent from current or replayed) —
+    the splice wrongly resurrected content a parent removed. Any
+    ambiguity (block unresolvable, no second copy, neither copy
+    base-verbatim-deleted) declines: no LLM, no guess. Returns
+    ``(new_buffer, provenance)`` or None.
+    """
+    lines = buffer.splitlines()
+    span = _micro_extract_brace_block(lines, error_line)
+    if span is None:
+        return None
+    block = "\n".join(lines[span[0]:span[1] + 1])
+    if name not in block:
+        return None
+    # Locate the OTHER copy: another definition-site line for ``name``
+    # (contains the identifier + an argument list, isn't comment/directive)
+    # whose brace block is disjoint from the error's block.
+    other_span = None
+    for j in range(len(lines)):
+        if span[0] <= j <= span[1]:
+            continue
+        ln = lines[j]
+        if (name in ln and "(" in ln
+                and not ln.lstrip().startswith(("//", "*", "/*", "#"))):
+            other = _micro_extract_brace_block(lines, j + 1)
+            if (other is not None and other != span
+                    and not (other[0] <= span[0] <= other[1])
+                    and name in "\n".join(lines[other[0]:other[1] + 1])):
+                other_span = other
+                break
+    if other_span is None:
+        return None
+    other_block = "\n".join(lines[other_span[0]:other_span[1] + 1])
+
+    def _prov(text: str) -> str | None:
+        if text and text in base_text:
+            if text not in replayed_text:
+                return "replayed_deleted_base_copy"
+            if text not in current_text:
+                return "current_deleted_base_copy"
+        return None
+
+    for cand_text, cand_span in ((block, span), (other_block, other_span)):
+        prov = _prov(cand_text)
+        if prov is not None:
+            return _micro_delete_span(
+                buffer, cand_span), f"{prov}:{name}"
+    return None
+
+
+def _micro_symbol_decls(symbol: str, *texts: str, limit: int = 6) -> list[str]:
+    """Declaration-ish lines mentioning ``symbol`` from the given texts.
+
+    Feeds the micro-patch prompt: the model sees how the sides declared
+    (or removed) the missing symbol before deciding the minimal patch.
+    """
+    decls: list[str] = []
+    for text in texts:
+        for ln in (text or "").splitlines():
+            s = ln.strip()
+            if (symbol in s and (s.endswith(";") or "(" in s)
+                    and not s.startswith(("//", "*", "/*"))):
+                if s not in decls:
+                    decls.append(s)
+                if len(decls) >= limit:
+                    return decls
+    return decls
 
 
 def _true_stage_sides(git_backend, path: str):
@@ -8369,14 +8508,29 @@ class Orchestrator:
                 # behavior (protobuf-0065 shipped a build-broken merge at
                 # sim 0.997 because rc=2 parsed as unknown with empty
                 # diagnostics and tests.required=False let it through).
-                result.escalated = True
-                result.reason = (
-                    "pre-continue tests failed"
-                    if self.config.tests.required
-                    else "compiler authority: pre-continue build failed with "
-                         "errors attributed to a merged file"
-                )
-                break
+                # Sprint-20 S20.6: before that escalate, one bounded
+                # micro-CEGIS round (deterministic duplicate repair +
+                # missing-symbol micro-patch, re-gated by the same
+                # command) — a buffer this close to the oracle deserves
+                # one tiny repair before the honest stop. Only on the
+                # indictment path: a required-gate policy failure is not
+                # the attributed-error shape.
+                _micro_repaired = (
+                    not self.config.tests.required
+                    and bool(getattr(self, "_last_tests_compiler_indictment",
+                                     False))
+                    and self._try_micro_cegis(result))
+                if _micro_repaired:
+                    test_ok = True  # re-gate clean — proceed, don't escalate
+                else:
+                    result.escalated = True
+                    result.reason = (
+                        "pre-continue tests failed"
+                        if self.config.tests.required
+                        else "compiler authority: pre-continue build failed with "
+                             "errors attributed to a merged file"
+                    )
+                    break
             # Drift observation (behavioral-regression redesign): runs AFTER the
             # test gate so the step's regressions are known. Mechanism-gated:
             # deterministic resolutions emit no drift (impossible by
@@ -10428,6 +10582,203 @@ class Orchestrator:
             step_index=self.step, path=path,
         )
         return pre_comment_buffer
+
+    def _micro_re_gate(self, result) -> bool:
+        """Re-run the SAME pre_continue gate after a micro-patch.
+
+        ``_run_tests`` resets ``_last_tests_compiler_indictment`` at entry,
+        so a clean re-gate clears the indictment and the run loop proceeds
+        instead of escalating."""
+        try:
+            ok = bool(self._run_tests("pre_continue", result))
+        except Exception:  # noqa: BLE001 — a broken re-gate must not wedge the loop
+            ok = False
+        self.journal.emit(
+            "micro_cegis_re_gate", {"passed": ok}, step_index=self.step)
+        if ok:
+            self.journal.emit(
+                "micro_cegis_succeeded", {}, step_index=self.step)
+        return ok
+
+    def _micro_path_for_stem(self, merged_paths, stem) -> str | None:
+        if stem is None:
+            return None
+        for p in merged_paths:
+            if Path(p).stem == stem:
+                return p
+        return None
+
+    def _micro_stage_sides(self, path):
+        try:
+            ts = _true_stage_sides(self.git, path)
+        except Exception:
+            return {}, ""
+        if not ts:
+            return {}, ""
+        return ts[0], ts[1]
+
+    def _try_micro_cegis(self, result) -> bool:
+        """Sprint-20 S20.6: bounded micro-repair before a compiler-authority
+        escalate (protobuf-0065 class: the buffer sits within ~0.4% of the
+        oracle and the gate failed with errors positively attributed to a
+        merged file).
+
+        Stage 1 — deterministic: ``redefinition of X`` errors resolve by
+        deleting the duplicate copy whose exact text is base-verbatim and
+        was deleted by a parent side. No LLM.
+        Stage 2 — micro-patch: missing-symbol errors (``'X' does not name
+        a type`` / ``was not declared`` / ``is not a member``) get one
+        tiny JSON SEARCH/REPLACE prompt per distinct symbol (<=3): error
+        lines, 5 buffer-context lines, and the symbol's declaration lines
+        from base/current/replayed.
+
+        Every round re-runs the same gate; a clean gate returns True (the
+        run loop proceeds — no escalate). One round per stage, ambiguity
+        or no gate progress declines and the escalate proceeds exactly as
+        before. Journaled end to end.
+        """
+        errors = list(getattr(self, "_last_attributed_merge_errors", []) or [])
+        enabled = bool(getattr(self.config.future, "enable_micro_cegis", True))
+        if not errors or not enabled:
+            return False
+        self.journal.emit(
+            "micro_cegis_started", {"errors": errors}, step_index=self.step)
+        merged_paths = list(getattr(result, "units_by_path", {}) or {})
+        repaired = False
+        try:
+            repaired = self._micro_repair_duplicates(merged_paths, errors)
+        except Exception as exc:  # noqa: BLE001 — repair is best-effort
+            self.journal.emit(
+                "micro_cegis_stage_failed",
+                {"stage": "duplicates", "error": str(exc)[:120]},
+                step_index=self.step)
+        if repaired and self._micro_re_gate(result):
+            return True
+        patched = False
+        try:
+            patched = self._micro_patch_missing_symbols(
+                merged_paths, errors)
+        except Exception as exc:  # noqa: BLE001 — repair is best-effort
+            self.journal.emit(
+                "micro_cegis_stage_failed",
+                {"stage": "missing_symbol", "error": str(exc)[:120]},
+                step_index=self.step)
+        if patched and self._micro_re_gate(result):
+            return True
+        self.journal.emit(
+            "micro_cegis_declined",
+            {"stage1_repaired": repaired, "stage2_patched": patched},
+            step_index=self.step)
+        return False
+
+    def _micro_repair_duplicates(self, merged_paths, errors) -> bool:
+        from capybase.verification import _parse_cc_error_location
+
+        changed = False
+        for ln in errors:
+            m = _MICRO_REDEF_RE.search(ln)
+            if not m:
+                continue
+            name = m.group(1)
+            stem, lineno = _parse_cc_error_location(ln)
+            path = self._micro_path_for_stem(merged_paths, stem)
+            if path is None or not lineno:
+                continue
+            try:
+                buffer = (Path(self.git.repo) / path).read_text(
+                    encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            sides, base_text = self._micro_stage_sides(path)
+            outcome = _micro_delete_base_verbatim_duplicate(
+                buffer, name, lineno, base_text,
+                sides.get("current", ""), sides.get("replayed", ""))
+            if outcome is None:
+                continue
+            new_buffer, provenance = outcome
+            self._write_worktree_only(path, new_buffer, accepted=None)
+            self.journal.emit(
+                "micro_cegis_patch",
+                {"kind": "duplicate_delete", "path": path,
+                 "symbol": name, "provenance": provenance},
+                step_index=self.step, path=path)
+            changed = True
+        return changed
+
+    def _micro_patch_missing_symbols(self, merged_paths, errors) -> bool:
+        from capybase.resolution_engine import apply_search_replace
+        from capybase.verification import _parse_cc_error_location
+
+        by_symbol: dict[str, list[str]] = {}
+        for ln in errors:
+            m = _MICRO_MISSING_RE.search(ln)
+            if m:
+                by_symbol.setdefault(m.group(1), []).append(ln)
+        if not by_symbol:
+            return False
+        changed = False
+        for symbol, lns in list(by_symbol.items())[:3]:
+            stem, lineno = _parse_cc_error_location(lns[0])
+            path = self._micro_path_for_stem(merged_paths, stem)
+            if path is None:
+                continue
+            try:
+                buffer = (Path(self.git.repo) / path).read_text(
+                    encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            buf_lines = buffer.splitlines()
+            ctx = "\n".join(
+                f"{i+1}: {buf_lines[i]}"
+                for i in range(max(0, (lineno or 1) - 5),
+                               min(len(buf_lines), (lineno or 1) + 4)))
+            sides, base_text = self._micro_stage_sides(path)
+            decls = _micro_symbol_decls(
+                symbol, base_text, sides.get("current", ""),
+                sides.get("replayed", ""))
+            prompt = (
+                f"The merged file {path} fails compilation:\n"
+                + "\n".join(lns)
+                + "\n\nMerged file context (line numbers shown):\n" + ctx
+                + f"\n\nLines mentioning '{symbol}' in the BASE/CURRENT/REPLAYED versions:\n"
+                + ("\n".join(decls) if decls else "(none found)")
+                + "\n\nProduce the MINIMAL patch that makes the file compile: "
+                  "restore the missing declaration/member if a side added it, "
+                  "or remove/adjust the uses if the sides deleted it. Respond "
+                  "as JSON: {\"edits\": [{\"search\": \"<verbatim lines from "
+                  "the merged file>\", \"replace\": \"<replacement lines>\"}]}"
+            )
+            try:
+                resp = self.resolution_engine.raw_complete(
+                    prompt, json_mode=True,
+                    max_tokens=max(
+                        2048, self.resolution_engine.config.max_tokens))
+                raw = resp.text if hasattr(resp, "text") else str(resp)
+                import json as _json
+                parsed = _json.loads(raw)
+                edits = parsed.get("edits") or []
+            except Exception as exc:  # noqa: BLE001 — empty/unparseable model output
+                self.journal.emit(
+                    "micro_cegis_patch_failed",
+                    {"symbol": symbol, "error": str(exc)[:120]},
+                    step_index=self.step, path=path)
+                continue
+            new_text, warnings = apply_search_replace(buffer, edits)
+            if not new_text or new_text == buffer:
+                self.journal.emit(
+                    "micro_cegis_patch_failed",
+                    {"symbol": symbol, "warnings": warnings[:3],
+                     "reason": "no applicable edits"},
+                    step_index=self.step, path=path)
+                continue
+            self._write_worktree_only(path, new_text, accepted=None)
+            self.journal.emit(
+                "micro_cegis_patch",
+                {"kind": "missing_symbol", "path": path, "symbol": symbol,
+                 "n_edits": len(edits), "warnings": warnings[:3]},
+                step_index=self.step, path=path)
+            changed = True
+        return changed
 
     def _whole_file_repair(
         self,

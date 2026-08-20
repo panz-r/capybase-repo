@@ -227,3 +227,38 @@ zero oracle-divergent merges.
     micro_cegis_declined throughout. Acceptance: protobuf-0065
     majority-of-3 — PASS or honest escalate through the rung; no
     behavior change on unattributed/advisory failures (unit tests).
+- 2026-08-20 02:3x: **S20.6 DONE — micro-CEGIS at the compiler-authority
+  gate** (orchestrator.py module helpers + methods + run-loop wiring;
+  tests/test_micro_cegis.py, 12 tests; 66 green across adjacent files).
+  Mechanism: `_try_micro_cegis(result)` fires in the run loop between
+  the failed pre_continue gate and the P4 escalate (indictment path
+  only — required-gate policy failures keep the old behavior). Stage 1
+  (deterministic): `redefinition of X` → brace-block extraction at the
+  error line, other-copy location by definition-site scan, deletion
+  ONLY of the copy whose exact text is base-verbatim AND absent from a
+  parent side (provenance journaled; ambiguity declines). Stage 2
+  (micro-patch): distinct missing-symbol errors (`'X' does not name a
+  type` / `was not declared` / `is not a member of`, ≤3) get one tiny
+  JSON SEARCH/REPLACE prompt each (error lines + 5 buffer-context lines
+  + the symbol's declaration lines from base/current/replayed),
+  applied via the existing apply_search_replace; malformed/empty model
+  output skips symbol. Every round re-runs `_run_tests("pre_continue")`
+  — the indictment flag resets per call, so a clean re-gate lets the
+  run proceed (no escalate); no progress declines exactly as before.
+  Journaled: micro_cegis_started / _patch / _patch_failed /
+  _re_gate / _succeeded / _declined / _stage_failed.
+  **Live acceptance (0065, majority-of-3, CAPYBASE_SKIP_SIZE_GUARD=1 —
+  its 90K marker needs the documented lift): majority PASS at sim
+  1.00 (verdicts ESCALATE,PASS,PASS).** Honest caveat, P2-precedent:
+  the rung itself was UNEXERCISED this sampling — zero
+  compiler_authority_override (let alone micro_cegis) events in all
+  three journals: runs 2-3 produced oracle-correct candidates
+  outright, run 1 escalated via a non-gate path. The 0065 metric
+  conversion (ESCALATE→PASS) is attributable to sampling majority;
+  micro-CEGIS stands as the unit-tested net behind the gate. Also
+  fixed during implementation: provenance labels were swapped in the
+  first cut (caught by the pure-function tests); the other-copy finder
+  moved from whole-block comparison to definition-site scanning
+  (modified duplicates were missed). Regression suite launched via
+  `longrun` (s20-suite-microcegis) — the S20.5c wrapper's first
+  production use.
