@@ -218,3 +218,25 @@ def test_empty_resolution_grant_does_not_shadow_immediate_escalates():
         recovery_retry_count=0,
     )
     assert decision.action == "escalate"
+
+
+def test_empty_recovery_does_not_steal_transport_failures():
+    """request_failed/truncated/lsp_failed empties keep the technical-branch
+    contract: plain retries with retry_count incrementing (the V8
+    CASE_TIMEOUT invariant). A recovery prompt cannot fix a transport
+    error — there was no content to reframe (sprint-20 S20.4 regression,
+    caught by test_run_escalates_fast_on_repeated_transient_failures)."""
+    engine = RiskEngine(max_recovery_retries_per_unit=1, enable_recovery_retry=True)
+    for kind in ("request_failed", "truncated", "lsp_failed"):
+        decision = engine.decide(
+            _empty_result(), retry_count=0, failure_kind=kind,
+            recovery_retry_count=0,
+        )
+        assert decision.action == "retry"
+        assert "__recovery_retry__" not in (decision.required_followups or []), kind
+    # parse_failed (the flask-0006 class) still gets the recovery grant
+    decision = engine.decide(
+        _empty_result(), retry_count=0, failure_kind="parse_failed",
+        recovery_retry_count=0,
+    )
+    assert "__recovery_retry__" in decision.required_followups

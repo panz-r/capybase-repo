@@ -262,3 +262,33 @@ zero oracle-divergent merges.
   (modified duplicates were missed). Regression suite launched via
   `longrun` (s20-suite-microcegis) — the S20.5c wrapper's first
   production use.
+- 2026-08-20 03:1x: **S20.4 regression fixed** (caught by the
+  s20-suite-microcegis gate, 1 failure:
+  test_run_escalates_fast_on_repeated_transient_failures). The
+  empty-resolution recovery grant was stealing TRANSPORT failures
+  (request_failed/truncated/lsp_failed) from the technical branch — a
+  transport error has no content to reframe, and the theft broke the
+  retry_count increment contract (the V8 CASE_TIMEOUT invariant).
+  Scoped to CONTENT empties only (parse_failed/no-kind — the
+  flask-0006 class); regression test added; orchestrator file gated
+  green via longrun.
+- 2026-08-20 03:2x: **S20.7 DONE — skeleton-aware sibling-boundary brace
+  insertion; both plan-named acceptance cases reclassified era-dead by
+  the S20.2 probe.** New Candidate 0 in `_try_balance_braces`: when one
+  closer is missing mid-file (the fmt-0003 shape — a TEST-macro block's
+  closer lost with sibling constructs after it), insert BEFORE the next
+  sibling construct instead of EOF/trailing closers. Signal: after the
+  innermost unclosed opener every depth reading is +1 too high, so a
+  true scope-level sibling reads depth-BEFORE == deficit; guards:
+  construct-start shape (call/signature + '{'), indentation at-or-left
+  of the opener (body content indents deeper), balance re-validation.
+  2 new tests; 60 green across the brace files.
+  **Live: fmt-0003 AND nlohmann-0033 → ESCALATE_TOOLCHAIN** (both
+  sides + oracle fail today's builds identically; 109s / 6s). Finding:
+  both plan-named brace-failure cases were NEVER model failures —
+  era-dead cases whose merge failures masked toolchain drift. The
+  era-probe census now counts 0109, fmt-0003, nlohmann-0033. S20.7's
+  mechanism stands unit-tested with no live firing available this
+  sampling (P2-precedent honesty). Metric note: "sim≈1.0 build
+  failures" now resolves as 0065→PASS + fmt-0003→toolchain-dead — the
+  class is empty either way.

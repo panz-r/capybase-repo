@@ -2492,6 +2492,49 @@ def _try_balance_braces(text: str, language: str | None = None) -> str | None:
         #     the case where the file doesn't end with structural closers.
         suffix = "}" * depth
 
+        # Candidate 0 (sprint-20 S20.7): insert at the next SIBLING construct
+        # boundary. The fmt-0003 shape: a construct's closer is lost MID-FILE
+        # (e.g. a TEST-macro block) and the file continues with sibling
+        # constructs and trailing structural closers — EOF or trailing-closer
+        # insertion lands in the wrong scope (brace-balanced, gcc-broken).
+        # Signal: after the innermost unclosed opener every depth reading is
+        # +depth too high, so a sibling that truly starts at scope depth 0
+        # reads depth-BEFORE == depth. Guards: the line must look like a
+        # construct start (a call/signature followed by '{'), sit at or left
+        # of the opener's indentation (same scope — body content indents
+        # deeper), and the result must re-validate balanced.
+        if depth == 1:
+            dbefore: list[int] = []
+            _d = 0
+            for cline in cleaned:
+                dbefore.append(_d)
+                _d += cline.count("{") - cline.count("}")
+            stack: list[int] = []
+            for i, cline in enumerate(cleaned):
+                for _ch_i, ch in enumerate(cline):
+                    if ch == "{":
+                        stack.append(i)
+                    elif ch == "}" and stack:
+                        stack.pop()
+            if stack:
+                opener = stack[-1]
+                opener_indent = len(lines[opener]) - len(lines[opener].lstrip()) \
+                    if opener < len(lines) else 0
+                for i in range(opener + 1, len(lines)):
+                    c = cleaned[i].strip()
+                    if (not c or c == "}" or c.startswith(("#", "//"))
+                            or dbefore[i] != depth or "{" not in c
+                            or "(" not in c):
+                        continue
+                    indent = len(lines[i]) - len(lines[i].lstrip())
+                    if indent > opener_indent:
+                        continue  # body content (deeper) — not a sibling
+                    candidate_0 = lines[:i] + [suffix] + lines[i:]
+                    result_0 = "\n".join(candidate_0)
+                    if _brace_imbalance_line(result_0, language) is None:
+                        return result_0
+                    break  # first sibling only — fall through to 1/2
+
         # Candidate 1: before trailing brace-only lines.
         # Walk backward past pure-``}`` and blank lines to find the
         # last content line before the structural closers. Also skip lines

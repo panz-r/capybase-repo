@@ -390,3 +390,49 @@ def test_rust_syntax_skips_non_rust():
     res = _verify(v, unit, cand)
     assert res.passed
     assert res.features["rust_syntax_checked"] is False
+
+
+# --- sprint-20 S20.7: sibling-boundary insertion (the fmt-0003 shape) ---
+
+
+def test_balance_braces_inserts_at_sibling_boundary():
+    """A construct's closer lost MID-FILE with sibling constructs after it:
+    the closer goes before the next sibling (same scope), not at EOF or
+    before trailing structural closers — fmt-0003 (unterminated
+    EXPECT_THROW inside a TEST block)."""
+    text = (
+        "TEST(A, B) {\n"
+        "  int x = 1;\n"
+        "  EXPECT_THROW(f(), E);\n"
+        "\n"
+        "TEST(C, D) {\n"
+        "  int y = 2;\n"
+        "}\n"
+    )
+    out = _try_balance_braces(text, "cpp")
+    assert out is not None
+    lines = out.split("\n")
+    idx_close = next(i for i, ln in enumerate(lines) if ln.strip() == "}")
+    idx_sibling = next(i for i, ln in enumerate(lines) if ln.startswith("TEST(C"))
+    assert idx_close < idx_sibling, out
+    assert lines[idx_sibling - 1].strip() == "}"  # immediately before
+
+
+def test_balance_braces_sibling_guard_skips_nested_blocks():
+    """A body-inner block (if/for) is NOT a sibling: it indents deeper than
+    the opener — the closer must still land at the true sibling."""
+    text = (
+        "TEST(A, B) {\n"
+        "  if (cond) {\n"
+        "    do();\n"
+        "  }\n"
+        "TEST(C, D) {\n"
+        "  int y = 2;\n"
+        "}\n"
+    )
+    out = _try_balance_braces(text, "cpp")
+    assert out is not None
+    lines = out.split("\n")
+    idx_sibling = next(i for i, ln in enumerate(lines) if ln.startswith("TEST(C"))
+    # the inserted closer sits immediately before the sibling
+    assert lines[idx_sibling - 1].strip() == "}", out

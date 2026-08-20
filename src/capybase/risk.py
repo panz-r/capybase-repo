@@ -200,8 +200,16 @@ class RiskEngine:
         # output contract) — the SAME separate budget and switch, so it is
         # bounded exactly once per unit by default and escalates unchanged
         # when the reframed ask also comes back empty.
+        # Scope: CONTENT empties only (parse_failed / no failure kind).
+        # Transport failures (request_failed, truncated) and external
+        # checker failures (lsp_failed) also produce empty candidates, but
+        # there was no content to reframe — a recovery prompt can't fix a
+        # transport error, and stealing them from the technical branch
+        # broke its retry_count contract (the V8 CASE_TIMEOUT invariant,
+        # pinned by test_run_escalates_fast_on_repeated_transient_failures).
         if (
             feats.get("empty_resolution")
+            and failure_kind not in ("request_failed", "truncated", "lsp_failed")
             and self.enable_recovery_retry
             and recovery_retry_count < self.max_recovery_retries_per_unit
         ):
