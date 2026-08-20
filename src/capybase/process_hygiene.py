@@ -55,7 +55,7 @@ def kill_stale_build_processes() -> int:
             "capybase-ccache-shim" in cmdline
             or "capy-rw-" in cmdline
             or "ccache-tmp/cpp_stdout" in cmdline
-            or str(cwd).startswith("/var/tmp/capy-rw-")
+            or str(cwd).startswith(("/tmp/capy-rw-", "/var/tmp/capy-rw-"))
         ):
             try:
                 os.kill(int(pid_dir), signal.SIGKILL)

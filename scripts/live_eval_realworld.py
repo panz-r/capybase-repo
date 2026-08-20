@@ -1270,7 +1270,12 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         return _mark_toolchain_dead(res, _cached_probe, t0)
     owns_td = td is None
     if owns_td:
-        td = tempfile.mkdtemp(prefix="capy-rw-", dir="/var/tmp")
+        # Worktrees live on the TMPFS (/tmp): fast builds, wiped on
+        # reboot (disposable by design — results/journals are disk-backed
+        # under /var/tmp). Env-overridable.
+        td = tempfile.mkdtemp(
+            prefix="capy-rw-",
+            dir=os.environ.get("CAPYBASE_WORKTREE_DIR", "/tmp"))
     try:
         repo = Path(td) / "r"
         try:
@@ -1564,7 +1569,8 @@ def main():
     # killed eval runs. Safe because no two eval runs should coexist.
     import glob as _glob
     import shutil as _shutil_sweep
-    for _stale in _glob.glob("/var/tmp/capy-rw-*"):
+    for _stale in (_glob.glob("/tmp/capy-rw-*")
+                   + _glob.glob("/var/tmp/capy-rw-*")):
         _shutil_sweep.rmtree(_stale, ignore_errors=True)
 
     # Export the ccache wiring into the eval process itself so EVERY child
@@ -1686,7 +1692,9 @@ def main():
             # D3: create the temp dir in the MAIN thread so we own cleanup. The
             # worker receives it via `td=`; if the worker times out and is
             # abandoned, the main thread cleans up here (no leaked temp trees).
-            _td = tempfile.mkdtemp(prefix="capy-rw-", dir="/var/tmp")
+            _td = tempfile.mkdtemp(
+                prefix="capy-rw-",
+                dir=os.environ.get("CAPYBASE_WORKTREE_DIR", "/tmp"))
             # Resolve the crate source clone for full-tree materialization.
             # Maps dataset name → external-datasets clone dir. Enables cargo check.
             _crate = None

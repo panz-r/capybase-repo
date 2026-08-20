@@ -537,3 +537,26 @@ architecture-purity rejection.
   filter, an integrated closing-sequence rehearsal — none block the
   harvest-day sequence; the full-suite gate stays deliberately
   post-harvest (CPU contention).
+- 2026-08-20 19:1x: **LARGE DISCOVERY + reconfiguration (4h to a
+  scheduled power outage).** /tmp is TMPFS — the harvest's results and
+  flight journals were RAM-BACKED and would have been WIPED by the
+  outage mid-run (the verified resume path would have had nothing to
+  resume from; ~160/677 projected by the outage = a full 22h restart).
+  Reconfigured per the user's directive — the inverse of a
+  move-everything-to-disk approach:
+  - WORKTREES + BUILDS on the TMPFS: worktree mkdtemp root moved to
+    /tmp (CAPYBASE_WORKTREE_DIR-overridable); startup sweep and
+    process_hygiene now cover BOTH roots (legacy /var/tmp trees
+    included).
+  - RESULTS + JOURNALS on DISK: results.json + flights under
+    /var/tmp/capybase-live/s20/harvest-disk/ (zfs, survives reboot);
+    ccache/cargo caches also disk-resident (post-reboot warm builds).
+  Incident during the switchover: a kill-pattern mismatch orphaned the
+    prior eval (wrong pattern order; parent= reaper) and it briefly
+    double-wrote the same results file alongside the new run — killed,
+    results validated (96 records, zero duplicate ids, JSON intact);
+    lesson recorded: kill by pid, not by cmdline pattern.
+  Final state verified live: resume loaded 95 priors; worktree active
+    at /tmp/capy-rw-*; single writer; RESUME.md runbook sits beside
+    the results for post-reboot relaunch. Stall-detector re-armed on
+    the disk path.
