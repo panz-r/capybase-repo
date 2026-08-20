@@ -406,3 +406,31 @@ the rest execute against the landed harvest.
 Order: E1/E2 gate sprint-21 planning credibility (a PASS-rate memo is
 worthless if regressions or probe false-positives pollute it). E5/E6
 can run pre-harvest.
+
+## S20.E additions from the reviewer window (2026-08-20 evening)
+
+Adopted from two reviewer responses, de-duplicated against done work
+(queue.rs twin = S20.3 DONE; S20.4-vs-transport pin = written with the
+regression fix; census miner = built+validated). Standing constraints
+for the harvest window: NO runtime-code changes while the harvest runs
+(scripts/docs/tests only — attribution hygiene); no broad archive scans
+(sampled subsets, nice/ionice); rejected architectures get a Future
+Research note, not design drafts.
+
+| # | Item | Acceptance | Source |
+|---|------|-----------|--------|
+| E7 | Pre-registered decision template (`docs/sprint21-decision-template.md`) | thresholds WRITTEN BEFORE the harvest lands (its only value); headline metrics with the theoretical-ceiling formula computed FROM harvest data (never pre-filled); era-adjusted rate ALWAYS beside the raw rate; S20.10/P2/mid-band/era rules pre-committed | R1 (pre-registration core), R2 (formula structure) |
+| E8 | Census-miner table extension | per-case mechanism waterfall (structural/portfolio/LLM provenance), oversized-cohort detail table, preservation detail, ccache economy per case — validated on D7/D8 subsets only | both |
+| E9 | Harvest triage kit (`scripts/triage_harvest.py`) | one compact section per non-PASS case with action categories (era-dead / environmental / model-capability / mechanism-gap / investigate) → the sprint-21 backlog | both |
+| E10 | Mechanism interaction matrix + pin tests | `docs/sprint20-mechanism-risk-matrix.md` + pytest pins: lockfile-vs-resurrection (pin the existing suffix exemption), micro-CEGIS-vs-P4 escalation transparency, brace-vs-compaction note | R2 (tests), R1 (matrix) |
+| E11 | Golden-path few-shot extractor (skeleton) | `scripts/extract_golden_path.py` — PASS + LLM-provenance + sim>0.95 (prompt, response) pairs keyed by skeleton signature; sprint-21 prompt-builder integration is a DECISION then, never wired now | R2 (build), R1 (don't-run scoping) |
+| E12 | Capabilities-doc delta | factual deltas with the labeling rule: unit-tested ≠ live-exercised ≠ corpus-proven | R1 |
+
+Reviewer rating recorded in the session log: **Response 1 more useful**
+(pre-registered thresholds vs post-hoc framing; honest-metrics discipline
+— era-adjusted beside raw, "theoretical ceiling under this exact eval"
+labeling vs adopting a pre-filled 99.26% as the external headline;
+operational harvest protection incl. nice/ionice scoping; correct
+golden-path scoping). R2's adoptions: the ceiling-formula structure,
+the lockfile-vs-resurrection pin, the triage taxonomy, the explicit
+architecture-purity rejection.
