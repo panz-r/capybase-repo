@@ -169,10 +169,31 @@ def main() -> int:
     member_split: list[dict] = []
     move_edit: list[dict] = []
     preservation_events: dict[str, int] = {}
+    # S20.E8: per-case mechanism waterfall + build economy.
+    mech_mix: dict[str, dict[str, int]] = {}
+    build_secs: dict[str, float] = {}
     for case_id, d in _iter_journals(args.flights or ""):
         et = d.get("event_type") or ""
         journal_counts[et] = journal_counts.get(et, 0) + 1
         p = d.get("payload") or {}
+        mm = mech_mix.setdefault(case_id, {"structural": 0, "portfolio": 0,
+                                           "llm": 0})
+        if et == "structurally_resolved":
+            mm["structural"] += 1
+        elif et == "true_side_portfolio":
+            mm["portfolio"] += 1
+        elif et == "candidate_accepted":
+            via = str(p.get("via") or "")
+            if via.startswith("structural") or via.startswith("deterministic"):
+                mm["structural"] += 1
+            else:
+                mm["llm"] += 1
+        if et == "build_probe":
+            try:
+                build_secs[case_id] = build_secs.get(case_id, 0.0) + float(
+                    p.get("duration_s") or p.get("elapsed") or 0.0)
+            except (TypeError, ValueError):
+                pass
         if et in ("llm_skipped_oversized", "llm_skipped_oversized_prompt"):
             oversized_cases.add(case_id)
         elif et == "class_member_split_candidate":
@@ -195,6 +216,20 @@ def main() -> int:
     report["member_split_distribution"] = member_split[:50]
     report["move_edit_distribution"] = move_edit[:50]
     report["preservation_events"] = preservation_events
+    # S20.E8 tables: mechanism mix + build economy.
+    _tot = {"structural": 0, "portfolio": 0, "llm": 0}
+    for mm in mech_mix.values():
+        for k in _tot:
+            _tot[k] += mm[k]
+    report["mechanism_waterfall"] = {
+        "cases_with_journals": len(mech_mix),
+        "totals": _tot,
+        "llm_only_cases": sorted(c for c, m in mech_mix.items()
+                                 if m["llm"] and not (
+                                     m["structural"] or m["portfolio"])),
+    }
+    report["build_economy_top10"] = sorted(
+        build_secs.items(), key=lambda kv: -kv[1])[:10]
 
     # ---- formatted report ----
     v = report["verdict_census"]
@@ -217,6 +252,12 @@ def main() -> int:
           f"{report['oversized_cohort']}")
     print(f"== move-edit distribution: {len(report['move_edit_distribution'])} "
           f"candidates")
+    w = report["mechanism_waterfall"]
+    print(f"== mechanism waterfall: {w['totals']} across "
+          f"{w['cases_with_journals']} cases "
+          f"(llm-only: {len(w['llm_only_cases'])})")
+    print(f"== build economy (top spenders, s): "
+          f"{[(c, round(s)) for c, s in report['build_economy_top10'][:5]]}")
     print(f"== preservation events: {report['preservation_events'] or 'none'}")
     s = report["skeleton_cross_tab"]
     print(f"== skeleton x jaccard: {s['non_clean_with_content']} non-clean "

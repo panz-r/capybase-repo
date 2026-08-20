@@ -448,3 +448,15 @@ architecture-purity rejection.
   signature; prepare-don't-wire (E7 gate: >=30 pairs before any
   integration decision). Remaining pre-harvest: E8 census tables, E12
   capabilities delta, E5 coverage, E6 resume check.
+- 2026-08-20 17:2x: **S20.E8/E12 EXECUTED; E6 VERIFIED.** E6: the
+  `--skip-existing` resume path loads prior results (field-filtered,
+  forward-compatible with new CaseResult fields), skips done ids, exits
+  in 0s — verified against a COPY of the in-flight results (33 loaded,
+  records intact). E8: census miner extended with the mechanism
+  waterfall (structural/portfolio/LLM per case + llm-only case list)
+  and the build-economy table (top spenders) — validated on D7-mech
+  (6 structural + 7 LLM; 0055 correctly tops build spend at 600s). E12:
+  docs/sprint20-capabilities-delta.md — factual deltas under the
+  labeling rule (unit-tested ≠ live-exercised ≠ corpus-proven), to be
+  upgraded by harvest evidence at sprint close. Remaining pre-harvest:
+  E5 coverage pass (deferred to avoid harvest CPU contention).
