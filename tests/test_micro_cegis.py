@@ -140,11 +140,13 @@ def _micro_orch(tmp_path, *, engine=None, flag=True, gate_results=None):
     written = {}
     orch._write_worktree_only = (
         lambda path, buffer, accepted=None: written.__setitem__(path, buffer))
+    staged: list[str] = []
+    orch.git.stage_paths = staged.extend
     gate_iter = iter(gate_results or [])
     orch._run_tests = lambda label, result: next(gate_iter, False)
     result = SimpleNamespace(
         units_by_path={"src/text_format.cc": []})
-    return orch, result, written
+    return orch, result, written, staged
 
 
 _ERR = ("/r/src/text_format.cc:1:12: error: 'tokenizer_' does not name a type")
@@ -153,7 +155,7 @@ _ERR = ("/r/src/text_format.cc:1:12: error: 'tokenizer_' does not name a type")
 def test_micro_cegis_missing_symbol_patch_repairs_and_re_gates(tmp_path):
     payload = ('{"edits": [{"search": "void f() { tokenizer_.Next(); }", '
                '"replace": "Tokenizer tokenizer_;\\nvoid f() { tokenizer_.Next(); }"}]}')
-    orch, result, written = _micro_orch(
+    orch, result, written, staged = _micro_orch(
         tmp_path, engine=_FakeEngine(payload), gate_results=[True])
     orch._last_attributed_merge_errors = [_ERR]
     orch._last_gate_cmd = "make -j4"
@@ -162,27 +164,31 @@ def test_micro_cegis_missing_symbol_patch_repairs_and_re_gates(tmp_path):
     kinds = [e for e in orch.journal.events if e[0] == "micro_cegis_patch"]
     assert kinds and kinds[0][1]["kind"] == "missing_symbol"
     assert any(e[0] == "micro_cegis_succeeded" for e in orch.journal.events)
+    # Defect-review pin: the patched path must be STAGED — rebase --continue
+    # commits the index, so an unstaged patch would ship the pre-patch splice.
+    assert staged == ["src/text_format.cc"]
 
 
 def test_micro_cegis_declines_when_re_gate_still_fails(tmp_path):
     payload = ('{"edits": [{"search": "void f() { tokenizer_.Next(); }", '
                '"replace": "void f() { tok.Next(); }"}]}')
-    orch, result, _ = _micro_orch(
+    orch, result, _, _s = _micro_orch(
         tmp_path, engine=_FakeEngine(payload), gate_results=[False])
+    assert _s == []  # no staging on a failed re-gate
     orch._last_attributed_merge_errors = [_ERR]
     assert orch._try_micro_cegis(result) is False
     assert any(e[0] == "micro_cegis_declined" for e in orch.journal.events)
 
 
 def test_micro_cegis_disabled_flag(tmp_path):
-    orch, result, _ = _micro_orch(tmp_path, flag=False, gate_results=[])
+    orch, result, _, _ = _micro_orch(tmp_path, flag=False, gate_results=[])
     orch._last_attributed_merge_errors = [_ERR]
     assert orch._try_micro_cegis(result) is False
     assert not any(e[0] == "micro_cegis_started" for e in orch.journal.events)
 
 
 def test_micro_cegis_no_errors_no_op(tmp_path):
-    orch, result, _ = _micro_orch(tmp_path, gate_results=[])
+    orch, result, _, _ = _micro_orch(tmp_path, gate_results=[])
     orch._last_attributed_merge_errors = []
     assert orch._try_micro_cegis(result) is False
 

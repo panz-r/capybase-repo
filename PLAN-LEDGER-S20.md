@@ -460,3 +460,31 @@ architecture-purity rejection.
   labeling rule (unit-tested ≠ live-exercised ≠ corpus-proven), to be
   upgraded by harvest evidence at sprint close. Remaining pre-harvest:
   E5 coverage pass (deferred to avoid harvest CPU contention).
+- 2026-08-20 17:4x: **DEFECT REVIEW of sprint-20 work** (read-only
+  against the running harvest; three defects found and FIXED, four
+  flagged). FIXED: (1) **micro-CEGIS staging bug** — the rung patched
+  the worktree AFTER Phase 2 had staged the pre-patch buffer, and
+  `git rebase --continue` commits the INDEX: a successful repair would
+  have silently shipped the unpatched splice while the gate validated
+  the patched worktree. `_micro_re_gate` now stages every patched path
+  (tracked via `_micro_patched_paths`); pinned by test (staged == the
+  patched path; no staging on failed re-gate). (2) `_compact_context_
+  text` trailing-newline off-by-one — every newline-terminated section
+  gained one spurious '\n' (the join's trailing empty element
+  double-counted with the appended trailing count); trailing blanks
+  now popped before join. (3) triage ordering — environmental
+  keywords checked before model-capability (axum-0005's couldn't-read-
+  a-file error was mis-bucketed via a coincidental 'timeout').
+  FLAGGED (not fixed, documented): (a) the duplicate-repair other-copy
+  finder can match call sites with nearby braces (provenance-guarded;
+  tighten to definition-shaped lines when the rung fires live);
+  (b) NO full-suite gate since 8eb9676 — S20.8/9/11 + E-items shipped
+  on targeted tests while the harvest exercises them; full suite
+  scheduled immediately post-harvest; (c) the E7 template's
+  pre-registration is mildly contaminated (written after 33/677
+  partial results, ~5%, axum-family only — recorded honestly);
+  (d) compaction never runs in the essential-blows-window branch
+  (outcome-equivalent: sides are protected and augmentation is dropped
+  regardless). Also noted: `_run_shell_tree` loses partial output if a
+  group-escaped descendant holds the pipe (acceptable degradation,
+  documented); census `json.dumps`-per-event is a perf smell.

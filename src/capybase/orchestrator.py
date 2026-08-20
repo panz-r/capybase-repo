@@ -10619,7 +10619,11 @@ class Orchestrator:
 
         ``_run_tests`` resets ``_last_tests_compiler_indictment`` at entry,
         so a clean re-gate clears the indictment and the run loop proceeds
-        instead of escalating."""
+        instead of escalating. On success the patched paths are STAGED
+        (defect review 2026-08-20: Phase 2 already staged the pre-patch
+        buffer; ``git rebase --continue`` commits the INDEX, so an
+        unstaged patch would be silently dropped while the gate had
+        validated the worktree — a wrong merge shipped as success)."""
         try:
             ok = bool(self._run_tests("pre_continue", result))
         except Exception:  # noqa: BLE001 — a broken re-gate must not wedge the loop
@@ -10627,8 +10631,17 @@ class Orchestrator:
         self.journal.emit(
             "micro_cegis_re_gate", {"passed": ok}, step_index=self.step)
         if ok:
+            # Stage every patched merged path so the continue commits the
+            # repaired buffer, not the pre-patch splice.
+            for p in self._micro_patched_paths or []:
+                try:
+                    self.git.stage_paths([p])
+                except Exception:  # noqa: BLE001 — staging is best-effort
+                    pass
             self.journal.emit(
-                "micro_cegis_succeeded", {}, step_index=self.step)
+                "micro_cegis_succeeded",
+                {"staged": list(self._micro_patched_paths or [])},
+                step_index=self.step)
         return ok
 
     def _micro_path_for_stem(self, merged_paths, stem) -> str | None:
@@ -10675,6 +10688,7 @@ class Orchestrator:
         self.journal.emit(
             "micro_cegis_started", {"errors": errors}, step_index=self.step)
         merged_paths = list(getattr(result, "units_by_path", {}) or {})
+        self._micro_patched_paths: list[str] = []
         repaired = False
         try:
             repaired = self._micro_repair_duplicates(merged_paths, errors)
@@ -10728,6 +10742,8 @@ class Orchestrator:
                 continue
             new_buffer, provenance = outcome
             self._write_worktree_only(path, new_buffer, accepted=None)
+            if path not in self._micro_patched_paths:
+                self._micro_patched_paths.append(path)
             self.journal.emit(
                 "micro_cegis_patch",
                 {"kind": "duplicate_delete", "path": path,
@@ -10803,6 +10819,8 @@ class Orchestrator:
                     step_index=self.step, path=path)
                 continue
             self._write_worktree_only(path, new_text, accepted=None)
+            if path not in self._micro_patched_paths:
+                self._micro_patched_paths.append(path)
             self.journal.emit(
                 "micro_cegis_patch",
                 {"kind": "missing_symbol", "path": path, "symbol": symbol,

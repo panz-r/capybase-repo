@@ -1175,6 +1175,12 @@ def _compact_context_text(text: str, language: str | None = None) -> str:
             continue
         blanks = 0
         out.append(ln)
+    # Trailing blank elements would make the join itself contribute a
+    # newline ON TOP of the appended trailing count (defect review
+    # 2026-08-20: every newline-terminated section gained one spurious
+    # trailing '\n'). Pop them; the trailing count alone is authoritative.
+    while out and out[-1] == "":
+        out.pop()
     trailing = len(text) - len(text.rstrip("\n"))
     return "\n".join(out) + ("\n" * trailing if trailing else "")
 

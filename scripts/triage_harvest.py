@@ -35,14 +35,18 @@ def _categorize(r: dict) -> str:
     if v == "ESCALATE":
         if "safe" in rl and "stop" in rl:
             return "mechanism-gap"  # safety stops recurring = design question
+        # environmental FIRST (defect review 2026-08-20: a couldn't-read-a-
+        # file gate error was mis-bucketed as model-capability via a
+        # coincidental 'timeout' in the reason text).
+        if any(k in rl for k in (
+                "build is not a directory", "cmake", "no conflict",
+                "setup failed", "couldn't read", "could not read",
+                "no such file")):
+            return "environmental"
         if any(k in rl for k in (
                 "empty", "needs_human", "model", "oversized", "timeout",
                 "capability")):
             return "model-capability"
-        if any(k in rl for k in (
-                "build is not a directory", "cmake", "no conflict",
-                "setup failed")):
-            return "environmental"
         return "investigate"
     if v in ("ORACLE_DIVERGENT", "NEAR_MATCH", "WORKING", "?"):
         return "investigate"
