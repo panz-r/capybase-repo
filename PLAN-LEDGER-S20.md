@@ -384,3 +384,25 @@ zero oracle-divergent merges.
   distribution; skeleton×jaccard cross-tab; era-probe census; PASS-rate
   + failure census under all sprint-20 mechanisms) and write the
   sprint-21 decision memo.
+
+## Sprint-20 extension phase — QA & follow-up (S20.E, added 2026-08-20)
+
+The development phase accumulated real quality debt alongside its wins:
+three mechanisms whose live firing is unproven, an irreversible new
+classification (era-dead) with one unresolved attribution caveat, and a
+first-ever full-corpus run under all S20 mechanisms simultaneously.
+This extension plans the assurance work; E1's instrument is built now,
+the rest execute against the landed harvest.
+
+| # | Item | Acceptance | Deps |
+|---|------|-----------|------|
+| E1 | Verdict-diff regression audit | `scripts/verdict_diff.py` diffs the harvest against every baseline (s18 midband 350 + ws1 12, s19 d7/d8 sets); EVERY PASS→non-PASS flip investigated and bisected to a mechanism (lockfile takeover / recovery redirection / compaction / move-edit stamping / brace candidates / micro-CEGIS); zero unexplained regressions | harvest |
+| E2 | Era-probe verification sweep | every ESCALATE_TOOLCHAIN case: probe signatures inspected (era-artifact vs content-defect) + cross-checked against history (a case that PASSED in any earlier sprint must never classify era-dead — a flip means probe bug); the 0055 attribution caveat resolved and documented | harvest |
+| E3 | Unexercised-mechanism dispositions | harvest journals mined for micro-CEGIS / sibling-brace / compaction firings; zero firings → explicit keep-as-net decisions with rationale (cost/guard audit); forced-exercise integration tests where cheap (drive the rung with a fake failing gate + real buffer) | harvest |
+| E4 | Lockfile takeover wide-band check | all harvest `lockfile_takeover_gate` firings with their sims; any firing at sim < 0.95 investigated (the enabling measurement was 2 corpus cases; the harvest is the wide band) | harvest |
+| E5 | Test-coverage pass | pytest-cov over the sprint's touched modules (structural_resolver, verification, orchestrator rungs, risk, eval-script additions); highest-value gaps closed | none |
+| E6 | Runbook hardening | harvest resume verified (`--skip-existing` against a partial results.json); the longrun → census → memo workflow documented in the results doc's harvest section | none |
+
+Order: E1/E2 gate sprint-21 planning credibility (a PASS-rate memo is
+worthless if regressions or probe false-positives pollute it). E5/E6
+can run pre-harvest.
