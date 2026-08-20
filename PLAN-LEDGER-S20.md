@@ -523,3 +523,17 @@ architecture-purity rejection.
   total: one critical latent defect (micro-CEGIS staging, fixed pass
   1), one duplicate-run guard defect (longrun pid, fixed pass 2), and
   cosmetic/test-quality fixes otherwise.
+- 2026-08-20 18:4x: **Pre-overnight work executed.** (1) **E2's
+  instrument built**: `scripts/era_sweep.py` — prints every era-dead
+  case's per-side probe signatures (era-artifact vs content-defect
+  inspection) and ENFORCES the never-declassify-a-prior-PASS invariant
+  against arbitrary baselines; validated on the real 0109 record
+  (signatures printed, invariant clean) and on a fabricated flip
+  (violation detected, era-adjusted-numbers-BLOCKED message, exit 2).
+  (2) **Overnight stall-detector armed**: detached watcher marks
+  HARVEST_STALL in progress.log if results.json goes >30 min without a
+  write (10-min checks). Still open pre-harvest (low priority, listed
+  for the record): E5's targeted-coverage variant, E11's provenance
+  filter, an integrated closing-sequence rehearsal — none block the
+  harvest-day sequence; the full-suite gate stays deliberately
+  post-harvest (CPU contention).
