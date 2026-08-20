@@ -560,3 +560,21 @@ architecture-purity rejection.
     at /tmp/capy-rw-*; single writer; RESUME.md runbook sits beside
     the results for post-reboot relaunch. Stall-detector re-armed on
     the disk path.
+- 2026-08-20 20:0x: **TWO LARGE HARVEST FINDINGS (mid-run, ~2h to
+  outage) + baselines secured.** (1) **The era census is exploding:
+  46 era-dead in the first 262 cases** — nlohmann-json-history 38
+  (nearly the whole dataset: historical nlohmann C++ vs today's gcc),
+  fmt 4, protobuf 3, jsonc 1. The corpus's achievable raw PASS ceiling
+  is far lower than assumed; the pre-registered era-adjusted metric is
+  exactly the right frame. (2) **THE E2 INVARIANT FIRED: 14 prior-PASS
+  cases now classify ESCALATE_TOOLCHAIN** — era-adjusted numbers are
+  BLOCKED per template §E until investigated. Leading hypothesis
+  (unverified): the s18-era PASSes are the hollow class P4 exposed —
+  verdicts produced under broken/no-op gates (cf50f4b's -j$(nproc)
+  bug, pre-P3 SYNTAX_ONLY degradation) where the compiler never ran;
+  the probe may be CORRECT and the old PASSes hollow. Alternative: a
+  probe bug (side-compile context mismatch). The 14-case inspection is
+  the first post-reboot task; era_sweep lists them against baselines.
+  DURABILITY: all baseline result sets (s18/s19/s20, 25 JSONs) copied
+  to /var/tmp/capybase-live/baselines/ — they were ALSO tmpfs-resident
+  and would have been lost with the outage (E1/E2 depend on them).
