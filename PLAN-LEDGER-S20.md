@@ -578,3 +578,11 @@ architecture-purity rejection.
   DURABILITY: all baseline result sets (s18/s19/s20, 25 JSONs) copied
   to /var/tmp/capybase-live/baselines/ — they were ALSO tmpfs-resident
   and would have been lost with the outage (E1/E2 depend on them).
+- 2026-08-20 22:00: **CLEAN STOP before scheduled poweroff** (SIGTERM
+  to the eval pid, worker + watchers stopped; the two pgrep hits after
+  were self-matches). FINAL pre-outage state: **329/677 results (218
+  PASS = 66%), zero duplicate ids, JSON valid**, results + flights +
+  baselines + caches all disk-resident under /var/tmp; CLEAN_STOP
+  marker written; RESUME.md beside the results. Post-reboot: relaunch
+  per RESUME.md (one command), then the E2 investigation (14 prior-PASS
+  flips) is the first analysis task, then the closing sequence.
