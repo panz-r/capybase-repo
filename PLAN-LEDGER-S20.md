@@ -434,3 +434,17 @@ operational harvest protection incl. nice/ionice scoping; correct
 golden-path scoping). R2's adoptions: the ceiling-formula structure,
 the lockfile-vs-resurrection pin, the triage taxonomy, the explicit
 architecture-purity rejection.
+- 2026-08-20 17:1x: **S20.E9/E10/E11 EXECUTED** (scripts/docs/tests only
+  — no runtime code touched while the harvest runs). E9
+  `scripts/triage_harvest.py`: per-non-PASS compact sections in five
+  categories (era-dead / environmental / model-capability /
+  mechanism-gap / investigate) — validated on D8 (0046→mechanism-gap,
+  flask-0006→model-capability) and the partial harvest. E10 pin tests
+  (`tests/test_mechanism_interaction_pins.py`): lockfile-resurrection
+  never-stops (suffix exemption pinned; fake git backend protocol
+  fixed during bring-up) + micro-CEGIS-decline keeps the honest
+  escalation reason. E11 `scripts/extract_golden_path.py` skeleton:
+  (prompt, response) pairs from PASS+sim>=0.95 cases keyed by skeleton
+  signature; prepare-don't-wire (E7 gate: >=30 pairs before any
+  integration decision). Remaining pre-harvest: E8 census tables, E12
+  capabilities delta, E5 coverage, E6 resume check.
