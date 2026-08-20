@@ -586,3 +586,17 @@ architecture-purity rejection.
   marker written; RESUME.md beside the results. Post-reboot: relaunch
   per RESUME.md (one command), then the E2 investigation (14 prior-PASS
   flips) is the first analysis task, then the closing sequence.
+- 2026-08-20 22:0x: **PRE-REBOOT investigation burst** (a) ALL flight
+  journals (s18/s19/s20, 94 journals) copied to
+  /var/tmp/capybase-live/journals/ — they were the last tmpfs-resident
+  evidence and are required for E1/E2/E3. (b) **E2 evidence, first
+  cut**: the flip count is now 16 (all ws1/midband baselines — BOTH
+  predate cf50f4b); 14 nlohmann + fmt-0004/0006 + sea-orm-0010.
+  Decisive sample: nlohmann-0020's s18 `tests_finished` shows rc=2,
+  verdict=unknown, diagnostics=[] with REAL cmake build output — the
+  gate FAILED and the advisory pass-through shipped it (the exact
+  P4/0065 loophole). The s18 PASSes are HOLLOW (never proved
+  compilability); the era probe's classifications are CONSISTENT with
+  broken-under-toolchain code the old gate waved through. Post-reboot:
+  complete the 16-case inspection to confirm uniformity, then unblock
+  era-adjusted numbers with this documentation.
