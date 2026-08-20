@@ -372,3 +372,14 @@ zero oracle-divergent merges.
   Remaining: S20.12 END-OF-SPRINT DATA HARVEST (the last part, per the
   user directive — full-corpus soak + journal mining + sprint-21
   decision memo).
+- 2026-08-20 16:24: **S20.12 HARVEST LAUNCHED** (via longrun, detached —
+  worker pid 807363; log /tmp/capybase-live/s20/harvest/s20-harvest.log,
+  results + flights under /tmp/capybase-live/s20/harvest/). Full corpus
+  (677 cases loaded with CAPYBASE_SKIP_SIZE_GUARD=1 — the era probe
+  makes the lift safe: un-passable big cases classify in seconds),
+  majority-of-3, provider nova-gemma4. Expected to run for many hours;
+  on completion: mine the journals (oversized-site census → the S20.10
+  cohort decision; preservation events → P2 keep-or-verify; move-edit
+  distribution; skeleton×jaccard cross-tab; era-probe census; PASS-rate
+  + failure census under all sprint-20 mechanisms) and write the
+  sprint-21 decision memo.
