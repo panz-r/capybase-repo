@@ -161,6 +161,10 @@ class CaseResult:
     marker_free: bool = False
     compiles: bool = False
     matches_oracle: float = 0.0
+    # Sprint-20 S20.11: control-flow skeleton similarity to the oracle
+    # (EVAL ONLY — never a gate). High with low matches_oracle flags an
+    # idiomatic rewrite candidate.
+    skeleton_similarity: float = 0.0
     elapsed: float = 0.0
     reason: str = ""
     verdict: str = ""  # PASS | WORKING | NEAR_MATCH | ORACLE_DIVERGENT | ESCALATE | ESCALATE_TOOLCHAIN | GATE_UNAVAILABLE
@@ -1098,6 +1102,37 @@ def _token_jaccard(a: str, b: str) -> float:
     return len(ta & tb) / len(u) if u else 0.0
 
 
+# Sprint-20 S20.11 — control-flow skeleton intent metric (EVAL ONLY;
+# never a production gate — the compiler is the authority). Flags
+# "idiomatic rewrites": outputs whose token similarity to the oracle is
+# low but whose structural intent (the ordered control-flow/definition
+# keyword stream) is preserved. Informs future metric design; the
+# verdict chain is untouched.
+_SKELETON_KEYWORDS = frozenset(
+    "if else elif for while do switch case default match guard try catch "
+    "finally return break continue throw raise yield def fn func impl "
+    "trait class struct enum interface namespace union typedef".split())
+
+
+def _skeleton_signature(text: str) -> list[str]:
+    """Ordered control-flow/definition keyword stream — the code's
+    structural intent, ignoring naming, formatting, and idiom swaps."""
+    import re as _re
+    return [t for t in _re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text or "")
+            if t in _SKELETON_KEYWORDS]
+
+
+def _skeleton_similarity(a: str, b: str) -> float:
+    """Sequence similarity of two skeletons (difflib ratio on the keyword
+    streams). High similarity with LOW token jaccard flags an idiomatic
+    rewrite rather than a wrong merge."""
+    import difflib as _dl
+    sa, sb = _skeleton_signature(a), _skeleton_signature(b)
+    if not sa or not sb:
+        return 0.0
+    return _dl.SequenceMatcher(None, sa, sb, autojunk=False).ratio()
+
+
 #: Minimum per-side preservation for the WORKING verdict: the output must
 #: carry at least this share of EACH side's changed-line content, so the
 #: label means "both sides' work survived", not "half a merge".
@@ -1352,6 +1387,13 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
     else:
         res.compiles = _brace_balanced(content, case.language)
     res.matches_oracle = _token_jaccard(content, case.expected_resolved) if content else 0.0
+    # Sprint-20 S20.11: skeleton intent similarity (EVAL ONLY — never a
+    # gate). Recorded on every result; the harvest cross-tabs it against
+    # matches_oracle to surface idiomatic-rewrite candidates (low jaccard,
+    # high skeleton).
+    res.skeleton_similarity = (
+        _skeleton_similarity(content, case.expected_resolved)
+        if content else 0.0)
     res.loser_preservation, res.winner_preservation = _preservation_fields(case, content)
     return res
 
@@ -1807,6 +1849,17 @@ def main():
     print(f"ORACLE_DIVERGENT: {wrong_ct}  (sim < 0.80 or marker/brace failure)")
     print(f"GATE_UNAVAILABLE: {gate_ct}  (sim >= 0.95 gate rejection the oracle "
           f"shares — sandbox artifact, not a resolver failure)")
+    # Sprint-20 S20.11 (eval-only): idiomatic-rewrite candidates —
+    # non-clean verdicts with content whose token jaccard to the oracle
+    # is low but whose control-flow skeleton is largely preserved.
+    # Diagnostic for future metric design; never affects verdicts.
+    idiomatic_ct = sum(
+        1 for r in results
+        if r.verdict in ("ORACLE_DIVERGENT", "NEAR_MATCH", "WORKING")
+        and r.matches_oracle < 0.80
+        and getattr(r, "skeleton_similarity", 0.0) >= 0.85)
+    print(f"SKELETON-INTENT CANDIDATES: {idiomatic_ct}  (sim < 0.80 but "
+          f"skeleton >= 0.85 — idiomatic rewrites; eval-only diagnostic)")
     print(f"wall:       {elapsed:.0f}s ({elapsed/60:.1f}m) [this run only]")
     # Real-conflict pass rate: excludes SAFE_SKIP (no real conflict) from the
     # denominator. This is the honest metric — a SAFE_SKIP isn't a resolution

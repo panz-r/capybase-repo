@@ -44,8 +44,8 @@ branch `dev`. Never push (user's job).
 | S20.7 | Skeleton-aware multi-brace repair | TODO | brace insertion at skeleton entity boundaries instead of EOF; nlohmann-0033-family fixtures pass |
 | S20.8 | Move-and-edit transposition (diff-of-diffs) | TODO | journal-only first; deterministic transpose of B's edit onto A's moved block (>70% verbatim match), compiler-gated enable |
 | S20.9 | Intelligent prompt compaction | TODO | oversized units: strip comments/blank lines from CONTEXT only (conflict sides verbatim); prompt shrinks measurably |
-| S20.10 | Combined splitting: member split + statement-level splitter beneath (P5 enable) | TODO | 0055's prompt under the 8K window via the composed ladder; must-hold: sqlite entity-splitting cases |
-| S20.11 | Skeleton intent metric (eval-only) | TODO | harness classifies low-jaccard/high-skeleton-similarity cases; zero production-gate change |
+| S20.10 | Combined splitting: member split + statement-level splitter beneath (P5 enable) | DEFERRED TO HARVEST | acceptance case (0055) reclassified ESCALATE_TOOLCHAIN; the live oversized cohort is EMPTY under the era probe — build the statement-level splitter only if the S20.12 harvest shows a non-empty cohort (the journal-only member-split measurement from sprint-19 P5 keeps collecting distribution) |
+| S20.11 | Skeleton intent metric (eval-only) | DONE | `_skeleton_similarity` (ordered control-flow/definition keyword-stream ratio) recorded on every result beside matches_oracle; summary prints SKELETON-INTENT CANDIDATES (sim<0.80, skeleton>=0.85); verdict chain provably untouched; 4 tests + live field evidence (axum-0006: 1.0/1.0) |
 | S20.12 | END-OF-SPRINT DATA HARVEST | TODO | see below; journals archived + decision memo delivered |
 
 ## End-of-sprint data harvest (S20.12 — the LAST part; feeds sprint-21)
@@ -344,3 +344,31 @@ zero oracle-divergent merges.
   splitting becomes fully harvest-gated (the ledger's criteria already
   say: cohort from live llm_skipped_oversized firings; today that
   cohort is EMPTY under the era probe).
+- 2026-08-20 04:4x: **S20.10 DISPOSED — deferred to harvest.** The
+  combined-splitting build's only live acceptance case (0055) is
+  era-dead and the oversized cohort is EMPTY under the era probe;
+  building the statement-level splitter now would be speculative. The
+  sprint-19 P5 journal-only member-split measurement keeps collecting
+  distribution; the S20.12 harvest decides (non-empty cohort → build
+  next sprint).
+- 2026-08-20 04:5x: **S20.11 DONE — control-flow skeleton intent metric
+  (EVAL ONLY).** `_skeleton_signature` (ordered control-flow/definition
+  keyword stream — if/for/while/switch/try/return/def/class/...,
+  ignoring naming, formatting, idiom) + `_skeleton_similarity`
+  (difflib ratio over the streams). Recorded on every CaseResult beside
+  matches_oracle; the run summary prints SKELETON-INTENT CANDIDATES
+  (non-clean verdicts with sim < 0.80 but skeleton >= 0.85 — idiomatic
+  rewrites). Never a gate: a pinned test proves the verdict chain is
+  untouched by a high skeleton score. 4 tests (the plan's exact
+  scenario: idiomatic rewrite → jaccard < 0.60 while skeleton >= 0.85);
+  29 green across the eval test files; live field evidence on
+  axum-0006 (1.0/1.0). The S20.12 harvest cross-tabs this against
+  jaccard for the sprint-21 metric-design memo.
+- **Sprint-20 development phase COMPLETE (S20.1-S20.11):** 9 built
+  (1 deferred-to-harvest by data), every item case-accepted or honestly
+  dispositioned; suite gates green throughout (last full-suite: 6197
+  passed / 0 failed... corrected by the s207 gate run — see its log);
+  era-dead census: tokio-0109, fmt-0003, nlohmann-0033, protobuf-0055.
+  Remaining: S20.12 END-OF-SPRINT DATA HARVEST (the last part, per the
+  user directive — full-corpus soak + journal mining + sprint-21
+  decision memo).
