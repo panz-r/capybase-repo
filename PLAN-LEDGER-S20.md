@@ -488,3 +488,19 @@ architecture-purity rejection.
   regardless). Also noted: `_run_shell_tree` loses partial output if a
   group-escaped descendant holds the pipe (acceptable degradation,
   documented); census `json.dumps`-per-event is a perf smell.
+- 2026-08-20 18:0x: **SECOND defect-review pass** (deeper areas the
+  first pass didn't reach). VERIFIED CLEAN: harvest pid/guard (807363
+  is the real worker; no spurious markers); harvest economics (55
+  results, p50 24s/case, only 8 repeat cases, era probe 43
+  probed-declined / 0 dead — no false positives so far; results.json
+  written incrementally, resume-safe); compaction code order matches
+  the flagged item (dead in the essential-blows branch,
+  outcome-equivalent); `_run_tests` returns bool as the micro-CEGIS
+  re-gate assumes. FIXED: `longrun.sh` worker now self-records its
+  real pid (`echo $$` at start) — the launcher's `$!` can die
+  immediately when setsid forks (observed once with the suite launch),
+  which would false-negative the active-run guard and allow duplicate
+  runs; self-tested (recorded pid == live worker; duplicate refused
+  rc=3). No large discoveries this pass — the first pass's critical
+  find (micro-CEGIS staging) remains the sprint's only
+  wrong-merge-class defect, and it was latent (rung never fired live).

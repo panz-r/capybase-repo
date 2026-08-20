@@ -37,6 +37,11 @@ fi
 printf '%q ' "$@" > "$BASE/cmd"
 cat > "$BASE/worker.sh" <<EOF
 #!/bin/bash
+# Self-record the REAL worker pid (defect review 2026-08-20: setsid may
+# fork when the caller is a process-group leader, so the launcher's \$!
+# can die immediately while this script runs under a different pid —
+# the active-run guard then false-negatives and allows duplicates).
+echo \$\$ > "$BASE/worker.pid"
 cd "$PWD"
 echo "\$(date +%F' '%H:%M:%S) ${NAME}_START" >> "$BASE/progress.log"
 eval "\$(cat "$BASE/cmd")" >> "$BASE/${NAME}.log" 2>&1
