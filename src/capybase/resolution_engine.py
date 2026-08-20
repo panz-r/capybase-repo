@@ -1136,6 +1136,49 @@ def _compose_resolve_prompt(
     return intro + data + contract + rules
 
 
+def _compact_context_text(text: str, language: str | None = None) -> str:
+    """Sprint-20 S20.9: strip full-line comments and collapse blank runs
+    from a CONTEXT section — never the conflict sides.
+
+    Applied only when the assembled prompt overflows the window, as a
+    finer-grained alternative to dropping the section wholesale: more
+    semantic signal per token (the enclosing-node text and dependency
+    snippets keep their code, lose their prose). Conservative: only
+    WHOLE-LINE comments (//, #, /*...*/ blocks and their continuation
+    lines) are removed; trailing inline comments stay; code lines pass
+    through verbatim; the original trailing newlines are preserved so
+    section composition is unchanged.
+    """
+    if not text:
+        return text
+    line_comments: tuple[str, ...] = (
+        ("#",) if language in ("python", "ruby", "shell") else ("//",))
+    out: list[str] = []
+    in_block = False
+    blanks = 0
+    for ln in text.split("\n"):
+        s = ln.strip()
+        if in_block:
+            if "*/" in s:
+                in_block = False
+            continue
+        if s.startswith("/*"):
+            in_block = "*/" not in s[2:]
+            continue
+        if any(s.startswith(c) for c in line_comments) or s.startswith("*"):
+            continue
+        if not s:
+            blanks += 1
+            if blanks > 1:
+                continue
+            out.append("")
+            continue
+        blanks = 0
+        out.append(ln)
+    trailing = len(text) - len(text.rstrip("\n"))
+    return "\n".join(out) + ("\n" * trailing if trailing else "")
+
+
 def _fit_to_budget(
     *,
     budget: TokenBudget | None,
@@ -1236,6 +1279,37 @@ def _fit_to_budget(
                 ),
             })
         return "", "", "", "", "", "", "", trims, _skeleton_block
+
+    # Sprint-20 S20.9: compaction BEFORE the drop cascade. When the
+    # assembled prompt overflows, strip comments and blank-run padding
+    # from the LARGE context sections (structural anchor, deps,
+    # surrounding primary text) — a finer-grained step than dropping
+    # them wholesale: the model keeps the code context and loses only
+    # prose. The conflict sides, contract, and skeleton are never
+    # touched. Compounds with the cascade below (which now trims the
+    # COMPACTED sections if still needed); journaled via trims.
+    _aug_total = estimate_tokens(
+        structural_anchor + siblings_block + deps + few_shot
+        + primary_text + history + obligations)
+    _budget_total = budget.available - overhead - essential
+    if _aug_total > _budget_total:
+        _before = _aug_total
+        structural_anchor = _compact_context_text(
+            structural_anchor, unit.language)
+        deps = _compact_context_text(deps, unit.language)
+        primary_text = _compact_context_text(primary_text, unit.language)
+        _after = estimate_tokens(
+            structural_anchor + siblings_block + deps + few_shot
+            + primary_text + history + obligations)
+        if _after < _before:
+            trims.append({
+                "section": "compaction",
+                "detail": (
+                    f"stripped comments/blank padding from context sections "
+                    f"before the drop cascade: {_before}t -> {_after}t "
+                    f"(sides/contract untouched)"
+                ),
+            })
 
     # Otherwise fit the augmentations in. We measure the running token total of
     # the augmentation sections and trim lowest-value-first until it fits.

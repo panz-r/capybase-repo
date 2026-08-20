@@ -317,3 +317,30 @@ zero oracle-divergent merges.
   copy); the detector catches relocations that left new content behind,
   which is also the splice-breaking shape. 5 unit tests; 50 green
   across the S20.8-adjacent files.
+- 2026-08-20 04:2x: **S20.9 DONE — intelligent prompt compaction
+  (context-only).** `_compact_context_text` (resolution_engine): strips
+  full-line comments (//, #, /*...*/ blocks + continuations) and
+  collapses blank runs from CONTEXT sections only — trailing inline
+  comments stay, code lines verbatim, trailing newlines preserved so
+  section composition is unchanged. Wired into `_fit_to_budget` BEFORE
+  the drop cascade: when the assembled augmentation total overflows,
+  compact anchor/deps/primary first (journaled as a `compaction` trim
+  with before/after tokens), then the existing lowest-value-first drop
+  cascade runs on the COMPACTED sections — more semantic signal per
+  token. Conflict sides, contract, and skeleton never touched. 7 tests
+  (compactor + budget integration: a comment-heavy anchor that the
+  cascade would have dropped now survives compacted; no-overflow and
+  disabled-budget passthroughs); 24 engine tests green.
+  **Live: the only oversized-population case, protobuf-0055, is now
+  ESCALATE_TOOLCHAIN (57s)** — era census grows to FOUR (0109,
+  fmt-0003, nlohmann-0033, 0055). Consistent with D7 (every 0055
+  resolution failed compiles), caveat recorded: the D7 attributed
+  errors ('HasInternalAccessors' not declared) could be era artifacts
+  or merge defects — the probe's strict identical-signature condition
+  held, but the era-vs-defect attribution is not 100% clean. S20.9's
+  live firing is therefore UNVALIDATED (no known context-dominated
+  oversized case remains); unit-tested, P2-precedent posture.
+  Consequence for S20.10: its acceptance case is gone — combined
+  splitting becomes fully harvest-gated (the ledger's criteria already
+  say: cohort from live llm_skipped_oversized firings; today that
+  cohort is EMPTY under the era probe).
