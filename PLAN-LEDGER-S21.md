@@ -47,3 +47,21 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   pairs without new journaling. Recommendation: (b) first (no schema
   cost), (a) if the few-shot experiment proves out. §F gate stays
   PENDING either way until one path lands.
+- 2026-08-21 21:5x: **S21.3 FIRST CUT — the investigate tier is
+  dominated by "perfect-buffer escalates"**: 19 of 30 sit at sim >=
+  0.94 (jsonc-0016, redis-0038/0040, sqlite-0014 at EXACTLY 1.0;
+  protobuf-0034/0051/0065, sqlite-0008/0029/0030, redis-0002/0015/
+  0049, sea-orm-0021/0023, zenodo-0011/0012 at 0.94-0.999) — buffers
+  the oracle-shape check would call correct, stopped by a gate or
+  safety net. These split into: oversized-cohort members (the S20.10
+  build's direct wins), P4/micro-CEGIS territory (0065-class), and
+  safety-stop reviews. The remainder: 8 zenodo mid-band (0.76-0.89,
+  genuine weave difficulty), 2 low-sim (sea-orm-0027, zenodo-0087).
+  Priority order for mechanisms: S21.5 (S20.10) first — it clears the
+  oversized members; then micro-CEGIS live-fire analysis (the
+  sim~1.0 gate escalates); the mid-band zenodo set is the true
+  model-capability frontier. **S21.4 framing recorded**: the 166
+  era-dead are a HARNESS capability question, not a resolver one —
+  pinned-toolchain feasibility (era-appropriate gcc/rustc per dataset
+  era) is the only path to converting them; write-off is the honest
+  default if pinning's cost exceeds a fresh corpus build.
