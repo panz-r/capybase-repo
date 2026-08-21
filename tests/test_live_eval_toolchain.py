@@ -229,3 +229,18 @@ def test_environmental_failures_never_classify(tmp_path, monkeypatch):
     assert probe is not None
     assert probe["toolchain_dead"] is False
     assert probe["environmental"] is True
+
+
+def test_mixed_signatures_still_classify(tmp_path, monkeypatch):
+    """S21.1: environmental lines co-occurring with genuine era compile
+    errors must NOT block classification (the 8-case fold-back lesson:
+    any-pattern decline over-triggers)."""
+    repo = tmp_path / "r"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "lib.rs").write_text("fn a() {}\n")
+    mixed = ("error: failed to get `sea-query` as a dependency\n"
+             "error[E0658]: `#[deprecated]` is experimental\n")
+    monkeypatch.setattr(_M, "_run_shell_tree", _fake_gate([(101, mixed)] * 3))
+    probe = _M._toolchain_era_probe(repo, _case(), has_crate=True)
+    assert probe is not None and probe["toolchain_dead"] is True
+    assert probe["environmental"] is False

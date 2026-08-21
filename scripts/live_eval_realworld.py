@@ -1043,10 +1043,18 @@ def _toolchain_era_probe(repo: Path, case: "Case", *, has_crate: bool) -> dict |
                 }
     finally:
         target.write_bytes(saved)  # restore the conflicted content exactly
-    _all_sigs = " ".join(
-        s for p in probes.values() for s in (p.get("sig") or []))
-    _environmental = any(
-        pat in _all_sigs for pat in _PROBE_ENVIRONMENTAL_PATTERNS)
+    # Mixed-signature semantics (sprint-21 S21.1): the 8 "environmentally
+    # purged" cases re-ran and re-classified era-dead legitimately — their
+    # probes carried environmental lines AND genuine era compile errors.
+    # Declining on ANY environmental line over-triggers (false-negative
+    # corrections); decline only when EVERY signature line is
+    # environmental (a pure environment failure has no content signal).
+    _env_lines = sum(
+        1 for p in probes.values() for s in (p.get("sig") or [])
+        if any(pat in s for pat in _PROBE_ENVIRONMENTAL_PATTERNS))
+    _total_lines = sum(
+        len(p.get("sig") or []) for p in probes.values())
+    _environmental = _total_lines > 0 and _env_lines == _total_lines
     dead = (
         probes["current"]["rc"] not in (0, None)
         and probes["replayed"]["rc"] not in (0, None)
