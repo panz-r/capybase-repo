@@ -210,3 +210,22 @@ class TestCensus:
             pass  # printing may expect more fields; the category is the assert
         out = capsys.readouterr().out
         assert "toolchain_era" in out, out[-400:]
+
+
+def test_environmental_failures_never_classify(tmp_path, monkeypatch):
+    """E2 post-reboot regression: a dependency-fetch failure is identical
+    across all three probe texts BY CONSTRUCTION — without the
+    environmental blocklist it trivially satisfies the strict identical-
+    signature condition (six sea-orm cases misclassified era-dead)."""
+    repo = tmp_path / "r"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "lib.rs").write_text("fn a() {}\n")
+    fetch_err = ("error: failed to get `sea-query` as a dependency of "
+                 "package `sea-orm v0.3.1`\n")
+    monkeypatch.setattr(_M, "_run_shell_tree",
+                        _fake_gate([(101, fetch_err)] * 3))
+    c = _case()
+    probe = _M._toolchain_era_probe(repo, c, has_crate=True)
+    assert probe is not None
+    assert probe["toolchain_dead"] is False
+    assert probe["environmental"] is True

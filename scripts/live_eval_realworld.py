@@ -939,6 +939,19 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
 
 _CC_ERROR_LINE_RE = re.compile(r"^\S+?:\d+:\d+:\s*(error:.*)$")
 
+# Environmental failure signatures (sprint-20 E2, post-reboot find): a
+# dependency-fetch/network failure is identical across all three probe
+# texts BY CONSTRUCTION (it never depends on content), so the strict
+# "identical signatures" condition is trivially satisfied — sea-orm
+# 0002/0009/0010/0011/0012/0028 were misclassified era-dead on exactly
+# this ("failed to get `sea-query` as a dependency"). The probe only
+# classifies TOOLCHAIN-era compile errors, never environment failures.
+_PROBE_ENVIRONMENTAL_PATTERNS = (
+    "failed to get ", "failed to fetch", "no matching package named",
+    "network", "registry error", "does not have a lock file",
+    "failed to download",
+)
+
 
 def _compile_error_signature(output: str, language: str) -> list[str]:
     """Normalized compile-error messages from a gate/cargo output.
@@ -1030,14 +1043,20 @@ def _toolchain_era_probe(repo: Path, case: "Case", *, has_crate: bool) -> dict |
                 }
     finally:
         target.write_bytes(saved)  # restore the conflicted content exactly
+    _all_sigs = " ".join(
+        s for p in probes.values() for s in (p.get("sig") or []))
+    _environmental = any(
+        pat in _all_sigs for pat in _PROBE_ENVIRONMENTAL_PATTERNS)
     dead = (
         probes["current"]["rc"] not in (0, None)
         and probes["replayed"]["rc"] not in (0, None)
         and probes["oracle"]["rc"] not in (0, None)
         and bool(probes["current"]["sig"])
         and probes["current"]["sig"] == probes["replayed"]["sig"]
+        and not _environmental
     )
-    return {"toolchain_dead": dead, "gate": gate, "probes": probes}
+    return {"toolchain_dead": dead, "gate": gate, "probes": probes,
+            "environmental": _environmental}
 
 
 def _mark_toolchain_dead(res: "CaseResult", probe: dict, t0: float) -> "CaseResult":
