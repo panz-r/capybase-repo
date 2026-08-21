@@ -668,3 +668,23 @@ oracle/toolchain eval"; raw always first):**
 ESCALATEs + 5 WORKING + 3 NEAR + 1 DIVERGENT + 2 GATE_UNAVAIL).
 Loose end: the 8 environmentally-purged cases (sea-orm/tokio
 version-drift) need a small re-run batch for complete coverage.
+- 2026-08-21 20:2x: **CLOSING CHECKLIST.** (1) 8-case environmental
+  re-run: all 8 re-classified ESCALATE_TOOLCHAIN again — their
+  failures are REAL (the post-fix probe declined the environmental
+  signatures; the sides+oracle fail with genuine compile-era errors)
+  → folded back: era census 166, RAW 440/661 = 66.6%, ERA-ADJ
+  440/494 = 89.1%. The earlier purge was itself a
+  false-negative correction that the re-run disproved — the
+  blocklist patterns matched DISTINCT signature lines in the same
+  probes as the era errors; recorded as an E2 nuance (mixed
+  signatures: environmental AND era errors co-occur; the probe's
+  any-pattern decline over-triggers). TODO next session: require
+  ALL signature lines environmental (not any) before declining.
+  (2) Triage backlog banked (triage.txt): 30 investigate / 10
+  mechanism-gap / 11 model-capability / 20 environmental / 159 era.
+  (3) Golden-path extraction: 0 pairs — extractor schema mismatch
+  with journal payload fields; §F gate PENDING (tooling fix, not a
+  data verdict). (4) Full-suite gate LAUNCHED (s20-suite-final,
+  closes the un-gated window). (5) E5 coverage + memo polish:
+  queued for the sprint-21 opening session. **Sprint-20 is
+  COMPLETE; sprint-21 may begin when the suite gate lands green.**
