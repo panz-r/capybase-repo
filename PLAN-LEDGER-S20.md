@@ -624,3 +624,17 @@ architecture-purity rejection.
   session): environmental-pattern extension + purge + flip
   dispositioning → unblock era-adjusted; E1 verdict-diff; triage
   backlog; fill template; sprint-21 memo.
+- 2026-08-21 20:2x: **ANALYSIS: era-adjusted UNBLOCKED.** Extended the
+  environmental patterns (version-resolution failures: "failed to
+  select a version", ...) and purged 8 more misclassifications
+  (sea-orm 0003/0007/0008, tokio 0112-0116 — dependency-version drift,
+  not era; backup .bak-pre-envfix2; the 8 need a small re-run batch).
+  Final census: era-dead 158/677. **E1 verdict-diff: 353 overlapping
+  (105 comparable): 64 unchanged, 0 ordinary regressions, 15 flips —
+  every single flip is PASS→ESCALATE_TOOLCHAIN**; 3 confirmed hollow
+  (rc=2 advisory pass-through, the P4/0065 loophole), 12 same-class
+  (no journals survived for midband runs; dispositioned on the
+  confirmed pattern + pre-cf50f4b timeline, honest caveat). No
+  sprint-20 mechanism regressed anything. **FINAL NUMBERS (template
+  §A, 'under this exact oracle/toolchain eval'): RAW 440/653 = 67.4%,
+  era-adjusted 440/494 = 89.1%, era census 158.**
