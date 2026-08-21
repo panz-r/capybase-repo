@@ -600,3 +600,27 @@ architecture-purity rejection.
   broken-under-toolchain code the old gate waved through. Post-reboot:
   complete the 16-case inspection to confirm uniformity, then unblock
   era-adjusted numbers with this documentation.
+- 2026-08-21 20:0x: **S20.12 HARVEST COMPLETE** (677/677, exit 0,
+  wall ~6.8h across the reboot+fix). Headline (template formulas):
+  RAW real-conflict PASS 440/661 = 66.6%; era-adjusted 440/494 = 89.1%;
+  ceiling 74.7%. **Era-adjusted numbers remain BLOCKED** — the sweep
+  shows 15 prior-PASS flips; at least one more environmental variant
+  leaked past the blocklist ("failed to select a version for
+  `security-framework`" — version-resolution is environmental too);
+  next: extend patterns, purge, then confirm the sqlite hollow-PASS
+  hypothesis (their s18 make-gates were -j$(nproc)-broken). Census
+  highlights: era census 166/677 (sqlite 90, nlohmann 38, sea-orm 9,
+  redis 6, fmt 4, protobuf 3, jsonc 1) + 302 probed-declined + 209
+  unprobed (python/crateless-rust/no-gate); mechanism waterfall
+  structural 832 / portfolio 171 / LLM 276 (68 llm-only of 495);
+  **oversized cohort 15 live firings** (template §B likely ENABLES
+  S20.10 for sprint-21 pending era-overlap subtraction);
+  **preservation events: 2 flags corpus-wide** → per §C, P2 KEEPS as
+  net, documented unexercised; skeleton×jaccard: 0 idiomatic
+  candidates at threshold (no signal — honest null); micro-CEGIS fired
+  7× (all declined, 0 conversions — E3 data); lockfile takeover 2×;
+  move-edit 2 candidates; recovery-retry 4; resurrections 36.
+  Artifacts: census.json beside results.json. REMAINING (next
+  session): environmental-pattern extension + purge + flip
+  dispositioning → unblock era-adjusted; E1 verdict-diff; triage
+  backlog; fill template; sprint-21 memo.
