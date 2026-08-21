@@ -65,3 +65,21 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   pinned-toolchain feasibility (era-appropriate gcc/rustc per dataset
   era) is the only path to converting them; write-off is the honest
   default if pinning's cost exceeds a fresh corpus build.
+- 2026-08-21 22:0x: **S21.5 DESIGN GROUNDED** (next session builds). Key
+  finding: `_find_statement_split_points` (conflict_extractor.py:993)
+  ALREADY EXISTS and is wired into the split ladder (line ~325: entity
+  split → statement split for sub-units still >80 lines, brace-depth-
+  safe `;` boundaries at body indent). The S20.10 build is therefore
+  NOT a new splitter — it is COMPOSING the member split into the
+  existing cascade: (1) in `_split_unit_at_entities`' decline paths
+  (where `class_member_split_candidate` is stamped, :935-941's
+  fragments_below_min_sub_lines class), when
+  `future.enable_class_member_splitting` is ON: split at the member
+  points (access-specifier-preserving, per-side splice-safety: non-
+  overlapping spans, no reordering, class shell carried as context);
+  (2) fragments still >max_lines flow into the EXISTING statement
+  splitter at :325 — zero new ladder code; (3) validation per the
+  pre-registered acceptance: the 15-case cohort's oversized skips
+  convert to prompt fits, majority-of-3, must-hold sqlite entity-
+  splitting. Estimated: the member-point splitting function +
+  composition glue + splice-safety tests + cohort run.
