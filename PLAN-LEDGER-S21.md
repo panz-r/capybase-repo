@@ -30,3 +30,20 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
 ## Work log (append, newest last)
 
 - 2026-08-21: ledger created from sprint-20's harvested decisions.
+- 2026-08-21 21:3x: **S21.1 DONE** (d1b92d9): mixed-signature probe
+  semantics — decline only when ALL signature lines are environmental;
+  both-direction regression tests; 15 green.
+- 2026-08-21 21:4x: **S21.2 DISPOSITIONED — schema, not code.** The
+  harvest journals' `candidate_accepted` carries only ids (no
+  resolved_text) and prompts were never journaled: golden-path pairs
+  CANNOT be mined retrospectively. Two viable paths (specified for
+  the next session): (a) journal schema extension — record
+  resolved_text on candidate_accepted + the built prompt hash/text on
+  context construction (size cost: journals grow ~10x for accepted
+  candidates only), then pairs accumulate from sprint-21 runs onward;
+  (b) offline reconstruction — the prompt is a pure function of
+  (unit, context, profile), all reconstructible from case data, and
+  the response for sim>=0.95 PASSes is ~the oracle — approximate
+  pairs without new journaling. Recommendation: (b) first (no schema
+  cost), (a) if the few-shot experiment proves out. §F gate stays
+  PENDING either way until one path lands.
