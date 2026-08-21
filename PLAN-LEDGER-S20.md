@@ -688,3 +688,9 @@ version-drift) need a small re-run batch for complete coverage.
   closes the un-gated window). (5) E5 coverage + memo polish:
   queued for the sprint-21 opening session. **Sprint-20 is
   COMPLETE; sprint-21 may begin when the suite gate lands green.**
+- 2026-08-21 21:17: **s20-suite-final GATE GREEN: 6220 passed / 2115
+  skipped / 0 failed / 0 xfailed in 1:00:41** — the un-gated window
+  (post-S20.7 changes through the harvest machinery) is CLOSED. Every
+  sprint-20 code change is now full-suite verified. **Sprint-20 is
+  fully complete: development, harvest, analysis, closing checklist,
+  and final gate all landed. Sprint-21 may begin.**
