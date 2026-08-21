@@ -638,3 +638,33 @@ architecture-purity rejection.
   sprint-20 mechanism regressed anything. **FINAL NUMBERS (template
   §A, 'under this exact oracle/toolchain eval'): RAW 440/653 = 67.4%,
   era-adjusted 440/494 = 89.1%, era census 158.**
+
+## S20.12 HARVEST — FINAL (analysis complete 2026-08-21)
+
+**Headline (per the locked template, "under this exact
+oracle/toolchain eval"; raw always first):**
+- RAW real-conflict PASS: **440/653 = 67.4%**
+- Era-adjusted: **440/494 = 89.1%** (era census 158 + twin loss 1)
+- Mechanism waterfall: structural 832 / portfolio 171 / LLM 276
+  (68 llm-only of 495 journaled)
+- E1: **zero mechanism regressions**; all 15 baseline flips are
+  era classifications of hollow s18 PASSes (3 confirmed rc=2
+  advisory pass-through, 12 same-class by pattern+timeline)
+
+**Pre-registered decisions (docs/sprint21-decision-template.md):**
+- §B S20.10 combined splitting: oversized cohort 15 live firings
+  (minus era overlap — sqlite cases in the cohort are era-dead;
+  non-era firings still >= 3) → **ENABLE for sprint-21**
+- §C P2 preservation: 2 flags corpus-wide, 0 carveout events →
+  **KEEP as documented unexercised net**
+- §D mid-band fast path: 0 idiomatic candidates at threshold →
+  stays OFF
+- §E era: invariant satisfied post-purge (15 flips dispositioned
+  hollow-era, environmental classes purged twice)
+- §F golden-path: extraction pending E11 run over the harvest
+  flights (>= 30 clean pairs gate)
+
+**Sprint-21 backlog source**: triage_harvest.py output (60
+ESCALATEs + 5 WORKING + 3 NEAR + 1 DIVERGENT + 2 GATE_UNAVAIL).
+Loose end: the 8 environmentally-purged cases (sea-orm/tokio
+version-drift) need a small re-run batch for complete coverage.
