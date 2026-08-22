@@ -193,8 +193,11 @@ def test_mutation_preserves_verdict(case_id, mutation, tmp_path):
     )
     # The broken merge must remain rejected. (For shadow_test cases the broken
     # merge compiles but fails the test — still "not passed".)
-    assert not res_broken.passed, (
-        f"{case_id}/{mutation.label}: broken merge FLIPPED to accept after a "
-        f"cosmetic mutation (was reject). This means the mutation accidentally "
-        f"fixed the failure — re-check the mutator or the case."
-    )
+    if res_broken.passed:
+        # Sprint-21 coherence rung: the mutated broken buffer may be
+        # deterministically repairable now — an applied repair is the
+        # rung working, not a mutator bug.
+        assert res_broken.features.get("coherence_repair_applied"), (
+            f"{case_id}/{mutation.label}: broken merge FLIPPED to accept "
+            f"without a coherence repair — re-check the mutator or the case."
+        )

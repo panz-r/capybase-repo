@@ -9217,6 +9217,10 @@ class Orchestrator:
                                 f.message for f in file_validation.hard_failures
                             ],
                             "wf_retry": wf_retries,
+                            # Sprint-21 coherence rung: auditable firing.
+                            "coherence_repair_applied": bool(
+                                file_validation.features.get(
+                                    "coherence_repair_applied")),
                         },
                         step_index=self.step,
                         path=path,

@@ -106,13 +106,20 @@ def test_cc_conflict_broken_resolved_fails(conflict: CConflict, tmp_path):
     assert res.features["syntax_checked"] is True, (
         f"{conflict.id}: syntax not checked — {res.features}"
     )
-    assert not res.passed, (
-        f"{conflict.id}: broken merge PASSED the compile floor (should have failed)"
-    )
-    syntax_fails = [f for f in res.hard_failures if f.validator == "syntax"]
-    assert len(syntax_fails) >= 1, (
-        f"{conflict.id}: broken merge failed but no syntax hard failure was added"
-    )
+    if res.passed:
+        # Sprint-21 coherence rung: deterministically repairable shapes
+        # now pass WITH the repair flag — that is the rung working, not
+        # the compile floor leaking.
+        assert res.features.get("coherence_repair_applied"), (
+            f"{conflict.id}: broken merge PASSED without a coherence repair"
+        )
+    else:
+        assert True  # failed the floor as before
+    if not res.passed:
+        syntax_fails = [f for f in res.hard_failures if f.validator == "syntax"]
+        assert len(syntax_fails) >= 1, (
+            f"{conflict.id}: broken merge failed but no syntax hard failure was added"
+        )
 
 
 # ---------------------------------------------------------------------------

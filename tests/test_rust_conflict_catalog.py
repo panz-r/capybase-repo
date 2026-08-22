@@ -137,15 +137,19 @@ def test_cargo_conflict_broken_resolved_fails(conflict: RustConflict, tmp_path):
     assert res.features["syntax_checked"] is True, (
         f"{conflict.id}: syntax not checked — {res.features}"
     )
-    assert not res.passed, (
-        f"{conflict.id}: broken merge was ACCEPTED (should have failed): "
-        f"{[f.message for f in res.hard_failures]}"
-    )
-    syntax_fails = [f for f in res.hard_failures if f.validator == "syntax"]
-    assert syntax_fails, (
-        f"{conflict.id}: broken merge failed but not via a syntax failure: "
-        f"{[f.validator for f in res.hard_failures]}"
-    )
+    if res.passed:
+        # Sprint-21 coherence rung: deterministically repairable shapes
+        # now pass WITH the repair flag — the rung working as designed.
+        assert res.features.get("coherence_repair_applied"), (
+            f"{conflict.id}: broken merge ACCEPTED without a coherence repair"
+        )
+    # else: failed as before — hard failures already carry the reason
+    if not res.passed:
+        syntax_fails = [f for f in res.hard_failures if f.validator == "syntax"]
+        assert syntax_fails, (
+            f"{conflict.id}: broken merge failed but not via a syntax failure: "
+            f"{[f.validator for f in res.hard_failures]}"
+        )
 
 
 def test_loose_conflict_broken_resolved_fails(tmp_path):

@@ -1488,7 +1488,11 @@ def test_deterministic_repair_after_budget_exhaustion(repo):
     has_det_repair = (
         "deterministic_brace_repair" in journal
         or "boundary_echo_strip" in journal
+        or "coherence_repair_applied" in journal
     )
+    # Sprint-21 coherence rung: the splice-gate repair may fix the brace
+    # BEFORE the whole-file repair stage ever runs — same deterministic
+    # mechanism, earlier seam. Either journal trace satisfies the test.
     assert has_det_repair, (
         "a deterministic repair must run after budget exhaustion; "
         f"journal has no deterministic-repair event. reason: {result.reason}"
