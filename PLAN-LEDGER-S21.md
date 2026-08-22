@@ -273,3 +273,11 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   false-attribution catches) → paired proof. Next: scale decision
   (enable memory by default? broader cohort? retrieval tuning for
   the flat two) — recorded as the sprint-21 closing decision.
+- 2026-08-22 17:2x: **GOLDEN-PATH ENABLED BY DEFAULT (f5b32c9).**
+  enable_rag and memory.enabled flip to True — safe by construction:
+  an empty/absent store degrades to no-retrieval (the exact prior
+  behavior), and eval runs seed from the golden-path corpus. Full-
+  suite gate launched over all S21 changes (s21-suite-goldenpath).
+  Sprint-21's remaining threads: retrieval tuning for the flat two
+  (flask-0006/0034), the broader-cohort validation, and the closing
+  results doc + ledger.
