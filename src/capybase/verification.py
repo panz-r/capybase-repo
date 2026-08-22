@@ -2369,6 +2369,59 @@ def _structural_validate(
     return failures
 
 
+def _try_repair_string_literal(text: str) -> str | None:
+    """Sprint-22 pre-eval item 2: repair an unterminated quote literal.
+
+    A splice can leave a line with an odd count of unescaped single or
+    double quotes — the classic 'missing terminating ' character' error
+    (protobuf-0034's exposed defect). Conservative: only when exactly
+    ONE line in the whole file is unbalanced, and only by appending the
+    missing terminator to that line (never removing or editing content
+    — the model's text is preserved, just closed).
+    """
+    if not text:
+        return None
+
+    def _quote_parity(line: str) -> tuple[int, int]:
+        """(singles, doubles) count of unescaped quotes."""
+        singles = doubles = 0
+        escaped = False
+        for ch in line:
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch == "'":
+                singles += 1
+            elif ch == '"':
+                doubles += 1
+        return singles, doubles
+
+    bad_lines = []
+    for i, line in enumerate(text.split("\n")):
+        s, d = _quote_parity(line)
+        if s % 2 == 1 or d % 2 == 1:
+            bad_lines.append((i, s, d))
+    if len(bad_lines) != 1:
+        return None  # multiple or zero — not a single-line fix
+    i, s, d = bad_lines[0]
+    lines = text.split("\n")
+    if s % 2 == 1:
+        lines[i] = lines[i] + "'"
+    elif d % 2 == 1:
+        lines[i] = lines[i] + '"'
+    else:
+        return None
+    # verify: no remaining unbalanced lines
+    for line in lines:
+        s2, d2 = _quote_parity(line)
+        if s2 % 2 == 1 or d2 % 2 == 1:
+            return None
+    return "\n".join(lines)
+
+
 def _try_balance_braces(text: str, language: str | None = None) -> str | None:
     """Deterministically repair a single brace imbalance, or return None.
 
@@ -4540,6 +4593,21 @@ class VerificationEngine:
                     whole = _repaired
                     imbalance_line = None
                     features["coherence_repair_applied"] = True
+            # Sprint-22 pre-eval item 2: unterminated string/char literal
+            # (0034's exposed defect — 'missing terminating ' character').
+            # Runs after (and independently of) the brace repair: a
+            # quote-parity fix doesn't affect brace balance.
+            _lit_repaired = _try_repair_string_literal(whole)
+            if _lit_repaired is not None and _lit_repaired != whole:
+                whole = _lit_repaired
+                features["coherence_repair_applied"] = True
+                # re-check braces after the literal fix (content changed)
+                imbalance_line = _brace_imbalance_line(whole, language)
+                if imbalance_line is not None:
+                    _repaired = _try_balance_braces(whole, language)
+                    if _repaired is not None:
+                        whole = _repaired
+                        imbalance_line = None
             if imbalance_line is not None:
                 # Fix #1 — enrich the message with the brace delta so the model
                 # knows WHICH kind of imbalance it is (extra `}` vs unclosed `{`),

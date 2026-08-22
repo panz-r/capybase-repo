@@ -1285,6 +1285,11 @@ def _is_lockfile_path(path: str) -> bool:
 
 # Sprint-20 S20.6 — micro-CEGIS at the compiler-authority gate.
 _MICRO_REDEF_RE = re.compile(r"redefinition of ['\"]?([A-Za-z_]\w*)")
+# Sprint-22 pre-eval: dead-code class — a -Werror=unused-function error
+# whose function block has no call sites in the merged file is
+# deterministically deletable (jsonc-0016: json_parse_double).
+_MICRO_UNUSED_RE = re.compile(
+    r"['\"]?([A-Za-z_]\w*)['\"]? defined but not used")
 _MICRO_MISSING_RE = re.compile(
     r"['\"]([A-Za-z_]\w*)['\"] (?:does not name a type|was not declared"
     r"|is not a member of)")
@@ -1340,6 +1345,45 @@ def _micro_delete_span(buffer: str, span: tuple[int, int]) -> str:
             and not lines[end].strip() and not lines[span[0] - 1].strip()):
         end += 1
     return "".join(lines[:span[0]] + lines[end:])
+
+
+def _micro_delete_unused_function(
+    buffer: str, name: str, error_line: int,
+) -> str | None:
+    """Sprint-22 pre-eval: deterministic dead-code removal.
+
+    A -Werror=unused-function error on symbol ``name``: locate the
+    function's brace block at the error line, verify the symbol has NO
+    call sites elsewhere in the file (only the definition), delete the
+    block. Conservative: any additional reference (call, address-of,
+    mention in a string literal) declines — the function may be used
+    by code outside the conflict region."""
+    lines = buffer.splitlines()
+    # find the block at the error line
+    span = None
+    for i in range(len(lines)):
+        if name in lines[i] and i >= error_line - 3 and i <= error_line + 3:
+            span = _micro_extract_brace_block(lines, i + 1)
+            if span is not None:
+                break
+    if span is None:
+        return None
+    block = "\n".join(lines[span[0]:span[1] + 1])
+    # verify no OTHER mention of the symbol outside the block
+    # (skip the block's own lines; a call site elsewhere declines)
+    for i, ln in enumerate(lines):
+        if span[0] <= i <= span[1]:
+            continue
+        # strip comments crudely (a mention in a comment is not a use,
+        # but conservatively count it anyway to avoid false deletions)
+        if name in ln:
+            return None
+    # also check the block looks like a function definition (has '{' and
+    # the name appears in the first few lines of the block)
+    if "{" not in block or name not in "\n".join(
+            lines[span[0]:min(span[0] + 3, span[1] + 1)]):
+        return None
+    return _micro_delete_span(buffer, span)
 
 
 def _micro_delete_base_verbatim_duplicate(
@@ -10725,6 +10769,34 @@ class Orchestrator:
 
         changed = False
         for ln in errors:
+            # Sprint-22 pre-eval: dead-code class first (deterministic,
+            # no provenance needed — the compiler already proved unused).
+            mu = _MICRO_UNUSED_RE.search(ln)
+            if mu:
+                name = mu.group(1)
+                stem, lineno = _parse_cc_error_location(ln)
+                path = self._micro_path_for_stem(merged_paths, stem)
+                if path is None or not lineno:
+                    continue
+                try:
+                    buffer = (Path(self.git.repo) / path).read_text(
+                        encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                new_buffer = _micro_delete_unused_function(
+                    buffer, name, lineno)
+                if new_buffer is None:
+                    continue
+                self._write_worktree_only(path, new_buffer, accepted=None)
+                if path not in self._micro_patched_paths:
+                    self._micro_patched_paths.append(path)
+                self.journal.emit(
+                    "micro_cegis_patch",
+                    {"kind": "unused_function_delete", "path": path,
+                     "symbol": name},
+                    step_index=self.step, path=path)
+                changed = True
+                continue
             m = _MICRO_REDEF_RE.search(ln)
             if not m:
                 continue
