@@ -8939,6 +8939,10 @@ class Orchestrator:
                     originals[path] = original
                     self._write_worktree_only(path, buffer, accepted=accepted)
                     continue
+            # Sprint-22 P2: track how many units in this file have failed
+            # (not accepted) so the retry-relaxation can check "is this
+            # the ONLY failing unit?" before granting an extra retry.
+            self._file_failing_unit_count = 0
             for unit in units:
                 _parent = unit.structural_metadata.get("parent_unit_id")
                 # Parent-aware asymmetry: if the parent conflict had substantial
@@ -8965,6 +8969,8 @@ class Orchestrator:
                 result.outcomes.append(outcome)
                 if outcome.accepted is None:
                     escalated_units.append(outcome)
+                    self._file_failing_unit_count = getattr(
+                        self, "_file_failing_unit_count", 0) + 1
                     # Don't break — continue processing remaining units so
                     # all outcomes are logged. The step still escalates
                     # (safety invariant: don't splice a partially-resolved
@@ -12877,17 +12883,40 @@ class Orchestrator:
                 and retry_count >= _unit_budget
                 and retry_count > 0
             ):
-                outcome.escalated = True
-                outcome.retry_count = retry_count
-                outcome.reason = (
-                    f"unit-count-aware retry cap reached ({_unit_budget} "
-                    f"retries; file has many units)"
+                # Sprint-22 P2: adaptive relaxation — when the candidate
+                # is already near-oracle (validation passed all hard
+                # gates, failed only a soft/semantic signal) AND this is
+                # the only failing unit in the file, grant ONE extra
+                # retry. The throughput cap protects large files from
+                # budget exhaustion; a single boundary case with headroom
+                # shouldn't be sacrificed to it.
+                _close = (
+                    validation is not None
+                    and not validation.passed
+                    and not validation.hard_failures
+                    and getattr(self, "_file_failing_unit_count", 0) <= 1
                 )
-                self._record_resolution_attempt(
-                    outcome, mechanism="llm",
-                    decision="escalate", reason=outcome.reason,
-                )
-                return outcome
+                if _close and retry_count == _unit_budget:
+                    self.journal.emit(
+                        "retry_relaxation",
+                        {"unit_id": unit.unit_id,
+                         "original_cap": _unit_budget,
+                         "reason": "high-sim single-failing-unit"},
+                        step_index=self.step, path=unit.path,
+                        unit_id=unit.unit_id)
+                    # fall through: don't escalate, let the retry happen
+                else:
+                    outcome.escalated = True
+                    outcome.retry_count = retry_count
+                    outcome.reason = (
+                        f"unit-count-aware retry cap reached ({_unit_budget} "
+                        f"retries; file has many units)"
+                    )
+                    self._record_resolution_attempt(
+                        outcome, mechanism="llm",
+                        decision="escalate", reason=outcome.reason,
+                    )
+                    return outcome
 
             # Zero-budget escape: when the unit-count cap gives 0 retries
             # (files with >20 units) and this is the first (and only)

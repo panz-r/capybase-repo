@@ -1325,7 +1325,11 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
             _materialize_conflict(case, repo, crate_source=crate_source)
         except _NoConflictError as exc:
             res.elapsed = time.time() - t0
+            # Sprint-22 P1: git resolved cleanly — nothing to resolve.
+            # Mark as SAFE_SKIP (excluded from the real-conflict
+            # denominator) instead of counting it as a failure.
             res.escalated = True
+            res.terminal_reason = "SAFE_SKIP"
             res.reason = f"skipped (no conflict): {exc}"
             return res
         except Exception as exc:
