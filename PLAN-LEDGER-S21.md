@@ -148,3 +148,16 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   sibling logic: before the next same-scope directive block). All
   three are one rung: 'coherence-repair before whole-file repair
   escalates', compiler-gated after.
+- 2026-08-22 14:3x: **Coherence-rung specimen run: 1/4 converted.**
+  sqlite-0014 **PASS at sim 1.0** (the missing-'}' sibling-boundary
+  class — repaired). 0034/0049 still escalate (the repair FIRED on
+  0034 — validations carry coherence_repair_applied — but the
+  code-glued stray still defeats the conservative negative-depth
+  bail; the statement-terminator fallback extension is the identified
+  next step). 0040 regressed sim (0.015 — the EOF-appended #endif
+  landed in the wrong scope, EXACTLY the anticipated positional-
+  mirror follow-up; the rung correctly applied the repair but the
+  repair itself is wrong-scoped). Ledger: rung verified live
+  (fires, repairs, re-validates); two follow-ups specified:
+  (a) negative-depth code-glued fallback, (b) positional #endif
+  insertion before same-scope directive blocks.
