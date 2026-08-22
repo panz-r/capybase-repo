@@ -306,3 +306,18 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   mechanisms target. **Combined: the system is stable and safe for
   the full harvest** (27 pre-eval cases, zero regressions); launch
   recommended with the 0016/0034 gaps recorded as known limitations.
+
+## Sprint-22 sharded harvest (user directive: shard → learn → fix → next)
+
+| shard | lang | cases | est | status |
+|-------|------|-------|-----|--------|
+| 1 | python | 111 | ~1.7h | RUNNING |
+| 2 | c | 205 | ~2.6h | queued |
+| 3 | rust | 194 | ~2.0h | queued |
+| 4 | cpp | 167 | ~1.5h | queued |
+
+Workflow per shard: run → verdict-diff vs harvest baselines → journal
+analysis on the top failures → implement fixes → next shard with
+improvements. Results/flights under /var/tmp/capybase-live/s22/.
+
+- 2026-08-22 21:5x: shard 1 (python) LAUNCHED. 111 cases loaded.
