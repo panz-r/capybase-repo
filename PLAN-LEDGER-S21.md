@@ -161,3 +161,17 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   (fires, repairs, re-validates); two follow-ups specified:
   (a) negative-depth code-glued fallback, (b) positional #endif
   insertion before same-scope directive blocks.
+- 2026-08-22 15:0x: **Specimen re-run: the onion peeled one layer.**
+  0034's failure CHANGED — no longer a brace imbalance; the buffer now
+  fails on 'missing terminating ' character' at php_generator.cc:416
+  (a string-literal defect the brace gate previously masked).
+  0049 unchanged (its stray shape didn't match the new fallback's
+  tails either). 0040 dispositioned: content truncation (143 vs 240
+  directives), LLM-path territory, NOT a coherence specimen. Net for
+  the perfect-buffer family: 0014 CONVERTED (sim 1.0); 0034's brace
+  class cleared with a deeper defect now exposed; 0049/0040 remain
+  honest escalates with distinct root causes. The coherence rung +
+  both follow-ups stay (behavior-preserving supersets, 60 tests
+  green each). Next-layer candidates recorded: string-literal
+  repair (0034's new face) and 0049's actual divergence-line content
+  (readable from its validation artifacts).
