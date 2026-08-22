@@ -189,3 +189,50 @@ def test_journal_noop_without_stamp():
         enable_class_member_splitting=False))
     orch._journal_class_member_candidate(_unit("int x;", "int y;"))
     assert orch.journal.events == []
+
+
+# --- sprint-21 S21.5: the enabling composition ---
+
+
+def test_member_split_enabled_rescues_the_decline_class():
+    """Flag ON + member points on either side → the decline class splits
+    into proportional sub-units (the S20.10 build); flag OFF → the
+    sprint-19 journal-only behavior (unit returned unsplit, stamped)."""
+    from capybase.conflict_extractor import (
+        _split_unit_at_entities,
+        _class_member_split_points,
+    )
+    cls_cur = (
+        "class C {\n public:\n"
+        + "".join(f"  int m{i}() {{ return {i}; }}\n" for i in range(30))
+        + "  void big() {\n" + "".join(f"    s{i};\n" for i in range(60))
+        + "  }\n};\n"
+    )
+    cls_rep = "class C {\n public:\n  int other() { return 2; }\n};\n"
+    unit = _unit(cls_cur, cls_rep)
+    pts = _class_member_split_points(cls_cur, "cpp")
+    assert len(pts) >= 3  # the fixture has member boundaries
+
+    out_off = _split_unit_at_entities(
+        unit, min_region_lines=5, min_sub_lines=8, member_split=False)
+    assert out_off == [unit]  # decline, journal-only (stamped)
+
+    out_on = _split_unit_at_entities(
+        unit, min_region_lines=5, min_sub_lines=8, member_split=True)
+    assert len(out_on) == len(pts) + 1  # member-count proportional split
+    # spans are contiguous and cover the marker region (no reordering)
+    spans = [u.marker_span for u in out_on]
+    assert spans[0][0] == unit.marker_span[0]
+    assert spans[-1][1] == unit.marker_span[1]
+    for (a1, a2), (b1, b2) in zip(spans, spans[1:]):
+        assert a2 < b1  # non-overlapping, ascending (separator gaps by design)
+
+
+def test_member_split_no_points_still_declines():
+    from capybase.conflict_extractor import _split_unit_at_entities
+    # no member points on either side (plain C-style text)
+    cur = "int a; // " + "x" * 200 + "\n" * 5
+    unit = _unit(cur * 8, cur * 8)
+    out = _split_unit_at_entities(
+        unit, min_region_lines=5, min_sub_lines=8, member_split=True)
+    assert out == [unit]

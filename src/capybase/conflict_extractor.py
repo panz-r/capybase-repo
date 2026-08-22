@@ -314,6 +314,8 @@ class ConflictExtractor:
                 u,
                 min_region_lines=fut.entity_split_min_lines if fut else 40,
                 min_sub_lines=fut.entity_split_min_sub_lines if fut else 8,
+                member_split=(
+                    fut.enable_class_member_splitting if fut else False),
             )
             # Statement-level splitting: when entity splitting still leaves
             # oversized sub-units (>80 non-blank lines inside a function body),
@@ -840,11 +842,51 @@ def _compute_parent_deletion_meta(unit: ConflictUnit) -> dict:
     }
 
 
+
+def _try_member_split_decline(
+    unit: ConflictUnit, cur_text: str, rep_text: str, lang: str,
+) -> list[ConflictUnit] | None:
+    """S21.5 (sprint-21): at the entity splitter's decline paths, split at
+    CLASS-MEMBER boundaries via the proportional sub-span infrastructure.
+
+    The member-point count from the better-populated side determines the
+    sub-unit count; spans are proportional over the marker region (the
+    same conservative slot model the statement splitter uses). Fragments
+    still oversized flow into the EXISTING statement splitter below
+    (conflict_extractor's split ladder) — this function only rescues the
+    decline class the sprint-19 P5 measurement identified. Access
+    specifiers and order are preserved by construction (contiguous
+    proportional spans, no reordering). Returns None when neither side
+    has member points (caller keeps the original decline).
+    """
+    if unit.marker_span is None:
+        return None
+    cur_pts = _class_member_split_points(cur_text, lang)
+    rep_pts = _class_member_split_points(rep_text, lang)
+    n = max(len(cur_pts), len(rep_pts)) + 1
+    if n < 2:
+        return None
+    start, end = unit.marker_span
+    spans = _proportional_sub_spans(start, end, [1] * n)
+    parent_meta = {
+        k: v for k, v in unit.structural_metadata.items()
+        if k.startswith("parent_")
+    } or None
+    return [
+        _build_sub_unit(
+            unit, k, span,
+            cur_text, rep_text, unit.base.text or "", n,
+            parent_meta=parent_meta,
+        )
+        for k, span in enumerate(spans)
+    ]
+
 def _split_unit_at_entities(
     unit: ConflictUnit,
     *,
-    min_region_lines: int,
-    min_sub_lines: int,
+    min_region_lines: int = 40,
+    min_sub_lines: int = 8,
+    member_split: bool = False,
 ) -> list[ConflictUnit]:
     """Split ``unit`` at top-level entity boundaries, or ``[unit]`` if not viable.
 
@@ -926,6 +968,10 @@ def _split_unit_at_entities(
         # it on the unit for the oversized-skip journal.
         _stamp_class_member_candidate(unit, cur_text, rep_text, lang,
                                       "no_top_level_boundary")
+        if member_split:
+            _ms = _try_member_split_decline(unit, cur_text, rep_text, lang)
+            if _ms:
+                return _ms
         return [unit]
 
     # Defensive parity: fragments must align in count.
@@ -939,6 +985,10 @@ def _split_unit_at_entities(
     if sum(keep) < 2:
         _stamp_class_member_candidate(unit, cur_text, rep_text, lang,
                                       "fragments_below_min_sub_lines")
+        if member_split:
+            _ms = _try_member_split_decline(unit, cur_text, rep_text, lang)
+            if _ms:
+                return _ms
         return [unit]
     # Re-extract the kept fragments (merging absorbed ones' text).
     cur_kept, rep_kept = _apply_keep(cur_frags, rep_frags, keep)
