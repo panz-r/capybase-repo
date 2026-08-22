@@ -246,3 +246,17 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   (LLM-provenance, portfolio-declined) — selectable from harvest
   journals. Recorded as the corrected claim; the earlier 'first
   live win' language is superseded.
+- 2026-08-22 16:3x: **GOLDEN-PATH v3 (proper LLM-walking cohort).**
+  Cohort: 4 cases whose harvest runs walked the LLM unit loop (0034
+  retrieval VERIFIABLY fired: context_built + retrieval_scores in
+  journal). Results: tokio-0037 ESCALATE→**PASS sim 1.0** (the
+  queue.rs twin's sibling — first time it passes); tokio-0046
+  ESCALATE→NEAR_MATCH 0.884; 0034/flask-0006 unchanged. Note: 0037
+  resolved via the plain-LLM acceptance path this sampling (no
+  preservation forcing — the sprint-19 recurring non-event), so the
+  conversion is LLM-sampling variance WITH retrieval active, not
+  provably retrieval-caused. Net honest position: retrieval fires
+  live on LLM-walking shapes; one conversion + one improvement on
+  the proper cohort; causality still requires a majority-of-3
+  paired design (retrieval ON vs OFF on the same shapes) to claim.
+  That paired A/B is the specified next experiment.
