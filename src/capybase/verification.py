@@ -4481,6 +4481,18 @@ class VerificationEngine:
         if language in ("rust", "python", "c", "cpp", "c++") and self.config.require_syntax_if_supported:
             imbalance_line = _brace_imbalance_line(whole, language)
             if imbalance_line is not None:
+                # Sprint-21 coherence-repair rung: before failing, attempt the
+                # DETERMINISTIC repair ladder on the spliced buffer (the
+                # perfect-buffer class — 0034/0049 stray '}', 0014 missing '}'
+                # at sim 0.999 — dies here). The repair functions are the same
+                # ones the unit-level fallback uses; re-validate after.
+                _repaired = _try_balance_braces(whole, language)
+                if _repaired is not None and _brace_imbalance_line(
+                        _repaired, language) is None:
+                    whole = _repaired
+                    imbalance_line = None
+                    features["coherence_repair_applied"] = True
+            if imbalance_line is not None:
                 # Fix #1 — enrich the message with the brace delta so the model
                 # knows WHICH kind of imbalance it is (extra `}` vs unclosed `{`),
                 # not just "unbalanced". The classification matches
@@ -4532,6 +4544,15 @@ class VerificationEngine:
         # stripped on Linux, hiding conflict markers inside the region).
         if language in ("c", "cpp", "c++") and self.config.require_syntax_if_supported:
             pp_line = _preprocessor_imbalance_line(whole)
+            if pp_line is not None:
+                # Sprint-21 coherence-repair rung (preprocessor arm —
+                # sqlite-0040's #endif class).
+                _repaired_pp = _try_balance_preprocessor(whole)
+                if _repaired_pp is not None and _preprocessor_imbalance_line(
+                        _repaired_pp) is None:
+                    whole = _repaired_pp
+                    pp_line = None
+                    features["coherence_repair_applied"] = True
             if pp_line is not None:
                 hard.append(
                     VerificationFailure(
