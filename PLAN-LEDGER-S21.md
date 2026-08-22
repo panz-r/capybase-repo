@@ -112,3 +112,9 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   (b) the resolver-side gap closes below ~5% with era-dead cases the
   remaining blocker. The 166 stay dispositioned as
   ESCALATE_TOOLCHAIN — measured, classified, documented.
+- 2026-08-22 13:44: **S21 suite gate GREEN: 6223 passed / 2115 skipped /
+  0 failed / 0 xfailed in 54m56s** — the S21.1 probe change and the
+  S21.5 composition + default flip are full-suite verified. Sprint-21
+  hygiene is current; remaining items are the golden-path
+  reconstruction (S21.2 path b), the 0034/0040 perfect-buffer class,
+  and the zenodo mid-band.
