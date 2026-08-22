@@ -197,3 +197,14 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   Sprint-21 few-shot integration is GO for the next session: query
   by skeleton similarity, inject as in-context examples, measure on
   the zenodo mid-band (the model-capability frontier).
+- 2026-08-22 15:4x: **Golden-path store SEEDED.** Discovery: the
+  entire few-shot pipeline already exists (ExperienceStore → BM25
+  LexicalRetriever → context_builder.retrieved_examples → the
+  prompt's few-shot block) — golden-path is a SEEDING problem, not
+  an integration build. 535 high-sim (base/current/replayed/
+  resolved) examples seeded to /var/tmp/capybase-live/s21/memory/
+  experiences.jsonl via the store's own append API (golden-path-seed
+  provenance, retry_count=1 to pass the repair-path quality filter).
+  NEXT: run the zenodo mid-band (8 cases, 0.76-0.89) with
+  CAPYBASE_MEMORY_DIR pointing at the seeded store vs the harvest
+  baselines — the few-shot experiment's measurement.
