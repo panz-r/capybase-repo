@@ -175,3 +175,15 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   green each). Next-layer candidates recorded: string-literal
   repair (0034's new face) and 0049's actual divergence-line content
   (readable from its validation artifacts).
+- 2026-08-22 15:1x: **0049's brace class ALSO cleared.** Its run's
+  whole-file validation record shows passed: True (no coherence
+  failure this sampling) — the escalate's reason is 'whole-file
+  repair could not re-resolve a unit in redis.c': a UNIT-level
+  re-resolve failure, a different layer (model capability on one
+  unit), not the stray brace. Family final: 0014 CONVERTED; 0034 and
+  0049's coherence classes both CLEARED with deeper distinct defects
+  now exposed (string literal; unit re-resolve); 0040 = truncation.
+  The perfect-buffer family is fully dispositioned — each member's
+  current blocker recorded with its evidence path. Sprint-21's
+  remaining threads stay as ledgered (golden-path b, zenodo
+  mid-band, the newly-exposed defect layers).
