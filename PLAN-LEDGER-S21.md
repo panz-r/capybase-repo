@@ -288,3 +288,9 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   fail test updates, and the file_validated auditability fix.
   **Sprint-21 development phase COMPLETE** — remaining: the closing
   results doc.
+- 2026-08-22 19:3x: **docs/sprint21-results.md written** — the
+  development-phase record: mechanisms table with commits + live
+  validations, the perfect-buffer family disposition, the golden-path
+  arc (three honest attribution corrections as the methodology story),
+  all five decisions, and the open threads for the next sprint.
+  Sprint-21 is COMPLETE.
