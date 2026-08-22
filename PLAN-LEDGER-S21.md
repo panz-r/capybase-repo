@@ -187,3 +187,13 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   current blocker recorded with its evidence path. Sprint-21's
   remaining threads stay as ledgered (golden-path b, zenodo
   mid-band, the newly-exposed defect layers).
+- 2026-08-22 15:2x: **S21.2 path (b) prototype: §F gate CLEARED.**
+  Offline reconstruction over the corpus: 677 (prompt-skeleton,
+  response) pairs, 535 at sim >= 0.95 — far past the >= 30 gate.
+  Honest caveat: this is the PROXY form (side-skeleton as the prompt
+  key, oracle as the response) — the full-fidelity form (exact prompt
+  via the resolution engine's builder) is the integration build.
+  Artifacts: /var/tmp/capybase-live/s21/golden_path_proxy.jsonl.
+  Sprint-21 few-shot integration is GO for the next session: query
+  by skeleton similarity, inject as in-context examples, measure on
+  the zenodo mid-band (the model-capability frontier).
