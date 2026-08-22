@@ -2704,17 +2704,33 @@ def _try_balance_preprocessor(text: str) -> str | None:
         return None
 
     if depth > 0:
-        # Unclosed #if(s): append the deficit of #endif at the end of the text.
-        # This closes a truncated construct — the common slice case where the
-        # region's #if was left open because its #endif is downstream of the
-        # marker block. Append at EOF (not mid-file) to avoid splitting a line.
-        suffix = "\n".join(["#endif"] * depth)
-        # Drop trailing blank lines before appending so the #endif lands after
-        # real content, then add a single trailing newline for tidiness.
-        rstrip_end = len(lines)
-        while rstrip_end > 0 and lines[rstrip_end - 1].strip() == "":
-            rstrip_end -= 1
-        candidate = lines[:rstrip_end] + [suffix]
+        # Unclosed #if(s). Sprint-21 (b) — positional insertion, the mirror
+        # of the sibling-brace logic: appending at EOF closes the construct
+        # in the WRONG scope when the #if opened mid-file and same-scope
+        # content follows (sqlite-0040: the EOF append produced a depth-
+        # balanced file that regressed sim to 0.015). Insert the deficit
+        # #endif BEFORE the next same-scope directive block — the first
+        # #if/#else after the point where depth returns to the opener's
+        # level — falling back to EOF when no such boundary exists.
+        suffix_lines = ["#endif"] * depth
+        insert_at = len(lines)
+        _d3 = 0
+        for i, line in enumerate(physical):
+            if _PP_OPEN_RE.match(line):
+                _d3 += 1
+            elif _PP_CLOSE_RE.match(line):
+                _d3 -= 1
+                if _d3 == depth - 1:
+                    # depth returned to the opener's level: the next
+                    # same-level directive is the sibling boundary
+                    for j in range(i + 1, len(physical)):
+                        if (_PP_OPEN_RE.match(physical[j])
+                                or _PP_ELSE_RE.match(physical[j])):
+                            insert_at = j
+                            break
+                    if insert_at != len(lines):
+                        break
+        candidate = lines[:insert_at] + suffix_lines + lines[insert_at:]
         result = "\n".join(candidate)
         if _preprocessor_imbalance_line(result) is None:
             return result
