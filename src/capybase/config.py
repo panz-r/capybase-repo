@@ -885,7 +885,7 @@ class FutureConfig(BaseModel):
     # regions under the window — the measurement stamps
     # class_member_split_candidate metadata and journals it at the
     # oversized-skip sites.
-    enable_class_member_splitting: bool = False
+    enable_class_member_splitting: bool = True
     # Phase 4 comment jury (design §5). An untrusted semantic sensor that
     # evaluates comment claims produced by the comment pass. Three operating
     # modes:

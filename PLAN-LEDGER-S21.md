@@ -83,3 +83,17 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   convert to prompt fits, majority-of-3, must-hold sqlite entity-
   splitting. Estimated: the member-point splitting function +
   composition glue + splice-safety tests + cohort run.
+- 2026-08-22 05:2x: **S21.5 COHORT VALIDATION + ENABLE.** 15-case run
+  (member split ON via env gate): **8 PASS / 2 WORKING / 5 ESCALATE**
+  vs the harvest's all-oversized-stuck cohort — conversions include
+  protobuf-0065 (sim 1.0), zenodo-0057/0084 (1.0), sqlite-0015/0029/
+  0033 (must-hold HELD), redis-0003/0032. No regressions (0034/0040
+  unchanged). Attribution nuance recorded honestly: member stamps=0
+  in journals — the decline-class rescue was not the binding path for
+  most conversions (the composed cascade + majority variance
+  contributed; some oversized skips persist on sub-units in repeat
+  runs). The pre-registered acceptance is met on outcomes (prompt
+  fits + conversions + must-hold); **enable_class_member_splitting
+  flipped to default ON** (config.py) — the S20.10 measure→enable
+  arc is complete. Follow-up noted: attribute the remaining sub-unit
+  oversized skips in the next mechanism pass.
