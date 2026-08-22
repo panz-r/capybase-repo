@@ -231,3 +231,18 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   retrieval in v2) — the mechanism's signal is real but the effect
   size needs the journal few-shot-block verification to attribute
   (retrieved-and-helped vs retrieval-off for these shapes).
+- 2026-08-22 16:1x: **FEW-SHOT ATTRIBUTION RESOLVED — and it's a
+  third correction.** 0036's v2 journal: ZERO context_built events —
+  the LLM unit loop never ran. The case resolved via
+  true_side_portfolio (trigger: dup_pathology) +
+  whole_side_adjudication (via llm). The conversions in BOTH A/B
+  runs are MECHANISM-LEVEL variance (the portfolio/adjudication
+  paths sampling differently), not few-shot. Golden-path remains
+  UNPROVEN live — the honest ledger line. What the experiments DID
+  establish: (a) the seeding + gating plumbing works end-to-end;
+  (b) the mid-band cases flip across runs via the portfolio path —
+  itself a variance finding worth a majority-of-3 note; (c) a proper
+  golden-path cohort must select cases that WALK THE LLM UNIT LOOP
+  (LLM-provenance, portfolio-declined) — selectable from harvest
+  journals. Recorded as the corrected claim; the earlier 'first
+  live win' language is superseded.
