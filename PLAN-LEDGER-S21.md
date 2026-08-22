@@ -281,3 +281,10 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   Sprint-21's remaining threads: retrieval tuning for the flat two
   (flask-0006/0034), the broader-cohort validation, and the closing
   results doc + ledger.
+- 2026-08-22 19:26: **s21-suite-final2 GATE GREEN: 6223 passed / 2115
+  skipped / 0 failed / 0 xfailed in 56m25s.** All sprint-21 changes
+  full-suite verified: member-split composition + default, coherence
+  rung + both follow-ups, golden-path defaults, the six repair-then-
+  fail test updates, and the file_validated auditability fix.
+  **Sprint-21 development phase COMPLETE** — remaining: the closing
+  results doc.
