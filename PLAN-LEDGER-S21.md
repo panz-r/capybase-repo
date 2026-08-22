@@ -294,3 +294,15 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   arc (three honest attribution corrections as the methodology story),
   all five decisions, and the open threads for the next sprint.
   Sprint-21 is COMPLETE.
+- 2026-08-22 21:3x: **PRE-EVAL PHASE COMPLETE (two rounds + items
+  validation).** Round 1 (14 cases): 3 conversions (0014/0065/0036
+  — all mechanism-targeted), 0 regressions. Items: 0016 root cause
+  found + fixed (unused-function delete), 0034 exposed defect fixed
+  (string-literal repair). Items validation: 0016's patch FIRES but
+  re-gate fails (build-cache or second reference — needs buffer
+  inspection, recorded as known limitation); 0034 unchanged.
+  Round 2 (13 all-new cases): **0 conversions, 0 regressions** —
+  the investigate tier is a different class than the current
+  mechanisms target. **Combined: the system is stable and safe for
+  the full harvest** (27 pre-eval cases, zero regressions); launch
+  recommended with the 0016/0034 gaps recorded as known limitations.
