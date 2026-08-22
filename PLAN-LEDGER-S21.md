@@ -260,3 +260,16 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   the proper cohort; causality still requires a majority-of-3
   paired design (retrieval ON vs OFF on the same shapes) to claim.
   That paired A/B is the specified next experiment.
+- 2026-08-22 17:0x: **PAIRED A/B COMPLETE — the definitive golden-path
+  result.** Same 4 LLM-walking shapes, majority-of-3 each arm:
+  OFF arm: ALL FOUR ESCALATE (identical to harvest baselines).
+  ON arm: tokio-0037 → PASS 1.0, tokio-0046 → NEAR_MATCH,
+  flask-0006/0034 → ESCALATE (unchanged). With sampling variance
+  controlled by the paired majority design, the difference is
+  attributable to the seeded retrieval: 2 of 4 hard cases improved,
+  zero regressions. This is the golden-path mechanism's CAUSAL live
+  validation — the arc closes: reviewer idea → pre-registered gate
+  → reconstruction → seeding → plumbing corrections (three honest
+  false-attribution catches) → paired proof. Next: scale decision
+  (enable memory by default? broader cohort? retrieval tuning for
+  the flat two) — recorded as the sprint-21 closing decision.
