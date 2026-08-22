@@ -746,6 +746,12 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
             cfg.validation.cc_build_target_template = _target
     cfg.future.enable_structural_resolver = True
     cfg.future.enable_combination_search = True
+    # Sprint-21 S21.5 cohort validation: the member-split composition is
+    # OFF by default; the env gate flips it for the validation run (the
+    # pre-registered acceptance: 15-case oversized cohort, majority-of-3,
+    # prompts under the 8K window, sqlite entity-splitting must-hold).
+    if os.environ.get("CAPYBASE_ENABLE_MEMBER_SPLIT", "") == "1":
+        cfg.future.enable_class_member_splitting = True
     cfg.policy.max_retries_per_unit = 2  # cap CEGIS retries for throughput
     # Disable the verifier model jury for high-region-count conflicts.
     # The jury makes 4 separate LLM calls (model + assertion + reflection +
