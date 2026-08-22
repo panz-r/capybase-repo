@@ -2466,6 +2466,38 @@ def _try_balance_braces(text: str, language: str | None = None) -> str | None:
                     result = "\n".join(candidate)
                     if _brace_imbalance_line(result, language) is None:
                         return result
+            # Sprint-21 (a) — the 0034/0049 class: the stray '}' sits on a
+            # code line WITHOUT a statement terminator (e.g. a bare
+            # ``foo()}`` call or a glued close after an expression). Scan
+            # FORWARD from the divergence line for the first line that IS
+            # brace-terminated junk: content + trailing '}'s where removing
+            # the LAST '}' leaves a line whose remaining content is a
+            # complete token sequence (ends with ')', ';', identifier, or is
+            # empty after brace-stripping with other code lines around it).
+            # One edit, deficit==1, always re-validated.
+            if deficit == 1:
+                for j in range(neg_line, min(neg_line + 25, len(lines))):
+                    raw = lines[j]
+                    c = cleaned[j] if j < len(cleaned) else raw
+                    if "}" not in c:
+                        continue
+                    stripped = c.replace("}", "")
+                    # ')' is deliberately EXCLUDED: 'bar() }' is a legal
+                    # one-liner block close, not junk (guard-pinned by
+                    # test_balance_braces_code_line_not_touched).
+                    _ok_tail = (not stripped.strip()
+                                or stripped.rstrip().endswith(
+                                    (";", ",", ":")))
+                    if not _ok_tail:
+                        continue
+                    last_brace = raw.rfind("}")
+                    patched = raw[:last_brace] + raw[last_brace + 1:]
+                    candidate = list(lines)
+                    candidate[j] = patched
+                    result = "\n".join(candidate)
+                    if _brace_imbalance_line(result, language) is None:
+                        return result
+                    break  # first candidate only — conservative
             return None  # couldn't collect enough stray brace-only lines
         candidate = [l for i, l in enumerate(lines) if i not in set(to_remove)]
         result = "\n".join(candidate)
