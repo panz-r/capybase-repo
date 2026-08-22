@@ -97,3 +97,18 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   flipped to default ON** (config.py) — the S20.10 measure→enable
   arc is complete. Follow-up noted: attribute the remaining sub-unit
   oversized skips in the next mechanism pass.
+- 2026-08-22 05:3x: **S21.4 DECISION — pinned toolchains: DEFER (no-go
+  for now).** Assessment: converting the 166 era-dead cases requires
+  per-dataset-era compilers (gcc for sqlite-90/nlohmann-38, rustc for
+  the rust tail) selected per merge-era — a harness toolchain-selection
+  layer + containerized/multi-version toolchain availability, touching
+  the build gate, ccache keys (per-toolchain), and the era probe
+  itself. Payoff is bounded: the harvest already established the
+  honest capability number (era-adjusted 89.1%) WITHOUT pinning, and
+  sprint-21's mechanism backlog (perfect-buffer escalates, the
+  remaining 0034/0040 class, the zenodo mid-band) attacks the same
+  11-point gap from the resolver side at far lower cost. Decision:
+  revisit pinning only if (a) a fresh era-matched corpus is built, or
+  (b) the resolver-side gap closes below ~5% with era-dead cases the
+  remaining blocker. The 166 stay dispositioned as
+  ESCALATE_TOOLCHAIN — measured, classified, documented.
