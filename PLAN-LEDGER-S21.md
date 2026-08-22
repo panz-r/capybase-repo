@@ -134,3 +134,17 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   failure into micro-CEGIS (it pre-dates that rung's gate-only
   trigger). 0014 (invalid storage class at wal.c:2103) and 0040/0049
   (unit re-resolve failures) need their own journal reads next.
+- 2026-08-22 14:0x: **The perfect-buffer class is ONE family: splice
+  coherence.** 0014 = missing '}' (the sibling-boundary class S20.7
+  targets — its repair must not have reached this path); 0049 = stray
+  '}' (0034's twin); 0040 = #endif imbalance (the PREPROCESSOR arm —
+  _try_balance_preprocessor exists but the missing-#endif case APPENDS
+  at EOF, the same wrong-scope defect sibling-brace fixed for braces).
+  Unified mechanism decision: route splice-coherence failures into
+  the DETERMINISTIC repair ladder at the whole-file repair stage —
+  0034/0049 need the negative-depth fallback extended to code-glued
+  strays; 0014 needs the sibling-boundary candidate REACHED from this
+  path; 0040 needs a positional #endif insertion (mirror of the
+  sibling logic: before the next same-scope directive block). All
+  three are one rung: 'coherence-repair before whole-file repair
+  escalates', compiler-gated after.
