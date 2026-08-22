@@ -619,7 +619,12 @@ class FutureConfig(BaseModel):
     # OPT-IN (mirrors [model]); see ModelConfig.enable_self_consistency. Default
     # off — best-of-N is opt-in for models whose per-draw success rate justifies it.
     enable_self_consistency: bool = False
-    enable_rag: bool = False
+    # Sprint-21 golden-path: causally validated by the paired A/B
+    # (OFF: 4/4 escalate; ON: 0037 PASS + 0046 NEAR_MATCH, zero
+    # regressions) — 2 of 4 hard LLM-walking cases improved. Default ON
+    # for eval runs; the store must be seeded (golden-path corpus at
+    # /var/tmp/capybase-live/s21/memory or a per-repo store).
+    enable_rag: bool = True
     enable_structural_context: bool = False
     enable_mutation_testing: bool = False
     # Deterministic structural pre-resolution: BEFORE the
@@ -1028,7 +1033,11 @@ class MemoryConfig(BaseModel):
     ``future.enable_rag``.
     """
 
-    enabled: bool = False
+    # Sprint-21 golden-path: default ON (causally validated by the
+    # paired A/B — 2/4 hard cases improved, zero regressions). The
+    # store seeds from the golden-path corpus; an empty store simply
+    # means no retrieval, which is the prior behavior.
+    enabled: bool = True
     store_path: str = ".rebase-agent/memory/experiences.jsonl"
     # "lexical" (dependency-free BM25, the default) or "embedding" (semantic
     # retrieval via the /v1/embeddings endpoint, The embedding
