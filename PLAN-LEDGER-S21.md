@@ -208,3 +208,14 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   NEXT: run the zenodo mid-band (8 cases, 0.76-0.89) with
   CAPYBASE_MEMORY_DIR pointing at the seeded store vs the harvest
   baselines — the few-shot experiment's measurement.
+- 2026-08-22 15:4x: **FEW-SHOT A/B RESULT: 2/6 CONVERTED TO PASS.**
+  zenodo-0036: NEAR_MATCH 0.893 → **PASS 0.984** (+0.091); zenodo-
+  0088: WORKING 0.890 → **PASS 0.924** (+0.034). The other four
+  byte-identical to baseline (the retriever surfaced no relevant
+  example for their shapes, or the examples didn't move the model).
+  This is the golden-path mechanism's first live win — the
+  model-capability frontier IS movable by seeding the system's own
+  successes. Follow-ups: verify which cases actually retrieved
+  golden examples (journal few-shot blocks) to separate
+  'no-retrieval' from 'retrieval-didn't-help'; tune retriever_k /
+  example rendering if the no-retrieval class dominates.
