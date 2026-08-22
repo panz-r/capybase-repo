@@ -752,6 +752,16 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # prompts under the 8K window, sqlite entity-splitting must-hold).
     if os.environ.get("CAPYBASE_ENABLE_MEMBER_SPLIT", "") == "1":
         cfg.future.enable_class_member_splitting = True
+    # Sprint-21 few-shot A/B: golden-path experiment gate. Enables the
+    # RAG memory layer and points the store at the seeded golden-path
+    # corpus (535 examples). Default OFF — the flag exists so the A/B
+    # is an explicit, journaled choice.
+    if os.environ.get("CAPYBASE_GOLDEN_PATH", "") == "1":
+        cfg.memory.enabled = True
+        cfg.future.enable_rag = True
+        cfg.memory.store_path = os.environ.get(
+            "CAPYBASE_MEMORY_DIR",
+            "/var/tmp/capybase-live/s21/memory/experiences.jsonl")
     cfg.policy.max_retries_per_unit = 2  # cap CEGIS retries for throughput
     # Disable the verifier model jury for high-region-count conflicts.
     # The jury makes 4 separate LLM calls (model + assertion + reflection +

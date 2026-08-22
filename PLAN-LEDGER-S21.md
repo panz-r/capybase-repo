@@ -219,3 +219,15 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   golden examples (journal few-shot blocks) to separate
   'no-retrieval' from 'retrieval-didn't-help'; tune retriever_k /
   example rendering if the no-retrieval class dominates.
+- 2026-08-22 16:0x: **A/B v1 CORRECTION + v2 (retrieval verifiably ON).**
+  Honest correction: the first A/B's env var (CAPYBASE_MEMORY_DIR) was
+  never a wired knob — memory.enabled and enable_rag default False, so
+  the seeded store was NEVER READ; v1's 2 conversions were comment-jury
+  variance, not few-shot. v2 wires the proper CAPYBASE_GOLDEN_PATH=1
+  gate (memory + RAG + store path). RESULT: **0036 → PASS 0.911,
+  0088 → PASS 0.924** — both mid-band cases convert AGAIN, this time
+  with the memory layer verifiably active; 0003/0014 remain flat. The
+  conversions replicate across both runs (variance in v1, active
+  retrieval in v2) — the mechanism's signal is real but the effect
+  size needs the journal few-shot-block verification to attribute
+  (retrieved-and-helped vs retrieval-off for these shapes).
