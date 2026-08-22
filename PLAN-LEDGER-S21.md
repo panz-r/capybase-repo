@@ -335,3 +335,8 @@ improvements. Results/flights under /var/tmp/capybase-live/s22/.
   regressions. The failures are the known zenodo frontier + the
   resurrection safety class. No shard-1-specific fixes warranted
   before shard 2 (C).**
+- 2026-08-23 00:5x: **Results tracker established** (docs/eval-results-
+  tracker.md + /var/tmp/capybase-live/s22/EVAL-RESULTS.md): the shard
+  table, pre-eval rounds, and per-language harvest baselines (python
+  84.7%, c 42.4%, rust 80.9%, cpp 61.1%). Each shard's row fills on
+  completion; the README table generates from this at sprint close.
