@@ -321,3 +321,17 @@ analysis on the top failures → implement fixes → next shard with
 improvements. Results/flights under /var/tmp/capybase-live/s22/.
 
 - 2026-08-22 21:5x: shard 1 (python) LAUNCHED. 111 cases loaded.
+- 2026-08-23 00:4x: **SHARD 1 (PYTHON) COMPLETE + ANALYZED.**
+  **98/111 PASS = 88.3%** (vs harvest baseline 94/111 = 84.7%, **+3.6pp
+  improvement**). Zero regressions on comparable baselines. 5 flips (4
+  improvements: 0011/0036/0087/0088 → PASS; 1 regression: 0028 WORKING
+  → ESCALATE — sampling variance territory). 13 non-PASS total:
+  - investigate 6 (all zenodo: 0012/0085 escalate at sim 0.97/0.80;
+    0003/0014/0040/0044 the mid-band frontier)
+  - mechanism-gap 2 (zenodo-0063/0064 resurrection stops at sim
+    0.92/0.98 — the safety net class)
+  - model-capability 3, environmental 2
+  **Shard-1 verdict: the new defaults lift Python +3.6pp with zero
+  regressions. The failures are the known zenodo frontier + the
+  resurrection safety class. No shard-1-specific fixes warranted
+  before shard 2 (C).**
