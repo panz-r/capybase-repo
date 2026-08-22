@@ -118,3 +118,19 @@ mid-sprint shape; S21.5 is the big build; S21.6 hardens the harness.
   hygiene is current; remaining items are the golden-path
   reconstruction (S21.2 path b), the 0034/0040 perfect-buffer class,
   and the zenodo mid-band.
+- 2026-08-22 13:5x: **0034/0040-class first look.** The five cohort
+  escalates decompose: sqlite-0004 = a REMAINING oversized (12689t —
+  sub-unit attribution follow-up from S21.5); 0034/0014/0040/0049 =
+  REPAIR_FAILUREs on whole-file validation. 0034's journal tells the
+  story: units extracted and ACCEPTED, then splice coherence flags
+  'extra closing brace at 2405' (depth negative — a stray '}' class)
+  and whole_side_probe fired twice before the escalate. The stray-
+  close class is the NEGATIVE-depth arm of _try_balance_braces —
+  which handles it only for brace-ONLY lines; 0034's stray is glued
+  to code (the conservative bail). Next mechanism candidate
+  (sprint-21 mid): extend the negative-depth repair's fallback (the
+  deficit==1 + statement-terminator rule at the divergence line) to
+  the whole-file repair path's input, OR feed the splice-coherence
+  failure into micro-CEGIS (it pre-dates that rung's gate-only
+  trigger). 0014 (invalid storage class at wal.c:2103) and 0040/0049
+  (unit re-resolve failures) need their own journal reads next.
