@@ -847,6 +847,24 @@ def _try_insertion_within_deletion(
         dl_ = (deleter_text or "").splitlines()
         il = (inserter_text or "").splitlines()
 
+        # Wholesale-deletion guard: an EMPTY deleter means the entire
+        # file/region was deleted (the AU/UA modify/delete whole-file
+        # shape). That is block-capture's keep-vs-delete domain — the
+        # model must adjudicate keeper-vs-deleter, not a deterministic
+        # salvage. P4 is for a deletion BLOCK inside a surviving file.
+        if not (deleter_text or "").strip():
+            continue
+
+        # Purity guard (s22 gate fallout): this salvage is for a side that
+        # ONLY inserted. If the inserter also replaced or deleted base lines
+        # (a MODIFIER — the modify/delete whole-file shape), the resolution
+        # below would silently drop those changes; decline so block-capture
+        # (keeper-vs-deleter, model-adjudicated) handles the shape instead.
+        inserter_ops = _dl.SequenceMatcher(
+            None, bl, il, autojunk=False).get_opcodes()
+        if any(tag not in ("equal", "insert") for tag, *_ in inserter_ops):
+            continue
+
         # Find ALL deletion opcodes; merge into a deletion ZONE (gaps
         # allowed — the deleter may have kept a few surviving lines
         # interspersed). The zone is [min_del_start, max_del_end).

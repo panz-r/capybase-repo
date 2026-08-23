@@ -336,3 +336,82 @@ Four-shard aggregate committed to README + docs/results/s22 extracts:
 **434/677 = 64.1% raw, 434/494 = 87.9% adjusted** (uniform formula
 PASS/(cases − era − SAFE_SKIP); s20 under same formula 65.0%/88.9%).
 Fix sprint opens now: R1 → C1 → R2 use-dedup → C4 → P5 → R3 → R4.
+
+## R1 IMPLEMENTED (2026-08-23, fix sprint item 1)
+
+**Root cause found — deeper than the reviewers' framing.** The rung's
+repair was VALIDATION-LOCAL: verify_file repaired its local `whole`,
+validated the repaired copy, returned passed=True — but
+VerificationResult carried no text, so the caller wrote its UNREPAIRED
+buffer to disk. tokio-0026's final file was brace-unbalanced (eval
+compiles = brace-balance for rust = False) while the session had
+"passed" the repaired copy. clickhouse-0049 same (cpp tree build
+failed on the unrepaired file). The in-session cargo/gcc checks were
+not too weak — they validated text that never reached the disk. The
+sqlite-0008/0014 conversions passed because they flowed the
+orchestrator-side repair path (which propagates via a synthetic unit);
+the internal rung instead MASKED the failure from ever reaching it.
+
+Changes:
+1. `VerificationResult.resolved_text` (conflict_model.py): the repaired
+   text when a rung fired, None otherwise.
+2. verify_file returns it at the final assembly; adds the R1
+   fail-closed guard: repaired + syntax stage did-not-run/pass → hard
+   failure `coherence repair applied without compiler verification`
+   (never accept on coherence alone — the reviewers' unanimous rule).
+3. Orchestrator consumption: main gate + cross-unit portfolio +
+   deterministic-repair + comment post-gate + deletion-respect swap
+   write/carry the repaired text; the two pristine-side probe sites
+   DECLINE a side whose text needed repair (repaired ≠ pristine).
+4. tests/test_r1_coherence_propagation.py: propagation, no-repair-
+   untouched, fail-closed (no compiler), compiler-backed accept. The
+   fail-closed test proved the guard's worth immediately: it rejected
+   a rung repair that produced syntactically invalid python.
+
+Validation: 5-specimen rerun (--case) pending after full-suite gate.
+
+**Validation result (16:38): 5/5 PASS** — tokio-0026 sim 0.985 (was
+ORACLE_DIVERGENT 3/3), clickhouse-0049 sim 1.000, clickhouse-0023
+0.990, protobuf-0012 0.973, protobuf-0038 0.962 (all four cpp DIV
+regressions converted). The five false accepts became genuine passes:
+the repaired text now reaches disk, compiles, and matches the oracle.
+
+## Gate fallout fixed (suite runs 1-3, 2026-08-23)
+
+Full-suite run #1 post-R1: 23 failed (14 = R1 test-double breakage,
+fixed via getattr-tolerant reads). Run #2: 9 failed — stash A/B proved
+all 9 pre-date R1 (last green gate was s21-final2; they landed in the
+ad16e06/93b61de/943b8d5 window without a full gate). Three clusters:
+
+- **A. lifetime-aware quote parity** (verification.py, ad16e06
+  regression): `_try_repair_string_literal` counted Rust lifetimes as
+  quote delimiters — a signature line with 5 lifetimes (odd count) got
+  a stray `'` appended after `{`, which then broke the brace stripper
+  (lifetime_mismatch catalog case). Fix: `'a`-style quotes with no
+  closing `'` within char-literal width are lifetimes, not delimiters.
+- **B. IndexError in brace-repair candidate 0** (verification.py):
+  `cleaned` (stripped) can have fewer lines than `lines`; every
+  cross-index access now length-guarded (sqlite-0113/0118 crashes).
+- **C. modify/delete hijack + broken fixture**: (1) the AU/UA test
+  fixture's replace pattern never matched (`\n\n\n` vs `\n\n`) — the
+  keeper never contained "return 11"; shipped broken, caught by this
+  gate. (2) P4 fired on whole-file deletion units (empty deleter) —
+  block-capture's keep-vs-delete domain — producing deleter+insertion
+  output and bypassing the model adjudication. Fixes: fixture anchored
+  on the alpha signature; P4 gains a wholesale-deletion guard (empty
+  deleter → decline) and a purity guard (inserter with replace/delete
+  ops → decline) so only pure insertions inside a surviving file's
+  deleted block salvage.
+
+All six affected files green (2210 passed incl. the gcc realworld
+corpus); final full-suite gate run #3 in flight before the R1+fixes
+commit.
+
+**Gate run #3 postscript**: 13 failed — 2 deterministic (fix A's first
+version skipped `'a;` char literals in C too; now LANGUAGE-GATED:
+lifetime exemption applies to rust only, `char c = 'a;` in C counts —
+80 tests green) and 11 contention flakes (run #3 overlapped the
+51-minute targeted run for its first 16 minutes; the 11 e2e/git/lsp
+tests pass standalone in 1.3s). Lesson recorded: never overlap full
+suite runs with other eval/test work. Gate run #4 (clean, uncontended)
+is the landing gate.

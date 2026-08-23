@@ -2369,7 +2369,9 @@ def _structural_validate(
     return failures
 
 
-def _try_repair_string_literal(text: str) -> str | None:
+def _try_repair_string_literal(
+    text: str, language: str | None = None
+) -> str | None:
     """Sprint-22 pre-eval item 2: repair an unterminated quote literal.
 
     A splice can leave a line with an odd count of unescaped single or
@@ -2378,25 +2380,57 @@ def _try_repair_string_literal(text: str) -> str | None:
     ONE line in the whole file is unbalanced, and only by appending the
     missing terminator to that line (never removing or editing content
     — the model's text is preserved, just closed).
+
+    ``language`` gates the Rust lifetime exemption: ``'a`` in Rust is a
+    lifetime, not an unterminated char literal (counting it made a
+    5-lifetime signature line "unbalanced" and the repair appended a
+    stray quote after a ``{``). In C/C++ the same shape IS a broken
+    char literal (``char c = 'a;``) and must count.
     """
     if not text:
         return None
+    _rust = (language or "").lower() in ("rust",)
 
     def _quote_parity(line: str) -> tuple[int, int]:
-        """(singles, doubles) count of unescaped quotes."""
+        """(singles, doubles) count of unescaped quotes.
+
+        Lifetime-aware (rust only): a ``'`` that starts an identifier
+        run with NO closing ``'`` within a char-literal's width (≤4
+        chars) is a Rust lifetime (``'a``, ``'b``, ``'_``), not a
+        literal delimiter.
+        """
         singles = doubles = 0
         escaped = False
-        for ch in line:
+        i = 0
+        n = len(line)
+        while i < n:
+            ch = line[i]
             if escaped:
                 escaped = False
+                i += 1
                 continue
             if ch == "\\":
                 escaped = True
+                i += 1
                 continue
-            if ch == "'":
+            if ch == "'" and _rust:
+                nxt = line[i + 1] if i + 1 < n else ""
+                if nxt and (nxt.isalnum() or nxt == "_"):
+                    # `'a` — char literal only when a closing `'` follows
+                    # within char-literal width; otherwise a lifetime.
+                    closer = line.find("'", i + 2, i + 6)
+                    if closer != -1:
+                        singles += 2  # the pair
+                        i = closer + 1
+                        continue
+                    i += 1  # lifetime — not a delimiter
+                    continue
+                singles += 1
+            elif ch == "'":
                 singles += 1
             elif ch == '"':
                 doubles += 1
+            i += 1
         return singles, doubles
 
     bad_lines = []
@@ -2603,9 +2637,17 @@ def _try_balance_braces(text: str, language: str | None = None) -> str | None:
                         stack.pop()
             if stack:
                 opener = stack[-1]
-                opener_indent = len(lines[opener]) - len(lines[opener].lstrip()) \
-                    if opener < len(lines) else 0
-                for i in range(opener + 1, len(lines)):
+                # ``cleaned`` (strings/comments stripped) can have a different
+                # line count than ``lines`` on multi-line-literal inputs —
+                # every cross-index access is length-guarded (sqlite-0113:
+                # IndexError when dbefore ran short).
+                _n_lines = min(len(lines), len(cleaned), len(dbefore))
+                if opener >= _n_lines:
+                    opener = _n_lines - 1 if _n_lines > 0 else 0
+                    opener_indent = 0
+                else:
+                    opener_indent = len(lines[opener]) - len(lines[opener].lstrip())
+                for i in range(opener + 1, _n_lines):
                     c = cleaned[i].strip()
                     if (not c or c == "}" or c.startswith(("#", "//"))
                             or dbefore[i] != depth or "{" not in c
@@ -4597,7 +4639,7 @@ class VerificationEngine:
             # (0034's exposed defect — 'missing terminating ' character').
             # Runs after (and independently of) the brace repair: a
             # quote-parity fix doesn't affect brace balance.
-            _lit_repaired = _try_repair_string_literal(whole)
+            _lit_repaired = _try_repair_string_literal(whole, language)
             if _lit_repaired is not None and _lit_repaired != whole:
                 whole = _lit_repaired
                 features["coherence_repair_applied"] = True
@@ -5319,6 +5361,31 @@ class VerificationEngine:
         # _run_shadow_tests).
         self._run_shadow_tests(path, whole, repo_root, hard, features)
 
+        # R1 (s22) fail-closed guard: a candidate that needed a deterministic
+        # repair rung is PROVISIONAL. The syntax/compile stage above ran on
+        # the REPAIRED text, so when it executed and passed, acceptance is
+        # compiler-backed. When it could NOT run (tool absent, undecidable
+        # environment), coherence alone is not acceptance evidence — fail
+        # honestly and let the repair loop / escalation decide. The
+        # reviewers' unanimous rule: never accept a coherence-repaired
+        # candidate on coherence alone.
+        if (features.get("coherence_repair_applied")
+                and not (features.get("syntax_checked")
+                         and features.get("syntax_passed"))):
+            features["coherence_repair_unverified"] = True
+            hard.append(
+                VerificationFailure(
+                    validator="syntax",
+                    severity="error",
+                    message=(
+                        "coherence repair applied without compiler "
+                        "verification (syntax stage did not run or did not "
+                        "pass on the repaired text); provisional candidate "
+                        "is not accepted on coherence alone"
+                    ),
+                    detail={"coherence_repair_unverified": True},
+                )
+            )
         passed = len(hard) == 0
         features["hard_failure_count"] = len(hard)
         features["warning_count"] = 0
@@ -5338,6 +5405,12 @@ class VerificationEngine:
             hard_failures=hard,
             warnings=[],
             features=features,
+            # R1 (s22): propagate the repaired text — the caller must write
+            # what was actually validated (see field docstring in
+            # conflict_model.py). Only set when a repair rung fired.
+            resolved_text=(
+                whole if features.get("coherence_repair_applied") else None
+            ),
         )
 
     # ------------------------------------------------------------------

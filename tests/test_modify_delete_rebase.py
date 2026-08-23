@@ -48,7 +48,11 @@ for _i in range(30):
 
 def _keeper_modified() -> str:
     """The replayed side's modification: change alpha + add gamma."""
-    return _BASE.replace("return 1\n\n\ndef beta", "return 11\n\n\ndef beta") + (
+    # NOTE: anchor on the alpha signature — a bare "return 1\n\n\n" pattern
+    # never matches (_BASE has two newlines there) and the replace silently
+    # no-ops, which is how this fixture shipped broken (the s22 gate caught it).
+    return _BASE.replace(
+        "def alpha():\n    return 1\n", "def alpha():\n    return 11\n") + (
         "def gamma():\n    return 3\n\n"
     )
 

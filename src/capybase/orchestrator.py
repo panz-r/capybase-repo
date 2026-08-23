@@ -9275,6 +9275,14 @@ class Orchestrator:
                         step_index=self.step,
                         path=path,
                     )
+                    # R1 (s22): the coherence rung validated a REPAIRED copy
+                    # of the buffer — write that text, not the pre-repair
+                    # splice (the tokio-0026/clickhouse-0049 false-accept
+                    # root cause: repair was validation-local, the caller
+                    # wrote the unrepaired buffer to disk).
+                    if (file_validation.passed
+                            and getattr(file_validation, "resolved_text", None) is not None):
+                        buffer = file_validation.resolved_text
                     # Causal attribution: record whether the previous repair
                     # mechanism changed the failure shape. NOT_ENGAGED = first
                     # iteration (no prior mechanism); CLEARED = the prior repair
@@ -9576,6 +9584,16 @@ class Orchestrator:
                                 repo_root=str(self.git.repo),
                                 whole_text=_wf_buf,
                             )
+                            # R1 (s22): if the rung repaired the portfolio
+                            # buffer, the disk copy (written pre-verify) is
+                            # stale — rewrite the repaired text and carry it
+                            # forward as the buffer.
+                            if (_wf_val.passed
+                                    and getattr(_wf_val, "resolved_text", None) is not None
+                                    and getattr(_wf_val, "resolved_text", None) != _wf_buf):
+                                _wf_buf = _wf_val.resolved_text
+                                self._write_worktree_only(
+                                    path, _wf_buf, accepted=_cand_list)
                             if not _wf_val.passed:
                                 # Visibility: the cross-unit portfolio used
                                 # to decline silently, hiding WHY whole-side
@@ -9739,6 +9757,12 @@ class Orchestrator:
                                 path, language, original, _spans,
                                 repo_root=str(self.git.repo),
                             )
+                            # R1 (s22): carry the repaired text into the
+                            # buffer so Phase 3 + the write path use what was
+                            # actually validated.
+                            if (file_validation.passed
+                                    and getattr(file_validation, "resolved_text", None) is not None):
+                                buffer = file_validation.resolved_text
                     _floor = None
                     if file_validation is None or not file_validation.passed:
                         # Wholesale winner floor — repair-exhaustion rescue:
@@ -10646,7 +10670,10 @@ class Orchestrator:
             )
             return pre_comment_buffer
         if validation.passed:
-            return comment_buffer
+            # R1 (s22): if the coherence rung repaired the post-comment
+            # buffer, return the repaired text — that is what was validated.
+            _rt = getattr(validation, "resolved_text", None)
+            return _rt if _rt is not None else comment_buffer
         # Failure: revert to the frozen buffer.
         self.journal.emit(
             "comment_post_validation_failed",
@@ -14128,6 +14155,12 @@ class Orchestrator:
             repo_root=str(self.git.repo), whole_text=cur)
         if not val.passed:
             return None
+        # R1 (s22): the rung may have repaired the swapped-in text — write
+        # and carry the repaired version (what was validated).
+        _rt = getattr(val, "resolved_text", None)
+        if _rt is not None:
+            cur = _rt
+            self._write_worktree_only(path, cur, accepted=None)
         from capybase.conflict_model import (
             CandidateResolution as _DRS_CR,
             ConflictSide as _DRS_CS,
@@ -14529,6 +14562,11 @@ class Orchestrator:
                 repo_root=str(self.git.repo), whole_text=text)
             if not val.passed:
                 continue
+            if getattr(val, "resolved_text", None) is not None:
+                # R1 (s22): the pristine-side text needed a coherence repair
+                # to pass — it is no longer the pristine side. Decline the
+                # swap rather than accept a silently modified side text.
+                continue
             verified.append((side, text, val))
         if not verified:
             return None
@@ -14713,6 +14751,15 @@ class Orchestrator:
                 step_index=self.step, path=path,
             )
             if val.passed:
+                if getattr(val, "resolved_text", None) is not None:
+                    # R1 (s22): repaired ≠ pristine — decline the side.
+                    self.journal.emit(
+                        "whole_side_probe",
+                        {"side": side, "passed": True,
+                         "declined": "coherence_repair"},
+                        step_index=self.step, path=path,
+                    )
+                    continue
                 verified.append((side, text, val))
 
         def _restore_spliced() -> None:

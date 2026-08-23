@@ -405,6 +405,13 @@ class VerificationResult(BaseModel):
     hard_failures: list[VerificationFailure] = Field(default_factory=list)
     warnings: list[VerificationWarning] = Field(default_factory=list)
     features: dict[str, float | int | str | bool] = Field(default_factory=dict)
+    # R1 (s22): when a deterministic repair rung (coherence brace/literal/
+    # preprocessor) modified the text inside verify_file, the REPAIRED text
+    # lives here — callers must write this text, not their pre-repair buffer.
+    # Root cause of the tokio-0026/clickhouse-0049 false accepts: the rung
+    # validated a repaired local copy while the caller wrote the unrepaired
+    # buffer to disk. None when no repair fired.
+    resolved_text: str | None = None
 
 
 # ---------------------------------------------------------------------------
