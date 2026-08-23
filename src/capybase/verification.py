@@ -2369,6 +2369,207 @@ def _structural_validate(
     return failures
 
 
+# ---------------------------------------------------------------------------
+# C1 (sprint-22): deterministic missing-symbol repair — pure helpers.
+#
+# The compiler says exactly which symbol is missing; the merge sides
+# contain its declaration (the conflict unit just doesn't include it —
+# often hundreds of lines away, invisible to the model). These helpers
+# connect the two WITHOUT inventing content: only exact declaration
+# lines found in base/current/replayed are injected, verbatim, at the
+# language-correct import/declaration point, and the result is re-gated
+# by the caller's normal compile authority.
+# ---------------------------------------------------------------------------
+
+# (language, pattern) — first match group is the missing symbol. The
+# unified cross-language table from the shard evidence: C's undeclared
+# identifiers/implicit declarations/unknown types, Rust's
+# cannot-find/unresolved-import/unknown-prefix/undeclared-module.
+_MISSING_SYMBOL_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
+    ("c", re.compile(
+        r"['\u2018\u2019]([A-Za-z_]\w*)['\u2018\u2019] (?:does not name a type"
+        r"|was not declared|is not a member of)")),
+    ("c", re.compile(
+        r"['\u2018]([A-Za-z_]\w*)['\u2019] undeclared")),
+    ("c", re.compile(
+        r"implicit declaration of function ['\u2018]([A-Za-z_]\w*)['\u2019]")),
+    ("c", re.compile(
+        r"unknown type name ['\u2018]([A-Za-z_]\w*)['\u2019]")),
+    ("c", re.compile(
+        r"type defaults to 'int' in declaration of ['\u2018]([A-Za-z_]\w*)")),
+    ("rust", re.compile(
+        r"cannot find (?:value|type|macro) `([A-Za-z_]\w*)`")),
+    ("rust", re.compile(r"unresolved import `([A-Za-z_][\w:]*)`")),
+    ("rust", re.compile(r"prefix `([A-Za-z_]\w*)` is unknown")),
+    ("rust", re.compile(
+        r"use of undeclared (?:crate or module|type|value) `([A-Za-z_]\w*)`")),
+)
+
+
+def parse_missing_symbols(error_text: str, language: str | None) -> list[str]:
+    """Missing symbols named by compiler diagnostics, unique.
+
+    Ordered by first appearance in the diagnostic text (the
+    first-reported symbol is fixed first). ``language`` selects which
+    signature family matches ("rust" vs the C family for c/cpp/c++);
+    None tries both (diagnostics are unambiguous in practice)."""
+    lang = (language or "").lower()
+    hits: list[tuple[int, str]] = []
+    for fam, pat in _MISSING_SYMBOL_PATTERNS:
+        if lang and fam != ("rust" if lang == "rust" else "c"):
+            continue
+        for m in pat.finditer(error_text or ""):
+            s = m.group(1).rsplit("::", 1)[-1]
+            if s:
+                hits.append((m.start(), s))
+    hits.sort()
+    out: list[str] = []
+    for _pos, s in hits:
+        if s not in out:
+            out.append(s)
+    return out[:6]
+
+
+def find_symbol_declaration_lines(
+    symbol: str, language: str | None, *texts: str,
+) -> list[str]:
+    """Injectable single-line declarations of ``symbol`` in ``texts``.
+
+    v1 scope — only lines that are complete declarations on their own:
+      * rust: ``use a::b::Symbol;`` / ``use a::{X, Symbol};`` /
+        ``mod symbol;``
+      * C:   prototypes (``... symbol(...);``), typedefs
+        (``typedef ... symbol;``), forward declarations
+        (``struct symbol;``)
+    Definitions (``=``, ``{`` bodies) and comment lines are excluded —
+    a partial snippet cannot be spliced verbatim. Order preserved
+    (first-seen wins; callers pass sides in preference order)."""
+    lang = (language or "").lower()
+    is_rust = lang == "rust"
+    out: list[str] = []
+    for text in texts:
+        if not text:
+            continue
+        for raw in text.splitlines():
+            s = raw.strip()
+            if not s or s.startswith(("//", "*", "/*", "#")):
+                if not (not is_rust and s.startswith("#include")):
+                    continue
+            if s in out:
+                continue
+            if is_rust:
+                if s.startswith("mod ") and s.endswith(";"):
+                    m_mod = re.match(r"mod\s+([A-Za-z_]\w*)\s*;$", s)
+                    if m_mod and m_mod.group(1) == symbol:
+                        out.append(s)
+                    continue
+                if not (s.startswith("use ") and s.endswith(";")):
+                    continue
+                if symbol not in re.findall(r"[A-Za-z_]\w*", s):
+                    continue
+                out.append(s)
+            else:
+                if "{" in s or "=" in s or not s.endswith(";"):
+                    continue
+                idents = re.findall(r"[A-Za-z_]\w*", s)
+                if symbol not in idents:
+                    continue
+                # prototype: symbol immediately before '('
+                if re.search(rf"\b{re.escape(symbol)}\s*\(", s):
+                    out.append(s)
+                elif s.startswith("typedef") and idents[-1] == symbol:
+                    out.append(s)
+                elif re.match(
+                        rf"(struct|union|enum)\s+{re.escape(symbol)}\s*;$", s):
+                    out.append(s)
+                elif not re.search(r"[({]", s) and idents[-1] == symbol:
+                    # plain variable declaration: ``Type *name;`` — the
+                    # redis-0002 shape (a dropped local's declaration is
+                    # injectable verbatim; initializers stay excluded via
+                    # the '=' check above).
+                    out.append(s)
+    return out[:4]
+
+
+def symbol_injection_point(buffer: str, language: str | None) -> int:
+    """0-based line index where an import/declaration line belongs.
+
+    rust: after the file's leading attribute/comment block and the
+    LAST contiguous ``use``/``mod`` line near the top. C: after the
+    last leading ``#include`` line. Fallback: 0 (top of file)."""
+    lang = (language or "").lower()
+    lines = (buffer or "").splitlines()
+    anchor = 0
+    if lang == "rust":
+        in_imports = False
+        for i, raw in enumerate(lines[:400]):
+            s = raw.strip()
+            if s.startswith(("use ", "mod ")) and s.endswith(";"):
+                anchor = i + 1
+                in_imports = True
+            elif in_imports and (not s or s.startswith(("//", "#["))):
+                # blank/comment INSIDE or right after the import block —
+                # keep scanning; a later use block extends the anchor.
+                continue
+            elif in_imports and s and not s.startswith(("//", "#[")):
+                break  # first real item after imports — stop
+    else:
+        for i, raw in enumerate(lines[:400]):
+            s = raw.strip()
+            if s.startswith("#include"):
+                anchor = i + 1
+    return anchor
+
+
+def inject_symbol_declaration(
+    buffer: str, decl_line: str, language: str | None,
+) -> str | None:
+    """Splice ``decl_line`` at the language-correct point, or None.
+
+    None when the declaration is already present (dedup) or malformed."""
+    s = (decl_line or "").strip()
+    if not s.endswith(";") or "\n" in s:
+        return None
+    lines = (buffer or "").splitlines()
+    norm = s.replace(" ", "")
+    for ln in lines:
+        if ln.strip().replace(" ", "") == norm:
+            return None  # already imported/declared
+    at = symbol_injection_point(buffer, language)
+    lines.insert(at, s)
+    return "\n".join(lines) + ("\n" if (buffer or "").endswith("\n") else "")
+
+
+def _dedup_rust_use_statements(text: str) -> str | None:
+    """R2 (sprint-22): remove exact-duplicate ``use`` statements.
+
+    Union-merged re-export lists can carry the same ``use`` line twice —
+    rustc rejects each duplicate with "the name `X` is defined multiple
+    times" (sea-orm-0021: 17 errors from three duplicated re-exports).
+    Duplicate identical use lines are always redundant; removing the
+    later copy never changes semantics. Scope-aware: dedup only within
+    the same indentation level (a ``use`` inside a function body is a
+    different scope from the top-level one). Returns the deduped text,
+    or None when nothing changed."""
+    lines = text.split("\n") if text else []
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    removed = 0
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("use ") and s.endswith(";"):
+            indent = len(ln) - len(ln.lstrip())
+            key = f"{indent}:{s}"
+            if key in seen:
+                removed += 1
+                continue  # drop the later duplicate
+            seen[key] = 1
+        out.append(ln)
+    if not removed:
+        return None
+    return "\n".join(out)
+
+
 def _try_repair_string_literal(
     text: str, language: str | None = None
 ) -> str | None:
@@ -4650,8 +4851,7 @@ class VerificationEngine:
                     if _repaired is not None:
                         whole = _repaired
                         imbalance_line = None
-            if imbalance_line is not None:
-                # Fix #1 — enrich the message with the brace delta so the model
+            if imbalance_line is not None:                # Fix #1 — enrich the message with the brace delta so the model
                 # knows WHICH kind of imbalance it is (extra `}` vs unclosed `{`),
                 # not just "unbalanced". The classification matches
                 # _try_balance_braces: walk the cleaned depth to see whether it
@@ -4731,6 +4931,17 @@ class VerificationEngine:
                     candidate_id=file_id, unit_id=file_id, passed=False,
                     hard_failures=hard, features=features,
                 )
+
+        # R2 (sprint-22): exact-duplicate `use` dedup (rust) — union-merged
+        # re-export lists carrying the same use line twice die on "defined
+        # multiple times". Runs before the syntax stage so the compiler
+        # validates the deduped text; rides the coherence_repair_applied
+        # feature so R1's propagation + fail-closed guard cover it.
+        if language == "rust" and self.config.require_syntax_if_supported:
+            _deduped = _dedup_rust_use_statements(whole)
+            if _deduped is not None:
+                whole = _deduped
+                features["coherence_repair_applied"] = True
 
         # Syntax check on the real, fully-spliced file.
         syntax_checked = False

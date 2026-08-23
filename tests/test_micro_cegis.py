@@ -162,7 +162,12 @@ def test_micro_cegis_missing_symbol_patch_repairs_and_re_gates(tmp_path):
     assert orch._try_micro_cegis(result) is True
     assert "Tokenizer tokenizer_;" in written["src/text_format.cc"]
     kinds = [e for e in orch.journal.events if e[0] == "micro_cegis_patch"]
-    assert kinds and kinds[0][1]["kind"] == "missing_symbol"
+    # C1 (s22): the deterministic symbol-inject stage runs BEFORE the model
+    # micro-patch and wins here (same decl, no model call); the model patch
+    # remains the fallback when no side carries the declaration.
+    assert kinds and kinds[0][1]["kind"] in ("symbol_inject", "missing_symbol")
+    if kinds[0][1]["kind"] == "symbol_inject":
+        assert kinds[0][1]["decl"] == "Tokenizer tokenizer_;"
     assert any(e[0] == "micro_cegis_succeeded" for e in orch.journal.events)
     # Defect-review pin: the patched path must be STAGED — rebase --continue
     # commits the index, so an unstaged patch would ship the pre-patch splice.

@@ -376,6 +376,37 @@ ORACLE_DIVERGENT 3/3), clickhouse-0049 sim 1.000, clickhouse-0023
 regressions converted). The five false accepts became genuine passes:
 the repaired text now reaches disk, compiles, and matches the oracle.
 
+## C1 + R2 IMPLEMENTED (2026-08-23, fix sprint items 2-3)
+
+**C1 — deterministic missing-symbol repair (unified C+Rust).**
+Pure helpers in verification.py: `parse_missing_symbols` (signature
+table incl. curly-quote gcc diagnostics — redis-0002's ‘pat’ shape),
+`find_symbol_declaration_lines` (only complete injectable lines: rust
+use/mod, C prototypes/typedefs/forwards/plain variable decls like
+`pubsubPattern *pat;`), `inject_symbol_declaration` (language-correct
+placement, dedup). Two hooks: micro-CEGIS stage 2a (before the model
+micro-patch) and `_try_symbol_injection_repair` at the file gate
+(before fault attribution — the missing decl lives OUTSIDE the units).
+Nothing invented: verbatim side/base lines only. 17 unit tests; the
+micro-CEGIS integration fixture now resolves via symbol_inject
+(`Tokenizer tokenizer_;`) with no model call.
+
+**Honest live-validation scoreboard**: the five named specimens were
+mis-triaged at shard analysis — axum-0019's "prefix `item`" is
+delimiter-cascade noise (C4-class), redis-0012 is resurrection (P5),
+sqlite-0030 a corrupted declaration (not injectable), sea-orm-0023 and
+redis-0002 coin-flipped to PASS on sampling variance with C1 unfired.
+**No live C1 conversion is claimed.** The hooks verifiably engage
+(decl_not_found journaled); the aggregate reround measures its real
+effect.
+
+**R2 — exact-duplicate `use` dedup (rust).** Scope-aware sweep in
+verify_file before the syntax stage (sea-orm-0021's 17
+"defined multiple times"); rides coherence_repair_applied so R1's
+propagation + fail-closed guard cover the deduped text. 4 tests.
+
+Gate: full suite pending before this batch lands.
+
 ## Gate fallout fixed (suite runs 1-3, 2026-08-23)
 
 Full-suite run #1 post-R1: 23 failed (14 = R1 test-double breakage,

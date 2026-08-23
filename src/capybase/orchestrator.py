@@ -10733,6 +10733,83 @@ class Orchestrator:
                 return p
         return None
 
+    def _micro_inject_missing_symbols(self, merged_paths, errors) -> bool:
+        """C1 (sprint-22): deterministic missing-symbol injection.
+
+        For each missing symbol named by the attributed compiler errors
+        (<=3), find an injectable declaration line in the pristine stage
+        sides / base (never invented), splice it at the language-correct
+        import point, and let the caller's re-gate judge the result.
+        Journaled per patch with provenance. Returns True when any file
+        was modified."""
+        from capybase.verification import (
+            find_symbol_declaration_lines,
+            inject_symbol_declaration,
+            parse_missing_symbols,
+        )
+        from capybase.verification import _parse_cc_error_location
+
+        error_text = "\n".join(errors)
+        # Language per path: the errors may mix files; resolve per symbol
+        # via its error's located stem, falling back to suffix sniffing.
+        by_symbol: dict[str, list[str]] = {}
+        for ln in errors:
+            stem, lineno = _parse_cc_error_location(ln)
+            path = self._micro_path_for_stem(merged_paths, stem)
+            lang = None
+            if path:
+                lang = "rust" if path.endswith(".rs") else (
+                    "c" if path.endswith((".c", ".h", ".cc", ".cpp", ".hpp",
+                                           ".hh", ".hxx", ".cxx")) else None)
+            for sym in parse_missing_symbols(ln, lang):
+                by_symbol.setdefault(sym, []).append(ln)
+        if not by_symbol:
+            return False
+        changed = False
+        for symbol, lns in list(by_symbol.items())[:3]:
+            stem, _lineno = _parse_cc_error_location(lns[0])
+            path = self._micro_path_for_stem(merged_paths, stem)
+            if path is None:
+                continue
+            try:
+                buffer = (Path(self.git.repo) / path).read_text(
+                    encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            language = ("rust" if path.endswith(".rs") else "c")
+            sides, base_text = self._micro_stage_sides(path)
+            # Provenance preference: the side that HAS the declaration —
+            # current, then replayed, then base (a side carrying it is
+            # branch intent; base is the floor).
+            decls = find_symbol_declaration_lines(
+                symbol, language,
+                sides.get("current", ""), sides.get("replayed", ""),
+                base_text, buffer)
+            if not decls:
+                self.journal.emit(
+                    "micro_cegis_symbol_decl_not_found",
+                    {"symbol": symbol, "path": path},
+                    step_index=self.step, path=path)
+                continue
+            new_buffer = inject_symbol_declaration(
+                buffer, decls[0], language)
+            if new_buffer is None:
+                continue
+            provenance = (
+                "current" if decls[0] in (sides.get("current") or "")
+                else "replayed" if decls[0] in (sides.get("replayed") or "")
+                else "base" if decls[0] in (base_text or "") else "buffer")
+            self._write_worktree_only(path, new_buffer, accepted=None)
+            if path not in self._micro_patched_paths:
+                self._micro_patched_paths.append(path)
+            self.journal.emit(
+                "micro_cegis_patch",
+                {"kind": "symbol_inject", "path": path, "symbol": symbol,
+                 "decl": decls[0][:120], "provenance": provenance},
+                step_index=self.step, path=path)
+            changed = True
+        return changed
+
     def _micro_stage_sides(self, path):
         try:
             ts = _true_stage_sides(self.git, path)
@@ -10779,6 +10856,23 @@ class Orchestrator:
                 {"stage": "duplicates", "error": str(exc)[:120]},
                 step_index=self.step)
         if repaired and self._micro_re_gate(result):
+            return True
+        # C1 (sprint-22): deterministic symbol injection BEFORE the model
+        # micro-patch — the compiler names the missing symbol, the sides
+        # carry its declaration (outside the conflict unit, invisible to
+        # the model). Inject verbatim, re-gate; the model stage only sees
+        # what determinism could not fix (redis-0002/0012, sqlite-0030,
+        # axum-0019, sea-orm-0023 class).
+        injected = False
+        try:
+            injected = self._micro_inject_missing_symbols(
+                merged_paths, errors)
+        except Exception as exc:  # noqa: BLE001 — repair is best-effort
+            self.journal.emit(
+                "micro_cegis_stage_failed",
+                {"stage": "symbol_inject", "error": str(exc)[:120]},
+                step_index=self.step)
+        if injected and self._micro_re_gate(result):
             return True
         patched = False
         try:
@@ -10938,6 +11032,89 @@ class Orchestrator:
             changed = True
         return changed
 
+    def _try_symbol_injection_repair(
+        self,
+        path: str,
+        original: str,
+        accepted: list[tuple[ConflictUnit, CandidateResolution]],
+        failures: list,
+        fault_idx: int,
+    ) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+        """C1 (sprint-22): deterministic symbol injection at the file gate.
+
+        When the file-gate failures name symbols the compiler couldn't
+        find, locate an injectable single-line declaration in the
+        pristine stage sides (current, then replayed) or base — content
+        that lives OUTSIDE the conflict units and is therefore invisible
+        to both the model and the attributed unit — and splice it
+        verbatim at the language-correct import point. The repaired
+        buffer is wrapped as a synthetic whole-file unit and re-validated
+        by the caller's normal gate. Returns the [(unit, cand)] list or
+        None to decline. Nothing is invented: exact side lines only."""
+        from capybase.conflict_model import CandidateResolution
+        from capybase.verification import (
+            find_symbol_declaration_lines,
+            inject_symbol_declaration,
+            parse_missing_symbols,
+        )
+
+        if not (0 <= fault_idx < len(accepted)):
+            return None
+        unit, _old_cand = accepted[fault_idx]
+        language = unit.language or (
+            "rust" if (path or "").endswith(".rs") else "c")
+        msgs = "\n".join(getattr(f, "message", "") or "" for f in failures)
+        symbols = parse_missing_symbols(msgs, language)
+        if not symbols:
+            return None
+        try:
+            spliced = _resolved_buffer(original, accepted)
+        except Exception:  # noqa: BLE001 - splice may fail on bad spans
+            return None
+        sides, base_text = self._micro_stage_sides(path)
+        for symbol in symbols[:3]:
+            decls = find_symbol_declaration_lines(
+                symbol, language,
+                sides.get("current", ""), sides.get("replayed", ""),
+                base_text or "", spliced)
+            if not decls:
+                self.journal.emit(
+                    "symbol_inject_decl_not_found",
+                    {"symbol": symbol, "path": path},
+                    step_index=self.step, path=path)
+                continue
+            repaired = inject_symbol_declaration(
+                spliced, decls[0], language)
+            if repaired is None:
+                continue
+            provenance = (
+                "current" if decls[0] in (sides.get("current") or "")
+                else "replayed" if decls[0] in (sides.get("replayed") or "")
+                else "base" if decls[0] in (base_text or "") else "buffer")
+            wf_unit = unit.model_copy(
+                update={"marker_span": None, "unit_kind": "whole_file"})
+            wf_cand = CandidateResolution(
+                candidate_id=(getattr(_old_cand, "candidate_id", unit.unit_id)
+                              or unit.unit_id) + ":symbolinject",
+                unit_id=unit.unit_id,
+                model_name="deterministic",
+                resolved_text=repaired,
+                prompt_version="deterministic_symbol_injection",
+                provenance="deterministic_symbol_injection",
+                self_reported_confidence=0.9,
+                explanation=(
+                    f"deterministic symbol injection: '{decls[0][:80]}' "
+                    f"from {provenance} side (compiler-missing symbol "
+                    f"'{symbol}')"),
+            )
+            self.journal.emit(
+                "symbol_inject_applied",
+                {"symbol": symbol, "decl": decls[0][:120],
+                 "provenance": provenance, "path": path},
+                step_index=self.step, path=path, unit_id=unit.unit_id)
+            return [(wf_unit, wf_cand)]
+        return None
+
     def _whole_file_repair(
         self,
         path: str,
@@ -10997,6 +11174,17 @@ class Orchestrator:
                     {"reason": _brace_diag},
                     step_index=self.step, path=path,
                 )
+            # C1 (sprint-22): deterministic symbol injection at the file
+            # gate — before fault attribution, because the missing symbol's
+            # declaration lives OUTSIDE the conflict units (the attributed
+            # unit cannot fix what it cannot see; axum-0019's plain-LLM
+            # retry reproduced the identical errors for exactly this
+            # reason). The compiler names the symbol; the pristine stage
+            # sides carry its declaration; splice it verbatim.
+            sym = self._try_symbol_injection_repair(
+                path, original, accepted, failures, max(0, fault_idx))
+            if sym is not None:
+                return sym
 
         # Smart blame (tiered verification): when no unit's span contains the
         # error line AND we're in tiered mode (time budget active), skip the
