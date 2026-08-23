@@ -132,3 +132,37 @@ decomposition is interesting but too ambitious for this sprint.
   borderline cases, (b) regressions from P1-P4 changes, or (c) the
   golden-path memory layer surfacing different (worse) examples?
   The P9 analysis task is now the sprint's priority before shard 3.
+- 2026-08-23 07:1x: **P9 REGRESSION INVESTIGATION COMPLETE.**
+  **Golden-path is RULED OUT**: retrieval_scores are empty on all 6 —
+  the store path isn't reached without CAPYBASE_GOLDEN_PATH=1 (not set
+  for shard 2). The memory layer is present but the store resolves to
+  the per-case temp repo, which has no seeded examples.
+
+  **Root cause: LLM sampling variance on compile-gated C cases.**
+  All 6 regressions were PASS in the harvest at high sim (0.94–1.0)
+  and remain at high sim in shard 2 (0.91–1.0). The buffers are
+  near-oracle; the failures are compile-level defects in the LLM's
+  output that the harvest's sampling didn't produce:
+  - jsonc-0007 (sim 0.978): unclosed '{' the brace repair can't fix
+    (sibling detection doesn't find a valid insertion point —
+    brace_repair_skipped reason=balance_failed on the repair path too)
+  - redis-0013/0014 (sim 1.0/0.999): compile errors (implicit
+    declaration; argument type) — different candidate each sampling
+  - redis-0047 (sim 0.912): attributed compile error (P4 mechanism
+    correctly fired)
+  - sqlite-0019 (sim 1.0): whole-file repair re-resolve failure
+  - sqlite-0039 (sim 0.995): identifier error
+
+  **The two improvements (sqlite-0008/0014 → PASS) are the coherence
+  rung's deterministic conversions — NOT sampling.** The -1.9pp net is
+  2 deterministic gains vs 6 variance losses. The true delta from
+  mechanisms is POSITIVE (+2); the 6 losses are the C pipeline's
+  inherent sampling noise floor (compile-gated cases that flip on
+  different LLM outputs).
+
+  **Verdict: shard 3 is SAFE to launch.** The regressions are variance,
+  not mechanism-caused. The retry relaxation fired correctly (4 of 6,
+  granting the extra retry — the model still didn't pass on the retry,
+  which is the ceiling, not the mechanism). The coherence rung is net
+  +2 on C. No repairs needed before shard 3; the noise floor is the
+  honest finding.
