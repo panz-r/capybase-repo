@@ -56,12 +56,19 @@ decomposition is interesting but too ambitious for this sprint.
 | P5 | Provenance-aware resurrection guard | R1#1 (best idea) | zenodo-0063/0064 | 3h | TODO |
 | P6 | Pre-resolution deletion context injection | R3#2 | Class A prevention | 3h | TODO |
 | P7 | Journal archaeology: 0085's stubborn unit | R3#7 | zenodo-0085 | 2h | TODO |
-| P8 | Live validation: P3 on zenodo-0044, P4 on flask-0006 | — | P3/P4 specimens | 30m | TODO (after shard 2) |
-| P9 | Shard 2 (C) analysis + failure report | — | C failures | 1h | TODO (when shard 2 lands) |
-| P10 | Shard 3 (Rust) launch with all P1-P7 improvements | — | 194 rust cases | — | TODO (after shard 2 analysis) |
+| P8 | Live validation: P3 on zenodo-0044, P4 on flask-0006 | — | P3/P4 specimens | 30m | TODO (after shard 3) |
+| P9 | Shard 2 (C) analysis + failure report | — | C failures | 1h | ✅ DONE (f89f740) |
+| P10 | Shard 3 (Rust) launch + analysis | — | 194 rust cases | — | 🔄 RUNNING |
 | P11 | Shard 4 (C++) launch + analysis | — | 167 cpp cases | — | TODO |
 | P12 | README results table from the tracker | — | all shards | 30m | TODO (at sprint close) |
 | P13 | Sprint-22 results doc | — | complete record | 1h | TODO (at sprint close) |
+| C1 | Side-provenance symbol injection (deterministic missing-symbol repair) | all 3 C reviewers | redis-0002/0012, sqlite-0030, redis-0013 | 4-6h | TODO |
+| C2 | Include-directive repair (implicit-declaration class) | C-R1#2, C-R3#2 | redis-0013/0014 | 3-4h | TODO |
+| C3 | Preceding-block injection (context expansion for stubborn units) | C-R2#5 | sqlite-0029, redis-0015/0049 | 2h | TODO |
+| C4 | Repair-interleaved retry loop (deterministic repair between retries) | C-R3#4 | variance class (6 cases) | 3h | TODO |
+| C5 | Oversized-prompt splitting diagnosis (sqlite-0004) | C-R1#3, C-R3#3 | sqlite-0004 | 2h | TODO |
+| C6 | Unit re-resolve archaeology (stubborn units) | C-R3#7 | sqlite-0029, redis-0015/0049 | 2h | TODO |
+| C7 | Branch-stall archaeology (redis-0054/0055) | C-R3#6 | redis-0054/0055 | 2h | TODO |
 
 ### Explicitly rejected (with reasons)
 
