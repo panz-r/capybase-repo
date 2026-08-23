@@ -191,3 +191,35 @@ See PLAN-LEDGER-S22-C-IMPROVEMENTS.md for full detail. Summary:
 Design principle: repair-layer, not reasoning-layer. The model already
 produces correct merges; these mechanisms connect compiler errors to
 side-content fixes.
+
+## Shard 3 (rust) — results + findings (2026-08-23)
+
+Run: 06:52–10:16 (3h24m), exit=0, 194/194, flights preserved.
+155 PASS (79.9% raw, -1.0pp vs s20) / 13 ESC / 24 ESCALATE_TOOLCHAIN /
+1 GATE_UNAVAILABLE / 1 ORACLE_DIVERGENT. Era-adjusted 91.2% (-1.2pp).
+Era set identical to s20 (tokio 15 + sea-orm 9) — probe fully stable.
+
+**Unlike shard 2, the regressions are NOT variance: all 4 flips are
+deterministic (3/3 identical journal trails).** 3 regressions, all
+repair-layer:
+
+- axum-0013: token_disjoint → unbalanced brace, rung can't repair,
+  whole-file repair repeats the same failed repair (no diversity) → C4.
+- axum-0019: `prefix 'item' is unknown` — symbol dropped outside the
+  conflict unit; plain_llm can't fix (fix not in unit context) → **C1
+  now has cross-language specimens (redis/sqlite C + axum Rust)**.
+- tokio-0026: insertion_union + coherence-repaired to "passing" →
+  accepted with NO compiler check in-session (pre_continue=`true`),
+  eval cargo check fails, sim 0.961 → new item **R1**.
+
+1 improvement: axum-0005 via midband-subsumption → true-side portfolio,
+deterministic, sim 1.0.
+
+| # | Item | Target | Effort | Priority |
+|---|------|--------|--------|----------|
+| R1 | Post-coherence-repair verification: a candidate that needed the coherence rung must not be accepted on coherence alone — require build-gate (when configured) or LLM verify before accept | tokio-0026 | 2-3h | P1 (rust-side) |
+
+Shard 4 (cpp, 167) launched 10:5x on the SAME mechanism state as shards
+1-3 (clean cross-shard comparison). src/ edits held until it completes —
+eval subprocesses re-import capybase per case; a mid-run edit would
+contaminate the shard.
