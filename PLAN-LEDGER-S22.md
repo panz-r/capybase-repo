@@ -304,3 +304,35 @@ in the command, never via ambient shell state.
   first minute, not after a complete-looking exit 0.
 - `docs/results/s22/meta.json` command_template corrected to include
   the env gate (it had the same omission that caused the incident).
+
+## Shard 4 (cpp) — results (2026-08-23, BASELINE FROZEN)
+
+Complete 13:54 exit=0, 167/167, flights preserved. 98 PASS (58.7%
+raw) / 20 ESC (13 are SAFE_SKIP corpus noise) / 45 ESCALATE_TOOLCHAIN
+/ 4 ORACLE_DIVERGENT. Adjusted 98/122 = 80.3%. Δ vs s20: −2.4pp raw,
+−3.7pp adjusted. Era set identical to s20 (45=45, zero churn — third
+language confirming probe stability).
+
+Flips: 6 regressions / 2 improvements.
+- **4 deterministic PASS→ORACLE_DIVERGENT** (clickhouse-0023/0049,
+  protobuf-0012/0038; sims 0.965–1.000; same sims as s20 —
+  same-shaped buffers, compiles flipped True→False):
+  clickhouse-0049's journal = tokio-0026's exact pattern
+  (lint_vs_refactor accept → coherence-repair → gate passed → eval
+  compile failed). **R1 family confirmed in a second language — R1
+  promotes to first implementation item.**
+- 2 variance flips (mixed repeats): clickhouse-0040 (ESC/PASS/ESC),
+  protobuf-0008 (ESC/DIV/PASS).
+- Improvements: protobuf-0065 ESCALATE→PASS sim 1.000 (the s19 D7
+  fixed-gate specimen); clickhouse-0013 0.843→0.998.
+
+| # | Item | Target | Effort | Priority |
+|---|------|--------|--------|----------|
+| E1 | Eval probe-on-divergence: when a marker-free, non-escalated, near-oracle buffer fails compile, probe `oracle_builds` so the GATE_UNAVAILABLE sandbox-artifact rescue can fire (it could not for the 4 cpp DIV regressions — oracle_builds was None) | cpp DIV class | 1h | P1 (eval-side) |
+
+## BASELINE FROZEN (2026-08-23 14:0x)
+
+Four-shard aggregate committed to README + docs/results/s22 extracts:
+**434/677 = 64.1% raw, 434/494 = 87.9% adjusted** (uniform formula
+PASS/(cases − era − SAFE_SKIP); s20 under same formula 65.0%/88.9%).
+Fix sprint opens now: R1 → C1 → R2 use-dedup → C4 → P5 → R3 → R4.

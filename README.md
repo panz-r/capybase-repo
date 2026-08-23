@@ -291,15 +291,21 @@ corpus runs one language at a time (Python → C → Rust → C++), each shard
 on a pinned mechanism state, with failure analysis and fixes landing
 between shards. The table below is the sprint-22 baseline round.
 
-| shard | lang | cases | PASS | ESC | era-dead | other | PASS % | era-adj % | Δ vs s20 | ran on |
+| shard | lang | cases | PASS | ESC | era-dead | other | PASS % | adj % | Δ raw | ran on |
 |-------|------|-------|------|-----|----------|-------|--------|-----------|----------|--------|
-| 1 | python | 111 | 98 | 9 | 0 | 4 | 88.3% | 88.3% | +3.6pp | `ad16e06` |
-| 2 | c | 205 | 83 | 22 | 98 | 2 | 40.5% | 78.3% | −1.9pp | `93b61de` |
+| 1 | python | 111 | 98 | 9 | 0 | 4 | 88.3% | 89.9% | +3.6pp | `ad16e06` |
+| 2 | c | 205 | 83 | 22 | 98 | 2 | 40.5% | 78.3% | −2.0pp | `93b61de` |
 | 3 | rust | 194 | 155 | 13 | 24 | 2 | 79.9% | 91.2% | −1.0pp | `943b8d5` |
-| 4 | cpp | 167 | — | — | — | — | *in flight* | | | `943b8d5` |
+| 4 | cpp | 167 | 98 | 20 | 45 | 4 | 58.7% | 80.3% | −2.4pp | `943b8d5` |
+| **total** | | **677** | **434** | **64** | **167** | **12** | **64.1%** | **87.9%** | **−0.9pp** | |
 
-"other" = WORKING/NEAR_MATCH/GATE_UNAVAILABLE/ORACLE_DIVERGENT; full
-per-shard breakdowns live in `docs/eval-results-tracker.md`.
+"other" = WORKING/NEAR_MATCH/GATE_UNAVAILABLE/ORACLE_DIVERGENT;
+"ESC" includes 16 SAFE_SKIP cases (git resolved the conflict cleanly —
+corpus noise, not resolver work). **adj %** = PASS / (cases − era-dead
+− SAFE_SKIP), one uniform formula across every row; the sprint-20
+baseline under the same formula is 440/677 = 65.0% raw and 440/495 =
+88.9% adjusted. Full per-shard breakdowns live in
+`docs/eval-results-tracker.md`.
 
 **Attribution — what these numbers are.** Every case is a real rebase
 conflict replayed live end to end against one local endpoint (provider
@@ -311,23 +317,25 @@ human resolution at token similarity ≥ 0.90. **era-dead**
 preflight probe compiles both sides and the human oracle with the
 current toolchain and all three fail identically (dependency drift,
 rustc lint drift) — these are environmental, not resolver failures, so
-the era-adjusted column excludes them from the denominator (shard 2
-also excludes one `SAFE_SKIP` case that git resolves cleanly). Non-PASS
+the adjusted column excludes them from the denominator (16 SAFE_SKIP
+cases — git resolved them cleanly — are excluded the same way). Non-PASS
 cases rerun up to 3 times and keep the majority verdict
 (`--repeat-nonpass 3`), which bounds — but does not eliminate —
-single-run sampling noise; two Rust coin-flip cases passed 1 of 3
+single-run sampling noise; several coin-flip cases passed 1-of-3
 repeats and are honestly counted as non-PASS.
 
 **Attribution — which code produced them.** Each shard ran on a pinned
 commit (the "ran on" column); mechanisms advanced only in the gaps
 between shards, and no shard ever saw a mid-run code change (verified
-by mechanism-signature absence in the flight journals). Shard 2's −1.9pp
-is a positive mechanism delta (+2 deterministic conversions) minus a
-6-case sampling-variance noise floor; shard 3's −1.0pp is 3
-deterministic repair-layer regressions minus 1 deterministic gain —
-per-case flip attribution is in `scripts/verdict_diff.py` output,
-recorded in the sprint failure reports
-(`docs/sprint22-{python,c,rust}-failures-report.md`).
+by mechanism-signature absence in the flight journals). The aggregate
+−0.9pp decomposes per shard: python +3.6pp (deterministic mechanism
+gains); C −2.0pp (positive mechanism delta of +2 deterministic
+conversions minus a 6-case sampling-variance noise floor); Rust −1.0pp
+(3 deterministic repair-layer regressions vs 1 deterministic gain);
+C++ −2.4pp (4 deterministic acceptance-gate regressions + 2 variance
+flips vs 2 gains). Per-case flip attribution is in
+`scripts/verdict_diff.py` output, recorded in the sprint failure
+reports (`docs/sprint22-{python,c,rust}-failures-report.md`).
 
 **Verifying the table.** Per-case verdicts for every shard and the
 sprint-20 baseline are committed as compact extracts under

@@ -35,7 +35,7 @@
     "shard4-cpp.jsonl": {
       "mechanism_commit": "943b8d5",
       "state": "same as shard 3 (only docs commits since)",
-      "ran": "first launch 2026-08-23 10:53 WITHOUT the size-guard env -> 80/167 subset (exit 0, looked complete; incident in PLAN-LEDGER-S22.md); relaunched 12:52 with the gate, identical cmd to shards 1-3 modulo --lang cpp (verified against longrun cmd files), --skip-existing ran the missing 87"
+      "ran": "first launch 2026-08-23 10:53 WITHOUT the size-guard env -> 80/167 subset (exit 0, looked complete; incident in PLAN-LEDGER-S22.md); relaunched 12:52 with the gate, identical cmd to shards 1-3 modulo --lang cpp (verified against longrun cmd files), --skip-existing ran the missing 87; COMPLETE 13:54 exit 0, 167/167"
     }
   },
   "baseline": {
