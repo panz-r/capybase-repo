@@ -23,7 +23,10 @@ recomputable from the committed extracts. s20 under the same formula:
 Run: first launch 10:53 WITHOUT the size-guard env (80/167 subset,
 incident logged); corrected relaunch 12:52–13:54, exit=0, 167/167,
 flights preserved. Final: 98 PASS (58.7%) / 20 ESC / 45
-ESCALATE_TOOLCHAIN / 4 ORACLE_DIVERGENT. Adjusted 98/122 = 80.3%.
+ESCALATE_TOOLCHAIN / 4 ORACLE_DIVERGENT. Adjusted 98/(167-45-13) =
+98/109 = 89.9%. (Correction 2026-08-23: an earlier version of this
+row said 80.3%, forgetting the 13 SAFE_SKIP exclusions; the uniform
+formula is PASS/(cases − era − SAFE_SKIP) throughout.)
 
 **Flip audit: 6 regressions, 2 improvements. Era set IDENTICAL to s20
 (45 = 45, zero churn — third language confirming probe stability).**

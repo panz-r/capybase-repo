@@ -296,7 +296,7 @@ between shards. The table below is the sprint-22 baseline round.
 | 1 | python | 111 | 98 | 9 | 0 | 4 | 88.3% | 89.9% | +3.6pp | `ad16e06` |
 | 2 | c | 205 | 83 | 22 | 98 | 2 | 40.5% | 78.3% | −2.0pp | `93b61de` |
 | 3 | rust | 194 | 155 | 13 | 24 | 2 | 79.9% | 91.2% | −1.0pp | `943b8d5` |
-| 4 | cpp | 167 | 98 | 20 | 45 | 4 | 58.7% | 80.3% | −2.4pp | `943b8d5` |
+| 4 | cpp | 167 | 98 | 20 | 45 | 4 | 58.7% | 89.9% | −2.4pp | `943b8d5` |
 | **total** | | **677** | **434** | **64** | **167** | **12** | **64.1%** | **87.9%** | **−0.9pp** | |
 
 "other" = WORKING/NEAR_MATCH/GATE_UNAVAILABLE/ORACLE_DIVERGENT;
