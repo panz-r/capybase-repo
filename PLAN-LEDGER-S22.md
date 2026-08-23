@@ -267,3 +267,27 @@ specimen A/B, then the next sharded round measures the aggregate):
 4. **micro-CEGIS stage-1 use-dedup** (sea-orm-0021 duplicate re-exports)
 5. **P5** provenance-aware resurrection guard (tokio-0037/0042/0046)
 6. C2/C3 and remaining P/C items as capacity allows
+
+(Execution order superseded by the rust-round synthesis: R1 → C1 → R2
+use-dedup → C4 → P5 → R3 → R4.)
+
+## Shard-4 launch incident (2026-08-23, 11:30–12:55)
+
+**Defect**: the shard-4 launch omitted `CAPYBASE_SKIP_SIZE_GUARD=1`.
+Shards 1-3 inherited the env gate from their launching shell; the
+reconstructed shard-4 command (from ps output, which does not show env)
+did not. The loader silently drops `marker_original > 48K` cases
+without it — shard 4 ran 80 of 167 (C++ has 87 guarded cases; C has
+132, python 13, rust 51, all of which ran in their shards, proving the
+gate was set for 1-3). The truncated run exited 0 at 11:30 (37min) —
+a complete-looking but incomplete subset.
+
+**Disposition**: the 80 completed cases are valid (same mechanism state
+943b8d5, same provider; the guard affects case selection only, not
+execution) and are kept. `s22-shard4b-cpp` relaunched 12:55 with the
+env gate passed explicitly (`env CAPYBASE_SKIP_SIZE_GUARD=1 ...`) +
+`--skip-existing`, running only the missing 87. README cpp row waits
+for the full 167.
+
+**Lesson recorded**: eval launches must carry the env gate explicitly
+in the command, never via ambient shell state.
