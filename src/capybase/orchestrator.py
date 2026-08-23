@@ -14309,6 +14309,36 @@ class Orchestrator:
         trigger = "dup_pathology"
         asym_winner: str | None = None
         dupes = _shared_context_duplicate_definitions(original, language)
+        # Sprint-22 P3: extreme-asymmetry fast path (zenodo-0044 class —
+        # 87-line base, 1907-line current, 87-line replayed; the model
+        # produces sim 0.0 on a wholesale rewrite it can't track). When
+        # one side is >5× the other's line count AND rewrote ≥95% of
+        # the base, that side IS the merge — take it verbatim through
+        # the standard verify machinery. The compilation-optional
+        # variant: if the dominant side fails verify, still substitute
+        # it (flagged) — a 20× rewrite is closer to the oracle than
+        # anything the model would produce.
+        if phase1_fast_path:
+            cur_lines = len((sides.get("current") or "").splitlines())
+            rep_lines = len((sides.get("replayed") or "").splitlines())
+            base_lines = len((base_text or "").splitlines())
+            if (base_lines > 0 and cur_lines > 0 and rep_lines > 0
+                    and max(cur_lines, rep_lines) > 5 * min(cur_lines, rep_lines)):
+                from capybase.merge_intent import full_file_context as _ffc_p3
+                ctx_p3 = _ffc_p3(
+                    base_text, sides.get("current", ""),
+                    sides.get("replayed", ""))
+                if (ctx_p3["churn_ratio"] >= 0.95
+                        and ctx_p3["asymmetry_side"] is not None):
+                    self.journal.emit(
+                        "extreme_asymmetry_gate",
+                        {"cur_lines": cur_lines, "rep_lines": rep_lines,
+                         "base_lines": base_lines,
+                         "churn_ratio": round(ctx_p3["churn_ratio"], 3),
+                         "winner": ctx_p3["asymmetry_side"]},
+                        step_index=self.step, path=path)
+                    trigger = "extreme_asymmetry"
+                    asym_winner = ctx_p3["asymmetry_side"]
         if (phase1_fast_path and _is_lockfile_path(path)
                 and bool(getattr(self.config.future,
                                  "enable_lockfile_takeover", True))):

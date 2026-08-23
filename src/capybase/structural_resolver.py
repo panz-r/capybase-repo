@@ -451,6 +451,17 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         if moved is not None:
             return StructuralResolution(rule="move_transplant", text=moved)
 
+    # Sprint-22 P4: insertion-inside-deletion salvage — one side deleted
+    # a block, the other inserted self-contained lines inside it. The
+    # deletion is honored; the insertion survives at the deletion site
+    # (flask-0006: a 21-line import cleanup + a 1-line import addition
+    # inside the deleted region — deterministic, no invented content).
+    if cur_changed and rep_changed:
+        salvaged = _try_insertion_within_deletion(base, current, replayed)
+        if salvaged is not None:
+            return StructuralResolution(
+                rule="insertion_within_deletion", text=salvaged)
+
     # Rule 4: both changed, but on disjoint line ranges → merge both edits.
     # If the changed-line sets (vs base) don't intersect, the edits don't
     # conflict at line granularity and we can combine them safely.
@@ -800,6 +811,107 @@ def _base_changed_lines(base: list[str], other: list[str]) -> set[int]:
         # i-indices are into base; mark the affected base range.
         changed.update(range(i1, i2))
     return changed
+
+
+def _try_insertion_within_deletion(
+    base: str, current: str, replayed: str,
+    *, min_deletion_lines: int = 5,
+) -> str | None:
+    """Sprint-22 P4: deterministic salvage for insertion-inside-deletion.
+
+    When one side DELETED a contiguous block (pure deletion, no
+    additions) and the other side INSERTED lines strictly inside that
+    block's base span, the correct merge honors the deletion. The
+    inserted lines' fate depends on whether they reference content
+    from the deleted region:
+
+    - If the inserted lines are self-contained (no reference to names
+      defined in the deleted block): re-insert them at the deletion
+      site — the deleting side accepted the surrounding context, and
+      the inserting side's addition can stand alone.
+    - If they reference deleted content: decline (the addition depends
+      on code the other side removed — the LLM or escalation handles
+      this genuinely ambiguous shape).
+
+    Returns the resolved text, or None to decline.
+    """
+    import difflib as _dl
+
+    bl = (base or "").splitlines()
+    if len(bl) < min_deletion_lines:
+        return None
+
+    for deleter_label, deleter_text, inserter_text in (
+            ("current", current, replayed),
+            ("replayed", replayed, current)):
+        dl_ = (deleter_text or "").splitlines()
+        il = (inserter_text or "").splitlines()
+
+        # Find ALL deletion opcodes; merge into a deletion ZONE (gaps
+        # allowed — the deleter may have kept a few surviving lines
+        # interspersed). The zone is [min_del_start, max_del_end).
+        del_ops = [
+            (i1, i2) for tag, i1, i2, _, _ in _dl.SequenceMatcher(
+                None, bl, dl_, autojunk=False).get_opcodes()
+            if tag == "delete"]
+        if not del_ops:
+            continue
+        total_deleted = sum(i2 - i1 for i1, i2 in del_ops)
+        if total_deleted < min_deletion_lines:
+            continue
+        zone = (min(i1 for i1, _ in del_ops), max(i2 for _, i2 in del_ops))
+        d_i1, d_i2 = zone
+        deleted_block = bl[d_i1:d_i2]
+
+        # Check the inserter's diff vs base: insertions inside the ZONE
+        ins_lines = []
+        for tag, i1, i2, j1, j2 in _dl.SequenceMatcher(
+                None, bl, il, autojunk=False).get_opcodes():
+            if tag != "insert":
+                continue
+            # insertion anchored at base position i1 — inside the zone?
+            if d_i1 < i1 <= d_i2:
+                ins_lines.extend(il[j1:j2])
+        if not ins_lines:
+            continue
+
+        # Check whether the inserted lines reference any identifier
+        # defined in the deleted block
+        import re as _re_p4
+        deleted_names = set(
+            _re_p4.findall(
+                r"(?:def|class|function|struct|import|from)\s+([A-Za-z_]\w*)",
+                "\n".join(deleted_block)))
+        # Only check names that were actually DELETED (not the survivors
+        # the deleter kept — a reference to a surviving import is fine)
+        deleted_only = bl[d_i1:d_i2]
+        surviving = set(dl_)  # lines the deleter kept
+        actually_deleted_names = {
+            n for n in deleted_names
+            if any(n in ln for ln in deleted_only
+                   if ln not in surviving)}
+        inserted_text = "\n".join(ins_lines)
+        for name in actually_deleted_names:
+            if name in inserted_text:
+                return None  # the insertion depends on deleted content
+
+        # Resolution: the deleting side's text (deletion honored), with
+        # the inserted lines re-inserted at the zone's start position in
+        # the deleter's output (the deleting side already accepted the
+        # surrounding context)
+        result_lines = []
+        result_lines_inserted = False
+        insert_pos = d_i1
+        for i, ln in enumerate(dl_):
+            if i >= insert_pos and not result_lines_inserted:
+                result_lines.extend(ins_lines)
+                result_lines_inserted = True
+            result_lines.append(ln)
+        if not result_lines_inserted:
+            result_lines.extend(ins_lines)  # append at end if start never hit
+        return "\n".join(result_lines)
+
+    return None
 
 
 def _detect_move_edit_shape(
