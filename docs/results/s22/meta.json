@@ -1,0 +1,47 @@
+{
+  "generated": "2026-08-23",
+  "description": "Sprint-22 sharded-harvest per-case verdict extracts (compact). One JSON object per line, sorted by id. Full audit trail (prompts, responses, candidate snapshots, journals) lives on the eval machine under /var/tmp/capybase-live/s22/flights-shard*/ and is not committed.",
+  "schema": {
+    "id": "corpus case id",
+    "language": "python|c|rust|cpp",
+    "dataset": "upstream project the conflict was mined from",
+    "verdict": "PASS|WORKING|NEAR_MATCH|ORACLE_DIVERGENT|ESCALATE|ESCALATE_TOOLCHAIN|GATE_UNAVAILABLE",
+    "terminal_reason": "why a non-PASS run stopped (REPAIR_FAILURE, TIMEOUT_CONVERGENCE, SAFE_STOP, SAFE_SKIP, ...)",
+    "matches_oracle": "token similarity to the human resolution",
+    "escalated": "the session aborted back to the pre-rebase HEAD",
+    "elapsed": "wall seconds",
+    "repeat_verdicts": "per-repeat verdicts under --repeat-nonpass 3 (majority kept)",
+    "reason": "harness note"
+  },
+  "corpus": "677 real-world rebase conflicts mined from upstream histories; each case carries both sides, the merge base, and the actual human resolution as oracle",
+  "endpoint": "local OpenAI-compatible endpoint via provider config 'nova-gemma4' (host not tracked; see docs/PROVIDER_CONFIG.md)",
+  "command_template": "scripts/longrun.sh s22-shard<N>-<lang> .venv/bin/python scripts/live_eval_realworld.py --provider nova-gemma4 --lang <lang> --repeat-nonpass 3 --skip-existing --out <results>.json --preserve-flights <flights-dir>",
+  "shards": {
+    "shard1-python.jsonl": {
+      "mechanism_commit": "ad16e06",
+      "state": "sprint-21 stack + pre-eval items 1&2 (unused-function deletion, string-literal repair)",
+      "ran": "2026-08-22 21:37 -> 2026-08-23 00:22, exit 0"
+    },
+    "shard2-c.jsonl": {
+      "mechanism_commit": "93b61de",
+      "state": "+ P1 SAFE_SKIP classification, P2 adaptive retry relaxation",
+      "ran": "2026-08-23 00:36 -> 04:00, exit 0"
+    },
+    "shard3-rust.jsonl": {
+      "mechanism_commit": "943b8d5",
+      "state": "+ P3 extreme-asymmetry fast path, P4 insertion-within-deletion salvage",
+      "ran": "2026-08-23 06:52 -> 10:16, exit 0"
+    },
+    "shard4-cpp.jsonl": {
+      "mechanism_commit": "943b8d5",
+      "state": "same as shard 3 (only docs commits since)",
+      "ran": "in flight at extract time; final extract lands with the README row"
+    }
+  },
+  "baseline": {
+    "file": "s20-harvest-baseline.jsonl",
+    "what": "sprint-20 full-corpus harvest (677 cases, single mechanism state), the delta reference for every PASS% comparison"
+  },
+  "verification": "see README 'Results' section; every number in the table recomputes from these extracts with the commands given there",
+  "no_midrun_contamination": "each mechanism change landed in a between-shards gap; verified by mechanism-signature absence in flight journals (P4 signature absent from all shard-2 flights)"
+}

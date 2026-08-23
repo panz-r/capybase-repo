@@ -284,27 +284,76 @@ verifier-model critic is wired and default-on. RAG experience replay
 (`[memory]`) and self-consistency are wired but off by default. Mutation
 testing is a stub.
 
-### Corpus census
+### Results
 
-677 real-world rebase conflicts mined from upstream histories — each case
-carries both sides, the merge base, and the actual human resolution as the
-oracle — replayed live end to end against a local gemma-4-E4B endpoint
-(8192-token context). PASS = marker-free, passes the compile/structural
-gate, and matches the human resolution at token similarity ≥ 0.90.
+Full-corpus results are measured by **sharded harvest**: the 677-case
+corpus runs one language at a time (Python → C → Rust → C++), each shard
+on a pinned mechanism state, with failure analysis and fixes landing
+between shards. The table below is the sprint-22 baseline round.
 
-- **Rust** (tokio, axum, sea-orm, clap, serde; 194 cases): 174 PASS
-  (2026-08-18 census including the winner floor and sprint-17 fixes, each
-  flipped case validated by majority-of-3 rerun). Remaining: guard/budget
-  stops, oversized-file limits, one genuine divergence.
-- **C/C++** (protobuf, clickhouse, nlohmann-json, fmt; 167 cases): 143
-  PASS, 12 git-resolved skips (2026-08-17/18 census). Remaining: 3
-  oversized-file timeouts, 5 guard/budget stops, 2 content micro-defects
-  at sim ≥ 0.996 whose oracles pass the same build gate.
-- **C** (redis, sqlite, json-c; 205 cases): json-c subset measured — 16 of
-  17 PASS; full redis/sqlite censuses pending.
-- **Python** (flask, zenodo, requests; 111 cases): partial census (first
-  30 cases) — 25 PASS.
+| shard | lang | cases | PASS | ESC | era-dead | other | PASS % | era-adj % | Δ vs s20 | ran on |
+|-------|------|-------|------|-----|----------|-------|--------|-----------|----------|--------|
+| 1 | python | 111 | 98 | 9 | 0 | 4 | 88.3% | 88.3% | +3.6pp | `ad16e06` |
+| 2 | c | 205 | 83 | 22 | 98 | 2 | 40.5% | 78.3% | −1.9pp | `93b61de` |
+| 3 | rust | 194 | 155 | 13 | 24 | 2 | 79.9% | 91.2% | −1.0pp | `943b8d5` |
+| 4 | cpp | 167 | — | — | — | — | *in flight* | | | `943b8d5` |
 
-Single-run census noise on this endpoint is ±5 cases (bimodal
-empty-response lottery); regression attribution reruns non-PASS cases and
-keeps the majority verdict (`--repeat-nonpass`).
+"other" = WORKING/NEAR_MATCH/GATE_UNAVAILABLE/ORACLE_DIVERGENT; full
+per-shard breakdowns live in `docs/eval-results-tracker.md`.
+
+**Attribution — what these numbers are.** Every case is a real rebase
+conflict replayed live end to end against one local endpoint (provider
+config `nova-gemma4`; hosts are never tracked — see
+`docs/PROVIDER_CONFIG.md`). A case is **PASS** when the resolution is
+marker-free, passes the compile/structural gate, and matches the actual
+human resolution at token similarity ≥ 0.90. **era-dead**
+(`ESCALATE_TOOLCHAIN`) cases are un-passable by construction: the
+preflight probe compiles both sides and the human oracle with the
+current toolchain and all three fail identically (dependency drift,
+rustc lint drift) — these are environmental, not resolver failures, so
+the era-adjusted column excludes them from the denominator (shard 2
+also excludes one `SAFE_SKIP` case that git resolves cleanly). Non-PASS
+cases rerun up to 3 times and keep the majority verdict
+(`--repeat-nonpass 3`), which bounds — but does not eliminate —
+single-run sampling noise; two Rust coin-flip cases passed 1 of 3
+repeats and are honestly counted as non-PASS.
+
+**Attribution — which code produced them.** Each shard ran on a pinned
+commit (the "ran on" column); mechanisms advanced only in the gaps
+between shards, and no shard ever saw a mid-run code change (verified
+by mechanism-signature absence in the flight journals). Shard 2's −1.9pp
+is a positive mechanism delta (+2 deterministic conversions) minus a
+6-case sampling-variance noise floor; shard 3's −1.0pp is 3
+deterministic repair-layer regressions minus 1 deterministic gain —
+per-case flip attribution is in `scripts/verdict_diff.py` output,
+recorded in the sprint failure reports
+(`docs/sprint22-{python,c,rust}-failures-report.md`).
+
+**Verifying the table.** Per-case verdicts for every shard and the
+sprint-20 baseline are committed as compact extracts under
+`docs/results/` (`s22/*.jsonl` + `s20-harvest-baseline.jsonl`, schema in
+`s22/meta.json`). From a clone:
+
+```bash
+# recount any shard's verdicts
+python3 -c "import json,collections;print(collections.Counter(json.loads(l)['verdict'] for l in open('docs/results/s22/shard3-rust.jsonl')))"
+
+# audit every flip against the sprint-20 baseline
+.venv/bin/python scripts/verdict_diff.py --new docs/results/s22/shard3-rust.jsonl --old docs/results/s20-harvest-baseline.jsonl
+```
+
+The full audit trail (prompts, model responses, candidate snapshots,
+per-session journals with every mechanism decision) is preserved per
+shard under `/var/tmp/capybase-live/s22/flights-shard*/` on the eval
+machine — too large to track, but every table number recomputes from
+the committed extracts alone.
+
+### Corpus
+
+677 real-world rebase conflicts mined from upstream histories — each
+case carries both sides, the merge base, and the actual human resolution
+as the oracle: Python (flask, zenodo, requests; 111), C (redis, sqlite,
+json-c; 205), Rust (tokio, axum, sea-orm, clap, serde; 194), C/C++
+(protobuf, clickhouse, nlohmann-json, fmt; 167). Earlier per-language
+censuses (sprints 17–20) and their methodology notes live in
+`docs/eval-results-tracker.md` and the sprint results docs.

@@ -26,10 +26,15 @@ _VERDICT_ORDER = {
 
 
 def _load(path: str) -> dict[str, dict]:
+    text = Path(path).read_text(encoding="utf-8")
     try:
-        rs = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+        rs = json.loads(text)
+    except json.JSONDecodeError:
+        # JSONL extract (docs/results/*): one case object per line
+        try:
+            rs = [json.loads(line) for line in text.splitlines() if line.strip()]
+        except json.JSONDecodeError:
+            return {}
     return {r.get("id"): r for r in rs if r.get("id")}
 
 
