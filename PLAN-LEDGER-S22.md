@@ -219,7 +219,38 @@ deterministic, sim 1.0.
 |---|------|--------|--------|----------|
 | R1 | Post-coherence-repair verification: a candidate that needed the coherence rung must not be accepted on coherence alone — require build-gate (when configured) or LLM verify before accept | tokio-0026 | 2-3h | P1 (rust-side) |
 
-Shard 4 (cpp, 167) launched 10:5x on the SAME mechanism state as shards
-1-3 (clean cross-shard comparison). src/ edits held until it completes —
+Shard 4 (cpp, 167) launched 10:5x. src/ edits held until it completes —
 eval subprocesses re-import capybase per case; a mid-run edit would
 contaminate the shard.
+
+## Baseline-freeze protocol (user directive, 2026-08-23)
+
+Once shard 4 lands: the 4-shard aggregate is the **README baseline row**.
+After that point, land as many fixes as possible between shard rounds —
+that is the purpose of sharding.
+
+**Mechanism-state mapping (verified: no mid-run contamination; each
+change landed in a between-shards gap; P4 signature absent from shard-2
+flights, P1 SAFE_SKIP active in shard 2 only):**
+
+| shard | ran on | state |
+|-------|--------|-------|
+| 1 python | ad16e06 | s21 stack + pre-eval items 1&2 |
+| 2 c | 93b61de | + P1 SAFE_SKIP, P2 retry relaxation |
+| 3 rust | 943b8d5 | + P3 extreme-asymmetry, P4 insertion-within-deletion |
+| 4 cpp | 943b8d5 | same as shard 3 (docs-only commits since) |
+
+README row cites the per-shard commits (footnote) and totals as the
+"s22 sharded baseline". The post-fix reround runs uniform on a single
+commit — that becomes the second row.
+
+**Fix-landing order after shard 4** (fixes validate via targeted
+specimen A/B, then the next sharded round measures the aggregate):
+
+1. **C1** side-provenance symbol injection (P0; redis-0002/0012,
+   sqlite-0030, axum-0019 cross-language)
+2. **R1** post-coherence-repair verification gate (tokio-0026)
+3. **C4** repair-interleaved retry diversity (axum-0013, sea-orm-0011)
+4. **micro-CEGIS stage-1 use-dedup** (sea-orm-0021 duplicate re-exports)
+5. **P5** provenance-aware resurrection guard (tokio-0037/0042/0046)
+6. C2/C3 and remaining P/C items as capacity allows
