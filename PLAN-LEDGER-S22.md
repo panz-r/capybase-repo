@@ -117,3 +117,18 @@ decomposition is interesting but too ambitious for this sprint.
   version required one contiguous deletion block; flask-0006's shape
   has multiple gaps with surviving lines — the rewrite merges all
   deletion opcodes into a zone.
+- 2026-08-23 06:5x: **SHARD 2 (C) COMPLETE — 40.5% raw, a -1.9pp
+  regression that needs investigation.** 83/205 PASS vs harvest 87/205
+  (42.4%). Era census 98 (harvest 97; redis-0038 newly classified).
+  **9 flips**: 2 improvements (sqlite-0008/0014 → PASS — the coherence
+  rung's perfect-buffer class converting, exactly as designed) vs
+  **6 regressions (PASS → ESCALATE)** — the concerning signal:
+  - jsonc-0007: splice coherence unbalanced braces (the rung fired but
+    the repair failed?)
+  - redis-0013/0014/0047: compile errors on cases that passed before
+  - sqlite-0019: whole-file repair failure
+  - sqlite-0039: expected identifier (compile)
+  These 6 need journal analysis: are they (a) sampling variance on
+  borderline cases, (b) regressions from P1-P4 changes, or (c) the
+  golden-path memory layer surfacing different (worse) examples?
+  The P9 analysis task is now the sprint's priority before shard 3.
