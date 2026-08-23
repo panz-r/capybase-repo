@@ -9,7 +9,7 @@ when it completes; the README table is generated from this file.
 |-------|------|-------|------|-----|-----|------|------|-----|------|-------|-------------|-----------------|--------|
 | 1 | python | 111 | 98 | 9 | 0 | 2 | 2 | 0 | 0 | **88.3%** | **+3.6pp** | 4/1 | ✅ DONE |
 | 2 | c | 205 | 83 | 22 | 98 | 1 | 0 | 0 | 1 | **40.5%** | **-1.9pp** | 2/6 ⚠️ | ✅ DONE |
-| 3 | rust | 194 | — | — | — | — | — | — | — | — | — | — | pending analysis |
+| 3 | rust | 194 | — | — | — | — | — | — | — | — | — | — | ⏳ ready to launch |
 | 4 | cpp | 167 | — | — | — | — | — | — | — | — | — | — | ⏳ queued |
 
 ## Pre-eval rounds (selected samples, not full shards)
