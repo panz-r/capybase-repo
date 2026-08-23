@@ -257,12 +257,18 @@ def load_cases(
     limit: int | None = None,
     lang: str | None = None,
     case_ids: list[str] | None = None,
+    dropped_ids: list[str] | None = None,
 ) -> list[Case]:
     """Load realworld conflict cases from extracted-testdata.
 
     ``case_ids`` (when given) selects a subset by exact id match — used by the
     ``--case`` flag for targeted single-case reruns (e.g. verifying a fix
-    against one case in seconds rather than a full 5-hour run)."""
+    against one case in seconds rather than a full 5-hour run).
+
+    ``dropped_ids`` (when a list is passed) receives the ids of cases the
+    48K size guard excluded, so the caller can surface a subset-run warning
+    (the shard-4 first-launch incident: 80/167 ran while exit=0 looked
+    complete)."""
     from capybase.orchestrator import _LOCKFILE_TAKEOVER_NAMES as _LOCK_NAMES
     cases: list[Case] = []
     for f in sorted(TESTDATA.glob("*.json")):
@@ -315,6 +321,8 @@ def load_cases(
         _skip_guard = os.environ.get("CAPYBASE_SKIP_SIZE_GUARD", "") == "1"
         if (not _skip_guard and not _is_lockfile
                 and len(c.marker_original) > 48 * 1024):
+            if dropped_ids is not None:
+                dropped_ids.append(c.id)
             continue
         cases.append(c)
         if limit and len(cases) >= limit:
@@ -1646,7 +1654,17 @@ def main():
     if flights_dir is not None:
         flights_dir.mkdir(parents=True, exist_ok=True)
 
-    cases = load_cases(limit=args.limit, lang=args.lang, case_ids=args.case)
+    dropped: list[str] = []
+    cases = load_cases(limit=args.limit, lang=args.lang, case_ids=args.case,
+                       dropped_ids=dropped)
+    if dropped:
+        print("!" * 72)
+        print(f"!! SUBSET RUN: the 48K size guard DROPPED {len(dropped)} cases"
+              f" (lang={args.lang or 'all'}) — this run is INCOMPLETE for the corpus")
+        print("!! Full-corpus runs must launch with: env CAPYBASE_SKIP_SIZE_GUARD=1 ...")
+        print("!! (Incident 2026-08-23: shard-4 first launch ran 80/167 this way,"
+              " exit=0, looked complete)")
+        print("!" * 72, flush=True)
     print(f"loaded {len(cases)} cases (lang={args.lang or 'all'})")
     if not cases:
         print("no cases; exiting"); return
@@ -1964,6 +1982,9 @@ def main():
 
     out = Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps([r.__dict__ for r in results], indent=2))
+    if dropped:
+        print(f"\n!! SUBSET RUN — size guard dropped {len(dropped)} corpus cases;"
+              " these results are NOT a full shard")
     print(f"\nfull results: {out}")
 
 

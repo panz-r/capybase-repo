@@ -291,3 +291,16 @@ for the full 167.
 
 **Lesson recorded**: eval launches must carry the env gate explicitly
 in the command, never via ambient shell state.
+
+**Post-incident verification + repairs (12:55-13:05)**:
+- longrun `cmd` files prove shards 1-3 carried exactly ONE env gate
+  (`CAPYBASE_SKIP_SIZE_GUARD=1`) and shard4b's command is identical to
+  theirs modulo `--lang cpp` — no other ambient state was lost; the
+  4b relaunch is provably uniform. No second relaunch needed.
+- Harness repaired: `load_cases(dropped_ids=...)` + SUBSET RUN banner
+  at startup and in the final summary when the 48K guard drops cases
+  (verified: without gate 80 loaded/87 dropped/banner fires; with gate
+  167/0/silent). A future missing-env launch is now visible in the
+  first minute, not after a complete-looking exit 0.
+- `docs/results/s22/meta.json` command_template corrected to include
+  the env gate (it had the same omission that caused the incident).

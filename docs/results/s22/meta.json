@@ -15,7 +15,7 @@
   },
   "corpus": "677 real-world rebase conflicts mined from upstream histories; each case carries both sides, the merge base, and the actual human resolution as oracle",
   "endpoint": "local OpenAI-compatible endpoint via provider config 'nova-gemma4' (host not tracked; see docs/PROVIDER_CONFIG.md)",
-  "command_template": "scripts/longrun.sh s22-shard<N>-<lang> .venv/bin/python scripts/live_eval_realworld.py --provider nova-gemma4 --lang <lang> --repeat-nonpass 3 --skip-existing --out <results>.json --preserve-flights <flights-dir>",
+  "command_template": "scripts/longrun.sh s22-shard<N>-<lang> env CAPYBASE_SKIP_SIZE_GUARD=1 .venv/bin/python scripts/live_eval_realworld.py --provider nova-gemma4 --lang <lang> --repeat-nonpass 3 --skip-existing --out <results>.json --preserve-flights <flights-dir> (CAPYBASE_SKIP_SIZE_GUARD=1 is REQUIRED: without it the loader silently drops >48K-marker cases — 87 of 167 cpp — and the run exits 0 as an incomplete subset; the harness now prints a SUBSET RUN banner)",
   "shards": {
     "shard1-python.jsonl": {
       "mechanism_commit": "ad16e06",
@@ -35,7 +35,7 @@
     "shard4-cpp.jsonl": {
       "mechanism_commit": "943b8d5",
       "state": "same as shard 3 (only docs commits since)",
-      "ran": "in flight at extract time; final extract lands with the README row"
+      "ran": "first launch 2026-08-23 10:53 WITHOUT the size-guard env -> 80/167 subset (exit 0, looked complete; incident in PLAN-LEDGER-S22.md); relaunched 12:52 with the gate, identical cmd to shards 1-3 modulo --lang cpp (verified against longrun cmd files), --skip-existing ran the missing 87"
     }
   },
   "baseline": {
