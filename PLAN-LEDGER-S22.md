@@ -217,7 +217,20 @@ deterministic, sim 1.0.
 
 | # | Item | Target | Effort | Priority |
 |---|------|--------|--------|----------|
-| R1 | Post-coherence-repair verification: a candidate that needed the coherence rung must not be accepted on coherence alone — require build-gate (when configured) or LLM verify before accept | tokio-0026 | 2-3h | P1 (rust-side) |
+| R1 | Post-coherence-repair verification: a candidate modified by ANY deterministic repair rung carries `provisional=True`; acceptance requires the baseline-relative per-file compile gate (never coherence alone) | tokio-0026 | 1-2h | **P0** (all 3 reviewers; safety hole) |
+| R2 | `use`-statement dedup sweep: post-splice exact-duplicate removal + in-brace item dedup; micro-CEGIS stage-1 response to `defined multiple times` (precedent: s17 #include dedup) | sea-orm-0021 | 1-2h | P1 (all 3) |
+| R3 | Within-session best-of-N candidate selection: on compile-gate failure + retry budget remaining, up to 2 extra diverse candidates, ALL fully validated; paired A/B before default-on | axum-0002-class coin-flips | 2-3h | P4 |
+| R4 | Near-floor sbcr acceptance: fixed pre-registered window (fitness ≥ floor − 0.02 AND retry-cap active) → one extra attempt; full validation still applies; conversions count as WORKING where sim < 0.90, never PASS | sea-orm-0011 | 1h | P5 |
+
+Rust-round reviewer synthesis (full detail: PLAN-LEDGER-S22-R-IMPROVEMENTS.md):
+R3-most-useful (within-session best-of-N is the legitimate form; parent-
+provenance P5 the most precise), R1-strong-diagnosis-but-two-integrity-
+lapses (cross-repeat best-of-N threshold tuned to 0.94 to convert a named
+case; fitness floor fitted to the observed 0.591 — both REJECTED as
+metric gaming), R2-best-vocabulary (Compiler-is-Authority flag; span-
+intersection adopted as audit field only; ~98% projection not adopted —
+honest projection ~93-95% era-adjusted). C1/C4 confirmed cross-language;
+implementation order after baseline freeze: R1 → C1 → R2 → C4 → P5 → R3 → R4.
 
 Shard 4 (cpp, 167) launched 10:5x. src/ edits held until it completes —
 eval subprocesses re-import capybase per case; a mid-run edit would
