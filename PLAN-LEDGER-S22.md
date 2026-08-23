@@ -166,3 +166,21 @@ decomposition is interesting but too ambitious for this sprint.
   which is the ceiling, not the mechanism). The coherence rung is net
   +2 on C. No repairs needed before shard 3; the noise floor is the
   honest finding.
+
+## C-shard improvement plan (from three-reviewer synthesis)
+
+See PLAN-LEDGER-S22-C-IMPROVEMENTS.md for full detail. Summary:
+
+| # | Item | Target | Effort | Priority |
+|---|------|--------|--------|----------|
+| C1 | Side-provenance symbol injection | redis-0002/0012, sqlite-0030 | 4-6h | P0 |
+| C2 | Include-directive repair | redis-0013/0014 | 3-4h | P1 |
+| C3 | Preceding-block injection | stubborn units | 2h | P2 |
+| C4 | Repair-interleaved retry loop | variance class | 3h | P3 |
+| C5 | Oversized-prompt splitting diagnosis | sqlite-0004 | 2h | P4 |
+| C6 | Unit re-resolve archaeology | sqlite-0029, redis-0015/0049 | 2h | P5 |
+| C7 | Branch-stall archaeology | redis-0054/0055 | 2h | P6 |
+
+Design principle: repair-layer, not reasoning-layer. The model already
+produces correct merges; these mechanisms connect compiler errors to
+side-content fixes.
