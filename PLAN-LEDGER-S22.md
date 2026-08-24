@@ -606,3 +606,64 @@ C1 already searches FULL side files (stage blobs) + the spliced buffer
 fast-fail already exists (resolution layer 6); #endif positional
 repair, use-dedup, repair rotation, resolved-file provenance all
 landed pre-reround.
+
+## Sprint-23 plan addendum — operational and safety items (2026-08-24)
+
+Proposed from our own operational history (the reviewers structurally
+cannot see these); added before implementation begins.
+
+### Gate 0 — reround flip audit PREEMPTS new mechanisms
+
+The reround is the first full-corpus exposure of R1/C1/C4/P5/E1.
+Before any sprint-23 mechanism lands:
+1. verdict_diff reround vs the frozen s22 extracts AND vs s20 — every
+   flip attributed (mechanism / variance / era / E1-reclassification).
+2. **A fix-sprint REGRESSION preempts the plan**: a mechanism-caused
+   PASS→non-PASS flip is repaired before D1/C1b/C3 land. The python
+   shard already shows 97 PASS vs 98 baseline with WORKING 2→4 — one
+   flip to examine.
+3. Never-declassify invariant (era-sweep E2): no prior PASS may become
+   era-dead.
+
+### Zero-cost safety audits (journal mining, no new code)
+
+The fix-sprint mechanisms are validated on their CONVERT specimens but
+their false-accept surfaces are unmeasured:
+- **P5-downgrade cross-tab**: every reround `resurrection_downgrade`
+  event vs the case's final verdict/sim — confirms no downgraded
+  resurrection diverged from the oracle (the guard's false-negative
+  surface).
+- **C1-injection cross-tab**: every `symbol_inject` patch vs final
+  verdict/sim — confirms injected content never produced a
+  wrong-but-compiling accept.
+Both run on the reround flights the day they land; results go in the
+sprint-23 results doc before any new mechanism is trusted on top.
+
+### Pre-registered acceptance criteria (written before implementation)
+
+- **D1**: >=1 of protobuf-0034/0051, jsonc-0016 converts with a
+  journal-attributed accumulating chain; no new hard failure class.
+- **C1b**: redis-0013 converts via derived prototype; sqlite-0030
+  converts only if the correct line exists verbatim/derivable — no
+  invented content, ever; zero sim-drops on any replace.
+- **C3**: >=1 of redis-0015/0049, sqlite-0029, zenodo-0085 converts;
+  prompt sizes stay under the 8K window on the cohort.
+- **R3'/R3/R4**: net coin-flip conversions positive with no
+  never-declassify violation; R3 accepts only through FULL validation
+  (fast gate is pre-screen only).
+- Each mechanism: paired A/B on its named specimens, then one full
+  suite gate per landing batch (no overlapping runs — the suite-overlap
+  rule).
+
+### Un-owned archaeology made explicit (P4 tier)
+
+C7 (redis-0054/0055 branch-stall) joins C5 (sqlite-0004 oversized) as
+the two named diagnosis tasks; sqlite-0040 truncation and zenodo-0085
+stubborn-unit ride C3/P7. Comment-phase LLM 400s (non-blocking, seen
+on axum-0005) go to the backlog for a single-retry hardening.
+
+### Execution order
+
+Gate 0 → D1 + C1b (one batch, one gate) → C3 + R3' (one batch) →
+C1c → R3/R4 → C5/C7 diagnosis → specimen validations per batch →
+sprint-23 reround (README row 3).
