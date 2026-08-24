@@ -1293,3 +1293,22 @@ regressions); 2 honest class moves.
 
 Mechanism regression count across python+c+rust: ZERO. Fix-sprint
 validated at shard scale. cpp (the last shard) is running.
+
+### R5 final composition (user directive): presentation × feedback, together
+
+The ladder does NOT replace feedback-driven retries — it composes
+with them. Each retry is CEGIS/REPL-shaped: the model gets BOTH (a)
+new information — the compiler feedback, well presented (verbatim
+gcc/rustc diagnostics, located, plus D1's accumulated history of
+what was tried and failed so the same error is never re-introduced)
+— and (b) a new presentation of the problem+feedback from the
+calibration palette. A retry that only changes presentation repeats
+the blind spot; a retry that only appends feedback re-presents the
+same trap. The measured 0.85-0.95 prompt similarity shows today's
+loop does (a) partially and (b) never. The retry formula:
+
+  attempt N = profile_variant(N) + accumulated_feedback(N)
+
+Feedback presentation is itself part of the craft: diagnostics
+verbatim with file:line anchors, the failing candidate's relevant
+region, and the delta from the prior attempt — the REPL discipline.
