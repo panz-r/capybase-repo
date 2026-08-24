@@ -1141,3 +1141,13 @@ Read-only. Two checks, one correction:
   confirmed at population scale.
 - axum-0005's couldn't-read flake: absent from r2 reasons so far
   (single occurrence; remains env-attributed).
+
+### Addendum: the couldn't-read flake is SYSTEMATIC (2 cases)
+
+axum-0005 AND axum-0033 both failed in r2 with `couldn't read` on the
+SAME file (axum/src/routing/method_routing.rs) — an environment
+defect specific to that file's cargo context in the temp worktree,
+not a one-off. Gate-0 attribution updates: BOTH rust regressions are
+non-mechanism (0005 = this env defect; 0021 = the D2 crash bug). The
+fix belongs in the eval's materialization/crate-source snapshot
+(diagnose at reround close; both cases re-runnable via --case).
