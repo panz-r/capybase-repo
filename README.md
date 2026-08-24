@@ -290,21 +290,23 @@ The 677-case corpus runs as a sharded harvest (one language at a time,
 fixes landing between rounds). Current state — all cases on the
 uniform commit `e7e7eb7`; Δ is versus the prior full round.
 
-| lang | cases | PASS | WORKING | era-dead | adj % | P+W adj % | Δ adj |
-|------|-------|------|---------|----------|-----------|-----------|-------|
-| python | 111 | 97 | 4 | 0 | 89.0% | 92.7% | −0.9pp |
-| c | 205 | 88 | 1 | 97 | 82.2% | 83.2% | +3.9pp |
-| rust | 194 | 157 | 0 | 24 | 92.4% | 92.4% | +1.2pp |
-| cpp | 167 | 102 | 1 | 45 | 93.6% | 94.5% | +3.7pp |
-| **total** | **677** | **444** | **6** | **166** | **89.7%** | **90.9%** | **+1.8pp** |
+| lang | cases | PASS | WORKING | era-dead | PASS % | adj % | P+W adj % | Δ adj |
+|------|-------|------|---------|----------|--------|-----------|-----------|-------|
+| python | 109 | 97 | 4 | 0 | 89.0% | 89.0% | 92.7% | −0.9pp |
+| c | 204 | 88 | 1 | 97 | 43.1% | 82.2% | 83.2% | +3.9pp |
+| rust | 194 | 157 | 0 | 24 | 80.9% | 92.4% | 92.4% | +1.2pp |
+| cpp | 154 | 102 | 1 | 45 | 66.2% | 93.6% | 94.5% | +3.7pp |
+| **total** | **661** | **444** | **6** | **166** | **67.2%** | **89.7%** | **90.9%** | **+1.8pp** |
 
 **PASS** = marker-free, passes the compile/structural gate, and matches
 the human resolution at token similarity ≥ 0.90, replayed live against
 one local endpoint (provider configs only — hosts are never tracked).
-**adj %** = PASS / (cases − era-dead − SAFE_SKIP): era-dead cases are
-un-passable by construction (both sides and the human oracle fail the
-current toolchain identically — environmental, not resolver failures),
-and SAFE_SKIP cases (git resolved them cleanly) are corpus noise.
+Counts cover real conflicts only — 16 corpus cases where git itself
+resolves the replay cleanly are not counted (recorded in the extracts
+as SAFE_SKIP for provenance). **adj %** = PASS / (cases − era-dead):
+era-dead cases are un-passable by construction (both sides and the
+human oracle fail the current toolchain identically — environmental,
+not resolver failures).
 Non-PASS cases rerun up to 3 times, majority verdict. **P+W adj %**
 adds WORKING verdicts — compiles, marker-free, both sides preserved,
 diverged from the human resolution below the PASS bar — the honest
