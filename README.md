@@ -287,48 +287,32 @@ testing is a stub.
 ### Results
 
 Full-corpus results are measured by **sharded harvest**: the 677-case
-corpus runs one language at a time (Python → C → Rust → C++), each shard
-on a pinned mechanism state, with failure analysis and fixes landing
-between shards. The table below is the sprint-22 baseline round.
+corpus runs one language at a time (Python → C → Rust → C++), with
+failure analysis and fixes landing between rounds. The table below is
+the CURRENT state — the sprint-22 reround, all 677 cases on the single
+uniform commit `e7e7eb7` (fix sprint: repair propagation +
+fail-closed verification, symbol injection, use-dedup, repair
+rotation, resolved-file provenance, probe-on-divergence).
 
-| shard | lang | cases | PASS | ESC | era-dead | other | PASS % | adj % | Δ raw | ran on |
-|-------|------|-------|------|-----|----------|-------|--------|-----------|----------|--------|
-| 1 | python | 111 | 98 | 9 | 0 | 4 | 88.3% | 89.9% | +3.6pp | `ad16e06` |
-| 2 | c | 205 | 83 | 22 | 98 | 2 | 40.5% | 78.3% | −2.0pp | `93b61de` |
-| 3 | rust | 194 | 155 | 13 | 24 | 2 | 79.9% | 91.2% | −1.0pp | `943b8d5` |
-| 4 | cpp | 167 | 98 | 20 | 45 | 4 | 58.7% | 89.9% | −2.4pp | `943b8d5` |
-| **total** | | **677** | **434** | **64** | **167** | **12** | **64.1%** | **87.9%** | **−0.9pp** | |
+| lang | cases | PASS | era-dead | adj denom | PASS % | adj % |
+|------|-------|------|----------|-----------|--------|-----------|
+| python | 111 | 97 | 0 | 109 | 87.4% | 89.0% |
+| c | 205 | 88 | 97 | 107 | 42.9% | 82.2% |
+| rust | 194 | 157 | 24 | 170 | 80.9% | 92.4% |
+| cpp | 167 | 102 | 45 | 109 | 61.1% | 93.6% |
+| **total** | **677** | **444** | **166** | **495** | **65.6%** | **89.7%** |
 
-"other" = WORKING/NEAR_MATCH/GATE_UNAVAILABLE/ORACLE_DIVERGENT;
-"ESC" includes SAFE_SKIP cases (git resolved the conflict cleanly —
-corpus noise, not resolver work). **adj %** = PASS / (cases − era-dead
-− SAFE_SKIP), one uniform formula across every row; the sprint-20
-baseline under the same formula is 440/677 = 65.0% raw and 440/495 =
-88.9% adjusted. Full per-shard breakdowns live in
-`docs/eval-results-tracker.md`.
-
-### Reround — post-fix measurement (row 2)
-
-After the baseline froze, a fix sprint landed six mechanisms (repair
-propagation + fail-closed verification, symbol injection, use-dedup,
-repair rotation, resolved-file provenance, probe-on-divergence); the
-reround measured them on a single uniform commit (`e7e7eb7`):
-
-| shard | lang | cases | PASS | PASS % | adj % | Δ adj vs row 1 |
-|-------|------|-------|------|--------|-----------|----------------|
-| r2 | python | 111 | 97 | 87.4% | 89.0% | −0.9pp (variance) |
-| r2 | c | 205 | 88 | 42.9% | 82.2% | +3.9pp |
-| r2 | rust | 194 | 157 | 80.9% | 92.4% | +1.2pp |
-| r2 | cpp | 167 | 102 | 61.1% | 93.6% | +3.7pp |
-| **total** | | **677** | **444** | **65.6%** | **89.7%** | **+1.8pp** |
-
-Attribution: **12 mechanism-verified conversions** (5 repair-propagation
-false-accept fixes, 6 resolved-file-provenance guard conversions, 1
-dedup-assisted), 6 variance conversions, against 7 regressions of
-which 3 are already-root-caused bugs with fixes specced (one repair-
-rotation over-skip, one crash, one environment defect). Safety
-audits: 17 guard downgrades → 9 PASS + 3 honest NEAR + zero divergent
-completions. Per-case extracts and provenance:
+**adj %** = PASS / (cases − era-dead − SAFE_SKIP), one uniform
+formula. History: the frozen sprint-22 baseline measured 434/677 =
+64.1% raw / 87.9% adjusted (per-shard commits and extracts in
+`docs/results/s22/`); the sprint-20 harvest baseline was 65.0% /
+88.9%. The reround's +1.8pp adjusted gain decomposes into **12
+mechanism-verified conversions** (5 repair-propagation false-accept
+fixes, 6 resolved-file-provenance guard conversions, 1 dedup-assisted)
+plus 6 variance conversions, against 7 regressions of which 3 are
+already-root-caused bugs with fixes specced. Safety audits: 17 guard
+downgrades → 9 PASS + 3 honest NEAR + zero divergent completions.
+Per-case extracts and provenance for this round:
 `docs/results/s22r2/` (schema + outcome summary in its `meta.json`).
 
 **Attribution — what these numbers are.** Every case is a real rebase
@@ -348,37 +332,13 @@ cases rerun up to 3 times and keep the majority verdict
 single-run sampling noise; several coin-flip cases passed 1-of-3
 repeats and are honestly counted as non-PASS.
 
-**Attribution — which code produced them.** Each shard ran on a pinned
-commit (the "ran on" column); mechanisms advanced only in the gaps
-between shards, and no shard ever saw a mid-run code change (verified
-by mechanism-signature absence in the flight journals). The aggregate
-−0.9pp decomposes per shard: python +3.6pp (deterministic mechanism
-gains); C −2.0pp (positive mechanism delta of +2 deterministic
-conversions minus a 6-case sampling-variance noise floor); Rust −1.0pp
-(3 deterministic repair-layer regressions vs 1 deterministic gain);
-C++ −2.4pp (4 deterministic acceptance-gate regressions + 2 variance
-flips vs 2 gains). Per-case flip attribution is in
-`scripts/verdict_diff.py` output, recorded in the sprint failure
-reports (`docs/sprint22-{python,c,rust}-failures-report.md`).
-
-**Verifying the table.** Per-case verdicts for every shard and the
-sprint-20 baseline are committed as compact extracts under
-`docs/results/` (`s22/*.jsonl` + `s20-harvest-baseline.jsonl`, schema in
-`s22/meta.json`). From a clone:
-
-```bash
-# recount any shard's verdicts
-python3 -c "import json,collections;print(collections.Counter(json.loads(l)['verdict'] for l in open('docs/results/s22/shard3-rust.jsonl')))"
-
-# audit every flip against the sprint-20 baseline
-.venv/bin/python scripts/verdict_diff.py --new docs/results/s22/shard3-rust.jsonl --old docs/results/s20-harvest-baseline.jsonl
-```
-
-The full audit trail (prompts, model responses, candidate snapshots,
-per-session journals with every mechanism decision) is preserved per
-shard under `/var/tmp/capybase-live/s22/flights-shard*/` on the eval
-machine — too large to track, but every table number recomputes from
-the committed extracts alone.
+**Attribution — which code produced them.** The whole reround ran on
+the single pinned commit `e7e7eb7`; every table number recomputes from
+the committed extracts alone (recount one-liners and the
+`scripts/verdict_diff.py` flip audit are in `docs/results/s22r2/meta.json`).
+Per-round mechanism states, flip tables, and the archaeology trail
+live in `docs/eval-results-tracker.md` and the sprint-22 ledger;
+failure deep-dives in `docs/sprint22-*-failures-report.md`.
 
 ### Corpus
 
