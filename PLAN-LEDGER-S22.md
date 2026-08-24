@@ -1025,3 +1025,32 @@ machinery with the reround idle, as part of F1's paired A/B. The
 wiring lessons (thinking-model token budget is mandatory; json_mode
 rejections also explain the comment-phase 400s) are recorded here for
 that work.
+
+## Deep-dive archaeology round 10 → F1 two-tier design (2026-08-24)
+
+Read-only (no model requests, per the operational rule). Region-level
+churn measured (changed lines per side vs base):
+
+| case | cur | rep | truth | deterministic verdict |
+|------|-----|-----|-------|----------------------|
+| sqlite-0040 | 2 | big | SIDE(replayed) | fires → takeover replayed ✓ |
+| redis-0054 | big | ~15 | SIDE(current) | fires ✓ |
+| sqlite-0004 | big | 3 | SIDE(current) | fires ✓ |
+| flask-0006 | big | ~small | SIDE(current) | fires ✓ |
+| redis-0015 / protobuf-0034 | | small | SIDE | fires ✓ |
+| zenodo-0040 (WEAVE) | 274 | 9 | weave | FIRES — false-fire, benign (takeover → NEAR 0.76, failure-path only) |
+| sea-orm-0027 (WEAVE) | 145 | 236 | weave | correctly declines |
+| tokio-0108 | 5 | 3 | SIDE | tiny-vs-tiny → adjudicator |
+| protobuf-0001 | 233 | 232 | SIDE | symmetric-big → adjudicator |
+| sqlite-0019 / axum-0013 | 62-73 | 18-36 | SIDE | moderate → adjudicator |
+
+### F1 final design: two tiers
+
+- **Tier 1 (deterministic, no LLM)**: on a FAILING weave, if one
+  side's churn vs base is <= ~15 lines (near-one-sided), take the
+  other side's pristine version through the normal gates. Covers 6 of
+  10 measured truths; single false-fire lands at NEAR, never a wrong
+  PASS, and only ever runs after the weave already failed.
+- **Tier 2 (LLM adjudicator)**: keep/weave/delete subsumption judgment
+  for symmetric/moderate shapes. Accuracy measured at implementation
+  time via paired A/B (reround idle).
