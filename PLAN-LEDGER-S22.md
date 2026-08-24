@@ -544,3 +544,65 @@ member/entity split largely cover it); mid-band repair-by-example
 (golden-path validated for conversions, not style); deletion-intent
 classifier (P5 leftover); cross-unit dependency graph (20-30h, ROI-poor
 by its own proponents).
+
+## Round-4 synthesis — the IMPROVED SPRINT-23 PLAN (2026-08-24)
+
+Three documents refining the per-case detail. Strong convergence on
+three items (now priority-bumped), one new rejection with a
+sim-conservation argument, and one 4th-occurrence rejection with a
+factual correction.
+
+### Feasibility verified this round (not assumed)
+
+- redis-0013: `cliSwitchProto` EXISTS in the replayed side as a
+  DEFINITION (`static int cliSwitchProto(void) {`) — a forward
+  declaration is a mechanical transform of verbatim side content
+  (`{` → `;`). CONVERTIBLE via derived prototypes.
+- sqlite-0030: `sqlite3_value_frombind` appears in all parents only as
+  table identifiers, not as the full correct declaration line —
+  C1b-replace target, conversion UNCERTAIN (honest).
+
+### The plan (priority order, post-reround)
+
+| # | Item | Convergence | Targets | Effort | Priority |
+|---|------|-------------|---------|--------|----------|
+| D1 | Error-accumulating repair chain (rounds build on prior output; model sees full tried/failed history) | r3 | protobuf-0034/0051, jsonc-0016 | 4-5h | P1 |
+| C1b | Two-mode repair: REPLACE mode — compiler line-anchored line replacement from parents (best-LCS line restore); type-token replacement (expected type verbatim in a parent); DERIVED prototypes (side definition `{`→`;`) | r3+r4 x3 docs | sqlite-0030 (uncertain), redis-0014, redis-0013 (verified derivable), sqlite-0039 | 3-4h | **P1 (bumped: 4-doc convergence + verified feasibility)** |
+| C3 | Adjacent-context injection: on 2nd unit failure, LOCKED_PRECEDING_CONTEXT (10-20 resolved lines before the marker + file imports) | C-round + r2 + r4 x2 docs | redis-0015/0049, sqlite-0029, zenodo-0085 | 2-4h | **P2 (confirmed: 3-round convergence)** |
+| R3' | Error-class→strategy rotation: parse→fixit/brace; symbol→C1; dup→R2; type→LLM-micro (replaces blind rotation) | r4 | class C/D coin-flips | 3h | P2 |
+| C1c | Project-wide symbol search (sibling files/headers; full-file step already exists in C1 via stage blobs) | r3+r4 | redis-0013 backstop | 4-6h | P3 |
+| R3+R4 | Within-session best-of-N (temperature ladder 0.2/0.4/0.6, fast-gate PRE-SCREEN, full validation on accept — never bypass) + deterministic proximity extra attempt | r2+r4 | class D coin-flips | 3h | P3 |
+| C5 | Oversized-prompt diagnosis (sqlite-0004) | all rounds | sqlite-0004 | 2h diag | P4 |
+
+Held: decision-point decomposition (top-3 mid-band only, 1-2 graded
+conversions), mid-band style transfer, statement splitting (mini-
+conflict/member-split cover), mixed-delimiter stack repair (C4
+backlog), deletion-intent classifier, P5 non-code extension (minor).
+
+### Rejected this round
+
+- **Whole-side fallback on ANY compile failure** (doc-1 #2): breaks
+  both-sides-represented semantics AND cannot produce PASS on the
+  near-oracle hard core — a wholesale swap replaces a sim-0.999 buffer
+  with different content, tanking oracle similarity; the cases where
+  takeover IS right (churn dominance, dup pathology,
+  single-compiling-side, wholesale floor) are already gated and
+  calibrated. Escalation is not a wrong merge — nothing broken ships.
+- **Cross-repeat best-of-N aggregation** (4th occurrence, doc-3 #3):
+  besides the standing post-hoc-threshold objection, the justification
+  is factually wrong — it lists 11 coin-flips with "sim ≥ 0.94" as
+  convertible "if any repeat passed", but those sims are the FAILED
+  buffer's oracle-similarity; most listed cases have ZERO PASS repeats
+  in the baseline (redis-0040, sqlite-0039, protobuf-0001/0034/0051,
+  axum-0013/0019/0033, zenodo-0079 were 3/3 ESCALATE). Buffer-sim is
+  not a PASS repeat. The legitimate levers for this population are
+  within-session R3 + R4 (in plan).
+- **Wall-clock retry budgets** (3rd occurrence): non-reproducible.
+
+### Premise corrections recorded (reviewers' claims vs code)
+
+C1 already searches FULL side files (stage blobs) + the spliced buffer
+— not "the conflict region"; empty-response→verified-single-side
+fast-fail already exists (resolution layer 6); #endif positional
+repair, use-dedup, repair rotation, resolved-file provenance all
+landed pre-reround.
