@@ -376,6 +376,33 @@ ORACLE_DIVERGENT 3/3), clickhouse-0049 sim 1.000, clickhouse-0023
 regressions converted). The five false accepts became genuine passes:
 the repaired text now reaches disk, compiles, and matches the oracle.
 
+## C4 + P5 + E1 IMPLEMENTED (2026-08-24, fix sprint items 4-6)
+
+**C4 — repair rotation.** Per-(step, path) tried-repair registry keyed
+by failure signature: a deterministic repair that failed for a
+signature never re-runs (axum-0013's two identical brace-repair
+rounds). `repair_rotation` journaled; new signatures re-arm the ladder.
+
+**P5 v2 — resolved-file provenance.** Surprise at implementation: the
+reviewers' replayed-coverage downgrade ALREADY existed in
+`_handle_resurrections` — the specimens stopped because the coverage
+check legitimately fails there (content not in the replayed blob).
+v2 adds the second conservative signal: stop downgrades to warn when
+EVERY flagged path was explicitly resolved + compile-validated this
+session (surfaced in output + bundle, never silent; untouched files
+keep the hard stop). **5-specimen validation: 4 PASS** (tokio-0037
+1.000, tokio-0042 0.999, clickhouse-0020 1.000, redis-0012 0.987) +
+tokio-0046 honest NEAR_MATCH 0.884; 6 journaled downgrades.
+
+**E1 — eval probe-on-divergence.** The WS1c oracle probe now also
+fires on marker-free, non-escalated c/cpp tree-build failures (the
+four cpp DIV regressions had oracle_builds=None, so the
+GATE_UNAVAILABLE rescue was unevaluable).
+
+**Fix-sprint scoreboard (validated conversions): R1 = 5, P5 = 4 (+1
+NEAR); C1/R2/C4 land for the reround to measure; R3/R4 deferred
+pending value call.**
+
 ## C1 + R2 IMPLEMENTED (2026-08-23, fix sprint items 2-3)
 
 **C1 — deterministic missing-symbol repair (unified C+Rust).**
