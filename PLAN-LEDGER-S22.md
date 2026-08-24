@@ -809,3 +809,27 @@ where cycling outlasts the wall budget before the hatch's seen-2x
 condition engages. Amendment (folded into R3'/D1 design): when the
 remaining file budget is under one more model cycle, engage the hatch
 immediately instead of starting a cycle that will be killed.
+
+## Deep-dive archaeology round 4 → sprint-23 amendments (2026-08-24)
+
+### 1. redis-0014 verified as a C1b line-restore target
+
+The correct `wait3(&statloc,WNOHANG,NULL)` call is IDENTICAL in all
+three parents — the model's merged variant is the defect. Line
+restore applies exactly as on 0040. C1b's verified target list:
+redis-0013 (derived prototype), redis-0040 + redis-0014 (line
+restore), sqlite-0030 (uncertain).
+
+### 2. sea-orm-0023 verified NOT a C1 case
+
+No Iterator/IntoIterator import exists in ANY parent — the `.iter`
+failure needs a trait the sides never import. C1 correctly declines;
+0023 stays an honest coin-flip (removed from C1's speculative list).
+
+### 3. jsonc-0016: D0 extends to the micro-CEGIS re-gate
+
+The file gate PASSED; the build failed rc=2; stage-1 fired
+(unused_function_delete); the re-gate failed with NO diagnostics in
+its feedback — the loop cannot tell whether the patch helped. D0's
+diagnostic capture covers the re-gate too, which is what makes D1's
+error accumulation meaningful on this target.
