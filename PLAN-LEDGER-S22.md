@@ -922,3 +922,27 @@ errors (parity ≠ gcc's line/column notion; likely a multi-line
 literal). Design refinement for D1/C1b: apply the terminator at the
 diagnostic's line:col, and treat parity-pass + gcc-fail as a
 decline.
+
+## Deep-dive archaeology round 7 → sprint-23 amendments (2026-08-24)
+
+### 1. zenodo-0079 joins the empty-response class (C7' grows 3 → 4)
+
+Three consecutive EMPTY model responses, then the one non-empty
+candidate died on "unmatched ')'" (delimiter class). C7''s
+ceiling-drop population: redis-0052/0054/0055 + zenodo-0079; the
+final-attempt shape also makes it a delimiter-repair beneficiary.
+The empty-response class now spans C AND python.
+
+### 2. redis-0047 verified as a C1 target
+
+`struct config has no member 'interactive'`: the member declaration
+`int interactive;` is verbatim in base+replayed (current removed it —
+upstream deprecation; branch intent keeps it). C1's variable-decl arm
+already covers the injection. C1/C1b verified targets: redis-0013,
+redis-0040, redis-0014, redis-0049, redis-0047 (+ sqlite-0030
+uncertain).
+
+**Archaeology saturation declared**: 20 cases examined across 7
+rounds; every batch-1 item has >=1 verified target; remaining
+unexamined cases (timeouts protobuf-0001/clickhouse-0021/0021-class,
+sandbox artifacts, mid-band) carry no open design questions.
