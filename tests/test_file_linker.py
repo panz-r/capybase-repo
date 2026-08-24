@@ -209,13 +209,22 @@ def test_verify_file_whole_text_overrides_splice(tmp_path):
     # resplice path DOES have.
     override_msgs = " ".join(f.message for f in result_override.hard_failures)
     resplice_msgs = " ".join(f.message for f in result_resplice.hard_failures)
-    # The resplice must FAIL (the duplicate-bearing splice is rejected) and
-    # the override must be CLEAN — that contrast is the test's point. The
-    # resplice's specific failure message depends on validator ordering:
-    # standalone rustc reports the fixture's `placeholder` parse error
-    # before any duplicate-import diagnostic can surface.
-    assert result_resplice.hard_failures, (
-        f"resplice (duplicate import) should fail validation, got: {resplice_msgs!r}"
+    # R2 (sprint-22) updated the contract: the resplice no longer FAILS on
+    # an exact-duplicate import — verify_file's use-dedup rung repairs it
+    # (marked via coherence_repair_applied, propagated on resolved_text per
+    # R1). The override remains the cleaner path (no repair needed), and the
+    # test's V8 core still holds: both validated texts are duplicate-free.
+    assert not result_resplice.hard_failures, (
+        f"resplice should pass (R2 dedups the duplicate import), got: {resplice_msgs!r}"
+    )
+    assert result_resplice.features.get("coherence_repair_applied"), (
+        "R2 use-dedup should have fired on the duplicate-bearing resplice"
+    )
+    assert result_resplice.resolved_text is not None
+    assert result_resplice.resolved_text.count(
+        "use std::collections::HashMap;") == 1
+    assert not result_override.features.get("coherence_repair_applied"), (
+        "the already-deduped override needs no repair"
     )
     assert not result_override.hard_failures, (
         f"override (deduped) should validate clean, got: {override_msgs}"
