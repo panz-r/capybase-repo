@@ -1,0 +1,18 @@
+{
+  "generated": "2026-08-25",
+  "description": "Sprint-22 REROUND (post-fix-sprint measurement, README row 2). Same compact schema as s22 extracts. Full audit trail under /var/tmp/capybase-live/s22/flights-r2-*/ on the eval machine.",
+  "mechanism_commit": "e7e7eb7",
+  "state": "s22 baseline + fix sprint: R1 repair propagation + fail-closed guard, C1 symbol injection, R2 use-dedup, C4 repair rotation, P5 resolved-file provenance, E1 probe-on-divergence",
+  "command_template": "scripts/reround_s22r2.sh via longrun (chained 4-shard harvest; env CAPYBASE_SKIP_SIZE_GUARD=1; --provider nova-gemma4 --repeat-nonpass 3 --skip-existing per shard)",
+  "ran": "2026-08-24 13:44 -> 2026-08-25 00:57, exit 0, 11h13m, all 677 cases",
+  "uniform_formula": "adj % = PASS/(cases - era-dead - SAFE_SKIP)",
+  "verification": "same as row 1: recount from extracts; verdict_diff --new docs/results/s22r2/r2-<lang>.jsonl --old docs/results/s22/<shard>-<lang>.jsonl",
+  "outcome_summary": {
+    "total": "444/677 = 65.6% raw, 89.7% adjusted (baseline 64.1%/87.9%; +1.8pp adjusted)",
+    "mechanism_conversions": 12,
+    "mechanism_detail": "R1 x5 (tokio-0026 + clickhouse-0023/0049 + protobuf-0012/0038), P5 x6 (tokio-0037/0042, clickhouse-0020, redis-0012/0030, zenodo-0064), plus sea-orm-0023/protobuf-0034 variance-assisted",
+    "regressions": "7 total: 2 mechanism-bug (sqlite-0008 C4 over-skip, axum-0021 D2 float('') crash) + 1 env (axum-0005 include_str docs path, E2) + 4 variance/class-moves",
+    "safety_audits": "17 resurrection downgrades -> 9 PASS + 3 NEAR + 1 elsewhere, zero divergent; C4 over-skip blast radius = 1 case; zero mechanism regressions in python/c/rust flips beyond those listed",
+    "era": "166 vs baseline 167 (redis-0038 probe flake)"
+  }
+}

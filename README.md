@@ -300,12 +300,36 @@ between shards. The table below is the sprint-22 baseline round.
 | **total** | | **677** | **434** | **64** | **167** | **12** | **64.1%** | **87.9%** | **−0.9pp** | |
 
 "other" = WORKING/NEAR_MATCH/GATE_UNAVAILABLE/ORACLE_DIVERGENT;
-"ESC" includes 16 SAFE_SKIP cases (git resolved the conflict cleanly —
+"ESC" includes SAFE_SKIP cases (git resolved the conflict cleanly —
 corpus noise, not resolver work). **adj %** = PASS / (cases − era-dead
 − SAFE_SKIP), one uniform formula across every row; the sprint-20
 baseline under the same formula is 440/677 = 65.0% raw and 440/495 =
 88.9% adjusted. Full per-shard breakdowns live in
 `docs/eval-results-tracker.md`.
+
+### Reround — post-fix measurement (row 2)
+
+After the baseline froze, a fix sprint landed six mechanisms (repair
+propagation + fail-closed verification, symbol injection, use-dedup,
+repair rotation, resolved-file provenance, probe-on-divergence); the
+reround measured them on a single uniform commit (`e7e7eb7`):
+
+| shard | lang | cases | PASS | PASS % | adj % | Δ adj vs row 1 |
+|-------|------|-------|------|--------|-----------|----------------|
+| r2 | python | 111 | 97 | 87.4% | 89.0% | −0.9pp (variance) |
+| r2 | c | 205 | 88 | 42.9% | 82.2% | +3.9pp |
+| r2 | rust | 194 | 157 | 80.9% | 92.4% | +1.2pp |
+| r2 | cpp | 167 | 102 | 61.1% | 93.6% | +3.7pp |
+| **total** | | **677** | **444** | **65.6%** | **89.7%** | **+1.8pp** |
+
+Attribution: **12 mechanism-verified conversions** (5 repair-propagation
+false-accept fixes, 6 resolved-file-provenance guard conversions, 1
+dedup-assisted), 6 variance conversions, against 7 regressions of
+which 3 are already-root-caused bugs with fixes specced (one repair-
+rotation over-skip, one crash, one environment defect). Safety
+audits: 17 guard downgrades → 9 PASS + 3 honest NEAR + zero divergent
+completions. Per-case extracts and provenance:
+`docs/results/s22r2/` (schema + outcome summary in its `meta.json`).
 
 **Attribution — what these numbers are.** Every case is a real rebase
 conflict replayed live end to end against one local endpoint (provider
