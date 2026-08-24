@@ -1273,3 +1273,23 @@ calibration DOE explored. Every palette point is known-parseable
 (the DOE tested both levels of each axis), so any rung is safe to
 render. Implementation: `_retry_profile(profile, attempt)` =
 profile.model_copy(update={...}) at the retry call site.
+
+## Gate-0 rust slice — ALL PREDICTIONS CONFIRMED (2026-08-24)
+
+194/194 complete. 186 unchanged; net +2 (4 improvements / 2
+regressions); 2 honest class moves.
+
+- **R1's headline: tokio-0026 ORACLE_DIVERGENT→PASS 0.995** — the
+  validation-local-repair false accept is now a genuine pass.
+- **P5: tokio-0037 →PASS 1.000, tokio-0042 →PASS 0.999, tokio-0046
+  →NEAR 0.884** — exactly the specimen validation's results,
+  reproduced at shard scale.
+- **E1 visible: sea-orm-0027 ESCALATE→GATE_UNAVAILABLE** — the
+  probe-on-divergence reclassified the sandbox artifact (its eval
+  surface working as designed).
+- sea-orm-0023 →PASS 0.956: variance coin-flip as predicted.
+- Regressions: axum-0005 (E2 env defect) + axum-0021 (D2 crash bug)
+  — both non-mechanism, both already fixed-in-waiting.
+
+Mechanism regression count across python+c+rust: ZERO. Fix-sprint
+validated at shard scale. cpp (the last shard) is running.
