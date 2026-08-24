@@ -775,3 +775,37 @@ lines (835 → 878: distinct signatures, so C4 rotation is engaged and
 not the bottleneck — the model's unit outputs are the variance).
 Adjacent-context injection is the missing piece; 0015 confirmed as
 C3's archetype alongside sqlite-0029/redis-0049.
+
+## Deep-dive archaeology round 3 → sprint-23 amendments (2026-08-24)
+
+### 1. Iterated brace repair (from sqlite-0019)
+
+0019's blocker is a DOUBLE gap — "2 unclosed '{' at line 1287" — and
+the brace rung acts only on single imbalances ("one edit fully
+balances"), so a multi-brace gap gets ZERO deterministic attempts
+while model retries reproduce the shape (new signature each round:
+1287 → 1280 — rotation engaged, content is the problem). Amendment:
+iterate the existing single-imbalance repair (<=3 applications, each
+re-validated) — deterministic, converts-or-declines. Joins batch 1.
+
+### 2. D0 — build-diagnostic capture (from protobuf-0051)
+
+0051's captured failure is ONLY the make driver line
+(`make[1]: *** [Makefile:1917: all-recursive] Error 1`) — no gcc
+diagnostic at all. Every error-keyed mechanism (C1/C1b/D1) is blind,
+and the model's repair prompt is meaningless. D1's multi-error
+premise was wrong for this target. Amendment: **D0 precedes D1** —
+when the whole-tree gate fails, capture the full build output and
+surface the actual per-file diagnostics (serial make -j1 retry if
+parallel interleaving swallows them). Without D0, 0051-class cases
+are unfixable by anything in the plan.
+
+### 3. Escape-hatch deadline-awareness (from axum-0002)
+
+The hatch DEMONSTRABLY converts when it fires (verified session:
+hatch accept → R1-propagated validation → session_completed — the
+PASS of the ESC/ESC/PASS pattern). The timeouts are the sessions
+where cycling outlasts the wall budget before the hatch's seen-2x
+condition engages. Amendment (folded into R3'/D1 design): when the
+remaining file budget is under one more model cycle, engage the hatch
+immediately instead of starting a cycle that will be killed.
