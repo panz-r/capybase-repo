@@ -970,3 +970,38 @@ conversions at sim ~0.90-1.00. **Decision-point decomposition killed
 permanently** — the wrong tool for side-choice cases and the two true
 weaves are honest judgment. Honest accounting note: the "mid-band is
 not failures" framing was wrong for 3 of 6 — they were winnable.
+
+## Deep-dive archaeology round 9 → F1 REFRAMED (2026-08-24)
+
+### The sweep: oracle-parent proximity across all 51 remaining failures
+
+~26 of 51 sit at oracle~parent >= 0.95; ~30 at >= 0.90. The
+"unsolvable" labels fall one by one:
+- flask-0006 (frontier): oracle = CURRENT verbatim (1.00)
+- tokio-0108 (needs-human): oracle = CURRENT (1.00)
+- sqlite-0004 (oversized): oracle = CURRENT (1.00)
+- sqlite-0040 (0.015 truncation mystery): oracle = REPLAYED (1.00)
+- the empty-response trio, the delimiter pair (axum-0013/0019), the
+  repair failures (protobuf-0034/0051, redis-0013/0014/0052/0054/0055),
+  the timeouts (protobuf-0001/0008, axum-0002/0033, clickhouse-0040,
+  redis-0015, sqlite-0019): all oracle~parent 0.99-1.00.
+
+For any of these, the pristine parent is a compiling (it is the
+parent's real code), oracle-matching candidate. The model's near-
+oracle buffers carry tiny weave defects the pure parent lacks.
+
+### F1 v2 — failure-path side-choice fallback (supersedes round-4 rejection)
+
+ROUND-4 REJECTION REVERSED, WITH EVIDENCE: "whole-side fallback on
+compile failure tanks sim" holds ONLY for true-weave oracles — the
+sweep shows those are TWO cases (zenodo-0040 0.76, sea-orm-0027 0.79).
+For oracle~parent conflicts the swap PRESERVES sim by construction.
+Design (blast-radius contained): when a splice FAILS validation and
+deterministic repairs are exhausted — before escalate — run the
+existing keep/weave/delete adjudication; a confident subsumption
+verdict takes the pristine side, which then passes the normal gates.
+Good weaves are never touched (only failing ones get the fallback);
+the subsumption judgment is the 4B's job and the open variable.
+Pre-registered acceptance: >= 5 conversions among the 26 measured
+targets; zero takeovers on the two true-weave cases (adjudicator
+must say weave there). Expected (conservative): 8-15 conversions.
