@@ -946,3 +946,27 @@ uncertain).
 rounds; every batch-1 item has >=1 verified target; remaining
 unexamined cases (timeouts protobuf-0001/clickhouse-0021/0021-class,
 sandbox artifacts, mid-band) carry no open design questions.
+
+## Deep-dive archaeology round 8 → sprint-23 amendment (2026-08-24)
+
+### F1 — side-choice adjudication for the mid-band (NEW item)
+
+Oracle-parent proximity measured for the F class:
+  zenodo-0003   oracle~current = 1.00   ← side-choice
+  jsonc-0004    oracle~current = 1.00   ← side-choice
+  zenodo-0014   oracle~replayed = 0.90  ← side-choice (borderline)
+  zenodo-0040   max = 0.76              ← true weave (judgment)
+  sea-orm-0027  max = 0.79              ← true weave (judgment)
+
+Three of six "mid-band judgment calls" are NOT judgment: the human
+resolution IS one parent — the correct merge was a whole-side choice,
+and our LLM wove instead (the portfolio's adjudication never engaged:
+no churn dominance, no dup pathology). Amendment (F1): extend the
+EXISTING whole-side adjudication (keep/weave/delete — proven on
+axum-0005) to non-churn-dominated conflicts before the LLM weave.
+Risk-contained: takeover requires the adjudicator to judge the losing
+side subsumed; compile gate still validates. Expected: 2-3 PASS
+conversions at sim ~0.90-1.00. **Decision-point decomposition killed
+permanently** — the wrong tool for side-choice cases and the two true
+weaves are honest judgment. Honest accounting note: the "mid-band is
+not failures" framing was wrong for 3 of 6 — they were winnable.
