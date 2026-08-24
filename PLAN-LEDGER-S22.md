@@ -891,3 +891,34 @@ Fix: include a cheap splice-hash (or accepted-candidate-ids hash) in
 the tried-repair key. Pre-registered acceptance: sqlite-0008 returns
 to PASS; axum-0013's anti-repeat still holds (same buffer, same
 signature → skip).
+
+## Deep-dive archaeology round 6 → sprint-23 amendments (2026-08-24)
+
+### 1. C5 RESOLVED: context cap, not splitting (sqlite-0004 measured)
+
+The marker blocks are TINY — 2-3 lines per unit — in a 5,899-line
+file. The 50,759-char prompt is almost entirely CONTEXT: the unit's
+`enclosing_symbol` is null (header shape defeats entity detection), so
+context falls back to file-scale. Round 3's "sides dominate"
+hypothesis was WRONG (my first parser miscounted; corrected against
+the actual marker lines). C5's fix is a context CAP for
+null-enclosing-symbol units + skeleton reliance — far cheaper than
+C-header splitting, which would not even apply (units are already
+minimal).
+
+### 2. redis-0049: dual-classification (C3 verified + C1 shape)
+
+18-attempt loop (C3 archetype — all three C3 targets now verified)
+AND the gate error is `implicit declaration of 'deleteKey'` whose
+prototype `static int deleteKey(redisDb *db, robj *key);` exists
+verbatim in base+current. C1's existing finder covers it — 0049
+becomes a C1/C1b candidate in addition to C3.
+
+### 3. protobuf-0034: literal repair needs line anchoring
+
+The failure recurs at the SAME line 416 twice around the repair —
+the global quote-parity fix passes its own check while gcc still
+errors (parity ≠ gcc's line/column notion; likely a multi-line
+literal). Design refinement for D1/C1b: apply the terminator at the
+diagnostic's line:col, and treat parity-pass + gcc-fail as a
+decline.
