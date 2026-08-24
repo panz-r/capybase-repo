@@ -1216,3 +1216,37 @@ by the repeat multiplier. Post-batch-1 projected shard wall:
 ~4.8h (PASS-bound) + ~1h residual failures ≈ 6h vs 10.7h — the
 reround itself would run ~40% faster. The PASS 68% floor is
 build+model irreducible.
+
+## Round-16 CORRECTION + R5 (user directive, 2026-08-24)
+
+**Framing corrected**: wall-time reduction is NOT a goal in itself —
+it is a side effect of deterministic correctness where determinism
+applies. Where the model is needed, the retry budget is an
+OPPORTUNITY, and today it is wasted: measured retry-prompt similarity
+is 0.85-0.95 (sea-orm-0011: 9/84 lines differ; axum-0013: 42/184) —
+the only variation is the appended error feedback. The presentation
+is static, so retries reproduce the same failure.
+
+### R5 — alternate-presentation retry ladder
+
+On retry N of the same unit, rotate the PRESENTATION along the
+already-calibrated prompt-factor axes (the knobs exist — the
+calibration factors were built for exactly this):
+- attempt 0: calibrated default
+- attempt 1: side_ordering swapped (anchoring effects are real for
+  small models — presenting replayed-first changes the merge bias)
+- attempt 2: conflict_summary_mode + output_layout changed
+- attempt 3: minimal-delta presentation (show only the diff vs one
+  side; ask for a patch, not a full resolution)
+D1's error accumulation rides on top (content varies too). The retry
+budget becomes a presentation SEARCH over orthogonal axes instead of
+temperature noise on a fixed prompt. Composes with R3 (the ladder IS
+the diversification) and leaves C4's repair rotation untouched
+(deterministic layer).
+
+Success metric (pre-registered): retry-conversion rate — the fraction
+of units passing on attempt >= 2 — measurably above the current
+baseline from journals. R5 joins the sprint-23 slate; round-16's
+"first-failure determinism" principle stands ONLY for the mechanisms
+whose correctness was archaeology-verified (F1 tier-1, C1b, repairs);
+for everything else, retries are for varied presentation, not fewer.
