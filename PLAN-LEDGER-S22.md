@@ -1168,3 +1168,20 @@ expected_resolved check at load time — one line next to the SUBSET
 banner lesson) + re-extract or exclude 0044. F-class accounting
 corrects: the "mid-band" population drops to 5 (0044 was never a
 judgment call — it was broken data). No resolver mechanism claims it.
+
+## Deep-dive archaeology round 15 → F1 tier-2 stakes + corpus validated (2026-08-24)
+
+- **Adjudicator decision population and stakes (measured)**: among
+  PASSING churn>15 cases, 123 are side-choice-shaped vs 6 weave-
+  shaped — the corpus prior is ~95% side-choice. The 6 weave-shaped
+  passing cases' weaves SUCCEED today, so under the failure-path
+  design they never reach the adjudicator: tier-2's live regression
+  surface is ~zero, bounded by (weave fails) x (adjudicator wrong).
+  On the failing side the split is 24 side : 4 weave. A side-choice-
+  biased adjudicator is safe by construction in this corpus.
+- **Corpus integrity: CLEAN.** Beyond E3's single empty oracle
+  (zenodo-0044), zero oddities in 677 cases (no identical sides, no
+  no-op oracles, no empty markers). The corpus is validated.
+
+**Archaeology program complete at 15 rounds.** Every sprint-23 item
+is evidence-anchored; the measurement (reround) adjudicates.
