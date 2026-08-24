@@ -286,9 +286,12 @@ testing is a stub.
 
 ### Results
 
-The 677-case corpus runs as a sharded harvest (one language at a time,
-fixes landing between rounds). Current state — all cases on the
-uniform commit `e7e7eb7`; Δ is versus the prior full round.
+The **661-case corpus of non-git-resolvable conflicts** (cases where
+git's own three-way merge leaves markers — anything git resolves
+cleanly is not a resolution problem) runs as a sharded harvest, one
+language at a time, fixes landing between rounds. Current state —
+all cases on the uniform commit `e7e7eb7`; Δ is versus the prior
+full round.
 
 | lang | cases | PASS | WORKING | era-dead | PASS % | adj % | P+W adj % | Δ adj |
 |------|-------|------|---------|----------|--------|-----------|-----------|-------|
@@ -301,9 +304,7 @@ uniform commit `e7e7eb7`; Δ is versus the prior full round.
 **PASS** = marker-free, passes the compile/structural gate, and matches
 the human resolution at token similarity ≥ 0.90, replayed live against
 one local endpoint (provider configs only — hosts are never tracked).
-Counts cover real conflicts only — 16 corpus cases where git itself
-resolves the replay cleanly are not counted (recorded in the extracts
-as SAFE_SKIP for provenance). **adj %** = PASS / (cases − era-dead):
+**adj %** = PASS / (cases − era-dead):
 era-dead cases are un-passable by construction (both sides and the
 human oracle fail the current toolchain identically — environmental,
 not resolver failures).
@@ -317,10 +318,11 @@ commit, commands, and flip-audit recipe).
 
 ### Corpus
 
-677 real-world rebase conflicts mined from upstream histories — each
-case carries both sides, the merge base, and the actual human resolution
-as the oracle: Python (flask, zenodo, requests; 111), C (redis, sqlite,
-json-c; 205), Rust (tokio, axum, sea-orm, clap, serde; 194), C/C++
-(protobuf, clickhouse, nlohmann-json, fmt; 167). Earlier per-language
+661 non-git-resolvable rebase conflicts mined from upstream histories
+(677 candidates; 16 git resolves cleanly on replay and are excluded) —
+each case carries both sides, the merge base, and the actual human
+resolution as the oracle: Python (flask, zenodo, requests; 109),
+C (redis, sqlite, json-c; 204), Rust (tokio, axum, sea-orm, clap,
+serde; 194), C/C++ (protobuf, clickhouse, nlohmann-json, fmt; 154). Earlier per-language
 censuses (sprints 17–20) and their methodology notes live in
 `docs/eval-results-tracker.md` and the sprint results docs.
