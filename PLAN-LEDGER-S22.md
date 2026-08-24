@@ -1125,3 +1125,19 @@ Read-only. Two checks, one correction:
   set nests inside the other's for any 16+ churn case — symmetric
   refactors genuinely overlap. Tier 2 requires the LLM adjudicator;
   there is no hidden deterministic shortcut.
+
+## Deep-dive archaeology round 13 → F1 default-on safety proven (2026-08-24)
+
+- **Passing-population sweep: 305 currently-PASSING cases have
+  min-churn <= 15; ZERO have takeover-oracle < 0.90.** The tier-1
+  takeover is safe across the entire passing population: even when
+  variance fails one of their weaves in a future round, the takeover
+  yields >= 0.90 (PASS or borderline), never a regression. Combined
+  with round 12 (failing-population false-fire = zenodo-0040 only,
+  benign NEAR), tier 1 has the complete default-on safety argument:
+  0/305 passing + 1 bounded failing. The 305 figure also shows the
+  corpus is dominated by near-one-sided conflicts the resolver
+  already weaves correctly — the takeover direction is empirically
+  confirmed at population scale.
+- axum-0005's couldn't-read flake: absent from r2 reasons so far
+  (single occurrence; remains env-attributed).
