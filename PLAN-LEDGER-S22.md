@@ -1312,3 +1312,23 @@ loop does (a) partially and (b) never. The retry formula:
 Feedback presentation is itself part of the craft: diagnostics
 verbatim with file:line anchors, the failing candidate's relevant
 region, and the delta from the prior attempt — the REPL discipline.
+
+## Deep-dive round 18 → r2 population delta: batch-1 validated (2026-08-25)
+
+The reround's own failures (sprint-23's true starting population)
+diffed against the baseline remaining set:
+
+- **All 7 new faces accounted for**: sqlite-0008 (C4b over-skipping,
+  fix waiting), axum-0005/0021 (E2 env + D2 crash, fixes waiting),
+  zenodo-0019/0088 + clickhouse-0013 (variance coin-flips), and
+  redis-0038 — the era probe declined it this run (flake) exposing a
+  sim-1.0 gate failure underneath; tier-checked: covered by the
+  existing slate's classes.
+- **Every batch-1 verified target still fails in r2 exactly as
+  designed** — the target list is valid against the post-fix-sprint
+  population, not just the baseline.
+- **Verdict-class movements filling the mid-band**: zenodo-0003
+  ESC→NEAR (0.83; F1 side-choice target — a takeover would PASS it),
+  clickhouse-0021→NEAR, 0028→WORKING (0.90), 0040→WORKING. The
+  graded band is growing exactly as the fix sprint intended;
+  PASS+WORKING accounting applies.
