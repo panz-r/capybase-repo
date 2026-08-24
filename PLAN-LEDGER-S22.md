@@ -1054,3 +1054,31 @@ churn measured (changed lines per side vs base):
 - **Tier 2 (LLM adjudicator)**: keep/weave/delete subsumption judgment
   for symmetric/moderate shapes. Accuracy measured at implementation
   time via paired A/B (reround idle).
+
+## Deep-dive archaeology round 11 → F1 coverage quantified (2026-08-24)
+
+Full-population tier sweep (all 51 remaining, read-only):
+
+- **Tier 1 (deterministic near-one-sided): 22 cases** — incl.
+  tokio-0108 (min churn 3), protobuf-0051 (4), sea-orm-0021 (3, R2's
+  target is also tier-1 coverable), sqlite-0030 (3), clickhouse-0021
+  (11), sea-orm-0011 (7), zenodo-0063 (15), tokio-0046 (8),
+  flask-0006 (14), redis-0026/sea-orm-0004 (1-2, but GATE_UNAVAILABLE
+  — the pristine side fails the same gate; excluded from ceiling).
+- **Tier 2 (adjudicator): 24** — symmetric (protobuf-0001 at 232/232,
+  redis-0049 at 673+ min-churn), moderate (16-113).
+- **True weave/other: only 5** (zenodo-0014/0040/0044/0085,
+  sea-orm-0027).
+
+Caveats kept: proximity metric is word-jaccard (mirrors the eval's
+token jaccard at the 0.90 threshold); threshold sensitivity at 15-18
+(zenodo-0085's weave sits at 16 — the 15 cutoff excludes it; 16-20
+band goes to tier 2); takeover direction = high-churn side (the
+tiny-churn side approximates base, not the oracle).
+
+**Honest tier-1 ceiling: ~20 conversions** (22 minus the two
+gate-unavailable); realistic expectations depend on routing (the
+failure path must reach the takeover) and stay pre-registered at
+">= 5 of 26" for acceptance, with the measured ceiling documented
+here. Tier 2 bounded by adjudicator accuracy (measured at
+implementation time, reround idle).
