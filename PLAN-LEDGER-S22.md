@@ -1151,3 +1151,20 @@ not a one-off. Gate-0 attribution updates: BOTH rust regressions are
 non-mechanism (0005 = this env defect; 0021 = the D2 crash bug). The
 fix belongs in the eval's materialization/crate-source snapshot
 (diagnose at reround close; both cases re-runnable via --case).
+
+## Deep-dive archaeology round 14 → corpus defect found (2026-08-24)
+
+### zenodo-0044's oracle is EMPTY — E3 added
+
+`expected_resolved` is 0 chars (the only such case of 677 — full
+corpus swept). The case has no oracle: its WORKING-at-sim-0.000
+verdict measures nothing, and it is unpassable by construction (any
+non-empty merge scores 0 against an empty expected). The human merge
+presumably deleted or moved the file — the extraction flattened a
+modify/delete-shaped resolution into a broken oracle.
+
+Disposition (E3, eval-side): corpus validation pass (non-empty
+expected_resolved check at load time — one line next to the SUBSET
+banner lesson) + re-extract or exclude 0044. F-class accounting
+corrects: the "mid-band" population drops to 5 (0044 was never a
+judgment call — it was broken data). No resolver mechanism claims it.
