@@ -1250,3 +1250,26 @@ baseline from journals. R5 joins the sprint-23 slate; round-16's
 "first-failure determinism" principle stands ONLY for the mechanisms
 whose correctness was archaeology-verified (F1 tier-1, C1b, repairs);
 for everything else, retries are for varied presentation, not fewer.
+
+### R5 design refinement (user directive): reuse the calibration palette
+
+The prompt builders already accept a per-call `profile:
+PromptProfile` (`_resolve_prompt_parts(unit, context, budget,
+profile)`; `active_profile()` is just the default). The retry ladder
+is therefore a PROFILE VARIANT per attempt, not new rendering code:
+
+- attempt 1: `side_ordering` flipped
+- attempt 2: `conflict_summary_mode` + `output_layout` flipped
+  (json_v6 <-> markdown_code — the parser handles both levels by
+  design)
+- attempt 3: `instruction_position` + `history_framing` flipped
+  (the outline axis offers ready-made variants via
+  _OUTLINE_VARIANT_TAGS if a fourth rung is wanted)
+
+Design principle (user): calibration optimizes the MEAN over the
+corpus; the per-case optimum varies; retries are the per-case search
+around the calibrated default, drawing from the same palette the
+calibration DOE explored. Every palette point is known-parseable
+(the DOE tested both levels of each axis), so any rung is safe to
+render. Implementation: `_retry_profile(profile, attempt)` =
+profile.model_copy(update={...}) at the retry call site.
