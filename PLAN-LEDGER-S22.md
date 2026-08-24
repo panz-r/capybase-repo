@@ -1185,3 +1185,34 @@ judgment call — it was broken data). No resolver mechanism claims it.
 
 **Archaeology program complete at 15 rounds.** Every sprint-23 item
 is evidence-anchored; the measurement (reround) adjudicates.
+
+## Deep-dive round 16 → wall-time economics of determinism (2026-08-24)
+
+Investigation: can better deterministic mechanisms make the slow
+cases fast? Yes — measured.
+
+**Wall decomposition (s22 baseline, per-run)**: PASS 4.8h (68%),
+active failures 2.0h (29%), era probes 0.21h (3%). With the x3
+repeat multiplier on non-PASS, the 51 active failures cost ~5.9h of
+shard wall — more than all PASS work. The slow tail the reround is
+grinding through IS the failure-retry economics.
+
+**Per-lever speedups (per-run, current -> post)**:
+- F1 tier-1 takeover (22 cases, 0.9h): fires at FIRST gate failure
+  (~one build verify) instead of retry cycling -> ~86% faster;
+  sea-orm-0011 (870s, the corpus's slowest case) is tier-1 (churn 7):
+  870s -> ~20s.
+- Iterated brace (0019+0029, 459s): repair at first failure vs model
+  retry loops -> ~87%.
+- C7' empty-fallback (0052/0054/0055/0079, 604s): empties burn
+  retries then escalate; single-side fallback converts on first empty
+  -> ~90%.
+- C1b symbol/line repairs (5 targets, 482s) -> ~74%.
+
+**Design principle promoted**: batch-1 mechanisms are WALL-TIME
+mechanisms as much as conversion mechanisms — first-failure
+determinism beats retry cycling, and every saved second is saved x3
+by the repeat multiplier. Post-batch-1 projected shard wall:
+~4.8h (PASS-bound) + ~1h residual failures ≈ 6h vs 10.7h — the
+reround itself would run ~40% faster. The PASS 68% floor is
+build+model irreducible.
