@@ -1332,3 +1332,22 @@ diffed against the baseline remaining set:
   clickhouse-0021→NEAR, 0028→WORKING (0.90), 0040→WORKING. The
   graded band is growing exactly as the fix sprint intended;
   PASS+WORKING accounting applies.
+
+## Deep-dive round 19 → C4b blast radius + P5 outcome audit (2026-08-25)
+
+- **C4 over-skip damage census (complete)**: repair_rotation fired on
+  7 non-PASS r2 cases — decomposed, exactly ONE is over-skip damage
+  (sqlite-0008, the known victim). axum-0019/protobuf-0051/
+  redis-0015 are rotation working as intended on already-failing
+  content; the three GATE_UNAVAILABLEs are sandbox artifacts. C4b's
+  fix-acceptance stays: sqlite-0008→PASS, and the blast radius is
+  bounded at one case.
+- **P5 downgrade outcome audit (complete)**: 13 downgrade cases —
+  9 PASS (incl. clickhouse-0014/0015 beyond the predicted set),
+  3 NEAR (0021, 0046, 0003 — honest graded completions), 1
+  elsewhere-attributed ESC (clickhouse-0013's variance flip-back).
+  **Zero divergent completions.** The guard's false-negative surface
+  is clean at full-shard scale.
+
+The reround's two safety audits are complete: both fix-sprint
+mechanisms behave exactly as designed everywhere they fired.
