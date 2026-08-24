@@ -863,3 +863,31 @@ attempts it; expectation stays 0-1, honestly.
 1 standing mystery closed, 2 negative verifications (0023 not-C1,
 0006 not-P4). Batch-1 targets now all journal- or corpus-verified
 except 0030 (explicitly uncertain).**
+
+## Gate-0 C-shard slice (executed 2026-08-24 19:50)
+
+- **Net +5 (6 improvements / 1 regression).** Era 98→97 (redis-0038
+  era→ESCALATE: probe flakiness, not a declassify violation — noted).
+- **P5 v2 C-targets 3/3 CONVERTED**: redis-0012 (0.987), redis-0030
+  (0.994), redis-0053 (0.996). Downgrades journaled (4 events).
+- Coin-flips landed: redis-0040 (0.948, variance-attributed — C1b not
+  yet live), sqlite-0039 (1.000), jsonc-0007 (0.990).
+- **REGRESSION (Gate-0 catch): sqlite-0008** — baseline coherence-rung
+  convert, now 3/3 ESCALATE. Journal-attributed to **C4 over-skipping**:
+  brace repair failed round 1 (balance_failed); the model retry
+  produced a NEW splice with the stray MOVED (4281→4267→4265); the
+  failure signature normalizes away the location, so every later round
+  skips the brace repair ("already failed for this failure
+  signature") — starving the exact retry path that converted the case
+  in the baseline. The escalation reason also carried an EMPTY
+  failure list (D0's capture gap visible again).
+
+### C4b (new batch-1 item): tried-set keys on the BUFFER, not just the signature
+
+Re-running a deterministic repair on an UNCHANGED buffer is waste
+(axum-0013's true target); a model-re-resolved buffer is NEW input
+and deserves a fresh deterministic attempt (sqlite-0008's need).
+Fix: include a cheap splice-hash (or accepted-candidate-ids hash) in
+the tried-repair key. Pre-registered acceptance: sqlite-0008 returns
+to PASS; axum-0013's anti-repeat still holds (same buffer, same
+signature → skip).
