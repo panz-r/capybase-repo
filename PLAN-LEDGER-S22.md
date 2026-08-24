@@ -699,3 +699,43 @@ sprint-23 reround (README row 3).
 - Safety cross-tabs: 4 resurrection_downgrade events, **0 divergent
   outcomes**; 0 symbol_inject patches (python rarely C-style);
   WORKING 2→4 recorded as verdict-class movement per addendum 2.
+
+## Deep-dive archaeology → sprint-23 plan amendments (2026-08-24)
+
+Three specimens examined at journal level while the reround runs;
+three amendments with evidence.
+
+### 1. P5 v2b — portfolio-site instrumentation (from zenodo-0063)
+
+The P5 miss decomposed: the file completed via the whole-file
+portfolio phase2_fallback (pristine side swap) after the main-loop
+file gate FAILED — and the portfolio accept, though it IS verified
+(`if not _wf_val.passed: continue` + build test), never records into
+`_resolved_validated_paths` (the `break` exits before the main-loop
+recording point). Amendment: record at the portfolio accept site.
+The wholesale winner floor stays EXCLUDED (unverified rescue).
+Expected: 0063 converts to an honest verdict at sim 0.922 (~1h).
+
+### 2. C5 rescoped — splitter gap, not context bloat (from sqlite-0004)
+
+The 12,689-token prompt is ONE unit (`sqliteInt.h 1:2`) of three —
+sbcr already resolved the other two (fitness 0.66/0.65). Unit 1:2
+declined sbcr (modification conflict), fell to the LLM, and its
+prompt was 50,759 chars with `enclosing_symbol: null`: the
+entity/member splitter does not decompose C-header top-level blocks.
+Context compaction (every reviewer's assumption) cannot fix a prompt
+whose conflict SIDES dominate. Amendment: C5 step 1 = measure the
+sides-vs-context split of the 50,759 chars; the likely fix is
+C-header-aware unit splitting at #ifdef/typedef boundaries.
+
+### 3. Mixed-delimiter repair PROMOTED from hold (from zenodo-0085)
+
+0085 has NO stubborn LLM loop (C3's archetype does not apply): a
+portfolio side-swap (ic-adjudicated) produced `SyntaxError: unmatched
+')'`, and the single repair round SKIPPED — "fault attribution: error
+outside all unit spans (tiered mode)". An unmatched PAREN is outside
+the brace repair's remit, and tiered mode's attribution skip leaves
+zero repair attempts. Amendment: extend the deterministic delimiter
+repair to `()`/`[]` (stack-based) and let it run pre-attribution —
+promoted from "C4 backlog" into the D1+C1b batch. C3's target list
+narrows to redis-0015/0029/0049 (the true re-resolve loops).
