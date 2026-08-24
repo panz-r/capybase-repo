@@ -667,3 +667,21 @@ on axum-0005) go to the backlog for a single-retry hardening.
 Gate 0 → D1 + C1b (one batch, one gate) → C3 + R3' (one batch) →
 C1c → R3/R4 → C5/C7 diagnosis → specimen validations per batch →
 sprint-23 reround (README row 3).
+
+### Addendum 2 — kill criteria, row-2 freeze, incremental Gate 0
+
+- **Pre-registered kill criteria**: if the first batch (D1+C1b)
+  converts 0 of its 5 targets on paired A/B, the later batches
+  (C3/R3'/C1c/R3+R4) are RE-JUSTIFIED against the flip-audit evidence
+  before execution — no building on momentum. Upside projections are
+  the reviewers' habit, not ours.
+- **Row-2 freeze protocol**: the reround becomes README row 2 under
+  the same verifiable-attribution scaffolding as row 1 — per-shard
+  extracts under docs/results/s22r2/ + meta.json with the pinned
+  commit (e7e7eb7) and commands; flip table recomputable from clones.
+- **Gate 0 is incremental**: each shard's flip audit + safety
+  cross-tabs run the day its flights land, not only at completion.
+  The python and C shards are auditable NOW.
+- Verdict-class movements count, not just PASS flips: mechanisms that
+  convert ESCALATE→WORKING move the honest PASS+WORKING rate and are
+  recorded as such (python's WORKING went 2→4 in r2).
