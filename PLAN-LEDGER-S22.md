@@ -739,3 +739,39 @@ zero repair attempts. Amendment: extend the deterministic delimiter
 repair to `()`/`[]` (stack-based) and let it run pre-attribution —
 promoted from "C4 backlog" into the D1+C1b batch. C3's target list
 narrows to redis-0015/0029/0049 (the true re-resolve loops).
+
+## Deep-dive archaeology round 2 → sprint-23 amendments (2026-08-24)
+
+### 1. C7 made concrete: the empty-response fast-fail's token ceiling
+(from redis-0054/0055)
+
+The "branch-stall" label decomposed: both cases are EMPTY model
+responses (twice, then no-progress escalate) — the same class as
+redis-0052, so THREE cases share it. The empty-first-response
+fast-fail to verified single-side candidates never fired because its
+gate requires `_tok_est < 1500` or oversized-parse-fail — genuine
+empty responses on medium-large units (the redis.c shape) are
+excluded. Amendment (C7'): for true-empty responses, drop the token
+ceiling — the single-side candidates still pass full verification, so
+the ceiling protects nothing here. Keep oversized-parse-fail semantics
+unchanged. Expected: 0-3 conversions, journal-verifiable.
+
+### 2. C1b upgraded: redis-0040 is a line-restore target (verified)
+
+0040's failure is the warning-promotion class (repo -Werror turns an
+incompatible-pointer warning into the error; the in-session gate
+passed; micro-CEGIS declined — no arm for it). The correct call
+`output_help(--argc, ++argv);` EXISTS VERBATIM in the replayed side —
+C1b's LCS-anchored line-restore arm applies directly. 0040 moves from
+COIN-FLIP to C1b convert candidate; C1b's verified-target list is now
+redis-0013 (derived prototype), redis-0040 (line restore),
+sqlite-0030 (uncertain), redis-0014 (type token).
+
+### 3. C3's archetype verified on redis-0015
+
+4 units, 16 resolution attempts (per-unit LLM retries), then two
+whole-file repair rounds failing on EXTRA closing braces at DIFFERENT
+lines (835 → 878: distinct signatures, so C4 rotation is engaged and
+not the bottleneck — the model's unit outputs are the variance).
+Adjacent-context injection is the missing piece; 0015 confirmed as
+C3's archetype alongside sqlite-0029/redis-0049.
