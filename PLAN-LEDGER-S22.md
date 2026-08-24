@@ -1099,3 +1099,29 @@ implementation time, reround idle).
   midband-takeover convert's gate failed on environment, not merge
   content. Era-adjacent flake candidate; watch for recurrence in cpp
   before claiming systematic.
+
+## Deep-dive archaeology round 12 → F1 direction + false-fire surface (2026-08-24)
+
+Read-only. Two checks, one correction:
+
+- **Direction metric pinned**: the tier design keys on LINE churn
+  (rounds 10-11), not diff-block count. A block-count run inverted
+  several high-churn designations (flask-0006: 2 big delete-blocks
+  for current vs 4 small blocks for replayed) and produced phantom
+  "bad directions". Under the line metric, round 11's table stands:
+  the oracle sits with the high-line-churn side on every tier-1
+  truth. The block-count artifact is documented so it is not
+  reintroduced at implementation time.
+
+- **In-session false-fire surface precisely bounded**: tier 1 sees
+  only churn (no oracle). Among min-churn<=15 cases, the weave-truths
+  are zenodo-0040 (9) and zenodo-0044 (2). 0040's weave FAILS →
+  takeover fires → sim 0.76 NEAR (benign, pre-registered). 0044's
+  weave SUCCEEDS (WORKING verdict; its near-one-sided shape never
+  reaches the failure path) → unreachable. No other weave sits under
+  the threshold (0085 at 16, 0014 at 38, 0027 at 145).
+
+- **No subset-subsumption in tier 2**: neither side's changed-block
+  set nests inside the other's for any 16+ churn case — symmetric
+  refactors genuinely overlap. Tier 2 requires the LLM adjudicator;
+  there is no hidden deterministic shortcut.
