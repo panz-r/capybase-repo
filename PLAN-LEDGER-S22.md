@@ -1005,3 +1005,23 @@ the subsumption judgment is the 4B's job and the open variable.
 Pre-registered acceptance: >= 5 conversions among the 26 measured
 targets; zero takeovers on the two true-weave cases (adjudicator
 must say weave there). Expected (conservative): 8-15 conversions.
+
+### Operational rule (user directive, 2026-08-24 21:10)
+
+**NO model requests of any kind while a measurement run is in flight
+— no dry-runs, no probes, no adjudicator tests — without explicit
+user approval.** The endpoint is the measurement instrument;
+competing requests contaminate the timeout class (load-sensitive) even
+when rejected.
+
+What happened: an F1 adjudicator dry-run (12 cases x several wiring
+attempts) made live calls against the endpoint during the rust shard.
+Most were 400-rejected (json_mode unsupported via the hand-built
+client, then messages-form/token-budget issues); the reround shows no
+stall (rust progressed normally, verdict mix healthy). The script is
+DELETED. The F1 adjudicator accuracy measurement moves INSIDE the
+implementation phase: it runs through the harness's standard specimen
+machinery with the reround idle, as part of F1's paired A/B. The
+wiring lessons (thinking-model token budget is mandatory; json_mode
+rejections also explain the comment-phase 400s) are recorded here for
+that work.
