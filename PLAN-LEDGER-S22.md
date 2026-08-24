@@ -685,3 +685,17 @@ sprint-23 reround (README row 3).
 - Verdict-class movements count, not just PASS flips: mechanisms that
   convert ESCALATE→WORKING move the honest PASS+WORKING rate and are
   recorded as such (python's WORKING went 2→4 in r2).
+
+### Gate 0 — python-shard early slice (executed 2026-08-24, C shard in flight)
+
+- Flips vs frozen baseline: 2 regressions, 1 improvement, 1 class move.
+  **No mechanism-caused regression.** zenodo-0019 (ESC/ESC/PASS) and
+  zenodo-0088 (WORKING/PASS/WORKING) are variance-class coin-flips,
+  majority rule honest.
+- **zenodo-0064 ESCALATE→PASS 0.978: P5 v2 prediction CONFIRMED.**
+- **zenodo-0063 still 3/3 ESCALATE: P5's weakest prediction MISSED**
+  (the 0.92 band did not hold) — journal archaeology queued for full
+  landing (why no downgrade fired or why it still escalated).
+- Safety cross-tabs: 4 resurrection_downgrade events, **0 divergent
+  outcomes**; 0 symbol_inject patches (python rarely C-style);
+  WORKING 2→4 recorded as verdict-class movement per addendum 2.
