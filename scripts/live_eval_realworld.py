@@ -1404,13 +1404,22 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         # clean passes never need reclassification). The predicate mirrors
         # the verdict chain: escalated, markers left, empty output, or a
         # structural-gate failure on a code file.
+        # E1 (sprint-22): ALSO fire when the c/cpp tree build FAILED on a
+        # marker-free, non-escalated buffer — the four cpp DIV regressions
+        # (clickhouse-0049 et al.) left oracle_builds=None, so the
+        # GATE_UNAVAILABLE sandbox-artifact rescue could not even be
+        # evaluated. Probing classifies them honestly instead.
         oracle_builds_result: bool | None = None
         from capybase.verification import structural_gate_applies as _sga_probe
+        _gate_failed_clean_buffer = (
+            c_builds_result is False and not res.escalated and bool(content)
+            and not _contains_markers(content))
         if content and (
                 res.escalated
                 or _contains_markers(content)
                 or (_sga_probe(case.path)
-                    and not _brace_balanced(content, case.language))):
+                    and not _brace_balanced(content, case.language))
+                or _gate_failed_clean_buffer):
             try:
                 oracle_builds_result = _oracle_builds(repo, case, crate_source)
             except Exception:  # noqa: BLE001 — classification is best-effort

@@ -12,6 +12,7 @@ dedicated scan is needed.
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -195,3 +196,84 @@ def test_lockfiles_are_exempt_from_resurrection_scanning():
             )
             assert bool(findings) is expect_findings, (
                 f"{fname}: expected findings={expect_findings}, got {findings}")
+
+
+# ---------------------------------------------------------------------------
+# P5 v2 (sprint-22): resolved-file provenance downgrade.
+# ---------------------------------------------------------------------------
+
+def _emits(orch) -> list[tuple[str, dict]]:
+    """Capture journal emits by wrapping (config-independent)."""
+    events: list[tuple[str, dict]] = []
+    orig = orch.journal.emit
+
+    def _cap(event_type, payload=None, **kwargs):
+        events.append((event_type, dict(payload or {})))
+        return orig(event_type, payload, **kwargs)
+
+    orch.journal.emit = _cap
+    return events
+
+def test_resolved_file_provenance_downgrades_stop_to_warn():
+    """A flagged path the session explicitly resolved and validated is an
+    explicit merge choice, not a silent undo — stop downgrades to warn."""
+    with tempfile.TemporaryDirectory() as d:
+        repo = Path(d)
+        git(repo, "init", "-q", "-b", "main")
+        ctx = _make_resurrection_repo(repo)
+        orch = _orch(repo, policy="stop")
+        orch._resolved_validated_paths = {"app.py"}
+        findings = orch._resurrection_scan(
+            start_oid=ctx["base_oid"], onto_oid=ctx["onto_oid"],
+            result_oid=ctx["result_oid"], backup_ref="capybase/backup/x",
+        )
+        assert findings
+        events = _emits(orch)
+        result = orch._handle_resurrections(
+            findings, start_oid=ctx["base_oid"], backup_ref="capybase/backup/x"
+        )
+        assert not result.escalated
+        downgrades = [e for e in events
+                      if e[0] == "resurrection_downgrade"]
+        assert downgrades, "resolved-file provenance should downgrade"
+        assert "resolved-file provenance" in downgrades[0][1]["reason"]
+
+
+def test_untouched_file_keeps_hard_stop():
+    """Findings in files the session never resolved keep the hard stop —
+    that is the truly silent restoration class."""
+    with tempfile.TemporaryDirectory() as d:
+        repo = Path(d)
+        git(repo, "init", "-q", "-b", "main")
+        ctx = _make_resurrection_repo(repo)
+        orch = _orch(repo, policy="stop")
+        # No _resolved_validated_paths: the session resolved nothing.
+        findings = orch._resurrection_scan(
+            start_oid=ctx["base_oid"], onto_oid=ctx["onto_oid"],
+            result_oid=ctx["result_oid"], backup_ref="capybase/backup/x",
+        )
+        result = orch._handle_resurrections(
+            findings, start_oid=ctx["base_oid"], backup_ref="capybase/backup/x"
+        )
+        assert result.escalated
+        assert not [e for e in _emits(orch)
+                    if e[0] == "resurrection_downgrade"]
+
+
+def test_partial_resolution_keeps_hard_stop():
+    """ALL flagged paths must be resolved+validated — a finding in an
+    untouched file blocks the downgrade even if others are covered."""
+    with tempfile.TemporaryDirectory() as d:
+        repo = Path(d)
+        git(repo, "init", "-q", "-b", "main")
+        ctx = _make_resurrection_repo(repo)
+        orch = _orch(repo, policy="stop")
+        orch._resolved_validated_paths = {"some/other/file.py"}
+        findings = orch._resurrection_scan(
+            start_oid=ctx["base_oid"], onto_oid=ctx["onto_oid"],
+            result_oid=ctx["result_oid"], backup_ref="capybase/backup/x",
+        )
+        result = orch._handle_resurrections(
+            findings, start_oid=ctx["base_oid"], backup_ref="capybase/backup/x"
+        )
+        assert result.escalated

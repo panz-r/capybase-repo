@@ -8045,6 +8045,7 @@ class Orchestrator:
         # _coverage_against metric as the resurrection detector itself.
         _effective_policy = cfg.resurrection_policy
         if _effective_policy == "stop" and findings:
+            _downgrade_reason: str | None = None
             try:
                 from capybase.merge_intent import _coverage_against
                 _all_explained = True
@@ -8067,17 +8068,36 @@ class Orchestrator:
                     if not _all_explained:
                         break
                 if _all_explained:
-                    self.journal.emit(
-                        "resurrection_downgrade",
-                        {"paths": [f.path for f in findings],
-                         "reason": "all findings explained by "
-                                   "replayed side content "
-                                   "(explicit merge choice)"},
-                        step_index=self.step,
-                    )
-                    _effective_policy = "warn"
+                    _downgrade_reason = (
+                        "all findings explained by replayed side content "
+                        "(explicit merge choice)")
             except Exception:  # noqa: BLE001 - never break on provenance check
                 pass
+            # P5 v2 (sprint-22): resolved-file provenance — every flagged
+            # path this session EXPLICITLY resolved and passed the full
+            # validation gate (marker-free + compile) is an explicit merge
+            # choice, not a silent undo: the content survived the gauntlet
+            # as part of a chosen resolution (tokio-0037/0042/0046,
+            # clickhouse-0020: near-oracle merges stopped here). Findings in
+            # files the session never touched keep the hard stop — that is
+            # the truly silent restoration class. Warn still surfaces the
+            # finding (output + review bundle); nothing is silent.
+            if _downgrade_reason is None:
+                _resolved = getattr(self, "_resolved_validated_paths", None)
+                if _resolved and all(
+                        f.path in _resolved for f in findings):
+                    _downgrade_reason = (
+                        "all flagged paths explicitly resolved and "
+                        "compile-validated by this session "
+                        "(resolved-file provenance)")
+            if _downgrade_reason is not None:
+                self.journal.emit(
+                    "resurrection_downgrade",
+                    {"paths": [f.path for f in findings],
+                     "reason": _downgrade_reason},
+                    step_index=self.step,
+                )
+                _effective_policy = "warn"
         if _effective_policy == "stop":
             self.log.warning(
                 "resurrection detection stopped the rebase: session=%s paths=%d "
@@ -9283,6 +9303,13 @@ class Orchestrator:
                     if (file_validation.passed
                             and getattr(file_validation, "resolved_text", None) is not None):
                         buffer = file_validation.resolved_text
+                    # P5 v2 (sprint-22): record explicitly-resolved+validated
+                    # paths for the resurrection guard's resolved-file
+                    # provenance downgrade.
+                    if file_validation.passed:
+                        if not hasattr(self, "_resolved_validated_paths"):
+                            self._resolved_validated_paths: set[str] = set()
+                        self._resolved_validated_paths.add(path)
                     # Causal attribution: record whether the previous repair
                     # mechanism changed the failure shape. NOT_ENGAGED = first
                     # iteration (no prior mechanism); CLEARED = the prior repair
@@ -11139,6 +11166,18 @@ class Orchestrator:
         """
         fault_idx = _attribute_whole_file_failure(failures, [u for u, _ in accepted])
 
+        # C4 (sprint-22): per-(step, path) tried-repair registry keyed by
+        # failure signature. A deterministic repair that already FAILED for
+        # this exact signature never re-runs (axum-0013: the model re-resolve
+        # set _phase2_model_used, which cleared _det_unchanged, and round 2
+        # re-ran the identical brace repair to the identical failure). When a
+        # kind is exhausted the flow falls through to the next strategy —
+        # attribution + model-with-error — instead of repeating itself.
+        if not hasattr(self, "_wf_repair_tried"):
+            self._wf_repair_tried: dict[tuple[int, str], set[str]] = {}
+        _sig = _hard_failure_signature(failures)
+        _tried = self._wf_repair_tried.setdefault((self.step, path), set())
+
         # Deterministic brace repair: run BEFORE the attribution gate. The brace
         # repair operates on the whole-file spliced buffer — it doesn't need
         # fault attribution to a specific unit. The #1 cause of whole-file
@@ -11148,30 +11187,39 @@ class Orchestrator:
         # a chance to fix it. Conservative: acts only when one edit fully
         # balances the braces.
         if not skip_deterministic:
-            det, _brace_diag = _try_deterministic_brace_repair(
-                failures, original, accepted, max(0, fault_idx)
-            )
-            if det is not None:
-                unit_new, cand_new = det[0]
-                self.journal.emit(
-                    "candidate_validated",
-                    {
-                        "candidate_id": cand_new.candidate_id,
-                        "passed": True,
-                        "whole_file_repair_for": unit_new.unit_id,
-                        "deterministic_brace_repair": True,
-                    },
-                    step_index=self.step,
-                    path=path,
-                    unit_id=unit_new.unit_id,
+            if f"brace:{_sig}" not in _tried:
+                det, _brace_diag = _try_deterministic_brace_repair(
+                    failures, original, accepted, max(0, fault_idx)
                 )
-                return det
-            elif _brace_diag not in ("not_brace_failure", "no_imbalance"):
-                # Only journal when we TRIED to repair braces and failed —
-                # not when the failure wasn't brace-related at all.
+                if det is not None:
+                    unit_new, cand_new = det[0]
+                    self.journal.emit(
+                        "candidate_validated",
+                        {
+                            "candidate_id": cand_new.candidate_id,
+                            "passed": True,
+                            "whole_file_repair_for": unit_new.unit_id,
+                            "deterministic_brace_repair": True,
+                        },
+                        step_index=self.step,
+                        path=path,
+                        unit_id=unit_new.unit_id,
+                    )
+                    return det
+                elif _brace_diag not in ("not_brace_failure", "no_imbalance"):
+                    # Only mark/journal when we TRIED and failed — not when
+                    # the failure wasn't brace-related at all.
+                    _tried.add(f"brace:{_sig}")
+                    self.journal.emit(
+                        "brace_repair_skipped",
+                        {"reason": _brace_diag},
+                        step_index=self.step, path=path,
+                    )
+            else:
                 self.journal.emit(
-                    "brace_repair_skipped",
-                    {"reason": _brace_diag},
+                    "repair_rotation",
+                    {"skipped": "brace",
+                     "reason": "already failed for this failure signature"},
                     step_index=self.step, path=path,
                 )
             # C1 (sprint-22): deterministic symbol injection at the file
@@ -11181,10 +11229,19 @@ class Orchestrator:
             # retry reproduced the identical errors for exactly this
             # reason). The compiler names the symbol; the pristine stage
             # sides carry its declaration; splice it verbatim.
-            sym = self._try_symbol_injection_repair(
-                path, original, accepted, failures, max(0, fault_idx))
-            if sym is not None:
-                return sym
+            if f"symbol_inject:{_sig}" not in _tried:
+                sym = self._try_symbol_injection_repair(
+                    path, original, accepted, failures, max(0, fault_idx))
+                if sym is not None:
+                    return sym
+                _tried.add(f"symbol_inject:{_sig}")
+            else:
+                self.journal.emit(
+                    "repair_rotation",
+                    {"skipped": "symbol_inject",
+                     "reason": "already failed for this failure signature"},
+                    step_index=self.step, path=path,
+                )
 
         # Smart blame (tiered verification): when no unit's span contains the
         # error line AND we're in tiered mode (time budget active), skip the
