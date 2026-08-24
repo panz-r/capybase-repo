@@ -833,3 +833,33 @@ The file gate PASSED; the build failed rc=2; stage-1 fired
 its feedback — the loop cannot tell whether the patch helped. D0's
 diagnostic capture covers the re-gate too, which is what makes D1's
 error accumulation meaningful on this target.
+
+## Deep-dive archaeology round 5 → sprint-23 amendments (2026-08-24)
+
+### 1. flask-0006 CLOSED as honest frontier
+
+The "P4's own specimen" mystery resolved — negatively. The true shape:
+current deleted 22 lines in two regions (the cleanup); replayed made
+an insert PLUS replaces in the tail (not pure insertion). P4's purity
+guard correctly declines — and the oracle WEAVES those tail changes
+(sim 0.535 says a deletion+insertion salvage is far from the human
+resolution). The design story mis-cited this case; no mechanism
+change; archaeology flag removed.
+
+### 2. Iterated brace repair: second verified target
+
+sqlite-0029 fails with "4 unclosed '{'" (0019: 2) after an 18-attempt
+resolution loop. The iterated-repair item (round 3) covers both;
+0029's 4-gap also CONFIRMS C3's archetype (multi-unit LLM loop) —
+all three C3 targets (0015/0029/0049) now journal-verified.
+
+### 3. sqlite-0030 stays uncertain — leaning no
+
+The real error is a signature-mismatched xFunc table initializer
+(multi-line entry); a single-line parent restore is dubious. C1b
+attempts it; expectation stays 0-1, honestly.
+
+**Archaeology rounds complete: 15 cases examined, 11 plan amendments,
+1 standing mystery closed, 2 negative verifications (0023 not-C1,
+0006 not-P4). Batch-1 targets now all journal- or corpus-verified
+except 0030 (explicitly uncertain).**
