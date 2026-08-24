@@ -1082,3 +1082,20 @@ failure path must reach the takeover) and stay pre-registered at
 ">= 5 of 26" for acceptance, with the measured ceiling documented
 here. Tier 2 bounded by adjudicator accuracy (measured at
 implementation time, reround idle).
+
+## Gate-0 rust partial slice (53/194, executed 2026-08-24 21:20)
+
+- 51 unchanged; 2 regressions, both infrastructure-attributed:
+- **axum-0021 (PASS→ESCALATE at sim 1.0): CRASH BUG — D2 added to
+  batch 1.** `ValueError: could not convert string to float: ''` —
+  the adjudication JSON parsers (`float(parsed.get("confidence",
+  0.0))` at orchestrator 15047/15154/15222) crash when the model
+  returns an empty confidence string; one repeat died this way and
+  the majority went ESCALATE despite a sim-1.0 completed session.
+  Fix: a `_safe_conf` guard on all three sites. (Same lesson as the
+  C1 dry-run wiring: never trust model-typed fields.)
+- **axum-0005 (PASS→ESCALATE 0.994): cargo failed to READ
+  `/tmp/../docs/me...`** — a path outside the worktree; the
+  midband-takeover convert's gate failed on environment, not merge
+  content. Era-adjacent flake candidate; watch for recurrence in cpp
+  before claiming systematic.
