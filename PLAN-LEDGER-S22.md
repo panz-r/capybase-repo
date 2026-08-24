@@ -473,3 +473,74 @@ lifetime exemption applies to rust only, `char c = 'a;` in C counts —
 tests pass standalone in 1.3s). Lesson recorded: never overlap full
 suite runs with other eval/test work. Gate run #4 (clean, uncontended)
 is the landing gate.
+
+## Round-3 reviewer synthesis (post-fix-sprint, 2026-08-24)
+
+Four documents: two proposals + a head-to-head pair (Response 1 vs
+Response 2). Rated below. Key context the reviewers partly lacked:
+C1 already searches FULL side files (stage blobs), not conflict
+regions; deterministic_gcc_fixit, #endif positional repair, use-dedup
+(R2), repair rotation (C4), and resolved-file provenance (P5 v2) all
+exist and are in the running reround.
+
+### Rating (the head-to-head pair)
+
+**Response 2 — most useful.** Three genuinely NEW mechanisms that
+survive contact with our evidence: (a) the error-accumulating repair
+chain (repair rounds build on prior output; the model sees the full
+tried/failed history so it cannot re-introduce fixed errors — directly
+targets the repair-fires-but-regate-fails trio); (b) budget-aware
+diverse-strategy scheduling (no two consecutive rounds use the same
+strategy — a sharper C4); (c) project-wide symbol index (real delta
+over C1: sibling files, headers). Also correctly bounds what will NOT
+convert (zenodo-0044, sea-orm-0027) and its strategic frame — "the
+honest ceiling is a function of how much repair burden shifts from the
+model to deterministic mechanisms" — is the right way to see the
+remaining population. Lapse: restates R3 as the cross-repeat
+aggregation ("any repeat passes AND sim >= 0.94") — the gaming pattern
+rejected twice before.
+
+**Response 1 — solid execution discipline, thinner novelty.** Best
+phasing of any reviewer this sprint (tiered ROI, honest effort
+estimates, an explicit "would NOT do" list that correctly refuses
+gate-weakening, mid-band-as-failures, and era-chasing). But its Tier-1
+restates existing/rejected items (full-file injection premise is
+factually off — C1 searches full sides; retry relaxation = R4;
+best-of-N aggregation = third occurrence of the rejected threshold
+pattern), and its Tier-2 is self-admitted low-ROI.
+
+### New sprint-23 candidates (accepted)
+
+| # | Item | Source | Targets | Effort | Priority |
+|---|------|--------|---------|--------|----------|
+| D1 | Error-accumulating repair chain: repair rounds build on the prior output; model retries carry the full tried/failed error history | R2(pair) | protobuf-0034/0051, jsonc-0016 | 4-5h | P1 |
+| C1c | Project-wide symbol search: extend C1's search space to sibling repo files (headers, mod files) | R2(pair), R1(pair) | redis-0013, sqlite-0030 | 4-6h | P2 |
+| C1b | Verbatim type/token repair: expected type from the compiler message when it appears verbatim in a parent; parse-error line restored from an unchanged base/side line | proposal-1 #4 | redis-0014, sqlite-0039 | 3-4h | P3 |
+| R3' | Diverse-strategy scheduling: no two consecutive repair rounds use the same strategy (model calls alternate with deterministic repairs) | R2(pair) | class D | 3h | P3 (extends C4) |
+
+Existing items reinforced: C5 (oversized-prompt diagnosis — all three
+converge), R4 (fitness-gated retry extension, pre-registered 0.02
+window), R3 within-session best-of-N (NOT the aggregation form),
+C6/P7 archaeology (zenodo-0085, sqlite-0040).
+
+### Rejected (with occurrence counts)
+
+- **Cross-repeat best-of-N aggregation** (3rd occurrence — R1(pair)
+  1.3, R2(pair) R3, proposal-1 #6 variant): post-hoc threshold fitting
+  on known cases; majority-of-3 is pre-registered.
+- **Skeleton-override-to-PASS** (3rd occurrence — playbook #2):
+  eval-only verdict manipulation; skeleton_similarity stays a recorded
+  diagnostic (S20.11), never a gate.
+- **Wall-clock retry budgets** (2nd occurrence): non-reproducible runs;
+  budget stays a deterministic function of unit count/fitness.
+- **Compile-gate weakening**: nobody proposed it; Response 1's explicit
+  rejection endorsed.
+
+### Held (not rejected, not now)
+
+Decision-point decomposition (mid-band, reasoning-layer, 6-8h for
+graded conversions); statement-level splitting (mini-conflict +
+member/entity split largely cover it); mid-band repair-by-example
+(golden-path validated for conversions, not style); deletion-intent
+classifier (P5 leftover); cross-unit dependency graph (20-30h, ROI-poor
+by its own proponents).
