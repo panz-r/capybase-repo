@@ -286,59 +286,29 @@ testing is a stub.
 
 ### Results
 
-Full-corpus results are measured by **sharded harvest**: the 677-case
-corpus runs one language at a time (Python → C → Rust → C++), with
-failure analysis and fixes landing between rounds. The table below is
-the CURRENT state — the sprint-22 reround, all 677 cases on the single
-uniform commit `e7e7eb7` (fix sprint: repair propagation +
-fail-closed verification, symbol injection, use-dedup, repair
-rotation, resolved-file provenance, probe-on-divergence).
+The 677-case corpus runs as a sharded harvest (one language at a time,
+fixes landing between rounds). Current state — all cases on the
+uniform commit `e7e7eb7`; Δ is versus the prior full round.
 
-| lang | cases | PASS | era-dead | adj denom | PASS % | adj % |
-|------|-------|------|----------|-----------|--------|-----------|
-| python | 111 | 97 | 0 | 109 | 87.4% | 89.0% |
-| c | 205 | 88 | 97 | 107 | 42.9% | 82.2% |
-| rust | 194 | 157 | 24 | 170 | 80.9% | 92.4% |
-| cpp | 167 | 102 | 45 | 109 | 61.1% | 93.6% |
-| **total** | **677** | **444** | **166** | **495** | **65.6%** | **89.7%** |
+| lang | cases | PASS | era-dead | PASS % | adj % | Δ adj |
+|------|-------|------|----------|--------|-----------|-------|
+| python | 111 | 97 | 0 | 87.4% | 89.0% | −0.9pp |
+| c | 205 | 88 | 97 | 42.9% | 82.2% | +3.9pp |
+| rust | 194 | 157 | 24 | 80.9% | 92.4% | +1.2pp |
+| cpp | 167 | 102 | 45 | 61.1% | 93.6% | +3.7pp |
+| **total** | **677** | **444** | **166** | **65.6%** | **89.7%** | **+1.8pp** |
 
-**adj %** = PASS / (cases − era-dead − SAFE_SKIP), one uniform
-formula. History: the frozen sprint-22 baseline measured 434/677 =
-64.1% raw / 87.9% adjusted (per-shard commits and extracts in
-`docs/results/s22/`); the sprint-20 harvest baseline was 65.0% /
-88.9%. The reround's +1.8pp adjusted gain decomposes into **12
-mechanism-verified conversions** (5 repair-propagation false-accept
-fixes, 6 resolved-file-provenance guard conversions, 1 dedup-assisted)
-plus 6 variance conversions, against 7 regressions of which 3 are
-already-root-caused bugs with fixes specced. Safety audits: 17 guard
-downgrades → 9 PASS + 3 honest NEAR + zero divergent completions.
-Per-case extracts and provenance for this round:
-`docs/results/s22r2/` (schema + outcome summary in its `meta.json`).
-
-**Attribution — what these numbers are.** Every case is a real rebase
-conflict replayed live end to end against one local endpoint (provider
-config `nova-gemma4`; hosts are never tracked — see
-`docs/PROVIDER_CONFIG.md`). A case is **PASS** when the resolution is
-marker-free, passes the compile/structural gate, and matches the actual
-human resolution at token similarity ≥ 0.90. **era-dead**
-(`ESCALATE_TOOLCHAIN`) cases are un-passable by construction: the
-preflight probe compiles both sides and the human oracle with the
-current toolchain and all three fail identically (dependency drift,
-rustc lint drift) — these are environmental, not resolver failures, so
-the adjusted column excludes them from the denominator (16 SAFE_SKIP
-cases — git resolved them cleanly — are excluded the same way). Non-PASS
-cases rerun up to 3 times and keep the majority verdict
-(`--repeat-nonpass 3`), which bounds — but does not eliminate —
-single-run sampling noise; several coin-flip cases passed 1-of-3
-repeats and are honestly counted as non-PASS.
-
-**Attribution — which code produced them.** The whole reround ran on
-the single pinned commit `e7e7eb7`; every table number recomputes from
-the committed extracts alone (recount one-liners and the
-`scripts/verdict_diff.py` flip audit are in `docs/results/s22r2/meta.json`).
-Per-round mechanism states, flip tables, and the archaeology trail
-live in `docs/eval-results-tracker.md` and the sprint-22 ledger;
-failure deep-dives in `docs/sprint22-*-failures-report.md`.
+**PASS** = marker-free, passes the compile/structural gate, and matches
+the human resolution at token similarity ≥ 0.90, replayed live against
+one local endpoint (provider configs only — hosts are never tracked).
+**adj %** = PASS / (cases − era-dead − SAFE_SKIP): era-dead cases are
+un-passable by construction (both sides and the human oracle fail the
+current toolchain identically — environmental, not resolver failures),
+and SAFE_SKIP cases (git resolved them cleanly) are corpus noise.
+Non-PASS cases rerun up to 3 times, majority verdict. Every number
+recomputes from the per-case extracts committed under `docs/results/`
+(current round: `s22r2/`, incl. its `meta.json` with the pinned
+commit, commands, and flip-audit recipe).
 
 ### Corpus
 
