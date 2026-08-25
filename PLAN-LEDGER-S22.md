@@ -1657,3 +1657,17 @@ varied presentation + best-of-N selection).
 
 Full harvest decision: ONLY after all items land + specimen-validate.
 The harvest threshold (≥10 verified conversions) remains.
+
+### Repair-retrieval audit result (2026-08-25)
+
+The repair-path retrieval (`context.repair_retrieved_examples`) is
+**intentionally unexercised in the eval**: the `repair_retriever` is
+never configured by `live_eval_realworld.py`. The code exists
+(context_builder.py populates it when a QualityFilteredRetriever is
+provided; resolution_engine.py renders the top-1 example in the
+repair prompt), but the eval harness passes None — "the prior
+behavior" per the code comment. This is not a dead mechanism (bug)
+but an **unconfigured feature** — activating it would require seeding
+a quality-filtered store and wiring the retriever into the eval's
+config. Recorded as a sprint-24 candidate (the golden-path A/B
+methodology applies).
