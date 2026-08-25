@@ -9844,13 +9844,37 @@ class Orchestrator:
                         # takeover on the FAILURE path — when one side's
                         # churn <= 15 lines, the other side IS the merge.
                         _f1_side = None
-                        if getattr(self.config.future,
-                                   "enable_f1_takeover", False):
+                        # F1-smart: always-on with 4 precise conditions:
+                        # (a) all repair rounds exhausted (wf_retries >= budget)
+                        # (b) not heading to interactive (a human decides)
+                        # (c) not the first attempt (model got its retries)
+                        # (d) the wholesale floor already declined
+                        _f1_eligible = (
+                            wf_retries >= max(1, wf_budget)
+                            and not getattr(self, "_interactive_pending", False)
+                            and (wf_retries >= 1
+                                 or getattr(self, "_phase2_model_used", False))
+                        )
+                        if _f1_eligible:
                             try:
                                 _sides_f1, _base_f1 = self._micro_stage_sides(path)
                                 if _sides_f1:
                                     _f1_side = _near_one_sided_takeover(
                                         _base_f1, _sides_f1)
+                                    # F1-smart (d): the takeover side must
+                                    # pass the compile gate — taking a side
+                                    # that doesn't compile is worse than
+                                    # escalating (test fixtures: synthetic
+                                    # sides that don't build)
+                                    if _f1_side is not None:
+                                        _f1_text_check = _sides_f1.get(_f1_side, "")
+                                        _f1_check = self.verification.verify_file(
+                                            path, language,
+                                            _sides_f1.get(_f1_side, ""), [],
+                                            repo_root=str(self.git.repo),
+                                            whole_text=_f1_text_check)
+                                        if not _f1_check.passed:
+                                            _f1_side = None
                             except Exception:  # noqa: BLE001
                                 _f1_side = None
                         if _f1_side is not None:
@@ -9861,15 +9885,12 @@ class Orchestrator:
                                     {"side": _f1_side, "path": path},
                                     step_index=self.step, path=path,
                                 )
-                                _f1_unit = ConflictUnit(
-                                    session_id=self.session_id,
-                                    step_index=self.step,
-                                    path=path,
-                                    language=language,
-                                    unit_id=f"{path}:f1_tier1",
-                                    unit_kind="whole_file",
-                                    marker_span=None,
-                                )
+                                _f1_unit = unit.model_copy(
+                                    update={
+                                        "unit_id": f"{path}:f1_tier1",
+                                        "unit_kind": "whole_file",
+                                        "marker_span": None,
+                                    })
                                 _f1_cand = CandidateResolution(
                                     candidate_id=f"{path}:f1_tier1:{_f1_side}",
                                     unit_id=_f1_unit.unit_id,
@@ -9892,9 +9913,7 @@ class Orchestrator:
                             # tier-1 declines (both sides changed
                             # significantly), ask the model
                             _f2_side = None
-                            if (getattr(self.config.future,
-                                        "enable_f1_takeover", False)
-                                    and _sides_f1):
+                            if _f1_eligible and _sides_f1:
                                 _f2_side = self._f1_tier2_adjudicate(
                                     path, language, _base_f1 or "",
                                     _sides_f1 or {})
@@ -9902,15 +9921,12 @@ class Orchestrator:
                                 _f2_text = (_sides_f1 or {}).get(
                                     _f2_side, "")
                                 if _f2_text.strip():
-                                    _f2_unit = ConflictUnit(
-                                        session_id=self.session_id,
-                                        step_index=self.step,
-                                        path=path,
-                                        language=language,
-                                        unit_id=f"{path}:f1_tier2",
-                                        unit_kind="whole_file",
-                                        marker_span=None,
-                                    )
+                                    _f2_unit = unit.model_copy(
+                                        update={
+                                            "unit_id": f"{path}:f1_tier2",
+                                            "unit_kind": "whole_file",
+                                            "marker_span": None,
+                                        })
                                     _f2_cand = CandidateResolution(
                                         candidate_id=f"{path}:f1_tier2:{_f2_side}",
                                         unit_id=_f2_unit.unit_id,
@@ -12687,7 +12703,37 @@ class Orchestrator:
                     pv = PROMPT_REPAIR
                     # Build prior-attempt summaries for failed-patch memory.
                     # Each summary is one line: the failure validator + message.
-                    prior_summaries = []
+                    # D1 (sprint-23): accumulate actual per-round failure
+                    # signatures — the OLD code rebuilt from CURRENT failures
+                    # each round, making every prior summary identical
+                    if not hasattr(self, '_repair_failure_history'):
+                        self._repair_failure_history: list[str] = []
+                    _current_sig = "; ".join(
+                        f"{f.validator}: {f.message[:60]}" for f in failures[:2])
+                    if _current_sig and _current_sig not in [
+                            s.split(": ", 1)[-1] for s in self._repair_failure_history]:
+                        self._repair_failure_history.append(
+                            f"attempt {retry_count + 1}: {_current_sig}")
+                    prior_summaries = list(self._repair_failure_history)
+                    # Candidate-diff feedback (s23): the model sees WHAT
+                    # CHANGED between its attempts — the REPL discipline.
+                    # Without the diff, the model reproduces a near-identical
+                    # candidate that fails the same way.
+                    if len(outcome.attempts) >= 2:
+                        import difflib as _dl_cdf
+                        _prev_text = (outcome.attempts[-2].resolved_text or "")[:4000]
+                        _curr_text = (prev_candidate.resolved_text or "")[:4000]
+                        if _prev_text and _curr_text:
+                            _diff_lines = list(_dl_cdf.unified_diff(
+                                _prev_text.splitlines()[:50],
+                                _curr_text.splitlines()[:50],
+                                fromfile="previous_attempt",
+                                tofile="current_attempt",
+                                lineterm=""))[:20]
+                            if len(_diff_lines) > 2:  # not just the headers
+                                prior_summaries.append(
+                                    "CHANGES SINCE LAST ATTEMPT:\n"
+                                    + "\n".join(_diff_lines))
                     for prev_attempt in outcome.attempts:
                         # The outcome's attempts list carries the candidates that
                         # were tried. We need the VALIDATION that rejected them.
@@ -12847,6 +12893,20 @@ class Orchestrator:
                     n_samples=n_complex,
                 )
             outcome.consensus = consensus_report
+            # Prompt-assembly instrumentation (s23): one event per prompt
+            # build makes any prompt-size issue diagnosable instantly.
+            # The prompt was built inside propose() (or its variants);
+            # we journal what we know: the version, the candidate count,
+            # and the context bundle's token estimate.
+            if hasattr(self, 'journal') and hasattr(context, 'token_estimate'):
+                self.journal.emit(
+                    "prompt_composition",
+                    {"context_token_estimate": context.token_estimate,
+                     "n_candidates": len(candidates),
+                     "unit_id": unit.unit_id,
+                     "failures_count": len(failures) if failures else 0},
+                    step_index=self.step, path=unit.path,
+                    unit_id=unit.unit_id)
             # Intent coverage re-ranking: among candidates grouped equally by
             # consensus (same cluster size), prefer the one that preserves more
             # side-specific lines. This directly targets the sim gap where the

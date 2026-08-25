@@ -14,8 +14,6 @@ renderers. Each attempt gets a profile variant; the axes rotate:
 """
 from __future__ import annotations
 
-import dataclasses
-
 from capybase.prompt_profile import (
     InstructionPosition,
     OutputLayout,
@@ -39,18 +37,18 @@ def retry_profile_variant(base_profile: PromptProfile, attempt: int) -> PromptPr
         new_so = (SideOrdering.BASE_FIRST
                   if base_profile.side_ordering == SideOrdering.CURRENT_FIRST
                   else SideOrdering.CURRENT_FIRST)
-        return dataclasses.replace(base_profile, side_ordering=new_so)
+        return base_profile.with_variant(side_ordering=new_so)
     elif attempt == 2:
         # Change output layout (json ↔ markdown-code)
         new_ol = (OutputLayout.MARKDOWN_CODE
                   if base_profile.output_layout == OutputLayout.JSON_V6
                   else OutputLayout.JSON_V6)
-        return dataclasses.replace(base_profile, output_layout=new_ol)
+        return base_profile.with_variant(output_layout=new_ol)
     elif attempt >= 3:
         # Change instruction position (bottom ↔ top-heavy)
         new_ip = (InstructionPosition.TOP_HEAVY
                   if base_profile.instruction_position == InstructionPosition.BOTTOM
                   else InstructionPosition.BOTTOM)
-        return dataclasses.replace(base_profile, instruction_position=new_ip)
+        return base_profile.with_variant(instruction_position=new_ip)
 
     return base_profile

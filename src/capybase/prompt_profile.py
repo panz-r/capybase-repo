@@ -206,6 +206,26 @@ class PromptProfile:
     parse_repair_mode: ParseRepairMode = ParseRepairMode.AUTO_REPAIR
     retry_schedule: RetrySchedule = RetrySchedule.STANDARD
 
+    def with_variant(self, **overrides) -> "PromptProfile":
+        """Return a copy with the given field overrides.
+
+        The profile is a frozen dataclass — direct assignment raises
+        FrozenInstanceError. This helper uses dataclasses.replace and
+        validates that overrides are known field names (typo-proof).
+        Used by the retry ladder (R5) and any future dynamic
+        presentation adjustment.
+
+            variant = profile.with_variant(side_ordering=SideOrdering.BASE_FIRST)
+        """
+        import dataclasses as _dc
+        field_names = {f.name for f in _dc.fields(self)}
+        unknown = set(overrides) - field_names
+        if unknown:
+            raise ValueError(
+                f"Unknown PromptProfile fields: {unknown}. "
+                f"Known: {sorted(field_names)}")
+        return _dc.replace(self, **overrides)
+
     def tag(self) -> str:
         """A short suffix recording the non-default axes, for ``prompt_version``.
 
@@ -307,8 +327,6 @@ DEFAULT_PROFILE = PromptProfile()
 #: Mirrors the legacy ``_OUTLINE_VARIANT`` global: one process-wide selection
 #: so the prompt builders and the parser read a single source of truth.
 _ACTIVE_PROFILE: PromptProfile | None = None
-
-
 def active_profile() -> PromptProfile:
     """The process-wide active profile (the default when none has been set)."""
     return _ACTIVE_PROFILE if _ACTIVE_PROFILE is not None else DEFAULT_PROFILE

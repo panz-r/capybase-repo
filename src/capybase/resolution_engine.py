@@ -3133,6 +3133,7 @@ class ResolutionEngine:
         prev_candidate: CandidateResolution | None = None,
         n_samples: int | None = None,
         attempt: int = 0,
+        temperature_override: float | None = None,
     ) -> list[CandidateResolution]:
         """Generate one or more candidates for ``unit``.
 
