@@ -2540,6 +2540,60 @@ def inject_symbol_declaration(
     return "\n".join(lines) + ("\n" if (buffer or "").endswith("\n") else "")
 
 
+def find_replacement_line(
+    buffer: str, error_text: str, language: str | None,
+    *parent_texts: str,
+) -> tuple[int, str] | None:
+    """C1b REPLACE mode: find the corrupted line and its parent replacement.
+
+    For type-default/corrupted-line errors (``type defaults to 'int'``,
+    ``expected identifier``), the correct line often exists verbatim in a
+    parent side. Returns (buffer_line_index, replacement_line) or None.
+    Nothing invented — the replacement must appear verbatim in a parent."""
+    import difflib as _dl
+    import re as _re_c1b
+
+    lines = buffer.split("\n")
+    # Locate the error line (file:line:col or line:N patterns)
+    m = _re_c1b.search(r":(\d+):\d+", error_text)
+    if not m:
+        return None
+    err_line = int(m.group(1)) - 1  # 0-based
+    if err_line < 0 or err_line >= len(lines):
+        return None
+    bad = lines[err_line]
+
+    for parent in parent_texts:
+        if not parent:
+            continue
+        p_lines = parent.split("\n")
+        # Find the most similar parent line (the bad line's counterpart)
+        best = max(
+            p_lines,
+            key=lambda pl: _dl.SequenceMatcher(
+                None, bad.strip(), pl.strip(), autojunk=False).ratio(),
+            default=None,
+        )
+        if best is None:
+            continue
+        ratio = _dl.SequenceMatcher(
+            None, bad.strip(), best.strip(), autojunk=False).ratio()
+        if 0.3 < ratio < 1.0 and best.strip() and best.strip() != bad.strip():
+            return (err_line, best)
+    return None
+
+
+def derive_prototype(definition_line: str) -> str | None:
+    """C1b: derive a forward declaration from a definition signature.
+
+    ``static int foo(void) {`` → ``static int foo(void);`` — a mechanical
+    transform of verbatim side content (redis-0013's cliSwitchProto)."""
+    s = definition_line.rstrip()
+    if not s.endswith("{"):
+        return None
+    return s[:-1].rstrip() + ";"
+
+
 def _dedup_rust_use_statements(text: str) -> str | None:
     """R2 (sprint-22): remove exact-duplicate ``use`` statements.
 
@@ -2655,6 +2709,81 @@ def _try_repair_string_literal(
         if s2 % 2 == 1 or d2 % 2 == 1:
             return None
     return "\n".join(lines)
+
+
+def _delimiter_imbalance_line(
+    text: str, language: str | None,
+) -> tuple[int, str] | None:
+    """(0-based line, char) of the first unmatched ) or ], or None.
+
+    String/comment stripped via _strip_strings_comments (same
+    foundations as the brace checker); parens/brackets stack-walked
+    together so nesting mismatches surface."""
+    cleaned = _strip_strings_comments(text, language)
+    stack: list[tuple[int, int, str]] = []
+    _pairs = {"(": ")", "[": "]", ")": "(", "]": "["}
+    for li, line in enumerate(cleaned):
+        for ci, ch in enumerate(line):
+            if ch in "([":
+                stack.append((li, ci, ch))
+            elif ch in ")]":
+                _expected_open = _pairs[ch]  # ")" -> "(", "]" -> "["
+                if not stack or stack[-1][2] != _expected_open:
+                    return (li, ci)
+                stack.pop()
+    return None
+
+
+def _try_repair_delimiter(
+    text: str, language: str | None,
+) -> str | None:
+    """Single-edit repair for one unmatched ) or ].
+
+    An unmatched close means either a stray closer (delete it) or a
+    missing opener earlier on the line. Conservative: only the
+    stray-closer deletion (the zenodo-0085 shape: a portfolio splice
+    left one ')' too many); anything needing an invented opener
+    declines."""
+    imb = _delimiter_imbalance_line(text, language)
+    if imb is None:
+        return None
+    li, ci = imb
+    lines = text.split("\n")
+    if li >= len(lines):
+        return None
+    line = lines[li]
+    if ci >= len(line):
+        return None
+    # delete the stray closer at the reported column
+    candidate = line[:ci] + line[ci + 1:]
+    lines[li] = candidate
+    out = "\n".join(lines)
+    if _delimiter_imbalance_line(out, language) is None:
+        return out
+    return None
+
+
+def _try_balance_braces_iterated(
+    text: str, language: str | None = None, *, max_rounds: int = 4,
+) -> str | None:
+    """Iterated single-imbalance repair for multi-gap failures.
+
+    The single-shot rung declines anything needing more than one edit;
+    multi-unclosed-brace failures (sqlite-0019: 2, sqlite-0029: 4) got
+    zero deterministic attempts. Each round applies the one-edit repair
+    and re-checks; the first non-improving round returns what we have
+    (only if fully balanced) or None."""
+    current = text
+    for _ in range(max_rounds):
+        if _brace_imbalance_line(current, language) is None:
+            return current if current != text else None
+        repaired = _try_balance_braces(current, language)
+        if repaired is None or repaired == current:
+            break
+        current = repaired
+    if current != text and _brace_imbalance_line(current, language) is None:
+        return current
+    return None
 
 
 def _try_balance_braces(text: str, language: str | None = None) -> str | None:
@@ -3881,6 +4010,14 @@ def _compile_rust(
     being available (``_resolve``), so a missing ``rustc`` is reported as
     "not checked" rather than a false syntax failure.
     """
+    # E2 (sprint-23): include_str!/include_bytes! resolve relative to the
+    # ORIGINAL file's directory; this temp-copy compile cannot see them
+    # (axum-0005/0033: include_str'd docs read as /tmp/../docs/... — a false
+    # syntax failure from EVERY caller: unit validator, whole-file gate,
+    # repair loops). Undecidable at this location: report not-checked.
+    if re.search(r"include_(?:str|bytes)!\s*\(", source):
+        return True, ("rustc temp-copy: include_str/include_bytes "
+                      "undecidable from this location; not checked")
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".rs", delete=False, encoding="utf-8"
     ) as tf:
@@ -4831,6 +4968,9 @@ class VerificationEngine:
                 # at sim 0.999 — dies here). The repair functions are the same
                 # ones the unit-level fallback uses; re-validate after.
                 _repaired = _try_balance_braces(whole, language)
+                if _repaired is None:
+                    _repaired = _try_balance_braces_iterated(
+                        whole, language)
                 if _repaired is not None and _brace_imbalance_line(
                         _repaired, language) is None:
                     whole = _repaired
@@ -4851,6 +4991,16 @@ class VerificationEngine:
                     if _repaired is not None:
                         whole = _repaired
                         imbalance_line = None
+            # s23 mixed-delimiter repair: parens/brackets get the same
+            # rung treatment braces do (zenodo-0085: unmatched ')' got zero
+            # repair attempts — the brace rung's remit is {} only).
+            if imbalance_line is None and _delimiter_imbalance_line(whole, language) is not None:
+                _del_repaired = _try_repair_delimiter(whole, language)
+                if (_del_repaired is not None
+                        and _delimiter_imbalance_line(_del_repaired, language) is None
+                        and _brace_imbalance_line(_del_repaired, language) is None):
+                    whole = _del_repaired
+                    features["coherence_repair_applied"] = True
             if imbalance_line is not None:                # Fix #1 — enrich the message with the brace delta so the model
                 # knows WHICH kind of imbalance it is (extra `}` vs unclosed `{`),
                 # not just "unbalanced". The classification matches

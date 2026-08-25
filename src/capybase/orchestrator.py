@@ -11119,6 +11119,80 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 - splice may fail on bad spans
             return None
         sides, base_text = self._micro_stage_sides(path)
+        # C1b REPLACE mode: for corrupted-line errors, try replacing the
+        # corrupted line with its parent counterpart (verbatim, LCS-anchored)
+        from capybase.verification import find_replacement_line
+        _replace = find_replacement_line(
+            spliced, msgs, language,
+            sides.get("current", ""), sides.get("replayed", ""),
+            base_text or "")
+        if _replace is not None:
+            err_idx, replacement = _replace
+            lines = spliced.split("\n")
+            lines[err_idx] = replacement
+            repaired = "\n".join(lines)
+            wf_unit = unit.model_copy(
+                update={"marker_span": None, "unit_kind": "whole_file"})
+            wf_cand = CandidateResolution(
+                candidate_id=(getattr(_old_cand, "candidate_id", unit.unit_id)
+                              or unit.unit_id) + ":linereplace",
+                unit_id=unit.unit_id,
+                model_name="deterministic",
+                resolved_text=repaired,
+                prompt_version="deterministic_line_replacement",
+                provenance="deterministic_symbol_injection",
+                self_reported_confidence=0.85,
+                explanation=(
+                    f"C1b line replacement: line {err_idx+1} corrupted; "
+                    f"replaced with parent verbatim: {replacement[:80]}"),
+            )
+            self.journal.emit(
+                "symbol_inject_applied",
+                {"kind": "line_replace", "line": err_idx + 1,
+                 "replacement": replacement[:120], "path": path},
+                step_index=self.step, path=path, unit_id=unit.unit_id)
+            return [(wf_unit, wf_cand)]
+
+        # C1b derived prototype: if the symbol's DEFINITION exists in a
+        # side, derive its forward declaration (redis-0013's class)
+        for symbol in symbols[:3]:
+            for side_name in ("current", "replayed"):
+                for ln in (sides.get(side_name) or "").split("\n"):
+                    if symbol in ln and ln.strip().endswith("{"):
+                        proto = None
+                        from capybase.verification import (
+                            derive_prototype as _dp,
+                        )
+                        proto = _dp(ln.strip())
+                        if proto and proto not in spliced:
+                            repaired = inject_symbol_declaration(
+                                spliced, proto, language)
+                            if repaired is not None:
+                                wf_unit = unit.model_copy(
+                                    update={"marker_span": None,
+                                            "unit_kind": "whole_file"})
+                                wf_cand = CandidateResolution(
+                                    candidate_id=(unit.unit_id
+                                                  + ":derivedproto"),
+                                    unit_id=unit.unit_id,
+                                    model_name="deterministic",
+                                    resolved_text=repaired,
+                                    prompt_version="deterministic_derived_prototype",
+                                    provenance="deterministic_symbol_injection",
+                                    self_reported_confidence=0.85,
+                                    explanation=(
+                                        f"C1b derived prototype from {side_name}: "
+                                        f"{proto[:80]}"),
+                                )
+                                self.journal.emit(
+                                    "symbol_inject_applied",
+                                    {"kind": "derived_prototype", "symbol": symbol,
+                                     "proto": proto[:100], "path": path,
+                                     "provenance": side_name},
+                                    step_index=self.step, path=path,
+                                    unit_id=unit.unit_id)
+                                return [(wf_unit, wf_cand)]
+
         for symbol in symbols[:3]:
             decls = find_symbol_declaration_lines(
                 symbol, language,
@@ -15392,6 +15466,30 @@ class Orchestrator:
             ln for ln in ((run.stdout or "") + (run.stderr or "")).splitlines()
             if "error" in ln.lower()
         ][:20]
+        # D0 (sprint-23): parallel builds can swallow the per-file gcc
+        # diagnostics, leaving only the make driver summary — the gate
+        # fails "blind" (protobuf-0051/0065: rc=2, empty diagnostics,
+        # every error-keyed mechanism starved). When a build gate fails
+        # with no attributable lines, re-run SERIALLY once to recover
+        # the real diagnostics. Cheap relative to a blind escalate.
+        if (_is_build_gate and not run.passed and not run.timed_out
+                and cmd and not _error_lines):
+            import re as _re_d0
+            _serial_cmd = _re_d0.sub(r"-j\d+\s*", "", cmd).strip()
+            if _serial_cmd and _serial_cmd != cmd:
+                _serial_run = self._run_raw_test(_serial_cmd)
+                _error_lines = [
+                    ln for ln in (
+                        (_serial_run.stdout or "")
+                        + (_serial_run.stderr or "")).splitlines()
+                    if "error" in ln.lower()
+                ][:20]
+                self.journal.emit(
+                    "build_diagnostic_recovery",
+                    {"command": _serial_cmd,
+                     "recovered_lines": len(_error_lines)},
+                    step_index=self.step,
+                )
         _attributed: list[str] = []
         if _is_build_gate and not run.passed and _error_lines and not run.timed_out:
             from capybase.verification import _parse_cc_error_location
