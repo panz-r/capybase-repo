@@ -76,3 +76,25 @@ Combined B+C specimens (~20 cases, minutes each, no shards):
 - F1 tier-1: flask-0006, tokio-0108, sqlite-0004, sqlite-0040, axum-0002,
   protobuf-0051 (dual D0+F1), sea-orm-0021, 0023, clickhouse-0021, 0040,
   protobuf-0008, axum-0013, 0033, redis-0053
+
+## README delta template (fill after specimen run)
+
+The Results table needs updating only when a full harvest runs (the
+specimen results validate mechanisms but don't produce population-level
+numbers). If the specimen run validates ≥10 conversions, the harvest
+runs and the table updates with real numbers. If <10, the table stays
+at the reround state until more mechanisms land.
+
+Template (fill from harvest results):
+```
+| lang | cases | PASS | WORKING | era-dead | PASS % | adj % | P+W adj % | Δ adj |
+|------|-------|------|---------|----------|--------|-----------|-----------|-------|
+| python | 109 | {p} | {w} | 0 | {p/109} | {p/109} | {(p+w)/109} | {delta} |
+| c | 204 | {p} | {w} | 97 | {p/204} | {p/107} | {(p+w)/107} | {delta} |
+| rust | 194 | {p} | {w} | 24 | {p/194} | {p/170} | {(p+w)/170} | {delta} |
+| cpp | 154 | {p} | {w} | 45 | {p/154} | {p/109} | {(p+w)/109} | {delta} |
+| **total** | **661** | **{P}** | **{W}** | **166** | **{P/661}** | **{P/495}** | **{(P+W)/495}** | **{delta}** |
+```
+
+Current (reround, e7e7eb7): 444/661 = 67.2% raw, 89.7% adj, 90.9% P+W
+Sprint-23 projection: +20 PASS (conservative) → ~93.7% adj
