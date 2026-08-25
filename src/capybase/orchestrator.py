@@ -9844,13 +9844,15 @@ class Orchestrator:
                         # takeover on the FAILURE path — when one side's
                         # churn <= 15 lines, the other side IS the merge.
                         _f1_side = None
-                        try:
-                            _sides_f1, _base_f1 = self._micro_stage_sides(path)
-                            if _sides_f1:
-                                _f1_side = _near_one_sided_takeover(
-                                    _base_f1, _sides_f1)
-                        except Exception:  # noqa: BLE001
-                            _f1_side = None
+                        if getattr(self.config.future,
+                                   "enable_f1_takeover", False):
+                            try:
+                                _sides_f1, _base_f1 = self._micro_stage_sides(path)
+                                if _sides_f1:
+                                    _f1_side = _near_one_sided_takeover(
+                                        _base_f1, _sides_f1)
+                            except Exception:  # noqa: BLE001
+                                _f1_side = None
                         if _f1_side is not None:
                             _f1_text = _sides_f1.get(_f1_side, "")
                             if _f1_text.strip():
@@ -9889,9 +9891,13 @@ class Orchestrator:
                             # adjudication for symmetric shapes — when
                             # tier-1 declines (both sides changed
                             # significantly), ask the model
-                            _f2_side = self._f1_tier2_adjudicate(
-                                path, language, _base_f1 or "",
-                                _sides_f1 or {})
+                            _f2_side = None
+                            if (getattr(self.config.future,
+                                        "enable_f1_takeover", False)
+                                    and _sides_f1):
+                                _f2_side = self._f1_tier2_adjudicate(
+                                    path, language, _base_f1 or "",
+                                    _sides_f1 or {})
                             if _f2_side is not None:
                                 _f2_text = (_sides_f1 or {}).get(
                                     _f2_side, "")
