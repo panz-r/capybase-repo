@@ -1427,3 +1427,78 @@ decomposition, not a design-level cap. Deferred to the specimen run.
 4. **C7' verify-path**: the specimens shifted modes; population-level
    measurement only (no code change unless the specimen run shows the
    fallback consistently failing verification).
+
+## Sprint-23 scope additions (user directive, 2026-08-25)
+
+User rejected the env-var gating of F1: "They must become smarter, and
+always be enabled." The gate was a symptom of F1 firing where it
+shouldn't — the fix is to make F1 smart enough to be default-on, not
+to hide it behind a flag. Plus the four other discoveries added to
+scope.
+
+### F1-smart (replaces the env-var gate)
+
+F1 tier-1 fired in six test fixtures that expect escalation. The fix
+isn't a gate — it's making F1's engagement conditions precise enough
+that it never fires when it shouldn't:
+
+1. **Tier-1 only after ALL deterministic repairs AND the wholesale
+   floor decline** — not just "when the splice fails." Currently F1
+   fires after the floor check but before some repair paths complete.
+2. **Never during interactive-fallback flows** — when the orchestrator
+   is heading to the interactive menu (TTY present, escalation
+   imminent), F1 doesn't fire (a human is about to decide).
+3. **Never on the FIRST attempt** — F1 is a rescue, not a primary
+   path. If the splice failed on the first model call, the model gets
+   its retries first; F1 only engages when retries are exhausted.
+4. **Config default flips to True** once these conditions are verified
+   by the test suite (the 6 fixtures that failed should pass because
+   F1 correctly declines in each, not because it's disabled).
+
+### Dead-mechanism audit (from D1's broken data flow)
+
+Systematic journal-mining audit: every mechanism that was built but
+never specimen-validated gets a "does it actually fire correctly?"
+check. D1's prior_attempt_summaries is the first confirmed dead
+mechanism (identical summaries = useless). The audit targets:
+- golden-path few-shot (validated in s21 — probably alive)
+- empty-response fast-fail (C7' — fired on 0055, alive but partial)
+- micro-CEGIS stage 2a symbol injection (fired on tokenizer fixture,
+  alive)
+- Any mechanism with journal events that "look right" but carry no
+  real data (the D1 pattern)
+~2h of journal mining.
+
+### Prompt-assembly instrumentation (from C5's dead end)
+
+One journal event at prompt-build time:
+  prompt_composition: {sides_chars, context_chars, struct_chars,
+  sibling_chars, boilerplate_chars, total_chars}
+Makes any prompt-size issue diagnosable in seconds. 3 lines.
+
+### Failure-mode stability metric (from C7's specimen shift)
+
+From repeat data: "same failure mode across 3 repeats: yes/no" per
+case. Classifies every mechanism target as stable or unstable,
+informing validation strategy (specimen vs population). Computed from
+existing extracts; no new eval needed.
+
+### Escalation-path priority chain (from F1's gate-requirement)
+
+Explicit, config-declared ordering of the failure path's consumers:
+  deterministic repairs → F1 tier-1 → F1 tier-2 → micro-CEGIS →
+  true-side portfolio → wholesale floor → escalation → interactive
+Each mechanism declares its position; the orchestrator walks the chain
+in order. Tests verify the chain, not individual behaviors.
+(Design-level; implementation may extend into sprint-24.)
+
+### Batch D execution order (updated)
+
+1. F1-smart conditions (replaces the gate; config flips to True)
+2. D1 accumulation fix (3 lines)
+3. R5 wiring (5 lines)
+4. Prompt-assembly instrumentation (3 lines)
+5. Dead-mechanism audit (2h journal mining)
+6. Failure-mode stability metric (from extracts)
+7. C5 investigation (specimen-level, needs the instrumentation)
+8. Priority chain (design; implement if time)
