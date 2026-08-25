@@ -1995,3 +1995,64 @@ escalate honestly.
 6. P4: CoT repair variant
 
 Estimated total: ~6-7h. Batch gates, then specimen re-run.
+
+## Sprint-24 scope seeds (consolidated, 2026-08-26)
+
+### 1. Pipeline trigger architecture (the user's core directive)
+
+Zero user configuration. Stages as typed interfaces. Mechanisms
+self-contained (trigger + action + safety). Pipeline generic
+(sequencing + contexts + journaling). Full design in the sprint-23
+ledger entries "Pipeline contract design principle" and the
+refinement "trigger logic is mechanism-owned."
+
+Implementation sketch:
+- `PipelineStage` enum: PRE_RESOLVE, POST_CANDIDATE, POST_VALIDATE,
+  REPAIR, POST_REPAIR_EXHAUSTION, POST_MODEL_FAILURE, PRE_ESCALATE
+- Typed stage contexts (RepairExhaustedContext, ModelFailureContext,
+  etc.) — each carries exactly what mechanisms at that stage need
+- `Mechanism` protocol: `stage`, `engage(ctx) -> Result | None`
+- Pipeline executor: walks stages, builds contexts, calls mechanisms
+- Mechanisms register for stages; triggers are mechanism-owned
+- Config flags collapse to zero (mechanisms self-describe activation)
+- The orchestrator becomes the pipeline executor + git/session mgmt
+
+This subsumes:
+- The escalation-path priority chain (item 10 from sprint-23)
+- The tiered fallback ladder (reviewer's item 7)
+- The F1/C7'/R3 activation conditions (become mechanism-owned triggers)
+- The config divergence problem (no config flags to diverge)
+
+### 2. Era-vendoring for rust dependency-resolution
+
+~12 cases recoverable by vendoring era-pinned Cargo.lock dependencies.
+Corpus-level fix: vendor the exact dependency versions for each era
+case's Cargo.lock, eliminating registry resolution failures.
+
+### 3. Repair-path retrieval activation
+
+The repair-path retrieval (top-1 example for the repair prompt) is
+implemented but intentionally unexercised (the eval harness doesn't
+configure the retriever). Activating it requires seeding a quality-
+filtered store. Sprint-24 item: wire the retriever in the eval
+harness and A/B its effect on retry conversion rate.
+
+### 4. Prompt-assembly monitoring
+
+If the prompt_composition instrumentation (sprint-23) reveals
+prompt-size anomalies, a monitoring/alerting mechanism (e.g., warn
+when total_chars > 20K) would surface issues before they become
+oversized-prompt skips.
+
+### 5. Corpus cleanup propagation
+
+zenodo-0044 (empty oracle) exclusion needs propagation to all
+existing extracts and historical docs. The E3 load-time check
+prevents future runs from including it, but past extracts need
+a cleanup pass.
+
+### 6. Full harvest (deferred from sprint-23)
+
+Only after sprint-23's mechanisms are specimen-validated and batch E
+lands. The harvest threshold remains: ≥10 mechanism-verified
+conversions.
