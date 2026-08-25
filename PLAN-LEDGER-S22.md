@@ -1351,3 +1351,24 @@ diffed against the baseline remaining set:
 
 The reround's two safety audits are complete: both fix-sprint
 mechanisms behave exactly as designed everywhere they fired.
+
+## Era-positives investigation (user question, 2026-08-25)
+
+"Are the 166 era-dead genuine, or is our build config causing false
+positives?" — signatures mined and every major class probed
+empirically (compile-only, worktrees, cleaned after):
+
+| class | n | probe result | verdict |
+|-------|---|--------------|---------|
+| jsonc -Werror promotions | 1 | `CFLAGS=-Wno-error` builds CLEAN | **FALSE ERA — corpus command updated** |
+| rust dep-resolution (tokio security-framework 5, sea-query 7) | ~12 | not flag-fixable; era Cargo.lock deps unresolvable on the modern registry | recoverable via vendored era-pinned deps — corpus cargo settings work item |
+| nlohmann host-libstdc++ | 38 | error originates in /usr/include/c++/15 alloc_traits static_assert; -std=11/14 + -fpermissive don't help | GENUINE (needs era container) |
+| sqlite lemon tool | 90 | `gcc -std=gnu89 -w -c tool/lemon.c` still errors (conflicting types) | GENUINE |
+| redis (jemalloc sysctl.h + hiredis va_arg void) | 6 | gnu89 doesn't help; MALLOC=libc skips jemalloc but hiredis va_arg remains | GENUINE |
+| fmt/protobuf template/builtin drift | ~8 | era code vs modern compiler internals | GENUINE |
+
+Net: **1 verified false-era fixed now; ~12 rust dep-resolution
+recoverable by corpus vendoring (separate item); ~153 genuine.** The
+era census is honest — the capybase contract (user-supplied era-
+appropriate build commands) is now exercised by the corpus config,
+with jsonc's updated as the first verified entry.

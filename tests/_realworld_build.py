@@ -55,7 +55,10 @@ from tests._realworld_cargo import cleanup_orphan_worktrees
 # verdict (the gcc syntax floor still runs).
 C_BUILD_COMMANDS: dict[str, str] = {
     "redis-history": "make -j4",
-    "jsonc-history": "cmake --build build",
+    # jsonc: the era repos build with -Werror; modern gcc emits warnings the era
+    # compilers did not (unused-value etc), promoting clean-era code to build
+    # failures — a false era-positive. Verified: -Wno-error builds the era clean.
+    "jsonc-history": 'cmake --build build -- CFLAGS="-Wno-error"',
     "sqlite-history": "./configure && make -j4",
     "nlohmann-json-history": "cmake --build build",
     "clickhouse-history": "cmake --build build",
