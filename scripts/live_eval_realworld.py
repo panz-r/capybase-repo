@@ -753,6 +753,10 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
         if _target:
             cfg.validation.cc_build_target_template = _target
     cfg.future.enable_structural_resolver = True
+    # Sprint-23 mechanisms: F1 is always-on (smart conditions in the
+    # orchestrator); R3 best-of-N is config-gated (default False,
+    # enabled here for the specimen/full runs)
+    cfg.future.enable_best_of_n = True
     cfg.future.enable_combination_search = True
     # Sprint-21 S21.5 cohort validation: the member-split composition is
     # OFF by default; the env gate flips it for the validation run (the
