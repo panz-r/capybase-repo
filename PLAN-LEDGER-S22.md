@@ -1502,3 +1502,24 @@ in order. Tests verify the chain, not individual behaviors.
 6. Failure-mode stability metric (from extracts)
 7. C5 investigation (specimen-level, needs the instrumentation)
 8. Priority chain (design; implement if time)
+
+### Failure-mode stability metric (computed 2026-08-25)
+
+From the reround's 3-repeat data (677 cases):
+- **438 no-repeat** (PASS first try) — no stability question
+- **223 stable** (all 3 repeats same verdict) — specimen validation is
+  reliable; the mechanism target is deterministic
+- **16 unstable** (mixed verdicts) — population-level validation only;
+  the failure mode is sampling-dependent
+
+The 16 unstable cases include 6 that passed at least one repeat
+(ESCALATE→PASS→PASS or similar — axum-0020, redis-0032, sqlite-0015,
+0033, zenodo-0057, 0076) — these are coin-flips the majority rule
+honestly kept as non-PASS. The other 10 have mixed ESCALATE/NEAR/WORK
+verdicts, meaning the model produces different-quality output on
+different samples of the same conflict.
+
+**Implication for mechanisms**: any mechanism targeting one of the 16
+unstable cases must be validated at population level (the specimen may
+pass or fail depending on the sample). The 223 stable cases can be
+specimen-validated reliably.
