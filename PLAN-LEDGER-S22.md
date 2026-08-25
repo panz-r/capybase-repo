@@ -1523,3 +1523,28 @@ different samples of the same conflict.
 unstable cases must be validated at population level (the specimen may
 pass or fail depending on the sample). The 223 stable cases can be
 specimen-validated reliably.
+
+### Dead-mechanism audit results (2026-08-25)
+
+Audited 13 mechanisms against reround flight journals (100-flight
+sample + targeted checks):
+
+| mechanism | events | status | note |
+|-----------|--------|--------|------|
+| use_dedup (R2) | 89 | **ALIVE** | fires frequently |
+| golden_path | 34 | **ALIVE** | retrieval fires regularly |
+| symbol_inject (C1) | 3 | **ALIVE** | rare but real |
+| resurrection_downgrade (P5) | 3 | **ALIVE** | fires on guard stops |
+| repair_rotation (C4) | 2 | **ALIVE** | fires on repeat failures |
+| micro_cegis | 1 | **ALIVE** | rare |
+| escape_hatch | 1 | **ALIVE** | fires on cycling (confirmed axum-0002) |
+| member_split (`#s` sub-units) | 18 | **ALIVE** | sub-unit resolution fires |
+| prior_attempt_summaries (D1) | 0 | **DEAD** | infrastructure exists but data flow broken (identical summaries) — fix in batch D |
+| f1_tier1/tier2 | 0 | **EXPECTED** | env-gated off in reround (pre-batch-C) |
+| empty_fast_fail (C7') | 0 | **EXPECTED** | reround predates batch A |
+| prompt_composition | 0 | **NOT IMPLEMENTED** | batch D item |
+
+**No unexpected dead mechanisms found.** The two expected-dead items
+(F1, C7') are new in sprint-23 and not in the reround's code. The one
+confirmed dead mechanism (D1) has a fix prepared. Everything else is
+alive with real payload data.
