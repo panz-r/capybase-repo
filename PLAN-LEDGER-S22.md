@@ -1402,3 +1402,13 @@ C7' specimen finding: redis-0052/0054's failure mode SHIFTED between
 baseline (empty response) and rerun (non-empty candidates failing
 validation) — the empty-response class is sampling-dependent. The fix
 is correct for its class; value is population-level.
+
+### C5 design note (2026-08-25)
+
+The prompt-size caps already exist: `_SIDES_MAX_CHARS = 4000` with
+anchor-based base localization, structural context capped at 30 units.
+sqlite-0004's 50K prompt must come from a THIRD source — likely the
+entity-splitting producing sub-units with full-file context, or the
+sibling-resolutions block accumulating across many sub-units. The fix
+requires running the case and inspecting the actual prompt
+decomposition, not a design-level cap. Deferred to the specimen run.
