@@ -1631,6 +1631,25 @@ def _whole_side_heuristic(base_text: str, sides: dict[str, str]) -> str:
     return "current" if c > r else "replayed"
 
 
+def _near_one_sided_takeover(
+    base_text: str, sides: dict[str, str], *, threshold: int = 30,
+) -> str | None:
+    """F1 tier-1 (sprint-23): deterministic near-one-sided takeover.
+
+    When one side's churn vs base is <= threshold (in the double-counted
+    additions+deletions metric — the archaeology's 15-line "changed lines"
+    maps to ~30 here), that side barely changed. The correct merge is the
+    OTHER side wholesale. Rounds 10-13 verified 22 remaining-failure
+    targets, 0/305 passing harmed, and the only false-fire lands at NEAR
+    not a wrong PASS. Returns the side name to take, or None when both
+    sides changed significantly (tier-2 territory: the LLM adjudicator)."""
+    c = _whole_side_churn(base_text, sides.get("current", ""))
+    r = _whole_side_churn(base_text, sides.get("replayed", ""))
+    if min(c, r) <= threshold and max(c, r) > 0:
+        return "current" if c > r else "replayed"
+    return None
+
+
 def _safe_conf(value) -> float:
     """D2 (sprint-23): adjudication confidences arrive model-typed.
 
@@ -9821,6 +9840,87 @@ class Orchestrator:
                         accepted = _floor
                         buffer = _floor[0][1].resolved_text
                     else:
+                        # F1 tier-1 (sprint-23): deterministic near-one-sided
+                        # takeover on the FAILURE path — when one side's
+                        # churn <= 15 lines, the other side IS the merge.
+                        _f1_side = None
+                        try:
+                            _sides_f1, _base_f1 = self._micro_stage_sides(path)
+                            if _sides_f1:
+                                _f1_side = _near_one_sided_takeover(
+                                    _base_f1, _sides_f1)
+                        except Exception:  # noqa: BLE001
+                            _f1_side = None
+                        if _f1_side is not None:
+                            _f1_text = _sides_f1.get(_f1_side, "")
+                            if _f1_text.strip():
+                                self.journal.emit(
+                                    "f1_tier1_takeover",
+                                    {"side": _f1_side, "path": path},
+                                    step_index=self.step, path=path,
+                                )
+                                _f1_unit = ConflictUnit(
+                                    session_id=self.session_id,
+                                    step_index=self.step,
+                                    path=path,
+                                    language=language,
+                                    unit_id=f"{path}:f1_tier1",
+                                    unit_kind="whole_file",
+                                    marker_span=None,
+                                )
+                                _f1_cand = CandidateResolution(
+                                    candidate_id=f"{path}:f1_tier1:{_f1_side}",
+                                    unit_id=_f1_unit.unit_id,
+                                    model_name="deterministic",
+                                    resolved_text=_f1_text,
+                                    prompt_version="deterministic_near_one_sided",
+                                    provenance="deterministic_structural",
+                                    self_reported_confidence=0.85,
+                                    explanation=(
+                                        f"F1 tier-1: near-one-sided — "
+                                        f"{_f1_side} side subsumes"),
+                                )
+                                accepted = [(_f1_unit, _f1_cand)]
+                                buffer = _f1_text
+                                file_validation = None
+                                continue  # re-enter the while loop to validate
+                        else:
+                            # F1 tier-2 (sprint-23): LLM subsumption
+                            # adjudication for symmetric shapes — when
+                            # tier-1 declines (both sides changed
+                            # significantly), ask the model
+                            _f2_side = self._f1_tier2_adjudicate(
+                                path, language, _base_f1 or "",
+                                _sides_f1 or {})
+                            if _f2_side is not None:
+                                _f2_text = (_sides_f1 or {}).get(
+                                    _f2_side, "")
+                                if _f2_text.strip():
+                                    _f2_unit = ConflictUnit(
+                                        session_id=self.session_id,
+                                        step_index=self.step,
+                                        path=path,
+                                        language=language,
+                                        unit_id=f"{path}:f1_tier2",
+                                        unit_kind="whole_file",
+                                        marker_span=None,
+                                    )
+                                    _f2_cand = CandidateResolution(
+                                        candidate_id=f"{path}:f1_tier2:{_f2_side}",
+                                        unit_id=_f2_unit.unit_id,
+                                        model_name="deterministic",
+                                        resolved_text=_f2_text,
+                                        prompt_version="llm_subsumption_adjudication",
+                                        provenance="deterministic_structural",
+                                        self_reported_confidence=0.75,
+                                        explanation=(
+                                            f"F1 tier-2: LLM adjudicated "
+                                            f"{_f2_side} subsumes"),
+                                    )
+                                    accepted = [(_f2_unit, _f2_cand)]
+                                    buffer = _f2_text
+                                    file_validation = None
+                                    continue
                         if file_validation is None:
                             result.escalated = True
                             result.reason = (
@@ -15240,6 +15340,46 @@ class Orchestrator:
             )
             return [(unit, cand)], text, val
         return None
+
+    def _f1_tier2_adjudicate(
+        self, path: str, language: str | None,
+        base_text: str, sides: dict[str, str],
+    ) -> str | None:
+        """F1 tier-2 (sprint-23): LLM subsumption adjudication.
+
+        When tier-1 declines (both sides changed > threshold), ask the
+        model: does one side subsume the other, or must they weave?
+        Returns the side name to take, or None (weave / unparseable /
+        low confidence). The adjudicator only ever sees weaves that
+        ALREADY FAILED validation — the failure-path gate bounds the
+        blast radius."""
+        from capybase.f1_adjudication import (
+            f1_tier2_prompt,
+            parse_f1_tier2_response,
+        )
+        try:
+            prompt = f1_tier2_prompt(
+                path, base_text,
+                sides.get("current", ""), sides.get("replayed", ""))
+            resp = self.resolution_engine.raw_complete(
+                prompt, json_mode=True,
+                max_tokens=max(2048, self.resolution_engine.config.max_tokens))
+            raw = resp.text if hasattr(resp, "text") else str(resp)
+            parsed = parse_f1_tier2_response(raw)
+            if parsed is None:
+                return None
+            choice, conf, reason = parsed
+            if choice in ("current", "replayed") and conf >= 0.70:
+                self.journal.emit(
+                    "f1_tier2_adjudication",
+                    {"choice": choice, "confidence": conf,
+                     "reason": reason, "path": path},
+                    step_index=self.step, path=path,
+                )
+                return choice
+            return None  # weave or low confidence
+        except Exception:  # noqa: BLE001 — adjudication is best-effort
+            return None
 
     def _adjudicate_whole_side(
         self,
