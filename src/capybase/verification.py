@@ -5036,6 +5036,15 @@ class VerificationEngine:
                     except FileNotFoundError:
                         ok = True  # tool vanished between resolve & run → skip
                         msg = "rustc not available; syntax not checked"
+                    # E2 (sprint-23): include_str!/include_bytes! resolve
+                    # relative to the ORIGINAL file's directory; a temp-copy
+                    # compile cannot see them (axum-0005/0033: include_str'd
+                    # docs read as /tmp/../docs/... — a false gate failure).
+                    # Undecidable at this location: never a failure here.
+                    if re.search(r"include_(?:str|bytes)!\s*\(", whole):
+                        ok = True
+                        msg = ("rustc standalone: include_str/include_bytes "
+                               "undecidable from a temp copy; not checked")
                     # Standalone rustc on a loose .rs can't resolve crate::
                     # / super:: paths (no Cargo.toml context), so it FALSE-
                     # POSITIVES on E0432/E0433 for any correct file that does

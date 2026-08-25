@@ -1631,6 +1631,18 @@ def _whole_side_heuristic(base_text: str, sides: dict[str, str]) -> str:
     return "current" if c > r else "replayed"
 
 
+def _safe_conf(value) -> float:
+    """D2 (sprint-23): adjudication confidences arrive model-typed.
+
+    The 4B intermittently returns an empty string (axum-0021: one repeat
+    died on float(''), flipping a sim-1.0 case to majority-ESCALATE).
+    Unparseable confidence is a low-confidence answer, never a crash."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _whole_side_adjudication_prompt(
     path: str, language: str | None,
     base_text: str, sides: dict[str, str],
@@ -9644,6 +9656,14 @@ class Orchestrator:
                             if _wf_build_ok:
                                 accepted = _cand_list
                                 buffer = _wf_buf
+                                # P5 v2b (sprint-23): the portfolio accept is
+                                # verified (verify_file + build above) — record
+                                # it for the resurrection guard's resolved-file
+                                # provenance (zenodo-0063 completed via this
+                                # surface and was never recorded).
+                                if not hasattr(self, "_resolved_validated_paths"):
+                                    self._resolved_validated_paths: set[str] = set()
+                                self._resolved_validated_paths.add(path)
                                 self.journal.emit(
                                     "whole_file_portfolio",
                                     {"side": _side,
@@ -11176,6 +11196,17 @@ class Orchestrator:
         if not hasattr(self, "_wf_repair_tried"):
             self._wf_repair_tried: dict[tuple[int, str], set[str]] = {}
         _sig = _hard_failure_signature(failures)
+        # C4b (sprint-23): the tried key carries the spliced-buffer hash —
+        # re-running a repair on an UNCHANGED buffer stays skipped (axum-0013's
+        # anti-repeat), but a model-re-resolved buffer is NEW input and earns a
+        # fresh deterministic attempt (sqlite-0008: the stray MOVED each round
+        # while the signature normalized away the location, starving the exact
+        # retry path that had converted the case).
+        try:
+            _buf_hash = hash(_resolved_buffer(original, accepted))
+        except Exception:  # noqa: BLE001 — splice may fail on bad spans
+            _buf_hash = 0
+        _sig = f"{_sig}:{_buf_hash & 0xffffff}"
         _tried = self._wf_repair_tried.setdefault((self.step, path), set())
 
         # Deterministic brace repair: run BEFORE the attribution gate. The brace
@@ -13293,7 +13324,17 @@ class Orchestrator:
                 failures is None
                 and retry_count == 0
                 and not (cand.resolved_text or "").strip()
-                and (_tok_est < 1500 or _empty_oversized)
+                and (
+                    _tok_est < 1500
+                    or _empty_oversized
+                    # C7' (sprint-23): a TRUE empty response (parse_failed
+                    # with no text) is the endpoint refusing the shape, not an
+                    # oversized-parse artifact — the single-side fallback
+                    # applies at any unit size (its candidates still pass full
+                    # verification). redis-0054/0055, zenodo-0079.
+                    or ((cand.failure_kind or "") == "parse_failed"
+                        and not (cand.resolved_text or "").strip())
+                )
                 and (not _refusal or _oversized_parse_fail)
                 # A TRANSPORT failure (request never completed) is not a
                 # model verdict — the endpoint said nothing about this
@@ -15044,7 +15085,7 @@ class Orchestrator:
                 raw = resp.text if hasattr(resp, "text") else str(resp)
                 parsed = _wsr_json.loads(raw)
                 _choice = str(parsed.get("choice", "")).strip().lower()
-                _conf = float(parsed.get("confidence", 0.0))
+                _conf = _safe_conf(parsed.get("confidence"))
                 adj_info = {
                     "choice": _choice,
                     "confidence": round(_conf, 2),
@@ -15151,7 +15192,7 @@ class Orchestrator:
             raw = resp.text if hasattr(resp, "text") else str(resp)
             parsed = _json.loads(raw)
             choice = str(parsed.get("choice", "")).strip().lower()
-            conf = float(parsed.get("confidence", 0.0))
+            conf = _safe_conf(parsed.get("confidence"))
             if choice in ("current", "replayed"):
                 llm_info = {
                     "choice": choice,
@@ -15219,7 +15260,7 @@ class Orchestrator:
                 return None
             return {
                 "verdict": verdict,
-                "confidence": round(float(parsed.get("confidence", 0.0)), 2),
+                "confidence": round(_safe_conf(parsed.get("confidence")), 2),
                 "reason": str(parsed.get("reason", ""))[:200],
             }
         except Exception as exc:  # noqa: BLE001 — adjudication is advisory

@@ -1666,6 +1666,18 @@ def main():
     dropped: list[str] = []
     cases = load_cases(limit=args.limit, lang=args.lang, case_ids=args.case,
                        dropped_ids=dropped)
+    # E3 (sprint-23): an empty expected_resolved is a corpus extraction
+    # defect (zenodo-0044) — the case is unpassable by construction and its
+    # verdicts measure nothing. Exclude at load, loudly.
+    _bad_oracle = [c.id for c in cases
+                   if not (c.expected_resolved or "").strip()]
+    if _bad_oracle:
+        print("!" * 72)
+        print(f"!! EXCLUDING {len(_bad_oracle)} CASE(S) WITH EMPTY ORACLE "
+              f"(corpus defect — E3): {_bad_oracle}")
+        print("!" * 72, flush=True)
+        _bad = set(_bad_oracle)
+        cases = [c for c in cases if c.id not in _bad]
     if dropped:
         print("!" * 72)
         print(f"!! SUBSET RUN: the 48K size guard DROPPED {len(dropped)} cases"
