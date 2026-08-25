@@ -2160,6 +2160,47 @@ def build_repair_prompt(
     # reproducing the same fix that already didn't work (CARGO_NO_PROGRESS).
     # Research: DrRepair found that "memory of prior failed patches"
     # significantly improves repair convergence.
+    # P3 (sprint-23 batch E): context injection — search the working
+    # buffer (auto-merged context) for the missing symbol's definition
+    # and inject it into the retry prompt. Tells the model the definition
+    # it needs (actionable) vs. the error message alone (diagnostic).
+    context_injection_block = ""
+    if attempt > 0 and failures:
+        from capybase.verification import (
+            find_symbol_declaration_lines,
+            parse_missing_symbols,
+        )
+        _err_text = "\n".join(str(f.message) for f in failures)
+        _symbols = parse_missing_symbols(_err_text, unit.language)
+        if _symbols:
+            _worktree = (unit.original_worktree_text or
+                         unit.base.text or "")
+            _cur_text = unit.current.text or ""
+            _rep_text = unit.replayed.text or ""
+            for _sym in _symbols[:2]:
+                _decls = find_symbol_declaration_lines(
+                    _sym, unit.language,
+                    _cur_text, _rep_text, _worktree)
+                if _decls:
+                    context_injection_block += (
+                        f"The symbol '{_sym}' is defined in this file as: "
+                        f"``{_decls[0]}``\n"
+                        f"You must use this exact signature in your "
+                        f"resolution.\n\n")
+                    break  # top-1 injection (more dilutes the signal)
+
+    # P4 (sprint-23 batch E): chain-of-thought repair — on iteration 3+,
+    # force a diagnosis block before the fix to ground the model's
+    # reasoning. The diagnosis is discarded; only the code is compiled.
+    cot_block = ""
+    if attempt >= 2:
+        cot_block = (
+            "DIAGNOSIS REQUIRED: Before writing your fix, output a "
+            "<diagnosis> block explaining exactly why this error occurs "
+            "in the context of the code above. Then output the fixed "
+            "code. The diagnosis helps you reason about the root cause; "
+            "it will not be compiled.\n\n")
+
     if prior_attempt_summaries and attempt > 0:
         prior_lines = ["PRIOR FAILED ATTEMPTS (do NOT repeat these fixes):"]
         for i, summary in enumerate(prior_attempt_summaries[-3:], 1):
@@ -2167,6 +2208,11 @@ def build_repair_prompt(
         prior_attempts_block = "\n".join(prior_lines) + "\n\n"
     else:
         prior_attempts_block = ""
+    # P3+P4: the context injection and CoT blocks are prepended to
+    # the prior attempts (most recent guidance first)
+    if context_injection_block or cot_block:
+        prior_attempts_block = (
+            context_injection_block + cot_block + prior_attempts_block)
     # Self-correction plan step: force the model to reason about
     # WHY each failure happened and WHAT it will change BEFORE emitting the fix,
     # in the same response (no extra round-trip). The A/B showed the model

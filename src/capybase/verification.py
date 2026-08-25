@@ -2764,7 +2764,8 @@ def _try_repair_delimiter(
 
 
 def _try_balance_braces_iterated(
-    text: str, language: str | None = None, *, max_rounds: int = 4,
+    text: str, language: str | None = None, *,
+    max_rounds: int = 3,
 ) -> str | None:
     """Iterated single-imbalance repair for multi-gap failures.
 
@@ -2772,11 +2773,24 @@ def _try_balance_braces_iterated(
     multi-unclosed-brace failures (sqlite-0019: 2, sqlite-0029: 4) got
     zero deterministic attempts. Each round applies the one-edit repair
     and re-checks; the first non-improving round returns what we have
-    (only if fully balanced) or None."""
+    (only if fully balanced) or None.
+
+    P6 (sprint-23 batch E): 3-round convergence stop. If the imbalance
+    location KEEPS MOVING after 3 repairs, the structure is fundamentally
+    corrupted (e.g., a missing `}` for an entire impl block). Deterministic
+    patching cannot safely guess the correct structure beyond 3 attempts.
+    Escalation is the honest outcome."""
     current = text
-    for _ in range(max_rounds):
-        if _brace_imbalance_line(current, language) is None:
+    last_imbalance = None
+    for round_n in range(max_rounds):
+        imb = _brace_imbalance_line(current, language)
+        if imb is None:
             return current if current != text else None
+        # P6: if the imbalance is at the SAME line as the previous round,
+        # the repair isn't converging — stop (fundamental corruption)
+        if last_imbalance is not None and imb == last_imbalance:
+            break
+        last_imbalance = imb
         repaired = _try_balance_braces(current, language)
         if repaired is None or repaired == current:
             break
