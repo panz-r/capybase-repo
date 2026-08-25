@@ -2,14 +2,19 @@
 
 Complete after the specimen run. Each item is a hard gate.
 
-## 1. Batch-D gate (after batch-C gate)
+## 1. Batch-D gate (after batch-C gate) — 10 items
 
 - [ ] F1-smart conditions replace the env-var gate (4 conditions)
 - [ ] Config `enable_f1_takeover` defaults to `True`
 - [ ] The 6 originally-failing test fixtures pass (F1 correctly declines)
 - [ ] D1 accumulation fix verified (prior summaries are distinct)
+- [ ] PromptProfile.with_variant() method added (frozen-dataclass helper)
+- [ ] R5 wiring: `retry_profile_variant` via with_variant, threaded through propose()
 - [ ] Prompt-assembly instrumentation emits `prompt_composition` events
-- [ ] R5 wiring: `retry_profile_variant` threaded through `propose()`
+- [ ] Candidate-diff feedback: retry prompts include prior-attempt diffs
+- [ ] R3 within-session best-of-N: 2-3 diverse candidates on compile-gate failure
+- [ ] Repair-retrieval audit: does the repair-path top-1 example fire?
+- [ ] C5 investigation: sqlite-0004 prompt decomposition via instrumentation
 - [ ] Full suite GREEN (0 failures)
 
 ## 2. Specimen run (24 cases, targeted only)
@@ -34,8 +39,10 @@ Complete after the specimen run. Each item is a hard gate.
 - [ ] README Results table updated with new deltas (or note: full harvest needed)
 - [ ] Extracts committed if a full harvest ran; specimen results otherwise
 
-## 5. Full harvest decision
+## 5. Full harvest decision (DELAYED until all batch-D items land)
 
+- [ ] ALL batch-D items implemented and gated GREEN (hard prerequisite)
+- [ ] ALL items specimen-validated (the specimen run covers every mechanism)
 - [ ] If ≥10 mechanism-verified conversions from specimens: a full harvest
       is justified (the mechanisms scale beyond their targets)
 - [ ] If <10: defer the harvest; more mechanisms needed first
