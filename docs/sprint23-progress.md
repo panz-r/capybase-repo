@@ -27,7 +27,7 @@ gates; specimens validate per batch.
 Gate: 2 failures from D0's tuple return type (`_run_raw_test` returns
 `(bool, str)` not an object with `.stdout`). Fixed; verified.
 
-## Batch C — strategic (COMMITTED, gate RUNNING)
+## Batch C — strategic (COMMITTED, gate GREEN after F1 gating fix)
 
 | item | mechanism | specimens pending |
 |------|-----------|-------------------|
@@ -35,7 +35,29 @@ Gate: 2 failures from D0's tuple return type (`_run_raw_test` returns
 | F1 tier-2 | LLM subsumption adjudicator (failure-path gated) | Symmetric shapes (24 measured) |
 | R5 retry ladder | `retry_profile_variant` via `dataclasses.replace` | Wiring into retry loop (batch D) |
 
-## Batch D — remaining (IN DESIGN)
+## Batch D — expanded scope (COMMITTED, gate RUNNING)
+
+| item | mechanism | status |
+|------|-----------|--------|
+| F1-smart | 4 conditions + compile check, always-on (no env gate) | ✅ committed |
+| D1 fix | Per-round failure signatures accumulated correctly | ✅ committed |
+| with_variant() | PromptProfile frozen-dataclass helper | ✅ committed |
+| R5 wiring | Retry ladder uses with_variant, 3 orthogonal axes | ✅ committed |
+| Prompt instrumentation | Journal event per prompt build | ✅ committed |
+| Candidate-diff feedback | Unified diff of prior attempt in retries | ✅ committed |
+| R3 best-of-N | Diverse-temperature candidates, full-gate validated | ✅ committed |
+| Repair-retrieval audit | Intentionally unexercised (not a bug) | ✅ recorded |
+| C5 investigation | Needs specimen run + instrumentation | pending |
+| Priority chain | Design only (sprint-24) | ✅ recorded |
+
+Analytical additions (committed during gate waits):
+- Failure-mode stability metric (f77f857)
+- Dead-mechanism audit (765fb66)
+- Escalation-path priority chain design (33d4aa4)
+- F1 tier-2 evaluation script (090df5a)
+- Sprint projection: +4.0pp adjusted (090df5a)
+- Specimen reliability: 20 stable / 4 unstable targets
+- Repair-retrieval audit (598a530)
 
 | item | status |
 |------|--------|
