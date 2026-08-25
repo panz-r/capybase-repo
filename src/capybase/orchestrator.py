@@ -12356,6 +12356,71 @@ class Orchestrator:
         self._step_preservation_stash.pop(unit.unit_id, None)
         return outcome
 
+    def _accept_r3(self, unit, candidate, context):
+        """Accept an R3 best-of-N winning candidate."""
+        from capybase.conflict_model import UnitOutcome
+        outcome = UnitOutcome(unit=unit)
+        outcome.accepted = candidate
+        outcome.attempts = [candidate]
+        outcome.validation = None  # already validated by R3
+        outcome.mechanism = "r3_best_of_n"
+        self.journal.emit(
+            "candidate_accepted",
+            {"candidate_id": candidate.candidate_id,
+             "via": "r3_best_of_n",
+             "temperature_diverse": True},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id)
+        return outcome
+
+    def _r3_best_of_n(
+        self, unit, context, *, base_candidate, failures,
+    ):
+        """R3 (sprint-23): within-session best-of-N candidate selection.
+
+        On a compile-gate failure with retry budget remaining, generate
+        up to 2 additional diverse candidates (temperature 0.4/0.6),
+        validate ALL through the full gate stack, and return the first
+        that passes all hard gates. Addresses the 16-case unstable
+        population (different-quality output on different samples).
+        All candidates go through the FULL validation — no shortcuts.
+
+        Returns a passing CandidateResolution, or None (caller proceeds
+        to the normal retry loop)."""
+        if not getattr(self.config.future, "enable_best_of_n", False):
+            return None
+        # Only on compile-gate failures (not parse/marker — different class)
+        _is_compile = any(
+            "compile" in (getattr(f, "validator", "") or "").lower()
+            or "syntax" in (getattr(f, "message", "") or "").lower()
+            for f in failures
+        )
+        if not _is_compile:
+            return None
+
+        for temp in (0.4, 0.6):
+            try:
+                diverse = self.resolution_engine.propose(
+                    unit, context,
+                    temperature_override=temp,
+                    n_samples=1,
+                )
+                for cand in diverse:
+                    if not cand.resolved_text:
+                        continue
+                    validation = self._unit_validator.validate(unit, cand)
+                    if validation is not None and validation.passed:
+                        self.journal.emit(
+                            "r3_best_of_n_accept",
+                            {"temperature": temp,
+                             "candidate_id": cand.candidate_id,
+                             "unit_id": unit.unit_id},
+                            step_index=self.step, path=unit.path,
+                            unit_id=unit.unit_id)
+                        return cand
+            except Exception:  # noqa: BLE001 — best-effort
+                continue
+        return None
+
     def _resolve_unit_core(
         self, unit: ConflictUnit, *, seed_failures: list | None = None,
         seed_candidate: "CandidateResolution | None" = None,
@@ -12669,6 +12734,17 @@ class Orchestrator:
             # building the prompt so the model sees what later commits expect.
             self._set_future_obligations_prompt_block(unit)
             context = self.context_builder.build(unit)
+            # R3 (sprint-23): on the FIRST retry iteration, try diverse-
+            # temperature candidates before the feedback retry. If any
+            # passes the full gate stack, accept immediately.
+            if (retry_count == 0 and failures
+                    and prev_candidate is not None
+                    and prev_candidate.resolved_text):
+                _r3_cand = self._r3_best_of_n(
+                    unit, context,
+                    base_candidate=prev_candidate, failures=failures)
+                if _r3_cand is not None:
+                    return self._accept_r3(unit, _r3_cand, context)
             # Surface a retrieval failure as an advisory (#idea 4): the context
             # builder has no journal, so it stashes the error for us to emit here.
             if self.context_builder.last_retrieval_error:
