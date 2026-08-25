@@ -1857,3 +1857,34 @@ context.
 
 This is the architectural direction the batch-D failures pointed at:
 not "test harder" but "design so the failure class cannot occur."
+
+### Refinement (user, 2026-08-26): trigger logic is mechanism-owned
+
+"Any sophisticated rules for when to run are PART of the mechanism
+design. The overall flow with typed stages and conflict types is a
+good foundation. Mechanisms that need anything more should treat
+trigger-mechanism as part of their own workings, using interfaces and
+data the pipeline can supply."
+
+This separates concerns cleanly:
+
+- **Pipeline** owns: stage sequencing, typed contexts, data the
+  mechanism needs (conflict texts, validation results, stage state)
+- **Mechanism** owns: WHEN to engage (its own trigger conditions,
+  evaluated against the stage context) and WHAT to do (its repair
+  strategy)
+
+F1 tier-1's trigger (min churn ≤ 15 changed lines) is part of F1's
+implementation, not a pipeline rule. The pipeline gives F1 the
+sides and base at the right stage; F1 computes its own churn
+threshold and decides. C7''s trigger (empty response + coercion
+check) is C7''s internal logic. The pipeline doesn't know or care
+about churn or emptiness — it knows "this is the post-repair
+stage; here are the contexts; mechanisms, engage if you should."
+
+This means:
+1. Mechanisms are SELF-CONTAINED: trigger + action + safety check
+2. The pipeline is GENERIC: stage contexts + invocation + journaling
+3. No "activation logic" leaks into the pipeline or config
+4. New mechanisms slot in without pipeline changes (register for a
+   stage, bring their own trigger)
