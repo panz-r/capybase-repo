@@ -15617,11 +15617,9 @@ class Orchestrator:
             import re as _re_d0
             _serial_cmd = _re_d0.sub(r"-j\d+\s*", "", cmd).strip()
             if _serial_cmd and _serial_cmd != cmd:
-                _serial_run = self._run_raw_test(_serial_cmd)
+                _serial_ok, _serial_out = self._run_raw_test(_serial_cmd)
                 _error_lines = [
-                    ln for ln in (
-                        (_serial_run.stdout or "")
-                        + (_serial_run.stderr or "")).splitlines()
+                    ln for ln in (_serial_out or "").splitlines()
                     if "error" in ln.lower()
                 ][:20]
                 self.journal.emit(
