@@ -1412,3 +1412,18 @@ entity-splitting producing sub-units with full-file context, or the
 sibling-resolutions block accumulating across many sub-units. The fix
 requires running the case and inspecting the actual prompt
 decomposition, not a design-level cap. Deferred to the specimen run.
+
+### Batch D plan (2026-08-25, pending batch-C specimens)
+
+1. **D1 fix (3 lines)**: accumulate per-round failure signatures in a
+   persistent `self._repair_failure_history: list[str]` across the
+   retry loop; pass as `prior_attempt_summaries`.
+2. **R5 wiring (5 lines)**: add `profile_override: PromptProfile | None`
+   to `propose()`; pass to `build_resolve_prompt`/`build_repair_prompt`;
+   orchestrator passes `retry_profile_variant(active_profile(), attempt)`.
+3. **C5 investigation**: run sqlite-0004, dump the prompt
+   decomposition (sides vs context vs siblings), identify the 50K
+   source; cap accordingly.
+4. **C7' verify-path**: the specimens shifted modes; population-level
+   measurement only (no code change unless the specimen run shows the
+   fallback consistently failing verification).
