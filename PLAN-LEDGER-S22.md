@@ -1598,3 +1598,62 @@ resolved or escalated.
 Implementation is sprint-24 territory (the refactor touches the main
 loop). For sprint-23, the design is recorded and F1-smart's conditions
 implement the chain informally.
+
+## Sprint-23 final scope additions (user directive, 2026-08-25)
+
+User: "Add these to sprint 23, and delay the full eval until these
+land." Four items from the implementation discoveries, all added
+before the specimen run. Full harvest deferred until all sprint-23
+mechanisms land and are specimen-validated.
+
+### R3 — within-session best-of-N (2-3h)
+
+Design from the reviewer synthesis: on compile-gate failure with
+retry budget remaining, generate up to 2 additional diverse candidates
+(temperature 0.2/0.4/0.6), validate ALL through the full gate stack,
+accept the first that passes all hard gates. Never bypasses full
+validation. Addresses the 16-case unstable population from below.
+This was in the sprint-23 plan but never assigned to a batch.
+
+### PromptProfile.with_variant() (30min)
+
+A proper helper method on the frozen dataclass:
+  def with_variant(self, **overrides) -> PromptProfile:
+      return dataclasses.replace(self, **overrides)
+Makes profile variants robust, self-documenting, and testable. The
+retry ladder (R5) uses this instead of direct dataclasses.replace.
+Prevents the silent-failure pattern the frozen dataclass exposed.
+
+### Repair-retrieval audit (15min)
+
+Quick journal check: does the repair-path's top-1 retrieved example
+(the one appended to build_repair_prompt) actually fire? The
+dead-mechanism audit checked fresh-path golden-path retrieval (34
+events, alive) but not the repair-path variant separately.
+
+### Candidate-diff feedback (1h)
+
+D1 accumulates failure signatures (strings). This adds the candidate
+DIFF: when a retry fails, the model sees a unified diff from the
+previous attempt alongside the error — "here's what you tried, here's
+what changed, here's what still fails." The candidate text is already
+available in the retry loop; this diffs it against the prior attempt
+and includes the result in the feedback block. Makes the retry
+genuinely CEGIS/REPL-shaped (accumulated errors + candidate history +
+varied presentation + best-of-N selection).
+
+### Updated batch-D execution order
+
+1. F1-smart conditions (config→True)
+2. D1 accumulation fix (3 lines)
+3. PromptProfile.with_variant() (R5 dependency)
+4. R5 wiring (uses with_variant)
+5. Prompt-assembly instrumentation (3 lines)
+6. Candidate-diff feedback (1h)
+7. R3 within-session best-of-N (2-3h)
+8. Repair-retrieval audit (15min)
+9. C5 investigation (specimen-level, needs the instrumentation)
+10. Priority chain (design only; sprint-24)
+
+Full harvest decision: ONLY after all items land + specimen-validate.
+The harvest threshold (≥10 verified conversions) remains.
