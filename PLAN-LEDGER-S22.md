@@ -1372,3 +1372,19 @@ recoverable by corpus vendoring (separate item); ~153 genuine.** The
 era census is honest — the capybase contract (user-supplied era-
 appropriate build commands) is now exercised by the corpus config,
 with jsonc's updated as the first verified entry.
+
+## Sprint-23 Batch A results (2026-08-25)
+
+Gate GREEN (6266/0). Targeted specimen rerun (9 cases, no shard):
+
+| specimen | fix | result |
+|----------|-----|--------|
+| axum-0021 | D2 crash guard | **PASS 1.000** ✓ (was majority-flip crash) |
+| zenodo-0063 | P5 v2b portfolio provenance | **PASS 0.922** ✓ (the P5 miss) |
+| redis-0055 | C7' empty-fallback | **PASS 0.997** ✓ |
+| sqlite-0008 | C4b buffer-hash keys | ESC/ESC/PASS — improved (was 3/3 ESC); the anti-repeat holds, one repeat converted |
+| redis-0052/0054 | C7' | still 3/3 ESC — empty responses persist; the fallback fired but the side candidates failed to verify (see below) |
+| zenodo-0079 | C7' | still 3/3 ESC — same |
+| axum-0005/0033 | E2 | still 3/3 ESC — E2 was placed in the whole-file gate only; the failure fires in the PER-UNIT validator. Fix moved into `_compile_rust` itself (all callers inherit) — needs revalidation |
+
+**Batch A net: 3 conversions + 1 coin-flip improved, 2 fixes verified sound but incomplete (E2 placement, C7' verify-path) — both diagnosed, follow-up fixes written.** Continue to Batch B.
