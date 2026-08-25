@@ -796,6 +796,11 @@ class FutureConfig(BaseModel):
     # patch re-runs the same gate; no gate progress escalates exactly as
     # before. One round, <=3 patches.
     enable_micro_cegis: bool = True
+    # R3 (sprint-23): within-session best-of-N — on compile-gate failure,
+    # generate up to 2 additional diverse-temperature candidates and accept
+    # the first that passes all hard gates. Default False: the extra model
+    # calls are a cost-benefit decision per deployment (the eval enables it).
+    enable_best_of_n: bool = False
     # Move-and-edit transposition (sprint-20 S20.8): one side moved a base
     # block while the other edited it in place — a deterministic transpose
     # of the editor's delta onto the moved block (compiler-gated) is the

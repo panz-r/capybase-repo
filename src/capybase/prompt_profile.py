@@ -206,6 +206,13 @@ class PromptProfile:
     parse_repair_mode: ParseRepairMode = ParseRepairMode.AUTO_REPAIR
     retry_schedule: RetrySchedule = RetrySchedule.STANDARD
 
+    # NOTE: this is a FROZEN dataclass. Direct field assignment raises
+    # FrozenInstanceError with no hint about the alternative. ALWAYS use
+    # with_variant() for creating modified copies — it validates field
+    # names and returns a new instance:
+    #   WRONG: profile.side_ordering = SideOrdering.BASE_FIRST  # raises
+    #   RIGHT: profile = profile.with_variant(side_ordering=SideOrdering.BASE_FIRST)
+
     def with_variant(self, **overrides) -> "PromptProfile":
         """Return a copy with the given field overrides.
 

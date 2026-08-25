@@ -1748,3 +1748,28 @@ This is the testable version of the priority chain (item 10). ~2h.
 4. Fix any issues the walkthrough reveals in the existing ordering
 
 These land, gate, then the specimen run proceeds.
+
+### Scope addition results (2026-08-26)
+
+Four items from the third discovery review, all executed:
+
+1. **Config divergence audit**: `enable_best_of_n` was MISSING from
+   config.py entirely (library users couldn't enable R3). Added with
+   default False. The three "disabled-by-eval" flags
+   (asymmetry/midband/wholesale) are conditional on
+   CAPYBASE_DISABLE_TAKEOVER env var, not divergences. Shadow jury and
+   code reopen are eval-only by design.
+
+2. **PromptProfile assignment safety**: frozen dataclasses cannot have
+   __setattr__ overridden (the decorator provides it). Added a prominent
+   docstring note pointing to with_variant() instead. The
+   FrozenInstanceError is at least deterministic; the docstring
+   guides to the correct pattern.
+
+3. **R3 cost estimate**: 40 compile/syntax failures in 707 candidate
+   validations (6%); 80 extra model calls; ~0.7h wall-time on an 11h
+   reround. **6% cost — well within acceptable bounds.**
+
+4. **F1 tier-2 ground truth verified**: 8 of 24 tier-2 targets
+   re-checked; all oracle-parent proximities match the round-11 sweep.
+   The evaluation's ground truth is stable and correct.
