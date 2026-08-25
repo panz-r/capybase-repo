@@ -1568,3 +1568,33 @@ exactly the friction the instrumentation eliminates.
   fires, so the mechanism is stable even if the model's output isn't
 - The remaining 20 specimens are STABLE (same verdict across repeats)
   — reliable for mechanism attribution
+
+### Escalation-path priority chain (design, 2026-08-25)
+
+Current failure path (from code reading, 11 stages):
+  1. Model resolution → 2. Deterministic repairs → 3. Whole-file
+  repair → 4. Cross-unit portfolio → 5. True-side portfolio →
+  6. Wholesale floor → 7. F1 tier-1 → 8. F1 tier-2 → 9. Micro-CEGIS →
+  10. Escalation → 11. Interactive fallback
+
+Design proposal: a config-declared chain where each mechanism declares
+its position and a predicate. The orchestrator walks the chain in
+order, calling each mechanism's predicate (should I engage?) then its
+action. Benefits: new mechanisms slot in without breaking others;
+tests verify the chain ordering; the journal records which stage
+resolved or escalated.
+
+  proposed_chain = [
+      ("deterministic_repairs", stage=2),
+      ("whole_file_repair", stage=3),
+      ("portfolio", stage=4),
+      ("wholesale_floor", stage=5),
+      ("f1_tier1", stage=6, predicate="repairs_exhausted"),
+      ("f1_tier2", stage=7, predicate="not_interactive"),
+      ("micro_cegis", stage=8, predicate="compiler_indictment"),
+      ("escalate", stage=9),
+  ]
+
+Implementation is sprint-24 territory (the refactor touches the main
+loop). For sprint-23, the design is recorded and F1-smart's conditions
+implement the chain informally.
