@@ -1548,3 +1548,23 @@ sample + targeted checks):
 (F1, C7') are new in sprint-23 and not in the reround's code. The one
 confirmed dead mechanism (D1) has a fix prepared. Everything else is
 alive with real payload data.
+
+### C5 confirmed: prompt decomposition requires instrumentation
+
+sqlite-0004's prompts/ directory is empty — the 50K-char prompt was
+built but the LLM was skipped (oversized), so it was never persisted.
+The context_built journal event doesn't carry size decomposition.
+Without the prompt_composition instrumentation (batch D, 3 lines),
+the C5 investigation requires re-running the case with debugging —
+exactly the friction the instrumentation eliminates.
+
+### Specimen reliability note
+
+4 of 24 specimen targets are in the UNSTABLE class (clickhouse-0021/
+0040, redis-0013/0047 — mixed verdicts across repeats). For these:
+- A PASS doesn't prove the mechanism (could be a lucky sample)
+- An ESCALATE doesn't disprove it (could be unlucky)
+- The F1 takeover on clickhouse-0021/0040 is deterministic once it
+  fires, so the mechanism is stable even if the model's output isn't
+- The remaining 20 specimens are STABLE (same verdict across repeats)
+  — reliable for mechanism attribution
