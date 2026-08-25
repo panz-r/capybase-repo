@@ -1773,3 +1773,87 @@ Four items from the third discovery review, all executed:
 4. **F1 tier-2 ground truth verified**: 8 of 24 tier-2 targets
    re-checked; all oracle-parent proximities match the round-11 sweep.
    The evaluation's ground truth is stable and correct.
+
+## Pipeline contract design principle (user directive, 2026-08-26)
+
+User: "We aim for zero pipeline configuration by the user, so the
+'what is available at each pipeline stage' should be a function of
+the system, with mechanisms activation part of the pipeline and
+mechanism implementations."
+
+This reframes the batch-D lessons from "add better tests" to "design
+the pipeline so placement bugs are structurally impossible":
+
+### The principle
+
+The pipeline OWNS the stage sequencing and the variable contracts.
+Mechanisms don't wire themselves in at arbitrary code positions —
+they REGISTER for a stage, and the pipeline calls them with the
+guaranteed-available context for that stage. No mechanism code
+touches pipeline variables directly; it receives a typed stage
+context.
+
+### What this means concretely
+
+1. **Stages are typed interfaces, not code positions**:
+   ```python
+   @dataclass
+   class RepairExhaustedContext:
+       path: str
+       language: str
+       original: str
+       spliced_buffer: str
+       sides: dict[str, str]
+       base_text: str
+       failures: list[VerificationFailure]
+       wf_retries: int
+       wf_budget: int
+   ```
+
+2. **Mechanisms declare their stage, not their position**:
+   ```python
+   class F1Tier1(Mechanism):
+       stage = PipelineStage.POST_REPAIR_EXHAUSTION
+       def engage(self, ctx: RepairExhaustedContext) -> Takeover | None:
+           ...
+   ```
+
+3. **The pipeline walks the chain, calling each mechanism with the
+   context it needs** — no mechanism references orchestrator
+   internals, so UnboundLocalError is structurally impossible.
+
+4. **Activation is pipeline-managed, not config-gated**: the pipeline
+   decides which mechanisms to invoke based on the stage and the
+   conflict's properties (not user-set flags). F1 doesn't need
+   `enable_f1_takeover` — the pipeline invokes it at the right stage
+   because that's what the stage contract says.
+
+5. **Zero user configuration**: the pipeline IS the configuration.
+   The user runs `capybase rebase <target>` and the mechanism chain
+   engages automatically. The eval harness's config overrides become
+   unnecessary (or become per-repo customizations, not per-mechanism
+   toggles).
+
+### Relationship to sprint-23's items
+
+- The **priority chain** (item 10, design only) is the first step:
+  declares the ordering.
+- The **failure-path ordering tests** (cycle A) verify the ordering.
+- The **stage contexts** are the full realization — each mechanism
+  receives a typed context instead of reaching into orchestrator
+  state.
+- The **instrumentation helper** (cycle A) becomes the pipeline's
+  built-in event emission, not a decorator.
+
+### Sprint-24 implementation sketch
+
+1. Define `PipelineStage` enum and typed stage contexts
+2. Refactor mechanisms to implement `Mechanism` protocol
+3. Pipeline executor walks stages, builds contexts, calls mechanisms
+4. Config flags collapse to zero (mechanisms self-describe their
+   activation conditions)
+5. The orchestrator becomes the pipeline executor + git/session
+   management (no mechanism code inline)
+
+This is the architectural direction the batch-D failures pointed at:
+not "test harder" but "design so the failure class cannot occur."
