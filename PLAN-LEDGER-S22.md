@@ -1888,3 +1888,110 @@ This means:
 3. No "activation logic" leaks into the pipeline or config
 4. New mechanisms slot in without pipeline changes (register for a
    stage, bring their own trigger)
+
+## Sprint-23 scope: reviewer synthesis on gate-A failures (2026-08-26)
+
+Eight recommendations reviewed against our system's architecture,
+the specimen evidence, and the archaeology. Validated, adapted, or
+rejected with reasons.
+
+### ADOPTED (6 items)
+
+**P1. Parser-level empty/refusal distinction (1-2h)**
+The reviewer is correct: my coercion-gap fix (empty text overrides
+the refusal label at the C7' fallback site) is a symptom patch. The
+root cause is the response parser conflating "zero bytes returned"
+with "model considered and declined." Fix at the parser:
+  - `len(raw_text) == 0` → `failure_kind = "empty"`, `needs_human = False`
+  - whitespace-only (<10 chars) → same as empty
+  - explicit refusal text → `failure_kind = "needs_human"`
+C7' then fires on `"empty"` with zero carve-out logic. Cleaner,
+better telemetry, and the needs_human path stays protected for
+genuine refusals. Replaces the fallback-level override (df0eb4e).
+
+**P2. Model-failure → whole-side portfolio rung (2h)**
+When the LLM returns empty on a unit, re-engage the true-side
+portfolio (whole-file pristine sides from the merge index) before
+escalating. The oracle for these cases is often one side verbatim
+(axum-0005 oracle=current 1.00; redis-0052 oracle=current 0.99).
+The existing `_empty_fast_fail_recovery` only tries single-unit
+side candidates; this extends to whole-file sides. Composes with
+the parser fix: `"empty"` → whole-side portfolio → escalate.
+
+**P3. Context injection at retry level (1h)**
+C1's symbol search applied to the RETRY prompt, not just the file
+gate. When the same compile error occurs twice:
+  - Parse the error for the missing symbol
+  - Search the WORKING BUFFER (auto-merged context) for its definition
+  - Inject: "The symbol 'X' is defined in this file as: [signature]"
+Tells the model the definition it needs (actionable) vs. the error
+message alone (diagnostic). Different from C1's file-gate injection
+(which modifies the buffer); this modifies the PROMPT.
+
+**P4. Chain-of-Thought repair variant (1h)**
+On repair iteration 3+, force a diagnosis block before the fix:
+  "First, output a <diagnosis> block explaining exactly why this
+   error occurs. Then, output the <fixed_code> block."
+The diagnosis is discarded (only the code is compiled); it grounds
+the 4B model's reasoning. This is an R5 presentation variant —
+a specific prompt structure change, not a new mechanism.
+
+**P5. Finer-grained no-progress signatures (30min)**
+Extend the failure signature to include error class and count, not
+just failure kind. If the error class changes between rounds (e.g.,
+"missing symbol" → "type mismatch"), that's progress even if the
+failure kind is the same. Prevents the no-progress guard from
+escalating on genuinely evolving repairs.
+
+**P6. Skeleton-aware brace placement (1h)**
+Refine the iterated brace repair: use the skeleton's entity
+boundaries to find the LOGICAL scope boundary for insertion, not
+the error line. Plus a 3-round convergence stop: if the error keeps
+moving after 3 repairs, the structure is fundamentally corrupted;
+escalate honestly.
+
+### ALREADY IMPLEMENTED (no action)
+
+- **Temperature jitter** → R3 (within-session best-of-N) already
+  implements diverse temperatures on compile-gate failure
+- **include_str pre-flight** → E2 already marks include-bearing files
+  as "undecidable from temp copy" in `_compile_rust` (the reviewer's
+  "copy the file" variant is an eval-harness materialization fix,
+  not a resolver fix — E2 class)
+- **Golden-path mandatory retrieval** → already fires (34 events in
+  the dead-mechanism audit); the env-gate concern is outdated
+
+### REJECTED (with reasons)
+
+- **F1 threshold lowering to 0.85 with compile-check**: The compile
+  check is already in F1-smart (condition d). The threshold change
+  (0.90→0.85 oracle proximity) requires oracle knowledge we don't
+  have in-session. The churn threshold (30 double-counted) was
+  archaeology-calibrated; changing it without population evidence
+  is the sprint-18 WS4 lesson.
+
+- **Whole-file winner floor on final-gate failure (sim ≥0.99)**:
+  Too close to F1 tier-1 (same mechanism, slightly different
+  trigger). The "near-perfect buffer" check requires knowing
+  similarity to a side's pristine text — computable in-session but
+  redundant with F1 tier-1's churn-based trigger. If F1 tier-1
+  isn't firing on these cases, the issue is the trigger conditions,
+  not a missing mechanism.
+
+- **Tiered fallback ladder (full implementation)**: This is the
+  pipeline-contract architecture (the user's sprint-24 directive).
+  The specific "model-failure → portfolio" rung is adopted as P2;
+  the full ladder (4 rungs with statement splitting) is sprint-24's
+  pipeline-contract work.
+
+### Batch E execution order
+
+1. P1: Parser-level empty/refusal distinction (replaces the
+   fallback-level override)
+2. P2: Model-failure → whole-side portfolio
+3. P5: Finer-grained no-progress signatures
+4. P6: Skeleton-aware brace placement (refine iterated)
+5. P3: Context injection at retry level
+6. P4: CoT repair variant
+
+Estimated total: ~6-7h. Batch gates, then specimen re-run.
