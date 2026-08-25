@@ -1388,3 +1388,17 @@ Gate GREEN (6266/0). Targeted specimen rerun (9 cases, no shard):
 | axum-0005/0033 | E2 | still 3/3 ESC — E2 was placed in the whole-file gate only; the failure fires in the PER-UNIT validator. Fix moved into `_compile_rust` itself (all callers inherit) — needs revalidation |
 
 **Batch A net: 3 conversions + 1 coin-flip improved, 2 fixes verified sound but incomplete (E2 placement, C7' verify-path) — both diagnosed, follow-up fixes written.** Continue to Batch B.
+
+### Sprint-23 mid-gate status (batch-C gate running, 2026-08-25)
+
+D1 discovery: the `prior_attempt_summaries` infrastructure ALREADY
+EXISTS (prompt builder renders "PRIOR FAILED ATTEMPTS"; orchestrator
+passes it) but has a data-flow bug — summaries are rebuilt from the
+CURRENT failures each round, so every prior summary is the same
+signature repeated. The real fix (batch D): accumulate actual
+per-round failure signatures in a persistent list across retries.
+
+C7' specimen finding: redis-0052/0054's failure mode SHIFTED between
+baseline (empty response) and rerun (non-empty candidates failing
+validation) — the empty-response class is sampling-dependent. The fix
+is correct for its class; value is population-level.
