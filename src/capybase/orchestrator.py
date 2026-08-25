@@ -192,6 +192,33 @@ def _normalize_failure_message(message: str) -> str:
     return re.sub(r"\b\d+\b", "N", message)
 
 
+def _error_class(message: str) -> str:
+    """P5 (sprint-23 batch E): extract the error class from a failure message.
+
+    The no-progress guard fires when the signature is identical across
+    retries. But "missing symbol X" → "type mismatch on X" is genuine
+    progress (the symbol was found; its type is now wrong). Including
+    the error class in the signature distinguishes these:
+      syntax vs semantic vs type vs symbol vs marker vs build
+    """
+    import re
+    msg = (message or "").lower()
+    if any(k in msg for k in ("syntax", "parse", "expected", "unterminated")):
+        return "syntax"
+    if any(k in msg for k in ("type", "pointer", "cast", "convert")):
+        return "type"
+    if any(k in msg for k in ("undeclared", "not found", "unresolved",
+                              "unknown", "missing")):
+        return "symbol"
+    if any(k in msg for k in ("defined multiple", "duplicate", "redefin")):
+        return "duplicate"
+    if any(k in msg for k in ("marker", "conflict")):
+        return "marker"
+    if any(k in msg for k in ("build", "make", "cmake")):
+        return "build"
+    return "other"
+
+
 def _hard_failure_signature(failures) -> frozenset:
     """A multiset signature of a candidate's hard failures for the no-progress
     guard (Fix C). Returns ``frozenset(Counter(...).items())`` — a hashable
@@ -207,8 +234,12 @@ def _hard_failure_signature(failures) -> frozenset:
     checks are also gated on non-empty resolved_text) AND genuine stuck-on-one-
     compiler-error cycling. ``failures`` is a list of VerificationFailure."""
     from collections import Counter
+    # P5 (sprint-23 batch E): prepend the error class to the normalized
+    # message so "symbol missing" → "type mismatch" registers as progress
+    # (different class prefix). Keeps the 2-tuple shape for backward compat.
     return frozenset(Counter(
-        (f.validator, _normalize_failure_message(f.message))
+        (f.validator,
+         f"[{_error_class(f.message)}] {_normalize_failure_message(f.message)}")
         for f in failures
     ).items())
 
@@ -12286,6 +12317,54 @@ class Orchestrator:
                 step_index=self.step, path=unit.path, unit_id=unit.unit_id,
             )
             return outcome
+        # P2 (sprint-23 batch E): whole-side portfolio on model failure.
+        # When the model returns empty, the single-unit side candidates
+        # may not suffice (multi-unit files where the oracle is one side
+        # verbatim). Try the whole-file pristine sides: if one compiles
+        # cleanly, it's the answer the model couldn't produce.
+        try:
+            _sides_p2, _base_p2 = self._micro_stage_sides(unit.path)
+            if _sides_p2:
+                for _side_name in ("current", "replayed"):
+                    _side_text = _sides_p2.get(_side_name, "")
+                    if not _side_text.strip():
+                        continue
+                    _val_p2 = self.verification.verify_file(
+                        unit.path, unit.language,
+                        _side_text, [],
+                        repo_root=str(self.git.repo),
+                        whole_text=_side_text)
+                    if _val_p2.passed:
+                        _wf_unit = unit.model_copy(
+                            update={"marker_span": None,
+                                    "unit_kind": "whole_file"})
+                        _wf_cand = CandidateResolution(
+                            candidate_id=f"{unit.unit_id}:p2_wholeside:{_side_name}",
+                            unit_id=unit.unit_id,
+                            model_name="deterministic",
+                            resolved_text=_side_text,
+                            prompt_version="p2_wholeside_fallback",
+                            provenance="deterministic_structural",
+                            self_reported_confidence=0.80,
+                            explanation=(
+                                f"P2 whole-side on model failure: "
+                                f"{_side_name} compiles cleanly"),
+                        )
+                        self.journal.emit(
+                            "p2_wholeside_accept",
+                            {"side": _side_name, "path": unit.path},
+                            step_index=self.step, path=unit.path,
+                            unit_id=unit.unit_id)
+                        from capybase.conflict_model import (
+                            UnitOutcome as _UO_p2,
+                        )
+                        _outcome_p2 = _UO_p2(unit=unit)
+                        _outcome_p2.accepted = _wf_cand
+                        _outcome_p2.attempts = [cand, _wf_cand]
+                        _outcome_p2.mechanism = "p2_whole_side_fallback"
+                        return _outcome_p2
+        except Exception:  # noqa: BLE001 — best-effort extension
+            pass
         return None
 
     def _resolve_unit(
@@ -13643,23 +13722,16 @@ class Orchestrator:
                 and (
                     _tok_est < 1500
                     or _empty_oversized
-                    # C7' (sprint-23): a TRUE empty response (parse_failed
-                    # with no text) is the endpoint refusing the shape, not an
-                    # oversized-parse artifact — the single-side fallback
-                    # applies at any unit size (its candidates still pass full
-                    # verification). redis-0054/0055, zenodo-0079.
-                    or ((cand.failure_kind or "") == "parse_failed"
-                        and not (cand.resolved_text or "").strip())
+                    # C7' + P1 (sprint-23 batch E): the parser now emits
+                    # failure_kind="empty" for zero-byte responses — a
+                    # transport failure, not a considered refusal. The
+                    # single-side fallback fires on "empty" at ANY unit
+                    # size with zero carve-out logic (the failure kind
+                    # carries the information; no boolean overrides).
+                    or (cand.failure_kind or "") == "empty"
                 )
                 and (not _refusal or _oversized_parse_fail
-                     # Coercion gap (s23 cycle A): an empty response is
-                     # coerced to needs_human by the parser (it can't
-                     # extract JSON from nothing), making a coerced refusal
-                     # indistinguishable from a considered one. A CONSIDERED
-                     # refusal has text (the model explains why); a COERCED
-                     # one has none. Empty text overrides the refusal label.
-                     or ("needs_human" in (cand.failure_kind or "")
-                         and not (cand.resolved_text or "").strip()))
+                     or (cand.failure_kind or "") == "empty")
                 # A TRANSPORT failure (request never completed) is not a
                 # model verdict — the endpoint said nothing about this
                 # conflict, so there is no basis for the deterministic side
