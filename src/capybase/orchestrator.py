@@ -13651,7 +13651,15 @@ class Orchestrator:
                     or ((cand.failure_kind or "") == "parse_failed"
                         and not (cand.resolved_text or "").strip())
                 )
-                and (not _refusal or _oversized_parse_fail)
+                and (not _refusal or _oversized_parse_fail
+                     # Coercion gap (s23 cycle A): an empty response is
+                     # coerced to needs_human by the parser (it can't
+                     # extract JSON from nothing), making a coerced refusal
+                     # indistinguishable from a considered one. A CONSIDERED
+                     # refusal has text (the model explains why); a COERCED
+                     # one has none. Empty text overrides the refusal label.
+                     or ("needs_human" in (cand.failure_kind or "")
+                         and not (cand.resolved_text or "").strip()))
                 # A TRANSPORT failure (request never completed) is not a
                 # model verdict — the endpoint said nothing about this
                 # conflict, so there is no basis for the deterministic side
