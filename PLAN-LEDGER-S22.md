@@ -1671,3 +1671,80 @@ but an **unconfigured feature** — activating it would require seeding
 a quality-filtered store and wiring the retriever into the eval's
 config. Recorded as a sprint-24 candidate (the golden-path A/B
 methodology applies).
+
+## Sprint-23 batch-D failure lessons → scope additions (user directive, 2026-08-25)
+
+Three implementation-failure classes across batches C/D, each revealing
+a structural gap. User: "Learn from these batch D failures and begin
+planning the fixes, added to the sprint 23 scope. Sprint 23 will cycle
+batch and run gate A after the extended scope fixes land."
+
+### Lesson 1: Mechanism placement is as important as correctness
+
+F1's 6 test failures (batch C) and R3's `context` UnboundLocalError
+(batch D) share a root cause: mechanisms wired into the pipeline at
+positions where their prerequisites aren't yet available or where
+they intercept flows they shouldn't. Each new mechanism currently
+requires the implementer to mentally trace the ENTIRE failure path
+to find the right insertion point — error-prone and untested.
+
+**Fix: mechanism position assertions** — a lightweight test helper
+that verifies each mechanism's wiring point has its prerequisites
+available. For each mechanism, a test asserts:
+- The mechanism's function is called at the right pipeline stage
+- The variables it needs are defined at that point
+- The mechanisms before it in the chain have already run or declined
+
+This catches placement bugs at test time, not at gate time. ~2h for
+the helper + assertions for all sprint-23 mechanisms.
+
+### Lesson 2: Instrumentation must be outside conditional branches
+
+The prompt-assembly instrumentation failed (32 tests) because it was
+placed inside an `if/elif` branch where its target variable (`prompt`)
+might not exist. The fix (moving after all branches) is correct but
+manual — the next instrumentation will hit the same trap.
+
+**Fix: instrumentation helper pattern** — a context-manager or
+decorator that guarantees instrumentation code runs AFTER a block
+completes (success or failure), with the block's outputs available.
+One pattern, used by all future instrumentation points.
+
+```python
+@instrumented("prompt_composition")
+def _build_prompt(...):
+    ...  # existing branching
+    return prompt  # instrumentation reads this after the branch
+```
+
+~30 min for the pattern + migration of the one existing instance.
+
+### Lesson 3: The test fixtures are placement-sensitive
+
+The 6 F1 test failures exposed that the test fixtures verify specific
+ESCALATION paths — they're implicit placement tests. But they only
+catch mis-placement accidentally (when a new mechanism happens to
+intercept). An explicit test that walks the failure path in order and
+verifies each mechanism fires (or declines) at its designated stage
+would make placement a first-class tested property.
+
+**Fix: failure-path walkthrough test** — a single test that drives a
+synthetic conflict through the full failure path with mocks at each
+stage, asserting:
+- Deterministic repairs run first
+- The wholesale floor runs before F1
+- F1 tier-1 runs before tier-2
+- Tier-2 runs before micro-CEGIS
+- Escalation is the terminal action
+- The interactive fallback is a post-escalation path, not pre-
+
+This is the testable version of the priority chain (item 10). ~2h.
+
+### Extended batch-D scope (cycle A)
+
+1. Mechanism position assertions (~2h)
+2. Instrumentation helper pattern (~30min)
+3. Failure-path walkthrough test (~2h)
+4. Fix any issues the walkthrough reveals in the existing ordering
+
+These land, gate, then the specimen run proceeds.
