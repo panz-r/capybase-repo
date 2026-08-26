@@ -2295,3 +2295,69 @@ then the 8 priorities as mechanism registrations on the pipeline.
   4 times now; within-session only)
 - Do NOT pursue the 8 model-empty cases via stronger prompting
   alone — the fallback chain (P2) is more reliable
+
+## Sprint-24 specimen analysis: mid-run findings (2026-08-26 19:40)
+
+13/18 completed. 2 PASS (clickhouse-0021, redis-0040), 11 ESC.
+
+### Finding 1: P1a diagnostics work — F1 tier-1 IS eligible but churn-declines
+
+The `f1_tier1_trigger_check` events show:
+- axum-0013: eligible=True, wf_retries=2, budget=1 → tier-1 ELIGIBLE
+- sea-orm-0021: eligible=True, wf_retries=1, budget=1 → tier-1 ELIGIBLE
+
+But `_near_one_sided_takeover()` declines because the CHURN is too
+symmetric (both sides changed > threshold). The tier-1 vs tier-2 split
+is working as designed — these cases ARE tier-2 territory. The fix
+isn't lowering the threshold (that was rejected); it's the compile-
+clean override (P1b, implemented but not yet wired to the orchestrator).
+
+### Finding 2: P3 diff-prompt IS working — tier-2 accuracy improved
+
+protobuf-0051's tier-2 now chooses `replayed` (the CORRECT side) at
+0.95 confidence with a substantive reason: "The replayed version
+consistently implements a major refactoring to use type_descriptor_
+for message and enum types." This is a dramatic improvement from
+sprint-23 where the same adjudicator said "the three versions are
+identical."
+
+BUT: the case still fails because the replayed side's build fails
+(strict compiler flags). The adjudicator is right; the build is the
+bottleneck.
+
+### Finding 3: P2 parsed-empty NOT reaching the fallback chain
+
+flask-0006 and redis-0052 still show "model produced an empty
+resolution" with no `llm_empty_fragment` or fallback events. The
+P2 fix correctly sets `failure_kind="empty"` on the candidate, but
+the orchestrator's retry path (risk_decision → retry) fires BEFORE
+the C7' fast-fail can engage. The fast-fill is placed AFTER the
+risk_decision in the code flow — it needs to be BEFORE.
+
+### Finding 4: sqlite-0019 regression (sim 1.000 → 0.006)
+
+The brace repair introduced a syntax error ("expected identifier or
+'(' before 'if'") — the 3-round convergence stop correctly identified
+the moving imbalance, but the repair itself inserted a brace in the
+wrong position, creating invalid syntax. The F1 trigger check fired
+(eligible=True) and tier-2 chose correctly, but the damage was
+already done.
+
+### Finding 5: redis-0055 never reaches the F1 path
+
+No F1 events at all for redis-0055 — the no-progress guard fires
+before the repair-exhaustion path is reached. This is a pipeline
+ordering issue: the guard should allow F1 to try before escalating.
+
+### Actions needed (sprint-24 continued)
+
+1. Wire P1b compile-clean override to the orchestrator (it's
+   implemented as a pipeline mechanism but not called from the
+   orchestrator's repair-exhaustion path)
+2. Move the C7' empty fast-fail BEFORE the risk_decision in
+   _resolve_unit_core (P2's failure_kind is correct but the
+   retry loop intercepts first)
+3. Fix the brace repair's insertion point (the 3-round stop is
+   correct but the insertion position is wrong for sqlite-0019)
+4. Allow F1 to engage before the no-progress guard escalates
+   (redis-0055's flow)
