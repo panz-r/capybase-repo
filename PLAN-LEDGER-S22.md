@@ -2209,3 +2209,89 @@ fully resolve without a stronger model or deeper repair capability.
 Items 1 and 2 are the sprint-24 headline: the architecture enables
 everything else, and the diff-centered prompt fixes the adjudicator's
 biggest weakness.
+
+## Sprint-24 plan UPDATED from reviewer synthesis (2026-08-26)
+
+The reviewer's analysis is precise and actionable. Key insight: "The
+system's mechanisms are correct but insufficiently connected. The
+development path is fix the wiring between existing mechanisms, not
+build new ones."
+
+### Adopted priorities (8 items, ordered by leverage)
+
+**P1. F1 tier-1 trigger debug + compile-clean override (4-5h → 3-5 cases)**
+- 1a: Diagnostic journaling of every `_f1_eligible` condition check
+  (f1_tier1_decline_reason event with all pipeline-state variables)
+- 1b: Compile-clean primary condition — if exactly one pristine side
+  compiles and the merge doesn't, take the compiling side regardless
+  of churn ratio (compiler is the authority; safety preserved)
+- 1c: R2 near-duplicate dedup (normalize use statements before
+  comparison: strip whitespace, sort nested items, remove trailing
+  semicolons) for sea-orm-0021
+
+**P2. Parsed-empty extension (1h → 3-4 cases)**
+- After JSON parsing succeeds, check if `resolved_text` is empty/
+  whitespace. If so: `failure_kind="empty"`, `needs_human=False`
+  (the model didn't "consider" anything — it generated no content)
+- Enables the full P1/P2 fallback chain on 4 cases
+
+**P3. F1 tier-2 diff-centered prompt (2h → 1-2 cases)**
+- Replace clipped sides with unified diff hunks (±3 context lines)
+- The diff is small (~500 chars vs 6000) regardless of file size
+- Eliminates the clip problem entirely for large files
+
+**P4. C1 error-routing + pipeline ordering (5-6h → 3-4 cases)**
+- 4a: redis-0013 — skip line-replacement for implicit-declaration
+  errors; go straight to derived-prototype
+- 4b: redis-0047 — add struct-member pattern to error parser
+- 4c: redis-0040 — parse incompatible-pointer for function name
+  and argument position, search parents for correct call
+- 4d: redis-0049 — after coherence repair, run C1 injection BEFORE
+  the R1 fail-closed check
+
+**P5. Prompt composition cap + entity-split safety (3h → 1-2 cases)**
+- 5a: sqlite-0004 — cap sibling-resolutions block to 2000 tokens,
+  entity-split context to 1500 tokens
+- 5b: sqlite-0029 — parenthesis-aware entity splitting (don't split
+  through parenthesized/bracketed expressions)
+
+**P6. Delimiter repair at candidate level (2h → 0-1 cases)**
+- Fire delimiter-balance check on model's candidate BEFORE validation
+- Fix the unmatched paren, then validate the repaired candidate
+
+**P7. Shape-specific presentation for model-empty class (4-5h → 1-2)**
+- 7a: Structural-fingerprint few-shot injection before first LLM call
+- 7b: Two-stage reasoning (list changes, then produce merge)
+- 7c: Diff-based generation for oversized prompts
+
+**P8. Best-of-N + dynamic retry (3h → 1-3 cases)**
+- Already partially implemented (R3 in sprint-23); extend with
+  dynamic retry budget based on proximity, not just wall time
+
+### Pipeline architecture integration
+
+The pipeline trigger architecture (the user's core sprint-24
+directive) is the FOUNDATION these fixes build on:
+- P1's compile-clean trigger becomes a mechanism-owned condition
+- P4d's cascade ordering becomes the pipeline's stage sequencing
+- P6's candidate-level repair becomes a stage mechanism
+- P7's shape-specific presentation becomes a mechanism trigger
+
+Implementation order: pipeline architecture first (1-2 weeks),
+then the 8 priorities as mechanism registrations on the pipeline.
+
+### Projected outcome
+
+- 12-16 conversions of 17 failures + 1 NEAR
+- Specimen PASS rate: 38% → ~79-93%
+- Honest ceiling: 2-3 irreducible (sqlite-0040, tokio-0108,
+  sqlite-0030 approaching era-adjacent)
+
+### What we will NOT do (from the reviewer, validated)
+
+- Do NOT weaken the compile gate (every fix is compiler-gated)
+- Do NOT build new mechanisms where wiring fixes suffice
+- Do NOT implement cross-repeat best-of-N aggregation (rejected
+  4 times now; within-session only)
+- Do NOT pursue the 8 model-empty cases via stronger prompting
+  alone — the fallback chain (P2) is more reliable
