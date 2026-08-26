@@ -2133,3 +2133,79 @@ model to see the differences.
 "Analyze the failures and plan fixes for sprint 24. No eval rerun
 before sprint 24 completes." The harvest threshold is moot; sprint-24
 plans and implements the fixes first.
+
+## Sprint-24 plan from sprint-23 failure analysis (2026-08-26)
+
+17 failures + 1 NEAR grouped by fix theme:
+
+### Theme 1: F1 tier-2 prompt starvation (3 cases — highest priority)
+
+axum-0013, protobuf-0051, sea-orm-0021 — the tier-2 prompt clips
+sides to 6000 chars, hiding the actual differences for large files.
+The model sees identical snippets and defaults to "current."
+
+**Fix: diff-centered F1 tier-2 prompt** — instead of showing the
+full (clipped) sides, compute the diff between current and replayed,
+show ONLY the changed regions with context, and ask the model to
+judge subsumption on the ACTUAL changes. This eliminates the clip
+problem entirely: the diff is small even for large files.
+
+### Theme 2: P1 JSON-shell gap (2 cases)
+
+redis-0052, zenodo-0079 — the model returns a JSON response with
+empty `resolved_text` (not zero bytes). P1's `len(raw_text) < 10`
+check doesn't fire.
+
+**Fix: extend "empty" to include parsed-empty** — when the JSON
+parses but `resolved_text` is empty/whitespace, also emit
+`failure_kind="empty"`. Three lines in the parser.
+
+### Theme 3: Pipeline architecture (2 cases)
+
+flask-0006, sqlite-0004 — F1 tier-1 doesn't fire because the churn
+is too symmetric, but the oracle is one side at 1.00. The tier-1/
+tier-2 threshold is miscalibrated for these shapes.
+
+**Fix: part of the pipeline-contract architecture** — with typed
+stage contexts and mechanism-owned triggers, the F1 trigger can
+use richer signals (compile-clean check on the pristine side as
+a primary condition, not just churn). The current architecture
+makes this hard to add without breaking other mechanisms.
+
+### Theme 4: Repair depth (2 cases)
+
+redis-0013, redis-0040 — C1 injection fires but doesn't close the
+compile error. The injected declaration exists but doesn't resolve
+the actual defect.
+
+**Fix: C1c (project-wide search)** — the needed declaration may be
+in a different file. Sprint-23's C1 searches base/current/replayed
+of the CONFLICT FILE only; the declaration for redis-0013's
+cliSwitchProto is in the same file but the repair doesn't compile.
+The fix is searching other files in the repo.
+
+### Theme 5: Model or variance (8 cases)
+
+redis-0047, redis-0049 (C1 not firing), redis-0055 (variance),
+sqlite-0019 (brace not converging), sqlite-0029 (correct side but
+build fails), sqlite-0030 (multiple mechanisms insufficient),
+sqlite-0040 (#endif truncation), tokio-0108 (needs_human).
+
+These are the honest frontier — mechanisms can improve but won't
+fully resolve without a stronger model or deeper repair capability.
+
+### Sprint-24 execution order
+
+1. **Pipeline trigger architecture** (the user's core directive) —
+   typed stages, mechanism-owned triggers, zero user config
+2. **F1 tier-2 diff-centered prompt** (highest-impact fix)
+3. **P1 parsed-empty extension** (2 conversions)
+4. **F1 tier-1 compile-clean trigger** (via the new architecture)
+5. **C1c project-wide search** (repair depth)
+6. **Era-vendoring for rust deps** (~12 recoverable)
+7. **Repair-path retrieval activation**
+8. **Prompt monitoring + corpus cleanup**
+
+Items 1 and 2 are the sprint-24 headline: the architecture enables
+everything else, and the diff-centered prompt fixes the adjudicator's
+biggest weakness.
