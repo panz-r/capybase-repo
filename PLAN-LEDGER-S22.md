@@ -2361,3 +2361,66 @@ ordering issue: the guard should allow F1 to try before escalating.
    correct but the insertion position is wrong for sqlite-0019)
 4. Allow F1 to engage before the no-progress guard escalates
    (redis-0055's flow)
+
+## Sprint-24 specimen results (COMPLETE, 2026-08-26 20:55)
+
+18/18 done: **2 PASS** (clickhouse-0021 0.917, redis-0040 0.948),
+16 ESCALATE. F1 activity: 26 trigger checks, 3 tier-1 takeovers,
+11 tier-2 adjudications.
+
+### Honest assessment
+
+These 18 cases are sprint-23's HARDEST failures — the cases that
+already resisted 20+ mechanisms. The 2 conversions are genuinely new
+(clickhouse-0021 was NEAR, redis-0040 was a coin-flip). The 16
+remaining failures decompose into the four wiring issues identified
+in the mid-run analysis, plus the honest model/era ceiling.
+
+### What worked (validated by journal evidence)
+
+1. **P1a diagnostics**: 26 trigger-check events across the specimen
+   flights reveal the full pipeline state at every F1 evaluation.
+   This is the instrumentation paying for itself immediately.
+
+2. **P3 diff-centered prompt**: tier-2 adjudications now show
+   substantive reasoning about actual code differences (protobuf-0051:
+   "major refactoring to use type_descriptor_") vs sprint-23's
+   "versions are identical." The adjudicator's JUDGMENT improved;
+   the bottleneck is now the build gate, not the prompt.
+
+3. **3 tier-1 takeovers fired** (on cases where churn was genuinely
+   asymmetric) — the mechanism works correctly when it engages.
+
+4. **redis-0040 and clickhouse-0021 converted** — both were targets
+   of specific sprint-24 fixes (P4c incompatible-pointer pattern for
+   redis-0040; F1 engagement for clickhouse-0021).
+
+### What didn't work (root causes identified)
+
+1. **P2 parsed-empty: placement bug** — the failure_kind="empty" is
+   set correctly by the parser, but the orchestrator's retry loop
+   (risk_decision) fires BEFORE the C7' fast-fail can engage. The
+   fast-fill needs to be placed BEFORE the risk_decision, not after.
+
+2. **P1b compile-clean: not wired** — implemented as a pipeline
+   mechanism but the orchestrator doesn't call the pipeline at the
+   repair-exhaustion point. The mechanism exists but is unreachable.
+
+3. **sqlite-0019 regression**: the brace repair's insertion position
+   created invalid syntax (sim dropped from 1.000 to 0.006). The
+   3-round convergence stop is correct but the insertion point
+   calculation is wrong for this file shape.
+
+4. **redis-0055**: never reaches the F1 path — the no-progress guard
+   escalates before repair exhaustion is reached.
+
+### Sprint-24 cycle B actions (next implementation batch)
+
+1. Wire P1b compile-clean to the orchestrator (the pipeline mechanism
+   exists; add the call at the repair-exhaustion point)
+2. Move C7' fast-fail BEFORE risk_decision in _resolve_unit_core
+   (P2's parsed-empty reaches the right failure_kind but the retry
+   loop intercepts)
+3. Fix brace repair insertion point for multi-entity files
+4. Allow F1 to engage before the no-progress guard escalates
+5. Re-run specimens on the same 18 cases
