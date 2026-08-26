@@ -327,7 +327,7 @@ class CandidateResolution(BaseModel):
     # immediate-escalate signal (the loop is stuck). Empty when well-formed.
     failure_kind: Literal[
         "", "model_refusal", "request_failed", "parse_failed", "truncated",
-        "lsp_failed", "no_op_repair",
+        "lsp_failed", "no_op_repair", "empty",
     ] = ""
     # Token-window trims applied to the prompt that produced this candidate
     # (e.g. few-shot/deps/anchor dropped to fit the context window). Empty when
