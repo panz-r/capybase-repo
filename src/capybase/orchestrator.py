@@ -9922,6 +9922,27 @@ class Orchestrator:
                                             whole_text=_f1_text_check)
                                         if not _f1_check.passed:
                                             _f1_side = None
+                                    # P1b (sprint-24 cycle B): compile-clean
+                                    # override — if tier-1's churn check
+                                    # declined but exactly ONE pristine side
+                                    # compiles cleanly (and the merge doesn't),
+                                    # take the compiling side regardless of
+                                    # churn. The compiler is the authority;
+                                    # safety preserved (redis-0055, clickhouse-0021).
+                                    if _f1_side is None:
+                                        _compiling = {}
+                                        for _side_name in ("current", "replayed"):
+                                            _side_text = _sides_f1.get(_side_name, "")
+                                            if not _side_text.strip():
+                                                continue
+                                            _side_check = self.verification.verify_file(
+                                                path, language, _side_text, [],
+                                                repo_root=str(self.git.repo),
+                                                whole_text=_side_text)
+                                            _compiling[_side_name] = bool(_side_check.passed)
+                                        _clean = [s for s, ok in _compiling.items() if ok]
+                                        if len(_clean) == 1:
+                                            _f1_side = _clean[0]
                             except Exception:  # noqa: BLE001
                                 _f1_side = None
                         if _f1_side is not None:
@@ -13738,6 +13759,21 @@ class Orchestrator:
                 _empty_oversized and _tok_est >= 1500
                 and (cand.failure_kind or "") == "parse_failed"
             )
+            # C7' diagnostic (sprint-24 cycle B): journal the exact
+            # condition values to find which one blocks the fast-fail
+            self.journal.emit(
+                "c7_fastfail_check",
+                {"failures_none": failures is None,
+                 "retry_count": retry_count,
+                 "resolved_empty": not (cand.resolved_text or "").strip(),
+                 "failure_kind": cand.failure_kind or "",
+                 "needs_human_attr": getattr(cand, "needs_human", None),
+                 "tok_est": _tok_est,
+                 "refusal": _refusal,
+                 "oversized_parse_fail": _oversized_parse_fail,
+                 "path": unit.path},
+                step_index=self.step, path=unit.path,
+                unit_id=unit.unit_id)
             if (
                 failures is None
                 and retry_count == 0
@@ -13968,6 +14004,59 @@ class Orchestrator:
                         sig_counts = Counter(recent)
                         max_repeat = max(sig_counts.values())
                         if max_repeat >= np_threshold:
+                            # Sprint-24 cycle B: before the no-progress guard
+                            # escalates, give F1 a chance to take over. The
+                            # unit has cycled through retries without progress;
+                            # if a pristine side compiles cleanly, the takeover
+                            # is a better answer than escalating (redis-0055:
+                            # the guard fires before F1 ever gets a chance).
+                            _np_f1_side = None
+                            try:
+                                _np_sides, _np_base = self._micro_stage_sides(unit.path)
+                                if _np_sides:
+                                    _np_compiling = {}
+                                    for _np_sn in ("current", "replayed"):
+                                        _np_st = _np_sides.get(_np_sn, "")
+                                        if _np_st.strip():
+                                            _np_chk = self.verification.verify_file(
+                                                unit.path, unit.language,
+                                                _np_st, [],
+                                                repo_root=str(self.git.repo),
+                                                whole_text=_np_st)
+                                            _np_compiling[_np_sn] = bool(_np_chk.passed)
+                                    _np_clean = [s for s, ok in _np_compiling.items() if ok]
+                                    if len(_np_clean) == 1:
+                                        _np_f1_side = _np_clean[0]
+                            except Exception:  # noqa: BLE001
+                                _np_f1_side = None
+                            if _np_f1_side is not None:
+                                self.journal.emit(
+                                    "f1_noprogress_rescue",
+                                    {"side": _np_f1_side, "path": unit.path},
+                                    step_index=self.step, path=unit.path,
+                                    unit_id=unit.unit_id)
+                                # Accept the compiling side as the outcome
+                                _np_text = _np_sides.get(_np_f1_side, "")
+                                _np_unit = unit.model_copy(
+                                    update={"marker_span": None,
+                                            "unit_kind": "whole_file"})
+                                _np_cand = CandidateResolution(
+                                    candidate_id=f"{unit.unit_id}:f1_noprogress",
+                                    unit_id=unit.unit_id,
+                                    model_name="deterministic",
+                                    resolved_text=_np_text,
+                                    prompt_version="f1_noprogress_rescue",
+                                    provenance="deterministic_structural",
+                                    self_reported_confidence=0.80,
+                                    explanation=(
+                                        f"F1 rescue from no-progress: "
+                                        f"{_np_f1_side} compiles cleanly"),
+                                )
+                                outcome.accepted = _np_cand
+                                outcome.escalated = False
+                                outcome.mechanism = "f1_noprogress_rescue"
+                                return outcome
+
                             stalled_sig = sig_counts.most_common(1)[0][0]
                             # stalled_sig is frozenset(Counter(...).items())
                             # where each item is ((validator, msg), count).

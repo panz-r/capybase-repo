@@ -2807,6 +2807,25 @@ def _try_balance_braces_iterated(
             break
         current = repaired
     if current != text and _brace_imbalance_line(current, language) is None:
+        # P6/cycle B (sprint-24): sanity-check the result — balanced braces
+        # don't guarantee valid syntax (sqlite-0019: the inserted brace
+        # created "expected identifier before 'if'" despite balancing).
+        # A quick heuristic: the result shouldn't have syntax-keyword lines
+        # at brace-depth 0 that don't look like top-level constructs.
+        if language in ("c", "cpp", "c++"):
+            for i, line in enumerate(current.split("\n")):
+                stripped = line.strip()
+                # A line starting with 'if' or 'for' at depth 0 (no
+                # enclosing brace) is a syntax error in C (statements
+                # can't appear at file scope)
+                if (stripped.startswith(("if ", "if(", "for ", "for(",
+                                          "while ", "while(", "return"))
+                        and i > 0):
+                    # Check if we're at file scope (no enclosing brace)
+                    depth = sum(current[:current.index(line)].count("{")
+                                - current[:current.index(line)].count("}"))
+                    if depth == 0:
+                        return None  # bad insertion — revert
         return current
     return None
 
