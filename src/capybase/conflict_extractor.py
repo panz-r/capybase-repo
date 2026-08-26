@@ -681,7 +681,112 @@ def _side_entity_split_points(side_text: str, language: str) -> list[int]:
     # remaining safe boundaries or declines (resolves as one block).
     if language in ("c", "cpp", "c++") and points:
         points = _drop_points_inside_preprocessor_conditional(side_text, points)
+    # Delimiter-depth safety: a true top-level entity boundary sits where the
+    # running depth of ``{}``/``()``/``[]`` (strings, char literals, and
+    # comments excluded) is zero. A candidate point with non-zero prefix depth
+    # is mid-expression/mid-block — the abstract parser misread a fragment
+    # (conflict sides start mid-construct, e.g. a switch statement's case
+    # labels, so a low-indent statement inside the switch can look like an
+    # entity start). Splitting there strands half an expression in each
+    # sub-unit; the splice then has unbalanced delimiters the whole-file
+    # repair can't attribute (observed on sqlite-0029: 4 unclosed braces at
+    # a seam "outside all unit spans").
+    points = [
+        p for p in points
+        if _prefix_delimiter_depths_zero(side_text, p)
+    ]
     return points
+
+
+def _is_continuation_shaped(side_text: str, language: str) -> bool:
+    """Whether ``side_text`` continues a construct opened ABOVE the conflict block.
+
+    The broadcast fragment model assumes a no-structure side is a leading blob
+    (a stale comment or deletion marker) whose entire content belongs to the
+    first fragment. These shapes violate that assumption:
+
+    - the first meaningful line is a ``case ...:`` / ``default:`` label — the
+      side starts inside a switch whose ``switch (...) {`` opened before the
+      conflict (the sqlite-0029 shape: both sides reorganize the case labels
+      of one switch);
+    - the first meaningful line OPENS by closing (``}`` / ``)`` / ``]``) — the
+      side resumes inside a block opened above.
+
+    Splitting such a region broadcasts continuation content into fragment 0
+    ahead of the construct that owns it. Only meaningful for brace/switch
+    languages; always False elsewhere (prose/config sides never hit this).
+    """
+    if language not in ("c", "cpp", "c++", "rust", "java", "javascript",
+                        "typescript", "go", "swift", "kotlin", "scala", "dart", "php"):
+        return False
+    for raw in side_text.split("\n"):
+        line = raw.strip()
+        if not line or line.startswith("//") or line.startswith("/*") or line.startswith("*"):
+            continue
+        if line.startswith(("case ", "case\t")) or line.startswith("default:") or line.startswith("default :"):
+            return True
+        if line[0] in "})]":
+            return True
+        return False
+    return False
+
+
+def _prefix_delimiter_depths_zero(side_text: str, point: int) -> bool:
+    """Whether the lines before ``point`` close every ``{}``/``()``/``[]`` they open.
+
+    A small string/comment-aware scanner over ``side_text.split("\\n")[:point]``
+    (escape sequences handled; ``//`` and ``/* */`` comments skipped for C-family
+    text — the newline-centric scan makes a ``#`` comment only matter for the
+    rest of its line, which cannot carry an unbalanced quote on valid input).
+    Conservative: on any doubt it returns True (keeps the point), matching the
+    splitter's best-effort contract.
+    """
+    pairs = {"{": "}", "(": ")", "[": "]"}
+    depth = {"{": 0, "(": 0, "[": 0}
+    in_str = in_char = in_line_comment = in_block_comment = False
+    prev = ""
+    for line in side_text.split("\n")[:point]:
+        ch_i = 0
+        while ch_i < len(line):
+            ch = line[ch_i]
+            nxt = line[ch_i + 1] if ch_i + 1 < len(line) else ""
+            if in_line_comment:
+                break  # rest of the line is comment
+            if in_block_comment:
+                if ch == "*" and nxt == "/":
+                    in_block_comment = False
+                    ch_i += 2
+                    continue
+                ch_i += 1
+                continue
+            if in_str or in_char:
+                if ch == "\\":
+                    ch_i += 2
+                    continue
+                if (in_str and ch == '"') or (in_char and ch == "'"):
+                    in_str = in_char = False
+                ch_i += 1
+                continue
+            if ch == "/" and nxt == "/":
+                in_line_comment = True
+                break
+            if ch == "/" and nxt == "*":
+                in_block_comment = True
+                ch_i += 2
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "'":
+                in_char = True
+            elif ch in pairs:
+                depth[ch] += 1
+            elif ch in pairs.values():
+                for opener, closer in pairs.items():
+                    if ch == closer:
+                        depth[opener] = max(0, depth[opener] - 1)
+            ch_i += 1
+        in_line_comment = False
+    return all(d == 0 for d in depth.values())
 
 
 def _drop_points_inside_preprocessor_conditional(
@@ -952,12 +1057,24 @@ def _split_unit_at_entities(
     elif cur_has_struct and not rep_has_struct:
         # Lopsided add: current carries the entities, replayed does not. Split
         # CURRENT at its entity boundaries; replayed is the single fragment it
-        # already is, broadcast across the same fragment count.
+        # already is, broadcast across the same fragment count. But when the
+        # no-structure side is CONTINUATION-shaped (it begins a `case`/
+        # `default:` label, or opens by closing a construct from above —
+        # mid-switch fragments, observed on sqlite-0029), its content is not a
+        # leading blob: broadcasting it into the first fragment splices switch
+        # cases before the switch opens, and the splice ends with unbalanced
+        # braces the whole-file repair can't attribute. Decline; the block
+        # resolves as one unit.
+        if _is_continuation_shaped(rep_text, lang):
+            return [unit]
         cur_frags = _fragment_at_points(cur_text, cur_pts)
         rep_frags = _broadcast_fragment(rep_text, len(cur_frags))
     elif rep_has_struct and not cur_has_struct:
         # Lopsided add (mirror): replayed carries the entities. Split REPLAYED;
-        # current is broadcast across the same count.
+        # current is broadcast across the same count. Same continuation guard,
+        # mirrored.
+        if _is_continuation_shaped(cur_text, lang):
+            return [unit]
         rep_frags = _fragment_at_points(rep_text, rep_pts)
         cur_frags = _broadcast_fragment(cur_text, len(rep_frags))
     else:

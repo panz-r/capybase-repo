@@ -2424,3 +2424,66 @@ in the mid-run analysis, plus the honest model/era ceiling.
 3. Fix brace repair insertion point for multi-entity files
 4. Allow F1 to engage before the no-progress guard escalates
 5. Re-run specimens on the same 18 cases
+
+### Sprint-24 P5 deep-dive while specimens run (2026-08-26, cycle B in flight)
+
+Offline archaeology on the two P5 target cases (no model requests) found
+BOTH root causes are deterministic prompt-composition bugs, not model
+limitations. Both fixed and unit-tested; validated offline against the
+actual corpus case JSONs.
+
+**P5a — sqlite-0004 (oversized prompt 12,689t): the semantic-change
+block live-computes a garbage whole-file diff.** The unit trail: units
+1:0/1:1 resolved via SBCR, unit 1:2 (a 2-line replayed addition, 5-line
+marker block) hit `llm_skipped_oversized_prompt` at 50,759 chars. The
+chain: (1) for multi-hunk marker units `unit.base.text` is the WHOLE
+merge-base file (252K chars); (2) the extractor's `_cached_entity_diff`
+performance guard correctly caches None for >200-line bases; (3)
+`_semantic_change_block` treats cached None as "not populated" and
+live-computes `semantic_diff(whole_file, fragment)` — marking every
+entity in the file "removed" (515/517 changes, reproduced offline);
+(4) the render joins ALL changes on one unbounded line, folded into
+budget-PROTECTED sides_text — the trim cascade can never touch it.
+Fix (resolution_engine.py): prefer diff3-refined sides when recorded
+(tight per-unit base → real change intent); decline the block when the
+base still exceeds 200 lines (mirrors the extractor's guard — computing
+it live re-does exactly the work the guard skips); bound the render to
+40 changes/side + count. Offline validation: unit 1:2's prompt drops
+50,759 → 7,708 chars (1,927 tokens, fits the 8,192 window with the
+2,048 completion reserve). The case's sim was 0.999 — the LLM call was
+the only thing missing.
+
+**P5b — sqlite-0029 (4 unclosed braces at a seam "outside all unit
+spans"): the entity splitter cut a switch statement mid-body.** Block 2
+of src/insert.c: cur=40L carries a switch; rep=20L starts `case
+OE_Abort:` — case labels of a switch opened ABOVE the conflict. The
+parser found an "entity start" at `addr1 = 0;` (a statement inside the
+switch), rep had no structure → lopsided broadcast put ALL 20 rep lines
+into fragment 0, splicing case labels ahead of the owning switch. Fix
+(conflict_extractor.py), two layered mechanism-owned triggers: (1)
+delimiter-depth filter — a candidate split point whose prefix has
+non-zero `{}`/`()`/`[]` depth (string/comment-aware scan) is
+mid-expression/mid-block and is dropped; (2) continuation-shape guard —
+when the no-structure side begins with a `case`/`default:` label or a
+closing delimiter, the broadcast model's "leading blob" assumption is
+violated and the split declines (resolves as one block). Both sqlite-
+0029 blocks now decline the split and resolve as single units (~60
+lines each, well inside the window). Positive control: the legitimate
+lopsided-add (stale comment ahead of two functions) still splits.
+
+**clickhouse-0021 cycle-B slip (PASS → NEAR_MATCH 0.747): adjudicator
+variance, not a regression.** Cycle A: midband subsumption adjudication
+returned `superseded` (0.95) → fires → true_side_portfolio took the
+replayed side deterministically → PASS. Cycle B: the same adjudication
+on the same inputs (identical churn 13/73, ratio 0.8219) returned
+`keep` (0.95, defensible reason: skip_stream_merging is significant
+CURRENT functionality absent from the REPLAYED rewrite) → per-unit LLM
+path → risk-gated escalate/NEAR. The midband adjudicator flip-flops on
+borderline refactor-vs-feature shapes at equal confidence in both
+directions — same instability class as pre-P3 F1 tier-2. Candidate
+future work: the P3 diff-centered prompt for the midband adjudicator.
+
+**Flaky test note:** tests/test_process_hygiene.py::test_sweep_returns_
+count_and_never_raises asserts a second /proc sweep kills nothing — it
+races the live specimen run's build workers. Env-dependent; deselect
+during in-flight evals.

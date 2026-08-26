@@ -182,6 +182,68 @@ def test_semantic_change_block_omits_unknown_role():
 
 
 # ---------------------------------------------------------------------------
+# Multi-hunk whole-file-base guard (sprint-24 P5a, sqlite-history-0004)
+# ---------------------------------------------------------------------------
+
+
+def _multihunk_unit(refined: dict | None = None) -> ConflictUnit:
+    """A marker-block unit whose base is the WHOLE merge-base file (>200 lines)
+    while the sides are narrow fragments — the multi-hunk shape. The extractor's
+    _cached_entity_diff performance guard caches None for such bases."""
+    base = "\n".join(f"def fn_{i}():\n    return {i}\n" for i in range(80))
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="big.py", language="python",
+        conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=base),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=""),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text="def added():\n    return 1\n"),
+        original_worktree_text=base, marker_span=(10, 12),
+    )
+    # What the live cache held: the extractor guard skipped the whole-file diff.
+    unit.structural_metadata["entity_changes"] = {"current": None, "replayed": None}
+    if refined is not None:
+        unit.structural_metadata["diff3_refined"] = refined
+    return unit
+
+
+def test_semantic_change_block_declines_whole_file_base():
+    """sqlite-history-0004 regression: a multi-hunk marker unit (whole-file
+    base, fragment sides) must NOT live-compute the entity diff. The live
+    compute marked all ~500 entities in the file 'removed', producing a 44.9K-
+    char block folded into budget-protected sides_text → a 12.7K-token prompt →
+    the LLM call skipped as oversized. The extractor's cache deliberately holds
+    None for such bases; treating that None as 'not populated' was the bug."""
+    assert _semantic_change_block(_multihunk_unit()) == ""
+
+
+def test_semantic_change_block_prefers_refined_sides():
+    """When diff3 refinement is recorded, the entity diff runs against the
+    tight refined base — real change intent for multi-hunk units instead of
+    declining. The cache (keyed to the RAW sides) is bypassed."""
+    refined = {
+        "current": "",
+        "base": "",
+        "replayed": "def added():\n    return 1\n",
+    }
+    block = _semantic_change_block(_multihunk_unit(refined=refined))
+    assert "Entity-level changes" in block
+    assert "added" in block
+
+
+def test_semantic_change_block_bounds_rendered_changes():
+    """Even a legitimate huge diff (a rewrite touching 60 entities on a
+    single-hunk unit) renders at most 40 changes per side + a count — the
+    block is folded into budget-protected sides_text and must stay bounded."""
+    base = "\n".join(f"def fn_{i}():\n    return {i}\n" for i in range(60))
+    current = "\n".join(f"def fn_{i}_new():\n    return {i}\n" for i in range(60))
+    unit = _unit(base, current, base)
+    block = _semantic_change_block(unit)
+    assert "…and" in block and "more changes" in block
+    # All 60 renames must not render in full.
+    assert "fn_59_new" not in block
+
+
+# ---------------------------------------------------------------------------
 # Value-resolution guidance block (pick a side OR write a combining expression)
 # ---------------------------------------------------------------------------
 

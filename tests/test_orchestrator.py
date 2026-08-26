@@ -1199,7 +1199,12 @@ def test_run_accepts_second_candidate_when_winner_fails(conflicted_repo):
 
 def test_run_escalates_when_all_candidates_fail(conflicted_repo):
     """When every surviving candidate fails validation, fall back to the normal
-    retry/escalate path (the winner's failures feed CEGIS repair)."""
+    retry/escalate path — and when that exhausts too, F1 tier-2 lands the
+    adjudicated pristine side. Sprint-24: the takeovers used to `continue`
+    past the outer loop's write-and-stage (journaled but never landed); they
+    now complete the file. The fake engine's raw_complete payloads yield a
+    parseable tier-2 choice, so this fixture documents the LANDING: the file
+    resolves to a compiling pristine side instead of escalating."""
     repo = conflicted_repo["repo"]
     engine = FakeConsensusEngine([
         _cand("    return 'hi'(", cid="a-broken"),
@@ -1215,10 +1220,68 @@ def test_run_escalates_when_all_candidates_fail(conflicted_repo):
         out=lambda *_a, **_k: None,
     )
     result = orch.run()
-    # All candidates fail across retries -> escalation (CEGIS repair is itself a
-    # fresh generation via the same FakeConsensusEngine, which keeps failing).
-    assert result.escalated
+    # All model candidates fail across retries; the always-on F1 tier-2
+    # takeover then resolves the file with a compiling pristine side.
+    assert not result.escalated
+    final = (repo / "app.py").read_text()
+    assert final in (
+        conflicted_repo["current"], conflicted_repo["replayed"],
+    ), f"F1 takeover should land a pristine side, got: {final!r}"
 
+
+
+def test_f1_tier2_takeover_lands_only_compiling_side(tmp_path):
+    """The tier-2 adjudicated side is compile-gated: when the chosen pristine
+    side doesn't build, the takeover declines (journaled) and the step
+    escalates honestly instead of writing an unverified file. The
+    protobuf-0051 shape — both side probes fail, tier-2 still has an
+    opinion — must not land that opinion."""
+    import subprocess
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+
+    def git(*a):
+        return subprocess.run(
+            ["git", "-C", str(repo)] + list(a), capture_output=True, text=True)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    # Both sides syntactically broken (unbalanced parens): the compile gate
+    # must decline whichever side tier-2 picks.
+    base = "def greet():\n    return 'hello'\n"
+    cur = "def greet():\n    return 'hi'(\n"
+    rep = "def greet():\n    return 'howdy'(\n"
+    (repo / "app.py").write_text(base)
+    git("add", "app.py"); git("commit", "-qm", "base")
+    git("branch", "feat"); git("checkout", "-q", "feat")
+    (repo / "app.py").write_text(rep)
+    git("add", "app.py"); git("commit", "-qm", "rep")
+    git("checkout", "-q", "main")
+    (repo / "app.py").write_text(cur)
+    git("add", "app.py"); git("commit", "-qm", "up")
+    git("checkout", "-q", "feat")
+    git("rebase", "main")
+
+    engine = FakeConsensusEngine([
+        _cand("    return 'hi'(", cid="a-broken"),
+        _cand("    return 'howdy'(", cid="b-broken"),
+    ])
+    _cfg = _self_consistency_config(repo)
+    _cfg.future.enable_empty_fast_fail = False
+    orch = Orchestrator(
+        _cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert result.escalated, (
+        "tier-2 must not land a side that fails the compile gate"
+    )
+    # escalated=True is the contract: the takeover path (which sets
+    # escalated=False on landing) never ran with the broken side. Whatever
+    # the last-resort repair-side fallback leaves in the worktree is that
+    # mechanism's business, not the takeover's.
 
 
 def test_run_retries_after_transient_error(conflicted_repo):

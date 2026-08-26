@@ -845,12 +845,39 @@ def _semantic_change_block(unit: ConflictUnit) -> str:
     base = unit.base.text or ""
     cur = unit.current.text or ""
     rep = unit.replayed.text or ""
+    # Prefer the diff3-refined sides when available: for multi-hunk marker
+    # units the raw base is the WHOLE merge-base file while cur/replayed are
+    # narrow block fragments — diffing a fragment against the whole file marks
+    # every entity in the file as changed (sqlite-history-0004: 515/517 bogus
+    # changes → a 44.9K-char block folded into budget-protected sides_text →
+    # a 12.7K-token prompt → the LLM call skipped as oversized). The refined
+    # base is the tight per-unit view, so the entity diff becomes real change
+    # intent instead of garbage.
+    refined_inputs = False
+    refined = unit.refined_sides
+    if refined is not None:
+        r_cur, r_base, r_rep = refined
+        if r_base or r_cur or r_rep:
+            base, cur, rep = r_base, r_cur, r_rep
+            refined_inputs = True
+    # Whole-file-base guard (same cutoff as the extractor's
+    # _cached_entity_diff performance guard, which caches None for >200-line
+    # bases): when the base is still the whole file (no refinement recorded),
+    # the entity diff is meaningless AND the cache deliberately holds None —
+    # computing it live here would re-do exactly the work that guard exists
+    # to skip. Decline the block rather than render hundreds of bogus
+    # "removed entity" changes. Also protects the commit-role fallback below
+    # from parsing the whole file per prompt.
+    if base.count("\n") > 200:
+        return ""
     try:
         # Read the cached entity diffs (computed once by conflict_features) so
         # the BASE→current and BASE→replayed parses are shared with the feature
         # spine and the operation counts, not re-done here. Falls back to a live
-        # parse only when the cache wasn't populated.
-        cached = unit.structural_metadata.get("entity_changes")
+        # parse only when the cache wasn't populated. The cache is keyed to the
+        # RAW sides — when the refined inputs replaced them, compute live
+        # against the refined texts instead.
+        cached = None if refined_inputs else unit.structural_metadata.get("entity_changes")
         if isinstance(cached, dict):
             cur_changes = cached.get("current")
             rep_changes = cached.get("replayed")
@@ -879,10 +906,22 @@ def _semantic_change_block(unit: ConflictUnit) -> str:
     lines = []
     if has_changes:
         lines.append("Entity-level changes vs BASE (deterministic — use these to read the sides):")
+        # Render bound: this block is folded into budget-protected sides_text
+        # (never trimmed), so a diff with hundreds of changes (a whole-file
+        # rewrite) would make the prompt untrimmable. The first changes carry
+        # the intent; the rest collapse to a count.
+        _MAX_CHANGES_PER_SIDE = 40
+
+        def _render_changes(changes: list) -> str:
+            rendered = "; ".join(c.render() for c in changes[:_MAX_CHANGES_PER_SIDE])
+            if len(changes) > _MAX_CHANGES_PER_SIDE:
+                rendered += f"; …and {len(changes) - _MAX_CHANGES_PER_SIDE} more changes"
+            return rendered
+
         if cur_changes:
-            lines.append("  CURRENT side: " + "; ".join(c.render() for c in cur_changes))
+            lines.append("  CURRENT side: " + _render_changes(cur_changes))
         if rep_changes:
-            lines.append("  REPLAYED side: " + "; ".join(c.render() for c in rep_changes))
+            lines.append("  REPLAYED side: " + _render_changes(rep_changes))
     if has_role:
         # Surface the commit role + its correctness guidance so the model knows
         # what this merge must satisfy (e.g. a bugfix must preserve behavior).

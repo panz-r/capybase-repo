@@ -627,3 +627,126 @@ def test_split_stamps_parent_deletion_meta_on_sub_units():
 
     def last_touch_blob(self, oid):
         return ("", "")
+
+
+# ---------------------------------------------------------------------------
+# Sprint-24 P5b: delimiter-depth + continuation-shape split safety
+# (sqlite-0029: a mid-switch fragment split that stranded case labels)
+# ---------------------------------------------------------------------------
+
+
+def test_split_points_inside_open_construct_are_dropped():
+    """A candidate entity start whose prefix has unbalanced ()/{}/[] is
+    mid-expression/mid-block — splitting there strands half an expression in
+    each sub-unit. The scanner must see through strings and comments."""
+    from capybase.conflict_extractor import _side_entity_split_points
+
+    # A multi-line call whose arguments span lines: an interior "entity start"
+    # inside the argument list has an unbalanced-paren prefix.
+    side = (
+        "int a = foo(int x,\n"
+        "            int y,\n"
+        "            int z);\n"
+        "int b = 2;\n"
+        "int c = 3;\n"
+    )
+    # Whatever points the parser finds, none may sit at lines 1-2 (inside
+    # foo's argument list). Line 0 is excluded by contract (leading fragment).
+    pts = _side_entity_split_points(side, "c")
+    assert all(p not in (1, 2) for p in pts), pts
+
+    # Braces: an interior point inside an unclosed block is dropped.
+    side2 = (
+        "void f(void) {\n"
+        "  int a = 1;\n"
+        "  int b = 2;\n"
+        "}\n"
+        "void g(void) {\n"
+        "  int c = 3;\n"
+        "}\n"
+    )
+    pts2 = _side_entity_split_points(side2, "c")
+    assert all(p not in (1, 2) for p in pts2), pts2
+    # g's line (4) IS a safe boundary: prefix closed f's brace.
+    assert 4 in pts2 or pts2 == [], pts2
+
+    # String literals must not count toward depth.
+    side3 = 'char *s = "}{";\nint x = 1;\nint y = 2;\n'
+    pts3 = _side_entity_split_points(side3, "c")
+    assert 1 in pts3 or pts3 == [], pts3
+
+
+def test_split_declines_when_no_structure_side_is_continuation():
+    """sqlite-0029 regression: the replayed side carries no entity boundaries
+    because it starts mid-switch (a `case` label of a switch opened above the
+    conflict). Broadcasting it into the first fragment spliced case labels
+    ahead of the owning switch — the splice ended 4 braces short with the
+    fault outside all unit spans. The split must decline (one unit)."""
+    cur_funcs = (
+        "  if( onError==OE_Replace ){\n"
+        "    onError = OE_Abort;\n"
+        "  }\n"
+        "  addr1 = 0;\n"
+        "  switch( onError ){\n"
+        "    case OE_Replace: {\n"
+        "      addr1 = sqlite3VdbeMakeLabel(pParse);\n"
+        "      break;\n"
+        "    }\n"
+        "  }\n"
+    )
+    rep_cases = (
+        "  case OE_Abort:\n"
+        "    sqlite3MayAbort(pParse);\n"
+        "  case OE_Fail: {\n"
+        "    char *zMsg = sqlite3MPrintf(db, \"%s\");\n"
+        "    break;\n"
+        "  }\n"
+        "  default: {\n"
+        "    break;\n"
+        "  }\n"
+    )
+    unit = _make_unit(
+        cur_funcs + rep_cases, (0, 40), cur_funcs, rep_cases,
+        base_text=cur_funcs,
+    )
+    subs = _split_unit_at_entities(unit, min_region_lines=8, min_sub_lines=2)
+    assert len(subs) == 1, "continuation-shaped no-structure side must decline the split"
+
+
+def test_split_still_fires_for_leading_blob_losided_add():
+    """The continuation guard must NOT break the legitimate lopsided-add case:
+    a stale comment / deletion marker ahead of real entities still broadcasts
+    into the leading fragment and the split fires."""
+    leading_blob = "/* deleted legacy helper */\n"
+    cur_funcs = (
+        "int one(void) {\n"
+        "  return 1;\n"
+        "}\n"
+        "int two(void) {\n"
+        "  return 2;\n"
+        "}\n"
+    )
+    unit = _make_unit(
+        leading_blob + cur_funcs, (0, 6), cur_funcs, leading_blob,
+        base_text="",
+    )
+    subs = _split_unit_at_entities(unit, min_region_lines=6, min_sub_lines=2)
+    assert len(subs) >= 2, "leading-blob lopsided add should still split"
+
+
+def test_continuation_shape_detector_boundaries():
+    """The detector: case/default labels and closing-delimiter leads are
+    continuation; comments, plain statements, and identifiers like `case_Study`
+    are not."""
+    from capybase.conflict_extractor import _is_continuation_shaped
+
+    assert _is_continuation_shaped("case X:\n  break;\n", "c")
+    assert _is_continuation_shaped("default:\n  break;\n", "c")
+    assert _is_continuation_shaped("}\nreturn;\n", "c")
+    assert _is_continuation_shaped(");\nx = 1;\n", "c")
+    assert not _is_continuation_shaped("/* stale */\n", "c")
+    assert not _is_continuation_shaped("int x = 1;\n", "c")
+    assert not _is_continuation_shaped("case_Study var;\n", "c")
+    assert not _is_continuation_shaped("anything\n", "python")
+    # Leading comments before a case label still count (first MEANINGFUL line).
+    assert _is_continuation_shaped("// fallthrough\ncase Y:\n  break;\n", "c")

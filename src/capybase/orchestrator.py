@@ -9974,7 +9974,18 @@ class Orchestrator:
                                 accepted = [(_f1_unit, _f1_cand)]
                                 buffer = _f1_text
                                 file_validation = None
-                                continue  # re-enter the while loop to validate
+                                # The takeover IS the file's resolution — its
+                                # side already passed the compile gate above.
+                                # Write + stage it, then move to the next file.
+                                # (A bare `continue` here targets the outer
+                                # per-file loop and skips _write_and_stage at
+                                # the loop tail: the takeover was journaled
+                                # but never landed — every F1 tier-1 takeover
+                                # in the sprint-24 cycle-A/B specimens was
+                                # silently discarded this way.)
+                                self._write_and_stage(
+                                    path, buffer, result, accepted=accepted)
+                                continue
                         else:
                             # F1 tier-2 (sprint-23): LLM subsumption
                             # adjudication for symmetric shapes — when
@@ -9988,7 +9999,30 @@ class Orchestrator:
                             if _f2_side is not None:
                                 _f2_text = (_sides_f1 or {}).get(
                                     _f2_side, "")
+                                # Compile-gate the adjudicated side (the same
+                                # contract as tier-1's F1-smart (d)): tier-2
+                                # fires when tier-1's churn check declined,
+                                # which includes shapes where NEITHER pristine
+                                # side builds (protobuf-0051's 0.1s probe
+                                # failures). Never land an unverified side —
+                                # decline to escalate instead.
+                                _f2_ok = False
                                 if _f2_text.strip():
+                                    try:
+                                        _f2_check = self.verification.verify_file(
+                                            path, language, _f2_text, [],
+                                            repo_root=str(self.git.repo),
+                                            whole_text=_f2_text)
+                                        _f2_ok = bool(_f2_check.passed)
+                                    except Exception:  # noqa: BLE001
+                                        _f2_ok = False
+                                if not _f2_ok:
+                                    self.journal.emit(
+                                        "f1_tier2_side_build_declined",
+                                        {"side": _f2_side, "path": path},
+                                        step_index=self.step, path=path,
+                                    )
+                                if _f2_text.strip() and _f2_ok:
                                     _f2_unit = unit.model_copy(
                                         update={
                                             "unit_id": f"{path}:f1_tier2",
@@ -10010,6 +10044,14 @@ class Orchestrator:
                                     accepted = [(_f2_unit, _f2_cand)]
                                     buffer = _f2_text
                                     file_validation = None
+                                    # Same as tier-1: land the adjudicated side
+                                    # (write + stage) before moving on. The bare
+                                    # `continue` discarded the tier-2 choice —
+                                    # protobuf-0051/axum-0013 journals ended at
+                                    # f1_tier2_adjudication with the chosen side
+                                    # never validated or written.
+                                    self._write_and_stage(
+                                        path, buffer, result, accepted=accepted)
                                     continue
                         if file_validation is None:
                             result.escalated = True
