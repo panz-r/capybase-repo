@@ -2397,6 +2397,17 @@ _MISSING_SYMBOL_PATTERNS: tuple[tuple[str, "re.Pattern[str]"], ...] = (
         r"unknown type name ['\u2018]([A-Za-z_]\w*)['\u2019]")),
     ("c", re.compile(
         r"type defaults to 'int' in declaration of ['\u2018]([A-Za-z_]\w*)")),
+    # P4b (sprint-24): struct-member pattern — redis-0047's
+    # "'struct config' has no member named 'interactive'" → inject
+    # the member declaration from the parent that has it
+    ("c", re.compile(
+        r"'struct (?:\w+)' has no member named '(\w+)'")),
+    # P4c (sprint-24): incompatible-pointer errors — extract the
+    # function name so C1b can search parents for the correct call
+    # (redis-0040: "passing argument 2 of 'output_help' from
+    # incompatible pointer type" → the correct call exists in replayed)
+    ("c", re.compile(
+        r"passing argument \d+ of '([A-Za-z_]\w*)' from incompatible")),
     ("rust", re.compile(
         r"cannot find (?:value|type|macro) `([A-Za-z_]\w*)`")),
     ("rust", re.compile(r"unresolved import `([A-Za-z_][\w:]*)`")),

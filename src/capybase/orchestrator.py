@@ -11273,9 +11273,16 @@ class Orchestrator:
             return None
         sides, base_text = self._micro_stage_sides(path)
         # C1b REPLACE mode: for corrupted-line errors, try replacing the
-        # corrupted line with its parent counterpart (verbatim, LCS-anchored)
+        # corrupted line with its parent counterpart (verbatim, LCS-anchored).
+        # P4a (sprint-24): SKIP line-replacement for implicit-declaration
+        # errors — the correct fix is a derived prototype or symbol
+        # injection, not replacing the call site (redis-0013: the LCS
+        # matched a different function with the same pattern shape).
+        import re as _re_p4a
+        _is_implicit_decl = bool(_re_p4a.search(
+            r"implicit declaration", msgs, _re_p4a.I))
         from capybase.verification import find_replacement_line
-        _replace = find_replacement_line(
+        _replace = None if _is_implicit_decl else find_replacement_line(
             spliced, msgs, language,
             sides.get("current", ""), sides.get("replayed", ""),
             base_text or "")

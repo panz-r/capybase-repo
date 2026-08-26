@@ -3744,6 +3744,22 @@ class ResolutionEngine:
                 "could not parse resolution", resp.text, warnings,
                 failure_kind="parse_failed",
             )
+        # Sprint-24 P2 (parsed-empty): the JSON parsed successfully but
+        # resolved_text is empty/whitespace and there are no edits. This is
+        # physically identical to a zero-byte response — the model produced
+        # no merge content. Emit "empty" (not parse_failed/model_refusal)
+        # so the fallback chain engages. Override needs_human: a model that
+        # produced zero tokens of merge content cannot have "considered"
+        # anything (flask-0006, redis-0052, tokio-0108, zenodo-0079).
+        if (isinstance(data, dict) and not has_edits
+                and not str(data.get("resolved_text", "")).strip()):
+            return _failed_candidate(
+                unit, self.config.model, prompt_version,
+                "model returned empty merge content (parsed-empty)",
+                resp.text,
+                ["JSON parsed but resolved_text is empty"],
+                failure_kind="empty",
+            )
         needs_human = bool(data.get("needs_human", False))
         cand = CandidateResolution(
             candidate_id=f"{unit.unit_id}:{uuid.uuid4().hex[:6]}",
