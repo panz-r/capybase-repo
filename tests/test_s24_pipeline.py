@@ -150,13 +150,24 @@ def test_f1_tier1_wrong_context_declines():
 # F1 compile-clean mechanism
 # ---------------------------------------------------------------------------
 
-def test_compile_clean_empty_splice_takes_side():
-    m = F1CompileCleanTakeover()
-    result = m.engage(_ctx(cur=_side(50), rep=_side(50), buf=""))
+def test_compile_clean_one_side_compiles():
+    m = F1CompileCleanTakeover(compiling_sides={"current": True, "replayed": False})
+    result = m.engage(_ctx(cur=_side(50), rep=_side(50)))
     assert result is not None
     assert result.action == "takeover"
+    assert result.metadata["side"] == "current"
 
 
-def test_compile_clean_nonempty_splice_declines():
+def test_compile_clean_both_compile_declines():
+    m = F1CompileCleanTakeover(compiling_sides={"current": True, "replayed": True})
+    assert m.engage(_ctx(cur=_side(50), rep=_side(50))) is None
+
+
+def test_compile_clean_neither_compiles_declines():
+    m = F1CompileCleanTakeover(compiling_sides={"current": False, "replayed": False})
+    assert m.engage(_ctx(cur=_side(50), rep=_side(50))) is None
+
+
+def test_compile_clean_no_verdicts_declines():
     m = F1CompileCleanTakeover()
-    assert m.engage(_ctx(cur=_side(50), rep=_side(50), buf="content")) is None
+    assert m.engage(_ctx(cur=_side(50), rep=_side(50))) is None

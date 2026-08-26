@@ -91,8 +91,15 @@ class F1CompileCleanTakeover:
     Trigger: one side compiles cleanly, the spliced buffer doesn't.
     Safety: the compiler validates the takeover directly.
 
+    The compile check is done by the CALLER (the orchestrator/pipeline
+    provides `compiling_sides: dict[str, bool]` in the metadata). This
+    mechanism reads the verdicts and takes the compiling side.
+
     Stage: POST_REPAIR_EXHAUSTION (after tier-1's churn check).
     """
+
+    def __init__(self, *, compiling_sides: dict[str, bool] | None = None):
+        self._compiling_sides = compiling_sides or {}
 
     @property
     def stage(self) -> Stage:
@@ -102,31 +109,35 @@ class F1CompileCleanTakeover:
     def name(self) -> str:
         return "f1_compile_clean_takeover"
 
+    def set_compiling_sides(self, verdicts: dict[str, bool]) -> None:
+        """Called by the orchestrator before pipeline execution."""
+        self._compiling_sides = verdicts
+
     def engage(self, ctx: StageContext) -> MechanismResult | None:
         """Evaluate the compile-clean trigger."""
         if not isinstance(ctx, RepairExhaustedContext):
             return None
-        if not ctx.sides:
+        if not ctx.sides or not self._compiling_sides:
             return None
 
-        # The compile check is done by the caller (the pipeline provides
-        # pre-compiled side verdicts in a production implementation).
-        # For now, this mechanism checks if the spliced buffer is empty
-        # or trivially different from base (indicating the merge failed
-        # to produce useful content).
-        if len(ctx.spliced_buffer.strip()) > 0:
-            # The merge produced content; compile-clean requires the
-            # caller to provide compile verdicts. Decline in this v1.
+        compiling = [
+            side for side, ok in self._compiling_sides.items() if ok
+        ]
+        if len(compiling) != 1:
+            return None  # 0 or 2 compiling sides → no clear winner
+
+        side = compiling[0]
+        text = ctx.sides.get(side, "")
+        if not text.strip():
             return None
 
-        # Spliced buffer is empty → take whichever side has content
-        for side_name in ("current", "replayed"):
-            text = ctx.sides.get(side_name, "")
-            if text.strip():
-                return MechanismResult(
-                    mechanism=self.name,
-                    action="takeover",
-                    resolved_text=text,
-                    metadata={"side": side_name, "reason": "empty_splice"},
-                )
-        return None
+        return MechanismResult(
+            mechanism=self.name,
+            action="takeover",
+            resolved_text=text,
+            metadata={
+                "side": side,
+                "reason": "compile_clean_override",
+                "compiling_sides": dict(self._compiling_sides),
+            },
+        )

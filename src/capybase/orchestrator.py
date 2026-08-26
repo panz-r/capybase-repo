@@ -9886,6 +9886,22 @@ class Orchestrator:
                             and (wf_retries >= 1
                                  or getattr(self, "_phase2_model_used", False))
                         )
+                        # P1a (sprint-24): diagnostic journaling — which
+                        # condition prevents firing on the 5 target cases?
+                        # This event fires on EVERY repair-exhaustion path,
+                        # recording the full pipeline state for debugging.
+                        self.journal.emit(
+                            "f1_tier1_trigger_check",
+                            {"wf_retries": wf_retries,
+                             "wf_budget": wf_budget,
+                             "interactive_pending": getattr(
+                                 self, "_interactive_pending", False),
+                             "phase2_model_used": getattr(
+                                 self, "_phase2_model_used", False),
+                             "eligible": _f1_eligible,
+                             "path": path},
+                            step_index=self.step, path=path,
+                        )
                         if _f1_eligible:
                             try:
                                 _sides_f1, _base_f1 = self._micro_stage_sides(path)
