@@ -2056,3 +2056,32 @@ a cleanup pass.
 Only after sprint-23's mechanisms are specimen-validated and batch E
 lands. The harvest threshold remains: ≥10 mechanism-verified
 conversions.
+
+### redis-0055 "regression" investigation (2026-08-26)
+
+**Finding: NOT a regression — batch A's PASS was the anomaly.**
+
+| run | verdict | repeats | reason |
+|-----|---------|---------|--------|
+| reround (r2) | ESCALATE | ESC/ESC/ESC | stalled on 17 unaccounted branch changes |
+| batch A | **PASS** | (first-try) | — (lucky sample) |
+| final specimens | ESCALATE | ESC/ESC/ESC | same as reround |
+
+The case's STABLE behavior is ESCALATE (3/3 in both the reround and
+the final run). Batch A got one lucky sample. The "regression" label
+was wrong — no mechanism bug, no batch-E interaction.
+
+**Secondary finding: P1's "empty" doesn't cover JSON-shell responses.**
+The journal shows `risk_decision: "model produced an empty resolution
+(no resolved_text)"` — the model returns a JSON shell with empty
+`resolved_text`, not zero bytes. P1's check (`len(raw_text) < 10`)
+doesn't fire because the raw response HAS text. The parser sets
+`failure_kind="parse_failed"` (not "empty"). Fix: also emit "empty"
+when the JSON parses but `resolved_text` is empty/whitespace.
+
+**Implication for the stability metric**: redis-0055 was NOT in the
+16-case unstable list (it was 3/3 ESC in the reround, appearing
+stable). But it passed in batch A's sampling — meaning the reround's
+3-repeat stability check underestimates cross-run variance. A case
+that's 3/3 ESC in one sampling can still pass 1/1 in another. The
+16-case count is a LOWER BOUND on instability.
