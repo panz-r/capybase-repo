@@ -2487,3 +2487,72 @@ future work: the P3 diff-centered prompt for the midband adjudicator.
 count_and_never_raises asserts a second /proc sweep kills nothing — it
 races the live specimen run's build workers. Env-dependent; deselect
 during in-flight evals.
+
+### Sprint-24 cycle-B specimen RESULTS (2026-08-26, complete 18/18)
+
+Same 18 hardest cases, code = cycle B (4 wiring fixes). Net verdicts
+2/18 PASS both cycles — but the composition changed materially:
+
+| case | A | B | what moved |
+|------|---|---|-----------|
+| redis-0055 | ESC | **PASS 0.999** | F1 no-progress rescue converted it |
+| clickhouse-0021 | PASS | NEAR 0.747 | midband adjudicator variance (see below) |
+| sqlite-0019 | 0.005 | 0.991 | brace-sanity check killed the catastrophic insertion; honest 0.99 ESC now |
+| redis-0013 | ESC | 1×PASS/3 | variance improvement |
+| redis-0047 | ESC | 1×PASS/3 | variance improvement |
+| all others | ESC | ESC | unchanged |
+
+**Fix scorecard**: F1 rescue 1/1 conversion; brace sanity repaired a
+catastrophe (0.005→0.991, still ESC); C7' diagnostics did their job
+(see below); P1b compile-clean fired but both sides failed probes on
+its targets.
+
+### THE HEADLINE BUG: F1 takeovers never landed (fixed post-run)
+
+The cycle-B journals for protobuf-0051 and axum-0013 END at
+`f1_tier2_adjudication` — the adjudication picks the correct side with
+substantive P3-diff-prompt reasoning (protobuf: "replayed consistently
+applies a major refactoring to use type_descriptor_..., the intended
+target state" at 0.95) and then NOTHING happens. AST analysis of the
+orchestrator found why: the tier-1/tier-2 takeover `continue`
+statements target the OUTER per-file loop (line 9236), skipping
+`_write_and_stage` at the loop tail — the takeover was journaled and
+then silently discarded. **Every F1 takeover in cycles A and B was
+thrown away.** Fixed: the takeover now write-and-stages its buffer
+(the side already passed the compile gate) before continuing. Tier-2
+additionally gained a compile gate of its own (`f1_tier2_side_build_
+declined` journal event) — the protobuf shape (both side probes fail
+at 0.1s) must decline to escalate rather than land an unverified
+file. Test updated: the old "all candidates fail → escalate" test was
+passing BECAUSE of the bug; its fixture now documents the tier-2
+landing; a new test pins the build-declined path.
+
+Expected effect on the specimens (next cycle): protobuf-0051's
+blocker moves to the 0.1s build-probe failure (cause unknown — probes
+don't capture stderr; diagnostic gap); axum-0013's tier-2 choice can
+now land if the side builds.
+
+### C7' diagnostics verdict: the parsed-empty class is TRUNCATION-LOOPING
+
+The `c7_fastfail_check` events on all four P2 targets (flask-0006,
+redis-0052, tokio-0108, zenodo-0079) show the same signature:
+`failure_kind="truncated"`, `needs_human_attr=true`, `refusal=true`,
+tiny units (160-1,317 tokens). The truncation check (finish_reason=
+length) intercepts BEFORE the P2 parsed-empty branch, so kind is
+never "empty" and the refusal carve-out correctly blocks the fast-
+fail — the model isn't refusing, it's LOOPING past the 8,192-token
+output ceiling on units that need ~200 output tokens. P2's parsed-
+empty branch is fine; it just never runs on these. Cycle-C item:
+truncation-aware diverse retry (R3-style temperature/presentation
+diversity on the truncated-empty shape) instead of same-family
+retries that re-loop.
+
+### Cycle-C queue (evidence-backed)
+
+1. F1 landing fix validation — rerun the takeover-target specimens
+   (protobuf-0051, axum-0013, redis-0049 tier-1 territory)
+2. Build-probe stderr capture (the 0.1s protobuf probe failures are
+   undiagnosable without it)
+3. Truncated-looping diverse retry (the four parsed-empty cases)
+4. sqlite-0004 P5a validation (fix landed after this run's snapshot)
+5. sqlite-0029 P5b validation (same)
