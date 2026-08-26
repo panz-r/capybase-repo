@@ -2085,3 +2085,51 @@ stable). But it passed in batch A's sampling — meaning the reround's
 3-repeat stability check underestimates cross-run variance. A case
 that's 3/3 ESC in one sampling can still pass 1/1 in another. The
 16-case count is a LOWER BOUND on instability.
+
+## F1 tier-2 evaluation results (2026-08-26)
+
+23 adjudication events across 6 cases (repeats included):
+
+- **11 correct takeovers** (48%)
+- **12 wrong-side takeovers** (52%) — ALL are cases where the
+  adjudicator chose a side but it was the WRONG side
+- **0 correct weave declines** (the adjudicator never chose "weave")
+- **0 missed side-choices** (it always picked a side)
+
+**Root cause of the 52% error rate**: the adjudicator's reasons for
+the wrong-side cases are revealing — redis-0014 (4 events) and
+protobuf-0051 (6 events) ALL say "the three versions are identical /
+no actual conflict" — the model can't see the differences because
+the prompt clips the sides to 6000 chars, and for large files the
+relevant changes may be beyond the clip boundary. The adjudicator
+defaults to "current" when it sees no difference (a reasonable
+default, but wrong when the oracle is the replayed side).
+
+**axum-0013** (2 wrong out of 5): mixed — the model chose current
+3/5 times and replayed 2/5. The correct answer is current. The
+inconsistency suggests the differences are subtle (feature flag
+documentation changes).
+
+### Implications for F1 tier-2
+
+The 48% accuracy is below random for a binary choice (the 95%
+side-choice prior means always picking "current" would get ~65%
+accuracy). The adjudicator is actively WRONG more than right on
+the tier-2 population. The issue is NOT the model's judgment —
+it's that the prompt doesn't show enough of the code for the
+model to see the differences.
+
+**Fix (sprint-24)**:
+1. Don't clip the sides in the F1 tier-2 prompt (or use a diff-
+   centered presentation showing only the changed regions)
+2. Add a "no visible difference" check — if the clipped sides are
+   identical, the prompt is useless; either extend the clip or
+   decline (weave)
+3. Consider a deterministic tiebreaker when the adjudicator's
+   reasons mention "identical" or "no conflict"
+
+## User directive: NO full eval rerun yet (2026-08-26)
+
+"Analyze the failures and plan fixes for sprint 24. No eval rerun
+before sprint 24 completes." The harvest threshold is moot; sprint-24
+plans and implements the fixes first.
