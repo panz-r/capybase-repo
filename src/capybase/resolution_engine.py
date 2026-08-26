@@ -3686,7 +3686,27 @@ class ResolutionEngine:
                 unit, self.config.model, prompt_version, str(exc), "",
                 failure_kind="request_failed",
             )
-        return self._candidate_from_response(unit, prompt_version, resp)
+        cand = self._candidate_from_response(unit, prompt_version, resp)
+        # P6 (sprint-24): delimiter repair at candidate level — check the
+        # model's output for ()/[] imbalance BEFORE validation. The file-level
+        # delimiter repair (coherence rung) only fires on the spliced buffer;
+        # this catches the model's individual candidates (zenodo-0079: the
+        # first candidate had an unmatched ')' that the file-level repair
+        # never saw because the candidate was rejected before splicing).
+        if cand and cand.resolved_text:
+            from capybase.verification import (
+                _delimiter_imbalance_line,
+                _try_repair_delimiter,
+            )
+            _lang = unit.language
+            _imb = _delimiter_imbalance_line(cand.resolved_text, _lang)
+            if _imb is not None:
+                _repaired = _try_repair_delimiter(cand.resolved_text, _lang)
+                if (_repaired is not None
+                        and _delimiter_imbalance_line(_repaired, _lang) is None):
+                    cand = cand.model_copy(
+                        update={"resolved_text": _repaired})
+        return cand
 
     def _candidate_from_response(
         self, unit: ConflictUnit, prompt_version: str, resp: LLMResponse
