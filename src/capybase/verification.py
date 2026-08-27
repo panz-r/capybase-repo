@@ -3360,24 +3360,31 @@ class _StandaloneSyntaxValidator:
         skip = self._skip_before_compile(ctx)
         if skip is not None:
             return skip
-        if ctx.unit.marker_span is None:
-            return VerificationCheckResult(
-                name=self.name, passed=True,
-                message="no marker span",
-                features={fk: False},
-            )
         if not ctx.candidate.resolved_text:
             return VerificationCheckResult(
                 name=self.name, passed=True,
                 message="empty resolved_text; syntax check skipped",
                 features={fk: False},
             )
-        spliced = splice_resolution(
-            ctx.unit.original_worktree_text,
-            ctx.unit.marker_span,
-            ctx.candidate.resolved_text,
-        )
-        spliced = _blank_markers(spliced, ctx.unit.language)
+        if ctx.unit.marker_span is None:
+            # Whole-file unit (marker_span None): the resolved_text IS the
+            # file. A blanket pass here let a model answer a whole-file
+            # prompt with BLOCK-interior content — sqlite-0029's candidate
+            # began with `if( pTab->tabFlags & TF_HasNotNull ){` at file
+            # scope, skipped unit validation entirely, and only the file-
+            # level build caught it (too late for a cheap retry). Compile
+            # the raw text through the same pipeline: parse errors (the
+            # wrong-shape signature) fail; standalone-unresolvable errors
+            # still defer via _is_resolution_error.
+            spliced = _blank_markers(
+                ctx.candidate.resolved_text, ctx.unit.language)
+        else:
+            spliced = splice_resolution(
+                ctx.unit.original_worktree_text,
+                ctx.unit.marker_span,
+                ctx.candidate.resolved_text,
+            )
+            spliced = _blank_markers(spliced, ctx.unit.language)
         if self._check_braces and not _braces_balanced(spliced, ctx.unit.language):
             return VerificationCheckResult(
                 name=self.name, passed=True,

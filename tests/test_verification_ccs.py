@@ -875,3 +875,44 @@ def test_ccs_syntax_validator_does_not_skip_c_files():
     result = validator.verify(ctx)
     # .c files ARE checked (ccs_syntax_checked=True).
     assert result.features.get("ccs_syntax_checked") is True
+
+
+def test_whole_file_unit_block_shaped_answer_fails():
+    """sqlite-0029 regression: a whole-file unit (marker_span None) whose
+    candidate is BLOCK-interior content — the model answered a whole-file
+    prompt with the conflict region only, resolved_text starting with a
+    file-scope `if(`. The old blanket "no marker span" pass let it skip
+    unit validation entirely; the file-level build caught it too late for
+    a cheap retry. The raw text IS the file for whole-file units — a
+    parse error must fail here."""
+    from capybase.verification import CcsSyntaxValidator
+
+    unit = _unit(marker_span=None, worktree="int f(void);\n")
+    unit = unit.model_copy(update={"unit_kind": "whole_file"})
+    # Block-shaped answer: function-body interior at file scope.
+    cand = _candidate(
+        "  if( pTab->tabFlags & TF_HasNotNull ){\n"
+        "    onError = OE_Abort;\n"
+        "  }\n"
+    )
+    result = _verify(CcsSyntaxValidator(), unit, cand)
+    assert not result.passed, (
+        "block-interior content for a whole-file unit must fail validation"
+    )
+
+
+def test_whole_file_unit_valid_tu_passes():
+    """A whole-file unit whose candidate is a complete, valid TU passes the
+    same pipeline (the intended shape for whole-file prompts)."""
+    from capybase.verification import CcsSyntaxValidator
+
+    unit = _unit(marker_span=None, worktree="int f(void);\n")
+    unit = unit.model_copy(update={"unit_kind": "whole_file"})
+    cand = _candidate(
+        "int compute(int n) {\n"
+        "  if (n > 0) { return n; }\n"
+        "  return -n;\n"
+        "}\n"
+    )
+    result = _verify(CcsSyntaxValidator(), unit, cand)
+    assert result.passed
