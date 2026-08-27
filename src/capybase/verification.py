@@ -2605,31 +2605,114 @@ def derive_prototype(definition_line: str) -> str | None:
     return s[:-1].rstrip() + ";"
 
 
+def _use_stmt_canonical_key(stmt_text: str) -> str | None:
+    """Canonical comparison form of a use statement, or None when unsafe.
+
+    Whitespace is collapsed; items inside each brace group are sorted;
+    trailing ``;`` and ``,`` are stripped. Two statements with the same key
+    bind identical names (module paths included in the key verbatim), so
+    removing the later one never changes semantics. Returns None when the
+    statement has unbalanced/unusually-nested braces — the caller then
+    skips dedup for it (conservative).
+    """
+    import re as _re
+
+    t = _re.sub(r"\s+", " ", stmt_text).strip().rstrip(";").strip()
+    if t.count("{") != t.count("}"):
+        return None
+
+    def _sort_group(m: "_re.Match[str]") -> str:
+        items = [i.strip().rstrip(",") for i in m.group(1).split(",") if i.strip()]
+        return "{" + ",".join(sorted(items)) + "}"
+
+    # Innermost-first for nested groups: repeatedly sort brace-free groups.
+    # Braces remain in the canonical form (they are use syntax) — the loop
+    # just needs to reach a fixed point.
+    for _ in range(3):
+        new = _re.sub(r"\{([^{}]*)\}", _sort_group, t)
+        if new == t:
+            break
+        t = new
+    return t
+
+
 def _dedup_rust_use_statements(text: str) -> str | None:
-    """R2 (sprint-22): remove exact-duplicate ``use`` statements.
+    """R2 (sprint-22) + P1c (sprint-24): remove duplicate ``use`` statements.
 
     Union-merged re-export lists can carry the same ``use`` line twice —
     rustc rejects each duplicate with "the name `X` is defined multiple
     times" (sea-orm-0021: 17 errors from three duplicated re-exports).
-    Duplicate identical use lines are always redundant; removing the
-    later copy never changes semantics. Scope-aware: dedup only within
-    the same indentation level (a ``use`` inside a function body is a
-    different scope from the top-level one). Returns the deduped text,
-    or None when nothing changed."""
-    lines = text.split("\n") if text else []
-    seen: dict[str, int] = {}
+    Removing the later copy never changes semantics. Scope-aware: dedup
+    only within the same indentation level (a ``use`` inside a function
+    body is a different scope from the top-level one).
+
+    P1c extends the sweep from exact-line matches to canonical-form
+    matches over LOGICAL statements:
+
+    - ``pub use`` lines (the original sweep only matched ``use `` — the
+      sea-orm re-export class was invisible to it);
+    - multi-line grouped statements (``pub use crate::{\\n ... \\n};``) —
+      scanned as one logical statement ending at the closing ``;``;
+    - order/whitespace-normalized comparison (``{b, c}`` ≡ ``{c , b}`` ≡
+      ``{\\n b,\\n c,\\n}``) — sorting items inside braces and collapsing
+      whitespace before comparing.
+
+    The key includes the statement's ``#[cfg(...)]``/attribute lines: the
+    sea-orm oracle has two ``pub use crate::{...}`` groups distinguished
+    ONLY by cfg feature — cfg-gated and ungated groups are different
+    bindings and must never collide. Only exact (attributes + canonical)
+    matches dedup; subsets are NOT collapsed (a subset group may be
+    cfg-gated differently — dropping it would be semantics-changing).
+    Returns the deduped text, or None when nothing changed.
+    """
+    if not text:
+        return None
+    lines = text.split("\n")
     out: list[str] = []
+    seen: set[str] = set()
     removed = 0
-    for ln in lines:
+    i = 0
+    n = len(lines)
+    while i < n:
+        ln = lines[i]
         s = ln.strip()
-        if s.startswith("use ") and s.endswith(";"):
-            indent = len(ln) - len(ln.lstrip())
-            key = f"{indent}:{s}"
+        is_use = s.startswith(("use ", "pub use ", "pub(crate) use "))
+        if not is_use:
+            out.append(ln)
+            i += 1
+            continue
+        # Collect the statement's preceding attribute lines (already
+        # emitted? no — attributes belong to the statement; walk back
+        # through out for contiguous #[...] lines).
+        attr_start = len(out)
+        while attr_start > 0 and out[attr_start - 1].strip().startswith("#["):
+            attr_start -= 1
+        attrs = tuple(l.strip() for l in out[attr_start:])
+        # Collect the full logical statement: continue until braces balance
+        # and a ';' ends it (single-line uses close immediately).
+        stmt_lines = [ln]
+        depth = ln.count("{") - ln.count("}")
+        j = i
+        while (depth > 0 or not stmt_lines[-1].rstrip().endswith(";")) and j + 1 < n:
+            j += 1
+            stmt_lines.append(lines[j])
+            depth += lines[j].count("{") - lines[j].count("}")
+            if depth < 0:
+                break  # malformed — treat as non-dedupable
+        stmt = "\n".join(stmt_lines)
+        key_body = _use_stmt_canonical_key(stmt)
+        indent = len(ln) - len(ln.lstrip())
+        if key_body is not None and depth == 0:
+            key = f"{indent}:{attrs}:{key_body}"
             if key in seen:
                 removed += 1
-                continue  # drop the later duplicate
-            seen[key] = 1
-        out.append(ln)
+                # Drop the duplicate statement AND its attribute lines.
+                del out[attr_start:]
+                i = j + 1
+                continue
+            seen.add(key)
+        out.extend(stmt_lines)
+        i = j + 1
     if not removed:
         return None
     return "\n".join(out)
