@@ -2589,3 +2589,35 @@ zenodo-0079 (the truncation-looping class).
 
 Sprint-24 specimen arc: **2/18 (A) → 2/18 (B, better composition) →
 5/18 + NEAR 3/3 (C)** on the hardest 18 cases, all era-adjusted-live.
+
+### Sprint-24 cycle-C code batch 2 (2026-08-27, post-specimen)
+
+Three more commits while cycle-D validates the diversity batch:
+
+**ce76028** — probe stderr capture (bounded error tails at all three
+record_probe sites); R5 ladder WIRED (retry_profile_variant was an
+orphaned mechanism — implemented in sprint-24, never called; propose()
+now rotates one presentation axis per retry attempt, restored in
+finally); truncation loop-breaker (+0.35 temperature when the previous
+attempt hit finish_reason=length); temperature_override dead-wire fix
+(the sequential n=1 path dropped the override entirely — R3's 0.4/0.6
+diverse probes have been sampling at base temperature since sprint-23);
+attempt threading through all propose paths.
+
+**9e520a0** — midband subsumption self-consistency: 3 samples,
+agreement-weighted confidence (0.95 × 2/3 = 0.63 stays below the 0.70
+fire bar — unanimity effectively required); split/tie settles to keep.
+Motivated by clickhouse-0021's 3-cycle flip (PASS→NEAR→ESC on identical
+inputs at equal 0.95 confidence both ways). Cycle A's superseded WAS
+oracle-correct, so a deterministic feature-presence check would push
+the wrong direction; self-consistency trades lucky PASSes for stability
+on borderline shapes.
+
+**71b9bbd** — P1c use-dedup canonical-form sweep: pub use (the original
+only matched `use `), multi-line groups as logical statements,
+order/whitespace-normalized keys, cfg-attribute context (the sea-orm
+oracle's two `pub use crate::{...}` groups are cfg-distinct only —
+verified untouched). The sea-orm-0021 oracle path: a union merge that
+re-emits a group with formatting variance now dedups.
+
+Cycle-D (in flight) carries ce76028; 9e520a0 and 71b9bbd await cycle E.
