@@ -1990,6 +1990,17 @@ def _resolve_tool(name: str) -> str | None:
 # defects at the per-unit level. Semantic errors defer to Phase B (whole-file
 # cargo check) where the full crate context is available.
 _RUST_SEMANTIC_ERROR = re.compile(r"error\[E\d{4}\]")
+# Resolution-shaped diagnostics rustc emits WITHOUT a bracketed E-code
+# (macro/name resolution): "error: cannot find macro `X` in this scope",
+# "error: use of undeclared crate or module `X`". Same semantic-artifact
+# class as E0432/E0433 — crate-internal references a standalone rustc
+# fragment cannot resolve (tokio-0108: the model's merge references
+# tokio's own `cfg_not_io_util!` macro, defined elsewhere in the crate;
+# classified as a parse defect it wrongly hard-failed two substantive
+# candidates into a no-progress escalate).
+_RUST_RESOLUTION_SHAPES = re.compile(
+    r"error: (?:cannot find (?:value|type|macro)|use of undeclared "
+    r"(?:crate or module|type|value)|unresolved import)")
 
 
 def _is_rust_resolution_error(msg: str) -> bool:
@@ -2000,8 +2011,15 @@ def _is_rust_resolution_error(msg: str) -> bool:
     context. These are NOT candidate defects. Only parse/syntax errors (emitted
     WITHOUT an ``E0xxx`` code) are real defects at this level — e.g. the
     malformed ``format!`` macro reads ``error: expected`` with no code.
+    Resolution-shaped uncoded errors ("cannot find macro", "use of
+    undeclared") are semantic too — rustc emits macro resolution failures
+    without a bracketed code, but they are artifacts of the missing crate
+    context, not parse defects.
     """
-    return bool(msg and _RUST_SEMANTIC_ERROR.search(msg))
+    if not msg:
+        return False
+    return bool(_RUST_SEMANTIC_ERROR.search(msg)
+                or _RUST_RESOLUTION_SHAPES.search(msg))
 
 
 # C/C++ diagnostics that indicate a RESOLUTION / type problem, NOT a parse
