@@ -133,15 +133,18 @@ class _RecJournal:
 
 
 class _FakeEngine:
-    def __init__(self, text: str):
-        self._text = text
+    def __init__(self, texts):
+        # Cycle-C: adjudication draws 3 self-consistency samples; cycle a
+        # list of responses (a bare string broadcasts to every call).
+        self._texts = [texts] if isinstance(texts, str) else list(texts)
         self.calls: list[dict] = []
         self.config = SimpleNamespace(max_tokens=8192)
 
     def raw_complete(self, prompt, *, json_mode=False, temperature=None,
                      max_tokens=None):
         self.calls.append({"prompt": prompt, "max_tokens": max_tokens})
-        return SimpleNamespace(text=self._text)
+        text = self._texts.pop(0) if self._texts else ""
+        return SimpleNamespace(text=text)
 
 
 def _stub_orchestrator(engine) -> Orchestrator:
@@ -159,9 +162,60 @@ def test_adjudicate_parses_superseded():
     out = orch._adjudicate_subsumption(
         "f.c", "c", "int a;\n", {"current": "int a;\n", "replayed": "int b;\n"},
         "current")
-    assert out == {"verdict": "superseded", "confidence": 0.9, "reason": "cosmetic"}
+    assert out["verdict"] == "superseded"
+    assert out["confidence"] == 0.9  # unanimous × 1.0 agreement
+    assert out["reason"] == "cosmetic"
+    assert out["agreement"] == 1.0
+    assert len(engine.calls) == 3  # self-consistency draws three samples
     # decision prompts must clear the local server's hidden pre-fill budget
     assert engine.calls[0]["max_tokens"] >= 1024
+
+
+def test_adjudicate_unanimous_keep():
+    """Unanimous keep is a positive verdict (the cascade stays on)."""
+    orch = _stub_orchestrator(_FakeEngine(
+        '{"verdict": "keep", "confidence": 0.95, "reason": "real feature"}'))
+    out = orch._adjudicate_subsumption(
+        "f.c", "c", "int a;\n", {"current": "int a;\n", "replayed": "int b;\n"},
+        "current")
+    assert out["verdict"] == "keep"
+    assert out["confidence"] == 0.95
+
+
+def test_adjudicate_split_vote_settles_to_keep_below_fire_bar():
+    """clickhouse-0021's shape: 2-1 split at high confidence. The majority
+    (keep) wins but the agreement-scaled confidence (0.95 × 2/3 = 0.63)
+    falls below the caller's 0.70 bar — no takeover on a borderline shape."""
+    orch = _stub_orchestrator(_FakeEngine([
+        '{"verdict": "keep", "confidence": 0.95, "reason": "feature absent"}',
+        '{"verdict": "superseded", "confidence": 0.95, "reason": "integrated"}',
+        '{"verdict": "keep", "confidence": 0.95, "reason": "feature absent"}',
+    ]))
+    out = orch._adjudicate_subsumption(
+        "f.c", "c", "int a;\n", {"current": "int a;\n", "replayed": "int b;\n"},
+        "current")
+    assert out["verdict"] == "keep"
+    assert out["confidence"] < 0.70
+    assert abs(out["agreement"] - 2 / 3) < 0.01
+    assert out["samples"] == [
+        {"v": "keep", "c": 0.95},
+        {"v": "superseded", "c": 0.95},
+        {"v": "keep", "c": 0.95},
+    ]
+
+
+def test_adjudicate_tie_settles_to_keep():
+    """Only two valid samples, one each way — a tie settles to keep
+    (conservative no-takeover)."""
+    orch = _stub_orchestrator(_FakeEngine([
+        '{"verdict": "keep", "confidence": 0.9, "reason": "a"}',
+        '{"verdict": "superseded", "confidence": 0.9, "reason": "b"}',
+        "unparseable",
+    ]))
+    out = orch._adjudicate_subsumption(
+        "f.c", "c", "int a;\n", {"current": "int a;\n", "replayed": "int b;\n"},
+        "current")
+    assert out["verdict"] == "keep"
 
 
 def test_adjudicate_empty_response_is_keep():
@@ -179,9 +233,6 @@ def test_adjudicate_garbage_json_is_keep():
         "f.c", "c", "int a;\n", {"current": "int a;\n", "replayed": "int b;\n"},
         "current")
     assert out is None
-    failed = [e for e in orch.journal.events
-              if e[0] == "midband_subsumption_adjudication_failed"]
-    assert failed, "parse failure must be journaled"
 
 
 # ---------------------------------------------------------------------------

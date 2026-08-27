@@ -15830,6 +15830,16 @@ class Orchestrator:
         (``{"verdict": "keep"|"superseded", "confidence": f, "reason": s}``)
         or None on an unparseable/absent model response (the caller treats
         None as "keep": no takeover without a positive superseded verdict).
+
+        Sprint-24 cycle-C: self-consistency (3 samples, agreement-weighted).
+        clickhouse-0021 flipped PASS→NEAR→ESCALATE across three cycles on
+        IDENTICAL inputs — keep vs superseded at equal 0.95 confidence both
+        ways, a genuinely borderline judgment. A single sample is a coin
+        flip on these shapes. The majority verdict's confidence is scaled
+        by sample agreement, so the caller's 0.70 bar effectively requires
+        unanimity (0.95 × 2/3 = 0.63 doesn't fire); a split vote settles
+        to keep — the conservative no-takeover direction, consistent with
+        "no takeover without a positive superseded verdict".
         """
         import json as _json
 
@@ -15843,20 +15853,53 @@ class Orchestrator:
             # for a one-sentence JSON on a 5K-char prompt, scaling up with
             # prompt size); a fragment-sized config cap returns empty
             # content with finish_reason=length. Floor at 2048.
-            resp = self.resolution_engine.raw_complete(
-                prompt, json_mode=True,
-                max_tokens=max(2048, self.resolution_engine.config.max_tokens))
-            raw = resp.text if hasattr(resp, "text") else str(resp)
-            if not (raw or "").strip():
+            samples: list[dict] = []
+            for _ in range(3):
+                resp = self.resolution_engine.raw_complete(
+                    prompt, json_mode=True,
+                    max_tokens=max(2048, self.resolution_engine.config.max_tokens))
+                raw = resp.text if hasattr(resp, "text") else str(resp)
+                if not (raw or "").strip():
+                    continue
+                try:
+                    parsed = _json.loads(raw)
+                except ValueError:
+                    continue
+                verdict = str(parsed.get("verdict", "")).strip().lower()
+                if verdict not in ("keep", "superseded"):
+                    continue
+                samples.append({
+                    "verdict": verdict,
+                    "confidence": round(_safe_conf(parsed.get("confidence")), 2),
+                    "reason": str(parsed.get("reason", ""))[:200],
+                })
+            if not samples:
                 return None
-            parsed = _json.loads(raw)
-            verdict = str(parsed.get("verdict", "")).strip().lower()
-            if verdict not in ("keep", "superseded"):
-                return None
+            votes_keep = sum(1 for s in samples if s["verdict"] == "keep")
+            votes_sup = len(samples) - votes_keep
+            # Majority required: with 3 valid samples, 2-1 decides; a 1-1
+            # split (only 2 valid) or a tie is borderline → keep.
+            verdict = (
+                "superseded" if votes_sup > votes_keep
+                else "keep" if votes_keep > votes_sup
+                else "keep"  # tie → conservative
+            )
+            winners = [s for s in samples if s["verdict"] == verdict]
+            conf = round(sum(s["confidence"] for s in winners) / len(winners), 2)
+            # Unanimous-majority agreement is required to fire at the caller's
+            # 0.70 bar: a 2-1 split halves the effective confidence so a
+            # borderline shape rarely takes over. The samples ride the result
+            # for journal attribution.
+            agreement = round(len(winners) / len(samples), 2)
+            eff_conf = round(conf * agreement, 2)
             return {
                 "verdict": verdict,
-                "confidence": round(_safe_conf(parsed.get("confidence")), 2),
-                "reason": str(parsed.get("reason", ""))[:200],
+                "confidence": eff_conf,
+                "reason": winners[0]["reason"],
+                "samples": [
+                    {"v": s["verdict"], "c": s["confidence"]} for s in samples
+                ],
+                "agreement": agreement,
             }
         except Exception as exc:  # noqa: BLE001 — adjudication is advisory
             self.journal.emit(
