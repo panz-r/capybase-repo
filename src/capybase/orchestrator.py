@@ -9915,14 +9915,13 @@ class Orchestrator:
                                     # mechanisms own their triggers; this
                                     # orchestrator provides the sides +
                                     # compile verdicts and executes the
-                                    # chosen takeover. Phase A runs the pure
-                                    # decision mechanisms (tier-1 churn);
-                                    # when they decline, the orchestrator
-                                    # probes both pristine sides and Phase B
-                                    # re-executes with the verdicts (the
-                                    # compile-clean override). Behavior is
-                                    # identical to the former inline tier-1 +
-                                    # P1b blocks — the swap is structural.
+                                    # chosen takeover. Three phases, exactly
+                                    # the former inline sequence: A = tier-1
+                                    # churn; B = probe both pristine sides +
+                                    # compile-clean; C = tier-2 LLM ballot
+                                    # (only when A and B declined — it must
+                                    # not bill a call when compile-clean
+                                    # already took the single compiling side).
                                     from capybase.pipeline import (
                                         RepairExhaustedContext,
                                         Stage,
@@ -9938,9 +9937,13 @@ class Orchestrator:
                                             self, "_phase2_model_used", False),
                                     )
                                     _pipe = self._pipeline()
-                                    _f1_result = _pipe.execute(
-                                        Stage.POST_REPAIR_EXHAUSTION,
-                                        _pipe_ctx)
+                                    self._f1_tier2_mech.enabled = False
+                                    try:
+                                        _f1_result = _pipe.execute(
+                                            Stage.POST_REPAIR_EXHAUSTION,
+                                            _pipe_ctx)
+                                    finally:
+                                        self._f1_tier2_mech.enabled = True
                                     _f1_text = ""
                                     if (_f1_result is not None
                                             and _f1_result.action == "takeover"):
@@ -9964,7 +9967,11 @@ class Orchestrator:
                                     if _f1_side is None:
                                         # Phase B: probe both pristine sides
                                         # and let the compile-clean mechanism
-                                        # take a single compiling one.
+                                        # take a single compiling one. The
+                                        # tier-2 ballot is disabled here —
+                                        # it ran (or declined) in Phase A and
+                                        # must not bill a second LLM call
+                                        # for the same exhaustion point.
                                         _compiling = {}
                                         for _side_name in ("current", "replayed"):
                                             _side_text = _sides_f1.get(_side_name, "")
@@ -9977,9 +9984,13 @@ class Orchestrator:
                                             _compiling[_side_name] = bool(_side_check.passed)
                                         self._f1_compile_clean_mech.set_compiling_sides(
                                             _compiling)
-                                        _f1_result_b = _pipe.execute(
-                                            Stage.POST_REPAIR_EXHAUSTION,
-                                            _pipe_ctx)
+                                        self._f1_tier2_mech.enabled = False
+                                        try:
+                                            _f1_result_b = _pipe.execute(
+                                                Stage.POST_REPAIR_EXHAUSTION,
+                                                _pipe_ctx)
+                                        finally:
+                                            self._f1_tier2_mech.enabled = True
                                         # Phase B accepts ONLY the compile-
                                         # clean mechanism: tier-1 is
                                         # deterministic and already had its
@@ -10041,12 +10052,20 @@ class Orchestrator:
                             # F1 tier-2 (sprint-23): LLM subsumption
                             # adjudication for symmetric shapes — when
                             # tier-1 declines (both sides changed
-                            # significantly), ask the model
+                            # significantly), ask the model — Phase C of the
+                            # pipeline execution: the F1Tier2Adjudication
+                            # mechanism with the orchestrator's adjudicator
+                            # injected (the decide callable). Runs only when
+                            # Phases A (tier-1) and B (compile-clean) both
+                            # declined.
                             _f2_side = None
                             if _f1_eligible and _sides_f1:
-                                _f2_side = self._f1_tier2_adjudicate(
-                                    path, language, _base_f1 or "",
-                                    _sides_f1 or {})
+                                _f2_result_c = _pipe.execute(
+                                    Stage.POST_REPAIR_EXHAUSTION, _pipe_ctx)
+                                if (_f2_result_c is not None
+                                        and _f2_result_c.action == "takeover"
+                                        and _f2_result_c.mechanism == "f1_tier2_adjudication"):
+                                    _f2_side = _f2_result_c.metadata.get("side")
                             if _f2_side is not None:
                                 _f2_text = (_sides_f1 or {}).get(
                                     _f2_side, "")
@@ -11210,11 +11229,14 @@ class Orchestrator:
         from capybase.mechanisms import (
             F1CompileCleanTakeover,
             F1Tier1Takeover,
+            F1Tier2Adjudication,
         )
         pipe = Pipeline(journal=self.journal)
         self._f1_compile_clean_mech = F1CompileCleanTakeover()
+        self._f1_tier2_mech = F1Tier2Adjudication(self._f1_tier2_adjudicate)
         pipe.register(F1Tier1Takeover())
         pipe.register(self._f1_compile_clean_mech)
+        pipe.register(self._f1_tier2_mech)
         self._pipeline_instance = pipe
         return pipe
 

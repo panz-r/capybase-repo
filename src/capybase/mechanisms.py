@@ -148,3 +148,57 @@ class F1CompileCleanTakeover:
                 "compiling_sides": dict(self._compiling_sides),
             },
         )
+
+
+class F1Tier2Adjudication:
+    """F1 tier-2: LLM subsumption adjudication for symmetric shapes.
+
+    Trigger: tier-1's churn check declined (both sides changed
+    significantly) — an LLM decides whether one side subsumes the
+    other. The decision callable is INJECTED by the orchestrator
+    (dependency injection: mechanisms never touch orchestrator
+    internals); it takes ``(path, language, base_text, sides)`` and
+    returns the chosen side name or None.
+
+    Stage: POST_REPAIR_EXHAUSTION, after tier-1 and the compile-clean
+    override. The orchestrator compile-gates and lands the result (the
+    same contract as the other takeover mechanisms).
+    """
+
+    def __init__(self, decide):
+        self._decide = decide
+        # The orchestrator's two-phase execution re-runs the stage after
+        # injecting compile verdicts; the LLM ballot must not fire twice
+        # for the same exhaustion point. Disabled during Phase B.
+        self.enabled = True
+
+    @property
+    def stage(self) -> Stage:
+        return Stage.POST_REPAIR_EXHAUSTION
+
+    @property
+    def name(self) -> str:
+        return "f1_tier2_adjudication"
+
+    def engage(self, ctx: StageContext) -> MechanismResult | None:
+        if not isinstance(ctx, RepairExhaustedContext):
+            return None
+        if not self.enabled:
+            return None
+        if not ctx.sides:
+            return None
+        try:
+            side = self._decide(ctx.path, ctx.language, ctx.base_text, ctx.sides)
+        except Exception:  # noqa: BLE001 — adjudication is best-effort
+            return None
+        if side not in ("current", "replayed"):
+            return None
+        text = ctx.sides.get(side, "")
+        if not text.strip():
+            return None
+        return MechanismResult(
+            mechanism=self.name,
+            action="takeover",
+            resolved_text=text,
+            metadata={"side": side},
+        )

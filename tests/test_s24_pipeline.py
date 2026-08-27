@@ -242,3 +242,43 @@ def test_compile_clean_mechanism_engages_at_pre_escalate():
     # no verdicts set must not fire it (it isn't registered for this stage).
     mech.set_compiling_sides({})
     assert pipe.execute(Stage.PRE_ESCALATE, ctx) is None
+
+
+def test_tier2_adjudication_mechanism_injection_and_latch():
+    """Migration #3: the tier-2 ballot as a mechanism — the decide callable
+    is injected (the orchestrator's adjudicator), runs only when enabled
+    (Phase C), and returns a takeover with the chosen side."""
+    from capybase.mechanisms import F1Tier2Adjudication
+    from capybase.pipeline import Pipeline, RepairExhaustedContext, Stage
+
+    calls = []
+
+    def decide(path, language, base_text, sides):
+        calls.append((path, sides))
+        return "replayed"
+
+    mech = F1Tier2Adjudication(decide)
+    pipe = Pipeline()
+    pipe.register(mech)
+    ctx = RepairExhaustedContext(
+        path="f.rs", language="rust", step_index=1,
+        sides={"current": "fn a() {}", "replayed": "fn b() {}"},
+        base_text="")
+
+    result = pipe.execute(Stage.POST_REPAIR_EXHAUSTION, ctx)
+    assert result is not None and result.action == "takeover"
+    assert result.metadata["side"] == "replayed"
+    assert result.resolved_text == "fn b() {}"
+    assert len(calls) == 1
+
+    # Disabled (Phase A/B) → no ballot billed.
+    mech.enabled = False
+    assert pipe.execute(Stage.POST_REPAIR_EXHAUSTION, ctx) is None
+    assert len(calls) == 1
+
+    # decide returning None/garbage → decline, no crash.
+    mech.enabled = True
+    mech._decide = lambda *a: None
+    assert pipe.execute(Stage.POST_REPAIR_EXHAUSTION, ctx) is None
+    mech._decide = lambda *a: (_ for _ in ()).throw(RuntimeError("x"))
+    assert pipe.execute(Stage.POST_REPAIR_EXHAUSTION, ctx) is None
