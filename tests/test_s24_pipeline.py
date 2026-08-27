@@ -282,3 +282,43 @@ def test_tier2_adjudication_mechanism_injection_and_latch():
     assert pipe.execute(Stage.POST_REPAIR_EXHAUSTION, ctx) is None
     mech._decide = lambda *a: (_ for _ in ()).throw(RuntimeError("x"))
     assert pipe.execute(Stage.POST_REPAIR_EXHAUSTION, ctx) is None
+
+
+def test_churn_fallback_mechanism_matches_whole_side_heuristic():
+    """Migration #4 equivalence: the mechanism's pick equals
+    _whole_side_heuristic's on every shape, engaging only when BOTH sides
+    compile."""
+    import random
+    from capybase.mechanisms import ChurnFallbackTakeover
+    from capybase.orchestrator import _whole_side_heuristic
+    from capybase.pipeline import Pipeline, RepairExhaustedContext, Stage
+
+    rng = random.Random(7)
+    mech = ChurnFallbackTakeover()
+    pipe = Pipeline()
+    pipe.register(mech)
+    words = ["alpha", "beta", "gamma", "delta"]
+
+    for trial in range(200):
+        base = "\n".join(f"{rng.choice(words)}_{i};"
+                         for i in range(rng.randint(5, 40)))
+        cur = "\n".join(
+            (f"NEW_{rng.randint(0,9)}_{i};" if i < rng.randint(0, 20)
+             else f"{base.splitlines()[i]}")
+            for i in range(len(base.splitlines())))
+        rep = "\n".join(
+            (f"REP_{rng.randint(0,9)}_{i};" if i < rng.randint(0, 20)
+             else f"{base.splitlines()[i]}")
+            for i in range(len(base.splitlines())))
+        sides = {"current": cur, "replayed": rep}
+        ctx = RepairExhaustedContext(
+            path="f.c", language="c", step_index=1,
+            sides=sides, base_text=base)
+        mech.set_compiling_sides({"current": True, "replayed": True})
+        result = pipe.execute(Stage.POST_REPAIR_EXHAUSTION, ctx)
+        expected = _whole_side_heuristic(base, sides)
+        got = result.metadata.get("side") if result else None
+        assert got == expected, f"trial {trial}: mech={got} heuristic={expected}"
+        # Not both compiling → decline.
+        mech.set_compiling_sides({"current": True, "replayed": False})
+        assert pipe.execute(Stage.POST_REPAIR_EXHAUSTION, ctx) is None

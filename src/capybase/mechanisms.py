@@ -202,3 +202,65 @@ class F1Tier2Adjudication:
             resolved_text=text,
             metadata={"side": side},
         )
+
+
+class ChurnFallbackTakeover:
+    """Deterministic churn fallback when adjudication is unavailable.
+
+    Trigger: BOTH pristine sides passed the compile probes but the tier-2
+    ballot declined/died (redis-0049: the LLM call hit the case wall
+    deadline; redis-0013: same shape after the C1 injection fixed the
+    compile). Either side compiles; the churn heuristic — the same one
+    _adjudicate_whole_side trusts when the model is unparseable — picks
+    without another LLM round-trip.
+
+    The compile verdicts are caller-provided (the same injection pattern
+    as F1CompileCleanTakeover); engages only when exactly both sides
+    compile.
+
+    Stage: POST_REPAIR_EXHAUSTION, after the tier-2 ballot.
+    """
+
+    def __init__(self, *, compiling_sides: dict[str, bool] | None = None):
+        self._compiling_sides = compiling_sides or {}
+
+    @property
+    def stage(self) -> Stage:
+        return Stage.POST_REPAIR_EXHAUSTION
+
+    @property
+    def name(self) -> str:
+        return "churn_fallback_takeover"
+
+    def set_compiling_sides(self, verdicts: dict[str, bool]) -> None:
+        self._compiling_sides = verdicts
+
+    def engage(self, ctx: StageContext) -> MechanismResult | None:
+        if not isinstance(ctx, RepairExhaustedContext):
+            return None
+        if not ctx.sides or not self._compiling_sides:
+            return None
+        compiling = [s for s, ok in self._compiling_sides.items() if ok]
+        if sorted(compiling) != ["current", "replayed"]:
+            return None  # not exactly both — compile-clean/tier-2 territory
+        from capybase.merge_intent import side_churn
+
+        c = side_churn(ctx.base_text, ctx.sides.get("current", ""))
+        r = side_churn(ctx.base_text, ctx.sides.get("replayed", ""))
+        # _whole_side_heuristic's exact policy (threshold 0.35, corpus-
+        # validated on the four whole-file cases): massive asymmetry → the
+        # higher-churn side carries the merge intent; near-symmetric (or
+        # both ≈ base) → replayed, the commit being applied.
+        if max(c, r) == 0 or abs(c - r) / max(c, r) < 0.35:
+            side = "replayed"
+        else:
+            side = "current" if c > r else "replayed"
+        text = ctx.sides.get(side, "")
+        if not text.strip():
+            return None
+        return MechanismResult(
+            mechanism=self.name,
+            action="takeover",
+            resolved_text=text,
+            metadata={"side": side, "churn_current": c, "churn_replayed": r},
+        )

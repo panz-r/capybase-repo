@@ -10123,27 +10123,37 @@ class Orchestrator:
                                     self._write_and_stage(
                                         path, buffer, result, accepted=accepted)
                                     continue
-                            # Churn-heuristic fallback (sprint-24 cycle-E):
-                            # when the tier-2 adjudication declines or dies
-                            # (redis-0049: the LLM call hit the case wall
-                            # deadline and the catch-all returned None with
-                            # no journal, no fallback) but BOTH pristine
-                            # sides passed the compile probes, the
-                            # deterministic churn heuristic — the same one
-                            # _adjudicate_whole_side trusts when the model is
-                            # unparseable — completes the takeover without
-                            # another LLM round-trip. Either side compiles;
-                            # the pick is bounded by the same validated
-                            # threshold as the older path.
+                            # Churn-heuristic fallback — Phase D of the
+                            # pipeline execution (migration #4): when the
+                            # tier-2 ballot declines or dies (redis-0049:
+                            # the LLM call hit the case wall deadline) but
+                            # BOTH pristine sides passed the Phase-B probes,
+                            # the ChurnFallbackTakeover mechanism completes
+                            # the takeover without another LLM round-trip
+                            # (_whole_side_heuristic's exact policy).
                             try:
                                 _both_clean = bool(
                                     _compiling.get("current")
                                     and _compiling.get("replayed"))
                             except NameError:  # eligibility/exception paths skip P1b
                                 _both_clean = False
+                            _hf_side_from_pipe = None
                             if _f2_side is None and _both_clean and _sides_f1:
-                                _heuristic_side = _whole_side_heuristic(
-                                    _base_f1 or "", _sides_f1 or {})
+                                self._churn_fallback_mech.set_compiling_sides(
+                                    dict(_compiling))
+                                self._f1_tier2_mech.enabled = False
+                                try:
+                                    _hf_result = _pipe.execute(
+                                        Stage.POST_REPAIR_EXHAUSTION,
+                                        _pipe_ctx)
+                                finally:
+                                    self._f1_tier2_mech.enabled = True
+                                if (_hf_result is not None
+                                        and _hf_result.action == "takeover"
+                                        and _hf_result.mechanism == "churn_fallback_takeover"):
+                                    _hf_side_from_pipe = _hf_result.metadata.get("side")
+                            if _hf_side_from_pipe is not None:
+                                _heuristic_side = _hf_side_from_pipe
                                 _heuristic_text = (_sides_f1 or {}).get(
                                     _heuristic_side, "")
                                 if _heuristic_text.strip():
@@ -11227,6 +11237,7 @@ class Orchestrator:
             return pipe
         from capybase.pipeline import Pipeline
         from capybase.mechanisms import (
+            ChurnFallbackTakeover,
             F1CompileCleanTakeover,
             F1Tier1Takeover,
             F1Tier2Adjudication,
@@ -11234,9 +11245,11 @@ class Orchestrator:
         pipe = Pipeline(journal=self.journal)
         self._f1_compile_clean_mech = F1CompileCleanTakeover()
         self._f1_tier2_mech = F1Tier2Adjudication(self._f1_tier2_adjudicate)
+        self._churn_fallback_mech = ChurnFallbackTakeover()
         pipe.register(F1Tier1Takeover())
         pipe.register(self._f1_compile_clean_mech)
         pipe.register(self._f1_tier2_mech)
+        pipe.register(self._churn_fallback_mech)
         self._pipeline_instance = pipe
         return pipe
 
