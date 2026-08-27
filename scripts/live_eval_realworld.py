@@ -1078,6 +1078,38 @@ def _toolchain_era_probe(repo: Path, case: "Case", *, has_crate: bool) -> dict |
                 }
     finally:
         target.write_bytes(saved)  # restore the conflicted content exactly
+    # Sprint-24 cycle-G: the conditional-omission case. A full-tree gate
+    # can pass rc=0 for all three texts while the CONFLICT FILE's target is
+    # conditionally omitted from the build — sqlite's configure drops the
+    # tcl extension when tcl.h is absent, so `make -j12` "builds the oracle"
+    # without ever compiling tclsqlite.c (sqlite-0040: oracle probe rc 0
+    # while every resolution-time `make tclsqlite.lo` died on tcl.h). Probe
+    # the conflict file's own object target with the oracle text in place:
+    # when it fails (and the rule exists), the file-level gate can never
+    # validate ANY resolution — toolchain-dead for the conflict file.
+    target_probe = None
+    if (case.language in ("c", "cpp", "c++")
+            and probes and all(p["rc"] == 0 for p in probes.values())):
+        stem = Path(case.path).stem
+        try:
+            for suffix in (".lo", ".o"):
+                target.write_text(
+                    case.expected_resolved, encoding="utf-8")
+                tp = _run_shell_tree(
+                    f"make {stem}{suffix}", cwd=str(repo), timeout=120)
+                out = (tp.stderr or "") + (tp.stdout or "")
+                if "No rule to make target" in out:
+                    continue  # wrong suffix — try the other
+                target_probe = {
+                    "cmd": f"make {stem}{suffix}",
+                    "rc": tp.returncode,
+                    "sig": _compile_error_signature(out, case.language)[:3],
+                }
+                break
+        except Exception:  # noqa: BLE001 — probe is best-effort
+            target_probe = None
+        finally:
+            target.write_bytes(saved)
     # Mixed-signature semantics (sprint-21 S21.1): the 8 "environmentally
     # purged" cases re-ran and re-classified era-dead legitimately — their
     # probes carried environmental lines AND genuine era compile errors.
@@ -1098,8 +1130,15 @@ def _toolchain_era_probe(repo: Path, case: "Case", *, has_crate: bool) -> dict |
         and probes["current"]["sig"] == probes["replayed"]["sig"]
         and not _environmental
     )
+    # Conditional-omission dead: full gate green everywhere, but the
+    # oracle's own conflict-file target fails — the pass-criterion file is
+    # not in the build the gate measures.
+    if (not dead and target_probe is not None
+            and target_probe["rc"] not in (0, None)):
+        dead = True
     return {"toolchain_dead": dead, "gate": gate, "probes": probes,
-            "environmental": _environmental}
+            "environmental": _environmental,
+            "conflict_target_probe": target_probe}
 
 
 def _mark_toolchain_dead(res: "CaseResult", probe: dict, t0: float) -> "CaseResult":
