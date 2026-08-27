@@ -3078,3 +3078,14 @@ redis-0013's cycle-G trail: all four pipeline mechanisms declined by
 the book (tier-1 not-near-one-sided, compile-clean not-exactly-one,
 ballot declined). The decline journaling (8bd8495) shows WHY in
 cycle-H+; the churn fallback needs both sides compiling.
+
+### redis-0049 cycle-H: the mechanisms decline correctly (2026-08-27)
+
+All four pipeline phases ran and declined (3 wf rounds each) — the
+Phase-B probes show the PRISTINE SIDES failing to compile with errors
+inside redis.c content (line-9085 redisLog(REDIS_WARNING, ...) — the
+pre-3.0 constant; a legacy function-pointer table entry). The churn
+fallback's both-compiling precondition is genuinely unmet. This is
+era-adjacent rather than wiring: the case's honest ceiling under this
+toolchain may be ESC unless the side errors are also spurious. The
+cycle-I decline journaling + full probe tails will settle it.
