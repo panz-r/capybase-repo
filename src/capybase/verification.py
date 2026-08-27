@@ -5720,7 +5720,17 @@ class VerificationEngine:
                             # returncode check).
                             _probe_extra = {}
                             if not syntax_ok:
-                                _probe_tail = "; ".join(err_lines[-3:]) if err_lines else (msg or "")
+                                # Prefer the last ERROR-CONTAINING lines —
+                                # the gcc diagnostic precedes its caret-marker
+                                # line, so a raw tail can carry only markers
+                                # ("^~~~~~~; compilation terminated") with the
+                                # actual error just above the captured window
+                                # (sqlite-0040's probe tail had zero signal).
+                                _probe_err_sel = [
+                                    ln for ln in err_lines
+                                    if "error" in ln.lower()
+                                ] or err_lines
+                                _probe_tail = "; ".join(_probe_err_sel[-3:]) if _probe_err_sel else (msg or "")
                                 _probe_tail = _probe_tail[:300]
                                 if _probe_tail:
                                     _probe_extra["errors"] = _probe_tail
