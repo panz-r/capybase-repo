@@ -4260,6 +4260,9 @@ class BuildStateTracker:
 
     def record_probe(self, cmd: str, duration_s: float, outcome: str,
                      **extra) -> None:
+        # None-valued extras (e.g. no stderr captured on a passing probe)
+        # are dropped so the payload stays clean.
+        extra = {k: v for k, v in extra.items() if v is not None}
         self.emit("build_probe", {
             "cmd": (cmd or "")[:200],
             "duration_s": round(duration_s, 1),
@@ -5441,7 +5444,8 @@ class VerificationEngine:
                                     _bs.record_probe(
                                         build_cmd,
                                         _bs_time.monotonic() - _bs_t0,
-                                        "timeout", path=path, kind=_kind)
+                                        "timeout", path=path, kind=_kind,
+                                        errors=(_to_out or "")[-300:] or None)
                                     if _is_full_build:
                                         _bs.note_timeout(
                                             _kind, build_cmd, _build_timeout)
@@ -5623,11 +5627,25 @@ class VerificationEngine:
                                             err_lines[0] if err_lines else "build failed",
                                         )
                         if _bs is not None:
+                            # Sprint-24 cycle-C: capture a bounded stderr tail
+                            # on failing probes. The protobuf-0051 side probes
+                            # failed in 0.1s with no diagnostic — whether that
+                            # is "No rule to make target", a missing Makefile,
+                            # or a real compile error was undeterminable from
+                            # cmd/duration/outcome alone. err_lines is defined
+                            # on every not-ok path (assigned right after the
+                            # returncode check).
+                            _probe_extra = {}
+                            if not syntax_ok:
+                                _probe_tail = "; ".join(err_lines[-3:]) if err_lines else (msg or "")
+                                _probe_tail = _probe_tail[:300]
+                                if _probe_tail:
+                                    _probe_extra["errors"] = _probe_tail
                             _bs.record_probe(
                                 build_cmd,
                                 _bs_time.monotonic() - _bs_t0,
                                 "pass" if syntax_ok else "fail",
-                                path=path)
+                                path=path, **_probe_extra)
                     except FileNotFoundError as exc:
                         # Build tool absent → skip (never a false fail), mirroring
                         # the gcc-absent path below.

@@ -3232,7 +3232,70 @@ class ResolutionEngine:
         ``n_samples`` overrides the config sample count when given (used by the
         orchestrator to allocate more samples to "complex" units,
         UAB-lite). ``None`` (default) uses ``self.config.samples`` unchanged.
+
+        Retry diversity (sprint-24 cycle-C, wiring the R5 ladder): attempt 1+
+        rotates one presentation axis per attempt (side ordering → output
+        layout → instruction position) via :func:`retry_profile_variant` —
+        the same palette the calibration DOE explored, so every variant is
+        known-parseable. Additionally, when the PREVIOUS attempt truncated
+        (``finish_reason=length`` / ``failure_kind="truncated"`` — the
+        truncation-looping class: the model runs past the output ceiling on
+        tiny units, flask-0006/redis-0052/tokio-0108/zenodo-0079 at 160-1,317
+        input tokens), the temperature is raised so the sampler escapes the
+        degenerate repetition cycle; same-family retries re-loop.
         """
+        _prev_truncated = (
+            prev_candidate is not None
+            and (
+                getattr(prev_candidate, "finish_reason", None) == "length"
+                or (getattr(prev_candidate, "failure_kind", "") or "") == "truncated"
+            )
+        )
+        if _prev_truncated and temperature_override is None:
+            temperature_override = min(
+                1.0, round(float(self.config.temperature) + 0.35, 2))
+        _ladder_base = None
+        if attempt >= 1:
+            try:
+                from capybase.prompt_profile import (
+                    active_profile as _ap, set_active_profile as _sap,
+                )
+                from capybase.retry_ladder import retry_profile_variant as _rpv
+                _base_prof = _ap()
+                _variant_prof = _rpv(_base_prof, attempt)
+                if _variant_prof is not _base_prof:
+                    _sap(_variant_prof)
+                    _ladder_base = _base_prof
+            except Exception:  # noqa: BLE001 — ladder is best-effort
+                _ladder_base = None
+        try:
+            return self._propose_impl(
+                unit, context,
+                failures=failures,
+                prev_candidate=prev_candidate,
+                n_samples=n_samples,
+                attempt=attempt,
+                temperature_override=temperature_override,
+            )
+        finally:
+            if _ladder_base is not None:
+                from capybase.prompt_profile import (
+                    set_active_profile as _sap,
+                )
+                _sap(_ladder_base)
+
+    def _propose_impl(
+        self,
+        unit: ConflictUnit,
+        context: ContextBundle,
+        *,
+        failures: list[VerificationFailure] | None = None,
+        prev_candidate: CandidateResolution | None = None,
+        n_samples: int | None = None,
+        attempt: int = 0,
+        temperature_override: float | None = None,
+    ) -> list[CandidateResolution]:
+        """The candidate-generation body (called by :meth:`propose`)."""
         prompt_trims: list[dict] = []
         if failures and prev_candidate and prev_candidate.resolved_text:
             prompt_version = PROMPT_REPAIR
@@ -3314,7 +3377,13 @@ class ResolutionEngine:
         # Single sample or no parallelism: sequential (fast path, no overhead).
         if n == 1 or not self.config.parallel_samples:
             for _ in range(n):
-                cand = self._one(unit, context, prompt, prompt_version)
+                # Pass the override through (cycle-C): the truncation
+                # loop-breaker and R3's diverse-temperature probes both ride
+                # this path with n_samples=1 — dropping it here sampled them
+                # at the base temperature (R3's 0.4/0.6 were dead wires).
+                cand = self._one(
+                    unit, context, prompt, prompt_version,
+                    temperature_override=temperature_override)
                 if prompt_trims:
                     cand.prompt_trims = list(prompt_trims)
                 candidates.append(cand)
@@ -3324,7 +3393,10 @@ class ResolutionEngine:
             # into ~1×latency. Safe because the adapter is stateless per-call.
             candidates = self._sample_parallel(
                 unit, context, prompt, prompt_version, n,
-                temperature_override=self.config.sampling_temperature,
+                temperature_override=(
+                    temperature_override
+                    if temperature_override is not None
+                    else self.config.sampling_temperature),
             )
             if prompt_trims:
                 for c in candidates:
@@ -3521,6 +3593,7 @@ class ResolutionEngine:
         failures: list[VerificationFailure] | None = None,
         prev_candidate: CandidateResolution | None = None,
         n_samples: int | None = None,
+        attempt: int = 0,
     ) -> tuple[list[CandidateResolution], ConsensusReport | None]:
         """Generate N samples and reorder so the majority winner is first.
 
@@ -3537,11 +3610,14 @@ class ResolutionEngine:
         ``prev_candidate`` (with ``failures``) selects the targeted *repair*
         prompt on a retry instead of the generic retry prompt — forwarded to
         ``propose`` so self-consistency retries keep the CEGIS counterexample
-        feedback instead of degrading to a from-scratch retry.
+        feedback instead of degrading to a from-scratch retry. ``attempt``
+        (the retry index) is forwarded too — it drives propose()'s retry-
+        presentation ladder and truncation loop-breaker.
         """
         candidates = self.propose(
             unit, context,
             failures=failures, prev_candidate=prev_candidate, n_samples=n_samples,
+            attempt=attempt,
         )
         if len(candidates) <= 1:
             return candidates, None

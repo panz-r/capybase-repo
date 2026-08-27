@@ -1141,7 +1141,8 @@ class FakeConsensusEngine:
         )
 
     def propose_with_consensus(self, unit, context, *, failures=None,
-                               prev_candidate=None, n_samples=None):
+                               prev_candidate=None, n_samples=None,
+                               attempt=0):
         return list(self._candidates), self._report
 
 

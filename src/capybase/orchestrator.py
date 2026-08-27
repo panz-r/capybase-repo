@@ -9511,11 +9511,15 @@ class Orchestrator:
                                     and "timed out after" in (_build_output or "")
                                 )
                                 if _p2_bs is not None:
+                                    _p2_err_tail = ""
+                                    if not _build_ok and _build_output:
+                                        _p2_err_tail = _build_output[-300:]
                                     _p2_bs.record_probe(
                                         _build_cmd, _p2bt_dur,
                                         "timeout" if _p2_timed_out
                                         else ("pass" if _build_ok else "fail"),
-                                        path=path)
+                                        path=path,
+                                        errors=_p2_err_tail or None)
                                     if _p2_timed_out:
                                         # _run_raw_test's 120s cap on a
                                         # full-tree command — same class as
@@ -13126,12 +13130,13 @@ class Orchestrator:
                     self.resolution_engine.propose_with_consensus(
                         unit, context, failures=failures,
                         prev_candidate=prev_candidate, n_samples=n_complex,
+                        attempt=retry_count,
                     )
                 )
             else:
                 candidates = self.resolution_engine.propose(
                     unit, context, failures=failures, prev_candidate=prev_candidate,
-                    n_samples=n_complex,
+                    n_samples=n_complex, attempt=retry_count,
                 )
             outcome.consensus = consensus_report
             # Prompt-assembly instrumentation (s23): one event per prompt
