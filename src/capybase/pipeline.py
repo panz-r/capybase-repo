@@ -192,6 +192,20 @@ class Pipeline:
     Walks stages in order, builds typed contexts, calls registered
     mechanisms. Journaling is built-in (every engagement and decline
     is recorded). Adding a mechanism requires NO pipeline changes.
+
+    Phased execution protocol (the orchestrator's pattern at
+    POST_REPAIR_EXHAUSTION): ``execute`` returns on the FIRST
+    engagement, so when a caller needs mechanisms that require
+    caller-provided state (compile verdicts) or must run in a specific
+    order, it re-executes the stage in PHASES with later mechanisms
+    latched off (``enabled = False``) until their phase. Two rules
+    learned the hard way (sprint-24):
+
+    1. A DETERMINISTIC mechanism re-engages on every re-execution —
+       latch it off after its phase or it preempts the later
+       mechanisms (the sea-orm preemption bug).
+    2. Latches must be restored idempotently at each phase-A entry —
+       an exception in a prior round must not poison the next.
     """
 
     def __init__(self, *, journal: Any = None):
