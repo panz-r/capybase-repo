@@ -2701,3 +2701,27 @@ journals show the R1 fail-closed guard firing on redis-0013/0049/0055
 and fixes the compile; redis-0049's actual blocker was the tier-2
 deadline, now covered by the churn fallback). The reordering would
 save latency at most. Not pursued this cycle.
+
+### Cycle-E early findings (2026-08-27, first 3 cases)
+
+**flask-0006: ORACLE_DIVERGENT — the starvation fix works.** From 3/3
+empty-escalates to 2/3 files written (max_tokens 2048 confirmed in the
+flight configs). Session 4187: retry-0 `kind=empty` — the C7' fast-
+fail fired on the parsed-empty kind for the first time in any cycle
+(the P2 chain finally engaged) → single-side fallback → file written.
+Session cff8: retry-1 `empty=False` — real model content at retry 1
+(the R5 ladder's side-ordering flip + the truncation breaker). The
+remaining gap is oracle-content match (sim 0), not completion.
+
+**clickhouse-0021: the midband self-consistency delivers the designed
+stability trade.** Unanimous `keep` 3/3 in all three sessions
+(agreement 1.0, conf 0.95-0.97) — the model's true center of mass is
+keep (skip_stream_merging is genuinely significant CURRENT function-
+ality); cycle A's PASS was the lucky single-sample `superseded` draw.
+The case is now a stable NEAR 0.747 instead of PASS/NEAR/ESC roulette
+across cycles.
+
+**Migration #2 landed (f70834f):** the no-progress rescue executes
+Stage.PRE_ESCALATE through the pipeline — F1CompileCleanTakeover
+registers for both stages (the same decision at the unit's last
+chance); PRE_ESCALATE engagement test added.
