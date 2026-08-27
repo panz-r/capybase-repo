@@ -3061,3 +3061,20 @@ three phases. This also explains why redis-0049's Phase-C ballot
 declined with no exception: not preemption there (tier-1 declined on
 churn), but sea-orm's class is now correct end-to-end. Cycle-I
 validates.
+
+### zenodo-0079's lead fixed: P6b splice-level delimiter repair (2026-08-27)
+
+The cycle-G journal showed the case's new failure mode: confident real
+candidates (needs_human=False, conf 0.9) failing "SyntaxError:
+unmatched ')'" identically across retries → no-progress escalate. The
+candidate-level P6 check was blind to it: a candidate whose first line
+closes a paren opened BEFORE the marker span is internally balanced
+alone — the imbalance only exists spliced. P6b (b548fb3): on a
+delimiter-shaped unit failure, repair the SPLICED buffer, re-extract
+the marker region, re-validate (p6b_splice_delimiter_repair journal).
+Lands cycle-I.
+
+redis-0013's cycle-G trail: all four pipeline mechanisms declined by
+the book (tier-1 not-near-one-sided, compile-clean not-exactly-one,
+ballot declined). The decline journaling (8bd8495) shows WHY in
+cycle-H+; the churn fallback needs both sides compiling.
