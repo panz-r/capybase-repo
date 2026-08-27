@@ -11851,6 +11851,65 @@ class Orchestrator:
                             step_index=self.step, path=path,
                         )
         if not skip_deterministic:
+            # Storage-class relocation repair (s24 cycle-J, the C1b-promotion
+            # item from the reviewer synthesis): gcc's "invalid storage class
+            # for function X" means the model's merge declared X inside a
+            # function body. Remove the misplaced declaration — the next
+            # round's C1 derived-prototype re-places it at file scope, or the
+            # removal alone suffices when the real definition exists below
+            # (redis-0013's wf trace: two rounds burned reaching the state C1
+            # could fix). Whole-file-unit contract; compiler re-gates it.
+            if f"storclass:{_sig}" not in _tried:
+                _sc_msgs = "\n".join(
+                    getattr(f, "message", "") for f in failures)
+                if "invalid storage class for function" in _sc_msgs:
+                    from capybase.verification import (
+                        find_misplaced_declaration,
+                        inject_symbol_declaration,
+                    )
+                    try:
+                        _spliced_sc = _resolved_buffer(original, accepted)
+                    except Exception:  # noqa: BLE001
+                        _spliced_sc = None
+                    if _spliced_sc:
+                        _mis = find_misplaced_declaration(
+                            _spliced_sc, _sc_msgs)
+                        if _mis is not None:
+                            _sc_lines = _spliced_sc.split("\n")
+                            _decl = _sc_lines.pop(_mis[0])
+                            _relocated = inject_symbol_declaration(
+                                "\n".join(_sc_lines), _decl,
+                                language)
+                            if _relocated is not None:
+                                _sc_unit = unit.model_copy(
+                                    update={"marker_span": None,
+                                            "unit_kind": "whole_file"})
+                                _sc_cand = CandidateResolution(
+                                    candidate_id=(
+                                        getattr(_old_cand, "candidate_id",
+                                                unit.unit_id)
+                                        or unit.unit_id) + ":stcreloc",
+                                    unit_id=unit.unit_id,
+                                    model_name="deterministic",
+                                    resolved_text=_relocated,
+                                    prompt_version=(
+                                        "deterministic_storage_class_relocation"),
+                                    provenance="deterministic_symbol_injection",
+                                    self_reported_confidence=0.85,
+                                    explanation=(
+                                        f"storage-class relocation: moved "
+                                        f"misplaced declaration to file scope: "
+                                        f"{_decl[:80]}"),
+                                )
+                                self.journal.emit(
+                                    "symbol_inject_applied",
+                                    {"kind": "storage_class_relocation",
+                                     "line": _mis[0] + 1,
+                                     "declaration": _decl[:120], "path": path},
+                                    step_index=self.step, path=path,
+                                    unit_id=unit.unit_id)
+                                _tried.add(f"storclass:{_sig}")
+                                return [(_sc_unit, _sc_cand)]
             # Deterministic #if/#endif balance repair: the entity-splitting + splice
             # pipeline can leave a whole-file preprocessor imbalance that no single
             # sub-unit owns (a conflict region sliced mid-file). Try a single-edit

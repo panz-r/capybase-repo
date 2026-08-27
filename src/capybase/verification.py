@@ -6824,3 +6824,49 @@ def _run_rust_shadow_test(
     # cargo test exits 0 when tests pass, non-zero on a failed assertion or a
     # compile error in the merged code.
     return (proc.returncode == 0, proc.returncode, target)
+
+
+def find_misplaced_declaration(
+    buffer: str, error_text: str,
+) -> tuple[int, str] | None:
+    """(0-based line, declaration text) of a function declaration declared
+    INSIDE a function body — gcc's "invalid storage class for function".
+
+    redis-0013's wf trace: the model's merge carried cliSwitchProto's
+    prototype inside a function (storage-class error at round 0); two
+    repair rounds passed before the buffer reached the implicit-
+    declaration state C1 handles. Relocating the misplaced declaration
+    (remove it; C1's derived-prototype re-places it at file scope)
+    short-circuits those rounds.
+    """
+    import re as _re
+
+    m = _re.search(
+        r"invalid storage class for function ['‘']([A-Za-z_]\w*)[''’]",
+        error_text)
+    if not m:
+        return None
+    symbol = m.group(1)
+    lines = buffer.split("\n")
+    depth = 0
+    in_comment = False
+    for i, raw in enumerate(lines):
+        line = raw
+        if in_comment:
+            if "*/" in line:
+                in_comment = False
+                line = line.split("*/", 1)[1]
+            else:
+                depth += line.count("{") - line.count("}")
+                continue
+        if "/*" in line and "*/" not in line:
+            in_comment = True
+            line = line.split("/*")[0]
+        s = line.strip()
+        if s.startswith("#"):
+            continue
+        if depth > 0 and s.endswith(";") and symbol in s and "(" in s:
+            # A declaration of the symbol at non-file scope.
+            return i, s
+        depth += line.count("{") - line.count("}")
+    return None
