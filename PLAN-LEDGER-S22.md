@@ -2793,3 +2793,26 @@ the second pop; fixed — the engine now repeats its last response).
 #1+#2 (pipeline takeovers), the uncoded-rustc classifier (tokio-0108),
 and the prompt-mirror fix. Watch: tokio-0108 conversion, redis-0049/
 0013 churn-fallback landings, sqlite-0040's first real probe error.
+
+### Cycle-G prep: the sqlite-0029 validation gap fixed + migration #3 (2026-08-27)
+
+**a5c3059 — whole-file units no longer skip the per-unit syntax
+check.** The blanket "no marker span → pass" let a model answer a
+whole-file prompt with BLOCK-interior content (sqlite-0029's cycle-E
+candidate began `if( pTab->tabFlags...` at file scope; the file-level
+build caught it too late for a cheap retry). The resolved_text IS the
+file for whole-file units — it now runs the same brace+compile
+pipeline: parse errors (the wrong-shape signature) fail at unit level;
+standalone-unresolvable errors still defer.
+
+**38383f1 — migration #3: the tier-2 ballot as a mechanism.**
+F1Tier2Adjudication takes the orchestrator's adjudicator as an
+injected decide callable (mechanisms never touch orchestrator
+internals). Three-phase execution preserves the original sequence
+exactly — A: tier-1 churn; B: probes + compile-clean; C: the ballot,
+only when A and B declined (no extra LLM call when compile-clean
+already took the single compiling side; an enable latch prevents
+double-balloting across the phase re-executions). The repair-
+exhaustion cluster (tier-1, compile-clean, tier-2) is now fully
+mechanism-mediated; the orchestrator keeps side effects only (side
+loading, probes, gates, landing).
