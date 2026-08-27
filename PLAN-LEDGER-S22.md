@@ -2725,3 +2725,22 @@ across cycles.
 Stage.PRE_ESCALATE through the pipeline — F1CompileCleanTakeover
 registers for both stages (the same decision at the unit's last
 chance); PRE_ESCALATE engagement test added.
+
+### redis-0040's cycle-E flip is honesty, not regression (2026-08-27)
+
+redis-0040 (PASS in B/C/D → ESC in E) looked like a midband self-
+consistency regression. The sample data says otherwise: its three
+cycle-E sessions drew (keep,keep,sup), (sup,keep,keep), (keep,keep,
+keep) — a true adjudication center of ~70/30 keep — while the oracle
+wants superseded (cycle-D's takeover of current PASSed). Every prior
+PASS was a ~30%-probability lucky single-sample draw. A softened
+majority rule would NOT restore them (no session had a superseded
+majority). The strict unanimity bar loses nothing real here; the case
+is genuine keep-bias in the LLM on a superseded-oracle shape — the
+separating signal is deterministic (churn_mult / in-band numbers), a
+future midband calibration target. Left as-is.
+
+protobuf-0051's cycle-E probes now name the failing target
+(google/protobuf/descriptor.lo Error 1 — the conflict file itself);
+the gcc diagnostic line sits above the captured window (the error-
+line preference in 85a7935 lands cycle-F).
