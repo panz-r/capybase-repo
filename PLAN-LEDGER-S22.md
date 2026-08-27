@@ -3089,3 +3089,13 @@ fallback's both-compiling precondition is genuinely unmet. This is
 era-adjacent rather than wiring: the case's honest ceiling under this
 toolchain may be ESC unless the side errors are also spurious. The
 cycle-I decline journaling + full probe tails will settle it.
+
+### The conflict-target probe's first live classification (2026-08-28)
+
+sqlite-0040 in cycle-H: **ESCALATE_TOOLCHAIN** — the full-tree probes
+rc 0 (the conditional omission: configure drops the tcl extension when
+tcl.h is absent) while `conflict_target_probe: make tclsqlite.lo rc 2`
+on the oracle's own file. The case now short-circuits honestly at
+probe cost instead of burning a full resolution budget against probes
+that can never pass. The 0.0s-probe mystery that opened this thread is
+fully closed.
