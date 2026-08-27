@@ -3130,3 +3130,50 @@ repair), and the ballot-decline journaling (redis-0049's why).
   harvest STAGED (not launched; the user's go decision after cycle-I's
   validation). Same shape as the sprint-22 harvest + skip-size-guard +
   the conflict-target probe active.
+
+### Sprint-24 plan UPDATED from two-reviewer feedback (2026-08-28, cycle-I in flight)
+
+**Reviewer rating: Response 2 > Response 1.** Response 2's items are
+mechanism-level, compiler-gated, and reuse existing machinery; Response
+1's headline (an intent-coverage PASS verdict bypassing oracle
+similarity) is the metric-gaming pattern rejected twice in this
+project's history — ORACLE_DIVERGENT already honestly encodes "valid
+alternative merge". Response 1 also misdiagnoses sqlite-0019 (fresh
+worktrees per session; the swings are last-buffer variance, not stale
+state).
+
+**ADOPTED (the cycle-J/sprint-25 queue, ordered by leverage):**
+
+1. **C1b Phase-A promotion** (redis-0013 class — R2's #1, the best
+   single idea in either response): run symbol injection /
+   derived-prototype deterministically at the FIRST whole-file compile
+   failure, BEFORE LLM retries burn the wall budget. The journals show
+   C1b fixes the compile and then the case dies at the deadline — the
+   order is the bug. Includes R1's budget short-circuit framing: once
+   a deterministic fix passes the gate, skip remaining model retries
+   for the unit.
+2. **Error-signature equivalence probe** (protobuf-0051, redis-0049):
+   diff the merged buffer's compiler stderr signature against the
+   pristine sides' — identical signatures mean era/environment, not
+   merge defects → ESCALATE_TOOLCHAIN. Extends the conflict-target
+   probe's proven pattern + the existing _DRIFT_TOLERANT_CODES
+   philosophy to the case-classification level.
+3. **Pristine-side micro-repair** (axum-0013): when tier-2's chosen
+   side fails the compile gate, run C1b on the SIDE's errors (the
+   other side may carry the missing declaration) before declining.
+   Conservative: still compiler-gated.
+4. **Context-shattering loop breaker** (redis-0052): on loop detection
+   (identical signatures), spike temperature AND switch to a diff-only
+   prompt — a repetition loop is driven by the prompt's repetitive
+   content; changing the attractor, not just the temperature, is why
+   the cycle-C breaker alone didn't convert it. Hard-escalate at the
+   third repeat (R1's framing).
+
+**HOLD (needs calibration):** refactor-vs-functional bias prompting
+for the coin-flips (R2's #5) — the direction is speculative: the
+redis-0040 oracle wants the DISCARD of the loser's content, and the
+directive as drafted pushes integration. Revisit only with calibration
+data.
+
+**REJECTED:** R1's intent-coverage PASS verdict (metric gaming — the
+thrice-rejected pattern); R1's worktree sanitization (misdiagnosis).
