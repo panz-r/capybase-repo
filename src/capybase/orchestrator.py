@@ -9937,6 +9937,13 @@ class Orchestrator:
                                             self, "_phase2_model_used", False),
                                     )
                                     _pipe = self._pipeline()
+                                    # Tier-1's one shot: enabled for THIS
+                                    # execute (Phase A), disabled for the
+                                    # later phases' re-executions (see the
+                                    # Phase-B comment). Re-enabled here
+                                    # idempotently — an exception in a prior
+                                    # round may have left it off.
+                                    self._f1_tier1_mech.enabled = True
                                     self._f1_tier2_mech.enabled = False
                                     try:
                                         _f1_result = _pipe.execute(
@@ -9967,11 +9974,16 @@ class Orchestrator:
                                     if _f1_side is None:
                                         # Phase B: probe both pristine sides
                                         # and let the compile-clean mechanism
-                                        # take a single compiling one. The
-                                        # tier-2 ballot is disabled here —
-                                        # it ran (or declined) in Phase A and
-                                        # must not bill a second LLM call
-                                        # for the same exhaustion point.
+                                        # take a single compiling one. BOTH
+                                        # tier-1 and the tier-2 ballot are
+                                        # disabled here — Pipeline.execute
+                                        # returns on first engagement, so a
+                                        # re-engaging tier-1 would preempt
+                                        # compile-clean from ever running
+                                        # (the sea-orm-0021 preemption bug),
+                                        # and the ballot must not bill a
+                                        # second call.
+                                        self._f1_tier1_mech.enabled = False
                                         _compiling = {}
                                         for _side_name in ("current", "replayed"):
                                             _side_text = _sides_f1.get(_side_name, "")
@@ -11246,7 +11258,8 @@ class Orchestrator:
         self._f1_compile_clean_mech = F1CompileCleanTakeover()
         self._f1_tier2_mech = F1Tier2Adjudication(self._f1_tier2_adjudicate)
         self._churn_fallback_mech = ChurnFallbackTakeover()
-        pipe.register(F1Tier1Takeover())
+        self._f1_tier1_mech = F1Tier1Takeover()
+        pipe.register(self._f1_tier1_mech)
         pipe.register(self._f1_compile_clean_mech)
         pipe.register(self._f1_tier2_mech)
         pipe.register(self._churn_fallback_mech)

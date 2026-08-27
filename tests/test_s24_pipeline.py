@@ -322,3 +322,55 @@ def test_churn_fallback_mechanism_matches_whole_side_heuristic():
         # Not both compiling → decline.
         mech.set_compiling_sides({"current": True, "replayed": False})
         assert pipe.execute(Stage.POST_REPAIR_EXHAUSTION, ctx) is None
+
+
+def test_phase_reexecution_not_preempted_by_tier1():
+    """The sea-orm-0021 preemption bug: Pipeline.execute returns on FIRST
+    engagement, so tier-1 (deterministic — engages whenever near-one-sided)
+    preempted compile-clean/the ballot/the fallback from ever running in
+    the Phase-B/C/D re-executions. With tier-1 latched off outside Phase A,
+    the Phase-B re-execution must reach compile-clean and take the single
+    compiling side."""
+    from capybase.mechanisms import (
+        ChurnFallbackTakeover,
+        F1CompileCleanTakeover,
+        F1Tier1Takeover,
+    )
+    from capybase.pipeline import Pipeline, RepairExhaustedContext, Stage
+
+    pipe = Pipeline()
+    t1 = F1Tier1Takeover()
+    cc = F1CompileCleanTakeover()
+    cf = ChurnFallbackTakeover()
+    pipe.register(t1)
+    pipe.register(cc)
+    pipe.register(cf)
+
+    # near-one-sided shape (replayed ≈ base) + exactly current compiling:
+    # tier-1 picks replayed (wrong — it fails the gate), compile-clean
+    # should then take current.
+    ctx = RepairExhaustedContext(
+        path="f.rs", language="rust", step_index=1,
+        sides={"current": "fn a() {}", "replayed": "fn a() { new }"},
+        base_text="fn a() {}")
+
+    # Phase A: tier-1 engages.
+    a = pipe.execute(Stage.POST_REPAIR_EXHAUSTION, ctx)
+    assert a.mechanism == "f1_tier1_takeover" and a.metadata["side"] == "replayed"
+
+    # (Orchestrator compile-gates the pick; it fails → Phase B.)
+    t1.enabled = False
+    cc.set_compiling_sides({"current": True, "replayed": False})
+    b = pipe.execute(Stage.POST_REPAIR_EXHAUSTION, ctx)
+    assert b is not None and b.mechanism == "f1_compile_clean_takeover", (
+        "Phase B must reach compile-clean — tier-1's re-engagement "
+        f"preempted it (got {b.mechanism if b else None})"
+    )
+    assert b.metadata["side"] == "current"
+
+    # Phase D shape (both compile, ballot declined): churn fallback runs.
+    t1.enabled = False
+    cc.set_compiling_sides({"current": True, "replayed": True})
+    cf.set_compiling_sides({"current": True, "replayed": True})
+    d = pipe.execute(Stage.POST_REPAIR_EXHAUSTION, ctx)
+    assert d is not None and d.mechanism == "churn_fallback_takeover"

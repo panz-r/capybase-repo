@@ -37,6 +37,13 @@ class F1Tier1Takeover:
 
     def __init__(self, *, churn_threshold: int = 30):
         self.churn_threshold = churn_threshold
+        # The orchestrator's phased execution re-runs the stage after
+        # Phase A; tier-1 is deterministic and already had its shot (its
+        # pick failing the compile gate means the LATER mechanisms must
+        # run — but Pipeline.execute returns on first engagement, so a
+        # re-engaging tier-1 would preempt compile-clean/the ballot/the
+        # fallback from ever running). Disabled outside Phase A.
+        self.enabled = True
 
     @property
     def stage(self) -> Stage:
@@ -49,6 +56,8 @@ class F1Tier1Takeover:
     def engage(self, ctx: StageContext) -> MechanismResult | None:
         """Evaluate the near-one-sided trigger and return a takeover."""
         if not isinstance(ctx, RepairExhaustedContext):
+            return None
+        if not self.enabled:
             return None
         if not ctx.sides:
             return None
