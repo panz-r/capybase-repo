@@ -2621,3 +2621,35 @@ verified untouched). The sea-orm-0021 oracle path: a union merge that
 re-emits a group with formatting variance now dedups.
 
 Cycle-D (in flight) carries ce76028; 9e520a0 and 71b9bbd await cycle E.
+
+### Cycle-D specimen RESULTS + the truncation-class true root cause (2026-08-27)
+
+Code = ce76028 diversity batch (ladder + breaker + temp dead-wire).
+**4 PASS + sea-orm NEAR 3/3 of 18**: sqlite-0004, sqlite-0030,
+redis-0040, redis-0055 PASS all held; redis-0047 reverted to ESC (the
+known variance case, C's 2/3 flips both ways). The truncation class
+(flask-0006, redis-0052, tokio-0108, zenodo-0079) did NOT convert —
+and the flight forensics explain why the breaker treated the wrong
+disease:
+
+**The class is OUTPUT STARVATION, not looping.** The eval's max_tokens
+sizing (conflict_lines × 16, floor 512) gave tokio-0108 a 1,120-token
+cap; the gemma server bills a large hidden prefill (~800 tokens on a
+5K-char prompt) against the completion budget, leaving ~300 effective
+output tokens. tokio-0108 attempt2 — under the R5 MARKDOWN_CODE variant
+(the ladder IS working; the model answered in the fenced-code + JSON
+shape) — produced a substantively CORRECT merge cut at 696 chars with
+finish_reason=length. flask-0006's larger prompt starved the output to
+zero bytes: the "empty truncated" signature. Every cycle has carried
+this; the diagnosis of "repetition looping" was wrong.
+
+Fix (harness-side, corpus-tuned knob): floor raised 512 → 2048 in
+_config_for. The resolver-side breaker/ladder stay (correct for actual
+looping; harmless otherwise). Expect the four cases to get real
+completions next cycle.
+
+Full test gate with the cycle-C code: 6,321 passed, 1 failure — the
+rust end-to-end noncompiling-merge test whose escalate-only assertion
+encoded the discarded-takeover world; updated to accept the compile-
+gated portfolio completion (the broken merge is still rejected; the
+portfolio's current_only side passes the same compile floor).

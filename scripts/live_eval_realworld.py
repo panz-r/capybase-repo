@@ -691,9 +691,16 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # Output token cap proportional to conflict size: a 3-line conflict doesn't
     # need 8K tokens of generation headroom (the model would hallucinate
     # boilerplate, wasting time on the slow endpoint). Cap at 16× the conflict's
-    # non-blank line count, floored at 512, ceiling at 8192.
+    # non-blank line count, ceiling at 8192. Floor at 2048 (was 512): the gemma
+    # server bills a large hidden prefill against the completion budget
+    # (~800 tokens on a 5K-char prompt, per the adjudication pre-fill
+    # measurements) — a 512-1120 token cap leaves ~0-300 effective output
+    # tokens, so the model's merge gets cut mid-JSON with finish_reason=length
+    # (tokio-0108's attempt2 produced a CORRECT merge cut at 696 chars;
+    # flask-0006's bigger prompt starved the output to empty). The four
+    # "truncation-looping" specimen cases are this starvation, not looping.
     _conflict_lines = sum(1 for ln in (case.marker_original or "").splitlines() if ln.strip())
-    cfg.model.max_tokens = min(8192, max(512, _conflict_lines * 16))
+    cfg.model.max_tokens = min(8192, max(2048, _conflict_lines * 16))
     cfg.model.json_mode = True
     cfg.model.request_timeout_seconds = 600
     cfg.model.generation_timeout_seconds = 240
