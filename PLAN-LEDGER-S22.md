@@ -3017,3 +3017,30 @@ flask-0006 joins the oracle-subjective bucket (5 cases now: redis-0040,
 redis-0047, clickhouse-0021, flask-0006, + sea-orm-0021's takeover
 half). The completions exist (real buffers, marker-free); matching this
 oracle is guessing the author's mind.
+
+### Cycle-G FINAL (2026-08-27, 18/18) + cycle-H launched
+
+**4 PASS + 1 ORACLE_DIVERGENT — identical shape to cycle-F.** The
+deterministic core (redis-0055, sqlite-0004, sqlite-0030, tokio-0108)
+held; flask OD 2/3; redis-0040 the documented 1/3 coin-flip. Full gate
+for the whole-file guard + migration #4 + probe work: 6,345 passed, 0
+failed.
+
+Two unconverged cases carry specific leads (not mechanism failures):
+
+- sea-orm-0021: tier-1 engages (pick=replayed, correct per churn), the
+  compile gate kills the pick (replayed fails probes) — but Phase B's
+  compile-clean NEVER engages despite the older rung's probes showing
+  current compiling. The Phase-B verify_file verdicts and the old
+  rung's whole_side_probe outcomes disagree — a check-context
+  discrepancy to reconcile next.
+- redis-0049: all four pipeline phases ran and declined correctly
+  (tier-1 declined, compile-clean declined, tier-2 ballot returned
+  None — no exception journaled, so an unparseable/low-confidence
+  ballot; the inline churn fallback needed both sides compiling and
+  didn't fire). The migration-#4 mechanism + the driver-line probe fix
+  land in cycle-H for this class.
+
+Cycle-H in flight carrying: the conflict-target toolchain probe
+(sqlite-0040 classifies honestly), migration #4 (the churn fallback as
+a mechanism with fresh probe verdicts), and the driver-line probe fix.
