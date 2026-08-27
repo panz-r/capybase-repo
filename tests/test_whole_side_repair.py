@@ -114,17 +114,25 @@ class _RecJournal:
 
 
 class _ScriptedEngine:
-    """raw_complete pops scripted responses; records every call."""
+    """raw_complete pops scripted responses; records every call.
+
+    When the script is exhausted, the LAST response repeats — the
+    self-consistency adjudicators draw 3 samples, and a single scripted
+    verdict should read as a unanimous verdict (an IndexError mid-loop
+    would abort the whole adjudication)."""
 
     def __init__(self, responses: list[str]):
         self._responses = list(responses)
+        self._last = ""
         self.calls: list[str] = []
         self.config = SimpleNamespace(max_tokens=8192)
 
     def raw_complete(self, prompt, *, json_mode=False, temperature=None,
                      max_tokens=None):
         self.calls.append(prompt)
-        return SimpleNamespace(text=self._responses.pop(0))
+        if self._responses:
+            self._last = self._responses.pop(0)
+        return SimpleNamespace(text=self._last)
 
 
 class _FakeGit:
