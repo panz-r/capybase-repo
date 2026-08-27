@@ -13481,6 +13481,61 @@ class Orchestrator:
             if not hasattr(outcome, "_attempt_hf_counts"):
                 outcome._attempt_hf_counts = []
             outcome._attempt_hf_counts.append(len(validation.hard_failures))
+            # P6b (s24 cycle-H): splice-level delimiter repair. The
+            # candidate-level P6 check can't see context imbalances — a
+            # candidate whose first line closes something opened BEFORE the
+            # marker span is internally balanced alone but yields
+            # "SyntaxError: unmatched ')'" spliced (zenodo-0079: confident
+            # candidates failing identically across retries, dying at
+            # no-progress). On a delimiter-shaped failure, repair the
+            # SPLICED text and re-splice the candidate from it.
+            if (not validation.passed
+                    and unit.marker_span is not None
+                    and cand.resolved_text
+                    and any(
+                        "unmatched '" in (getattr(f, "message", "") or "")
+                        and (")" in f.message or "]" in f.message)
+                        for f in validation.hard_failures)):
+                try:
+                    from capybase.adapters.parsers import splice_resolution
+                    from capybase.verification import (
+                        _delimiter_imbalance_line,
+                        _try_repair_delimiter,
+                    )
+                    _spliced = splice_resolution(
+                        unit.original_worktree_text,
+                        unit.marker_span, cand.resolved_text)
+                    if (_delimiter_imbalance_line(_spliced, unit.language)
+                            is not None):
+                        _repaired_splice = _try_repair_delimiter(
+                            _spliced, unit.language)
+                        if (_repaired_splice is not None
+                                and _delimiter_imbalance_line(
+                                    _repaired_splice, unit.language) is None):
+                            # Extract the repaired region back out of the
+                            # splice so the candidate stays splice-safe.
+                            _start, _end = unit.marker_span
+                            _sp_lines = _repaired_splice.split("\n")
+                            _region = "\n".join(_sp_lines[_start:_end + 1])
+                            if _region.strip():
+                                _repaired_cand = cand.model_copy(
+                                    update={"resolved_text": _region})
+                                _r_val = self.verification.verify(
+                                    unit, _repaired_cand)
+                                self._journal_validation(
+                                    unit, _repaired_cand, _r_val)
+                                if _r_val.passed:
+                                    self.journal.emit(
+                                        "p6b_splice_delimiter_repair",
+                                        {"candidate_id": cand.candidate_id,
+                                         "unit_id": unit.unit_id},
+                                        step_index=self.step, path=unit.path,
+                                        unit_id=unit.unit_id)
+                                    cand = _repaired_cand
+                                    validation = _r_val
+                                    outcome.validation = validation
+                except Exception:  # noqa: BLE001 — repair is best-effort
+                    pass
             # Sprint-19 P2: track this attempt's quality against a stashed
             # preservation-rejected candidate. Quality = passed validation
             # (warnings allowed — an equally-flagged retry is NOT strictly
