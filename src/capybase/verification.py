@@ -5803,15 +5803,29 @@ class VerificationEngine:
                             # returncode check).
                             _probe_extra = {}
                             if not syntax_ok:
-                                # Prefer the last ERROR-CONTAINING lines —
-                                # the gcc diagnostic precedes its caret-marker
-                                # line, so a raw tail can carry only markers
-                                # ("^~~~~~~; compilation terminated") with the
-                                # actual error just above the captured window
-                                # (sqlite-0040's probe tail had zero signal).
+                                # Prefer the last ERROR-CONTAINING lines,
+                                # EXCLUDING make/ninja driver summaries
+                                # (``make[1]: *** [...] Error 1`` matches
+                                # "error" but carries zero diagnostic signal —
+                                # protobuf-0051's tails were all driver
+                                # lines). The gcc diagnostic (which the
+                                # driver line references) is the signal.
+                                def _is_driver_summary(ln: str) -> bool:
+                                    s = ln.strip()
+                                    return (
+                                        s.startswith("make[")
+                                        or s.startswith("make:")
+                                        or s.startswith("ninja:")
+                                        or "Error 1" in s or "Error 2" in s
+                                        or "Waiting for unfinished jobs" in s
+                                    )
                                 _probe_err_sel = [
                                     ln for ln in err_lines
                                     if "error" in ln.lower()
+                                    and not _is_driver_summary(ln)
+                                ] or [
+                                    ln for ln in err_lines
+                                    if not _is_driver_summary(ln)
                                 ] or err_lines
                                 _probe_tail = "; ".join(_probe_err_sel[-3:]) if _probe_err_sel else (msg or "")
                                 _probe_tail = _probe_tail[:300]
