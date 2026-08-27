@@ -14212,7 +14212,14 @@ class Orchestrator:
                             # if a pristine side compiles cleanly, the takeover
                             # is a better answer than escalating (redis-0055:
                             # the guard fires before F1 ever gets a chance).
+                            # Migrated to the pipeline (PRE_ESCALATE stage,
+                            # same stage/mechanism contract as the file-level
+                            # repair-exhaustion path): the orchestrator probes
+                            # both sides and injects the verdicts; the
+                            # compile-clean mechanism owns the take-the-single-
+                            # compiling-side decision.
                             _np_f1_side = None
+                            _np_sides = None
                             try:
                                 _np_sides, _np_base = self._micro_stage_sides(unit.path)
                                 if _np_sides:
@@ -14226,9 +14233,32 @@ class Orchestrator:
                                                 repo_root=str(self.git.repo),
                                                 whole_text=_np_st)
                                             _np_compiling[_np_sn] = bool(_np_chk.passed)
-                                    _np_clean = [s for s, ok in _np_compiling.items() if ok]
-                                    if len(_np_clean) == 1:
-                                        _np_f1_side = _np_clean[0]
+                                    self._f1_compile_clean_mech.set_compiling_sides(
+                                        _np_compiling)
+                                    from capybase.pipeline import (
+                                        PreEscalateContext as _PEC,
+                                        Stage as _Stg,
+                                    )
+                                    _np_ctx = _PEC(
+                                        path=unit.path,
+                                        language=unit.language,
+                                        step_index=self.step,
+                                        sides=_np_sides,
+                                        base_text=_np_base or "",
+                                        escalation_reason=(
+                                            f"no_progress: signature repeated "
+                                            f"{max_repeat}/{len(recent)}"),
+                                    )
+                                    _np_result = self._pipeline().execute(
+                                        _Stg.PRE_ESCALATE, _np_ctx)
+                                    if (_np_result is not None
+                                            and _np_result.action == "takeover"
+                                            and _np_result.mechanism == "f1_compile_clean_takeover"):
+                                        _np_f1_side = _np_result.metadata.get("side")
+                                    else:
+                                        _np_f1_side = None
+                                else:
+                                    _np_f1_side = None
                             except Exception:  # noqa: BLE001
                                 _np_f1_side = None
                             if _np_f1_side is not None:

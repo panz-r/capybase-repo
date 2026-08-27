@@ -210,3 +210,35 @@ def test_f1_tier1_mechanism_matches_inline_semantics():
             f"(base {len(base.splitlines())}L, cur {len(cur.splitlines())}L, "
             f"rep {len(rep.splitlines())}L)"
         )
+
+
+def test_compile_clean_mechanism_engages_at_pre_escalate():
+    """The no-progress rescue migrated onto the pipeline: the compile-clean
+    mechanism takes the single compiling side at PRE_ESCALATE (the unit's
+    last chance before the no-progress guard escalates — redis-0055's
+    converter) using the same decision as POST_REPAIR_EXHAUSTION."""
+    from capybase.mechanisms import F1CompileCleanTakeover
+    from capybase.pipeline import Pipeline, PreEscalateContext, Stage
+
+    mech = F1CompileCleanTakeover()
+    pipe = Pipeline()
+    pipe.register(mech)
+
+    ctx = PreEscalateContext(
+        path="f.c", language="c", step_index=1,
+        sides={"current": "int a;", "replayed": "int b;"},
+        base_text="", escalation_reason="no_progress: stalled")
+    mech.set_compiling_sides({"current": True, "replayed": False})
+    result = pipe.execute(Stage.PRE_ESCALATE, ctx)
+    assert result is not None
+    assert result.action == "takeover"
+    assert result.metadata["side"] == "current"
+
+    # Both compiling → decline (no single winner; tier-2/churn territory).
+    mech.set_compiling_sides({"current": True, "replayed": True})
+    assert pipe.execute(Stage.PRE_ESCALATE, ctx) is None
+
+    # The tier-1 mechanism stays repair-exhaustion-only: PRE_ESCALATE with
+    # no verdicts set must not fire it (it isn't registered for this stage).
+    mech.set_compiling_sides({})
+    assert pipe.execute(Stage.PRE_ESCALATE, ctx) is None

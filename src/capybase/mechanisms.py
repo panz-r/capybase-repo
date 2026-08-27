@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from capybase.pipeline import (
     MechanismResult,
+    PreEscalateContext,
     RepairExhaustedContext,
     Stage,
     StageContext,
@@ -99,15 +100,17 @@ class F1CompileCleanTakeover:
     provides `compiling_sides: dict[str, bool]` in the metadata). This
     mechanism reads the verdicts and takes the compiling side.
 
-    Stage: POST_REPAIR_EXHAUSTION (after tier-1's churn check).
+    Stages: POST_REPAIR_EXHAUSTION (after tier-1's churn check, the
+    whole-file repair path) and PRE_ESCALATE (the unit-level no-progress
+    rescue — the same decision at the last chance before escalation).
     """
 
     def __init__(self, *, compiling_sides: dict[str, bool] | None = None):
         self._compiling_sides = compiling_sides or {}
 
     @property
-    def stage(self) -> Stage:
-        return Stage.POST_REPAIR_EXHAUSTION
+    def stage(self) -> list[Stage]:
+        return [Stage.POST_REPAIR_EXHAUSTION, Stage.PRE_ESCALATE]
 
     @property
     def name(self) -> str:
@@ -119,7 +122,7 @@ class F1CompileCleanTakeover:
 
     def engage(self, ctx: StageContext) -> MechanismResult | None:
         """Evaluate the compile-clean trigger."""
-        if not isinstance(ctx, RepairExhaustedContext):
+        if not isinstance(ctx, (RepairExhaustedContext, PreEscalateContext)):
             return None
         if not ctx.sides or not self._compiling_sides:
             return None
