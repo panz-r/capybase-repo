@@ -13449,6 +13449,12 @@ class Orchestrator:
                         break
             outcome.validation = validation
             outcome.attempts.append(cand)
+            # P8 (s24): per-attempt hard-failure counts for the proximity-
+            # based dynamic retry budget (a strictly-decreasing trend means
+            # the model is converging — see the budget-cap relaxation below).
+            if not hasattr(outcome, "_attempt_hf_counts"):
+                outcome._attempt_hf_counts = []
+            outcome._attempt_hf_counts.append(len(validation.hard_failures))
             # Sprint-19 P2: track this attempt's quality against a stashed
             # preservation-rejected candidate. Quality = passed validation
             # (warnings allowed — an equally-flagged retry is NOT strictly
@@ -13862,12 +13868,30 @@ class Orchestrator:
                     and not validation.hard_failures
                     and getattr(self, "_file_failing_unit_count", 0) <= 1
                 )
-                if _close and retry_count == _unit_budget:
+                # P8 (s24): proximity-based dynamic budget — the model is
+                # CONVERGING (this attempt's hard-failure count strictly
+                # below the FIRST attempt's). One extra retry is the
+                # cheapest conversion path for a near-miss; latched to one
+                # grant per unit, and the no-progress guard independently
+                # stops loops whose failure signatures stall.
+                _hf_trend = list(getattr(outcome, "_attempt_hf_counts", []))
+                _progress = (
+                    len(_hf_trend) >= 2
+                    and 0 < _hf_trend[-1] < _hf_trend[0]
+                    and not getattr(outcome, "_progress_grant_used", False)
+                )
+                if _progress:
+                    outcome._progress_grant_used = True
+                if (_close or _progress) and retry_count == _unit_budget:
                     self.journal.emit(
                         "retry_relaxation",
                         {"unit_id": unit.unit_id,
                          "original_cap": _unit_budget,
-                         "reason": "high-sim single-failing-unit"},
+                         "reason": (
+                             "converging-failure-trend"
+                             if _progress and not _close
+                             else "high-sim single-failing-unit"),
+                         "hf_trend": _hf_trend},
                         step_index=self.step, path=unit.path,
                         unit_id=unit.unit_id)
                     # fall through: don't escalate, let the retry happen

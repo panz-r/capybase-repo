@@ -2523,3 +2523,31 @@ def test_f1_churn_fallback_lands_when_adjudication_unavailable(tmp_path):
     )
     final = (repo / "app.py").read_text()
     assert final in (cur, rep), f"expected a pristine side, got {final!r}"
+
+
+def test_converging_failure_trend_grants_one_extra_retry(conflicted_repo):
+    """P8: a unit whose hard-failure count strictly decreases across
+    attempts (the model is converging) earns ONE extra retry at the
+    unit-count budget cap — the cheapest conversion path for a near-
+    miss. Bounded: the exact-equality check lets the cap be crossed
+    once, and a stalled/oscillating trend earns nothing."""
+    repo = conflicted_repo["repo"]
+    # Attempt 1: 2 hard failures (broken + marker); attempt 2: 1 hard
+    # failure (only broken); attempt 3 would pass.
+    engine = FakeConsensusEngine([
+        _cand("    return 'hi'(  \n<<<<<<< leaked\n", cid="a-two"),
+        _cand("    return 'howdy'(", cid="b-one"),
+        _cand("    return 'hi' + 'howdy'", cid="c-pass"),
+    ])
+    _cfg = _self_consistency_config(repo)
+    _cfg.future.enable_empty_fast_fail = False
+    _cfg.policy.max_retries_per_unit = 1  # the cap the trend must exceed
+    orch = Orchestrator(
+        _cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    # The third (passing) candidate only ran if the trend grant fired.
+    assert not result.escalated
+    final = (repo / "app.py").read_text()
+    assert "hi' + 'howdy" in final or "howdy" in final
