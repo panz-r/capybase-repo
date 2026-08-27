@@ -3099,3 +3099,23 @@ on the oracle's own file. The case now short-circuits honestly at
 probe cost instead of burning a full resolution budget against probes
 that can never pass. The 0.0s-probe mystery that opened this thread is
 fully closed.
+
+### Cycle-H FINAL (2026-08-28, 18/18) — the stability inflection
+
+**4 PASS + 1 ESCALATE_TOOLCHAIN + 1 ORACLE_DIVERGENT (both non-PASS
+classes now DETERMINISTIC 3/3) + 12 ESC.**
+
+- The deterministic core PASSed a 5th consecutive cycle (redis-0055,
+  sqlite-0004, sqlite-0030; tokio-0108 a 3rd).
+- flask-0006: ORACLE_DIVERGENT 3/3 — completions every repeat (four
+  cycles of chaotic empty-ESC before the starvation fix).
+- sqlite-0040: ESCALATE_TOOLCHAIN 3/3 at probe cost (the
+  conflict-target probe's first live classification).
+- The ONLY remaining nondeterminism: redis-0040 and redis-0047 at 1/3
+  PASS — the documented oracle-subjective coin-flips.
+
+The F/G/H triple shows the system's behavior on the hardest 18 is now
+deterministic everywhere except the two coin-flips. Cycle-I (in flight)
+carries the last fix queue: the Phase-B preemption fix (sea-orm's
+exhaustion cluster end-to-end), P6b (zenodo's splice-level delimiter
+repair), and the ballot-decline journaling (redis-0049's why).
