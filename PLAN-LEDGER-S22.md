@@ -2678,3 +2678,26 @@ Committed this window: 5609ac9 (journaled retry prompts mirror the R5
 ladder — the audit trail was recording the BASE prompt while the model
 saw the variant), 124d797 (churn fallback + tier-2 failure journaling),
 85a7935 (probe tail error-line preference).
+
+### Mechanism migration begins + P4d disposition (2026-08-27, cycle-E in flight)
+
+**3e397c0 — the first orchestrator→pipeline migration landed.** The
+repair-exhaustion point now executes Stage.POST_REPAIR_EXHAUSTION
+through the Pipeline: Phase A runs the pure tier-1 churn decision;
+Phase B (only when A declines) probes both pristine sides and feeds
+the verdicts to the compile-clean mechanism. The orchestrator keeps
+the side effects — side loading, compile probes, landing. Two hard-
+won details: Phase B accepts ONLY the compile-clean mechanism (tier-1
+is deterministic — re-engaging it would bypass the compile gate the
+phase-A pick already failed); and the mechanism needed the inline's
+max-churn>0 guard for exact equivalence. Verified by a 300-trial
+randomized equivalence test against _near_one_sided_takeover
+(decision-identical) + the 222-test neighborhood.
+
+**P4d (C1-before-R1 ordering): dispositioned as stale.** The cycle-D
+journals show the R1 fail-closed guard firing on redis-0013/0049/0055
+— and all three resolving through the existing downstream paths
+(redis-0055 PASSES; redis-0013's C1 injection fires at the file gate
+and fixes the compile; redis-0049's actual blocker was the tier-2
+deadline, now covered by the churn fallback). The reordering would
+save latency at most. Not pursued this cycle.
