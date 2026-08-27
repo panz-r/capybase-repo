@@ -2816,3 +2816,30 @@ double-balloting across the phase re-executions). The repair-
 exhaustion cluster (tier-1, compile-clean, tier-2) is now fully
 mechanism-mediated; the orchestrator keeps side effects only (side
 loading, probes, gates, landing).
+
+### Midband oracle-subjectivity finding (2026-08-27, offline analysis)
+
+Computed loser-coverage + winner-content checks for the two
+"superseded-oracle" midband cases, straight from the corpus JSONs:
+
+- redis-0040: loser (replayed, 19 churn) moved interactive help to
+  help.h + output_help() — a REAL functional refactor in STABLE
+  regions (coverage 0.00 — my hypothesis that superseded-oracles have
+  high coverage was backwards). The winner (current) does NOT contain
+  the refactor (help.h/output_help absent; the old
+  showInteractiveHelp remains). The oracle genuinely DISCARDED the
+  replayed commit's feature.
+- clickhouse-0021: same shape — the winner (replayed) lacks
+  skip_stream_merging (the loser's real feature); the cycle-A oracle
+  still took the winner verbatim.
+
+Conclusion: both "superseded-oracle" cases are winner-verbatim
+resolutions of GENUINELY LOSABLE conflicts — the historical authors
+dropped the loser's features. The LLM's keep verdicts are semantically
+defensible; these cases measure the AUTHOR'S INTENT, not merge
+semantics derivable from the code. No deterministic signal (coverage,
+churn, content) can separate them — the pursuit of accuracy there is
+oracle-guessing. Stability is the achievable goal, which the
+self-consistency unanimity bar already delivers. The loser-COVERAGE
+calibration target is CLOSED as evidence-based-unachievable; the
+midband borderline class is recorded as oracle-subjective.
