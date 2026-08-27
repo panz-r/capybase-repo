@@ -2921,3 +2921,58 @@ re-checks with all fixes stacked.
 Specimen arc: 2 (A) → 2 (B) → 5 (C) → 4+NEAR (D) → 3+2N+OD (E) →
 4+OD (F), with the variance class now fully attributed. Cycle-G in
 flight (whole-file guard, migration #3, P8, subset dedup).
+
+### Sprint-24 SYNTHESIS (interim, cycle-G in flight)
+
+The specimen arc on the hardest 18 cases:
+**2 (A) → 2 (B) → 5 (C) → 4+NEAR (D) → 3+2N+OD (E) → 4+OD (F)**,
+with the variance class now fully attributed.
+
+**The deterministic PASS core** (multi-cycle stable): redis-0055,
+sqlite-0004, sqlite-0030, tokio-0108.
+
+**Findings taxonomy** — every one of the 18 cases now belongs to a
+named class:
+
+1. REAL BUGS FOUND AND FIXED (7): the F1-takeover discard (every
+   takeover journaled-then-thrown-away), output starvation (the eval's
+   max_tokens sizing vs the server's prefill billing), the uncoded-
+   rustc classification (macro-resolution errors read as parse
+   defects), the whole-file unit validation skip (block-shaped answers
+   sailing through), the R5 ladder never being called, the
+   temperature_override dead wire (R3's diverse probes sampled at base
+   temp), the semantic-change whole-file-diff blowup (44.9K chars in
+   budget-protected text).
+2. ORACLE-SUBJECTIVE (4): redis-0040, redis-0047, clickhouse-0021,
+   sea-orm-0021(partially) — the oracles are winner-verbatim
+   resolutions of genuinely losable conflicts; the model's verdicts
+   are semantically defensible; stability (self-consistency), not
+   accuracy, is achievable. Documented, not chased.
+3. ENVIRONMENTAL (2): sqlite-0040 (tcl.h absent — the conflict file
+   conditionally omitted from the oracle's own build; the new
+   conflict-target probe classifies it honestly), protobuf-0051
+   (pending — probe stderr now visible, root cause under
+   investigation).
+4. SPLICE/RESIDUE (2): sqlite-0029, sqlite-0019 — near-oracle buffers
+   (0.99) with worktree-residue sim swings on unchanged ESC verdicts;
+   the whole-file guard (cycle-G) targets the wrong-shape answers.
+5. HONEST FRONTIER (3): flask-0006, redis-0052, zenodo-0079 — real
+   completions now (starvation fixed) but oracle-content mismatch;
+   redis-0052 is the one true looping case; redis-0049/0013 are
+   deadline-class (churn fallback targeted, cycle-G validates).
+
+**The architecture deliverable**: the repair-exhaustion cluster (tier-1
+churn, compile-clean, tier-2 ballot, churn fallback) is fully
+mechanism-mediated on the typed pipeline — 4 migrations, each with
+randomized equivalence tests against the inline logic it replaced
+(300-trial tier-1, 200-trial churn fallback), three-phase (now four-
+phase) execution preserving the original sequence exactly, and the
+pipeline_mechanism journal events giving per-engagement attribution.
+
+**The meta-lesson of the sprint**: the highest-yield discoveries were
+all WIRING and CLASSIFICATION bugs invisible to the test suite (the
+discarded takeovers passed every unit test; the starved outputs looked
+like model refusals; the misclassified macro errors looked like parse
+defects). The diagnostic journaling (c7_fastfail_check,
+f1_tier1_trigger_check, probe stderr, prompt mirrors) was the
+instrument that found them — observability first, mechanism second.
