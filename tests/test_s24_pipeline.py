@@ -171,3 +171,42 @@ def test_compile_clean_neither_compiles_declines():
 def test_compile_clean_no_verdicts_declines():
     m = F1CompileCleanTakeover()
     assert m.engage(_ctx(cur=_side(50), rep=_side(50))) is None
+
+
+def test_f1_tier1_mechanism_matches_inline_semantics():
+    """Migration equivalence: the pipeline mechanism's takeover decision
+    must equal the legacy inline _near_one_sided_takeover on every shape —
+    the orchestrator swap is structural, not behavioral."""
+    import random
+    from capybase.mechanisms import F1Tier1Takeover
+    from capybase.orchestrator import _near_one_sided_takeover
+    from capybase.pipeline import RepairExhaustedContext
+
+    rng = random.Random(42)
+    mech = F1Tier1Takeover()
+    words = ["alpha", "beta", "gamma", "delta", "epsilon"]
+
+    def rand_text(lines: int) -> str:
+        return "\n".join(
+            f"{rng.choice(words)}_{rng.randint(0, 9)};" for _ in range(lines))
+
+    for trial in range(300):
+        base = rand_text(rng.randint(1, 30))
+        cur = rand_text(rng.randint(1, 30))
+        rep = rand_text(rng.randint(1, 30))
+        if rng.random() < 0.3:
+            cur = base  # near-one-sided shapes
+        if rng.random() < 0.3:
+            rep = base
+        sides = {"current": cur, "replayed": rep}
+        inline = _near_one_sided_takeover(base, sides)
+        ctx = RepairExhaustedContext(
+            path="f.c", language="c", step_index=1,
+            sides=sides, base_text=base)
+        result = mech.engage(ctx)
+        mech_side = result.metadata.get("side") if result else None
+        assert mech_side == inline, (
+            f"trial {trial}: mechanism={mech_side} inline={inline} "
+            f"(base {len(base.splitlines())}L, cur {len(cur.splitlines())}L, "
+            f"rep {len(rep.splitlines())}L)"
+        )

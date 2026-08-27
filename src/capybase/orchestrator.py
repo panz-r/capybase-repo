@@ -9910,30 +9910,61 @@ class Orchestrator:
                             try:
                                 _sides_f1, _base_f1 = self._micro_stage_sides(path)
                                 if _sides_f1:
-                                    _f1_side = _near_one_sided_takeover(
-                                        _base_f1, _sides_f1)
-                                    # F1-smart (d): the takeover side must
-                                    # pass the compile gate — taking a side
-                                    # that doesn't compile is worse than
-                                    # escalating (test fixtures: synthetic
-                                    # sides that don't build)
-                                    if _f1_side is not None:
-                                        _f1_text_check = _sides_f1.get(_f1_side, "")
-                                        _f1_check = self.verification.verify_file(
-                                            path, language,
-                                            _sides_f1.get(_f1_side, ""), [],
-                                            repo_root=str(self.git.repo),
-                                            whole_text=_f1_text_check)
-                                        if not _f1_check.passed:
+                                    # Pipeline-mediated takeover decision
+                                    # (the sprint-24 architecture): the
+                                    # mechanisms own their triggers; this
+                                    # orchestrator provides the sides +
+                                    # compile verdicts and executes the
+                                    # chosen takeover. Phase A runs the pure
+                                    # decision mechanisms (tier-1 churn);
+                                    # when they decline, the orchestrator
+                                    # probes both pristine sides and Phase B
+                                    # re-executes with the verdicts (the
+                                    # compile-clean override). Behavior is
+                                    # identical to the former inline tier-1 +
+                                    # P1b blocks — the swap is structural.
+                                    from capybase.pipeline import (
+                                        RepairExhaustedContext,
+                                        Stage,
+                                    )
+                                    _pipe_ctx = RepairExhaustedContext(
+                                        path=path, language=language,
+                                        step_index=self.step,
+                                        sides=_sides_f1,
+                                        base_text=_base_f1 or "",
+                                        retry_count=wf_retries,
+                                        retry_budget=wf_budget,
+                                        phase2_model_used=getattr(
+                                            self, "_phase2_model_used", False),
+                                    )
+                                    _pipe = self._pipeline()
+                                    _f1_result = _pipe.execute(
+                                        Stage.POST_REPAIR_EXHAUSTION,
+                                        _pipe_ctx)
+                                    _f1_text = ""
+                                    if (_f1_result is not None
+                                            and _f1_result.action == "takeover"):
+                                        _f1_side = _f1_result.metadata.get("side")
+                                        _f1_text = _f1_result.resolved_text or ""
+                                        # F1-smart (d): the takeover side must
+                                        # pass the compile gate — taking a
+                                        # side that doesn't compile is worse
+                                        # than escalating (test fixtures:
+                                        # synthetic sides that don't build)
+                                        if _f1_text.strip():
+                                            _f1_check = self.verification.verify_file(
+                                                path, language, _f1_text, [],
+                                                repo_root=str(self.git.repo),
+                                                whole_text=_f1_text)
+                                            if not _f1_check.passed:
+                                                _f1_side = None
+                                                _f1_text = ""
+                                        else:
                                             _f1_side = None
-                                    # P1b (sprint-24 cycle B): compile-clean
-                                    # override — if tier-1's churn check
-                                    # declined but exactly ONE pristine side
-                                    # compiles cleanly (and the merge doesn't),
-                                    # take the compiling side regardless of
-                                    # churn. The compiler is the authority;
-                                    # safety preserved (redis-0055, clickhouse-0021).
                                     if _f1_side is None:
+                                        # Phase B: probe both pristine sides
+                                        # and let the compile-clean mechanism
+                                        # take a single compiling one.
                                         _compiling = {}
                                         for _side_name in ("current", "replayed"):
                                             _side_text = _sides_f1.get(_side_name, "")
@@ -9944,9 +9975,25 @@ class Orchestrator:
                                                 repo_root=str(self.git.repo),
                                                 whole_text=_side_text)
                                             _compiling[_side_name] = bool(_side_check.passed)
-                                        _clean = [s for s, ok in _compiling.items() if ok]
-                                        if len(_clean) == 1:
-                                            _f1_side = _clean[0]
+                                        self._f1_compile_clean_mech.set_compiling_sides(
+                                            _compiling)
+                                        _f1_result_b = _pipe.execute(
+                                            Stage.POST_REPAIR_EXHAUSTION,
+                                            _pipe_ctx)
+                                        # Phase B accepts ONLY the compile-
+                                        # clean mechanism: tier-1 is
+                                        # deterministic and already had its
+                                        # chance in Phase A (its pick failed
+                                        # the compile gate) — re-engaging it
+                                        # here would land an unverified side.
+                                        if (_f1_result_b is not None
+                                                and _f1_result_b.action == "takeover"
+                                                and _f1_result_b.mechanism == "f1_compile_clean_takeover"):
+                                            _f1_side = _f1_result_b.metadata.get("side")
+                                            _f1_text = _f1_result_b.resolved_text or ""
+                                        else:
+                                            _f1_side = None
+                                            _f1_text = ""
                             except Exception:  # noqa: BLE001
                                 _f1_side = None
                         if _f1_side is not None:
@@ -11146,6 +11193,30 @@ class Orchestrator:
                 step_index=self.step, path=path)
             changed = True
         return changed
+
+    def _pipeline(self):
+        """The mechanism pipeline, built lazily on first use.
+
+        Sprint-24 architecture: mechanisms own their triggers and register
+        for pipeline stages; the orchestrator executes side effects (side
+        loading, compile probes, landing). Built once per orchestrator so
+        the compile-clean mechanism's verdict state persists across calls
+        (each execute() sets fresh verdicts before Phase B).
+        """
+        pipe = getattr(self, "_pipeline_instance", None)
+        if pipe is not None:
+            return pipe
+        from capybase.pipeline import Pipeline
+        from capybase.mechanisms import (
+            F1CompileCleanTakeover,
+            F1Tier1Takeover,
+        )
+        pipe = Pipeline(journal=self.journal)
+        self._f1_compile_clean_mech = F1CompileCleanTakeover()
+        pipe.register(F1Tier1Takeover())
+        pipe.register(self._f1_compile_clean_mech)
+        self._pipeline_instance = pipe
+        return pipe
 
     def _micro_stage_sides(self, path):
         try:

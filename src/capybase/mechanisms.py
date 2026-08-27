@@ -60,8 +60,12 @@ class F1Tier1Takeover:
         c_churn = _side_churn(ctx.base_text, current)
         r_churn = _side_churn(ctx.base_text, replayed)
         min_churn = min(c_churn, r_churn)
+        max_churn = max(c_churn, r_churn)
 
-        if min_churn > self.churn_threshold:
+        # Match the inline _near_one_sided_takeover semantics exactly: the
+        # winner must have actually changed (max > 0) — both sides ≈ base
+        # means no conflict content to take over.
+        if min_churn > self.churn_threshold or max_churn == 0:
             return None  # Both sides changed significantly → tier-2
 
         # Take the high-churn side (the low-churn side ≈ base)
