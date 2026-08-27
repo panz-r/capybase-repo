@@ -12940,100 +12940,130 @@ class Orchestrator:
                 # build_retry_prompt on any failure, which mismatches a retry that
                 # took the PROMPT_REPAIR path (candidate+targeted-fix) — making the
                 # audit trail misleading.
-                if pending_recovery:
-                    from capybase.resolution_engine import build_recovery_prompt
-                    pv = "cegis_recovery.v1"
-                    prompt = build_recovery_prompt(unit, context, failures, budget=self.resolution_engine.token_budget)
-                elif failures and prev_candidate and prev_candidate.resolved_text:
-                    pv = PROMPT_REPAIR
-                    # Build prior-attempt summaries for failed-patch memory.
-                    # Each summary is one line: the failure validator + message.
-                    # D1 (sprint-23): accumulate actual per-round failure
-                    # signatures — the OLD code rebuilt from CURRENT failures
-                    # each round, making every prior summary identical
-                    if not hasattr(self, '_repair_failure_history'):
-                        self._repair_failure_history: list[str] = []
-                    _current_sig = "; ".join(
-                        f"{f.validator}: {f.message[:60]}" for f in failures[:2])
-                    if _current_sig and _current_sig not in [
-                            s.split(": ", 1)[-1] for s in self._repair_failure_history]:
-                        self._repair_failure_history.append(
-                            f"attempt {retry_count + 1}: {_current_sig}")
-                    prior_summaries = list(self._repair_failure_history)
-                    # Candidate-diff feedback (s23): the model sees WHAT
-                    # CHANGED between its attempts — the REPL discipline.
-                    # Without the diff, the model reproduces a near-identical
-                    # candidate that fails the same way.
-                    if len(outcome.attempts) >= 2:
-                        import difflib as _dl_cdf
-                        _prev_text = (outcome.attempts[-2].resolved_text or "")[:4000]
-                        _curr_text = (prev_candidate.resolved_text or "")[:4000]
-                        if _prev_text and _curr_text:
-                            _diff_lines = list(_dl_cdf.unified_diff(
-                                _prev_text.splitlines()[:50],
-                                _curr_text.splitlines()[:50],
-                                fromfile="previous_attempt",
-                                tofile="current_attempt",
-                                lineterm=""))[:20]
-                            if len(_diff_lines) > 2:  # not just the headers
-                                prior_summaries.append(
-                                    "CHANGES SINCE LAST ATTEMPT:\n"
-                                    + "\n".join(_diff_lines))
-                    for prev_attempt in outcome.attempts:
-                        # The outcome's attempts list carries the candidates that
-                        # were tried. We need the VALIDATION that rejected them.
-                        # The candidate's parse_warnings/explanation carry the
-                        # failure info.
-                        if prev_attempt is prev_candidate:
-                            continue
-                        summary_parts = []
-                        for f in failures:
-                            summary_parts.append(f"{f.validator}: {f.message[:60]}")
-                        if summary_parts:
-                            prior_summaries.append("; ".join(summary_parts[:2]))
-                    prompt = build_repair_prompt(unit, context, prev_candidate, failures, attempt=retry_count, prior_attempt_summaries=prior_summaries or None, budget=self.resolution_engine.token_budget)
-                elif failures:
-                    pv = PROMPT_RETRY
-                    prompt = build_retry_prompt(unit, context, failures, budget=self.resolution_engine.token_budget)
-                else:
-                    pv = PROMPT_RESOLVE
-                    prompt = build_resolve_prompt(unit, context, budget=self.resolution_engine.token_budget)
-                # Post-construction oversized check: the pre-construction guard
-                # (_llm_oversized_for_window) measures only the windowed marker
-                # block, assuming augmentation is trimmable. But the obligations
-                # block is budget-PROTECTED (folded into sides_text), so a prompt
-                # with whole-file sides + obligations can blow the window without
-                # the pre-guard catching it. Measure the ACTUAL prompt size here
-                # and escalate as "oversized" before burning an HTTP-400 round-
-                # trip. Surfaced in the C live-eval (sqlite-history-0005): a
-                # 148KB prompt (37K tokens vs 8K window) hit HTTP 400.
-                # Threshold: only fire when the prompt exceeds the window AND is
-                # large in absolute terms (>10K tokens). This catches the
-                # whole-file-sides blowup (37K tokens) without pre-empting
-                # legitimately-tight prompts (a few hundred tokens over a small
-                # window may still produce usable output — the model decides).
-                _window = int(getattr(self.config.model, "context_window", 0) or 0)
-                if _window > 0:
-                    _prompt_t = estimate_tokens(prompt)
-                    if _prompt_t > _window and _prompt_t > 10000:
-                        self.journal.emit(
-                            "llm_skipped_oversized_prompt",
-                            {"prompt_tokens": _prompt_t, "window": _window,
-                             "prompt_chars": len(prompt)},
-                            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                # Mirror the R5 retry ladder: propose() activates one
+                # presentation variant per retry attempt and restores the
+                # base profile before returning, so the prompt built HERE
+                # (for the audit trail) must run under the SAME variant the
+                # model actually saw — retry_profile_variant is deterministic
+                # in the attempt index, so recomputing it is exact.
+                _mirror_ladder_base = None
+                if retry_count >= 1:
+                    try:
+                        from capybase.prompt_profile import (
+                            active_profile as _mp_ap,
+                            set_active_profile as _mp_sap,
                         )
-                        # Sprint-19 P5 (journal-only): correlate the skip
-                        # with a measured class-member split candidate when
-                        # one exists (the protobuf-0055 class).
-                        self._journal_class_member_candidate(unit)
-                        outcome.escalated = True
-                        outcome.retry_count = retry_count
-                        outcome.reason = (
-                            f"oversized prompt: {_prompt_t}t > {_window}t window "
-                            f"(obligations/sides exceeded the context window)"
+                        from capybase.retry_ladder import (
+                            retry_profile_variant as _mp_rpv,
                         )
-                        return outcome
-                self.journal.store_prompt(unit.unit_id, retry_count, prompt)
+                        _mp_base = _mp_ap()
+                        _mp_variant = _mp_rpv(_mp_base, retry_count)
+                        if _mp_variant is not _mp_base:
+                            _mp_sap(_mp_variant)
+                            _mirror_ladder_base = _mp_base
+                    except Exception:  # noqa: BLE001 — mirror is best-effort
+                        _mirror_ladder_base = None
+                try:
+                    if pending_recovery:
+                        from capybase.resolution_engine import build_recovery_prompt
+                        pv = "cegis_recovery.v1"
+                        prompt = build_recovery_prompt(unit, context, failures, budget=self.resolution_engine.token_budget)
+                    elif failures and prev_candidate and prev_candidate.resolved_text:
+                        pv = PROMPT_REPAIR
+                        # Build prior-attempt summaries for failed-patch memory.
+                        # Each summary is one line: the failure validator + message.
+                        # D1 (sprint-23): accumulate actual per-round failure
+                        # signatures — the OLD code rebuilt from CURRENT failures
+                        # each round, making every prior summary identical
+                        if not hasattr(self, '_repair_failure_history'):
+                            self._repair_failure_history: list[str] = []
+                        _current_sig = "; ".join(
+                            f"{f.validator}: {f.message[:60]}" for f in failures[:2])
+                        if _current_sig and _current_sig not in [
+                                s.split(": ", 1)[-1] for s in self._repair_failure_history]:
+                            self._repair_failure_history.append(
+                                f"attempt {retry_count + 1}: {_current_sig}")
+                        prior_summaries = list(self._repair_failure_history)
+                        # Candidate-diff feedback (s23): the model sees WHAT
+                        # CHANGED between its attempts — the REPL discipline.
+                        # Without the diff, the model reproduces a near-identical
+                        # candidate that fails the same way.
+                        if len(outcome.attempts) >= 2:
+                            import difflib as _dl_cdf
+                            _prev_text = (outcome.attempts[-2].resolved_text or "")[:4000]
+                            _curr_text = (prev_candidate.resolved_text or "")[:4000]
+                            if _prev_text and _curr_text:
+                                _diff_lines = list(_dl_cdf.unified_diff(
+                                    _prev_text.splitlines()[:50],
+                                    _curr_text.splitlines()[:50],
+                                    fromfile="previous_attempt",
+                                    tofile="current_attempt",
+                                    lineterm=""))[:20]
+                                if len(_diff_lines) > 2:  # not just the headers
+                                    prior_summaries.append(
+                                        "CHANGES SINCE LAST ATTEMPT:\n"
+                                        + "\n".join(_diff_lines))
+                        for prev_attempt in outcome.attempts:
+                            # The outcome's attempts list carries the candidates that
+                            # were tried. We need the VALIDATION that rejected them.
+                            # The candidate's parse_warnings/explanation carry the
+                            # failure info.
+                            if prev_attempt is prev_candidate:
+                                continue
+                            summary_parts = []
+                            for f in failures:
+                                summary_parts.append(f"{f.validator}: {f.message[:60]}")
+                            if summary_parts:
+                                prior_summaries.append("; ".join(summary_parts[:2]))
+                        prompt = build_repair_prompt(unit, context, prev_candidate, failures, attempt=retry_count, prior_attempt_summaries=prior_summaries or None, budget=self.resolution_engine.token_budget)
+                    elif failures:
+                        pv = PROMPT_RETRY
+                        prompt = build_retry_prompt(unit, context, failures, budget=self.resolution_engine.token_budget)
+                    else:
+                        pv = PROMPT_RESOLVE
+                        prompt = build_resolve_prompt(unit, context, budget=self.resolution_engine.token_budget)
+                    # Post-construction oversized check: the pre-construction guard
+                    # (_llm_oversized_for_window) measures only the windowed marker
+                    # block, assuming augmentation is trimmable. But the obligations
+                    # block is budget-PROTECTED (folded into sides_text), so a prompt
+                    # with whole-file sides + obligations can blow the window without
+                    # the pre-guard catching it. Measure the ACTUAL prompt size here
+                    # and escalate as "oversized" before burning an HTTP-400 round-
+                    # trip. Surfaced in the C live-eval (sqlite-history-0005): a
+                    # 148KB prompt (37K tokens vs 8K window) hit HTTP 400.
+                    # Threshold: only fire when the prompt exceeds the window AND is
+                    # large in absolute terms (>10K tokens). This catches the
+                    # whole-file-sides blowup (37K tokens) without pre-empting
+                    # legitimately-tight prompts (a few hundred tokens over a small
+                    # window may still produce usable output — the model decides).
+                    _window = int(getattr(self.config.model, "context_window", 0) or 0)
+                    if _window > 0:
+                        _prompt_t = estimate_tokens(prompt)
+                        if _prompt_t > _window and _prompt_t > 10000:
+                            self.journal.emit(
+                                "llm_skipped_oversized_prompt",
+                                {"prompt_tokens": _prompt_t, "window": _window,
+                                 "prompt_chars": len(prompt)},
+                                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                            )
+                            # Sprint-19 P5 (journal-only): correlate the skip
+                            # with a measured class-member split candidate when
+                            # one exists (the protobuf-0055 class).
+                            self._journal_class_member_candidate(unit)
+                            outcome.escalated = True
+                            outcome.retry_count = retry_count
+                            outcome.reason = (
+                                f"oversized prompt: {_prompt_t}t > {_window}t window "
+                                f"(obligations/sides exceeded the context window)"
+                            )
+                            return outcome
+                    self.journal.store_prompt(unit.unit_id, retry_count, prompt)
+                finally:
+                    if _mirror_ladder_base is not None:
+                        from capybase.prompt_profile import (
+                            set_active_profile as _mp_sap,
+                        )
+                        _mp_sap(_mirror_ladder_base)
             self.journal.emit(
                 "context_built",
                 {
