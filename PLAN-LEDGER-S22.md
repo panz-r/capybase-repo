@@ -2556,3 +2556,36 @@ retries that re-loop.
 3. Truncated-looping diverse retry (the four parsed-empty cases)
 4. sqlite-0004 P5a validation (fix landed after this run's snapshot)
 5. sqlite-0029 P5b validation (same)
+
+### Sprint-24 cycle-C specimen RESULTS (2026-08-27, complete 18/18)
+
+Code = 75a45db (F1 landing fix + P5a + P5b + tier-2 compile gate). The
+diversity-retry work (ce76028) landed DURING the run and is not in
+these numbers. **5 PASS / 1 NEAR / 12 ESC — from 2/18 in both A and B:**
+
+| case | B | C | attribution |
+|------|---|---|-----------|
+| sqlite-0004 | ESC | **PASS 1.000** | P5a — no oversized skip in the journal; file written at full size; the LLM call was the only missing piece |
+| sqlite-0030 | ESC | **PASS 1.000** | F1 tier-1 takeover LANDS (f1_tier1_takeover replayed + file_written) — the first tier-1 landing ever |
+| redis-0047 | ESC (1/3 P) | **PASS 0.960** (2/3) | source_portfolio current_only ×3; improved flip rate (variance-leaning) |
+| redis-0055 | PASS | **PASS 0.999** | stable (F1 rescue from cycle B) |
+| redis-0040 | PASS | **PASS 0.996** | stable |
+| sea-orm-0021 | ESC 0.000 | **NEAR 3/3** | f1_tier1_takeover current ×3 — deterministic consistent resolution where A/B were chaotic 0.000-sim escalates; the taken side isn't oracle (P1c R2-dedup remains the oracle path) |
+| clickhouse-0021 | NEAR | ESC 0.718 | third flip of the midband adjudicator coin (PASS→NEAR→ESC across cycles) — 3-way instability now confirmed; candidate fix: P3 diff-prompt for the midband adjudicator |
+
+sqlite-0029: still ESC 0.991 WITH P5b in — the split correctly declined,
+the single-unit LLM resolution produced a 0.991 buffer, the build still
+fails (the known "correct side but build fails" frontier). Honest
+escalate.
+
+**Cycle-C code work (ce76028, awaiting next validation):** probe stderr
+capture; R5 ladder wired (retry_profile_variant was an orphaned
+mechanism — implemented, never called); truncation loop-breaker
+(+0.35 temperature on truncated-prev retries); temperature_override
+dead-wire fix (the sequential n=1 path dropped it — R3's 0.4/0.6 probes
+were sampling at base temperature); attempt threading through all
+propose paths. Targets: flask-0006, redis-0052, tokio-0108,
+zenodo-0079 (the truncation-looping class).
+
+Sprint-24 specimen arc: **2/18 (A) → 2/18 (B, better composition) →
+5/18 + NEAR 3/3 (C)** on the hardest 18 cases, all era-adjusted-live.
