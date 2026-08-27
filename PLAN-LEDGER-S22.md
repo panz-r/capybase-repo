@@ -3044,3 +3044,20 @@ Two unconverged cases carry specific leads (not mechanism failures):
 Cycle-H in flight carrying: the conflict-target toolchain probe
 (sqlite-0040 classifies honestly), migration #4 (the churn fallback as
 a mechanism with fresh probe verdicts), and the driver-line probe fix.
+
+### The Phase-B preemption bug found and fixed (2026-08-27, cycle-H in flight)
+
+Reconciling the sea-orm-0021 discrepancy exposed a real pipeline bug:
+``Pipeline.execute`` returns on the FIRST engagement, and tier-1 is
+deterministic — it engages on every near-one-sided shape. So whenever
+tier-1's pick failed the compile gate, the Phase-B/C/D re-executions
+re-engaged tier-1 and returned BEFORE compile-clean/the ballot/the
+churn fallback could run (sea-orm: tier-1 engaged 3× picking the
+gate-failing replayed side while compile-clean — which would have
+taken the compiling current — never ran). Fixed (58a9a95): tier-1 gets
+an enable latch — one shot in Phase A, disabled for the later phases,
+re-enabled idempotently at each Phase A. Regression test covers all
+three phases. This also explains why redis-0049's Phase-C ballot
+declined with no exception: not preemption there (tier-1 declined on
+churn), but sea-orm's class is now correct end-to-end. Cycle-I
+validates.
