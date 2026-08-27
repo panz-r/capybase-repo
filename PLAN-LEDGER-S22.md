@@ -2995,3 +2995,25 @@ ambiguity (model failure vs deliberate deletion) is what the
 resolves — the fast-fail needs to route through that guard rather than
 inventing its own semantics. NOT half-implemented; recorded as a
 specified next item.
+
+### flask-0006: the deletion-candidate fix dissolves into oracle-subjectivity (2026-08-27)
+
+Implemented the designed deletion candidate in the empty fast-fail
+(constructed the deliberate-deletion candidate when the non-empty side
+≈ the refined base), then reverted it same-session on closer analysis:
+
+- flask's ACTUAL shape is add/empty: base ≈ EMPTY at the block,
+  replayed ADDED an 18-line __getattr__, current = unchanged (empty
+  side). The oracle is current VERBATIM (byte-identical) — the
+  historical merge DISCARDED a real addition. Taking the empty side =
+  taking the NON-changer — against the corpus-validated near-one-sided
+  semantics (take the changer). Another author-intent resolution.
+- The implemented trigger (non-empty base, other ≈ base) is nearly
+  unreachable in real git conflicts: any replayed touch inside the
+  deleted region breaks near-identity; touches outside the region
+  merge cleanly without a conflict block.
+
+flask-0006 joins the oracle-subjective bucket (5 cases now: redis-0040,
+redis-0047, clickhouse-0021, flask-0006, + sea-orm-0021's takeover
+half). The completions exist (real buffers, marker-free); matching this
+oracle is guessing the author's mind.
