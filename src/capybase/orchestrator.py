@@ -16005,6 +16005,15 @@ class Orchestrator:
             raw = resp.text if hasattr(resp, "text") else str(resp)
             parsed = parse_f1_tier2_response(raw)
             if parsed is None:
+                # redis-0049 forensics: a declined ballot was invisible —
+                # no event, indistinguishable from an exception. Journal
+                # the decline for attribution.
+                self.journal.emit(
+                    "f1_tier2_adjudication_declined",
+                    {"path": path, "why": "unparseable",
+                     "raw_head": (raw or "")[:120]},
+                    step_index=self.step, path=path,
+                )
                 return None
             choice, conf, reason = parsed
             if choice in ("current", "replayed") and conf >= 0.70:
@@ -16015,6 +16024,12 @@ class Orchestrator:
                     step_index=self.step, path=path,
                 )
                 return choice
+            self.journal.emit(
+                "f1_tier2_adjudication_declined",
+                {"path": path, "why": "weave_or_low_confidence",
+                 "choice": choice, "confidence": conf},
+                step_index=self.step, path=path,
+            )
             return None  # weave or low confidence
         except Exception as exc:  # noqa: BLE001 — adjudication is best-effort
             # redis-0049 forensics: a wall-deadline timeout inside the LLM
