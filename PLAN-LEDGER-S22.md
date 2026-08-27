@@ -2891,3 +2891,33 @@ correctly in all sessions):
    remaining exposure.
 
 The full gate for migrations #2+#3: 6,338 passed, 0 failed.
+
+### Cycle-F FINAL: tokio-0108 CONVERTED (2026-08-27, 18/18)
+
+**4 PASS + 1 ORACLE_DIVERGENT.** The headline: **tokio-history-0108
+PASS** — the rustc uncoded-resolution classifier (e07eb8b) completed
+the case's arc (four cycles empty-truncated → starved → real
+completions misclassified → clean PASS). Stable deterministic core
+across cycles now: redis-0055, sqlite-0004, sqlite-0030, tokio-0108.
+
+The oracle-subjective coin-flips behaved as documented: redis-0040 1/3
+PASS (the ~30% draw), clickhouse mixed repeats (cascade variance now
+that the takeover correctly declines), sea-orm ESC (subset-dedup gap,
+fixed a582611 for cycle-G). sqlite-0019/0029 sim residue swings
+(0.99↔0.005) are worktree residue on unchanged ESC verdicts.
+
+**sqlite-0040's 0.0s probe mystery SOLVED by the improved tails**:
+`fatal error: tcl.h: No such file or directory` — the Tcl dev headers
+are absent from the eval sandbox; tclsqlite.c's pristine sides can
+NEVER pass these probes. The case is environmentally probe-dead
+(toolchain-dead class) — a corpus-environment item (vendor tcl headers
+or exclude), not a resolver fix.
+
+redis-0049: the spliced buffer carries a file-scope `if` signature
+(the sqlite-0029 class — the whole-file guard a5c3059 targets it in
+cycle-G); side probes pass; no churn-fallback landing yet — cycle-G
+re-checks with all fixes stacked.
+
+Specimen arc: 2 (A) → 2 (B) → 5 (C) → 4+NEAR (D) → 3+2N+OD (E) →
+4+OD (F), with the variance class now fully attributed. Cycle-G in
+flight (whole-file guard, migration #3, P8, subset dedup).
