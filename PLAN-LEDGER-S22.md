@@ -2653,3 +2653,28 @@ rust end-to-end noncompiling-merge test whose escalate-only assertion
 encoded the discarded-takeover world; updated to accept the compile-
 gated portfolio completion (the broken merge is still rejected; the
 portfolio's current_only side passes the same compile floor).
+
+### Cycle-F prep from cycle-D forensics (2026-08-27, cycle-E in flight)
+
+Probe stderr capture (ce76028) paid off immediately in cycle-D's
+journals:
+
+**redis-0013 — the C1b derived-prototype injection WORKS, then the case
+dies on the redis-0049 pattern.** The journal shows
+`symbol_inject_applied: derived_prototype cliSwitchProto → static int
+cliSwitchProto(void)` and the build flipping to PASS (make redis-cli.o
+1.4s ×3) — the compile defect is FIXED — then tier-1 eligible, both
+side probes pass, journal ends: tier-2 died on the case wall deadline
+with both sides compiling. The churn-heuristic fallback (124d797,
+committed for redis-0049) targets exactly this shape: adjudication
+unavailable + both sides compile → deterministic churn pick lands.
+
+**sqlite-0040 — probes fail in 0.0s with "compilation terminated"**,
+but the first stderr capture grabbed only gcc's caret-marker lines
+(the diagnostic sat above the window). Probe tails now prefer error-
+containing lines (85a7935); the next run shows the actual error.
+
+Committed this window: 5609ac9 (journaled retry prompts mirror the R5
+ladder — the audit trail was recording the BASE prompt while the model
+saw the variant), 124d797 (churn fallback + tier-2 failure journaling),
+85a7935 (probe tail error-line preference).
