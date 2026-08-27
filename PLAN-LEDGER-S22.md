@@ -2976,3 +2976,22 @@ like model refusals; the misclassified macro errors looked like parse
 defects). The diagnostic journaling (c7_fastfail_check,
 f1_tier1_trigger_check, probe stderr, prompt mirrors) was the
 instrument that found them — observability first, mechanism second.
+
+### flask-0006 root cause: the fast-fail cannot see the deletion side (2026-08-27)
+
+The case's unit conflict is EMPTY-current vs content-replayed (current
+deleted `from __future__ import annotations` + `import typing as t`;
+the oracle takes the DELETION). The empty fast-fail recovery skips
+empty-side candidates by construction (`if not text.strip(): continue`)
+— the deletion, though it is the oracle's resolution, is never tried;
+replayed (≈base) validates and wins → ORACLE_DIVERGENT sim 0.
+
+Design for the fix (next cycle): when one side's fragment is empty and
+the other ≈ the refined base fragment (near-one-sided: the empty side
+is the changer), construct the DELETION candidate (resolved_text="",
+provenance deletion-intent) and validate it. The empty-resolved_text
+ambiguity (model failure vs deliberate deletion) is what the
+`_accept_deletion_recommended`/modify-delete class machinery already
+resolves — the fast-fail needs to route through that guard rather than
+inventing its own semantics. NOT half-implemented; recorded as a
+specified next item.
