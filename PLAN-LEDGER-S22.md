@@ -2744,3 +2744,16 @@ protobuf-0051's cycle-E probes now name the failing target
 (google/protobuf/descriptor.lo Error 1 — the conflict file itself);
 the gcc diagnostic line sits above the captured window (the error-
 line preference in 85a7935 lands cycle-F).
+
+### Structural-supersession experiment: reverted same-session (2026-08-27)
+
+Tried a deterministic pre-ballot check for the redis-0040 class
+(winner rewrote ≥60% of base + loser churn ≤30 → superseded without
+asking the LLM). The sea-orm-0009 wiring test killed it immediately:
+that shape is ALSO wholesale-winner + tiny-loser, but the loser's 4
+lines carry REAL features and the oracle WEAVES them. Churn
+magnitudes cannot separate the classes. The signal that can: loser-
+COVERAGE — whether the loser's changed lines fall in regions the
+winner also rewrote (redis-0040: superseded) vs novel insertions in
+stable regions (sea-orm-0009: weave). Recorded as the concrete next
+calibration target for the midband gate. Nothing shipped.
