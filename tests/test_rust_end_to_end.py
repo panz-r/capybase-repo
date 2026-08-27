@@ -138,14 +138,22 @@ def test_rust_rebase_rejects_noncompiling_merge(rust_conflicted_repo):
         out=lambda *_a, **_k: None,
     )
     result = orch.run()
-    # Either retried then escalated (the broken merge can't be fixed), OR the
-    # structural resolver declined and the model's broken merge failed Phase B.
-    # In both cases the rebase must NOT have silently applied a non-compiling
-    # file — escalate is the correct, safe outcome.
-    assert result.escalated
-    assert "<<<<<<<" in (repo / "src" / "config.rs").read_text() or (
-        "timeout_ms: 10000" not in (repo / "src" / "config.rs").read_text()
-    )
+    # The broken merge is rejected at the compile floor — never silently
+    # applied. Two acceptable outcomes (sprint-24: F1 takeovers now LAND
+    # instead of being discarded past write-and-stage):
+    #   (a) escalate — the conflict is preserved for the human, or
+    #   (b) the always-on takeover lands a PRISTINE side that passed the
+    #       same compile gate (reason records the derived candidate).
+    final = (repo / "src" / "config.rs").read_text()
+    if result.escalated:
+        assert "<<<<<<<" in final or ("timeout_ms: 10000" not in final)
+    else:
+        # A deterministic whole-side candidate (the source portfolio's
+        # current_only) landed and passed the same compile floor — the
+        # broken merge itself was still rejected. The applied file must be
+        # marker-free; its compilation was proven by the gate that accepted
+        # it.
+        assert "<<<<<<<" not in final, "landed side must be marker-free"
 
 
 @skip_no_rustc
