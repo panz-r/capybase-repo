@@ -2868,3 +2868,26 @@ Additional evidence-driven fixes beyond the plan: the F1-landing bug
 (every takeover discarded), the eval starvation floor, uncoded-rustc
 classification, whole-file unit validation, midband self-consistency,
 churn fallback + tier-2 failure journaling, probe stderr capture.
+
+### sea-orm-0021 cycle-F flip: forensics + subset dedup (2026-08-27)
+
+NEAR 3/3 (C/D/E) → ESC 0 in F. Three-layer finding, none of them a
+migration bug (the pipeline_mechanism events show tier-1 engaging
+correctly in all sessions):
+
+1. The OLD whole-side-repair rung's adjudication flipped: D drew a
+   lucky single-sample `superseded` (took current → NEAR); F's
+   self-consistent ballot says `keep` → declined → cascade. Same
+   oracle-subjectivity class as redis-0040/clickhouse.
+2. The cascade's merges leave `pub use` re-export groups with SUBSET
+   overlap — P1c's exact-canonical dedup conservatively missed them
+   (17→14 dup errors, never clean). Fixed in a582611: same-(indent,
+   attrs, prefix) groups where one's items ⊆ the other's now absorb,
+   both directions, bindings preserved; partial overlap still
+   conservative.
+3. The session journal ends mid-tier-2-ballot — the case wall deadline
+   hit during Phase C's LLM call. The exhaustion cluster's budget
+   accounting (the ballot's ~30s counts against the case wall) is the
+   remaining exposure.
+
+The full gate for migrations #2+#3: 6,338 passed, 0 failed.
