@@ -2843,3 +2843,28 @@ oracle-guessing. Stability is the achievable goal, which the
 self-consistency unanimity bar already delivers. The loser-COVERAGE
 calibration target is CLOSED as evidence-based-unachievable; the
 midband borderline class is recorded as oracle-subjective.
+
+### Sprint-24 plan items: completion status (2026-08-27, cycle-F in flight)
+
+- Pipeline trigger architecture — DONE (migrations #1-#3: tier-1,
+  compile-clean [dual-stage], tier-2 ballot; three-phase execution;
+  300-trial equivalence verified)
+- P1a F1 diagnostics — DONE (delivered every subsequent finding)
+- P1b compile-clean — DONE (fires + lands; gated)
+- P1c use-dedup canonical sweep — DONE (71b9bbd)
+- P2 parsed-empty — DONE (the chain engaged in cycle-E once starvation
+  was fixed; the class was starvation, not parsing)
+- P3 diff-prompt — DONE (validated: substantive tier-2 reasoning)
+- P4a/b/c C1 routing — DONE; P4d dispositioned stale
+- P5a/b composition + split safety — DONE (sqlite-0004 converted)
+- P6 delimiter repair — DONE (c8e059e)
+- P7 shape-specific presentation — superseded (the "model-empty" class
+  was output starvation; the eval floor fix resolved it)
+- P8 dynamic retry budget — DONE (224ba3b: converging-trend grant)
+- Era-vendoring, repair-path retrieval, prompt monitoring — remaining
+  backlog items, not specimen-blocked
+
+Additional evidence-driven fixes beyond the plan: the F1-landing bug
+(every takeover discarded), the eval starvation floor, uncoded-rustc
+classification, whole-file unit validation, midband self-consistency,
+churn fallback + tier-2 failure journaling, probe stderr capture.
