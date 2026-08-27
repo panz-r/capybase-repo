@@ -3119,3 +3119,14 @@ deterministic everywhere except the two coin-flips. Cycle-I (in flight)
 carries the last fix queue: the Phase-B preemption fix (sea-orm's
 exhaustion cluster end-to-end), P6b (zenodo's splice-level delimiter
 repair), and the ballot-decline journaling (redis-0049's why).
+
+### Sprint-24 wrap materials staged (2026-08-28, cycle-I in flight)
+
+- docs/sprint24-specimen-dispositions.md — the final per-case report:
+  PASS core, deterministic non-pass classes, coin-flips,
+  class-attributed ESC with named blockers, the seven real bugs, the
+  architecture deliverable, harvest expectations.
+- /tmp/capybase-live/s24-full-harvest/worker.sh — the full-corpus
+  harvest STAGED (not launched; the user's go decision after cycle-I's
+  validation). Same shape as the sprint-22 harvest + skip-size-guard +
+  the conflict-target probe active.
