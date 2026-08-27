@@ -203,3 +203,70 @@ def test_union_merged_double_group_dedups():
     assert out is not None
     assert out.count("pub use crate::{") == 1
     assert out.count("Value as Json") == 1
+
+
+def test_subset_group_absorbed_by_larger_union():
+    """Cycle-G: the sea-orm cascade shape — a union group plus a residual
+    side fragment whose items are a SUBSET. The smaller is redundant
+    (every name it binds is bound by the larger); rustc would reject both
+    as 'defined multiple times'."""
+    text = (
+        "#[cfg(feature = \"macros\")]\n"
+        "pub use crate::{\n"
+        "    DeriveActiveModel, DeriveColumn, DeriveEntity,\n"
+        "};\n"
+        "\n"
+        "#[cfg(feature = \"macros\")]\n"
+        "pub use crate::{ DeriveActiveModel, DeriveColumn };\n"
+    )
+    out = _dedup_rust_use_statements(text)
+    assert out is not None
+    assert out.count("pub use crate::{") == 1
+    assert out.count("DeriveActiveModel") == 1
+
+
+def test_superset_absorbs_earlier_subset():
+    """The mirror direction: the smaller group comes FIRST, the union
+    second. The earlier subset is absorbed (dropped retroactively)."""
+    text = (
+        "#[cfg(feature = \"macros\")]\n"
+        "pub use crate::{ DeriveActiveModel };\n"
+        "\n"
+        "#[cfg(feature = \"macros\")]\n"
+        "pub use crate::{\n"
+        "    DeriveActiveModel, DeriveColumn, DeriveEntity,\n"
+        "};\n"
+    )
+    out = _dedup_rust_use_statements(text)
+    assert out is not None
+    assert out.count("pub use crate::{") == 1
+
+
+def test_disjoint_groups_not_collapsed():
+    """Same prefix, no overlap — both stay (they bind different names)."""
+    text = (
+        "pub use crate::{Alpha, Beta};\n"
+        "pub use crate::{Gamma, Delta};\n"
+    )
+    assert _dedup_rust_use_statements(text) is None
+
+
+def test_partial_overlap_both_stay():
+    """Partial overlap (neither is a subset) — both stay; dropping either
+    would lose bindings. (Union-vs-intersection is NOT decided here.)"""
+    text = (
+        "pub use crate::{Alpha, Beta};\n"
+        "pub use crate::{Beta, Gamma};\n"
+    )
+    assert _dedup_rust_use_statements(text) is None
+
+
+def test_subset_with_different_cfg_not_collapsed():
+    """A cfg-gated subset is NOT absorbed by an ungated superset —
+    different binding conditions."""
+    text = (
+        "pub use crate::{Alpha, Beta};\n"
+        "#[cfg(feature = \"x\")]\n"
+        "pub use crate::{Alpha};\n"
+    )
+    assert _dedup_rust_use_statements(text) is None

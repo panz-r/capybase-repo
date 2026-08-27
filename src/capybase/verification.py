@@ -2623,6 +2623,29 @@ def derive_prototype(definition_line: str) -> str | None:
     return s[:-1].rstrip() + ";"
 
 
+def _split_use_group(canonical: str):
+    """Split a canonical use statement into ``(prefix, items)`` when it is a
+    flat single-level group (``pub use crate::{a,b}`` → ``("pub use
+    crate::", {a, b})``); None otherwise (nested groups, plain paths).
+
+    Items are opaque strings — ``error::*`` and ``a as b`` compare literally,
+    which is exactly the binding semantics for same-prefix groups: dropping
+    ``{A,B}`` when ``{A,B,error::*}`` exists binds A and B identically (a
+    ``*`` item glob-imports its module's contents, not sibling items).
+    """
+    import re as _re
+
+    m = _re.match(
+        r"^((?:pub(?:\([^)]*\))?\s+)?use\s+[A-Za-z_][\w:]*::)\{([^{}]*)\}$",
+        canonical)
+    if not m:
+        return None
+    items = frozenset(i.strip() for i in m.group(2).split(",") if i.strip())
+    if not items:
+        return None
+    return m.group(1), items
+
+
 def _use_stmt_canonical_key(stmt_text: str) -> str | None:
     """Canonical comparison form of a use statement, or None when unsafe.
 
@@ -2660,54 +2683,47 @@ def _dedup_rust_use_statements(text: str) -> str | None:
     Union-merged re-export lists can carry the same ``use`` line twice —
     rustc rejects each duplicate with "the name `X` is defined multiple
     times" (sea-orm-0021: 17 errors from three duplicated re-exports).
-    Removing the later copy never changes semantics. Scope-aware: dedup
+    Removing the duplicate never changes semantics. Scope-aware: dedup
     only within the same indentation level (a ``use`` inside a function
     body is a different scope from the top-level one).
 
-    P1c extends the sweep from exact-line matches to canonical-form
-    matches over LOGICAL statements:
+    The sweep works over LOGICAL statements (multi-line groups end at
+    their closing ``;``) with canonical-form comparison:
 
     - ``pub use`` lines (the original sweep only matched ``use `` — the
       sea-orm re-export class was invisible to it);
-    - multi-line grouped statements (``pub use crate::{\\n ... \\n};``) —
-      scanned as one logical statement ending at the closing ``;``;
-    - order/whitespace-normalized comparison (``{b, c}`` ≡ ``{c , b}`` ≡
-      ``{\\n b,\\n c,\\n}``) — sorting items inside braces and collapsing
-      whitespace before comparing.
+    - order/whitespace-normalized keys (``{b, c}`` ≡ ``{c , b}`` ≡ a
+      multi-line group);
+    - SUBSET collapse (cycle-G): when two same-(indent, attrs, prefix)
+      groups overlap, the smaller is absorbed — every name it binds is
+      bound by the larger, in BOTH drop directions. The sea-orm cascade
+      merges produce union groups plus residual side fragments (subset
+      overlap, not exact duplicates); exact-only matching left the
+      "defined multiple times" errors standing.
+    - attribute context (``#[cfg(...)]``) is part of the identity: the
+      sea-orm oracle has two ``pub use crate::{...}`` groups distinguished
+      ONLY by cfg feature — cfg-distinct groups never collide.
 
-    The key includes the statement's ``#[cfg(...)]``/attribute lines: the
-    sea-orm oracle has two ``pub use crate::{...}`` groups distinguished
-    ONLY by cfg feature — cfg-gated and ungated groups are different
-    bindings and must never collide. Only exact (attributes + canonical)
-    matches dedup; subsets are NOT collapsed (a subset group may be
-    cfg-gated differently — dropping it would be semantics-changing).
     Returns the deduped text, or None when nothing changed.
     """
     if not text:
         return None
     lines = text.split("\n")
-    out: list[str] = []
-    seen: set[str] = set()
-    removed = 0
+    # Parse into logical statements: (start, end_exclusive, attrs_start,
+    # indent, attrs, canonical, split) — split is (prefix, items) for flat
+    # groups, None otherwise.
+    stmts: list[dict] = []
     i = 0
     n = len(lines)
     while i < n:
         ln = lines[i]
         s = ln.strip()
-        is_use = s.startswith(("use ", "pub use ", "pub(crate) use "))
-        if not is_use:
-            out.append(ln)
+        if not s.startswith(("use ", "pub use ", "pub(crate) use ")):
             i += 1
             continue
-        # Collect the statement's preceding attribute lines (already
-        # emitted? no — attributes belong to the statement; walk back
-        # through out for contiguous #[...] lines).
-        attr_start = len(out)
-        while attr_start > 0 and out[attr_start - 1].strip().startswith("#["):
-            attr_start -= 1
-        attrs = tuple(l.strip() for l in out[attr_start:])
-        # Collect the full logical statement: continue until braces balance
-        # and a ';' ends it (single-line uses close immediately).
+        attrs_start = i
+        while attrs_start > 0 and lines[attrs_start - 1].strip().startswith("#["):
+            attrs_start -= 1
         stmt_lines = [ln]
         depth = ln.count("{") - ln.count("}")
         j = i
@@ -2718,21 +2734,63 @@ def _dedup_rust_use_statements(text: str) -> str | None:
             if depth < 0:
                 break  # malformed — treat as non-dedupable
         stmt = "\n".join(stmt_lines)
-        key_body = _use_stmt_canonical_key(stmt)
-        indent = len(ln) - len(ln.lstrip())
-        if key_body is not None and depth == 0:
-            key = f"{indent}:{attrs}:{key_body}"
-            if key in seen:
-                removed += 1
-                # Drop the duplicate statement AND its attribute lines.
-                del out[attr_start:]
-                i = j + 1
-                continue
-            seen.add(key)
-        out.extend(stmt_lines)
+        canonical = _use_stmt_canonical_key(stmt) if depth == 0 else None
+        split = _split_use_group(canonical) if canonical else None
+        stmts.append({
+            "attrs_start": attrs_start, "start": i, "end": j + 1,
+            "indent": len(ln) - len(ln.lstrip()),
+            "attrs": tuple(l.strip() for l in lines[attrs_start:i]),
+            "canonical": canonical, "split": split,
+        })
         i = j + 1
+
+    # Decide keeps: exact duplicates, then subset absorption (both
+    # directions) among same-(indent, attrs, prefix) flat groups.
+    keep = [True] * len(stmts)
+    removed = 0
+    seen_exact: set[str] = set()
+    kept_groups: list[tuple[int, tuple, str, frozenset, int]] = []
+    for idx, st in enumerate(stmts):
+        if st["canonical"] is None:
+            continue
+        key = f"{st['indent']}:{st['attrs']}:{st['canonical']}"
+        if key in seen_exact:
+            keep[idx] = False
+            removed += 1
+            continue
+        seen_exact.add(key)
+        if st["split"] is None:
+            continue
+        _indent, _attrs, _prefix, _items = (
+            st["indent"], st["attrs"], st["split"][0], st["split"][1])
+        absorbed = False
+        for g_idx, g_indent, g_attrs, g_prefix, g_items in kept_groups:
+            if (g_idx != idx and _indent == g_indent and _attrs == g_attrs
+                    and _prefix == g_prefix):
+                if g_items >= _items:
+                    # An earlier kept group already binds everything —
+                    # drop this one.
+                    keep[idx] = False
+                    removed += 1
+                    absorbed = True
+                    break
+                if _items > g_items:
+                    # This group absorbs the earlier smaller one.
+                    keep[g_idx] = False
+                    removed += 1
+        if absorbed:
+            continue
+        kept_groups.append((idx, _indent, _attrs, _prefix, _items))
+        # Drop absorbed groups from kept_groups (their keep flag is False).
+        kept_groups = [g for g in kept_groups if keep[g[0]]]
+
     if not removed:
         return None
+    drop_ranges = set()
+    for idx, st in enumerate(stmts):
+        if not keep[idx]:
+            drop_ranges.update(range(st["attrs_start"], st["end"]))
+    out = [l for k, l in enumerate(lines) if k not in drop_ranges]
     return "\n".join(out)
 
 
