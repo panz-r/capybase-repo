@@ -2757,3 +2757,39 @@ COVERAGE — whether the loser's changed lines fall in regions the
 winner also rewrote (redis-0040: superseded) vs novel insertions in
 stable regions (sea-orm-0009: weave). Recorded as the concrete next
 calibration target for the midband gate. Nothing shipped.
+
+### Cycle-E FINAL RESULTS (2026-08-27, 18/18) + cycle-F launched
+
+**3 PASS + 2 NEAR + 1 ORACLE_DIVERGENT of 18** (code: max_tokens
+floor, midband self-consistency, P1c dedup).
+
+Gains: flask-0006 ESC→ORACLE_DIVERGENT 2/3 (first real completions —
+one via the C7' empty-kind fast-fail engaging at last, one via real
+retry-1 model content); clickhouse ESC→NEAR 2/3 (unanimous-keep
+stability replacing the three-cycle coin flip); tokio-0108 got REAL
+1.4K-char completions for the first time (starvation fix works) but
+was blocked by a classification bug — rustc's uncoded "cannot find
+macro" read as a parse defect and hard-failed two substantive
+candidates (fixed post-run in e07eb8b: uncoded resolution-shaped
+errors are semantic artifacts like E0432/E0433).
+
+Slips: redis-0040 PASS→ESC (established honesty: 70/30 keep-bias vs
+superseded-oracle; prior PASSes were 30% draws); sqlite-0029 sim
+0.992→0.037 — a MODEL candidate whose resolved text begins with a
+file-scope `if(` passed the UNIT-level check (sibling markers blanked)
+but broke the assembled file; residue-sim collapse on an unchanged ESC
+verdict; splice/sibling-context validation gap recorded. The tier-2
+gate correctly declined the brace-unbalanced pristine sides.
+
+Stable core across C/D/E: redis-0055, sqlite-0004, sqlite-0030 PASS;
+sea-orm NEAR 3/3 deterministic.
+
+Full gate (post-migration): 6,333 passed, 1 failure = scripted-engine
+drift (single scripted verdict aborted the 3-sample adjudication on
+the second pop; fixed — the engine now repeats its last response).
+
+**Cycle-F in flight (1555273)** carrying: the churn fallback
+(redis-0049/0013 deadline class), probe error-line tails, migrations
+#1+#2 (pipeline takeovers), the uncoded-rustc classifier (tokio-0108),
+and the prompt-mirror fix. Watch: tokio-0108 conversion, redis-0049/
+0013 churn-fallback landings, sqlite-0040's first real probe error.
