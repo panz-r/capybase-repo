@@ -10057,6 +10057,60 @@ class Orchestrator:
                                     self._write_and_stage(
                                         path, buffer, result, accepted=accepted)
                                     continue
+                            # Churn-heuristic fallback (sprint-24 cycle-E):
+                            # when the tier-2 adjudication declines or dies
+                            # (redis-0049: the LLM call hit the case wall
+                            # deadline and the catch-all returned None with
+                            # no journal, no fallback) but BOTH pristine
+                            # sides passed the compile probes, the
+                            # deterministic churn heuristic — the same one
+                            # _adjudicate_whole_side trusts when the model is
+                            # unparseable — completes the takeover without
+                            # another LLM round-trip. Either side compiles;
+                            # the pick is bounded by the same validated
+                            # threshold as the older path.
+                            try:
+                                _both_clean = bool(
+                                    _compiling.get("current")
+                                    and _compiling.get("replayed"))
+                            except NameError:  # eligibility/exception paths skip P1b
+                                _both_clean = False
+                            if _f2_side is None and _both_clean and _sides_f1:
+                                _heuristic_side = _whole_side_heuristic(
+                                    _base_f1 or "", _sides_f1 or {})
+                                _heuristic_text = (_sides_f1 or {}).get(
+                                    _heuristic_side, "")
+                                if _heuristic_text.strip():
+                                    self.journal.emit(
+                                        "f1_churn_fallback_takeover",
+                                        {"side": _heuristic_side, "path": path},
+                                        step_index=self.step, path=path,
+                                    )
+                                    _hf_unit = unit.model_copy(
+                                        update={
+                                            "unit_id": f"{path}:f1_churn_fallback",
+                                            "unit_kind": "whole_file",
+                                            "marker_span": None,
+                                        })
+                                    _hf_cand = CandidateResolution(
+                                        candidate_id=(
+                                            f"{path}:f1_churn_fallback:{_heuristic_side}"),
+                                        unit_id=_hf_unit.unit_id,
+                                        model_name="deterministic",
+                                        resolved_text=_heuristic_text,
+                                        prompt_version="deterministic_churn_fallback",
+                                        provenance="deterministic_structural",
+                                        self_reported_confidence=0.6,
+                                        explanation=(
+                                            f"F1 churn fallback: tier-2 "
+                                            f"unavailable, both sides compile, "
+                                            f"{_heuristic_side} carries the churn"),
+                                    )
+                                    accepted = [(_hf_unit, _hf_cand)]
+                                    buffer = _heuristic_text
+                                    self._write_and_stage(
+                                        path, buffer, result, accepted=accepted)
+                                    continue
                         if file_validation is None:
                             result.escalated = True
                             result.reason = (
@@ -15789,7 +15843,16 @@ class Orchestrator:
                 )
                 return choice
             return None  # weave or low confidence
-        except Exception:  # noqa: BLE001 — adjudication is best-effort
+        except Exception as exc:  # noqa: BLE001 — adjudication is best-effort
+            # redis-0049 forensics: a wall-deadline timeout inside the LLM
+            # call died here SILENTLY — no event, no fallback, the case just
+            # escalated. Journal it so the churn fallback's trigger is
+            # attributable.
+            self.journal.emit(
+                "f1_tier2_adjudication_failed",
+                {"error": f"{type(exc).__name__}: {exc}"[:200], "path": path},
+                step_index=self.step, path=path,
+            )
             return None
 
     def _adjudicate_whole_side(

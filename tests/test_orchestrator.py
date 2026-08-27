@@ -2464,3 +2464,62 @@ def test_before_snapshot_absent_for_new_file(repo):
     )
     # No prior content existed → no .before snapshot (no crash, no empty file).
     assert not (orch.paths.snapshots / "brand_new.py.before").exists()
+
+
+def test_f1_churn_fallback_lands_when_adjudication_unavailable(tmp_path):
+    """redis-0049: the tier-2 LLM call died on the case wall deadline and the
+    catch-all returned None silently — no journal, no fallback, escalate.
+    When BOTH pristine sides passed the compile probes and adjudication is
+    unavailable/unparseable, the deterministic churn heuristic completes the
+    takeover (same heuristic _adjudicate_whole_side trusts)."""
+    import subprocess
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+
+    def git(*a):
+        return subprocess.run(
+            ["git", "-C", str(repo)] + list(a), capture_output=True, text=True)
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    base = "def greet():\n    return 'hello'\n"
+    cur = "def greet():\n    return 'hi'\n"
+    rep = "def greet():\n    return 'howdy'\n"
+    (repo / "app.py").write_text(base)
+    git("add", "app.py"); git("commit", "-qm", "base")
+    git("branch", "feat"); git("checkout", "-q", "feat")
+    (repo / "app.py").write_text(rep)
+    git("add", "app.py"); git("commit", "-qm", "rep")
+    git("checkout", "-q", "main")
+    (repo / "app.py").write_text(cur)
+    git("add", "app.py"); git("commit", "-qm", "up")
+    git("checkout", "-q", "feat")
+    git("rebase", "main")
+
+    class GarbageAdjudicationEngine(FakeConsensusEngine):
+        """All merge candidates fail; tier-2's raw_complete is unparseable
+        so adjudication returns None (the deadline-death shape)."""
+
+        def raw_complete(self, prompt, *, json_mode=False, temperature=None,
+                         max_tokens=None):
+            return type("R", (), {"text": "not json"})()
+
+    engine = GarbageAdjudicationEngine([
+        _cand("    return 'hi'(", cid="a-broken"),
+        _cand("    return 'howdy'(", cid="b-broken"),
+    ])
+    _cfg = _self_consistency_config(repo)
+    _cfg.future.enable_empty_fast_fail = False
+    orch = Orchestrator(
+        _cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    # Both sides compile (valid python) → churn fallback lands one.
+    assert not result.escalated, (
+        "churn fallback should complete the takeover when adjudication dies"
+    )
+    final = (repo / "app.py").read_text()
+    assert final in (cur, rep), f"expected a pristine side, got {final!r}"
