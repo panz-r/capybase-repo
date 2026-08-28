@@ -3234,3 +3234,15 @@ Arc: 2→2→5→4+N→3+2N+OD→4+OD→4+OD→4+OD+TC→**5 PASS+2N+OD+TC**. Ni
 18 now in deterministic non-ESCALATE states (5 PASS + 2 NEAR + flask OD
 + sqlite-0040 TC), plus the two coin-flips. Cycle-J in flight carrying
 the storage-class relocation + the output-tests WORKING probe.
+
+### Cycle-J FINAL (2026-08-28): redis-0013's PASS is stable
+
+5 PASS + 1 NEAR + 1 OD + 1 TC — the cycle-I shape held: redis-0013
+PASS (now stable across I/J — the deadline class is genuinely
+converted), sea-orm NEAR, clickhouse flipped back to ESC (cascade
+variance, as attributed). The output-tests probe ran: sea-orm's
+cargo test recorded False, flask None (no command registered for the
+python dataset yet). Environmental guard added (cc9f41b): offline
+cargo/ctest failures record None, not False — a suite that cannot
+run says nothing. Cycle-K in flight carrying the equivalence probe
+(redis-0049's reclassification test) + the side micro-repair.
