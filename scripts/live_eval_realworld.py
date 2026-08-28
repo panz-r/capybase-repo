@@ -1096,24 +1096,34 @@ def _toolchain_era_probe(repo: Path, case: "Case", *, has_crate: bool) -> dict |
     # when it fails (and the rule exists), the file-level gate can never
     # validate ANY resolution — toolchain-dead for the conflict file.
     target_probe = None
+    _target_sigs: dict[str, list[str]] = {}
     if (case.language in ("c", "cpp", "c++")
             and probes and all(p["rc"] == 0 for p in probes.values())):
         stem = Path(case.path).stem
         try:
             for suffix in (".lo", ".o"):
-                target.write_text(
-                    case.expected_resolved, encoding="utf-8")
-                tp = _run_shell_tree(
-                    f"make {stem}{suffix}", cwd=str(repo), timeout=120)
-                out = (tp.stderr or "") + (tp.stdout or "")
-                if "No rule to make target" in out:
-                    continue  # wrong suffix — try the other
-                target_probe = {
-                    "cmd": f"make {stem}{suffix}",
-                    "rc": tp.returncode,
-                    "sig": _compile_error_signature(out, case.language)[:3],
-                }
-                break
+                cmd = f"make {stem}{suffix}"
+                _suffix_ok = True
+                for name, text in (
+                        ("oracle", case.expected_resolved),
+                        ("current", case.current),
+                        ("replayed", case.replayed)):
+                    target.write_text(text, encoding="utf-8")
+                    tp = _run_shell_tree(cmd, cwd=str(repo), timeout=120)
+                    out = (tp.stderr or "") + (tp.stdout or "")
+                    if "No rule to make target" in out:
+                        _suffix_ok = False
+                        break  # wrong suffix — try the other
+                    _target_sigs[name] = _compile_error_signature(
+                        out, case.language)[:5]
+                if _suffix_ok:
+                    target_probe = {
+                        "cmd": cmd,
+                        "rc": 0 if not _target_sigs.get("oracle") else 2,
+                        "sig": _target_sigs.get("oracle", [])[:3],
+                        "sides_sig": _target_sigs.get("current", [])[:3],
+                    }
+                    break
         except Exception:  # noqa: BLE001 — probe is best-effort
             target_probe = None
         finally:
@@ -1143,6 +1153,18 @@ def _toolchain_era_probe(repo: Path, case: "Case", *, has_crate: bool) -> dict |
     # not in the build the gate measures.
     if (not dead and target_probe is not None
             and target_probe["rc"] not in (0, None)):
+        dead = True
+    # Signature equivalence (sprint-25 item 2): when ALL THREE texts fail
+    # the conflict-target build with IDENTICAL signatures, the errors are
+    # era/content-intrinsic (redis-0049: the era code lives in the sides
+    # and the oracle alike) — the resolver cannot distinguish its output
+    # from the human resolution. Semantically honest: identical signatures
+    # across all three is content evidence, not denominator trimming.
+    _all3 = (_target_sigs.get("oracle") and _target_sigs.get("current")
+             and _target_sigs.get("replayed"))
+    if (not dead and _all3
+            and _target_sigs["oracle"] == _target_sigs["current"]
+            and _target_sigs["current"] == _target_sigs["replayed"]):
         dead = True
     return {"toolchain_dead": dead, "gate": gate, "probes": probes,
             "environmental": _environmental,
