@@ -1528,7 +1528,17 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
             try:
                 _tp = _run_shell_tree(_test_cmd, cwd=str(repo), timeout=900)
                 _t_out = (_tp.stderr or "") + (_tp.stdout or "")
-                if "timed out after" in _t_out or getattr(_tp, "timed_out", False):
+                if ("timed out after" in _t_out
+                        or getattr(_tp, "timed_out", False)):
+                    output_tests_result = None
+                elif any(_pat in _t_out for _pat in (
+                        # Environmental failures say nothing about the merge:
+                        # offline cargo/ctest cannot fetch or configure — a
+                        # suite that cannot RUN is not a suite that failed.
+                        "failed to download", "network", "offline",
+                        "does not have a lock file", "no such file or "
+                        "directory: Cargo.lock", "error: could not find "
+                        "`cargo`", "ctest: not found")):
                     output_tests_result = None
                 else:
                     output_tests_result = _tp.returncode == 0
