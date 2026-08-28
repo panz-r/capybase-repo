@@ -3289,3 +3289,15 @@ remaining ESCs all carry named blockers. Cycle-L in flight (worker
 3510208): the context-shattering breaker (redis-0052) + the golden-path
 retrieval (repair prompts get quality-filtered few-shot for the first
 time since sprint-21) — journal-event attribution.
+
+### Sprint-25 items 5+6 status; vendoring sequenced post-harvest (2026-08-28)
+
+- Item 6 DONE (4df9c50): the harvest census carries the prompt-
+  monitoring cross-tabs (prompts/case, max context tokens, golden-path
+  hit-rate + best score, shattered-repair accepts). Validated on
+  cycle-K: 16 cases, 7.3 prompts/case, 28.9K max context, golden-path
+  0 (activates in cycle-L).
+- Vendoring: crates.io IS reachable — `cargo vendor` per era-dead rust
+  dataset is feasible. Sequenced AFTER the harvest baseline so the
+  harvest measures the resolver work, not an environment change; the
+  next sprint's first item.
