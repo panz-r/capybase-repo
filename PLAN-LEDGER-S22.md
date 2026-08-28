@@ -3255,3 +3255,13 @@ this sampling's cascade weave didn't complete where I/J's did (the
 I/J PASSes came via a completed whole-file weave). The case joins the
 sampling-variance class; not a regression — the new mechanisms declined
 by design.
+
+### Repair-path retrieval activated (2026-08-28, sprint-25 item 5)
+
+The audit's "unconfigured feature" is now configured: cycle-L stages
+with CAPYBASE_GOLDEN_PATH=1 (the 535-example golden-path store exists,
+the QualityFilteredRetriever + repair-prompt rendering audited ALIVE).
+Cycle-L carries the shattering breaker + the retrieval together —
+attribution via journal events (golden_path retrieval events vs
+shattered_repair_accept) rather than separate A/B cycles; the two
+target disjoint ESC classes.
