@@ -3368,3 +3368,20 @@ portfolio path for a regression.
 
 Progress at this check: 171/676 results — 4 new good verdicts, 0 other
 flips, no timeouts.
+
+### jsonc-0007 flip triage: leaning variance (2026-08-28)
+
+The three harvest sessions: one plain-LLM accept; one plain-LLM accept
+that file-validated TRUE after a wf round fixed an `expected ')'`;
+one EXACT-HISTORY-REUSE session (replaying unit 1:2 verbatim from an
+earlier session's accepted resolution, re-validated). The 2/3 ESC + 1/3
+PASS shape matches the case's documented sprint-22 class ("unfixable
+brace imbalance" — the pre-harvest variance coin). The deterministic
+portfolio accept seen earlier belongs to this variance family (the
+current_only side sometimes validates, sometimes fails the brace gate).
+Leaning variance; final call at the modal outcome after the harvest +
+rerun complete.
+
+The tmp-quota rerun is ARMED (worker 207485): waits for the main
+harvest, cleans stale worktrees, reruns clickhouse-0001..0011 with the
+same config into harvest-rerun-clickhouse.json for merging.
