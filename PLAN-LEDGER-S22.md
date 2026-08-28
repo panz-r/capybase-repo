@@ -3316,3 +3316,27 @@ max_tokens = min(config, max(2048, 3× context estimate)). redis-0052's
 1,317-token unit gets ~3,951 output tokens instead of 8,192: less
 loop runway, and the JSON shell may complete before the cap. Cycle-M
 validates.
+
+### Cycle-L FINAL (2026-08-28): 6 PASS — the sprint's peak close
+
+The arc: 2 (A) → 2 (B) → 5 (C) → 4+N (D) → 3+2N (E) → 4 (F) → 4 (G)
+→ 4 (H) → 5 (I) → 5 (J) → 4 (K) → **6 + 1 NEAR + 1 OD (L)**.
+
+- The deterministic core held (redis-0055, sqlite-0004/0030,
+  tokio-0108); sea-orm NEAR 3/3; flask OD 2/3.
+- redis-0040 drew its coin-flip favorably (2/3 PASS).
+- **zenodo-0079 converted** — the trail shows plain_llm (not P6b; the
+  delimiter repair may have assisted an earlier repeat, or sampling
+  reached a clean candidate). NET variance-positive.
+- The golden-path retrieval FIRED across 14 cases (19 hit prompts in
+  the surveyed sessions) with no regressions to the core — the A/B
+  needs the harvest's cross-tab for effect size.
+- redis-0052: shattering cannot fire on empty candidates (recorded);
+  the per-unit output cap (9b6b36f) is its lever, cycle-M or harvest.
+- Census fix (c2c30a3): retrieval hit-counts only (the scores field
+  carries raw distances).
+
+**Sprint-24+25 status: all queued items implemented and dispositioned.
+The full harvest is staged awaiting the user's go** — the specimen
+set's information is exhausted; every case sits in a named class with
+a stable multi-cycle disposition.
