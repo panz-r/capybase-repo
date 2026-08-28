@@ -3246,3 +3246,12 @@ python dataset yet). Environmental guard added (cc9f41b): offline
 cargo/ctest failures record None, not False — a suite that cannot
 run says nothing. Cycle-K in flight carrying the equivalence probe
 (redis-0049's reclassification test) + the side micro-repair.
+
+### Cycle-K mid-run: redis-0013 reclassified variance-leaning (2026-08-28)
+
+The decline journaling's first payoff: redis-0013's cycle-K ballot says
+`weave` at confidence 1.0 — every takeover path correctly declined, and
+this sampling's cascade weave didn't complete where I/J's did (the
+I/J PASSes came via a completed whole-file weave). The case joins the
+sampling-variance class; not a regression — the new mechanisms declined
+by design.
