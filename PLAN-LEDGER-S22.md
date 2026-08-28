@@ -3385,3 +3385,27 @@ rerun complete.
 The tmp-quota rerun is ARMED (worker 207485): waits for the main
 harvest, cleans stale worktrees, reruns clickhouse-0001..0011 with the
 same config into harvest-rerun-clickhouse.json for merging.
+
+### THE GOLDEN-PATH REGRESSION: harvest restarted memory-off (2026-08-28)
+
+The harvest's flip audit caught a REAL regression cluster: protobuf-
+0008/0015/0034/0043 + redis-0012 (reround PASS → 3/3 ESC), all heavy
+exact_reuse users (2-3/3 sessions). Mechanism: the golden-path store
+(209MB, seeded sprint-21) replays STALE resolutions that fail under
+the current toolchain (protobuf-0034: an unterminated-quote error from
+a replayed resolution, then R1 fail-closed blocks it). The reround
+passed these cases with memory OFF — they resolve fresh, fine.
+
+DECISION (user not reachable; best judgment per the harvest's purpose
+— an apples-to-apples README baseline): restart memory-off.
+- Main harvest killed at ~265/676; the chained clickhouse rerun (which
+  had auto-fired and inherited the contaminated env) killed too.
+- Both worker scripts stripped of GOLDEN_PATH; the contaminated
+  partial preserved at full-harvest-gp-contaminated-partial.json.
+- Relaunched clean (worker 1310568): 676 cases, memory-off = the
+  reround's configuration. The clickhouse rerun re-arms after it.
+- Golden-path post-mortem: the A/B is NOT dead — it gets a proper
+  next-sprint design (re-seed the store against the current toolchain,
+  validate each replay against the CURRENT sides before accepting,
+  A/B on the specimen set first). The replay-stale-resolution failure
+  is itself a finding: exact_reuse needs freshness validation.
