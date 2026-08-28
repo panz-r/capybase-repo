@@ -3277,3 +3277,15 @@ oracle's opaque failure is the residual mystery. Per decision 2, the
 honest classification stays ESCALATE. A looser all-era-pattern rule was
 considered and rejected: it would classify cases where the resolver
 could still produce a building merge near a non-building oracle.
+
+### Cycles I/J/K: the stability triple (2026-08-28)
+
+The rock-solid core across all three: redis-0055, sqlite-0004,
+sqlite-0030, tokio-0108 (PASS ×3); sea-orm NEAR ×3; flask OD ×3;
+sqlite-0040 TOOLCHAIN ×3. Variance at the edges only: redis-0013
+(PASS/PASS/ESC — the weave@1.0 completion), clickhouse (NEAR/ESC/ESC —
+cascade variance). Seven of 18 deterministic across three cycles; the
+remaining ESCs all carry named blockers. Cycle-L in flight (worker
+3510208): the context-shattering breaker (redis-0052) + the golden-path
+retrieval (repair prompts get quality-filtered few-shot for the first
+time since sprint-21) — journal-event attribution.
