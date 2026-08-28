@@ -3340,3 +3340,14 @@ The arc: 2 (A) → 2 (B) → 5 (C) → 4+N (D) → 3+2N (E) → 4 (F) → 4 (G)
 The full harvest is staged awaiting the user's go** — the specimen
 set's information is exhausted; every case sits in a named class with
 a stable multi-cycle disposition.
+
+### THE FULL HARVEST LAUNCHED (2026-08-28, worker 4019826)
+
+676 cases, --repeat-nonpass 3, code = everything through b3b0815:
+all seven bug fixes, the four pipeline migrations, the output-cap, the
+storage-class relocation, the equivalence toolchain probe + conflict-
+target probe, the output-tests WORKING probe with C_TEST_COMMANDS,
+GOLDEN_PATH=1 (the golden-path retrieval's corpus-wide A/B), skip-size-
+guard. Output: /var/tmp/capybase-live/s24/full-harvest.json + flights.
+Expected duration: 15-25h (the sprint-22 shards ran 3-5h per language
+group). Case 1 (axum-0001): PASS sim=1.00 in 6s.
