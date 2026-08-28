@@ -3216,3 +3216,21 @@ model-driving and recovery):
 
 The full harvest runs when the user says go (staged at
 /tmp/capybase-live/s24-full-harvest/worker.sh).
+
+### Cycle-I FINAL (2026-08-28, 18/18) — the best result: 5 PASS + 2 NEAR
+
+The preemption fix's blast radius delivered:
+
+- **sea-orm-0021: ESC → NEAR** — compile-clean finally took the single
+  compiling side after tier-1's gated pick (f1_tier1_takeover
+  side=current + file_written — the exact Phase-B path the preemption
+  bug had starved).
+- **redis-0013: ESC → PASS** — the deadline class converted; the
+  cascade completed within budget with the phases running unpreempted.
+- clickhouse-0021: NEAR (stable); the core 5 PASS: redis-0055,
+  sqlite-0004/0030, tokio-0108, + redis-0013.
+
+Arc: 2→2→5→4+N→3+2N+OD→4+OD→4+OD→4+OD+TC→**5 PASS+2N+OD+TC**. Nine of
+18 now in deterministic non-ESCALATE states (5 PASS + 2 NEAR + flask OD
++ sqlite-0040 TC), plus the two coin-flips. Cycle-J in flight carrying
+the storage-class relocation + the output-tests WORKING probe.
