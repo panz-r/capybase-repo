@@ -10099,6 +10099,68 @@ class Orchestrator:
                                     except Exception:  # noqa: BLE001
                                         _f2_ok = False
                                 if not _f2_ok:
+                                    # Sprint-25 item 3: pristine-side
+                                    # micro-repair — the chosen side's
+                                    # compile failure may be one missing
+                                    # declaration the OTHER side carries
+                                    # (axum-0013: the adjudicated side needs
+                                    # an import its counterpart has). Run C1
+                                    # on the side's errors before declining;
+                                    # still compiler-gated.
+                                    try:
+                                        _f2_msgs = "\n".join(
+                                            str(f.message) for f in
+                                            (_f2_check.hard_failures
+                                             if _f2_check else []))
+                                        from capybase.verification import (
+                                            inject_symbol_declaration,
+                                            parse_missing_symbols,
+                                        )
+                                        _f2_syms = parse_missing_symbols(
+                                            _f2_msgs, language)[:2]
+                                        if _f2_syms:
+                                            _other = ("replayed"
+                                                      if _f2_side == "current"
+                                                      else "current")
+                                            _other_text = (_sides_f1 or {}).get(
+                                                _other, "")
+                                            for _sym in _f2_syms:
+                                                _decl = None
+                                                for _ln in _other_text.split("\n"):
+                                                    if (_sym in _ln
+                                                            and _ln.strip().endswith(";")):
+                                                        _decl = _ln.strip()
+                                                        break
+                                                    if (_sym in _ln
+                                                            and _ln.strip().endswith("{")):
+                                                        from capybase.verification import (
+                                                            derive_prototype as _dp2,
+                                                        )
+                                                        _decl = _dp2(_ln.strip())
+                                                        break
+                                                if _decl:
+                                                    _patched = inject_symbol_declaration(
+                                                        _f2_text, _decl, language)
+                                                    if _patched:
+                                                        _pv2 = self.verification.verify_file(
+                                                            path, language,
+                                                            _patched, [],
+                                                            repo_root=str(self.git.repo),
+                                                            whole_text=_patched)
+                                                        if _pv2.passed:
+                                                            _f2_text = _patched
+                                                            _f2_ok = True
+                                                            self.journal.emit(
+                                                                "f1_tier2_side_micro_repair",
+                                                                {"side": _f2_side,
+                                                                 "symbol": _sym,
+                                                                 "path": path},
+                                                                step_index=self.step,
+                                                                path=path)
+                                                            break
+                                    except Exception:  # noqa: BLE001
+                                        pass
+                                if not _f2_ok:
                                     self.journal.emit(
                                         "f1_tier2_side_build_declined",
                                         {"side": _f2_side, "path": path},
