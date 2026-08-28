@@ -2577,3 +2577,29 @@ def test_p6b_splice_level_delimiter_repair(conflicted_repo):
     final = (repo / "app.py").read_text()
     assert isinstance(result.escalated, bool)
     assert final  # file present
+
+
+def test_context_shattering_rescue_breaks_loops(conflicted_repo):
+    """s25 item 4: when the no-progress guard detects a repeated
+    signature, ONE diff-only high-temperature attempt fires before the
+    escalation paths — a repetition loop is an attractor of the prompt's
+    repetitive content, and the shattered prompt removes the attractor."""
+    repo = conflicted_repo["repo"]
+    # Two identical failures (loops the guard), then the shattered
+    # attempt's candidate validates.
+    engine = FakeConsensusEngine([
+        _cand("    return 'hi'(", cid="loop-1"),
+        _cand("    return 'hi'(", cid="loop-2"),  # identical → same signature
+        _cand("    return 'hi' + 'howdy'", cid="shattered-fix"),
+    ])
+    _cfg = _self_consistency_config(repo)
+    _cfg.future.enable_empty_fast_fail = False
+    _cfg.policy.max_retries_per_unit = 3
+    orch = Orchestrator(
+        _cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert not result.escalated, "the shattered rescue should resolve the loop"
+    final = (repo / "app.py").read_text()
+    assert "howdy" in final

@@ -14454,6 +14454,49 @@ class Orchestrator:
                         sig_counts = Counter(recent)
                         max_repeat = max(sig_counts.values())
                         if max_repeat >= np_threshold:
+                            # Sprint-25 item 4: the context-shattering rescue
+                            # — ONE diff-only, high-temperature attempt before
+                            # the guard escalates. A repetition loop is an
+                            # attractor of the prompt's repetitive content;
+                            # temperature alone (the truncation breaker)
+                            # doesn't remove the attractor. Latched per unit.
+                            if not getattr(outcome, "_shatter_tried", False):
+                                outcome._shatter_tried = True
+                                try:
+                                    _shattered = self.resolution_engine.propose(
+                                        unit, context,
+                                        failures=failures,
+                                        prev_candidate=cand,
+                                        n_samples=1,
+                                        attempt=retry_count + 1,
+                                        shatter=True,
+                                    )
+                                    for _sh_cand in _shattered:
+                                        if not (_sh_cand.resolved_text or "").strip():
+                                            continue
+                                        _sh_val = self.verification.verify(
+                                            unit, _sh_cand)
+                                        self._journal_validation(
+                                            unit, _sh_cand, _sh_val)
+                                        if _sh_val.passed:
+                                            self.journal.emit(
+                                                "shattered_repair_accept",
+                                                {"unit_id": unit.unit_id,
+                                                 "candidate_id": _sh_cand.candidate_id},
+                                                step_index=self.step,
+                                                path=unit.path,
+                                                unit_id=unit.unit_id)
+                                            outcome.accepted = _sh_cand
+                                            outcome.validation = _sh_val
+                                            outcome.escalated = False
+                                            outcome.retry_count = retry_count
+                                            outcome.reason = (
+                                                "context-shattering rescue: "
+                                                "diff-only repair broke the "
+                                                "repetition loop")
+                                            return outcome
+                                except Exception:  # noqa: BLE001 — rescue is best-effort
+                                    pass
                             # Sprint-24 cycle B: before the no-progress guard
                             # escalates, give F1 a chance to take over. The
                             # unit has cycled through retries without progress;

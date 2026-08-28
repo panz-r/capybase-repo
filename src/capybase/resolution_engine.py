@@ -3219,6 +3219,7 @@ class ResolutionEngine:
         n_samples: int | None = None,
         attempt: int = 0,
         temperature_override: float | None = None,
+        shatter: bool = False,
     ) -> list[CandidateResolution]:
         """Generate one or more candidates for ``unit``.
 
@@ -3254,6 +3255,13 @@ class ResolutionEngine:
         if _prev_truncated and temperature_override is None:
             temperature_override = min(
                 1.0, round(float(self.config.temperature) + 0.35, 2))
+        if shatter and temperature_override is None:
+            # The context-shattering rescue (s25 item 4): a repetition
+            # loop is an attractor of BOTH the sampling and the prompt's
+            # repetitive content — spike the temperature alongside the
+            # diff-only prompt so the next sample escapes both.
+            temperature_override = max(
+                0.8, round(float(self.config.temperature) + 0.5, 2))
         _ladder_base = None
         if attempt >= 1:
             try:
@@ -3276,6 +3284,7 @@ class ResolutionEngine:
                 n_samples=n_samples,
                 attempt=attempt,
                 temperature_override=temperature_override,
+                shatter=shatter,
             )
         finally:
             if _ladder_base is not None:
@@ -3294,10 +3303,18 @@ class ResolutionEngine:
         n_samples: int | None = None,
         attempt: int = 0,
         temperature_override: float | None = None,
+        shatter: bool = False,
     ) -> list[CandidateResolution]:
         """The candidate-generation body (called by :meth:`propose`)."""
         prompt_trims: list[dict] = []
-        if failures and prev_candidate and prev_candidate.resolved_text:
+        if shatter and prev_candidate and prev_candidate.resolved_text:
+            # The context-shattering repair (s25 item 4): replace the full
+            # repair prompt with the diff-only window — the loop's
+            # attractor is the repetitive context itself.
+            prompt_version = "shattered_repair.v1"
+            prompt = build_shattered_repair_prompt(
+                unit, prev_candidate, list(failures or []))
+        elif failures and prev_candidate and prev_candidate.resolved_text:
             prompt_version = PROMPT_REPAIR
             # The repair prompt carries sides+candidate+feedback only; build it
             # via the public builder (string). Trims stay empty (sides protected).
@@ -3971,3 +3988,57 @@ def _failed_candidate(
         parse_warnings=warnings or [reason],
         failure_kind=failure_kind,
     )
+
+
+def build_shattered_repair_prompt(
+    unit: ConflictUnit,
+    candidate: CandidateResolution,
+    failures: list,
+) -> str:
+    """The context-shattering repair prompt (s25 item 4).
+
+    A repetition loop is driven by the prompt's own repetitive content —
+    the model re-emits what it sees. This prompt strips EVERYTHING except
+    the exact error, a small window of the failing lines, and the output
+    contract: no sides, no structure, no history. The attractor is gone;
+    the model does a local pattern-match instead of re-deriving (and
+    re-looping) the whole merge. For redis-0052's class — true looping
+    where temperature alone does not break the cycle.
+    """
+    import re as _re
+
+    cand_text = candidate.resolved_text or ""
+    lines = cand_text.split("\n")
+    # Locate the first error line from the failures (file:line:col).
+    err_line = None
+    err_msg = ""
+    for f in failures:
+        m = _re.search(r":(\d+):\d+", getattr(f, "message", "") or "")
+        if m:
+            err_line = int(m.group(1)) - 1
+            err_msg = f.message
+            break
+    if err_msg and not err_line:
+        err_msg = failures[0].message if failures else "validation failed"
+    window = 8
+    lo = max(0, (err_line or len(lines) // 2) - window)
+    hi = min(len(lines), (err_line or len(lines) // 2) + window + 1)
+    snippet = "\n".join(f"{i + 1:5d}| {lines[i]}" for i in range(lo, hi))
+    return f"""Your previous merge attempt failed ONE validation. Fix it locally.
+
+file: {unit.path}
+error: {err_msg}
+
+The failing region (line numbers are from your previous output):
+
+```
+{snippet}
+```
+
+RULES:
+- Output the corrected version of ONLY the lines shown above, as a JSON
+  object: {{"resolved_text": "<the corrected snippet lines, joined with \\n>"}}
+- Do NOT reformat, rename, or restructure anything outside the error.
+- Make the SMALLEST change that fixes the error.
+
+Respond with ONLY the JSON object."""
