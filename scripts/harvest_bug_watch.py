@@ -64,6 +64,15 @@ def main() -> int:
                 "worker produced no result" in (c.get("reason") or ""):
             infra_errors.append(
                 {"id": cid, "verdict": v, "reason": (c.get("reason") or "")[:100]})
+        if "setup failed" in (c.get("reason") or ""):
+            # Infrastructure, not a resolver flip: the case never ran
+            # (the harvest's 11 clickhouse setup-fails were a full tmpfs
+            # during one stretch — git add got ENOSPC, reported by git as
+            # "Disk quota exceeded"). Rerun targets, not triage targets.
+            infra_errors.append(
+                {"id": cid, "verdict": v,
+                 "reason": "setup failed (infrastructure)"})
+            continue
         if bv in _GOOD and b is not None:
             flips.append({
                 "id": cid, "was": bv, "now": v,
