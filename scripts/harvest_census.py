@@ -251,10 +251,12 @@ def main() -> int:
                   / max(1, len(prompt_mon)), 1)),
         "max_context_tokens_seen": max(
             (v["max_ctx_tokens"] for v in prompt_mon.values()), default=0),
+        # Hit COUNTS only — the retrieval_scores field carries raw
+        # retriever distances (thousands-scale), not 0-1 similarities;
+        # averaging them as scores was meaningless.
         "golden_path_cases": len(golden_path),
-        "golden_path_avg_best_score": round(
-            sum(v["best"] for v in golden_path.values())
-            / max(1, len(golden_path)), 3),
+        "golden_path_total_hit_prompts": sum(
+            v["hits"] for v in golden_path.values()),
         "shattered_repair_accepts": dict(sorted(shattered.items())),
     }
     report["journal_events"] = journal_counts
