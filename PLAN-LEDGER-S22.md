@@ -3177,3 +3177,42 @@ data.
 
 **REJECTED:** R1's intent-coverage PASS verdict (metric gaming — the
 thrice-rejected pattern); R1's worktree sanitization (misdiagnosis).
+
+### Sprint-25 PLAN (2026-08-28, from the four user decisions)
+
+Decision 1 — WORKING via output tests: DONE (1af9e54). The corpus
+config carries test commands; divergent-band merges with passing
+project tests classify WORKING. Both categories (PASS-convergence and
+WORKING-value) stay distinct and both get optimized.
+
+Decision 2 — toolchain classification stays semantically honest,
+calibrated against corpus cases; adjust when it stops making sense.
+The error-signature equivalence probe implements this (item 2 below).
+
+Decision 3 — test commands in the corpus repo config: DONE (the
+mechanism + initial entries). Per-repo verification happens in the
+harvest; unrunnable suites are inherent to their cases.
+
+Decision 4 — the ordered plan (increasing edit complexity; both
+model-driving and recovery):
+
+1. [DONE] Storage-class relocation repair (c41c4e3, redis-0013 class)
+2. Error-signature equivalence probe — merged-buffer stderr ≡ pristine
+   sides' stderr → ESCALATE_TOOLCHAIN (protobuf-0051, redis-0049).
+   SMALL: extends the conflict-target probe.
+3. Pristine-side micro-repair — run C1b on tier-2's chosen side before
+   declining (axum-0013). SMALL: wiring.
+4. Context-shattering loop breaker — on identical signatures, spike
+   temperature AND switch to a diff-only prompt; hard-escalate at the
+   third repeat (redis-0052). MEDIUM: a new prompt mode + trigger.
+5. Repair-path retrieval activation — the strictly-filtered repair
+   few-shot (built, never enabled). MEDIUM: config + validation.
+6. Prompt monitoring + corpus cleanup — the prompt_composition events
+   are flowing; add the harvest cross-tabs + stale-case cleanup.
+   MEDIUM.
+7. Era-vendoring for rust deps (~12 recoverable cases) — per-repo
+   environment work. LARGE, recovery.
+8. [HELD] Coin-flip bias prompting — needs calibration data first.
+
+The full harvest runs when the user says go (staged at
+/tmp/capybase-live/s24-full-harvest/worker.sh).
