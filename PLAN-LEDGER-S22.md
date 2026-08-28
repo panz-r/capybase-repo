@@ -3265,3 +3265,15 @@ Cycle-L carries the shattering breaker + the retrieval together —
 attribution via journal events (golden_path retrieval events vs
 shattered_repair_accept) rather than separate A/B cycles; the two
 target disjoint ESC classes.
+
+### redis-0049's equivalence probe verdict: correctly not classified (2026-08-28)
+
+Cycle-K's probe data: current fails with 9 era errors, replayed with 1
+DIFFERENT era error (each side is a different pre-3.0 redis snapshot
+missing different symbols — signatures legitimately differ), and the
+oracle fails rc=2 with NO parseable signature (an opaque make-level
+failure). The strict identical-signature rule correctly declines; the
+oracle's opaque failure is the residual mystery. Per decision 2, the
+honest classification stays ESCALATE. A looser all-era-pattern rule was
+considered and rejected: it would classify cases where the resolver
+could still produce a building merge near a non-building oracle.
