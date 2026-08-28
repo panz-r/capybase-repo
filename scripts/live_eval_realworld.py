@@ -87,7 +87,10 @@ from capybase.provider_config import (  # noqa: E402
     resolve_provider,
 )
 from capybase.resolution_engine import ResolutionEngine  # noqa: E402
-from tests._realworld_build import C_BUILD_COMMANDS  # noqa: E402
+from tests._realworld_build import (  # noqa: E402
+    C_BUILD_COMMANDS,
+    C_TEST_COMMANDS,
+)
 from capybase.verification import (  # noqa: E402
     _ccache_enabled,
     _ccache_env,
@@ -194,6 +197,11 @@ class CaseResult:
     # verdict => GATE_UNAVAILABLE: the case measures the sandbox, not the
     # resolver. Probed only for cases heading to a non-clean verdict.
     oracle_builds: bool | None = None
+    # Sprint-25 decision 1: the project's own tests run on the resolver's
+    # output tree (post-hoc, divergent band only). True → the WORKING
+    # verdict regardless of preservation (tests pass = un-gameable merge
+    # value: capybase never writes tests). None = no command / couldn't run.
+    output_tests: bool | None = None
     # Sprint-20 S20.2: toolchain-era preflight — both pristine sides AND
     # the oracle fail the real gate with identical compile-error
     # signatures (un-passable under this toolchain; the tokio-0109
@@ -1308,6 +1316,14 @@ def _is_working(r: "CaseResult") -> bool:
     """WORKING: compiling, marker-free, below the PASS bar, and preserving
     both sides' changes — a functioning both-features merge the oracle
     diverged from for out-of-band (human/planning) reasons."""
+    if (
+        not r.escalated
+        and r.marker_free
+        and r.compiles
+        and r.matches_oracle < PASS_THRESHOLD
+        and getattr(r, "output_tests", None) is True
+    ):
+        return True  # the project's own tests accept the merge
     return (
         not r.escalated
         and r.marker_free
@@ -1474,6 +1490,28 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
                 oracle_builds_result = _oracle_builds(repo, case, crate_source)
             except Exception:  # noqa: BLE001 — classification is best-effort
                 oracle_builds_result = None
+        # Sprint-25 decisions 1+3: the output-tests probe. When the merge is
+        # marker-free, non-escalated, and BELOW the PASS bar (the divergent
+        # band — clear PASSes never pay the test cost), run the dataset's
+        # test command on the output tree. A pass upgrades the verdict to
+        # WORKING: the project's own tests accept the merge. A timeout or
+        # infrastructure failure records None (not False) — an unrunnable
+        # suite says nothing about the merge.
+        output_tests_result: bool | None = None
+        _test_cmd = C_TEST_COMMANDS.get(case.dataset, "")
+        if (_test_cmd and content and not res.escalated
+                and not _contains_markers(content)
+                and _token_jaccard(content, case.expected_resolved)
+                < PASS_THRESHOLD):
+            try:
+                _tp = _run_shell_tree(_test_cmd, cwd=str(repo), timeout=900)
+                _t_out = (_tp.stderr or "") + (_tp.stdout or "")
+                if "timed out after" in _t_out or getattr(_tp, "timed_out", False):
+                    output_tests_result = None
+                else:
+                    output_tests_result = _tp.returncode == 0
+            except Exception:  # noqa: BLE001 — probe is best-effort
+                output_tests_result = None
     finally:
         # D3: when the main thread owns the temp dir, it cleans up after the
         # worker returns or times out. When we own it, clean up here.
@@ -1482,6 +1520,7 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
             shutil.rmtree(td, ignore_errors=True)
     res.elapsed = time.time() - t0
     res.oracle_builds = oracle_builds_result
+    res.output_tests = output_tests_result
     res.marker_free = not _contains_markers(content) if content else False
     # Non-code files (markdown, lockfiles, prose): marker-free is the only
     # structural gate. Brace-balance on prose rejects perfect merges — a

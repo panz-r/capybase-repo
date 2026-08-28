@@ -184,3 +184,25 @@ def run_command_at_worktree(
         # and the temp dir holding it.
         _git(clone, "worktree", "remove", "--force", str(wt))
         shutil.rmtree(td, ignore_errors=True)
+
+
+#: Per-dataset TEST commands (sprint-25 decision 3: the corpus repo config
+#: carries test commands where they exist — the same mechanism as the
+#: production ``[tests]`` config). Used by the harness's post-hoc
+#: output-tests probe: when the resolver's merge diverges from the oracle
+#: but the project's OWN tests pass on the output tree, the case classifies
+#: WORKING (sprint-25 decision 1: capybase only fixes conflicts — it never
+#: writes or modifies tests — so tests passing is un-gameable evidence of
+#: real-world merge value; oracle-convergence alone may be too strict).
+#: Empty/absent = no test command (the probe stays None; the
+#: preservation-based WORKING rule still applies). Bounded by the probe's
+#: timeout; suites that cannot run in the sandbox fail honestly to None.
+C_TEST_COMMANDS: dict[str, str] = {
+    "jsonc-history": "ctest --test-dir build --output-on-failure",
+    # Rust crates: the case worktree IS the crate; cargo test with the
+    # probe's timeout. Big suites (tokio) partial-run to a timeout → the
+    # probe records None, not False (a timeout is not a test failure).
+    "axum-history": "cargo test --quiet",
+    "sea-orm-history": "cargo test --quiet",
+    "tokio-history": "cargo test --quiet --lib",
+}
