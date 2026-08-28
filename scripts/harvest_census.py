@@ -172,6 +172,9 @@ def main() -> int:
     # S20.E8: per-case mechanism waterfall + build economy.
     mech_mix: dict[str, dict[str, int]] = {}
     build_secs: dict[str, float] = {}
+    prompt_mon: dict[str, dict] = {}
+    golden_path: dict[str, dict] = {}
+    shattered: dict[str, int] = {}
     for case_id, d in _iter_journals(args.flights or ""):
         et = d.get("event_type") or ""
         journal_counts[et] = journal_counts.get(et, 0) + 1
@@ -194,6 +197,32 @@ def main() -> int:
                     p.get("duration_s") or p.get("elapsed") or 0.0)
             except (TypeError, ValueError):
                 pass
+        # Sprint-25 prompt monitoring: prompt_composition cross-tabs —
+        # context size vs outcome, the R5 retry-variant tags, and the
+        # golden-path retrieval hit-rate (repair few-shot).
+        if et == "prompt_composition":
+            _pc = prompt_mon.setdefault(
+                case_id, {"n_prompts": 0, "max_ctx_tokens": 0,
+                          "variants": {}})
+            _pc["n_prompts"] += 1
+            try:
+                _pc["max_ctx_tokens"] = max(
+                    _pc["max_ctx_tokens"],
+                    int(p.get("context_token_estimate") or 0))
+            except (TypeError, ValueError):
+                pass
+        elif et == "retrieval_explained" or et == "context_built":
+            if p.get("retrieval_scores"):
+                _rg = golden_path.setdefault(
+                    case_id, {"hits": 0, "best": 0.0})
+                _rg["hits"] += 1
+                try:
+                    _rg["best"] = max(
+                        _rg["best"], max(p["retrieval_scores"]))
+                except (TypeError, ValueError):
+                    pass
+        elif et == "shattered_repair_accept":
+            shattered[case_id] = shattered.get(case_id, 0) + 1
         if et in ("llm_skipped_oversized", "llm_skipped_oversized_prompt"):
             oversized_cases.add(case_id)
         elif et == "class_member_split_candidate":
@@ -215,6 +244,19 @@ def main() -> int:
                     preservation_events.get(
                         "deletion_superseded(feature)", 0) + 1
 
+    report["prompt_monitoring"] = {
+        "cases_with_prompts": len(prompt_mon),
+        "avg_prompts_per_case": (
+            round(sum(v["n_prompts"] for v in prompt_mon.values())
+                  / max(1, len(prompt_mon)), 1)),
+        "max_context_tokens_seen": max(
+            (v["max_ctx_tokens"] for v in prompt_mon.values()), default=0),
+        "golden_path_cases": len(golden_path),
+        "golden_path_avg_best_score": round(
+            sum(v["best"] for v in golden_path.values())
+            / max(1, len(golden_path)), 3),
+        "shattered_repair_accepts": dict(sorted(shattered.items())),
+    }
     report["journal_events"] = journal_counts
     report["oversized_cohort"] = sorted(oversized_cases)
     report["member_split_distribution"] = member_split[:50]
