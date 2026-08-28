@@ -3351,3 +3351,20 @@ GOLDEN_PATH=1 (the golden-path retrieval's corpus-wide A/B), skip-size-
 guard. Output: /var/tmp/capybase-live/s24/full-harvest.json + flights.
 Expected duration: 15-25h (the sprint-22 shards ran 3-5h per language
 group). Case 1 (axum-0001): PASS sim=1.00 in 6s.
+
+### Harvest incident 1: the clickhouse tmpfs stretch (2026-08-28)
+
+Cases clickhouse-0001..0011 (11 cases) failed on SETUP — git add hit a
+full /tmp tmpfs (git reports ENOSPC as "Disk quota exceeded"), 3s each,
+then the run SELF-RECOVERED (0013+ ran; /tmp back to 3.7G, 2 stale
+worktrees). NOT resolver flips: the bug-watch now classifies
+setup-failures as infrastructure (6d03a4f). RERUN LIST at completion:
+clickhouse-0001..0011 via --case flags (cheap targeted reruns).
+
+The one REAL flip to watch: jsonc-0007 (PASS → 2/3 ESC). One session
+shows source_portfolio current_only accepted (a deterministic accept —
+not sampling variance). If the modal rerun says ESC, triage the
+portfolio path for a regression.
+
+Progress at this check: 171/676 results — 4 new good verdicts, 0 other
+flips, no timeouts.
