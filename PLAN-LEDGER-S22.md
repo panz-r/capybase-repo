@@ -3301,3 +3301,18 @@ time since sprint-21) — journal-event attribution.
   dataset is feasible. Sequenced AFTER the harvest baseline so the
   harvest measures the resolver work, not an environment change; the
   next sprint's first item.
+
+### redis-0052's shattering verdict + the output-cap lever (2026-08-28)
+
+Cycle-L's journal: the shattered rescue never fired — the no-progress
+guard's signature tracking skips all-needs_human signatures, and the
+truncated-empty candidates are exactly that shape; moreover the
+shattered prompt's ±8-line window has NO text to window (empty
+resolved_text). The rescue as designed targets NON-empty loops (sqlite-
+0019/0029's repeated compile errors), not empty truncation loops.
+
+The lever for the true-loop class: the per-unit output cap (9b6b36f) —
+max_tokens = min(config, max(2048, 3× context estimate)). redis-0052's
+1,317-token unit gets ~3,951 output tokens instead of 8,192: less
+loop runway, and the JSON shell may complete before the cap. Cycle-M
+validates.
