@@ -149,6 +149,54 @@ _DATASET_EXTRA_INCLUDES: dict[str, list[str]] = {
 }
 
 
+#: Sprint-26 A5 (era recovery): the validated rust dep patches. Old tokio
+#: trees pin security-framework "^0.2" — ALL crates.io 0.2.x versions are
+#: yanked; the git-tag pin restores resolution (verified: vendor 169 crates,
+#: offline build rc=0 with --cap-lints warn for the 2019 rustdoc-attribute
+#: drift). Per-dataset because the pins differ by era.
+RUST_DEP_PATCHES: dict[str, list[str]] = {
+    "tokio-history": [
+        '[patch.crates-io]\n'
+        'security-framework = { git = '
+        '"https://github.com/kornelski/rust-security-framework", tag = "v0.2.2" }\n',
+    ],
+}
+
+
+def _vendor_rust_deps(repo: Path, dataset: str) -> bool:
+    """Patch yanked/broken deps, cargo vendor, and wire the offline config.
+
+    Returns True when a vendor/ dir was created (the gate then builds
+    offline via the source replacement). Best-effort: any failure leaves
+    the tree as-is (the case fails the gate and classifies era honestly).
+    """
+    patches = RUST_DEP_PATCHES.get(dataset)
+    if not patches:
+        return False
+    ct = repo / "Cargo.toml"
+    if not ct.exists() or (repo / "vendor").is_dir():
+        return False
+    import subprocess as _sp
+    try:
+        with ct.open("a") as f:
+            f.write("\n" + "\n".join(patches))
+        v = _sp.run(
+            ["cargo", "vendor", "vendor"],
+            cwd=str(repo), capture_output=True, text=True, timeout=600)
+        if v.returncode != 0 or not (repo / "vendor").is_dir():
+            return False
+        # The config cargo prints verbatim; write it ourselves (stable form).
+        (repo / ".cargo").mkdir(exist_ok=True)
+        (repo / ".cargo" / "config.toml").write_text(
+            "[source.crates-io]\n"
+            'replace-with = "vendored-sources"\n\n'
+            "[source.vendored-sources]\n"
+            'directory = "vendor"\n')
+        return True
+    except Exception:  # noqa: BLE001 — vendoring is best-effort
+        return False
+
+
 def _dataset_include_flags(dataset: str) -> str:
     """'-I<prefix>/tcl8.6' style flags for the dataset's era headers."""
     if dataset not in _DATASET_EXTRA_INCLUDES:
@@ -616,6 +664,18 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
             from pathlib import Path as _Pf_merge
             for _p in (_cur_p, _base_p, _rep_p):
                 _Pf_merge(_p).unlink(missing_ok=True)
+
+    # Sprint-26 A5: rust era recovery — patch the yanked/broken deps and
+    # vendor them so the cargo gate runs offline (the tokio registry class).
+    if case.language == "rust" and crate_source is not None:
+        _vendored = _vendor_rust_deps(repo, case.dataset)
+        if _vendored:
+            # Offline + lint-capped: the vendored era deps carry 2019
+            # rustdoc-attribute drift (verified: --cap-lints warn builds
+            # rc=0); the gate's cargo subprocess inherits this env.
+            os.environ.setdefault("CARGO_NET_OFFLINE", "true")
+            os.environ.setdefault(
+                "RUSTFLAGS", "--cap-lints warn")
 
     # For C cases: run the build-prepare step AFTER the rebase, so the build
     # dir is fresh on the final conflicted state. The rebase's git checkouts
