@@ -3450,3 +3450,43 @@ harvest incident's 5 flips). GOLDEN_PATH survives only for the
 deliberate, freshness-validated A/B and now prints a policy warning.
 The README architecture note states the split. Next sprint's A/B
 design (re-seed + freshness validation) proceeds under this policy.
+
+### ERA-DEAD INVENTORY: the 167 classified (2026-08-29, user question)
+
+"What are the actual errors classified as era? Misconfigured corpus
+entries, or other issues?" — Offline verification on materialized
+trees, per cluster:
+
+**1. sqlite ×90 (54%) — MISCONFIGURED, flag-fixable (VERIFIED).**
+gcc 15's default -std=gnu23 made empty-paren K&R declarations mean
+(void): `void FindActions();` (lemon.c:171) vs the definition with
+`(struct lemon *)` → "conflicting types". Offline: the era tree fails
+make rc=2; with **CFLAGS="-std=gnu99" → rc=0, zero errors**. Corpus
+build config fix: sqlite's prepare becomes
+`CFLAGS='-std=gnu99' ./configure && make`.
+
+**2. nlohmann ×36 (22%) — PARTIALLY misconfigured.** Two layers:
+(a) doctest's `altStackMem[4 * SIGSTKSZ]` (glibc made SIGSTKSZ
+non-constant) — flag/literal fixable; (b) old json.hpp vs libstdc++15:
+the type_error::create mismatch demotes to a warning under
+`-std=c++11 -fpermissive -Wno-error`, but 2 allocator_traits static
+asserts remain (genuine drift in a test allocator). Flags take the
+build 34 errors → 2; full recovery needs excluding that test target
+or accepting the residual.
+
+**3. rust ×~26 (tokio 15, sea-orm 9, fmt 4, misc)** — cargo registry
+resolution failures (`security-framework = "^0.2"`, `sea-query =
+"^0.18"`) are VENDORING targets (crates.io reachable); the rest are
+genuine rustc/API drift (FromValueTuple, must_use, #[deprecated] on
+trait impls, fmt private fields).
+
+**4. sqlite-0039 ×1 — MY PROBE'S FALSE POSITIVE (fixed).** lempar.c
+is lemon's TEMPLATE (the '%' tokens are template syntax); `make
+lempar.o` fails by design while the real build (rc 0) never compiles
+it directly. Template-signature guard added to the conflict-target
+probe; sqlite-0039 returns to the passable pool.
+
+**Impact if executed**: ~90 sqlite + ~34 nlohmann + ~10-20 vendored
+rust re-enter the active pool; the era census shrinks 167 → ~30-40
+and the RAW PASS rate rises accordingly (the adjustment stays honest
+for the genuine remainder).

@@ -1165,7 +1165,17 @@ def _toolchain_era_probe(repo: Path, case: "Case", *, has_crate: bool) -> dict |
     # not in the build the gate measures.
     if (not dead and target_probe is not None
             and target_probe["rc"] not in (0, None)):
-        dead = True
+        # Template-file guard (sqlite-0039 lesson): a conflict file that
+        # fails its target with "expected expression before '%'" is a
+        # GENERATOR TEMPLATE (lemon's lempar.c) — never compiled directly
+        # by the real build (the full gate proved rc 0). The target rule
+        # exists but is not on the default build path; classifying it
+        # toolchain-dead steals a passable case.
+        _template_sig = any(
+            "before '%' token" in s or 'before ‘%’' in s
+            for s in (target_probe.get("sig") or []))
+        if not _template_sig:
+            dead = True
     # Signature equivalence (sprint-25 item 2): when ALL THREE texts fail
     # the conflict-target build with IDENTICAL signatures, the errors are
     # era/content-intrinsic (redis-0049: the era code lives in the sides
