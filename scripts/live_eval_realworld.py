@@ -118,10 +118,84 @@ C_PREPARE_COMMANDS: dict[str, str] = {
     "redis-history": "",
     "jsonc-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
     "sqlite-history": "./configure && make -j{jobs}",
-    "nlohmann-json-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+    # Sprint-26 A3 (era recovery): BuildTests=OFF removes doctest's
+    # altStackMem[4*SIGSTKSZ] (glibc made SIGSTKSZ non-constant) AND the 2
+    # allocator_traits-drift errors in unit-allocator — both lived in the
+    # test tree. The CXX flags demote the type_error::create mismatches to
+    # warnings. VERIFIED offline: rc=0, zero errors, full 38/38 recovery.
+    "nlohmann-json-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DJSON_BuildTests=OFF -DCMAKE_CXX_FLAGS='-DSIGSTKSZ=32768 -std=c++11 -fpermissive -Wno-error'",
     "clickhouse-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
     "protobuf-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -Dprotobuf_BUILD_TESTS=OFF",
 }
+
+#: Sprint-26 A1 (era recovery): per-dataset CFLAGS injected into the
+#: autotools prepare (``_resolve_c_build``'s configure branches IGNORE
+#: C_PREPARE_COMMANDS — verified: sqlite era trees have configure.ac, so
+#: the default never flows). sqlite: gcc 15's default -std=gnu23 makes
+#: K&R empty-paren declarations mean (void), conflicting with the lemon.c
+#: definitions ('FindActions'). VERIFIED on two commits: rc2 -> rc0.
+C_DATASET_CFLAGS: dict[str, str] = {
+    "sqlite-history": "-std=gnu99",
+}
+
+#: Sprint-26 A1: extra INCLUDE paths per dataset, extracted from .debs
+#: (no root: ``apt-get download tcl8.6-dev && dpkg-deb -x``). The sqlite
+#: tclsqlite.c cases need tcl.h — VERIFIED: sqlite-0065 builds rc=0 with
+#: this path + gnu99. Populated lazily on first use; empty when the
+#: extraction isn't available (those cases stay era-dead honestly).
+_DATASET_INCLUDE_PREFIX = Path("/tmp/capybase-era-includes")
+_DATASET_EXTRA_INCLUDES: dict[str, list[str]] = {
+    "sqlite-history": ["tcl8.6"],  # -> _DATASET_INCLUDE_PREFIX/tcl8.6
+}
+
+
+def _dataset_include_flags(dataset: str) -> str:
+    """'-I<prefix>/tcl8.6' style flags for the dataset's era headers."""
+    if dataset not in _DATASET_EXTRA_INCLUDES:
+        return ""
+    _ensure_dataset_includes()
+    flags = []
+    for sub in _DATASET_EXTRA_INCLUDES[dataset]:
+        p = _DATASET_INCLUDE_PREFIX / sub
+        if p.is_dir():
+            flags.append(f"-I{p}")
+    return " ".join(flags)
+
+
+def _ensure_dataset_includes() -> None:
+    """Extract era headers (tcl8.6-dev) into the local prefix if absent.
+
+    Runs once per process. Best-effort: on any failure the prefix stays
+    empty and the prepare simply omits the -I flags (the tcl cases then
+    fail the gate and classify era honestly, as before).
+    """
+    if _DATASET_INCLUDE_PREFIX.exists():
+        return
+    marker = _DATASET_INCLUDE_PREFIX.parent / ".era-includes.ok"
+    if marker.exists():
+        return
+    try:
+        import subprocess as _sp
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            _sp.run(
+                ["apt-get", "download", "tcl8.6-dev"],
+                cwd=td, check=True, capture_output=True, timeout=120)
+            deb = next(Path(td).glob("tcl8.6-dev*.deb"))
+            _DATASET_INCLUDE_PREFIX.mkdir(parents=True, exist_ok=True)
+            # Extract ONLY the header tree (the .deb also carries tclsh
+            # binaries and Tcl libraries we don't need or want on PATH).
+            _sp.run(
+                ["dpkg-deb", "-x", str(deb), str(td + "/x")],
+                check=True, capture_output=True, timeout=120)
+            src = Path(td, "x", "usr", "include", "tcl8.6")
+            if src.is_dir():
+                _sp.run(
+                    ["cp", "-r", str(src), str(_DATASET_INCLUDE_PREFIX / "tcl8.6")],
+                    check=True, capture_output=True, timeout=60)
+        marker.touch()
+    except Exception:  # noqa: BLE001 — best-effort; cases degrade to era
+        pass
 
 # Per-case build-command cache: populated by _materialize_conflict after it
 # probes the extracted tree's build system. _config_for reads from here so the
@@ -383,8 +457,8 @@ def _resolve_c_build(repo: Path, dataset: str, default_prepare: str) -> tuple[st
                 "cmake --build build")
     if has_autotools:
         # Generate configure from configure.ac, run it, then build derived
-        # headers only (not the full project — that takes too long for the
-        # case budget). The headers (parse.h, opcodes.h, sqlite3.h, etc.)
+        # headers only (not the full project — that takes too long for
+        # the case budget). The headers (parse.h, opcodes.h, sqlite3.h, etc.)
         # are needed for gcc -fsyntax-only verification. The build_cmd stays
         # "make -j{jobs}" so verify_file can do targeted builds (.lo/.o).
         # The job count is resolved in Python (not $(nproc)) because the
@@ -392,14 +466,33 @@ def _resolve_c_build(repo: Path, dataset: str, default_prepare: str) -> tuple[st
         # a literal -j$(nproc) argument is an invalid make option (usage
         # text, rc=2, no attributable error lines).
         _jobs = max(4, (os.cpu_count() or 4))
-        return ("autoreconf -fi >/dev/null 2>&1; ./configure >/dev/null 2>&1",
+        _cfg = C_DATASET_CFLAGS.get(dataset, "")
+        _inc = _dataset_include_flags(dataset)
+        _cflags = f"{_cfg} {_inc}".strip()
+        # export: the ';' between autoreconf and configure would otherwise
+        # scope the env prefix to autoreconf only (verified: without export,
+        # configure omits -std from CFLAGS/BCC and lemon.c fails again).
+        _env = f"export CFLAGS='{_cflags}'; " if _cflags else ""
+        return (f"{_env}autoreconf -fi >/dev/null 2>&1; ./configure >/dev/null 2>&1",
                 f"make -j{_jobs}")
     if has_configure:
         _jobs = max(4, (os.cpu_count() or 4))
-        return ("./configure >/dev/null 2>&1",
+        _cfg = C_DATASET_CFLAGS.get(dataset, "")
+        _inc = _dataset_include_flags(dataset)
+        _cflags = f"{_cfg} {_inc}".strip()
+        _env = f"export CFLAGS='{_cflags}'; " if _cflags else ""
+        return (f"{_env}./configure >/dev/null 2>&1",
                 f"make -j{_jobs}")
     if has_makefile:
         _jobs = max(4, (os.cpu_count() or 4))
+        # Sprint-26 C18 site-2: redis's ready-Makefile in-loop gate needs the
+        # same era stack as the probe gate (C_BUILD_COMMANDS site): -lm link
+        # order, -fno-common, and gnu99 (bundled hiredis K&R). Scoped to the
+        # redis dataset so other ready-Makefile trees keep the plain gate.
+        if dataset == "redis-history":
+            return ("", "make -j{j} CC='cc -std=gnu99 -fcommon "
+                    "-Wl,--no-as-needed' CFLAGS='-std=gnu99 -fcommon' "
+                    "MALLOC=libc FORCE_LIBC_MALLOC=yes".format(j=_jobs))
         return ("", f"make -j{_jobs}")
     # Unknown build system — no whole-tree gate. The CcsSyntaxValidator
     # (gcc -fsyntax-only) still gates per-unit; brace-balance is the only
@@ -568,6 +661,28 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
                 if _fixed != _lemon_src:
                     _lemon_path.write_text(_fixed)
 
+        # Sprint-26 A5-fmt (era recovery): old fmt's core.h lacks
+        # <cstdint> (uint64_t does not name a type under libstdc++ 15 —
+        # the 'types_' errors were downstream). One include addition;
+        # VERIFIED: fmt-0004's full cmake build (incl. tests) rc=0.
+        _fmt_core = repo / "include" / "fmt" / "core.h"
+        if _fmt_core.exists():
+            _fc = _fmt_core.read_text()
+            if "#include <cstdint>" not in _fc and "uint64_t" in _fc:
+                _fc = _fc.replace("#include <cstdio>", "#include <cstdio>\n#include <cstdint>", 1)
+                if "#include <cstdint>" in _fc:
+                    _fmt_core.write_text(_fc)
+        # Sprint-26 A1-redis (era recovery): bundled hiredis carries
+        # va_arg(ap, void) — invalid C, gcc 15 hard-errors it. Replace with
+        # the (void)ap discard. VERIFIED: with the full redis stack the
+        # tree builds redis-server/cli/benchmark.
+        _hiredis = repo / "deps" / "hiredis" / "hiredis.c"
+        if _hiredis.exists():
+            _hc = _hiredis.read_text()
+            if "va_arg(ap,void)" in _hc or "va_arg(ap, void)" in _hc:
+                _hiredis.write_text(
+                    _hc.replace("va_arg(ap,void);", "(void)ap;")
+                       .replace("va_arg(ap, void);", "(void)ap;"))
         if prepare:
             # Run the prepare step (configure/cmake). The prepare is
             # deterministic per source tree but takes ~30s (cmake) to ~3-5
@@ -649,6 +764,13 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
             _dirty = [
                 ln for ln in (_diff.stdout or "").splitlines()
                 if ln.strip() and ln.strip() != case.path
+                # Sprint-26 A1: keep the era patches applied — reverting
+                # tool/lemon.c resurrects the K&R declarations the patcher
+                # fixed (the harvest's 90 sqlite failures: the probe's make
+                # rebuilt lemon from the REVERTED source).
+                and ln.strip() != "tool/lemon.c"
+                and ln.strip() != "deps/hiredis/hiredis.c"
+                and ln.strip() != "include/fmt/core.h"
             ]
             if _dirty:
                 _sp_restore.run(

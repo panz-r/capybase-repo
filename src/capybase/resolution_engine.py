@@ -3805,28 +3805,23 @@ class ResolutionEngine:
             if temperature_override is not None
             else self.config.temperature
         )
-        # Per-unit output cap (s25): a unit's output need scales with its
-        # input — a 1,317-token unit does not need 8,192 output tokens, and
-        # an oversized ceiling lets a repetition loop run to full length
-        # before truncation (redis-0052: finish_reason=length at the 8,192
-        # cap on every retry, the parse salvage yielding empty). Capping at
-        # 3x the context estimate (floor 2048, ceiling the config) both
-        # saves budget and gives loops less runway — the JSON shell may
-        # complete before the cap.
-        _mt_cap = self.config.max_tokens
-        try:
-            _ctx_est = int(getattr(context, "token_estimate", 0) or 0)
-            if _ctx_est > 0:
-                _mt_cap = min(
-                    self.config.max_tokens, max(2048, 3 * _ctx_est))
-        except Exception:  # noqa: BLE001 — the cap is best-effort
-            _mt_cap = self.config.max_tokens
+        # NOTE (sprint-26 A0): the per-unit output cap (3× the windowed
+        # context estimate, floor 2048) was REMOVED. It was a no-op for its
+        # intended beneficiary (redis-0052's 8,208-line conflict got the full
+        # 8,192 under any conflict-size formula) while throttling whole-file
+        # units whose windowed prompt is tiny but whose resolution is
+        # thousands of lines — redis-0055 (8,674-line resolution capped to
+        # 2,048, 3/3 empty truncation; a validated PASS regressed), redis-
+        # 0012, sqlite-0033, ~120 sessions of budget burn (natural A/B:
+        # pre-cap cycle-L 0 attempts vs harvest 6-9 per case). Output need is
+        # not derivable from INPUT size for whole-file units. The eval-side
+        # sizing (conflict_lines × 16, floor 2048) remains the only cap.
         try:
             resp: LLMResponse = self.client.complete(
                 messages,
                 model=self.config.model,
                 temperature=temperature,
-                max_tokens=_mt_cap,
+                max_tokens=self.config.max_tokens,
                 json_mode=self._request_json_mode(),
             )
         except Exception as exc:  # noqa: BLE001 - degrade to retryable failure

@@ -54,7 +54,12 @@ from tests._realworld_cargo import cleanup_orphan_worktrees
 # repos enter the corpus. Empty/absent = the test skips that dataset's build
 # verdict (the gcc syntax floor still runs).
 C_BUILD_COMMANDS: dict[str, str] = {
-    "redis-history": "make -j4",
+    # Sprint-26 C18 (era recovery): the CC wrapper fixes BOTH the -lm
+    # link order (Ubuntu --as-needed drops libm placed before objects —
+    # redis-0049's oracle fails on 'undefined reference to log') and
+    # gcc 15's -fno-common default (hashDictType multiple definitions in
+    # redis.h). VERIFIED offline: redis-server/cli/benchmark all build.
+    "redis-history": "make -j4 CC='cc -std=gnu99 -fcommon -Wl,--no-as-needed' CFLAGS='-std=gnu99 -fcommon' MALLOC=libc FORCE_LIBC_MALLOC=yes",
     # jsonc: the era repos build with -Werror; modern gcc emits warnings the era
     # compilers did not (unused-value etc), promoting clean-era code to build
     # failures — a false era-positive. Verified: -Wno-error builds the era clean.
