@@ -3525,3 +3525,58 @@ from 67.6% toward the high-70s; adjusted% moves only honestly.
 **Verification discipline**: each recovered pool re-runs with the full
 bug-watch (flip audit vs its OWN prior verdicts — era → anything is
 progress, never a flip); the README row cites the config commits.
+
+### Sprint-26 CONSOLIDATED: all prior-sprint backlog merged (2026-08-29)
+
+Everything still open from sprints 20-25, merged into sprint-26 by
+theme. Items newly UNBLOCKED by the harvest data are marked.
+
+**A. Era recovery (the sprint's core — queued above)**
+1-7 as planned: sqlite gnu99 config → pool re-run → nlohmann
+flags/exclusion → pool re-run → rust vendoring → genuine-drift
+acceptance → harvest + README row.
+
+**B. Calibration-now-possible (harvest majority-of-3 data exists)**
+8. Mid-band fast-path extension — rejected in s22 "needs calibration
+   data from the sharded harvest"; the data now exists (per-case
+   repeat verdicts + churn gates). Revisit with the corpus cross-tab.
+9. Coin-flip bias prompting (refactor-vs-functional directive) — HELD
+   for calibration; the harvest's repeat spread on redis-0040/0047-
+   class cases is the calibration set.
+10. Self-consistency default-on decision — wired, off by default
+    (README); the harvest + specimen majority data can now size its
+    cost/benefit.
+
+**C. Deterministic-repair depth (sprint-22 held list)**
+11. Mixed-delimiter stack repair (C4 backlog) — interleaved ()/[]/{}
+    mismatches; the delimiter repair handles single-pair today.
+12. Deletion-intent classifier — the modify/delete enrichment covers
+    duplicate-def shapes; a general classifier remains open.
+13. Statement splitting as rung 4 — held redundant while mini-conflict/
+    member-split cover it; revisit only with overflow evidence.
+14. P5 non-code extension — resurrection guard for prose/config files
+    (minor).
+15. Comment-phase LLM 400 single-retry hardening (axum-0005 class).
+16. Mid-band style transfer — held since s22; lowest priority.
+
+**D. Open diagnoses (named, unresolved)**
+17. protobuf-0051's underlying conflict-target failure — the gcc line
+    is now captured (driver-line fix); diagnose the actual error.
+18. redis-0049's opaque oracle failure (rc=2, no signature).
+19. sqlite-0019/0029 residue class + the sibling-context unit-level
+    validation gap (wrong-shape candidates passing with siblings
+    blanked).
+20. zenodo-0013 / sqlite-0037 unit-count retry-cap class.
+21. jsonc-0007 final triage (harvest: 3/3 ESC — close as variance).
+22. GATE_UNAVAILABLE census (1 harvest case).
+
+**E. System surface (README-documented gaps)**
+23. Mutation testing — a stub; design or remove from the docs.
+24. S20.11 skeleton-intent cross-tab — idiomatic-rewrite candidate
+    census from the harvest (low-jaccard/high-skeleton cases).
+
+**Ordering**: A first (the lever), then D17 (one diagnosis riding the
+recovered-pool re-runs), B (calibration analyses on existing data),
+C by complexity, E last. Items stay marked HELD/REJECTED unless the
+unblock note applies — the s22 rejections (AST intent override,
+cross-repeat best-of-N, gate relaxation) remain rejected.
