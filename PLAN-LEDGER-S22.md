@@ -4472,3 +4472,13 @@ unknown' — the opener line lives outside the fragment) is NOT repairable
 by stray deletion; it stays with C19's seam-aware design item.
 sea-orm-0014 (brace+scope splice, 0.858) is the prime conversion
 candidate for A7.
+
+### A5 sea-orm sub-item validated E2E (2026-08-29, bf57629)
+
+sea-orm-0007/0008: the git dep pin needed tag **0.18.2**, not 0.18.0
+(0.18.0's Expr lacks `as_enum` — E0599 ×3), plus a `[patch.crates-io]`
+sea-query-derive unification (the tag's workspace carries it while
+crates.io also supplies it — cargo vendor dies on the duplicate source).
+VERIFIED on 0007's merge_sha tree: 349 crates vendored, offline build
+rc=0. Both cases added to the staged fixpool (now 9 cases: C17, G1,
+G2, G4, G5, G11, C20-residue, sea-orm ×2).
