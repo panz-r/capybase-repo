@@ -3946,3 +3946,56 @@ directive A/B on 6 cases × majority-of-3 stands as designed.
 **Item 23 — the stub is a config flag** (FutureConfig.
 enable_mutation_testing=False) with no engine; removal = flag +
 README line.
+
+### Sprint-26 COMPLETENESS AUDIT: every known failure mapped (2026-08-29)
+
+Cross-checked all 49 ESCALATE + 8 NEAR/ORACLE_DIVERGENT harvest cases
+against the sprint-26 task list. **13 ESCALATE cases lacked tasks** —
+now added as open-ended try-to-fix items (G1-G13). Plus 4 value-
+verdict cases (3 NEAR_MATCH + 1 ORACLE_DIVERGENT) documented under
+their classes. The audit found one surprise: **redis-0055 (the
+specimen-set PASS, 0.999 sim) went 3/3 ESCALATE in the harvest** —
+the specimen-era fix (F1 rescue) stopped engaging; triage rides G7.
+
+**G-series (open-ended try-to-fix, ordered by sim — highest first):**
+- G1 redis-0055 (0.998, 3/3 ESC): specimen PASS regressed corpus-wide.
+  Hypothesis: the harvest's unit path differs from the specimen's
+  (session context/exact-reuse absence). TRIAGE FIRST — a regression
+  of a validated conversion.
+- G2 redis-0014 (0.999, REPAIR_FAILURE): server.c:56 'expected...'
+  — splice-level C repair (P6b-adjacent but gcc-shape).
+- G3 sqlite-history-0033 (0.999, MODEL_NEEDS_HUMAN): in the empty
+  band (item 12) — oscillation classifier covers; verify.
+- G4 zenodo-hdiff-0019 (0.996, TIMEOUT_CONVERGENCE): python
+  IndentationError loop — the shattered rescue's python shape
+  (indentation is window-fixable).
+- G5 axum-history-0019 (0.996, REPAIR_FAILURE): cargo gate on
+  host.rs — rust whole-file repair depth.
+- G6 protobuf-0001 (0.997, TIMEOUT_CONVERGENCE): non_empty_resolution
+  loop (empty-band, item 12 adjacent).
+- G7 redis-0047 (0.912): specimen coin-flip; the harvest's 1/3 PASS
+  matches — covered by item 9's A/B, verified no new task needed.
+- G8 zenodo-0012 (0.971, retry cap): with item 20's trend analysis.
+- G9 redis-0015 (0.976, MODEL_NEEDS_HUMAN): empty-band adjacent.
+- G10 axum-0002 (0.859, TIMEOUT_CONVERGENCE, signature '(none)'):
+  the no-progress guard saw NO hard failures — soft-warning stall.
+  New sub-class: soft-stall convergence.
+- G11 sea-orm-0014 (0.858, TIMEOUT_CONVERGENCE): rust cargo-gate loop.
+- G12 sea-orm-0011 (0.793, retry cap): lowest-sim cap case.
+- G13 clickhouse-0013 (0.843, MODEL_NEEDS_HUMAN): empty-band.
+
+**Value-verdict classes (documented, no fix tasks)**: sea-orm-0027
+(ORACLE_DIVERGENT 0.682 — a genuinely different merge), tokio-0046 /
+zenodo-0003/0014 (NEAR_MATCH band — sub-PASS but adjacent; the
+mid-band/candidate work may recover them; not discrete failures).
+
+**Existing-task verifications from this audit**:
+- redis-0055's G1 triage may also explain redis-0012/0047 (same
+  family, corpus context vs specimen context).
+- The empty band (item 12) now spans 15 harvest terminals + G3/G6/G9/
+  G13 — the classifier's true demand is ~19 cases, not 15.
+- The retry-cap class (item 20) includes G8/G12 (3+ cases with the
+  2 analyzed non-qualifiers).
+
+**Sprint-26 final count: 31 items** (A1-A7 era recovery, B8-B10
+calibration, C11-C23 depth/diagnosis as amended, G1-G13 open-ended).
