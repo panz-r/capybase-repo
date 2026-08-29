@@ -4080,3 +4080,53 @@ it 8,192 — the loop there is a model limitation, not a cap issue.
 A0 changed to REMOVAL, A5 split into validated-tokio /
 sea-orm-needs-dep-rewrite / sea-orm-0003-era-dead, G-series scoped
 to named mechanisms. Investigation phase CLOSED.
+
+### Sprint-26 PRE-SPRINT INVESTIGATION ROUND 8 (2026-08-29, no evals — cap damage + redis recovery validated)
+
+**A0 damage scan: the cap burned ~120 cases corpus-wide.** The
+truncated-empty-at-low-input signature appears in 120 harvest
+sessions; a natural A/B (cycle-L pre-cap vs harvest post-cap, same
+cases) shows 0→6-9 attempts per case (redis-0015/0042/0032/0026).
+The 14 flips were the visible tip; the rest was budget burn. A0
+(removal) is the highest-confidence item in the sprint — the next
+harvest should show broad PASS improvement beyond the era recovery.
+
+**A2 refinement — the sqlite recovery is 86 of 91, not 91.** The
+sqlite era pool's conflict files: vdbe.c ×12, sqliteInt.h ×8,
+shell.c ×6, vdbesort.c ×6, **tclsqlite.c ×5**, delete/insert/select
+×4 each, +. The 5 tclsqlite.c cases need tcl.h (absent from the
+sandbox — the conflict-target probe's own finding); gnu99 does not
+fix a missing header. Recovery = 86 via item 1; the 5 need the tcl
+env fix or stay era-dead.
+
+**A3 UPGRADED — nlohmann is a FULL recovery (38/38).**
+`-DJSON_BuildTests=OFF` + `-DCMAKE_CXX_FLAGS="-std=c++11
+-fpermissive -Wno-error"` builds the tree rc=0 with ZERO errors
+(the 2 allocator errors live in the excluded tests). Better than
+the round-5 estimate (which kept a 2-error residual).
+
+**A5 redis pool — RECOVERY STACK VALIDATED (6/6 era cases).** The
+redis era failures decompose into FOUR layers, each fixed offline
+and verified to a built redis-server:
+1. va_arg(ap, void) in bundled hiredis (invalid C, gcc 15 hard
+   error) → prepare-time sed to `(void)ap;`
+2. -lm link order (--as-needed drops it) → CC wrapper
+   `-Wl,--no-as-needed`
+3. jemalloc's sys/sysctl.h (removed in glibc 2.30) → MALLOC=libc
+   + FORCE_LIBC_MALLOC=yes
+4. -fno-common (gcc 15 default) multiple-definition of hashDictType
+   → -fcommon
+Full stack on redis-0033: rc=2 → redis-server+cli+benchmark BUILT.
+Re-verified on redis-0049's oracle: rc=0. The redis corpus fix =
+prepare env: `CC='cc -std=gnu99 -fcommon -Wl,--no-as-needed'
+MALLOC=libc FORCE_LIBC_MALLOC=yes` + the hiredis sed.
+
+**Item 22 addendum — the 5 unprobed ESC cases** (clickhouse-0013/
+0021, protobuf-0001/0008/0015 — the empty band) never received era
+probes (probe declined). Census gap, not classification gap: they're
+item-12 cases, not era candidates.
+
+**Revised era projection**: 167 → ~26 genuine (sqlite tcl ×5,
+protobuf content/drift ×3, fmt ×4, rust drift ~13, jsonc ~1); raw
+PASS ceiling rises substantially. The 141 recovered cases re-enter
+at their true rates.
