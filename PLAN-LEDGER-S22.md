@@ -3674,3 +3674,66 @@ variance, not regression.
 
 **Item 23 (mutation testing stub)** — unaffected by this round; the
 design-or-remove decision stands.
+
+### Sprint-26 PRE-SPRINT INVESTIGATION ROUND 2 (2026-08-29, no evals)
+
+**THE HEADLINE: the sqlite-90 mystery solved to ROOT CAUSE — the
+harness's own lemon patch is being REVERTED.** The harness has carried
+a lemon.c K&R patcher since Aug 3 (ca2752b), yet 90 cases failed with
+exactly the errors it fixes. The mechanism: the materializer's post-
+prepare tracked-file restore (the jsonc rebase-continue fix, lines
+~641-658) `git checkout`s every dirty tracked file — and tool/lemon.c
+is TRACKED, so the patch is reverted; the era probe's make then
+recompiles lemon from the pristine K&R source (fresh mtime → rebuild)
+and dies at FindActions. Verified end-to-end offline: extract→patch→
+prepare passes, but the restore step reverts; elapsed evidence agrees
+(4.96s cases — probe-only, no configure in the loop that mattered).
+
+**Item 1 UPGRADED — the CFLAGS fix is immune, verified at the
+Makefile level**: configure bakes CFLAGS into BOTH the C compiler and
+the build-tool compiler — the generated Makefile reads
+`BCC = gcc -std=gnu99` — and the Makefile is UNTRACKED (survives the
+revert). `CFLAGS='-std=gnu99' make lemon` on the raw K&R source:
+rc=0. The fix therefore needs NO change to the revert logic, though
+the revert should ALSO exempt tool/lemon.c (defense in depth — the
+patch aids in-session derived-header rebuilds). Both land in item 1.
+
+**Item 12 (deletion-intent) — the 15 terminals enumerated: ALL are
+the near-oracle empty-resolution class** (sims 0.84-1.0: protobuf
+0001/0008/0015/0043, redis 0012/0015/0052/0055, sqlite 0006/0033,
+zenodo 0064/0079, jsonc-0007, clickhouse 0013/0021) — the same
+MODEL_NEEDS_HUMAN band as the flips. The classifier's real target =
+the empty-candidate oscillation on near-oracle merges; scope it
+there, not as a general modify/delete classifier.
+
+**Item 19 (residue) — both cases terminal REPAIR_FAILURE at sim
+1.0/0.999** — the near-oracle repair ceiling, not worktree noise.
+Scope: whole-file-repair convergence on the residue class.
+
+**Item 8 (mid-band extension) — the extension cohort is 27 ESCALATEs
+at sim ≥ 0.9.** Fired-cohort precision 40/41 PASS; the extension's
+upside = some fraction of those 27; its risk = the fired cohort's
+counter-examples. The calibration analysis runs on existing flights
+before any threshold change.
+
+**Item 14 (P5 non-code) — ZERO non-code cases in the real-conflict
+pool** (md/toml/lock files resolved via the dedicated takeover paths
+or excluded). DISPOSITION: drop; the resurrection guard's non-code
+extension has no demand.
+
+**Item 10 (self-consistency) — no direct data** (the config ran off
+in the eval; per-sample data wasn't recorded). Scope: design the
+specimen-set A/B with journal instrumentation first (samples +
+modal-vs-first divergence), run in a later validation cycle.
+
+**Item 23 (mutation stub) — located**: `FutureConfig.
+enable_mutation_testing: bool = False` + jury_benchmark references.
+The stub is a config flag with no engine behind it. DISPOSITION:
+remove the flag + the README line (honest docs), or schedule the
+engine — recommend REMOVE now, revisit if a need appears.
+
+**Item 16 (style transfer) — folded into item 8** (same mid-band
+calibration data governs both; no separate mechanism warranted).
+
+Sprint-26 final shape: 18 items (drops: 11/13/15/14; folds: 16→8),
+each with validated evidence and a named mechanism.
