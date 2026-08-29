@@ -4428,3 +4428,10 @@ inside = defect). Expect 0051 ESCALATE→PASS on the A7 harvest rerun
 (the sim-0.999 resolution now passes the gate). Same class check due on
 protobuf-0055/0058/0059 (TOOLCHAIN_ERA verdicts — verify whether their
 era probe hit the same no-rule line before calling them dead).
+
+**0055/0058/0059 checked**: NOT the 0051 class — their probes carry
+real attributable errors identical on all three sides incl. the oracle
+(0055: LogSeverity NONE/STRICT/VERIFY enum-era drift; 0058/0059:
+__builtin_assume — clang builtin under gcc). Correctly TOOLCHAIN_ERA;
+A6 floor members, no fix available (oracle fails too — no passable
+target under this toolchain).
