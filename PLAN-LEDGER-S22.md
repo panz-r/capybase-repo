@@ -4294,3 +4294,31 @@ zero regressions in the flip audit (A0's regression test = redis-
 G1 re-check → A5 (vendoring) → C18 → G2/G4/G5/G11/G10 (G-series) →
 C12/C17/C19/C20 → A6 → A7 (harvest) → B9/B10 (calibration A/Bs) →
 C22/C23 (docs).
+
+### Sprint-26 PRE-SPRINT INVESTIGATION ROUND 12 (2026-08-29, no evals — environment recovery + coverage audits)
+
+**THE tcl.h CLASS IS RECOVERABLE — era projection improves again.**
+tcl-dev cannot be apt-installed (no sudo, no-new-privs), BUT the
+.deb downloads and extracts without root: `apt-get download
+tcl8.6-dev && dpkg-deb -x` → `/tmp/tcl-prefix/usr/include/tcl8.6/
+tcl.h`. VERIFIED on sqlite-0065 (a tclsqlite.c case): with
+`CFLAGS='-std=gnu99 -I/tmp/tcl-prefix/usr/include/tcl8.6'
+./configure && make` → **rc=0**. The 5 tcl cases join the recovered
+pool (prepare env: the extracted include path + gnu99). Era
+projection: 167 → **~21** (sqlite tcl ×5 recover; the true floor is
+protobuf ×3, fmt ×4, rust drift ~13, jsonc ×1).
+
+**G-band membership verified**: sqlite-0033 (3/4 empty), protobuf-
+0001 (2/2), redis-0015 (8/10), clickhouse-0013 (3/4) — all four
+confirmed in the empty-oscillation band. C12's demand holds at ~19.
+
+**C_TEST_COMMANDS validated offline**: jsonc's `ctest` runs but 7%
+pass (57/61 fail — era test code vs the new toolchain) → records
+False honestly, no false-WORKING risk. The output-tests probe's
+harvest coverage audit: True=1 (jsonc-0004 → correctly WORKING),
+False=3, eligible-unprobed=0 — the decision-1+3 mechanism worked
+exactly as designed on the corpus.
+
+**Canonical plan amendments**: A1's sqlite prepare gains the tcl
+include path for tclsqlite.c cases (or a dataset-level CPPFLAGS);
+A6's genuine-drift floor shrinks to ~21.
