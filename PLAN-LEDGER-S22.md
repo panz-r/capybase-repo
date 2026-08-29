@@ -4529,3 +4529,10 @@ sqlite pool 11 ESC triage: 0006/0019/0029/0040 = known band; the rest:
   verify its signature is real (tcl? new?) in pool analysis.
 
 Fixpool now 13 cases (added 0108, 0109, 0073, 0092).
+
+### Full unit suite GREEN with all sprint-26 commits (2026-08-29)
+
+6351 passed / 2115 skipped / 0 failed in 1h27m (the build-integration
+tests are legitimately slow; the earlier "hung" run was just long).
+Validates together: C12 (a8e603c), C17 (28b6469), G5/G11 P6b brace
+(4a681ca), B9 directive (023c238), 0109 crash fix (f7417b8).
