@@ -99,3 +99,16 @@ the Pipeline class.
   ESCALATE_TOOLCHAIN at probe cost (the era census shrinks honestly).
 - The coin-flip class contributes ±1-2 PASS per run of sampling luck —
   majority-of-3 on the FULL corpus averages this out.
+
+---
+
+## Addendum: the GATE_UNAVAILABLE class (sprint-26 C22)
+
+redis-history-0026 (the harvest's single GATE_UNAVAILABLE): the
+oracle-build probe showed the ORACLE ITSELF fails the brace-balance
+gate (splice coherence on src/config.c). The resolver exhausted
+honestly — the ballot said weave@0.95 (declined), the churn fallback
+declined, the shattering rescue accepted a unit — and the file-level
+gate still failed. When the human resolution cannot pass the gate,
+the case measures the sandbox, not the resolver. One case; documented
+rather than chased.
