@@ -3737,3 +3737,72 @@ calibration data governs both; no separate mechanism warranted).
 
 Sprint-26 final shape: 18 items (drops: 11/13/15/14; folds: 16→8),
 each with validated evidence and a named mechanism.
+
+### Sprint-26 PRE-SPRINT INVESTIGATION ROUND 3 (2026-08-29, no evals — flight-level analysis)
+
+**The harvest census RUN (the carried cross-tab item):**
+- Mechanism waterfall: structural 832 / portfolio 119 / LLM 211 across
+  493 journaled cases — the deterministic layers carry 82% of accepts.
+- symbol_inject fired 1,514 times (the workhorse); whole_file_repair
+  rounds 3,112.
+- The context-shattering rescue accepted 2 cases corpus-wide
+  (redis-0026, sea-orm-0004) — real but rare.
+- Prompt monitoring: 120 cases with prompts, 6.3 avg, 43.6K max
+  context (whole-file units, trimmed — zero oversized skips on those).
+- Era census: 167 dead / 301 probed-declined / 208 unprobed.
+
+**Item 8 (mid-band extension) — the calibration cohort COMPUTED.**
+The 27 ESCALATE sim≥0.9 cohort's gate data: 21 sessions in_band=True
+(ballot declined → honest), 54 in_band=False of which 21 sit at
+churn_mult ≥ 2.0 (the near-threshold band: sqlite-0033/0006, zenodo-
+0019 at mult 14.8/2.2, ratio 0.93-0.55). The extension's true target
+= the high-mult/high-ratio FALSE cases (0.55-0.93 ratio band vs the
+current in_band 0.55-0.90) — a threshold-widening analysis with the
+counter-example set already enumerated.
+
+**Item 12 (deletion-intent → the empty band) — oscillation
+QUANTIFIED.** Per-case empty-attempt rates: clickhouse-0013 3/4,
+clickhouse-0021 3/3, jsonc-0007 4/5, protobuf-0001 2/2, 0008 4/9,
+0015 1/2 — the band oscillates empty/non-empty across retries (not
+pure-empty). The classifier's trigger: mixed empty/non-empty
+sequences on near-oracle units.
+
+**Item 9 (coin-flip bias) — NO ballot data in session 1 for any of
+the 6** (they never reached the exhaustion cluster — they die at the
+unit level). The directive design must instead ride the RESOLVE
+prompt (pre-emptive), not the adjudicator. Assumption corrected.
+
+**Item 18 (redis gate) — plumbing VALIDATED.** _resolve_c_build
+returns (no-prepare, `make -jN`) for ready-Makefile trees; the gate
+rides C_BUILD_COMMANDS["redis-history"]="make -j4" into both the era
+probe and the in-loop gate. The fix = the gate string becomes
+`make -j4 CC='cc -Wl,--no-as-needed'` — one edit, flows everywhere.
+
+**Item 17 (protobuf-0051) — extraction PARTIALLY validated.** The
+merge_sha header HAS both `enum_type_` and `enum_type` — the failure
+is class-scope-specific (the side uses the member on a class whose
+mermaid state lacks it), not a missing declaration. Content-era
+confirmed; the corpus-vs-tree consistency question narrows to
+per-class member sets.
+
+**Item 20 (retry-cap) — P8's grant FIRED for 2 of 4** (sea-orm-0011:
+2 relaxations; zenodo-0012: 1) — the cap class splits into
+"relaxation-tried, still capped" vs "trend didn't qualify"
+(sqlite-0037, zenodo-0013). The task = analyze the 2 non-qualifiers'
+trends.
+
+**Item 22 (GATE_UNAVAILABLE, redis-0026) — journaled: ballot
+`weave@0.95` declined, churn fallback declined** — the case ends
+honestly at exhaustion after the shattering rescue accepted a unit
+but the file-level gate still failed on braces. Disposition:
+document as the compile-gate-honesty class (the oracle itself fails
+brace balance).
+
+**Vendoring spec'd — 9 registry-fail cases; the pins read**: sea-orm
+0003 pins sea-query ^0.27 + a GIT branch dep (sqlite-bind-decimals);
+0007/0008 pin ^0.18.0 + a git dep. Git-based deps mean vendoring
+needs `cargo vendor` WITH the git checkouts (cargo supports vendored
+git deps); the tokio cases are version-range only. Spec complete.
+
+Sprint-26 unchanged in shape (18 items); descriptions now carry
+flight-level evidence throughout.
