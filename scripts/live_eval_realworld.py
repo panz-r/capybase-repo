@@ -780,15 +780,27 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     if os.environ.get("CAPYBASE_ENABLE_MEMBER_SPLIT", "") == "1":
         cfg.future.enable_class_member_splitting = True
     # Sprint-21 few-shot A/B: golden-path experiment gate. Enables the
-    # RAG memory layer and points the store at the seeded golden-path
-    # corpus (535 examples). Default OFF — the flag exists so the A/B
-    # is an explicit, journaled choice.
+    # POLICY (user directive, 2026-08-28): the memory path is RELEVANT
+    # IN ACTUAL USE but DISABLED IN EVAL RUNS. In production the store
+    # self-populates from the user's own accepted resolutions under
+    # their current toolchain — freshness is inherent. In evals a seeded
+    # store replays STALE resolutions (the 2026-08-28 harvest incident:
+    # 5 baseline PASSes flipped because exact_reuse replayed sprint-21-
+    # era resolutions that no longer compile), and any memory-on number
+    # stops being apples-to-apples with prior rows. Default OFF; the
+    # flag remains ONLY for a deliberate, journaled A/B with a re-seeded
+    # and freshness-validated store (next sprint's design).
+    cfg.memory.enabled = False
+    cfg.future.enable_rag = False
     if os.environ.get("CAPYBASE_GOLDEN_PATH", "") == "1":
         cfg.memory.enabled = True
         cfg.future.enable_rag = True
         cfg.memory.store_path = os.environ.get(
             "CAPYBASE_MEMORY_DIR",
             "/var/tmp/capybase-live/s21/memory/experiences.jsonl")
+        print("!! CAPYBASE_GOLDEN_PATH=1: memory ON in an EVAL run — "
+              "policy violation unless this is the deliberate, "
+              "freshness-validated A/B. Baseline rows must be memory-off.")
     cfg.policy.max_retries_per_unit = 2  # cap CEGIS retries for throughput
     # Disable the verifier model jury for high-region-count conflicts.
     # The jury makes 4 separate LLM calls (model + assertion + reflection +
