@@ -4031,7 +4031,7 @@ DID ITS JOB: the flip audit flagged exactly this.
 - Item 12: the empty band's oscillation rates confirmed on harvest
   sessions (clickhouse-0021 3/3, jsonc-0007 4/5, protobuf-0008 4/9).
 
-**Sprint-26 FINAL: 32 items** (A0 output-cap basis fix added; the
+**Sprint-26 FINAL: 31 items** (A0 output-cap basis fix added; the
 G-series triage re-orders execution: A0 → G1 re-check → the rest).
 
 ### Sprint-26 PRE-SPRINT INVESTIGATION ROUND 7 (2026-08-29, no evals — adversarial + final surfaces)
@@ -4076,7 +4076,7 @@ it 8,192 — the loop there is a model limitation, not a cap issue.
   P6b-adjacent (P6b handles ()/[]; this needs the brace+scope form).
 - G11 (sea-orm-0014, 0.858): cargo-gate loop — same family as G5.
 
-**No remaining unvalidated assumptions.** Sprint-26 = 32 items with
+**No remaining unvalidated assumptions.** Sprint-26 = 31 items with
 A0 changed to REMOVAL, A5 split into validated-tokio /
 sea-orm-needs-dep-rewrite / sea-orm-0003-era-dead, G-series scoped
 to named mechanisms. Investigation phase CLOSED.
