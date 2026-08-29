@@ -3437,3 +3437,16 @@ golden-path partial preserved at full-harvest-gp-contaminated-
 partial.json (its 5-flip cluster is the freshness-validation finding).
 The clickhouse tmpfs cases ran clean in this run — no rerun needed;
 the accidentally-killed rerun worker is moot.
+
+### POLICY: memory in production, never in evals (user directive, 2026-08-28)
+
+"The memory path is relevant in actual use but should be disabled in
+our eval runs." Wired as hard policy (ea4a54c): the eval config
+explicitly forces memory/rag off with the rationale at the config
+site — production stores self-populate from the user's own accepts
+under their current toolchain (freshness inherent), while seeded eval
+stores replay stale resolutions and break baseline comparability (the
+harvest incident's 5 flips). GOLDEN_PATH survives only for the
+deliberate, freshness-validated A/B and now prints a policy warning.
+The README architecture note states the split. Next sprint's A/B
+design (re-seed + freshness validation) proceeds under this policy.
