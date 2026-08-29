@@ -3580,3 +3580,97 @@ recovered-pool re-runs), B (calibration analyses on existing data),
 C by complexity, E last. Items stay marked HELD/REJECTED unless the
 unblock note applies — the s22 rejections (AST intent override,
 cross-repeat best-of-N, gate relaxation) remain rejected.
+
+### Sprint-26 PRE-SPRINT INVESTIGATION (2026-08-29, no evals — offline validation of every task's assumptions)
+
+**Item 1 (sqlite gnu99) — VALIDATED ×2 commits.** A second, older
+commit (aac39e1d): default rc=2 → gnu99 rc=0. The fix covers the
+pool's age range, not one lucky commit. Mechanism confirmed: gcc 15
+default -std=gnu23 vs K&R empty-paren declarations.
+
+**Item 3 (nlohmann) — flag combination VERIFIED, residual localized.**
+`-DSIGSTKSZ=32768 -std=c++11 -fpermissive -Wno-error` (no sed needed
+— the -D supersedes the literal): build reaches 2 errors, both from
+ONE test file — `test/src/unit-allocator.cpp`'s `bad_allocator`
+(throws in `construct()`; C++15 allocator_traits requires rebind
+conformance the test intentionally violates). Everything else,
+including the library and all other tests, builds. Exclusion =
+skip that one test target (or -k keep-going with the 2-error budget).
+
+**Item 5 (rust vendoring) — ENUMERATED: 7 vendorable, ~13 genuine
+drift, 6 near-registry.** Registry-resolution failures (sea-orm
+0007/0008, tokio 0112-0115 + more): `cargo vendor` targets. Drift
+(FromValueTuple, mem::drop/ManuallyDrop, #[deprecated] trait impls):
+era floor. Near-registry ("failed to load source for dependency"):
+likely vendorable with lock files — verify per case.
+
+**Item 6 (genuine drift list) — FINAL.** fmt ×4 (private field
+`types_`), protobuf 0058/0059 (`__builtin_assume` — clang-ism vs
+gcc), protobuf-0055 (NONE/ENONET typo), jsonc-0017 (-Werror
+unused-value), redis va_arg-void ×~5, + the rustc drift above.
+~35 cases stay era-dead legitimately.
+
+**Item 8 (mid-band extension) — CALIBRATION DATA COMPUTED.** The
+harvest had 41 midband-portfolio firings across 603 sessions; their
+final verdicts: 40 PASS + 1 ESCALATE (97.6% precision on fired
+cases). The s22 rejection's missing evidence now exists: the fired
+cohort is nearly always right; extension = lowering the in_band
+threshold, validated against the non-fired mid-band cohort's
+counter-examples before any code change.
+
+**Item 9 (coin-flip calibration set) — ENUMERATED: 12 cases.**
+6 true coin-flips (mixed ESC/PASS repeats: protobuf-0008/0015,
+redis-0012/0047, sqlite-0037, zenodo-0036) + 6 stable-WORKING
+(jsonc-0004, protobuf-0073, zenodo-0028/0040, +2). The bias-prompting
+experiment runs on the 6.
+
+**Item 17 (protobuf-0051) — ROOT-CAUSED as CONTENT, not toolchain.**
+The captured gcc line: `descriptor.cc:7786: 'enum_type_' was not
+declared; did you mean 'enum_type'?` — the SIDE texts reference
+renamed members absent from the tree's headers. All three texts fail
+identically (hence the era signature match), but this is a
+content-consistency question, not toolchain drift. My autotools
+rebuild also hit `No rule to make target field_access_listener.cc` —
+the era tree's own Makefile references a file the archive lacks.
+Disposition: investigate whether the case's extraction is
+self-consistent (side-vs-tree mismatch = corpus bug → fix or
+exclude; else a distinct "content-era" class).
+
+**Item 18 (redis-0049 opaque oracle) — SOLVED: link-order.** The
+oracle text COMPILES clean; the link fails `undefined reference to
+'log'` — old redis's Makefile puts `-lm` BEFORE the objects and
+Ubuntu's default `--as-needed` drops it. VERIFIED FIX: `make
+CC="cc -Wl,--no-as-needed"` → rc=0, redis-server built. The redis
+era pool (6 cases: the va_arg-void five are separate) has a
+one-wrapper corpus fix.
+
+**Item 20 (retry-cap class) — 4 cases** (sea-orm-0011, sqlite-0037,
+zenodo-0012/0013, all sim 0.79-0.99). Small enough for one targeted
+relaxation analysis, not a mechanism.
+
+**Item 22 (GATE_UNAVAILABLE) — 1 case** (redis-0026, oracle_builds
+false on brace imbalance). Sandbox artifact class; document.
+
+**Item 24 (S20.11 skeleton cross-tab) — RUN: no idiomatic-rewrite
+candidates.** Zero cases with jaccard<0.80 & skeleton≥0.90. The
+largest spread is 0.15 (zenodo-0087, the known oracle-subjective).
+DISPOSITION: the skeleton signal adds nothing beyond jaccard for
+classification on this corpus — close the item as
+evidence-based-negative, keep the field for regression tracking.
+
+**Items 11/13/15 — class counts ZERO in the harvest terminals.**
+Mixed-delimiter terminals: 0. Oversized-prompt terminals: 0. HTTP-400
+terminals: 0. The C4 mixed-delimiter backlog, statement-splitting
+rung 4, and the 400-hardening have NO live demand — DISPOSITION:
+drop from the sprint (record as no-demand), revisit only if a future
+harvest shows the class.
+
+**Item 12 (deletion-intent) — 15 empty-class terminals** remain the
+real demand; the general classifier stays scoped to those.
+
+**Item 21 (jsonc-0007) — CLOSED as variance.** Harvest: 3/3 ESCALATE
+(the modal), consistent with the documented brace-coin. The flip was
+variance, not regression.
+
+**Item 23 (mutation testing stub)** — unaffected by this round; the
+design-or-remove decision stands.
