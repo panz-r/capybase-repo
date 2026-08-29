@@ -3806,3 +3806,76 @@ git deps); the tokio cases are version-range only. Spec complete.
 
 Sprint-26 unchanged in shape (18 items); descriptions now carry
 flight-level evidence throughout.
+
+### Sprint-26 PRE-SPRINT INVESTIGATION ROUND 4 (2026-08-29, no evals — scope/duration/closure validation)
+
+**Item 7 (harvest re-run) — duration model from the actual run.**
+Wall: 19.2h for 676 (1.7 min/case avg). Pool re-runs are CHEAPER than
+estimated: era cases exit at the probe in 5.0s avg (the sqlite pool
+re-runs in minutes as-is), but RECOVERED cases that pass take the
+dataset's PASS average (~124s for sqlite) — the honest worst case for
+the 91-case pool is ~3.1h. Full re-run ~19h. Sequencing implication:
+pool re-runs are cheap; only the FINAL full harvest is expensive.
+
+**Item 1 refinement — THE LEMON-PATCH REVERT.** The mechanism from
+round 2 (tracked-file restore reverts the lemon patch) is confirmed
+as the *cause of the harvest's 90 failures*, with the CFLAGS fix
+immune (BCC baked into the untracked Makefile). One nuance for the
+implementer: the harness's existing lemon patcher (ca2752b) works
+(6 declarations patched correctly offline) — item 1 should ALSO move
+the patch AFTER the tracked-file restore (or exempt lemon.c from the
+restore) so the in-session derived-header rebuilds keep working on
+trees where prepare's CFLAGS didn't reach (non-configure fallbacks).
+
+**Item 2 pool scope fixed**: 91 era + 6 sqlite ESCALATE for
+before/after comparison. Item 4: 38.
+
+**Item 8 — the 27-case cohort's gate data pulled**: 21 sessions
+in_band=True (ballot declined honestly), 54 in_band=False of which
+21 near-threshold (churn_mult ≥ 2.0: sqlite-0033 @ 14.8, zenodo-0019
+@ 14.8, sqlite-0006 @ 2.2). The widening analysis targets the
+high-mult/low-band FALSE sessions.
+
+**Item 9 CORRECTED (second pass)**: none of the 6 coin-flips reach
+the exhaustion ballot — they die at the UNIT level. The bias
+directive rides the RESOLVE prompt pre-emptively; its A/B measures
+first-attempt verdict shifts on the 6 cases × majority-of-3.
+
+**Item 10 (self-consistency) — zero multi-candidate sessions in the
+harvest sample** (config off). The A/B needs: enable + instrument
+(consensus_agreement/clusters/n_samples ARE journaled when active —
+emit_payload carries them at orchestrator.py:13523) + run the
+specimen set. Cost model from the specimen run's latency data.
+
+**Items 11/15 re-verified across ALL flights (not just terminals)**:
+unmatched-delimiter events: 4 total (terminal count 0 — transient,
+repaired in-loop); HTTP-400 events: 0. The drops stand.
+
+**Item 12 — oscillation quantified per case**: clickhouse-0013 3/4
+empty attempts, clickhouse-0021 3/3, jsonc-0007 4/5, protobuf-0001
+2/2, protobuf-0008 4/9, protobuf-0015 1/2. MIXED sequences (not
+pure-empty) — the classifier triggers on the alternation pattern
+near-oracle units.
+
+**Item 16 — the WORKING band is 5 cases** (jsonc-0004, protobuf-0073,
+zenodo-0028/0040/0088) — the style-transfer fold into item 8 covers
+their recovery path via the mid-band; no separate mechanism.
+
+**Item 21 — CLOSED**: harvest modal = ESCALATE 3/3. Variance.
+
+**Item 22 — journaled end-to-end**: redis-0026's ballot said
+weave@0.95 (declined), churn fallback declined, shattering accepted a
+unit, file-level brace gate still failed. The oracle itself fails
+brace balance — compile-gate honesty. Disposition stands.
+
+**Sprint-26 FINAL: 18 items.** Ready queue order:
+A1 sqlite config+revert-exemption → A2 pool re-run (3.1h worst) →
+A3 nlohmann flags+exclusion → A4 pool re-run → A5 vendoring (9+6
+cases, git-dep spec) → A6 drift acceptance (~35) → A7 harvest
+(19h) + README. B8 mid-band calibration analysis → B9 coin-flip
+resolve-prompt A/B (6 cases) → B10 self-consistency instrumented A/B.
+C12 deletion-oscillation classifier (15-case band) → C17 protobuf-
+0051 content-era investigation → C18 redis-0049 link-order fix →
+C19 residue repair-convergence analysis → C20 retry-cap trend
+analysis (2 non-qualifiers) → D22 GATE_UNAVAILABLE doc → D23
+mutation-stub removal. Every item carries flight-level evidence.
