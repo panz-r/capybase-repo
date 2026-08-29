@@ -4349,3 +4349,20 @@ path it re-enters the active pool.
 **Era floor FINAL: 167 → 18** (fmt-0003 ×1, protobuf content ×3,
 rust drift ~13, jsonc-0017 ×1). Recovered: sqlite 91 (gnu99+tcl),
 nlohmann 38, redis 6, rust ~15 vendored, fmt 3 — **149 of 167**.
+
+### Sprint-26 EXECUTION LOG (2026-08-29)
+
+Committed: 1a6bbe2 (A0 cap removal + A1 sqlite CFLAGS/tcl + A3
+nlohmann + A5-fmt sed + C18 redis both sites), d2bf86e (A5 rust
+vendoring: _vendor_rust_deps + offline env, E2E 169 crates rc=0),
+8feefd9 (C23 stub removed), 4bb3f58 (C22 GATE_UNAVAILABLE doc).
+
+Pools: sqlite 97 running (case 1 = ESC, no regression; era probe
+correctly declining — the toolchain builds); tokio vendor 5 running
+(**2 PASSes already** — the recipe converts live); nlohmann 38
+staged post-sqlite.
+
+**G10 corrected**: axum-0002's '(none)' signature was the
+empty-resolution validator rendering empty — it's a C12 band member
+(no soft-warning stall class exists in the data). G10 folds into
+C12; the demand for a warnings-aware guard is zero.
