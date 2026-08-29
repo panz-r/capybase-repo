@@ -11945,45 +11945,51 @@ class Orchestrator:
                         _spliced_sc = _resolved_buffer(original, accepted)
                     except Exception:  # noqa: BLE001
                         _spliced_sc = None
-                    if _spliced_sc:
-                        _mis = find_misplaced_declaration(
-                            _spliced_sc, _sc_msgs)
-                        if _mis is not None:
-                            _sc_lines = _spliced_sc.split("\n")
-                            _decl = _sc_lines.pop(_mis[0])
-                            _relocated = inject_symbol_declaration(
-                                "\n".join(_sc_lines), _decl,
-                                language)
-                            if _relocated is not None:
-                                _sc_unit = unit.model_copy(
-                                    update={"marker_span": None,
-                                            "unit_kind": "whole_file"})
-                                _sc_cand = CandidateResolution(
-                                    candidate_id=(
-                                        getattr(_old_cand, "candidate_id",
-                                                unit.unit_id)
-                                        or unit.unit_id) + ":stcreloc",
-                                    unit_id=unit.unit_id,
-                                    model_name="deterministic",
-                                    resolved_text=_relocated,
-                                    prompt_version=(
-                                        "deterministic_storage_class_relocation"),
-                                    provenance="deterministic_symbol_injection",
-                                    self_reported_confidence=0.85,
-                                    explanation=(
-                                        f"storage-class relocation: moved "
-                                        f"misplaced declaration to file scope: "
-                                        f"{_decl[:80]}"),
-                                )
-                                self.journal.emit(
-                                    "symbol_inject_applied",
-                                    {"kind": "storage_class_relocation",
-                                     "line": _mis[0] + 1,
-                                     "declaration": _decl[:120], "path": path},
-                                    step_index=self.step, path=path,
-                                    unit_id=unit.unit_id)
-                                _tried.add(f"storclass:{_sig}")
-                                return [(_sc_unit, _sc_cand)]
+                    # Best-effort like every deterministic repair: a crash
+                    # here must not kill the run (sqlite-0109: a bare
+                    # `language` NameError escalated the whole case 3/3).
+                    try:
+                        if _spliced_sc:
+                            _mis = find_misplaced_declaration(
+                                _spliced_sc, _sc_msgs)
+                            if _mis is not None:
+                                _sc_lines = _spliced_sc.split("\n")
+                                _decl = _sc_lines.pop(_mis[0])
+                                _relocated = inject_symbol_declaration(
+                                    "\n".join(_sc_lines), _decl,
+                                    unit.language)
+                                if _relocated is not None:
+                                    _sc_unit = unit.model_copy(
+                                        update={"marker_span": None,
+                                                "unit_kind": "whole_file"})
+                                    _sc_cand = CandidateResolution(
+                                        candidate_id=(
+                                            getattr(_old_cand, "candidate_id",
+                                                    unit.unit_id)
+                                            or unit.unit_id) + ":stcreloc",
+                                        unit_id=unit.unit_id,
+                                        model_name="deterministic",
+                                        resolved_text=_relocated,
+                                        prompt_version=(
+                                            "deterministic_storage_class_relocation"),
+                                        provenance="deterministic_symbol_injection",
+                                        self_reported_confidence=0.85,
+                                        explanation=(
+                                            f"storage-class relocation: moved "
+                                            f"misplaced declaration to file scope: "
+                                            f"{_decl[:80]}"),
+                                    )
+                                    self.journal.emit(
+                                        "symbol_inject_applied",
+                                        {"kind": "storage_class_relocation",
+                                         "line": _mis[0] + 1,
+                                         "declaration": _decl[:120], "path": path},
+                                        step_index=self.step, path=path,
+                                        unit_id=unit.unit_id)
+                                    _tried.add(f"storclass:{_sig}")
+                                    return [(_sc_unit, _sc_cand)]
+                    except Exception:  # noqa: BLE001 — relocation is best-effort
+                        pass
             # Deterministic #if/#endif balance repair: the entity-splitting + splice
             # pipeline can leave a whole-file preprocessor imbalance that no single
             # sub-unit owns (a conflict region sliced mid-file). Try a single-edit
