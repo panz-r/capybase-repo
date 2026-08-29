@@ -626,7 +626,6 @@ class FutureConfig(BaseModel):
     # /var/tmp/capybase-live/s21/memory or a per-repo store).
     enable_rag: bool = True
     enable_structural_context: bool = False
-    enable_mutation_testing: bool = False
     # Deterministic structural pre-resolution: BEFORE the
     # LLM, attempt a model-free resolution from base+sides via provably-safe
     # rules (identical sides, one-sided change, disjoint line edits). Every

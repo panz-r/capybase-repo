@@ -285,7 +285,7 @@ verifier-model critic is wired and default-on. RAG experience replay
 from the user's own accepted resolutions under their toolchain — but
 DISABLED IN EVAL RUNS by policy (a seeded store replays stale
 resolutions and breaks baseline comparability). Self-consistency is
-wired but off by default. Mutation testing is a stub.
+wired but off by default.
 
 ### Results
 
