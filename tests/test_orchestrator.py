@@ -2603,3 +2603,91 @@ def test_context_shattering_rescue_breaks_loops(conflicted_repo):
     assert not result.escalated, "the shattered rescue should resolve the loop"
     final = (repo / "app.py").read_text()
     assert "howdy" in final
+
+
+def test_empty_oscillation_band_retargets_shattered_rescue(conflicted_repo):
+    """C12 (sprint-26): the empty-oscillation band — attempts alternate
+    empty ↔ parse-defect on near-oracle units. When the no-progress guard
+    fires on an EMPTY candidate, the shattered prompt has no diff window
+    (propose()'s shatter branch requires non-empty prev_candidate text and
+    degenerates to the full-context retry). The rescue must retarget the
+    most recent NON-empty defect candidate and ITS failures instead."""
+    from capybase.conflict_model import CandidateResolution
+    from capybase.consensus import ConsensusReport
+
+    repo = conflicted_repo["repo"]
+
+    def _oc(text, *, cid, kind=""):
+        return CandidateResolution(
+            candidate_id=cid, unit_id="u", model_name="fake",
+            prompt_version="v", resolved_text=text, failure_kind=kind,
+        )
+
+    class _BandEngine(FakeConsensusEngine):
+        """Serves candidates from one queue regardless of which propose
+        variant the loop selects; records the shattered-rescue target."""
+
+        def __init__(self, candidates):
+            super().__init__(candidates)
+            self.shatter_calls = []
+
+        def _next(self):
+            return [self._candidates.pop(0)] if self._candidates else []
+
+        def propose_with_consensus(self, unit, context, *, failures=None,
+                                   prev_candidate=None, n_samples=None,
+                                   attempt=0):
+            cands = self._next()
+            self._report = ConsensusReport(
+                winner=cands[0] if cands else None, clusters=[],
+                n_samples=len(cands), agreement_score=1.0,
+                cluster_count=1, entropy=0.0,
+            ) if cands else self._report
+            return cands, self._report
+
+        def propose_recovery(self, unit, context, *, failures=None):
+            return self._next()
+
+        def propose(self, unit, context, *, failures=None,
+                    prev_candidate=None, n_samples=None, attempt=0,
+                    temperature_override=None, shatter=False):
+            if shatter:
+                self.shatter_calls.append(
+                    (prev_candidate.candidate_id
+                     if prev_candidate is not None else None,
+                     list(failures or [])))
+            return self._next()
+
+    # Alternation with DISTINCT defect signatures (so the guard fires only
+    # when the EMPTY signature repeats — unclosed-paren vs unterminated-string)
+    # and the guard-firing attempt EMPTY.
+    engine = _BandEngine([
+        _oc("    return 'hi'(", cid="defect-1"),
+        _oc("", cid="empty-1", kind="parse_failed"),
+        _oc("    x = 'unterminated", cid="defect-2"),
+        _oc("", cid="empty-2", kind="parse_failed"),
+        _oc("    return 'hi' + 'howdy'", cid="shattered-fix"),
+    ])
+    _cfg = _self_consistency_config(repo)
+    _cfg.future.enable_empty_fast_fail = False
+    # The hermetic _config disables the per-unit syntax check (fake snippets
+    # false-fail it); this test NEEDS it — the defect candidates' rejection
+    # signatures are the band's parse defects.
+    _cfg.validation.enable_per_unit_syntax_check = True
+    _cfg.policy.max_retries_per_unit = 6
+    orch = Orchestrator(
+        _cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    assert not result.escalated, "the retargeted shattered rescue should resolve the band"
+    journal = orch.paths.journal.read_text(encoding="utf-8")
+    assert "oscillation_band_rescue" in journal, "the band detection must be journaled"
+    assert engine.shatter_calls, "the shattered rescue must have fired"
+    target_cid, target_failures = engine.shatter_calls[0]
+    assert target_cid == "defect-2", (
+        "the rescue must target the most recent NON-empty defect candidate, "
+        f"got {target_cid}")
+    assert target_failures, "the retargeted call must carry the defect's own failures"
+    final = (repo / "app.py").read_text()
+    assert "howdy" in final

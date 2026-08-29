@@ -113,6 +113,18 @@ class UnitOutcome:
     # catches the empty-output transport loop AND genuine stuck-on-one-error
     # cycling that the content-hash backstops structurally cannot reach.
     _recent_hard_failure_sigs: list = field(default_factory=list)
+    # C12 (sprint-26): the empty-oscillation band — attempts alternate between
+    # empty responses (no repairable text) and non-empty candidates rejected
+    # for concrete parse defects (stray '@', missing terminator, expected
+    # unqualified-id). One kind string per RETRY-rejected attempt. The
+    # alternation starves the CEGIS loop: every empty retry discards the
+    # defect candidate's progress, and the loop eventually dies on an empty
+    # candidate — exactly when the shattered rescue needs non-empty text.
+    _osc_attempt_kinds: list = field(default_factory=list)
+    # The most recent (candidate, ValidationResult) pair whose resolved_text
+    # was non-empty and rejected — the shattered-rescue retarget when the
+    # no-progress guard fires on an empty candidate.
+    _osc_last_defect: tuple | None = None
     # No-op cache (the analysis's "eliminate avoidable slow retries"): maps a
     # candidate's resolved_text hash → its VerificationResult. When the model
     # re-proposes the same candidate (common after a preservation-heuristic
@@ -14408,6 +14420,17 @@ class Orchestrator:
                 path=unit.path,
                 unit_id=unit.unit_id,
             )
+            # C12 (sprint-26): classify this rejected attempt for the
+            # empty-oscillation detector. Empty attempts carry no repairable
+            # text; defect attempts carry concrete parse errors that ARE
+            # locally fixable from a diff window. Stash the newest defect
+            # (candidate, validation) so the no-progress guard's shattered
+            # rescue can retarget it when the loop dies on an empty candidate.
+            if not (cand.resolved_text or "").strip():
+                outcome._osc_attempt_kinds.append("empty")
+            else:
+                outcome._osc_attempt_kinds.append("defect")
+                outcome._osc_last_defect = (cand, validation)
             # No-progress guard: if the hard-failure SIGNATURE (multiset of
             # (validator, normalized_message)) is unchanged across N consecutive
             # attempts, the loop is producing zero new information — escalate.
@@ -14462,11 +14485,48 @@ class Orchestrator:
                             # doesn't remove the attractor. Latched per unit.
                             if not getattr(outcome, "_shatter_tried", False):
                                 outcome._shatter_tried = True
+                                # C12 (sprint-26): when the guard fires on an
+                                # EMPTY candidate, the shattered prompt has no
+                                # diff window to repair — the shatter branch in
+                                # propose() requires non-empty prev_candidate
+                                # text and silently degenerates to the
+                                # full-context PROMPT_RETRY (the exact
+                                # attractor the rescue exists to break). When
+                                # the attempt history shows the mixed
+                                # empty/defect alternation, retarget the
+                                # rescue at the most recent defect candidate
+                                # and ITS hard failures: the band's defects
+                                # are concrete (stray '@', missing
+                                # terminator, unqualified-id) and locally
+                                # fixable from the ±8-line window.
+                                _sh_kinds = outcome._osc_attempt_kinds[-6:]
+                                _sh_target, _sh_failures = cand, failures
+                                if (
+                                    not (cand.resolved_text or "").strip()
+                                    and _sh_kinds.count("empty") >= 2
+                                    and _sh_kinds.count("defect") >= 2
+                                    and outcome._osc_last_defect is not None
+                                ):
+                                    _sh_t, _sh_v = outcome._osc_last_defect
+                                    if (
+                                        (_sh_t.resolved_text or "").strip()
+                                        and getattr(_sh_v, "hard_failures", None)
+                                    ):
+                                        _sh_target = _sh_t
+                                        _sh_failures = list(_sh_v.hard_failures)
+                                        self.journal.emit(
+                                            "oscillation_band_rescue",
+                                            {"unit_id": unit.unit_id,
+                                             "empty_attempts": _sh_kinds.count("empty"),
+                                             "defect_attempts": _sh_kinds.count("defect"),
+                                             "target_candidate_id": _sh_t.candidate_id},
+                                            step_index=self.step, path=unit.path,
+                                            unit_id=unit.unit_id)
                                 try:
                                     _shattered = self.resolution_engine.propose(
                                         unit, context,
-                                        failures=failures,
-                                        prev_candidate=cand,
+                                        failures=_sh_failures,
+                                        prev_candidate=_sh_target,
                                         n_samples=1,
                                         attempt=retry_count + 1,
                                         shatter=True,
