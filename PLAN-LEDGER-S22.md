@@ -4322,3 +4322,30 @@ exactly as designed on the corpus.
 **Canonical plan amendments**: A1's sqlite prepare gains the tcl
 include path for tclsqlite.c cases (or a dataset-level CPPFLAGS);
 A6's genuine-drift floor shrinks to ~21.
+
+### Sprint-26 PRE-SPRINT INVESTIGATION ROUND 13 (2026-08-29, no evals — fmt recovery + pool confirmations)
+
+**fmt ×3 MORE cases recovered: 0004/0005/0006.** The 'types_ does
+not have field' signatures were DOWNSTREAM of the real error: the
+era core.h lacks `#include <cstdint>` (uint64_t does not name a
+type) — old fmt assumed transitively-included headers; libstdc++ 15
+stopped providing them. VERIFIED: one sed (add cstdint to
+include/fmt/core.h in prepare) → cmake build rc=0 INCLUDING tests
+(the conflict file test/format-impl-test.cc builds). fmt-0003 is
+GENUINE drift: its tree implements std::format_arg_store
+(the 2022 experimental std::format) which structurally conflicts
+with libstdc++ 15's real <format>. Corpus fix: the prepare gains
+the include sed for fmt-history; 0003 stays era-dead.
+
+**sqlite-0040 re-scoped**: it is a tcl case that reached resolution
+(the probe correctly declined — its tcl.h failure wasn't
+signature-identical content drift); with the round-12 tcl include
+path it re-enters the active pool.
+
+**sqlite ESCALATE pool (6) confirmed**: all are already-named items
+(0006=G3 band, 0019/0029=C19, 0033=cap class/G1, 0037=C20,
+0040=tcl recovery). No uncovered cases.
+
+**Era floor FINAL: 167 → 18** (fmt-0003 ×1, protobuf content ×3,
+rust drift ~13, jsonc-0017 ×1). Recovered: sqlite 91 (gnu99+tcl),
+nlohmann 38, redis 6, rust ~15 vendored, fmt 3 — **149 of 167**.
