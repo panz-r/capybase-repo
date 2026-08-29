@@ -3879,3 +3879,70 @@ C12 deletion-oscillation classifier (15-case band) → C17 protobuf-
 C19 residue repair-convergence analysis → C20 retry-cap trend
 analysis (2 non-qualifiers) → D22 GATE_UNAVAILABLE doc → D23
 mutation-stub removal. Every item carries flight-level evidence.
+
+### Sprint-26 PRE-SPRINT INVESTIGATION ROUND 5 (2026-08-29, no evals — implementation-surface validation)
+
+**Item 1 (sqlite) — CRITICAL IMPLEMENTATION CORRECTION.**
+`_resolve_c_build` IGNORES C_PREPARE_COMMANDS for autotools trees:
+sqlite's era trees have configure.ac → the autotools branch returns
+its own hardcoded prepare ("autoreconf; ./configure") regardless of
+the config table. The fix CANNOT be a C_PREPARE_COMMANDS edit; it
+must be a per-dataset CFLAGS map consulted in the autotools branch
+(e.g. `CFLAGS_BY_DATASET = {"sqlite-history": "'-std=gnu99'"}` →
+`CFLAGS='-std=gnu99' ./configure`), landing in the prepare string.
+Verified: /tmp/sq2 has configure.ac, no CMakeLists.
+
+**Item 3 (nlohmann) — carrier VALIDATED with the exact harness
+prepare format**: the cmake branch passes default_prepare through
+when "cmake" in it, so `-DCMAKE_CXX_FLAGS="-DSIGSTKSZ=32768
+-std=c++11 -fpermissive -Wno-error"` appended to the nlohmann
+C_PREPARE_COMMANDS entry flows to the build. Result identical to
+round 1: rc=2 from only the 2 allocator errors (one test file).
+Gate note: with prepare_ok=True but the gate `cmake --build build`
+failing on those 2 errors, the case gets a hard fail on that test —
+acceptable (the conflict file is the library, which builds clean).
+
+**Item 18 (redis) — the edit is TWO sites, not one.** The era probe
+gate reads C_BUILD_COMMANDS["redis-history"]="make -j4"; the in-loop
+gate reads _DETECTED_BUILD_CMD ← _resolve_c_build's ready-Makefile
+branch ("make -j{jobs}"). Both need the wrapper: either
+`CC='cc -Wl,--no-as-needed'` appended in both, or one shared helper.
+Verified redis's tree is the ready-Makefile case (Makefile at root).
+
+**Item 5 (vendoring) — RECIPE VALIDATED END-TO-END on a real case**
+(tokio-history-0112, 2019 tree, no lockfile): (1) plain `cargo
+vendor` fails — security-framework 0.2.x is FULLY YANKED from
+crates.io (all 4 versions); (2) the fix: `[patch.crates-io]`
+security-framework = { git = "...rust-security-framework", tag =
+"v0.2.2" } — the tag exists upstream; (3) `cargo vendor` → 169
+crates; (4) `.cargo/config.toml` source-replacement; (5) `cargo
+build --offline RUSTFLAGS="--cap-lints warn"` → rc=0 (one 2019
+rustdoc-attribute lint drift, capped). The full recipe: patch pins +
+vendor + config + cap-lints. sea-orm's git-branch deps (sea-query
+sqlite-bind-decimals) vendor the same way (git deps supported).
+
+**Item 7 (duration) — refined**: era-cases exit at the probe in 5s;
+pool re-runs of UNRECOVERED pools are minutes. Recovered pools run
+at the dataset PASS rate (~124s sqlite) → 91-case sqlite ~3.1h,
+38 nlohmann ~1.3h, the 9+6 vendored rust ~1h. Full harvest 19.2h.
+
+**Item 8 (mid-band) — the widening verdict is NEGATIVE on this
+data.** The near-band (mult≥2.0, in_band=False) splits: 30 ESCALATE
+sessions (median mult 20.8) vs 140 PASS sessions (median 13.0) —
+the PASS cases' mults OVERLAP and extend beyond the ESC range
+(2.0-278.8 vs 2.0-911.5). Churn-mult widening cannot separate them;
+the fired cohort's 40/41 PASS came from the BALLOT, not the gate
+numbers. DISPOSITION: keep the current in_band + ballot design;
+the extension task closes as evidence-based-negative (the 27-case
+cohort's escalates are the near-oracle empty band, already covered
+by item 12's classifier).
+
+**Item 9 (coin-flip) — delivery confirmed unit-level**: no ballot
+data exists for the 6 because they never exhaust; the resolve-prompt
+directive A/B on 6 cases × majority-of-3 stands as designed.
+
+**Item 21 — CLOSED** (harvest modal ESCALATE 3/3, variance).
+
+**Item 23 — the stub is a config flag** (FutureConfig.
+enable_mutation_testing=False) with no engine; removal = flag +
+README line.
