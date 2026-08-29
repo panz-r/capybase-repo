@@ -4366,3 +4366,15 @@ staged post-sqlite.
 empty-resolution validator rendering empty — it's a C12 band member
 (no soft-warning stall class exists in the data). G10 folds into
 C12; the demand for a warnings-aware guard is zero.
+
+### C19 scoped (2026-08-29): the moving-brace defect is a splice-structure problem
+
+sqlite-0019/0029's trail: coherence_repair_applied=True yet 2
+unclosed braces persist and MOVE (1294→1280) — the iterated balancer
+runs but cannot close the gap because the missing '}' belong to
+units' internal structure (entity-split seams the model's per-unit
+resolutions each under-close by 1-2). Each repair round's fresh
+model attempt re-introduces the same gap. NOT a quick deterministic
+fix: it needs seam-aware splice assembly (closing braces emitted at
+sub-unit boundaries). Parked as a design item for the next sprint;
+the residue class stays 2 cases (0019/0029) at sim 1.0/0.999.
