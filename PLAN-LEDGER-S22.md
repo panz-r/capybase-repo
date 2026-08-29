@@ -4506,3 +4506,26 @@ PENDING pool confirmation (mechanisms landed today):
 Draft floor ≈ 5 confirmed + C19's parked 2 (0019/0029, sim 0.999-1.0
 residue) + whatever the A7 harvest leaves. The 26-item projection from
 round 10 now looks pessimistic: confirmed floor is 5, not 26.
+
+### Mid-pool triage (2026-08-29) — one crash found+fixed (f7417b8)
+
+sqlite pool 11 ESC triage: 0006/0019/0029/0040 = known band; the rest:
+- **0109 = CRASH**: bare `language` NameError in the storage-class
+  relocation repair (inject_symbol_declaration arg), unguarded —
+  escalated the case 3/3 at sim 0.92-0.94. Fixed (unit.language +
+  best-effort wrap) in f7417b8.
+- **0108 = P6b brace class**: `expected identifier or '(' before '}'`
+  (extra close brace, whole-file) — exactly 4a681ca's new form; the
+  pool predates it.
+- **0073 = wrong-era member**: merged text references WhereInfo member
+  absent in the era struct (bShortcut/isShortcut flip-flopping); one
+  pristine side compiles → F1/ballot territory.
+- **0092 = empty class** (model produced empty resolution, sim 1.00) —
+  C12 band candidate.
+- **0077/0078 = oversized prompts** (13.5K/13K t > 8192 window,
+  obligations/sides) — the documented oversized-splitting design class;
+  no sprint-26 fix.
+- **0039 = ESCALATE_TOOLCHAIN sim 0.00** — probe says all-sides-fail;
+  verify its signature is real (tcl? new?) in pool analysis.
+
+Fixpool now 13 cases (added 0108, 0109, 0073, 0092).
