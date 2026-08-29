@@ -160,6 +160,32 @@ RUST_DEP_PATCHES: dict[str, list[str]] = {
         'security-framework = { git = '
         '"https://github.com/kornelski/rust-security-framework", tag = "v0.2.2" }\n',
     ],
+    # sea-orm sub-item: the git tag's workspace carries sea-query-derive
+    # while crates.io also supplies it via other deps — unify on ONE
+    # source or `cargo vendor` dies on the duplicate (validated E2E).
+    "sea-orm-history": [
+        '[patch.crates-io]\n'
+        'sea-query-derive = { git = '
+        '"https://github.com/SeaQL/sea-query.git", tag = "0.18.2" }\n',
+    ],
+}
+
+#: Sprint-26 A5 (sea-orm sub-item): dep-LINE rewrites — the era trees carry
+#: `sea-query = { version = "^0.18.0", git = ".../sea-query.git", ... }`;
+#: the git source's default branch now serves 1.0.2 and resolution dies.
+#: Pinning the git dep to the era's LAST 0.18.x tag restores resolution —
+#: 0.18.2 specifically: 0.18.0 lacks Expr::as_enum which the trees call
+#: (E0599 ×3 on 0007). cargo vendor then includes the pinned tree. Textual
+#: replace on Cargo.toml: a tree without the fragment (later-era cases)
+#: is a no-op. VERIFIED E2E on sea-orm-0007's merge_sha tree: 349 crates
+#: vendored, offline build rc=0 (2.4s incremental, --cap-lints warn).
+RUST_DEP_REWRITES: dict[str, list[tuple[str, str]]] = {
+    "sea-orm-history": [
+        (
+            'sea-query.git", features',
+            'sea-query.git", tag = "0.18.2", features',
+        ),
+    ],
 }
 
 
@@ -171,15 +197,22 @@ def _vendor_rust_deps(repo: Path, dataset: str) -> bool:
     the tree as-is (the case fails the gate and classifies era honestly).
     """
     patches = RUST_DEP_PATCHES.get(dataset)
-    if not patches:
+    rewrites = RUST_DEP_REWRITES.get(dataset)
+    if not patches and not rewrites:
         return False
     ct = repo / "Cargo.toml"
     if not ct.exists() or (repo / "vendor").is_dir():
         return False
     import subprocess as _sp
     try:
-        with ct.open("a") as f:
-            f.write("\n" + "\n".join(patches))
+        if rewrites:
+            _text = ct.read_text(encoding="utf-8")
+            for _old, _new in rewrites:
+                _text = _text.replace(_old, _new)
+            ct.write_text(_text, encoding="utf-8")
+        if patches:
+            with ct.open("a") as f:
+                f.write("\n" + "\n".join(patches))
         v = _sp.run(
             ["cargo", "vendor", "vendor"],
             cwd=str(repo), capture_output=True, text=True, timeout=600)
