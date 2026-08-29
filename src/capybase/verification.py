@@ -4824,6 +4824,31 @@ def _is_missing_build_system(output: str) -> bool:
     )
 
 
+_NO_RULE_TARGET_RE = re.compile(
+    r"No rule to make target ['\"]([^'\"]+)['\"]"
+)
+
+
+def _missing_make_target(err_lines: list[str]) -> str | None:
+    """The file named by make's missing-rule failure, or None.
+
+    ``make[2]: *** No rule to make target 'X.cc', needed by 'X.lo'.  Stop.``
+    carries no ``error`` substring and no file:line:col location, so the
+    build gate's error-classification loop skips it entirely and the
+    conservative fallback promotes the ``make[1]: *** [...] Error 1`` driver
+    line to a hard failure. protobuf-0051: upstream's own merge_sha deleted
+    field_access_listener.cc while leaving it in src/Makefile.am — the gate
+    was unpassable for ANY conflict-file content. The named target lets the
+    gate classify it like any other file-scoped failure: outside the conflict
+    file = pre-existing build-system inconsistency (infra), inside = defect.
+    """
+    for ln in err_lines:
+        m = _NO_RULE_TARGET_RE.search(ln)
+        if m:
+            return m.group(1)
+    return None
+
+
 def _parse_cc_error_location(msg: str) -> tuple[str | None, int | None]:
     """Extract ``(file_stem, line)`` from a gcc/clang diagnostic.
 
@@ -5718,6 +5743,30 @@ class VerificationEngine:
                                     real_errors = []      # in conflict file, real
                                     sibling_errors = []   # in other files, infra
                                     werror_lines = []     # -Werror promotions, infra
+                                    # C17 (sprint-26): make's missing-target
+                                    # failure is invisible to the loop below
+                                    # (no "error" substring, no file:line:col)
+                                    # — classify it by the NAMED target file,
+                                    # same doctrine as sibling compile errors.
+                                    # protobuf-0051: upstream's own merge_sha
+                                    # deleted field_access_listener.cc while
+                                    # leaving it in src/Makefile.am — the gate
+                                    # was unpassable for ANY content, and a
+                                    # sim-0.999 resolution died in the repair
+                                    # loop on the meaningless driver line.
+                                    _nr_target = _missing_make_target(err_lines)
+                                    if _nr_target is not None:
+                                        if Path(_nr_target).stem == conflict_stem:
+                                            real_errors.append(
+                                                "missing make target "
+                                                f"{_nr_target} (conflict file "
+                                                "absent from the build)")
+                                        else:
+                                            sibling_errors.append(
+                                                "missing make target "
+                                                f"{_nr_target} (build-system "
+                                                "inconsistency, not the "
+                                                "resolved file)")
                                     # make/cmake driver lines: ``make[2]: ***``,
                                     # ``CMake Error``, ``ninja: error``. These are
                                     # build-system summaries, not gcc diagnostics —

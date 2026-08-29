@@ -18,6 +18,7 @@ from capybase.verification import (
     _is_ccs_resolution_error,
     _parse_cc_error_location,
     _is_cc_werror_warning,
+    _missing_make_target,
     VerificationContext,
     CcsSyntaxValidator,
 )
@@ -638,6 +639,33 @@ def test_is_cc_werror_warning_real_error():
     assert not _is_cc_werror_warning(
         "src/delete.c:42:3: error: conflicting types for 'foo'"
     )
+
+
+def test_missing_make_target_extraction():
+    """C17: make's missing-rule failure names its target file.
+
+    protobuf-0051: upstream's merge_sha deleted field_access_listener.cc
+    while leaving it in src/Makefile.am — the whole-tree gate fails with
+    'No rule to make target' for ANY conflict-file content. The named file
+    lets the gate classify it (sibling = infra, conflict file = defect)
+    instead of falling back to the meaningless 'Error 1' driver line."""
+    target = _missing_make_target([
+        "make[2]: Entering directory '/repo/src'",
+        "make[2]: *** No rule to make target "
+        "'google/protobuf/field_access_listener.cc', needed by "
+        "'google/protobuf/field_access_listener.lo'.  Stop.",
+        "make[1]: *** [Makefile:1917: all-recursive] Error 1",
+    ])
+    assert target == "google/protobuf/field_access_listener.cc"
+    # conflict-file target extracts too (classified as a real defect)
+    assert _missing_make_target([
+        "make: *** No rule to make target 'descriptor.cc', needed by "
+        "'descriptor.lo'.  Stop.",
+    ]) == "descriptor.cc"
+    # ordinary make output: no match
+    assert _missing_make_target([
+        "make[1]: *** [Makefile:1917: all-recursive] Error 1",
+    ]) is None
 
 
 def test_is_cc_werror_warning_plain_warning():
