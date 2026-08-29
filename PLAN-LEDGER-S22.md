@@ -4435,3 +4435,23 @@ real attributable errors identical on all three sides incl. the oracle
 __builtin_assume — clang builtin under gcc). Correctly TOOLCHAIN_ERA;
 A6 floor members, no fix available (oracle fails too — no passable
 target under this toolchain).
+
+### C20 resolved: both P8 non-qualifiers explained, no widening warranted (2026-08-29)
+
+- **sqlite-0037**: non-qualification was era noise — the retry sequence
+  drowned in toolchain-era compile errors. Post-A1/A2 it **PASSES
+  outright** (234s, sim 1.00) in the s26 pool; P8 never needed to fire.
+- **zenodo-hdiff-0013**: correctly non-qualified — its 3 unresolved
+  units died on FIRST-attempt EMPTY resolutions (pure 'E' patterns, no
+  alternation, so not a C12 band member either). P8 trends hard-failure
+  convergence (9→4→1 counterexample sequences); empties carry no
+  direction to trend on. Widening P8 to "trend" empties would be
+  vacuous.
+
+Residual observation (deferred to A7 evidence): zenodo-0013's units
+never received ANY feedback attempt — the unit-count-aware budget (1
+retry; 5 units) was consumed by empty-output weather. IF the A7 rerun
+(era configs + C12 in place) still shows pure-empty deaths here, the
+candidate micro-fix is a single bounded recovery-prompt grant when the
+budget is exhausted but no counterexample was ever seen. Not implemented
+now — no evidence it converts.
