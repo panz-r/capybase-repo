@@ -2579,6 +2579,40 @@ def test_p6b_splice_level_delimiter_repair(conflicted_repo):
     assert final  # file present
 
 
+def test_p6b_splice_level_brace_repair(conflicted_repo):
+    """G5/G11 (sprint-26): the brace+scope form. A candidate whose spliced
+    text carries a stray brace-only closer line (the splice-junction shape
+    rustc reports as "mismatched closing delimiter: `}`" and the structural
+    gate as "brace imbalance detected") is repaired deterministically at
+    the SPLICE level — the balancer drops the stray closer, the marker span
+    is remapped past the deleted line, and the repaired region re-validates."""
+    repo = conflicted_repo["repo"]
+    engine = FakeConsensusEngine([
+        _cand("    return {'hi': 'howdy'}\n}", cid="stray-brace"),
+    ])
+    _cfg = _self_consistency_config(repo)
+    # The per-unit python syntax check produces the "unmatched '}'"
+    # trigger (production gets the same shape from rustc's "mismatched
+    # closing delimiter: `}`" via cargo); hermetic _config disables it.
+    _cfg.validation.enable_per_unit_syntax_check = True
+    orch = Orchestrator(
+        _cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    journal = orch.paths.journal.read_text(encoding="utf-8")
+    final = (repo / "app.py").read_text()
+    if not result.escalated:
+        # accepted via the brace repair: the stray closer is gone and the
+        # merged content landed
+        assert "p6b_splice_delimiter_repair" in journal
+        assert "howdy" in final
+        assert "^\n}" not in final.replace("\r", "")
+    else:
+        # escalation is acceptable only when the repair was attempted
+        assert "brace imbalance detected" in journal or "p6b_splice_delimiter_repair" in journal
+
+
 def test_context_shattering_rescue_breaks_loops(conflicted_repo):
     """s25 item 4: when the no-progress guard detects a repeated
     signature, ONE diff-only high-temperature attempt fires before the

@@ -13622,51 +13622,97 @@ class Orchestrator:
             # candidates failing identically across retries, dying at
             # no-progress). On a delimiter-shaped failure, repair the
             # SPLICED text and re-splice the candidate from it.
+            # G5/G11 (sprint-26): the brace+scope form — rustc reports the
+            # same splice class as "mismatched closing delimiter: `}`" and
+            # the structural gate as "brace imbalance detected at line N"
+            # (axum-0019, sea-orm-0014). The deterministic brace balancer
+            # (_try_balance_braces) owns the repair; unlike the paren form
+            # it may REMOVE lines, so the marker span is re-mapped through
+            # a line diff before the region is extracted back out.
+            _p6b_delim = any(
+                "unmatched '" in (getattr(f, "message", "") or "")
+                and (")" in f.message or "]" in f.message)
+                and "}" not in f.message
+                for f in validation.hard_failures)
+            _p6b_brace = any(
+                ("mismatched closing delimiter" in (getattr(f, "message", "") or "")
+                 or "brace imbalance detected" in (getattr(f, "message", "") or "")
+                 or ("unmatched '" in (getattr(f, "message", "") or "")
+                     and "}" in f.message))
+                for f in validation.hard_failures)
             if (not validation.passed
                     and unit.marker_span is not None
                     and cand.resolved_text
-                    and any(
-                        "unmatched '" in (getattr(f, "message", "") or "")
-                        and (")" in f.message or "]" in f.message)
-                        for f in validation.hard_failures)):
+                    and (_p6b_delim or _p6b_brace)):
                 try:
                     from capybase.adapters.parsers import splice_resolution
                     from capybase.verification import (
                         _delimiter_imbalance_line,
+                        _try_balance_braces,
                         _try_repair_delimiter,
                     )
                     _spliced = splice_resolution(
                         unit.original_worktree_text,
                         unit.marker_span, cand.resolved_text)
-                    if (_delimiter_imbalance_line(_spliced, unit.language)
+                    _repaired_splice = None
+                    if _p6b_delim and (
+                            _delimiter_imbalance_line(_spliced, unit.language)
                             is not None):
                         _repaired_splice = _try_repair_delimiter(
                             _spliced, unit.language)
                         if (_repaired_splice is not None
                                 and _delimiter_imbalance_line(
-                                    _repaired_splice, unit.language) is None):
-                            # Extract the repaired region back out of the
-                            # splice so the candidate stays splice-safe.
-                            _start, _end = unit.marker_span
-                            _sp_lines = _repaired_splice.split("\n")
-                            _region = "\n".join(_sp_lines[_start:_end + 1])
-                            if _region.strip():
-                                _repaired_cand = cand.model_copy(
-                                    update={"resolved_text": _region})
-                                _r_val = self.verification.verify(
-                                    unit, _repaired_cand)
-                                self._journal_validation(
-                                    unit, _repaired_cand, _r_val)
-                                if _r_val.passed:
-                                    self.journal.emit(
-                                        "p6b_splice_delimiter_repair",
-                                        {"candidate_id": cand.candidate_id,
-                                         "unit_id": unit.unit_id},
-                                        step_index=self.step, path=unit.path,
-                                        unit_id=unit.unit_id)
-                                    cand = _repaired_cand
-                                    validation = _r_val
-                                    outcome.validation = validation
+                                    _repaired_splice, unit.language) is not None):
+                            _repaired_splice = None
+                    if _repaired_splice is None and _p6b_brace:
+                        _braced = _try_balance_braces(
+                            _spliced, unit.language)
+                        if _braced is not None and _braced != _spliced:
+                            _repaired_splice = _braced
+                    if _repaired_splice is not None:
+                        # Extract the repaired region back out of the
+                        # splice so the candidate stays splice-safe. The
+                        # brace repair may have deleted lines — remap the
+                        # marker span through a line diff first (the paren
+                        # repair is single-char, indices never move).
+                        _start, _end = unit.marker_span
+                        _sp_lines = _repaired_splice.split("\n")
+                        _orig_lines = _spliced.split("\n")
+                        _del_before = 0
+                        _del_inside = 0
+                        if len(_orig_lines) != len(_sp_lines):
+                            import difflib as _dl_g5
+                            _sm = _dl_g5.SequenceMatcher(
+                                None, _orig_lines, _sp_lines, autojunk=False)
+                            for _tag, _i1, _i2, _j1, _j2 in _sm.get_opcodes():
+                                if _tag == "delete":
+                                    if _i2 <= _start:
+                                        _del_before += _i2 - _i1
+                                    elif _i1 < _end + 1:
+                                        _del_inside += (
+                                            min(_i2, _end + 1)
+                                            - max(_i1, _start))
+                        _rs = _start - _del_before
+                        _re_ = _end - _del_before - _del_inside
+                        _region = "\n".join(_sp_lines[_rs:_re_ + 1])
+                        if _region.strip():
+                            _repaired_cand = cand.model_copy(
+                                update={"resolved_text": _region})
+                            _r_val = self.verification.verify(
+                                unit, _repaired_cand)
+                            self._journal_validation(
+                                unit, _repaired_cand, _r_val)
+                            if _r_val.passed:
+                                self.journal.emit(
+                                    "p6b_splice_delimiter_repair",
+                                    {"candidate_id": cand.candidate_id,
+                                     "unit_id": unit.unit_id,
+                                     "form": "brace" if _del_before or _del_inside or _p6b_brace else "delim"},
+                                    step_index=self.step, path=unit.path,
+                                    unit_id=unit.unit_id)
+                                cand = _repaired_cand
+                                validation = _r_val
+                                outcome.validation = validation
                 except Exception:  # noqa: BLE001 — repair is best-effort
                     pass
             # Sprint-19 P2: track this attempt's quality against a stashed
