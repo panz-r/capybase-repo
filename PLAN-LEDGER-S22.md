@@ -4401,3 +4401,30 @@ no partial. Full-suite unit run left running in the background.
 
 **sqlite pool mid-run**: 54/97, 44 PASS / 8 ESCALATE (54/97 at
 check time) — conversions flowing at the expected rate.
+
+### C17 resolved: NOT content-era — a broken merge_sha + a gate blind spot (2026-08-29, 28b6469)
+
+protobuf-0051 reproduction (disk tree at /var/tmp/c17-0051, git archive
+of merge_sha 04fc93f4b + replayed splice + autoreconf/configure/make):
+the make failure is `No rule to make target
+'google/protobuf/field_access_listener.cc'` — upstream's own merge
+commit DELETED the file while leaving it in src/Makefile.am. The gate
+is unpassable for any descriptor.cc content; the 1-line conflict
+(uninitialized vs `= {{}}` small_size_blocks_) is trivial and our
+resolution was sim 0.999.
+
+The ESCALATE mechanism: the no-rule line has no 'error' substring and
+no file:line:col, so verification's classification loop skipped it; the
+conservative fallback promoted `make[1]: *** Error 1` to a hard
+failure → unpassable repair loop → REPAIR_FAILURE. The current-side
+`message_type_` error (old-era file vs new-era headers) is real but
+irrelevant — the current side was never viable; only the merged/replayed
+content matters. `oracle_builds: true` was the eval side accidentally
+excusing the no-rule line as a sibling-file failure.
+
+Fix (28b6469): `_missing_make_target()` names the target file; the gate
+classifies with sibling-error doctrine (outside conflict file = infra,
+inside = defect). Expect 0051 ESCALATE→PASS on the A7 harvest rerun
+(the sim-0.999 resolution now passes the gate). Same class check due on
+protobuf-0055/0058/0059 (TOOLCHAIN_ERA verdicts — verify whether their
+era probe hit the same no-rule line before calling them dead).
