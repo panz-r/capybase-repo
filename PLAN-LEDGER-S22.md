@@ -4455,3 +4455,20 @@ retry; 5 units) was consumed by empty-output weather. IF the A7 rerun
 candidate micro-fix is a single bounded recovery-prompt grant when the
 budget is exhausted but no counterexample was ever seen. Not implemented
 now — no evidence it converts.
+
+### G5/G11 implemented: P6b brace+scope form (2026-08-29, 4a681ca)
+
+P6b now triggers on the rust/structural brace shapes (rustc's
+'mismatched closing delimiter: `}`', 'brace imbalance detected at line
+N', python ast's unmatched '}') and routes the repair through the
+deterministic brace balancer. The balancer may delete lines, so the
+marker span is remapped through a difflib line-diff before region
+re-extraction. Full re-verification guards it (a wrong deletion
+declines). Test drives the python ast shape end-to-end (74/74 orch
+suite).
+
+Scope note: the missing-opener form (axum-0019's 'prefix `item` is
+unknown' — the opener line lives outside the fragment) is NOT repairable
+by stray deletion; it stays with C19's seam-aware design item.
+sea-orm-0014 (brace+scope splice, 0.858) is the prime conversion
+candidate for A7.
