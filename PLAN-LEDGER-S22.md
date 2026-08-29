@@ -4482,3 +4482,27 @@ crates.io also supplies it — cargo vendor dies on the duplicate source).
 VERIFIED on 0007's merge_sha tree: 349 crates vendored, offline build
 rc=0. Both cases added to the staged fixpool (now 9 cases: C17, G1,
 G2, G4, G5, G11, C20-residue, sea-orm ×2).
+
+### A6 floor draft (2026-08-29 — final numbers pending A7; membership evidence cited)
+
+CONFIRMED floor (all-three-sides fail identically, oracle included —
+no passable target under this toolchain):
+- protobuf-0055 (LogSeverity NONE/STRICT/VERIFY enum-era drift)
+- protobuf-0058/0059 (__builtin_assume — clang builtin under gcc)
+- fmt-0003 (not recovered by the cstdint sed)
+- jsonc-0017
+- sea-orm-0003 (dep branch deleted upstream and absent locally)
+
+PENDING pool confirmation (mechanisms landed today):
+- sea-orm-0007/0008 — E2E-validated 0.18.2 pin (bf57629); expect
+  recovery in fixpool
+- sqlite tcl ×5 — .deb include extraction (round-12); expect PASS in
+  sqlite pool
+- The 6 ESCALATE sqlite band members (0006=G3/C12 band, 0019/0029=C19
+  parked, 0033=cap class, 0037=C20-converted, 0040=tcl) — pool shows
+  0037 PASS already
+- rust drift remainder (tokio 5/5 recovered; axum/serde/etc. A7 data)
+
+Draft floor ≈ 5 confirmed + C19's parked 2 (0019/0029, sim 0.999-1.0
+residue) + whatever the A7 harvest leaves. The 26-item projection from
+round 10 now looks pessimistic: confirmed floor is 5, not 26.
