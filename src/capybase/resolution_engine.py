@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -1033,6 +1034,26 @@ _RESOLVE_RULES_JSON_V6 = (
     "- If you cannot merge safely, set needs_human=true and explain.\n"
 )
 
+#: B9 (sprint-26): the refactor-vs-functional resolve directive for the
+#: coin-flip A/B. The coin-flip autopsy showed a ~70/30 keep-bias toward the
+#: refactored side — the model takes the rename/move side wholesale and drops
+#: the other side's behavioral addition because its identifiers no longer
+#: appear anywhere in the refactored text. The directive names that trap
+#: explicitly. Deliberately NOT a push to integrate everything (the s22 hold
+#: note: some oracles want the discard) — it only rules out the
+#: identifier-vanished false-negative. Off by default (byte-identical
+#: prompts); enabled per-run via CAPYBASE_RESOLVE_DIRECTIVE=refactor_fn.
+_RESOLVE_DIRECTIVE_REFACTOR_FN = (
+    "MERGE GUIDANCE: when one side is a pure refactor (rename/move/reformat,\n"
+    "same semantics) and the other side adds or changes behavior, keep the\n"
+    "behavioral change expressed under the refactor's new names and shape.\n"
+    "The behavioral side's identifiers may not appear anywhere in the\n"
+    "refactored side — that is NOT evidence the change was reverted or\n"
+    "superseded. Dropping a behavioral change because its old identifiers\n"
+    "vanished is the single most common wrong merge on this corpus.\n"
+)
+_RESOLVE_DIRECTIVE = os.environ.get("CAPYBASE_RESOLVE_DIRECTIVE", "").strip()
+
 #: The markdown-code output contract. The merged code is emitted RAW inside a
 #: fenced block (no JSON escaping of newlines/quotes — the failure mode that
 #: breaks 3B models on code with embedded quotes), followed by a small JSON
@@ -1519,6 +1540,12 @@ def _resolve_prompt_parts(
     # axis. The default (JSON_V6) yields byte-identical v6 strings; MARKDOWN_CODE
     # yields the fenced-code-then-JSON contract that eliminates escaping.
     contract, rules = _render_output_contract(profile)
+    # B9 (sprint-26): the coin-flip A/B directive rides the resolve prompt
+    # pre-emptively (the 6 calibration cases die at the UNIT level — no
+    # exhaustion ballot to target). Env-gated, off by default: production
+    # prompts stay byte-identical.
+    if _RESOLVE_DIRECTIVE == "refactor_fn":
+        rules = rules + "\n" + _RESOLVE_DIRECTIVE_REFACTOR_FN
     # Token-window enforcement: the three sides + boilerplate (intro/contract/
     # rules) are ESSENTIAL and never trimmed; the augmentation sections (anchor,
     # siblings, deps, few-shot, surrounding context) are trimmed to fit. The

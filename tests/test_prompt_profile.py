@@ -383,3 +383,32 @@ def test_side_ordering_base_first():
     assert prompt_bf.index("BASE (common ancestor)") < prompt_bf.index("CURRENT_UPSTREAM_SIDE body")
     # CURRENT_FIRST (default): CURRENT appears before BASE
     assert prompt_cf.index("CURRENT_UPSTREAM_SIDE body") < prompt_cf.index("BASE (common ancestor)")
+
+
+# ---------------------------------------------------------------------------
+# B9 (sprint-26): refactor-vs-functional resolve directive — env-gated A/B
+# ---------------------------------------------------------------------------
+
+def test_resolve_directive_default_off(monkeypatch):
+    """Without CAPYBASE_RESOLVE_DIRECTIVE the prompt is byte-identical
+    (the directive must not leak into production or shift attribution)."""
+    import capybase.resolution_engine as re_mod
+    monkeypatch.setattr(re_mod, "_RESOLVE_DIRECTIVE", "")
+    u, ctx = _unit(), ContextBuilder().build(_unit())
+    prompt = build_resolve_prompt(u, ctx)
+    assert "MERGE GUIDANCE" not in prompt
+    assert _RESOLVE_RULES_JSON_V6 in prompt
+
+
+def test_resolve_directive_refactor_fn_rides_rules(monkeypatch):
+    """CAPYBASE_RESOLVE_DIRECTIVE=refactor_fn appends the directive after
+    the rules block — pre-emptive on the RESOLVE prompt (the coin-flip
+    cases die at the unit level; there is no ballot to target)."""
+    import capybase.resolution_engine as re_mod
+    monkeypatch.setattr(re_mod, "_RESOLVE_DIRECTIVE", "refactor_fn")
+    u, ctx = _unit(), ContextBuilder().build(_unit())
+    prompt = build_resolve_prompt(u, ctx)
+    assert "MERGE GUIDANCE" in prompt
+    assert "identifier" in prompt
+    # the base rules remain intact before the directive
+    assert prompt.index(_RESOLVE_RULES_JSON_V6) < prompt.index("MERGE GUIDANCE")
