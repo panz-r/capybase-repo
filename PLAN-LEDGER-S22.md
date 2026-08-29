@@ -3999,3 +3999,37 @@ mid-band/candidate work may recover them; not discrete failures).
 
 **Sprint-26 final count: 31 items** (A1-A7 era recovery, B8-B10
 calibration, C11-C23 depth/diagnosis as amended, G1-G13 open-ended).
+
+### Sprint-26 PRE-SPRINT INVESTIGATION ROUND 6 (2026-08-29, no evals — G-series validation)
+
+**G1 (redis-0055) ROOT-CAUSED: the per-unit output cap has an
+estimate-basis bug, and it regressed a validated PASS.** The corpus
+case is a 7,814-non-blank-line conflict whose resolution is 8,674
+lines — but its WINDOWED prompt context estimates 407 tokens. The
+cap formula (min(config, max(2048, 3× context.token_estimate)))
+therefore throttled output to 2,048 tokens — every attempt truncated
+empty (3/3, zero-char responses, finish_reason=length) — while the
+specimen cycles (pre-cap) passed with the full 8,192. The windowed
+prompt estimate measures INPUT, not output need; for large-conflict
+units the output need scales with the CONFLICT size, not the prompt.
+THE FIX (new item A0, before A1): the cap's basis must include the
+conflict-size signal the eval's own max_tokens sizing uses —
+conflict_lines×16 — e.g. cap = min(config, max(2048, 3×ctx_est,
+conflict_lines×8)). Redis-0012 (2,532L) and sqlite-0033 (7,607L) are
+the same class — explaining 3 of the 14 flips. THE HARVEST'S GATE
+DID ITS JOB: the flip audit flagged exactly this.
+
+**G-series validated:**
+- G4 (zenodo-0019): python IndentationError loop — shattered-rescue
+  shape confirmed (window-fixable), but only post-A0 (the rescue
+  needs non-empty candidates).
+- G10 (axum-0002): soft-stall (signature '(none)') — new sub-class
+  confirmed; the guard tracks hard-failure signatures only.
+- C19 (sqlite-0019/0029): the brace-repair defect MOVES between
+  rounds (line 1294→1280) — UNCHANGED convergence; scope = moved-
+  defect brace repair, not worktree noise.
+- Item 12: the empty band's oscillation rates confirmed on harvest
+  sessions (clickhouse-0021 3/3, jsonc-0007 4/5, protobuf-0008 4/9).
+
+**Sprint-26 FINAL: 32 items** (A0 output-cap basis fix added; the
+G-series triage re-orders execution: A0 → G1 re-check → the rest).
