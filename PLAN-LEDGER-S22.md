@@ -3490,3 +3490,38 @@ probe; sqlite-0039 returns to the passable pool.
 rust re-enter the active pool; the era census shrinks 167 → ~30-40
 and the RAW PASS rate rises accordingly (the adjustment stays honest
 for the genuine remainder).
+
+---
+
+## SPRINT-26 PLAN: Era Recovery (2026-08-29, from the era-dead inventory)
+
+**Goal**: recover the misconfigured era pool into active passable cases;
+shrink the era census to its genuine remainder (~30-40); raise the RAW
+PASS rate. The adjustment stays honest for what's genuinely dead.
+
+**The ordered queue (increasing edit complexity, recovery + validation
+mixed per the standing directive):**
+
+| # | Item | Target pool | Complexity | Status |
+|---|------|-------------|------------|--------|
+| 1 | sqlite corpus fix: prepare becomes `CFLAGS='-std=gnu99' ./configure && make` | 90 cases | TRIVIAL (one config line, fix VERIFIED offline rc2→0) | TODO |
+| 2 | Re-run the sqlite era pool (91 cases incl. the un-stolen 0039) | 91 | eval time only | TODO |
+| 3 | nlohmann corpus fix: `-std=c++11 -fpermissive -Wno-error` + the SIGSTKSZ literal in doctest.h's build path + exclude/accept the 2 allocator_traits errors | ~34 of 36 | SMALL (config + one sed in prepare + gate decision) | TODO |
+| 4 | Re-run the nlohmann era pool | 36 | eval time | TODO |
+| 5 | rust vendoring: `cargo vendor` the registry-resolution failures (security-framework, sea-query eras) into the corpus worktrees | ~10-20 | MEDIUM (per-dataset vendor + offline config) | TODO |
+| 6 | Genuine-drift acceptance: the remainder (fmt private fields, rustc API removals, allocator_traits) stays era-dead — document as the honest floor | ~20-30 | docs | TODO |
+| 7 | Full-corpus harvest re-run with the recovered pools + README row update (raw PASS% rises; Δ vs 8a290d9) | 676 | eval time | TODO |
+
+**Carried from sprint-25 (unchanged):**
+- golden-path A/B with freshness validation (production-on / eval-off
+  policy stands; the A/B is the deliberate, journaled exception)
+- harvest census cross-tabs (mechanism waterfall from the 8a290d9 run)
+
+**Projected outcome**: era census 167 → ~35; the recovered ~130 cases
+re-enter at their true pass rates (sqlite's era pool contains the
+specimen-validated hardest-C classes — expect a mix); raw PASS% rises
+from 67.6% toward the high-70s; adjusted% moves only honestly.
+
+**Verification discipline**: each recovered pool re-runs with the full
+bug-watch (flip audit vs its OWN prior verdicts — era → anything is
+progress, never a flip); the README row cites the config commits.
