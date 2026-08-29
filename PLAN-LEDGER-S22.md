@@ -4378,3 +4378,26 @@ model attempt re-introduces the same gap. NOT a quick deterministic
 fix: it needs seam-aware splice assembly (closing braces emitted at
 sub-unit boundaries). Parked as a design item for the next sprint;
 the residue class stays 2 cases (0019/0029) at sim 1.0/0.999.
+
+### C12 implemented (2026-08-29, a8e603c)
+
+The empty-oscillation classifier: UnitOutcome tracks per-retry
+attempt kinds (empty|defect) and stashes the most recent non-empty
+(defect candidate, validation). When the no-progress guard fires on
+an EMPTY candidate with >=2 empty and >=2 defect attempts in the
+last 6, the shattered rescue retargets the stashed defect candidate
+and ITS hard failures (the band's defects — stray @, missing
+terminator, unqualified-id — are locally fixable from the ±8-line
+window). Journaled as oscillation_band_rescue. The defect was that
+the rescue degenerated to a full-context PROMPT_RETRY whenever the
+guard's cand was empty (propose()'s shatter branch requires
+non-empty prev_candidate text) — the exact attractor the rescue
+exists to break. Test drives the full alternation with distinct
+defect signatures; 73/73 orchestrator suite green.
+
+**tokio vendor pool FINAL: 5/5 PASS** — the vendoring recipe
+(patch pins -> cargo vendor -> offline build) fully converts live,
+no partial. Full-suite unit run left running in the background.
+
+**sqlite pool mid-run**: 54/97, 44 PASS / 8 ESCALATE (54/97 at
+check time) — conversions flowing at the expected rate.
