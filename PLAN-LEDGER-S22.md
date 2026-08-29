@@ -4183,3 +4183,114 @@ recovered cases — the pool re-run needs the default.
 
 All 32 task descriptions now carry execution-ready evidence; no
 open assumptions remain. Investigation TRULY closed.
+
+### SPRINT-26 CANONICAL PLAN (2026-08-29, round 10 — SUPERSEDES all prior sprint-26 sections and the stale table above)
+
+Read this section alone; the rounds 1-9 entries are the evidence
+appendices. Status per item is execution-ready unless noted.
+
+**A. Era recovery**
+- **A0. Remove the per-unit output cap** (resolution_engine.py `_one`,
+  the `_mt_cap` block, restore `max_tokens=self.config.max_tokens`).
+  VERIFIED: cap is a no-op for its beneficiary (redis-0052, 8,208-line
+  conflict → formula gives full 8,192), broke redis-0055/0012/0033
+  (windowed-prompt estimate throttled whole-file outputs), burned
+  ~120 sessions (natural A/B: L pre-cap 0 attempts vs harvest 6-9).
+  Removal is timeline-proven safe for the starvation class (floor
+  511937e predates the cap by a day; flask/tokio converted floor-only).
+- **A1. sqlite build flags** — per-dataset CFLAGS map consulted in
+  `_resolve_c_build`'s AUTOTOOLS branch (C_PREPARE_COMMANDS is
+  ignored there — verified: sqlite trees have configure.ac):
+  `CFLAGS='-std=gnu99' ./configure`. ALSO: exempt tool/lemon.c from
+  the tracked-file restore (or move the existing lemon patcher after
+  it) so in-session derived-header rebuilds keep the patch. Fix
+  verified rc2→0 on TWO commits.
+- **A2. sqlite pool re-run** — 91 era cases + 6 sqlite ESCALATE for
+  before/after. Mechanics validated (91 --case flags parse; era
+  exits 5s; recovered worst case ~124s → ~3.1h).
+- **A3. nlohmann prepare** — replace the C_PREPARE_COMMANDS entry
+  with: `cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+  -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DJSON_BuildTests=OFF
+  -DCMAKE_CXX_FLAGS='-DSIGSTKSZ=32768 -std=c++11 -fpermissive
+  -Wno-error'`. VERIFIED rc=0, zero errors, full 38/38 recovery
+  (BuildTests=OFF removes the doctest SIGSTKSZ AND the 2
+  allocator-drift test errors — both lived in tests). Quoting
+  validated against _run_shell_tree's shell=True.
+- **A4. nlohmann pool re-run** — 38 cases, ~1.3h worst case.
+- **A5. rust vendoring** — tokio class VALIDATED end-to-end:
+  `[patch.crates-io]` git-tag pins (security-framework v0.2.2 — all
+  crates.io 0.2.x yanked) → cargo vendor (169 crates) →
+  .cargo/config.toml → `cargo build --offline --cap-lints warn`
+  rc=0. sea-orm 0007/0008 need a prepare-time dep-line rewrite
+  (their git dep resolves to sea-query 1.0.2 vs required ^0.18;
+  tag 0.18.0 exists upstream). sea-orm-0003: branch deleted upstream
+  and absent locally — era-dead unless fork-recoverable.
+- **A6. Genuine-drift acceptance** — the honest floor (~26): sqlite
+  tcl ×5 (tcl.h absent), protobuf content/drift ×3, fmt ×4, rust
+  drift ~13, jsonc-0017 ×1. Document per-case.
+- **A7. Full harvest + README row** — 19.2h expected; bug-watch flip
+  audit gates the update; Δ vs 8a290d9.
+
+**B. Calibration (data exists)**
+- **B8. CLOSED (negative)** — mid-band churn-mult widening cannot
+  separate the cohorts (ESC median 20.8 vs PASS median 13.0, ranges
+  overlap); keep in_band + ballot. Style-transfer folded here.
+- **B9. Coin-flip resolve-prompt directive A/B** — 6 cases (unit-
+  level deaths, no ballots; the directive rides the RESOLVE prompt
+  pre-emptively), majority-of-3 yardstick.
+- **B10. Self-consistency instrumented A/B** — fields already
+  journaled (orchestrator:13523); cost model from 51 samples: 22s →
+  65s/unit at n=3; gate = PASS delta must exceed the calibration
+  variance band.
+
+**C. Depth & diagnosis**
+- **C12. Empty-oscillation classifier** — ~19-case demand; trigger =
+  mixed empty/parse-defect alternation on near-oracle units (rates
+  quantified: 3/4, 3/3, 4/5, 4/9, 1/2); ACTION = route the non-empty
+  defect candidate to the shattered/deterministic repair path (the
+  band's defects are concrete: unqualified-id, missing terminator,
+  stray @).
+- **C17. protobuf-0051 content-era investigation** — class-scope
+  member sets (enum_type_ vs enum_type on specific classes); headers
+  have both names.
+- **C18. redis gate link-order** — TWO sites: C_BUILD_COMMANDS[
+  "redis-history"] and _resolve_c_build's ready-Makefile branch; both
+  get `CC='cc -Wl,--no-as-needed'`. Stack verified to built binaries.
+- **C19. Moved-defect brace repair** — sqlite-0019/0029 (REPAIR_
+  FAILURE at sim 1.0/0.999; the defect moved 1294→1280 between
+  rounds).
+- **C20. Retry-cap trend analysis** — P8 fired 2/4; analyze the 2
+  non-qualifiers (sqlite-0037, zenodo-0013).
+- **C22. GATE_UNAVAILABLE doc** — redis-0026 journaled end-to-end
+  (oracle itself fails brace balance).
+- **C23. Mutation-stub removal** — the flag (FutureConfig.
+  enable_mutation_testing) + README line; no engine exists.
+
+**D. G-series (open-ended, mechanisms named)**
+- **G1. redis-0055 re-check post-A0** (the cap caused it; verified
+  L-vs-harvest natural A/B).
+- **G2. redis-0014** — C1b READY (parse_missing_symbols handles
+  'statloc' undeclared, both quote forms).
+- **G4. zenodo-0019** — python IndentationError loop; shattered
+  rescue post-A0.
+- **G5/G11. axum-0019/sea-orm-0014** — brace+scope splice defects
+  (P6b extension to the brace+scope form).
+- **G10. axum-0002 soft-stall** — new sub-class: the guard tracks
+  hard signatures only; soft-warning stalls unseen.
+- **G3/G6/G9/G13** — item-12 band members (covered by C12).
+- **G7. redis-0047** — B9 covers.
+- **G8/G12. zenodo-0012/sea-orm-0011** — C20 covers.
+
+**DROPPED (evidence-based)**: C11 mixed-delimiter (4 transient
+events, 2 cases, repaired in-loop), C13 statement splitting
+(redundant), C14 P5 non-code (zero non-code cases), C15 HTTP-400
+hardening (zero events), B8-as-widening (negative).
+
+**ACCEPTANCE**: era census 167 → ~26; raw PASS% toward high-70s;
+zero regressions in the flip audit (A0's regression test = redis-
+0055 returning to PASS); README row cites the config commits.
+
+**Execution order**: A0 → A1+A3 (configs) → A2+A4 (pools, ~4.5h) →
+G1 re-check → A5 (vendoring) → C18 → G2/G4/G5/G11/G10 (G-series) →
+C12/C17/C19/C20 → A6 → A7 (harvest) → B9/B10 (calibration A/Bs) →
+C22/C23 (docs).
