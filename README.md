@@ -290,16 +290,21 @@ The **661-case corpus of non-git-resolvable conflicts** (cases where
 git's own three-way merge leaves markers — anything git resolves
 cleanly is not a resolution problem) runs as a sharded harvest, one
 language at a time, fixes landing between rounds. Current state —
-all cases on the uniform commit `e7e7eb7`; Δ is versus the prior
-full round.
+all cases on the uniform commit `e9513c5` (sprint-24/25: the F1
+takeover-landing fix, output-starvation floor, uncoded-rustc
+classification, whole-file unit validation, the four pipeline
+migrations, per-unit output caps, the conflict-target + signature-
+equivalence toolchain probes); Δ is versus the prior full round
+(`e7e7eb7`). 676 cases ran; 16 git-resolvable skips leave the 660-row
+denominator below.
 
 | lang | cases | PASS | WORKING | era-dead | PASS % | adj % | P+W adj % | Δ adj |
 |------|-------|------|---------|----------|--------|-----------|-----------|-------|
-| python | 109 | 97 | 4 | 0 | 89.0% | 89.0% | 92.7% | −0.9pp |
-| c | 204 | 88 | 1 | 97 | 43.1% | 82.2% | 83.2% | +3.9pp |
-| rust | 194 | 157 | 0 | 24 | 80.9% | 92.4% | 92.4% | +1.2pp |
-| cpp | 154 | 102 | 1 | 45 | 66.2% | 93.6% | 94.5% | +3.7pp |
-| **total** | **661** | **444** | **6** | **166** | **67.2%** | **89.7%** | **90.9%** | **+1.8pp** |
+| python | 108 | 95 | 3 | 0 | 88.0% | 88.0% | 90.7% | −2.0pp |
+| c | 204 | 88 | 1 | 98 | 43.1% | 83.0% | 84.0% | +0.8pp |
+| rust | 194 | 162 | 0 | 24 | 83.5% | 95.3% | 95.3% | +2.9pp |
+| cpp | 154 | 101 | 1 | 45 | 65.6% | 92.7% | 93.6% | −0.9pp |
+| **total** | **660** | **446** | **5** | **167** | **67.6%** | **90.5%** | **91.5%** | **+0.6pp** |
 
 **PASS** = marker-free, passes the compile/structural gate, and matches
 the human resolution at token similarity ≥ 0.90, replayed live against

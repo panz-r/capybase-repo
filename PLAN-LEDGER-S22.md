@@ -3409,3 +3409,31 @@ DECISION (user not reachable; best judgment per the harvest's purpose
   validate each replay against the CURRENT sides before accepting,
   A/B on the specimen set first). The replay-stale-resolution failure
   is itself a finding: exact_reuse needs freshness validation.
+
+### THE CLEAN HARVEST FINAL (2026-08-28, e9513c5): README row updated
+
+**446 PASS + 5 WORKING / 660 real-conflict cases = 91.5% P+W adjusted
+(+0.6pp vs the reround's 90.9%).** Zero infrastructure errors. The
+golden-path contamination excluded via restart; the clean run is
+bug-free per the gate.
+
+Per-language: rust +2.9pp (the specimen fixes — starvation, rustc
+classifier, takeover landings), c +0.8pp, cpp −0.9pp, python −2.0pp
+(the near-oracle MODEL_NEEDS_HUMAN band + one ORACLE_DIVERGENT).
+
+**Flip triage (14, all named classes, zero wiring bugs)**:
+- 9 near-oracle model-capability closes (jsonc-0007, protobuf-0008/
+  0015, redis-0012, sqlite-0006/0033, zenodo-0064, + protobuf-0043's
+  convergence timeout) at 0.94-0.994 sim — the variance band (several
+  drew 1/3 PASS).
+- 2 unit-count retry caps (sqlite-0037, zenodo-0013).
+- 1 compile-gate honesty (redis-0040 at sim 1.000 — the build failed).
+- 1 classification honesty (sqlite-0039 → ESCALATE_TOOLCHAIN 3/3 via
+  the new probe).
+- 1 oracle-subjective (zenodo-0087 → ORACLE_DIVERGENT 3/3).
+
+16 new good verdicts vs 14 flips = net +2 PASS. The contaminated
+golden-path partial preserved at full-harvest-gp-contaminated-
+partial.json (its 5-flip cluster is the freshness-validation finding).
+The clickhouse tmpfs cases ran clean in this run — no rerun needed;
+the accidentally-killed rerun worker is moot.
