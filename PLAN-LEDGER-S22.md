@@ -4033,3 +4033,50 @@ DID ITS JOB: the flip audit flagged exactly this.
 
 **Sprint-26 FINAL: 32 items** (A0 output-cap basis fix added; the
 G-series triage re-orders execution: A0 → G1 re-check → the rest).
+
+### Sprint-26 PRE-SPRINT INVESTIGATION ROUND 7 (2026-08-29, no evals — adversarial + final surfaces)
+
+**A0 VERDICT CHANGED: REMOVE the per-unit cap, don't fix its basis.**
+The evidence is now one-sided: (1) the cap's intended beneficiary
+(redis-0052) is an 8,208-line conflict — ANY conflict-size-aware
+formula gives it the full 8,192, i.e. the cap is a no-op for it, and
+it stayed ESC in cycle L; (2) the cap demonstrably broke redis-0055
+(3/3 empty truncation), and sqlite-0033 shows the identical
+signature (476-token windowed estimate → 3/3 truncated-empty at
+max_tokens 8192) — 3+ flipped PASSes attributable; (3) zero cases
+show cap-attributed conversions. The design error is fundamental:
+output need is not derivable from INPUT size for whole-file units
+(windowed prompt ~476t, output ~9,000 lines). REMOVAL restores the
+pre-cap behavior for everything and removes the regression class.
+The truncation-looping concern (redis-0052's original motivation)
+returns to the eval's conflict_lines×16 sizing, which already gave
+it 8,192 — the loop there is a model limitation, not a cap issue.
+
+**A5 (vendoring) — per-dataset reality check:**
+- tokio (0112-0115 + more): VALIDATED end-to-end — [patch.crates-io]
+  git-tag pins (security-framework v0.2.2) + vendor + cap-lints →
+  offline build rc=0 (169 crates).
+- sea-orm 0007/0008: their git dep resolves to sea-query 1.0.2
+  (current default branch) while the case requires ^0.18.0 — a
+  patch alone CANNOT fix it (version conflict with the git dep's
+  own version). The fix needs a prepare-time Cargo.toml rewrite
+  (sed the git dep to the registry or to tag 0.18.0, which exists
+  upstream). MEDIUM complexity, per-case.
+- sea-orm 0003: the sqlite-bind-decimals BRANCH is DELETED upstream
+  AND absent from the local clone — the code it references may be
+  unrecoverable. DISPOSITION: era-dead (document), unless the
+  branch is recoverable from forks.
+
+**G-series hypotheses validated from flights:**
+- G2 (redis-0014, 0.999): server.c:1950 'statloc' undeclared — a
+  C1-symbol-injection shape (the fix belongs to C1's family, high
+  conversion odds).
+- G5 (axum-0019, 0.996): cargo 'prefix `item` is unknown' +
+  'mismatched closing delimiter' — a delimiter+scope splice defect;
+  P6b-adjacent (P6b handles ()/[]; this needs the brace+scope form).
+- G11 (sea-orm-0014, 0.858): cargo-gate loop — same family as G5.
+
+**No remaining unvalidated assumptions.** Sprint-26 = 32 items with
+A0 changed to REMOVAL, A5 split into validated-tokio /
+sea-orm-needs-dep-rewrite / sea-orm-0003-era-dead, G-series scoped
+to named mechanisms. Investigation phase CLOSED.
