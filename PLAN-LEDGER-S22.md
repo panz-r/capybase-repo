@@ -4130,3 +4130,56 @@ item-12 cases, not era candidates.
 protobuf content/drift ×3, fmt ×4, rust drift ~13, jsonc ~1); raw
 PASS ceiling rises substantially. The 141 recovered cases re-enter
 at their true rates.
+
+### Sprint-26 PRE-SPRINT INVESTIGATION ROUND 9 (2026-08-29, no evals — final task-description hardening)
+
+**A0 removal is SAFE for the starvation class — timeline proven.**
+The eval-side floor (511937e, Aug 27 14:28) predates the cap (9b6b36f,
+Aug 28 14:24) by a full day; flask-0006/tokio-0108 converted in cycles
+E+ under the floor alone. Removing the cap removes only the
+regression layer; the starvation fix stays. Cycle-L's window
+(13:11–14:50) is entirely pre-cap — its redis-0055 PASS vs the
+harvest's 3/3 ESC is a clean natural A/B.
+
+**G2 (redis-0014) — mechanism READY**: `parse_missing_symbols`
+parses both the plain and unicode-quote forms of "'statloc'
+undeclared" → ['statloc']. C1b injects the declaration from the
+sides; the item is execution-ready, not exploratory.
+
+**Item 12 (empty-oscillation classifier) — the ACTION validated
+from the 0008 trail**: the band's non-empty candidates fail on
+CONCRETE errors (unqualified-id before string, missing terminating
+", stray '@') — these are C-parse defects on fragment-shaped
+candidates (the .cpp temp suffix reveals cpp-mode validation). The
+classifier's action: on mixed empty/parse-defect alternation, route
+the non-empty defect candidate through the shattered/deterministic
+repair path (which the empty candidates can't use — no window text).
+This gives item 12 a concrete mechanism: defect-candidate rescue
+instead of discard.
+
+**B10 (self-consistency) — cost model from 51 real samples**: median
+22.2s, p90 24.8s, mean 21.7s per generation. n=3 self-consistency ≈
+65s/unit vs 22s single — a 3× latency cost. The A/B design: enable on
+the specimen set, measure PASS delta per added 43s; worth it only if
+the delta exceeds the variance band (the 12-case calibration set
+from item 9 provides the yardstick).
+
+**Item 11 (mixed-delimiter) — FULLY CLOSED**: the 4 events trace to
+exactly 2 cases (zenodo-0078/0079 — the 0079 P6b class). The drop
+stands with the demand enumerated.
+
+**Item 3 (nlohmann) — prepare-string quoting validated**: the
+C_PREPARE_COMMANDS entry with `-DCMAKE_CXX_FLAGS='...'` rides
+_run_shell_tree's shell=True; single-quoted flags are safe. The
+exact entry: `cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+-DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DJSON_BuildTests=OFF
+-DCMAKE_CXX_FLAGS='-DSIGSTKSZ=32768 -std=c++11 -fpermissive
+-Wno-error'`.
+
+**A2 mechanics**: 91 --case flags parse correctly (argparse append);
+load_cases filters via a set — no scaling concern. Case timeouts
+(1200s default) are irrelevant for era-probe exits but bind for
+recovered cases — the pool re-run needs the default.
+
+All 32 task descriptions now carry execution-ready evidence; no
+open assumptions remain. Investigation TRULY closed.
