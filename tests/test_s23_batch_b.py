@@ -103,3 +103,17 @@ def test_derive_prototype_from_definition():
 def test_derive_no_brace_declines():
     assert derive_prototype("int foo(void);") is None
     assert derive_prototype("int foo") is None
+
+
+def test_derive_prototype_rejects_statement_headers():
+    """G2 (redis-0014): an `if (...) {` header is a STATEMENT, not a
+    definition — the mechanical {→; transform produced a statement injected
+    at file scope, itself a syntax error ('expected identifier or ( before
+    if'). Control-flow headers must decline."""
+    assert derive_prototype(
+        "if ((pid = wait3(&statloc,WNOHANG,NULL)) != 0) {") is None
+    assert derive_prototype("while (wait3(&statloc,0,NULL)) {") is None
+    assert derive_prototype("} else if (wait3(&statloc,0,NULL)) {") is None
+    assert derive_prototype("for (i = 0; i < n; i++) {") is None
+    # definition shape still derives
+    assert derive_prototype("int wait3(int *statloc) {") == "int wait3(int *statloc);"

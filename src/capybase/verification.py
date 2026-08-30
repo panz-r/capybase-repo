@@ -2612,13 +2612,26 @@ def find_replacement_line(
     return None
 
 
+#: C1b guard (G2, redis-0014): statement headers are not definitions. The
+#: definition matcher feeds any ``{``-terminated line containing the symbol
+#: here; an ``if ((pid = wait3(&statloc,...)) != 0) {`` header mechanically
+#: became ``...);`` — a STATEMENT injected at file scope, itself a syntax
+#: error ('expected identifier or ( before if'). Only definition-shaped
+#: lines (return-type + identifier + params) may yield prototypes.
+_PROTO_CTRL_RE = re.compile(
+    r"^\s*(?:}?\s*else\s+)?(if|for|while|switch|do|else|return)\b")
+
+
 def derive_prototype(definition_line: str) -> str | None:
     """C1b: derive a forward declaration from a definition signature.
 
     ``static int foo(void) {`` → ``static int foo(void);`` — a mechanical
-    transform of verbatim side content (redis-0013's cliSwitchProto)."""
+    transform of verbatim side content (redis-0013's cliSwitchProto).
+    Control-flow headers are rejected (statement, not declaration)."""
     s = definition_line.rstrip()
     if not s.endswith("{"):
+        return None
+    if _PROTO_CTRL_RE.match(s):
         return None
     return s[:-1].rstrip() + ";"
 
