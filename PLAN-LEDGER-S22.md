@@ -4536,3 +4536,19 @@ Fixpool now 13 cases (added 0108, 0109, 0073, 0092).
 tests are legitimately slow; the earlier "hung" run was just long).
 Validates together: C12 (a8e603c), C17 (28b6469), G5/G11 P6b brace
 (4a681ca), B9 directive (023c238), 0109 crash fix (f7417b8).
+
+### Sqlite pool FINAL + fixpool early conversions (2026-08-30)
+
+**sqlite pool: 82 PASS + 2 WORKING / 97 = 86.6%** (15 ESC: 8
+REPAIR_FAILURE incl. C19's 0019/0029, 2 MODEL_NEEDS_HUMAN, 2 OVERSIZED
+(0077/0078), 1 TOOLCHAIN_ERA (0039), 1 crash (0109, fixed f7417b8),
+1 other). The 91-era-dead cohort converted.
+
+**fixpool (in flight): protobuf-0051 PASS** — C17's missing-make-target
+classification (28b6469) converted the sim-0.999 resolution live.
+axum-0019 hit a harness FileNotFoundError at launch (concurrent-launch
+transient: nlohmann's startup stale-process sweep killed the fixpool's
+in-flight builds 5s in); its standalone rerun completes normally
+(ESCALATE REPAIR_FAILURE sim 1.00 — P6b brace didn't rescue it,
+consistent with its missing-opener root = C19 class). Manual axum
+rerun queued for the pool's tail.
