@@ -4731,3 +4731,10 @@ on failure. Full blast radius vs s24: exactly 14 stolen (tokio
 0001-0013 + redis-0038, already staged); 14 consistent floor; the
 remaining harvest corpus (zenodo, python) unaffected. The 13 tokio
 cases join the fix-validation rerun (now 23 cases).
+
+### Vendoring live confirmation (2026-08-30)
+
+tokio 0099-0116 — the ENTIRE s24-era cohort (15 toolchain-dead + 3) —
+PASS 18/18 in the A7 harvest. The rust era floor reduces to the 14
+stolen-by-poisoning cases (rerun restores them) + sea-orm's genuine
+members.
