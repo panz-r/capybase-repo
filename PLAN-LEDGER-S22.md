@@ -4693,3 +4693,14 @@ real errors, no tag), fmt-0003, sea-orm-0003. The A6 draft's 5-member
 floor was wrong on 0017/0058/0059 — all three join the staged
 fix-validation rerun (now 8 cases: 0039, redis-0014/0038/0048,
 jsonc-0017, protobuf-0058/0059).
+
+### C20 follow-up implemented: terminal recovery grant for pure-empty units (2026-08-30, 538a1e2)
+
+Harvest journal check on sqlite-0006 (the C12-band member): its
+unresolved unit ran EEE — PURE-empty, no alternation, C12 correctly
+absent. Third data point for the C20-deferred micro-fix (0006#s0, 0092)
+plus the conversion proof (zenodo-0013's fixpool PASS came exactly via
+a recovery-prompt chance). Both death paths (no-progress guard — where
+these actually died — and budget exhaustion) now grant ONE latched
+recovery attempt; journaled empty_terminal_recovery_grant. 75/75 orch
+suite. sqlite-0006 + 0092 join the fix-validation rerun (now 10 cases).
