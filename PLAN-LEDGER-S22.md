@@ -4704,3 +4704,17 @@ a recovery-prompt chance). Both death paths (no-progress guard — where
 these actually died — and budget exhaustion) now grant ONE latched
 recovery attempt; journaled empty_terminal_recovery_grant. 75/75 orch
 suite. sqlite-0006 + 0092 join the fix-validation rerun (now 10 cases).
+
+### sqlite-0099 classified: C19-family, preprocessor flavor (2026-08-30)
+
+New harvest escalate: `splice coherence: unbalanced preprocessor
+directives at line 366`. All four texts are individually #if/#endif
+balanced — the imbalance is CREATED by the splice: region 1 carries
+three #if opens whose matching #endifs live outside the region, so the
+merged region content controls the count. The single-edit deterministic
+repair correctly declined (a wrong-scope #endif silently changes what
+compiles). Same seam-crossing class as C19's braces: parked with the
+seam-aware assembly design item, which must handle brace AND
+preprocessor seams. protobuf-0008's harvest ESC re-confirmed as
+all-DEFECT coin-flip variance (B9's specimen; no empties, C12 rightly
+absent).
