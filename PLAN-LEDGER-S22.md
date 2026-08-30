@@ -4758,3 +4758,22 @@ overridden by their fix-validation rerun verdicts in the extracts."
 Table: per-lang rows from make_results_round (--override rerun),
 Δ per lang vs the s24 row (python 88.0/90.7, c 43.1/83.0/84.0,
 rust 83.5/95.3/95.3, cpp 65.6/92.7/93.6, total 67.6/90.5/91.5).
+
+### B9 A/B RESULT: directive evidence-neutral, stays off (2026-08-31)
+
+WITH arm (refactor_fn, 6 coin-flips × repeat-all 3) vs the harvest
+WITHOUT arm: 4 PASS + 1 NEAR + 1 ESC vs 5 PASS + 1 ESC — delta −17%,
+WITHIN the ±50% band (n=6): no effect. The harvest's own machinery
+(era configs + C12-family) had already stabilized the coin-flips
+(0008/0015/0047/0037 PASS without the directive). The one flip DOWN
+(zenodo-0036 PASS→NEAR ×3) matches the s22 hold note: discard-wanting
+oracles suffer under an integration-pushing directive. Disposition:
+the env knob stays available (CAPYBASE_RESOLVE_DIRECTIVE), default off
+— no promotion. Latency +12%.
+
+### B10 arm bug fixed mid-analysis (2026-08-31, d8cc231)
+
+jsonc-0007 crashed in the SC arm: norm_hash UnboundLocalError (assigned
+only under 'if cand_hash:'; an empty consensus winner skips it, the
+convergence check reads it). None-init + guard; 75/75 orch suite.
+jsonc-0007 + the two quota-broken clickhouse cases rerun with the fix.
