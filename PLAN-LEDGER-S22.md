@@ -4652,3 +4652,18 @@ clickhouse-0013 side-collapse, axum-0019 C19-class) + SAFE_SKIPs.
 Also committed this window: scripts/ab_analysis.py (0615992) — the
 B9/B10 comparator with the pooled-rate variance-band gate (dry-run on
 the fixpool reproduces 5 flips up, +38% exceeding ±31%).
+
+### Era-probe honesty fix: -Werror/sibling excuse (2026-08-30, 6595c8e)
+
+redis-0038's A7 era verdict root-caused via the s24 record: it PASSed
+in s24 ONLY because its current side carried an extra va_arg error
+(signatures differed → not era-dead). The sprint-26 va_arg sed fixed
+that error everywhere → all three sides collapsed onto the shared
+intsetGet -Werror promotion → all-identical → falsely era-dead.
+The probe now filters -Werror promotions and sibling-file errors (the
+verdict build's exact excuses) before signature comparison — infra
+errors are identical across sides BY CONSTRUCTION and were making
+era-dead the default for strict-flag era trees. redis-0048 (s24
+era-dead on the same promotion) is re-examined by the same fix.
+Both added to the staged fix-validation rerun (the in-flight harvest
+runs pre-fix code for all four cases).
