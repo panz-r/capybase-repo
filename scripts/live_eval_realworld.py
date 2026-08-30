@@ -911,6 +911,17 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
         cfg.future.enable_true_side_asymmetry_takeover = False
         cfg.future.enable_midband_subsumption_takeover = False
         cfg.future.enable_wholesale_winner_floor = False
+    # B10 (sprint-26): the self-consistency A/B arm —
+    # CAPYBASE_SELF_CONSISTENCY=N (N>1) enables consensus sampling with N
+    # samples (samples_complex follows). The per-candidate consensus fields
+    # (agreement/clusters/n_samples) are journaled on candidate_generated
+    # when active, so the A/B's cost model reads straight from the flights.
+    # Default off = the harvest baseline arm; no CLI surface change.
+    _sc_n = os.environ.get("CAPYBASE_SELF_CONSISTENCY", "").strip()
+    if _sc_n.isdigit() and int(_sc_n) > 1:
+        cfg.model.enable_self_consistency = True
+        cfg.model.samples = int(_sc_n)
+        cfg.model.samples_complex = int(_sc_n)
     # Output token cap proportional to conflict size: a 3-line conflict doesn't
     # need 8K tokens of generation headroom (the model would hallucinate
     # boilerplate, wasting time on the slow endpoint). Cap at 16× the conflict's
@@ -1986,6 +1997,13 @@ def main():
                          "single-run variance. The kept record is the first run with "
                          "the majority verdict; all verdicts are stored in "
                          "repeat_verdicts. Cases that PASS first try are not rerun.")
+    ap.add_argument("--repeat-all", type=int, default=1,
+                    help="Like --repeat-nonpass but repeats EVERY case (a first-try "
+                         "PASS can itself be variance). The majority-of-3 yardstick "
+                         "for calibration A/Bs (B9/B10): the WITHOUT arm is the "
+                         "harvest itself; the WITH arm needs honest repeats on "
+                         "coin-flip cases that pass first try 50-70% of the time. "
+                         "When both flags are set, --repeat-all wins.")
     ap.add_argument("--preserve-flights", default=None,
                     help="Directory to copy per-case orchestrator session artifacts into "
                          "(FR2a flight recorder). Produces <dir>/flights/<case_id>/<session_id>/ "
@@ -2221,15 +2239,19 @@ def main():
         r = _execute_case()
         verdict = _verdict_for(r)
         r.repeat_verdicts = []
-        if args.repeat_nonpass > 1 and verdict != "PASS":
+        # --repeat-all (B9/B10 majority yardstick) subsumes --repeat-nonpass:
+        # repeat regardless of the first verdict.
+        _repeat_n = max(args.repeat_all, args.repeat_nonpass)
+        _repeat_only_nonpass = args.repeat_all <= 1
+        if _repeat_n > 1 and (not _repeat_only_nonpass or verdict != "PASS"):
             # Variance-aware majority: rerun non-PASS cases, keep the modal
             # verdict (the first run exhibiting it) so a single lucky or
             # unlucky draw doesn't label the case.
             from collections import Counter as _VC
             _verdicts = [verdict]
             _records = [r]
-            for _k in range(args.repeat_nonpass - 1):
-                print(f"\n      [repeat {_k + 2}/{args.repeat_nonpass}] ...", end=" ")
+            for _k in range(_repeat_n - 1):
+                print(f"\n      [repeat {_k + 2}/{_repeat_n}] ...", end=" ")
                 _rr = _execute_case()
                 _vv = _verdict_for(_rr)
                 _rr.verdict = _vv
