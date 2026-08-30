@@ -4596,3 +4596,17 @@ build rc=0 — passable. The guard now scans all three target sigs and
 the equivalence block short-circuits on it. NOTE: the running A7
 harvest imported the old code — 0039 will misclassify there; post-
 harvest rerun queued for the honest README number.
+
+### Post-pool classifications + A7 tooling prep (2026-08-30)
+
+- **sqlite-0092**: one unit (shell.c whole-file), 3× pure-empty (EEE), no
+  alternation — C12 correctly not engaged. The unit exceeds the model
+  window (every prompt shape returns empty). Class = oversized-whole-
+  file, aligned with 0077/0078 → the parked oversized-splitting design.
+- **sea-orm-0007**: genuine loop on 2 concrete rust syntax errors
+  (expected parameter name found '/', expected item found '||') at sim
+  0.91 — honest escalate, no mechanism mismatch.
+- Flip-audit pipeline dry-run validated on the harvest json format
+  (s24 vs s22r2: 14 flips, all previously triaged; 16 new-good).
+- README row plan: per-lang extracts under docs/results/s26/ + meta.json
+  (sprint-26 commit + mechanism list); Δ vs the s24 harvest row.
