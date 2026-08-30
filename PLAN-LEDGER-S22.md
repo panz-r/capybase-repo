@@ -4738,3 +4738,23 @@ tokio 0099-0116 — the ENTIRE s24-era cohort (15 toolchain-dead + 3) —
 PASS 18/18 in the A7 harvest. The rust era floor reduces to the 14
 stolen-by-poisoning cases (rerun restores them) + sea-orm's genuine
 members.
+
+### README row draft skeleton (2026-08-30 — numbers fill at harvest end)
+
+Narrative paragraph (replaces the e9513c5 paragraph):
+"Sprint-26 era recovery: all cases on the uniform commit `<FINAL>`
+(era configs — sqlite gnu99 + tcl includes, nlohmann cmake flags,
+redis link-order; rust dep vendoring with era tag pins; A0 output-cap
+removal; C12 empty-oscillation retarget; C17 missing-make-target
+classification; G5/G11 P6b brace+scope splice repair; the one-shot
+terminal recovery grant; era-probe -Werror/sibling excuses covering
+both -W tag renderings; vendoring side-effect revert). Δ is versus
+the prior full round (`e9513c5`). 676 cases ran; <SKIPS> git-
+resolvable skips leave the <N>-row denominator below. The era floor
+collapsed from 167 to <FLOOR>; the 14 harvest rows invalidated by the
+mid-run regressions (vendoring poisoning, -Werror homogenization) are
+overridden by their fix-validation rerun verdicts in the extracts."
+
+Table: per-lang rows from make_results_round (--override rerun),
+Δ per lang vs the s24 row (python 88.0/90.7, c 43.1/83.0/84.0,
+rust 83.5/95.3/95.3, cpp 65.6/92.7/93.6, total 67.6/90.5/91.5).
