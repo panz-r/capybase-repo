@@ -4792,13 +4792,30 @@ _CC_ERROR_LINE_RE = re.compile(r":(\d+):\d+:\s*(?:error|warning):")
 # is in the conflict file or a sibling file the merge didn't touch.
 _CC_ERROR_FILE_RE = re.compile(r"([^\s:][^\s:]*?)\.([chp]+)(?:\+\+)?:\d+:\d+:\s*(?:fatal\s+)?(?:error|warning):", re.IGNORECASE)
 
-# Detects gcc/clang -Werror warning promotions: ``error: ... [-Werror=category]``.
-# These are warnings promoted to errors by -Werror, NOT real compile failures.
-# The trailing ``[-Werror=...]`` tag is the ONLY syntactic signal that
-# distinguishes them from genuine errors (gcc emits ``error:`` for both).
-# Match ONLY ``-Werror=`` (the promotion tag); plain ``-Wfoo`` warnings don't
-# carry ``error:`` so they never reach this check.
-_CC_WERROR_TAG_RE = re.compile(r"\[-Werror[=+][\w.-]+\]")
+# Detects gcc/clang -Werror warning promotions: ``error: ... [-Werror=category]``
+# and ``error: ... [-Wcategory]`` — under plain -Werror, gcc 15 renders the
+# plain warning tag on the promoted line (redis-0048: ``error: passing
+# argument 3 of 'intsetGet' ... [-Wincompatible-pointer-types]``). A -W tag
+# names a WARNING option; gcc appends it only to warning diagnostics, so an
+# ``error:`` line carrying ANY -W tag is a promotion, never a real failure.
+# The error:-prefix guard keeps plain ``warning:`` lines out (they carry the
+# same tags but are not promotions).
+_CC_WERROR_TAG_RE = re.compile(r"\[-W[^\]]+\]")
+
+
+def _is_cc_werror_warning(msg: str) -> bool:
+    """True when a gcc error line is a -Werror warning promotion.
+
+    gcc emits ``error: ...`` for -Werror promotions, indistinguishable from
+    real errors except for the trailing ``[-W...]`` tag. Examples:
+    ``error: 'calloc' sizes... [-Werror=calloc-transposed-args]``
+    ``error: passing argument 3 of 'intsetGet'... [-Wincompatible-pointer-types]``
+
+    These are warnings the project's build flags promoted to errors — the code
+    compiled successfully but triggered a strictness flag. Not a merge defect.
+    """
+    return (bool(_CC_WERROR_TAG_RE.search(msg))
+            and not msg.lstrip().startswith(("warning:", "note:")))
 
 
 def _parse_cc_error_line(msg: str) -> int | None:
@@ -4883,20 +4900,6 @@ def _parse_cc_error_location(msg: str) -> tuple[str | None, int | None]:
         line = int(line_m.group(1)) if line_m else None
         return (stem, line)
     return (None, None)
-
-
-def _is_cc_werror_warning(msg: str) -> bool:
-    """True when a gcc error line is a -Werror warning promotion.
-
-    gcc emits ``error: ...`` for -Werror promotions, indistinguishable from
-    real errors except for the trailing ``[-Werror=category]`` tag. Examples:
-    ``error: 'calloc' sizes... [-Werror=calloc-transposed-args]``
-    ``error: right-hand operand of comma... [-Werror=unused-value]``
-
-    These are warnings the project's build flags promoted to errors — the code
-    compiled successfully but triggered a strictness flag. Not a merge defect.
-    """
-    return bool(_CC_WERROR_TAG_RE.search(msg))
 
 
 # The Rust editions rustc accepts for ``--edition``. 2024 stabilized in Rust

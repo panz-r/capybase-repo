@@ -1220,15 +1220,18 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
 
 _CC_ERROR_LINE_RE = re.compile(r"^\S+?:\d+:\d+:\s*(error:.*)$")
 
-#: Era-probe honesty (redis-0038): the tag gcc appends to a -Werror
-#: promotion. The verdict build excuses -Werror promotions and
-#: sibling-file errors as infrastructure; the era probe must excuse the
-#: SAME classes before comparing signatures — otherwise a case whose
-#: only failures are infra-class can PASS the eval's localized build
-#: check yet never stop being era-dead (0038: the va_arg sed fixed the
-#: last heterogeneous member, all three sides collapsed onto the shared
-#: intsetGet -Werror promotion, and a PASS-class case went era-dead).
-_CC_WERROR_TAG_RE = re.compile(r"\[-Werror(?:=[^\]]*)?\]\s*$")
+#: Era-probe honesty (redis-0038/0048): the tag gcc appends to promoted
+#: warnings. Two renderings exist: `[-Werror=cat]` (explicit -Werror= flag)
+#: and `[-Wcat]` (observed under plain -Werror in gcc 15 — redis-0048's
+#: recorded sig carries `[-Wincompatible-pointer-types]`). A -W tag names
+#: a WARNING option; gcc puts it only on warning diagnostics, so an
+#: ``error:`` line ending in ANY -W tag is a promotion. The verdict build
+#: excuses promotions and sibling-file errors as infrastructure; the era
+#: probe must excuse the SAME classes before comparing signatures —
+#: otherwise a case whose only failures are infra-class can PASS the
+#: eval's localized build check yet never stop being era-dead (0038: the
+#: va_arg sed homogenized the last heterogeneous signature member).
+_CC_WERROR_TAG_RE = re.compile(r"\[-W[^\]]+\]\s*$")
 
 # Environmental failure signatures (sprint-20 E2, post-reboot find): a
 # dependency-fetch/network failure is identical across all three probe
