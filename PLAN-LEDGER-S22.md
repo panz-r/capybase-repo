@@ -4627,3 +4627,14 @@ harvest rerun queued for the honest README number.
   [2] B9 WITH arm (6 coin-flips × repeat-all 3), [3] B10 WITH arm
   (12-case stratified set × repeat-all 3, n=3 samples). The WITHOUT
   arms are the harvest itself.
+
+### G2 root cause fixed: derive_prototype statement-header guard (2026-08-30, 3ded9ce)
+
+redis-0014's rerun journal showed C1b DID engage — and corrupted: the
+`{`-terminated definition matcher fed the `if ((pid = wait3(&statloc,..)
+) != 0) {` statement header; the mechanical {→; transform produced a
+STATEMENT injected at file scope → 'expected identifier or ( before if'
+(server.c:57), a worse error than the original. Control-flow headers
+(if/for/while/switch/do/else, incl. else-if) now decline — the path
+falls through to LLM repair. In the staged post-harvest rerun alongside
+0039 (the harvest runs pre-fix code for both).
