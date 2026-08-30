@@ -4610,3 +4610,20 @@ harvest rerun queued for the honest README number.
   (s24 vs s22r2: 14 flips, all previously triaged; 16 new-good).
 - README row plan: per-lang extracts under docs/results/s26/ + meta.json
   (sprint-26 commit + mechanism list); Δ vs the s24 harvest row.
+
+### Post-harvest pipeline staged + validated (2026-08-30, fe81670/355ed81/34d400d)
+
+- `--repeat-all N` harness flag: majority-of-N on EVERY case (the B9/B10
+  yardstick — a first-try PASS is itself variance on coin-flips).
+- `CAPYBASE_SELF_CONSISTENCY=N` env arm for B10 (consensus fields
+  journal when active); B9's arm is CAPYBASE_RESOLVE_DIRECTIVE
+  (023c238). Default behavior unchanged.
+- `scripts/make_results_round.py`: harvest json → docs/results/<round>/
+  per-lang extracts + meta.json recount; VALIDATED — reproduces the
+  published s24 README row exactly (660/446/5/167; 67.6/90.5/91.5).
+- Chained post-harvest worker armed on the harvest PID (sequential —
+  the stale-process sweep kills ANY capy-rw-* process, so no eval may
+  start while another runs): [1] sqlite-0039 rerun (3881e41 validation),
+  [2] B9 WITH arm (6 coin-flips × repeat-all 3), [3] B10 WITH arm
+  (12-case stratified set × repeat-all 3, n=3 samples). The WITHOUT
+  arms are the harvest itself.
