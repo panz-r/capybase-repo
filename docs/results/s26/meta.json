@@ -1,0 +1,26 @@
+{
+  "round": "s26",
+  "source": "/var/tmp/capybase-live/s26/full-harvest.json",
+  "recount": {
+    "total": 660,
+    "pass": 594,
+    "working": 8,
+    "era_dead": 9,
+    "pass_pct": 90.0,
+    "adj_pct": 91.2,
+    "pw_adj_pct": 92.5
+  },
+  "generated": "2026-08-31",
+  "description": "Sprint-26 era-recovery harvest (README row 3). Same schema as s22r2 extracts; verdicts for the 14 harvest rows invalidated by two mid-run regressions are overridden by their fix-validation reruns (override-from markers in repeat_verdicts).",
+  "mechanism_commit": "d8cc231",
+  "state": "sprint-26: era configs (sqlite gnu99+tcl, nlohmann cmake, redis link-order), rust dep vendoring (era tag pins + side-effect revert), A0 cap removal, C12 empty-oscillation retarget, C17 missing-make-target classification, G5/G11 P6b brace+scope repair, terminal recovery grant, era-probe -Werror/sibling excuses (both -W tag renderings)",
+  "command_template": "scripts/live_eval_realworld.py --provider nova-gemma4 --repeat-nonpass 3 (env CAPYBASE_SKIP_SIZE_GUARD=1); fix-validation rerun: --override layers 0039-rerun.json + fix-rerun-2.json",
+  "ran": "2026-08-30 04:22 -> 22:21 (18h, exit 0, all 676) + fix-validation rerun 22:53 -> 01:36",
+  "verification": "recount from extracts (make_results_round.py); flip audit harvest_bug_watch.py vs s22r2 + direct diff vs the s24 harvest (156 up / 5 variance-class down, zero mechanism regressions)",
+  "outcome_summary": {
+    "total": "594 PASS + 8 WORKING / 660 = 90.0% raw, 91.2% adj, 92.5% P+W adj (+1.0pp P+W vs prior row)",
+    "era": "167 -> 9 (C's 98-case era class fully recovered by configuration; rust 7 sea-orm genuine + cpp 2 protobuf-0055/fmt-0003)",
+    "regressions_found_and_fixed_midrun": "sqlite-0109 crash (f7417b8), 0039 template guard (3881e41), redis-0038 -Werror homogenization (6595c8e/f609847), tokio 0001-0013 vendoring poisoning (06dee33), norm_hash crash (d8cc231)",
+    "calibration": "B9 directive neutral (-17% within \u00b150% band, 1 flip down on discard-wanting oracle) \u2014 stays off; B10 SC n=3 neutral-to-negative (-17%, +83% latency) \u2014 stays off"
+  }
+}

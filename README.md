@@ -293,21 +293,33 @@ The **661-case corpus of non-git-resolvable conflicts** (cases where
 git's own three-way merge leaves markers — anything git resolves
 cleanly is not a resolution problem) runs as a sharded harvest, one
 language at a time, fixes landing between rounds. Current state —
-all cases on the uniform commit `e9513c5` (sprint-24/25: the F1
-takeover-landing fix, output-starvation floor, uncoded-rustc
-classification, whole-file unit validation, the four pipeline
-migrations, per-unit output caps, the conflict-target + signature-
-equivalence toolchain probes); Δ is versus the prior full round
-(`e7e7eb7`). 676 cases ran; 16 git-resolvable skips leave the 660-row
-denominator below.
+all cases on the uniform commit `d8cc231` (sprint-26 era recovery:
+per-dataset era configs — sqlite gnu99 + tcl includes, nlohmann cmake
+flags, redis link-order; rust dep vendoring with era tag pins; the A0
+output-cap removal; C12 empty-oscillation retarget; C17 missing-make-
+target classification; G5/G11 P6b brace+scope splice repair; the
+one-shot terminal recovery grant; era-probe -Werror/sibling excuses
+covering both -W tag renderings; vendoring side-effect revert); Δ is
+versus the prior full round (`e9513c5`). 676 cases ran; 16
+git-resolvable skips leave the 660-row denominator below. The era
+floor collapsed from 167 to 9 (C's entire 98-case era class recovered
+by configuration); the 14 harvest rows invalidated by two mid-run
+regressions (vendoring poisoning, -Werror signature homogenization) —
+both diagnosed and fixed the same day — are overridden by their
+fix-validation rerun verdicts in the extracts. Flip audit vs the prior
+round: 156 up, 5 down (all sim ≥ 0.99 gate stalls, documented oracle-
+subjective variance, or known big-file classes) — zero mechanism
+regressions. Calibration A/Bs: the refactor-vs-functional resolve
+directive (B9) and self-consistency n=3 (B10) are both evidence-
+neutral on their specimen sets and stay off by default.
 
-| lang | cases | PASS | WORKING | era-dead | PASS % | adj % | P+W adj % | Δ adj |
+| lang | cases | PASS | WORKING | era-dead | PASS % | adj % | P+W adj % | Δ P+W |
 |------|-------|------|---------|----------|--------|-----------|-----------|-------|
-| python | 108 | 95 | 3 | 0 | 88.0% | 88.0% | 90.7% | −2.0pp |
-| c | 204 | 88 | 1 | 98 | 43.1% | 83.0% | 84.0% | +0.8pp |
-| rust | 194 | 162 | 0 | 24 | 83.5% | 95.3% | 95.3% | +2.9pp |
-| cpp | 154 | 101 | 1 | 45 | 65.6% | 92.7% | 93.6% | −0.9pp |
-| **total** | **660** | **446** | **5** | **167** | **67.6%** | **90.5%** | **91.5%** | **+0.6pp** |
+| python | 108 | 97 | 4 | 0 | 89.8% | 89.8% | 93.5% | +2.8pp |
+| c | 204 | 176 | 1 | 0 | 86.3% | 86.3% | 86.8% | +2.8pp |
+| rust | 194 | 177 | 0 | 7 | 91.2% | 94.7% | 94.7% | −0.6pp |
+| cpp | 154 | 144 | 3 | 2 | 93.5% | 94.7% | 96.7% | +3.1pp |
+| **total** | **660** | **594** | **8** | **9** | **90.0%** | **91.2%** | **92.5%** | **+1.0pp** |
 
 **PASS** = marker-free, passes the compile/structural gate, and matches
 the human resolution at token similarity ≥ 0.90, replayed live against
@@ -321,8 +333,9 @@ adds WORKING verdicts — compiles, marker-free, both sides preserved,
 diverged from the human resolution below the PASS bar — the honest
 graded-success rate. Every number
 recomputes from the per-case extracts committed under `docs/results/`
-(current round: `s22r2/`, incl. its `meta.json` with the pinned
-commit, commands, and flip-audit recipe).
+(current round: `s26/`, incl. its `meta.json` with the pinned
+commit, commands, and flip-audit recipe; the prior `s22r2/`
+remains for comparison).
 
 ### Corpus
 
