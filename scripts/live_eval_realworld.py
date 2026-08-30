@@ -1220,6 +1220,16 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
 
 _CC_ERROR_LINE_RE = re.compile(r"^\S+?:\d+:\d+:\s*(error:.*)$")
 
+#: Era-probe honesty (redis-0038): the tag gcc appends to a -Werror
+#: promotion. The verdict build excuses -Werror promotions and
+#: sibling-file errors as infrastructure; the era probe must excuse the
+#: SAME classes before comparing signatures — otherwise a case whose
+#: only failures are infra-class can PASS the eval's localized build
+#: check yet never stop being era-dead (0038: the va_arg sed fixed the
+#: last heterogeneous member, all three sides collapsed onto the shared
+#: intsetGet -Werror promotion, and a PASS-class case went era-dead).
+_CC_WERROR_TAG_RE = re.compile(r"\[-Werror(?:=[^\]]*)?\]\s*$")
+
 # Environmental failure signatures (sprint-20 E2, post-reboot find): a
 # dependency-fetch/network failure is identical across all three probe
 # texts BY CONSTRUCTION (it never depends on content), so the strict
@@ -1234,7 +1244,9 @@ _PROBE_ENVIRONMENTAL_PATTERNS = (
 )
 
 
-def _compile_error_signature(output: str, language: str) -> list[str]:
+def _compile_error_signature(
+    output: str, language: str, conflict_path: str | None = None,
+) -> list[str]:
     """Normalized compile-error messages from a gate/cargo output.
 
     rustc/cargo top-level error lines carry no location prefix
@@ -1265,6 +1277,20 @@ def _compile_error_signature(output: str, language: str) -> list[str]:
         else:
             m = _CC_ERROR_LINE_RE.match(ln)
             if m:
+                # Era-probe honesty (redis-0038): excuse exactly what the
+                # verdict build excuses — -Werror promotions and (when the
+                # conflict path is known) sibling-file errors — before
+                # signature comparison. Infra-class errors are identical
+                # across sides BY CONSTRUCTION; letting them into the
+                # signature makes era-dead the default for any era tree
+                # built with strict flags, regardless of content.
+                if _CC_WERROR_TAG_RE.search(ln):
+                    continue
+                if conflict_path:
+                    _loc = re.match(r"^(\S+?):\d+:\d+:", ln)
+                    if _loc and (Path(_loc.group(1)).stem
+                                 != Path(conflict_path).stem):
+                        continue
                 sig.add(m.group(1).strip())
     return sorted(sig)
 
@@ -1315,7 +1341,7 @@ def _toolchain_era_probe(repo: Path, case: "Case", *, has_crate: bool) -> dict |
                 out = (proc.stderr or "") + (proc.stdout or "")
                 probes[name] = {
                     "rc": proc.returncode,
-                    "sig": _compile_error_signature(out, case.language),
+                    "sig": _compile_error_signature(out, case.language, conflict_path=case.path),
                 }
             except Exception as exc:  # noqa: BLE001 — probe is best-effort
                 probes[name] = {
@@ -1353,7 +1379,8 @@ def _toolchain_era_probe(repo: Path, case: "Case", *, has_crate: bool) -> dict |
                         _suffix_ok = False
                         break  # wrong suffix — try the other
                     _target_sigs[name] = _compile_error_signature(
-                        out, case.language)[:5]
+                        out, case.language,
+                        conflict_path=case.path)[:5]
                 if _suffix_ok:
                     target_probe = {
                         "cmd": cmd,
