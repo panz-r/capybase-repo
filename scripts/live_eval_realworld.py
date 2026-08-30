@@ -2051,7 +2051,7 @@ def main():
                          "PASS can itself be variance). The majority-of-3 yardstick "
                          "for calibration A/Bs (B9/B10): the WITHOUT arm is the "
                          "harvest itself; the WITH arm needs honest repeats on "
-                         "coin-flip cases that pass first try 50-70% of the time. "
+                         "coin-flip cases that pass first try 50-70%% of the time. "
                          "When both flags are set, --repeat-all wins.")
     ap.add_argument("--preserve-flights", default=None,
                     help="Directory to copy per-case orchestrator session artifacts into "
