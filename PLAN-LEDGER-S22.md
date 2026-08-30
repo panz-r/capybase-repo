@@ -4667,3 +4667,13 @@ era-dead the default for strict-flag era trees. redis-0048 (s24
 era-dead on the same promotion) is re-examined by the same fix.
 Both added to the staged fix-validation rerun (the in-flight harvest
 runs pre-fix code for all four cases).
+
+### -Werror tag rendering completion (2026-08-30, f609847)
+
+The 6595c8e filter initially missed redis-0048's ACTUAL rendering:
+`error: ... [-Wincompatible-pointer-types]` — the PLAIN warning tag, no
+-Werror= prefix (gcc 15 under plain -Werror). Rule: a -W tag names a
+warning option and gcc appends it only to warning diagnostics, so any
+error-kind line carrying a -W tag is a promotion. Both the eval probe
+filter and the verdict's _is_cc_werror_warning broadened (the verdict
+one keeps warning:/note: lines out by kind); 144+74 tests green.
