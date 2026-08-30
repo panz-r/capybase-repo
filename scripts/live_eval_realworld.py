@@ -205,6 +205,9 @@ def _vendor_rust_deps(repo: Path, dataset: str) -> bool:
         return False
     import subprocess as _sp
     try:
+        _orig_toml = ct.read_bytes()
+        _lock = repo / "Cargo.lock"
+        _orig_lock = _lock.read_bytes() if _lock.exists() else None
         if rewrites:
             _text = ct.read_text(encoding="utf-8")
             for _old, _new in rewrites:
@@ -217,6 +220,22 @@ def _vendor_rust_deps(repo: Path, dataset: str) -> bool:
             ["cargo", "vendor", "vendor"],
             cwd=str(repo), capture_output=True, text=True, timeout=600)
         if v.returncode != 0 or not (repo / "vendor").is_dir():
+            # REVERT every vendoring side effect: a poisoned Cargo.toml
+            # (patch section or tag pin the tree's own deps can't
+            # resolve with) breaks cargo for ALL THREE era probes
+            # identically — a false toolchain-dead that stole 13
+            # s24-PASS tokio cases (0001-0013: their era's lockfile
+            # can't vendor with the security-framework pin; the
+            # leftover patch then failed every probe's cargo check).
+            # Restore the manifest + lockfile and drop any partial
+            # vendor dir; the case then runs on its materialized state.
+            ct.write_bytes(_orig_toml)
+            if _orig_lock is not None:
+                _lock.write_bytes(_orig_lock)
+            elif _lock.exists():
+                _lock.unlink()
+            import shutil as _shutil
+            _shutil.rmtree(repo / "vendor", ignore_errors=True)
             return False
         # The config cargo prints verbatim; write it ourselves (stable form).
         (repo / ".cargo").mkdir(exist_ok=True)
