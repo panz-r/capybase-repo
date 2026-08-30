@@ -1385,10 +1385,18 @@ def _toolchain_era_probe(repo: Path, case: "Case", *, has_crate: bool) -> dict |
         # GENERATOR TEMPLATE (lemon's lempar.c) — never compiled directly
         # by the real build (the full gate proved rc 0). The target rule
         # exists but is not on the default build path; classifying it
-        # toolchain-dead steals a passable case.
+        # toolchain-dead steals a passable case. Computed over ALL three
+        # target signatures — the equivalence block below needs the same
+        # guard: 0039's template errors are identical across sides, which
+        # re-flagged it dead through THAT path in the s26 pool.
         _template_sig = any(
             "before '%' token" in s or 'before ‘%’' in s
-            for s in (target_probe.get("sig") or []))
+            for _sigs in _target_sigs.values()
+            for s in (_sigs or [])
+        ) or any(
+            "before '%' token" in s or 'before ‘%’' in s
+            for s in (target_probe.get("sig") or [])
+        )
         if not _template_sig:
             dead = True
     # Signature equivalence (sprint-25 item 2): when ALL THREE texts fail
@@ -1397,9 +1405,12 @@ def _toolchain_era_probe(repo: Path, case: "Case", *, has_crate: bool) -> dict |
     # and the oracle alike) — the resolver cannot distinguish its output
     # from the human resolution. Semantically honest: identical signatures
     # across all three is content evidence, not denominator trimming.
+    # Template guard applies here too: a generator template's identical
+    # '%'-token errors are not content evidence.
     _all3 = (_target_sigs.get("oracle") and _target_sigs.get("current")
              and _target_sigs.get("replayed"))
     if (not dead and _all3
+            and not _template_sig
             and _target_sigs["oracle"] == _target_sigs["current"]
             and _target_sigs["current"] == _target_sigs["replayed"]):
         dead = True
