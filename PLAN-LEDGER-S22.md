@@ -4718,3 +4718,16 @@ seam-aware assembly design item, which must handle brace AND
 preprocessor seams. protobuf-0008's harvest ESC re-confirmed as
 all-DEFECT coin-flip variance (B9's specimen; no empties, C12 rightly
 absent).
+
+### Vendoring-poisoning regression found+fixed mid-harvest (2026-08-30, 06dee33)
+
+The harvest's tokio section exposed it: 0001-0013 (ALL s24 PASS)
+classified toolchain-era at 0s. `_vendor_rust_deps` left its Cargo.toml
+edits in the tree on vendor failure — the earlier-era lockfiles can't
+vendor under the security-framework pin, and the leftover patch section
+then fails cargo resolution IDENTICALLY for all three probes → false
+era-dead. Fixed: manifest + lockfile restored, partial vendor/ dropped
+on failure. Full blast radius vs s24: exactly 14 stolen (tokio
+0001-0013 + redis-0038, already staged); 14 consistent floor; the
+remaining harvest corpus (zenodo, python) unaffected. The 13 tokio
+cases join the fix-validation rerun (now 23 cases).
