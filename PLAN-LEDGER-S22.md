@@ -4552,3 +4552,12 @@ in-flight builds 5s in); its standalone rerun completes normally
 (ESCALATE REPAIR_FAILURE sim 1.00 — P6b brace didn't rescue it,
 consistent with its missing-opener root = C19 class). Manual axum
 rerun queued for the pool's tail.
+
+### nlohmann pool FINAL: 38/38 PASS (2026-08-30)
+
+The A3 prepare recipe (cmake: JSON_BuildTests=OFF + SIGSTKSZ=32768 +
+-std=c++11 -fpermissive -Wno-error) converted the ENTIRE 38-case era
+cohort with zero escalates. Era recovery scoreboard so far:
+sqlite 84/97 P+W (86.6%), tokio 5/5, nlohmann 38/38, sea-orm 1/2
+(0008 PASS; 0007 genuine syntax loop at sim 0.91), protobuf 0051 PASS
+via C17, redis-0055 PASS (G1/A0 acceptance met).
