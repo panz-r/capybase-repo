@@ -4561,3 +4561,26 @@ cohort with zero escalates. Era recovery scoreboard so far:
 sqlite 84/97 P+W (86.6%), tokio 5/5, nlohmann 38/38, sea-orm 1/2
 (0008 PASS; 0007 genuine syntax loop at sim 0.91), protobuf 0051 PASS
 via C17, redis-0055 PASS (G1/A0 acceptance met).
+
+### Fixpool + transient-rerun FINAL (2026-08-30); A7 harvest launched
+
+Fixpool 13/13 + clean reruns:
+- **PASS ×5**: protobuf-0051 (C17), redis-0055 (G1/A0 acceptance met),
+  sea-orm-0008 (vendoring live), zenodo-0013 (empty class — C12-era
+  machinery), zenodo-0019 (G4 shattered rescue post-A0)
+- **NEAR_MATCH ×1**: sqlite-0109 (crash f7417b8 → real resolution)
+- **ESCALATE ×7 — all genuine now** (no crashes/transients):
+  axum-0019 (sim 1.00 REPAIR_FAILURE, missing-opener = C19 class),
+  redis-0014 (server.c brace-shape, G2's C1b did not convert it),
+  sea-orm-0007 (syntax loop sim 0.91), sea-orm-0014 (G11, deps resolve
+  but deeper defect), sqlite-0073 (wrong-era member), sqlite-0092
+  (empty class persists), sqlite-0108 (C19 junction family — coherence
+  balancer declines the non-brace-only line)
+
+Launch-transient note for future pools: stagger dual launches by ≥60s
+(nlohmann's startup stale-process sweep killed the fixpool's in-flight
+builds 5s in; both transient-error cases reran clean sequentially).
+
+**A7 full harvest LAUNCHED** (all fixes through f7417b8, suite green
+6351/0; ~19h expected; out: s26/full-harvest.json). A6 floor final +
+README row follow its completion + flip audit.
