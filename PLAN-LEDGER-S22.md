@@ -4584,3 +4584,15 @@ builds 5s in; both transient-error cases reran clean sequentially).
 **A7 full harvest LAUNCHED** (all fixes through f7417b8, suite green
 6351/0; ~19h expected; out: s26/full-harvest.json). A6 floor final +
 README row follow its completion + flip audit.
+
+### sqlite-0039 misclassification found+fixed (2026-08-30, 3881e41)
+
+Its pool verdict (ESCALATE_TOOLCHAIN ×3, 24s) was a FALSE era call: the
+conflict file is tool/lempar.c — the lemon generator TEMPLATE the
+template guard exists for. The guard covered only the conditional-
+omission block; the signature-equivalence block (s25 item 2) re-flagged
+dead on the template's identical '%'-token errors. All three sides
+build rc=0 — passable. The guard now scans all three target sigs and
+the equivalence block short-circuits on it. NOTE: the running A7
+harvest imported the old code — 0039 will misclassify there; post-
+harvest rerun queued for the honest README number.
