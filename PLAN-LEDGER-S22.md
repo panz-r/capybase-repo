@@ -4638,3 +4638,17 @@ STATEMENT injected at file scope → 'expected identifier or ( before if'
 (if/for/while/switch/do/else, incl. else-if) now decline — the path
 falls through to LLM repair. In the staged post-harvest rerun alongside
 0039 (the harvest runs pre-fix code for both).
+
+### A7 mid-flight triage (304/676, hour 7) — healthy, no wiring bugs
+
+255 PASS / 39 ESC / 3 WORKING at the one-third mark; ZERO agent
+errors/harness errors (the fixpool transient class is not recurring).
+Era verdicts materializing at the expected floor: fmt-0003, jsonc-0017,
+protobuf-0055/0058/0059, sea-orm-0003 (+ redis-0038/0048 — the known
+probe-flake and link-order cases; review at harvest end). Non-era
+escalates = known classes only (axum-0002 C12-band, axum-0013 C4,
+clickhouse-0013 side-collapse, axum-0019 C19-class) + SAFE_SKIPs.
+
+Also committed this window: scripts/ab_analysis.py (0615992) — the
+B9/B10 comparator with the pooled-rate variance-band gate (dry-run on
+the fixpool reproduces 5 flips up, +38% exceeding ±31%).
