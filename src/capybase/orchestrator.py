@@ -13884,6 +13884,7 @@ class Orchestrator:
             # cand_hash is already computed above (for the no-op cache). The
             # escalation check runs AFTER the risk decision — only when the
             # decision is "retry" — so it never fires before the normal budget.
+            norm_hash = None
             if cand_hash:
                 outcome._seen_candidate_hashes[cand_hash] = (
                     outcome._seen_candidate_hashes.get(cand_hash, 0) + 1
@@ -13925,6 +13926,7 @@ class Orchestrator:
             conv_threshold = getattr(self.config.policy, "cegis_convergence_threshold", 2)
             if (conv_threshold > 0 and cand.resolved_text
                     and not validation.hard_failures
+                    and norm_hash is not None
                     and norm_hash in outcome._seen_normalized_hashes
                     and outcome._seen_normalized_hashes[norm_hash] >= conv_threshold):
                 # Advisory validators: soft heuristics that signal a semantic
