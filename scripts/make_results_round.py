@@ -32,9 +32,32 @@ def main() -> None:
     ap.add_argument("--results", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--round", required=True, help="round name, e.g. s26")
+    ap.add_argument(
+        "--override", action="append", default=None, metavar="JSON",
+        help="A later rerun's results JSON whose verdicts REPLACE the "
+             "harvest's for matching case ids (later files win). Used when "
+             "the harvest ran pre-fix code for a known case set: the "
+             "fix-validation rerun's verdicts are the honest numbers. The "
+             "replaced row's repeat_verdicts carry a marker of the swap.")
     args = ap.parse_args()
 
     records = json.loads(Path(args.results).read_text())
+    swapped = 0
+    if args.override:
+        index = {r["id"]: r for r in records}
+        for ovr_path in args.override:
+            for ovr in json.loads(Path(ovr_path).read_text()):
+                old = index.get(ovr["id"])
+                if old is None:
+                    continue
+                ovr = dict(ovr)
+                ovr["repeat_verdicts"] = list(
+                    ovr.get("repeat_verdicts") or []) + [
+                        f"override-from:{old.get('verdict')}"]
+                index[ovr["id"]] = ovr
+                swapped += 1
+        records = list(index.values())
+        print(f"overridden verdicts: {swapped}")
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
