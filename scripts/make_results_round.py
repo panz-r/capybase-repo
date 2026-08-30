@@ -51,12 +51,13 @@ def main() -> None:
         print(f"{path}: {len(rows)} rows")
 
     # README-table recount from the extracts themselves (single source).
-    # SAFE_SKIP (git resolved cleanly on replay) leaves the denominator,
-    # matching the README convention (676 loaded − 16 skips = 660).
+    # SAFE_SKIP (git resolved cleanly on replay; verdict=ESCALATE +
+    # terminal_reason=SAFE_SKIP) leaves the denominator, matching the
+    # README convention (676 loaded − 16 skips = 660).
     total = passes = working = era = 0
     for lang, rows in by_lang.items():
         for row in rows:
-            if row["verdict"] == "SAFE_SKIP":
+            if row.get("terminal_reason") == "SAFE_SKIP":
                 continue
             total += 1
             if row["verdict"] == "PASS":
