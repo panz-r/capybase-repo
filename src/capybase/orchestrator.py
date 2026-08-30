@@ -231,6 +231,24 @@ def _error_class(message: str) -> str:
     return "other"
 
 
+def _empty_terminal_grant_due(outcome) -> bool:
+    """C20 follow-up (sprint-26): True when a unit's entire attempt
+    history is PURE-EMPTY output (≥2 empties, zero defect candidates)
+    and the one-shot terminal-recovery latch is unused. Such a unit
+    never received a single counterexample — its budget burned on
+    output weather. Callers grant ONE bounded recovery-prompt attempt
+    (zenodo-0013 converted exactly this way in the fixpool;
+    sqlite-0006#s0 / 0092 died without it) and set the latch."""
+    kinds = getattr(outcome, "_osc_attempt_kinds", None)
+    if (kinds
+            and kinds.count("empty") >= 2
+            and kinds.count("defect") == 0
+            and not getattr(outcome, "_empty_terminal_recovery", False)):
+        outcome._empty_terminal_recovery = True
+        return True
+    return False
+
+
 def _hard_failure_signature(failures) -> frozenset:
     """A multiset signature of a candidate's hard failures for the no-progress
     guard (Fix C). Returns ``frozenset(Counter(...).items())`` — a hashable
@@ -14455,15 +14473,29 @@ class Orchestrator:
                 )
                 return outcome
             if decision.action == "escalate":
-                outcome.retry_count = retry_count
-                self.journal.emit(
-                    "candidate_rejected",
-                    {"candidate_id": cand.candidate_id, "action": "escalate"},
-                    step_index=self.step,
-                    path=unit.path,
-                    unit_id=unit.unit_id,
-                )
-                return outcome
+                # C20 follow-up: the budget-exhaustion death path of the
+                # pure-empty class (see _empty_terminal_grant_due).
+                if _empty_terminal_grant_due(outcome):
+                    recovery_retry_count += 1
+                    pending_recovery = True
+                    self.journal.emit(
+                        "empty_terminal_recovery_grant",
+                        {"unit_id": unit.unit_id, "via": "budget",
+                         "recovery_retries": recovery_retry_count},
+                        step_index=self.step, path=unit.path,
+                        unit_id=unit.unit_id)
+                    # do NOT return: the next iteration proposes via
+                    # build_recovery_prompt with the failures seed.
+                else:
+                    outcome.retry_count = retry_count
+                    self.journal.emit(
+                        "candidate_rejected",
+                        {"candidate_id": cand.candidate_id, "action": "escalate"},
+                        step_index=self.step,
+                        path=unit.path,
+                        unit_id=unit.unit_id,
+                    )
+                    return outcome
             # retry
             self.journal.emit(
                 "candidate_rejected",
@@ -14692,31 +14724,48 @@ class Orchestrator:
                                 outcome.mechanism = "f1_noprogress_rescue"
                                 return outcome
 
-                            stalled_sig = sig_counts.most_common(1)[0][0]
-                            # stalled_sig is frozenset(Counter(...).items())
-                            # where each item is ((validator, msg), count).
-                            # Unpack correctly to get bare validator names.
-                            validators = sorted(
-                                {v for (v, _msg), _cnt in stalled_sig}
-                            ) or ["(none)"]
-                            self.journal.emit(
-                                "candidate_rejected",
-                                {"candidate_id": cand.candidate_id,
-                                 "action": "escalate", "via": "no_progress",
-                                 "reason": (f"hard-failure signature repeated "
-                                            f"{max_repeat}/{len(recent)} times "
-                                            f"in recent attempts ({validators})"),
-                                 "retry_count": retry_count},
-                                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
-                            )
-                            outcome.escalated = True
-                            outcome.retry_count = retry_count
-                            outcome.reason = (
-                                f"no hard-failure progress: signature repeated "
-                                f"{max_repeat}/{len(recent)} times ({validators})"
-                                + _obligation_suffix(unit, cand)
-                            )
-                            return outcome
+                            # C20 follow-up: the no-progress death path of
+                            # the pure-empty class (see
+                            # _empty_terminal_grant_due) — the repeated
+                            # signature is the empty validator's, not a
+                            # compile error. Grant the one-shot recovery
+                            # attempt instead of escalating; fall through
+                            # to the retry-seed section below.
+                            if _empty_terminal_grant_due(outcome):
+                                recovery_retry_count += 1
+                                pending_recovery = True
+                                self.journal.emit(
+                                    "empty_terminal_recovery_grant",
+                                    {"unit_id": unit.unit_id, "via": "no_progress",
+                                     "recovery_retries": recovery_retry_count},
+                                    step_index=self.step, path=unit.path,
+                                    unit_id=unit.unit_id)
+                            else:
+                                stalled_sig = sig_counts.most_common(1)[0][0]
+                                # stalled_sig is frozenset(Counter(...).items())
+                                # where each item is ((validator, msg), count).
+                                # Unpack correctly to get bare validator names.
+                                validators = sorted(
+                                    {v for (v, _msg), _cnt in stalled_sig}
+                                ) or ["(none)"]
+                                self.journal.emit(
+                                    "candidate_rejected",
+                                    {"candidate_id": cand.candidate_id,
+                                     "action": "escalate", "via": "no_progress",
+                                     "reason": (f"hard-failure signature repeated "
+                                                f"{max_repeat}/{len(recent)} times "
+                                                f"in recent attempts ({validators})"),
+                                     "retry_count": retry_count},
+                                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                                )
+                                outcome.escalated = True
+                                outcome.retry_count = retry_count
+                                outcome.reason = (
+                                    f"no hard-failure progress: signature repeated "
+                                    f"{max_repeat}/{len(recent)} times ({validators})"
+                                    + _obligation_suffix(unit, cand)
+                                )
+                                return outcome
             # Oscillation backstop (CEGIS resilience): if the SAME resolved_text
             # has been seen more times than the retry budget allows, the model is
             # cycling — escalate instead of wasting more tokens. This fires only

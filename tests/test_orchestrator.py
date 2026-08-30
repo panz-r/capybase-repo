@@ -2725,3 +2725,68 @@ def test_empty_oscillation_band_retargets_shattered_rescue(conflicted_repo):
     assert target_failures, "the retargeted call must carry the defect's own failures"
     final = (repo / "app.py").read_text()
     assert "howdy" in final
+
+
+def test_empty_terminal_recovery_grant_fires_before_escalate(conflicted_repo):
+    """C20 follow-up (sprint-26): a unit whose whole budget burned on
+    PURE-EMPTY attempts never saw a counterexample — one bounded
+    recovery-prompt attempt is granted before the escalate (zenodo-0013
+    converted exactly this way in the fixpool; sqlite-0006#s0/0092 died
+    without it). Latched: a second grant never fires."""
+    from capybase.conflict_model import CandidateResolution
+    from capybase.consensus import ConsensusReport
+
+    repo = conflicted_repo["repo"]
+
+    def _oc(text, *, cid):
+        return CandidateResolution(
+            candidate_id=cid, unit_id="u", model_name="fake",
+            prompt_version="v", resolved_text=text, failure_kind="empty"
+            if not text else "",
+        )
+
+    class _EmptyEngine(FakeConsensusEngine):
+        def __init__(self, candidates):
+            super().__init__(candidates)
+            self.via = []
+
+        def _next(self, tag):
+            self.via.append(tag)
+            if not self._candidates:
+                return [], self._report
+            c = [self._candidates.pop(0)]
+            self._report = ConsensusReport(
+                winner=c[0], clusters=[], n_samples=1, agreement_score=1.0,
+                cluster_count=1, entropy=0.0)
+            return c, self._report
+
+        def propose_with_consensus(self, unit, context, *, failures=None,
+                                   prev_candidate=None, n_samples=None,
+                                   attempt=0):
+            c, rep = self._next("consensus")
+            return c, rep
+
+        def propose_recovery(self, unit, context, *, failures=None):
+            c, _ = self._next("recovery")
+            return c
+
+    engine = _EmptyEngine([
+        _oc("", cid="e1"),
+        _oc("", cid="e2"),
+        _oc("    return 'hi' + 'howdy'", cid="recovered"),
+    ])
+    _cfg = _self_consistency_config(repo)
+    _cfg.future.enable_empty_fast_fail = False
+    _cfg.policy.max_retries_per_unit = 1
+    orch = Orchestrator(
+        _cfg, repo=str(repo), resolution_engine=engine,
+        out=lambda *_a, **_k: None,
+    )
+    result = orch.run()
+    journal = orch.paths.journal.read_text(encoding="utf-8")
+    assert "empty_terminal_recovery_grant" in journal, (
+        "the all-empty exhausted unit must get the bounded recovery grant")
+    assert "recovery" in engine.via, "the grant must route via the recovery prompt"
+    assert not result.escalated, "the recovery attempt resolves the unit"
+    final = (repo / "app.py").read_text()
+    assert "howdy" in final
