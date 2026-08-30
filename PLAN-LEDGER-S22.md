@@ -4677,3 +4677,19 @@ warning option and gcc appends it only to warning diagnostics, so any
 error-kind line carrying a -W tag is a promotion. Both the eval probe
 filter and the verdict's _is_cc_werror_warning broadened (the verdict
 one keeps warning:/note: lines out by kind); 144+74 tests green.
+
+### Blast-radius audit: the promotion filter shrinks the floor again (2026-08-30)
+
+Applying the f609847 tag filter analytically to the s24 era-dead
+records: 4 flip to passable — redis-0048 (as diagnosed), AND
+protobuf-0058/0059 + jsonc-0017. The __builtin_assume failures carry
+[-Wimplicit-function-declaration]: PROMOTED WARNINGS (gcc 14+ makes
+implicit-function-declaration an error by default in C99+), not real
+errors. With f609847 the probe, the in-session gate, and the verdict
+all excuse them consistently — the cases are passable end-to-end.
+
+CONFIRMED FLOOR now: protobuf-0055 (NONE/STRICT/VERIFY undeclared —
+real errors, no tag), fmt-0003, sea-orm-0003. The A6 draft's 5-member
+floor was wrong on 0017/0058/0059 — all three join the staged
+fix-validation rerun (now 8 cases: 0039, redis-0014/0038/0048,
+jsonc-0017, protobuf-0058/0059).
