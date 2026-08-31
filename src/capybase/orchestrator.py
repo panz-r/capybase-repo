@@ -11973,7 +11973,19 @@ class Orchestrator:
                 )
                 for f in failures
             )
+            # D5b (s27): undeclared-symbol failures are exempt — the C1
+            # family's fix (prototype/declaration injection) is FILE-SCOPE,
+            # so span attribution is meaningless for them; the skip made
+            # C1b/C1c unreachable for exactly their shape (redis-0014:
+            # statloc's use site sits outside every marker span, the symbol
+            # block never ran, zero symbol events across all repeats).
+            _is_undeclared = any(
+                "undeclared" in (getattr(f, "message", "") or "")
+                or "was not declared" in (getattr(f, "message", "") or "")
+                for f in failures
+            )
             if (not _is_pp_failure and not _is_build_test
+                    and not _is_undeclared
                     and not deterministic_only and _tiered_active
                     and len(accepted) > 1):
                 self.journal.emit(
