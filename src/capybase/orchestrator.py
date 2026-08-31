@@ -12113,6 +12113,58 @@ class Orchestrator:
             # error is "expected identifier, found keyword `use`" (or similar), the
             # marker span excluded the enclosing wrapper (e.g. ``use crate::{``) and
             # the splice doubled it. Strip the consecutive duplicate statement line.
+            # F4 (s27): side-pick fallback — when the merged splice fails
+            # the gate but a pristine-side splice passes it, the merge is
+            # the defect; land the side (protobuf-0001 / zenodo-0079
+            # class: sim>=0.9 merges rejected on gate/coherence failures
+            # while both sides compile). Degrades honestly to NEAR on
+            # merge-wanting oracles — still ahead of an ESCALATE that
+            # re-merges into the same gate failure every round.
+            if f"sidepick:{_sig}" not in _tried:
+                _tried.add(f"sidepick:{_sig}")
+                try:
+                    _sp_sides, _ = self._micro_stage_sides(path)
+                    _sp_pristine = [t for t in (_sp_sides or {}).values()
+                                    if t.strip()] or None
+                    for _sp_side, _sp_cands in _whole_file_side_candidates(units):
+                        _sp_spans = [
+                            (u.marker_span, c.resolved_text)
+                            for u, c in _sp_cands]
+                        _sp_val = self.verification.verify_file(
+                            path, language, original, _sp_spans,
+                            repo_root=str(self.git.repo),
+                            whole_text=_resolved_buffer(original, _sp_cands),
+                            pristine_side_texts=_sp_pristine,
+                        )
+                        self._journal_validation(
+                            _sp_cands[0][0], _sp_cands[0][1], _sp_val)
+                        if _sp_val.passed:
+                            _sp_unit = _sp_cands[0][0].model_copy(
+                                update={"marker_span": None,
+                                        "unit_kind": "whole_file"})
+                            _sp_cand = _sp_cands[0][1].model_copy(
+                                update={
+                                    "candidate_id": (
+                                        _sp_cands[0][1].candidate_id
+                                        + f":sidepick-{_sp_side}"),
+                                    "prompt_version":
+                                        "deterministic_side_pick",
+                                    "provenance":
+                                        "deterministic_structural",
+                                    "self_reported_confidence": 0.7,
+                                    "explanation": (
+                                        f"F4 side-pick: merged splice "
+                                        f"failed the gate; the {_sp_side} "
+                                        f"splice verifies"),
+                                })
+                            self.journal.emit(
+                                "side_pick_applied",
+                                {"side": _sp_side, "path": path,
+                                 "sig": _sig[:60]},
+                                step_index=self.step, path=path)
+                            return [(_sp_unit, _sp_cand)]
+                except Exception:  # noqa: BLE001 — side-pick is best-effort
+                    pass
             det = _try_deterministic_prefix_dedup(
                 failures, original, accepted, fault_idx
             )
