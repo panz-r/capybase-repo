@@ -4959,3 +4959,34 @@ D3 (cap knee fix, trivial) → F2 (coherence honesty + pp-aware mask)
 → F3 (echo normalizer) → F4 (side-pick fallback) → D1 (seam ledger,
 now scoped to the true multi-unit boundary cases: 0108/0111/0019/0029)
 → D4/D5 (relocation closure, C1c synthesis) → D7 (oversized).
+
+### SPRINT-27 MAP — final analysis increments (2026-08-31)
+
+**The graded bands (the 92.5%-adj ceiling's next layers):**
+- NEAR_MATCH ×6 (sim 0.83-0.90): gate-clean, just under the bar —
+  sea-orm-0021 sits AT 0.90 (rounding). IN-SESSION recovery is
+  impossible by construction (sim is eval-side; the orchestrator never
+  sees the oracle) — the only lever is output-tests (jsonc-0004
+  already WORKING with tests=True). S27-D9: audit the 6 datasets for
+  corpus test commands; each new test command upgrades WORKING
+  confidence and may re-tier NEAR cases.
+- WORKING ×8: 7 of 8 tests=False — the label is compile+preservation
+  only. Same D9 lever.
+- DIVERGENT ×4: flask-0006 (documented empty class), sea-orm-0027
+  (documented one-side merge), redis-0032 (0.95 via brace/marker
+  flag), sqlite-0054 (marker-left coin-flip 2/3 vs 1 PASS — variance,
+  not structural).
+
+**Time economics (reshapes D3's priority):** total 12.6h / 676 cases;
+median 47s, p90 152s, only 2 cases >600s (4% of wall). The budget-
+starvation class is small BECAUSE budgets rarely bind — the cap-knee
+fix (D3) stays trivial but drops in priority below instrumentation
+(D0) and gate honesty (F2). Bonus: full-corpus repeat-majority
+(--repeat-all 3) would cost ~38h — an overnight run is now feasible
+if variance tiering is ever needed.
+
+**S27 final order**: D0 (buffer provenance — the 0113 divergence is
+unfindable without it) → D2 (-W rerun, free) → F2 (coherence
+honesty + pp-aware masking) → F3 (echo normalizer) → F4 (side-pick)
+→ D3 (cap knee) → D1 (seam ledger, multi-unit cases) → D4/D5 →
+D7 (oversized) → D9 (output-tests audit).
