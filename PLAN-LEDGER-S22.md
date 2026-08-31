@@ -5016,3 +5016,29 @@ Seam-family validation rerun LAUNCHED (0113/0118/0019/0029/0108/0111 +
 redis-0049 for the -W class). This likely absorbs much of D1's scope —
 the 'seam ledger' may reduce to the genuinely multi-unit boundary
 cases once the phantom failures clear.
+
+### S27 ANALYSIS FINAL — seam-family validation confirms the phantom-brace thesis (2026-08-31)
+
+Rerun with a67461b (7 cases, repeat-nonpass 3):
+- **PASS ×4**: sqlite-0019 (1.00) and 0029 (0.97) — the two cases
+  PARKED as 'C19: needs seam-aware assembly' — plus 0113/0118 (1.00).
+  The C19 design debt was 4/6 PHANTOM: a comment-apostrophe repair
+  poisoning the masker, not splice structure.
+- ESC ×2: sqlite-0108/0111 (sim 1.00) — the genuine class: select.c's
+  braces inside #if branches; the checker fails the ORACLE itself
+  (preprocessor-unaware counting). Exactly F2's scope.
+- ESC ×1: redis-0049 (0.95) — moved PAST the -W promotion stall into a
+  deeper unit death ('could not re-resolve a unit'); the -W excuse
+  worked, the case's remaining difficulty is genuine.
+
+**FINAL S27 ORDER** (validated): F2 (pp-aware masking + oracle-shares
+at the coherence gate — 0108/0111) → D2 residual (0049's new shape)
+→ F3 (shattered echo normalizer) → F4 (side-pick fallback) → D3 (cap
+knee) → D0 (buffer provenance — lower urgency now: the 0113 trail was
+solvable, but provenance would have saved this entire forensic arc)
+→ D1 RESIDUAL (true multi-unit seam cases — none confirmed remaining
+in the corpus after the phantom fix; re-scan needed) → D5 (C1c
+synthesis, redis-0014) → D7 (oversized) → D9 (output-tests).
+
+Net: sprint-27's opening position is +4 PASS over the harvest's table
+(a67461b alone), with F2 next.
