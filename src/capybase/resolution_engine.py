@@ -2058,6 +2058,35 @@ def build_retry_prompt(
     budget: TokenBudget | None = None,
 ) -> str:
     feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
+    # D5c (s27): when the failure names a MISSING SYMBOL, forbid the model
+    # from inventing a declaration for it. redis-0014's circular death: the
+    # repair round added a WRONG declaration (struct rusage statloc — the
+    # 'invalid operands' error), which rotated the failure signature and
+    # exhausted the phase-2 budget before the deterministic C1 injection
+    # (which knows the right shape) could land. The pipeline owns
+    # declarations; the model owns the merge.
+    _missing_syms = []
+    for f in failures:
+        _msg = getattr(f, "message", "") or ""
+        for _pat in (
+            r"['\"](\w+)['\"] was not declared",
+            r"['\"](\w+)['\"] undeclared",
+            r"cannot find (\w+) in this scope",
+            r"undeclared identifier ['\"](\w+)['\"]",
+        ):
+            import re as _re_d5c
+            for m in _re_d5c.finditer(_pat, _msg):
+                if m.group(1) not in _missing_syms:
+                    _missing_syms.append(m.group(1))
+    _decl_guard = ""
+    if _missing_syms:
+        _decl_guard = (
+            "\n### declaration guard\n"
+            "Do NOT add, invent, or guess a declaration for: "
+            + ", ".join(_missing_syms[:4])
+            + ". The pipeline injects declarations deterministically; a wrong\n"
+            "guessed type breaks the build differently. Fix ONLY the merge "
+            "code.\n")
     inner = build_resolve_prompt(unit, context, budget=budget)
     return f"""Your previous merge attempt was rejected. Fix it.
 
@@ -2065,6 +2094,7 @@ def build_retry_prompt(
 
 ### validator feedback (previous attempt failed these checks)
 {feedback}
+{_decl_guard}
 
 Address every failure above; do not repeat the mistake. End with the ```json
 fenced answer as instructed.
