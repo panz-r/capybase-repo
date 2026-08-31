@@ -4810,3 +4810,99 @@ Mid-sprint regressions found and fixed the same day: 0109 crash,
 vendoring poisoning, norm_hash. Design debt for next sprint: seam-
 aware splice assembly (C19 braces + preprocessor seams), oversized
 splitting (0077/0078-class).
+
+## SPRINT-26 POST-HARVEST ANALYSIS → SPRINT-27 MAP (2026-08-31)
+
+### 1. Conversion attribution (156 up-flips)
+
+| mechanism class | conversions |
+|---|---|
+| sqlite era config (gnu99 + tcl includes) | 78 |
+| nlohmann cmake flags | 38 |
+| rust vendoring (tokio era pins) | 15 |
+| redis era fixes (link-order, va_arg) | 5 |
+| fmt era (cstdint sed) | 3 |
+| promotion-filter flips (jsonc-0017, pb-0058/0059) | 3 |
+| variance/portfolio/A0 (source_portfolio ×4, plain-LLM full-output via A0, F1 churn-fallback + shattered ×1) | 14 |
+
+**97% of the sprint's gains are configuration-era recovery.** The model
+layer barely changed; the environments became honest.
+
+### 2. Failure taxonomy (49 live failures after the 9-case floor)
+
+- **22 at sim ≥ 0.96** — the pipeline HELD the near-oracle answer and
+  lost it at assembly/gate/budget:
+  - 14 wf-gate stalls (11 at sim ≥ 0.99, 6 at 1.00)
+  - 3 no-progress (all 1.00), 3 unit-death, 2 unitcount-cap
+- ~14 genuine content difficulty (sea-orm syntax loops, sqlite-0073
+  wrong-era member, protobuf-0065 keyword-splice, side-collapse)
+- 4 oracle-divergent + 2 resurrection-guard + 2 oversized + 6 near-match
+
+### 3. The gate-stall family decomposes (the dominant recoverable class)
+
+- **8 brace-seam**: splice coherence 'missing/extra closing brace' or
+  `expected identifier or '(' before '}'` — sqlite-0019/0029/0108/
+  0111/0113/0118, axum-0013/0015. The balancer RUNS and declines or
+  mis-places (count ≠ scope).
+- **3 symbol-scope**: redis-0013 (storage-class relocation ran, loop
+  not closed), redis-0014 (statloc — prototype derivation declines
+  statement headers, nothing synthesizes), redis-0049 (implicit
+  declaration WITH [-W-implicit...] tag — an IN-SESSION promotion
+  stall; f609847 post-dates the harvest and already fixes this class!)
+- 1 preprocessor-seam (0099), 1 content (0073), 1 keyword (0065)
+
+### 4. Mechanism census (752 harvest sessions)
+
+C1 symbol injection 1122 applications (workhorse; leaks at statement
+shapes); F1 tier-1 69 / tier-2 60 / compile-clean 19 / churn 5;
+**shattered rescue 14 accepts** (s25 mechanism earning its keep);
+recovery_retry 20; source portfolio repeatedly the converting path on
+coin-flips. **Zero-fire in-harvest: C12 band retarget, P6b both
+forms** (trigger classes empty at this corpus state); terminal grant
+wasn't in the harvest's code but went 1-for-1 in the rerun (0006).
+
+### 5. Conclusions
+
+1. The model layer is saturating: half the remaining failures carry
+   sim ≥ 0.96. The binding constraints are now SPLICE ASSEMBLY
+   (seams), BUDGET GEOMETRY (unit-count caps), and the WINDOW CEILING.
+2. Whole-file repair is structurally too late for seams: counting
+   braces cannot place a closer at the right SCOPE. The fix belongs at
+   SPLICE TIME with a structural ledger across unit boundaries.
+3. The -W promotion doctrine cut both ways (era probe steals AND
+   in-session gate stalls) — one fix (f609847) closed both; the
+   redis-0049-class cases are free conversions awaiting a rerun.
+4. Prompting/sampling is exhausted as a lever: B9 (directive) and B10
+   (self-consistency) both neutral. Design effort belongs in
+   deterministic assembly, not prompt shape.
+
+### 6. SPRINT-27 MAP (priority-ordered by case count)
+
+- **S27-D1. Seam-aware splice assembly** (8-12 cases): a per-file
+  structural ledger (brace depth, #if depth, paren) walked ACROSS unit
+  boundaries at splice time; when a unit's resolved content changes
+  net depth vs its context, re-anchor the span at the nearest legal
+  seam (pull trailing closer lines in from following context; push
+  duplicated openers out). Accept only on whole-file balance + gate.
+  The C19 generalization: braces + preprocessor + delimiter forms.
+- **S27-D2. -W promotion rerun validation** (1-3 cases, ~free):
+  redis-0049-class under current code (f609847).
+- **S27-D3. Unit-count budget geometry** (3 cases): replace the flat
+  1-retry cap with wall-proportional budget + P8-style trend
+  relaxation per unit. zenodo-0011/0012, sea-orm-0011.
+- **S27-D4. Scope-relocation closure** (redis-0013): re-gate in the
+  same round after the storage-class relocation lands.
+- **S27-D5. Declaration synthesis C1c** (redis-0014): when prototype
+  derivation declines (statement-only occurrences), synthesize a
+  typed declaration from usage (wait3(&statloc,...) → int statloc;),
+  compile-gated.
+- **S27-D6. Failure-signature rendering** (axum-0002): hard failures
+  whose messages render empty ('(none)' sig) blind the no-progress
+  guard — render validator+shape always.
+- **S27-D7. Oversized splitting** (2-4 cases, design docs v1-v3
+  exist): sqlite-0077/0078 + the shell.c whole-file class.
+- **S27-D8. C12/terminal-grant coverage audit**: C12 zero-fire —
+  decide keep-or-fold after D1 lands (the seam fix may absorb the
+  band's members).
+
+Calibration: closed (B9/B10 neutral, knobs off). No B-series in s27.
