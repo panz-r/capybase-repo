@@ -14803,10 +14803,17 @@ class Orchestrator:
                                 # fixable from the ±8-line window.
                                 _sh_kinds = outcome._osc_attempt_kinds[-6:]
                                 _sh_target, _sh_failures = cand, failures
+                                # C12 broadening (s27): >=1 defect suffices —
+                                # zenodo-0079's shape (3 empty + 3 needs_human
+                                # + 1 'unmatched )') fell between the >=2-
+                                # defect band trigger and the terminal grant's
+                                # 0-defect requirement. Mostly-empty with one
+                                # concrete defect is the same starvation: the
+                                # loop discards the only repairable candidate.
                                 if (
                                     not (cand.resolved_text or "").strip()
                                     and _sh_kinds.count("empty") >= 2
-                                    and _sh_kinds.count("defect") >= 2
+                                    and _sh_kinds.count("defect") >= 1
                                     and outcome._osc_last_defect is not None
                                 ):
                                     _sh_t, _sh_v = outcome._osc_last_defect
