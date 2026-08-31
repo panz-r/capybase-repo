@@ -11636,7 +11636,14 @@ class Orchestrator:
         )
 
         if not (0 <= fault_idx < len(accepted)):
-            return None
+            # D5b (s27): an out-of-range fault_idx (the error line sits
+            # outside every marker span) must not kill the symbol path —
+            # its fix is FILE-SCOPE injection, so any unit works as the
+            # carrier (redis-0014: statloc's use site is out-of-span; the
+            # guard declined every round and C1b/C1c never ran).
+            if not accepted:
+                return None
+            fault_idx = 0
         unit, _old_cand = accepted[fault_idx]
         language = unit.language or (
             "rust" if (path or "").endswith(".rs") else "c")
