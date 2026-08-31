@@ -2172,6 +2172,38 @@ recovery attempt; you MUST produce a merge):
 """
 
 
+def _missing_symbol_decl_guard(failures) -> str:
+    """D5c (s27): the declaration guard for missing-symbol failures.
+
+    redis-0014's circular death: the repair round added a WRONG
+    declaration (struct rusage statloc — the 'invalid operands' error),
+    which rotated the failure signature and exhausted the phase-2 budget
+    before the deterministic C1 injection (which knows the right shape)
+    could land. The pipeline owns declarations; the model owns the merge.
+    """
+    import re as _re
+    syms: list[str] = []
+    for f in failures:
+        msg = getattr(f, "message", "") or ""
+        for pat in (
+            r"[\'\"](\w+)[\'\"] was not declared",
+            r"[\'\"](\w+)[\'\"] undeclared",
+            r"cannot find (\w+) in this scope",
+            r"undeclared identifier [\'\"](\w+)[\'\"]",
+        ):
+            for m in _re.finditer(pat, msg):
+                if m.group(1) not in syms:
+                    syms.append(m.group(1))
+    if not syms:
+        return ""
+    return (
+        "\n### declaration guard\n"
+        "Do NOT add, invent, or guess a declaration for: "
+        + ", ".join(syms[:4])
+        + ". The pipeline injects declarations deterministically; a wrong\n"
+        "guessed type breaks the build differently. Fix ONLY the merge code.\n")
+
+
 def build_repair_prompt(
     unit: ConflictUnit,
     context: ContextBundle,
@@ -2216,6 +2248,7 @@ def build_repair_prompt(
     """
     profile = active_profile()
     feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
+    _decl_guard = _missing_symbol_decl_guard(failures)
     cur_lines, _base_lines, rep_lines = _prompt_sides(unit)
     side_intent = _side_intent_block(unit)
     # Structural context: the block (file structure, unit inventory, change
@@ -2336,6 +2369,7 @@ YOUR PREVIOUS ATTEMPT (needs fixing):
 
 ### validator feedback (fix these specific issues)
 {feedback}
+{_decl_guard}
 
 HOW YOUR CODE IS TESTED: your snippet is spliced back into the full file and the
 entire file is compiled. If the file has OTHER unresolved conflict hunks (a
