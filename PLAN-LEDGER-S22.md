@@ -5102,3 +5102,28 @@ D10+D5 targeted batch (3 cases):
 Also landed this window: F4 side-pick rung (861f3b6) — its members
 (protobuf-0001, zenodo-0079) don't overlap 0108/0111 (whose sides fail
 the gate too); validation batch queued next.
+
+### S27 day-2 close (2026-08-31)
+
+D5b revalidation: redis-0014 still ESC — the remaining layer is
+CIRCULAR: the model's repair round adds a WRONG declaration (struct
+rusage statloc — the 'invalid operands binary &' error), which both
+breaks C1c's address-only test and changes the failure signature each
+round, so the phase-2 budget (1 model call) exhausts before any
+deterministic path lands. D5b's two fixes remain correct hardening
+(attribution exemption + fault_idx fallback); 0014 needs the model
+round to NOT invent declarations (a repair-prompt constraint: 'never
+add declarations for the missing symbol; the pipeline injects them')
+— queued as D5c. protobuf-0001 (unit-level death, needs_human class)
+and zenodo-0079 (no-progress at 0.96) unchanged — F4's trigger (merged
+splice fails gate, side passes) didn't match: 0079's failure is at the
+UNIT level, before any splice exists. F4's beam rung stays armed for
+its true members.
+
+0108/0111 final disposition: honest ESCALATE (genuine seam merges on a
+fair gate — oracle passes targeted). D10 stays as the guard for real
+oracle-fails-targeted shapes.
+
+Day totals: 3 mechanisms + 2 completions landed (D10, F4, D5b, D5b-
+completion); 1 refuted hypothesis converted to a correct guard; 2
+cases reclassified honest.
