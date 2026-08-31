@@ -5127,3 +5127,25 @@ oracle-fails-targeted shapes.
 Day totals: 3 mechanisms + 2 completions landed (D10, F4, D5b, D5b-
 completion); 1 refuted hypothesis converted to a correct guard; 2
 cases reclassified honest.
+
+### S27 day-3 (2026-08-31, through d8bec4a)
+
+- **D5c** (9fbe1b2 + d0858e7): declaration guard in BOTH repair and
+  retry prompts (first wiring hit only the retry path — a duplicate
+  feedback-line pattern; redis-0014's rounds use the CEGIS repair
+  prompt). Verified by direct prompt assertions.
+- **D9 audit (honest negative)**: sqlite `make quicktest` is blocked at
+  testfixture — the amalgamation's statGetFuncdef/FuncDef ordering
+  breaks under this gcc regardless of flags (TCL_CONFIG_SH extracted
+  from the tcl8.6-dev .deb and wired; the blocker is era content in
+  the test path itself). Needs its own lemon.c-style patch — parked.
+- **D11** (1f1c040 + d8bec4a): tier-2 fallback — when the ballot's
+  chosen side fails its build, verify and land the OTHER side. The
+  first cut gated on _compiling (dead code exactly when tier-1
+  declined); the fix verifies directly. **redis-0014 PASS (0.97)** —
+  journal: f1_tier2_fallback_side {chosen: replayed, landed: current}.
+  The case had a VERIFIED answer discarded at escalation for five
+  mechanism generations.
+
+S27 running total: 8 conversions (0019/0029/0113/0118, axum-0013,
+zenodo-0011, redis-0014 + the s26-counted redis-0055 class).
