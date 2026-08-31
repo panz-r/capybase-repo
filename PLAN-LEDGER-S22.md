@@ -4906,3 +4906,56 @@ wasn't in the harvest's code but went 1-for-1 in the rerun (0006).
   band's members).
 
 Calibration: closed (B9/B10 neutral, knobs off). No B-series in s27.
+
+### SPRINT-27 MAP REFINEMENT — seam forensics (2026-08-31)
+
+Deep-dive on the 14 wf-gate stalls; four structural findings that
+RESHAPE the map:
+
+**F1. Buffer-provenance gap (new D0, blocks D1 debugging).**
+sqlite-0113's stored candidates include the CORRECT resolution (oracle-
+equal text, both span conventions splice to a checker-BALANCED file) —
+it was ACCEPTED, and the file gate still failed with 'unbalanced
+braces at line 502'. The buffer the gate rejected cannot be
+reconstructed from journal+candidates: no buffer hash, no diff vs the
+reconstructed splice. Every gate stall is currently undebuggable past
+this point. D0 = journal/store the exact rejected buffer (or hash +
+diff vs splice) — the enabling instrumentation for D1.
+
+**F2. The coherence checker is preprocessor-unaware and the ORACLE
+fails it (0108/0111-class).** select.c: the checker reports current,
+replayed, AND the oracle unbalanced (braces inside #if branches) — the
+coherence gate is unpassable BY CONSTRUCTION. These are GATE_UNAVAIL-
+ABLE-class stalls miscounted as repair failures. Fix: (a) #if-depth-
+aware brace masking; (b) the oracle-shares doctrine AT the coherence
+gate — when the oracle text fails the same structural check, the check
+is not evidence; downgrade like GATE_UNAVAILABLE.
+
+**F3. Shattered-prompt echo artifacts.** 0113's two garbage candidates
+carry the shattered prompt's numbered-snippet format verbatim
+('      497 |   #define ...') — the model echoes the repair prompt's
+EXAMPLE shape, including UNRELATED file regions. Fix: deterministic
+post-parse normalizer stripping '^\\s*\\d+\\s*\\|' line prefixes + a
+prompt line 'your output contains NO line numbers'.
+
+**F4. The side-pick fallback (single-unit delete-shaped regions).**
+0113/0118 are SINGLE-unit cases whose both sides are depth-neutral —
+both sides' splices balance by construction; only the MERGE breaks.
+When the merged candidate's splice fails coherence but a side's splice
+balances+compiles, take the side deterministically (degrades to NEAR
+on merge-wanting oracles — still ahead of ESCALATE).
+
+**F5. (none)-signature is cosmetic.** The sig's message part carries
+the discrimination; only the no-progress reason RENDER drops it. D6
+downgrades to a display fix.
+
+**F6. Unit-count cap knee mis-placed (D3 sharpened).** zenodo-0011/12
+and sea-orm-0011 have only 6-8 units — the 'many units' cap collapsed
+them to 1 retry. The knee was sized for 78-unit files; at 6-8 units
+the budget should be ~2-3. Simple formula fix, not a redesign.
+
+**REVISED S27 ORDER**: D0 (provenance) → D2 (-W rerun, free) →
+D3 (cap knee fix, trivial) → F2 (coherence honesty + pp-aware mask)
+→ F3 (echo normalizer) → F4 (side-pick fallback) → D1 (seam ledger,
+now scoped to the true multi-unit boundary cases: 0108/0111/0019/0029)
+→ D4/D5 (relocation closure, C1c synthesis) → D7 (oversized).
