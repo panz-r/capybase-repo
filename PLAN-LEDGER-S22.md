@@ -4777,3 +4777,36 @@ jsonc-0007 crashed in the SC arm: norm_hash UnboundLocalError (assigned
 only under 'if cand_hash:'; an empty consensus winner skips it, the
 convergence check reads it). None-init + guard; 75/75 orch suite.
 jsonc-0007 + the two quota-broken clickhouse cases rerun with the fix.
+
+### SPRINT-26 CLOSE-OUT (2026-08-31, 0fce02b)
+
+**README row 3 committed**: 660 cases / 594 PASS + 8 WORKING /
+90.0% raw / 91.2% adj / 92.5% P+W adj (+1.0pp vs prior row). Era floor
+167 → 9. Extracts + meta under docs/results/s26/ (override-from
+markers on the 14 regression-invalidated rows).
+
+**A6 FINAL floor (9)**: fmt-0003, protobuf-0055 (real undeclared
+identifiers — LogSeverity enum-era drift), sea-orm ×7 (0003 branch
+deleted upstream; 0015-0019+0029 git-dep eras beyond the 0.18.2 pin's
+reach). Zero era cases remain in C — the entire 98-case class
+recovered by configuration (gnu99, tcl includes, cmake flags,
+link-order).
+
+**Flip audit (gate)**: 156 up / 5 down vs the prior row; all five are
+sim ≥ 0.99 gate stalls, documented oracle-subjective variance
+(redis-0032), or known big-file classes — zero mechanism regressions.
+
+**Calibration verdicts**: B9 directive neutral (−17% within ±50%,
+zenodo-0036 flip-down matches the s22 discard-oracle note) — off.
+B10 SC n=3 neutral-to-negative (−17%, +83% latency; the jsonc-0007
+flip-down exposed and fixed the norm_hash crash d8cc231) — off.
+B10's two quota-broken clickhouse trees (huge materializations) are
+excluded from the arm; the verdict is decisive without them.
+
+**Sprint-26 complete**: 31-item canonical plan — every item executed,
+parked-with-scope (C19), or closed evidence-negative (B8/B9/B10).
+Mid-sprint regressions found and fixed the same day: 0109 crash,
+0039 template guard, redis-0038 -Werror homogenization, tokio
+vendoring poisoning, norm_hash. Design debt for next sprint: seam-
+aware splice assembly (C19 braces + preprocessor seams), oversized
+splitting (0077/0078-class).
