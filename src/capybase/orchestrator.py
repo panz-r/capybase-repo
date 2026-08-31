@@ -10239,7 +10239,12 @@ class Orchestrator:
                                         _other = ("replayed"
                                                   if _f2_side == "current"
                                                   else "current")
-                                        if _compiling.get(_other):
+                                        # No _compiling gate: that dict is
+                                        # populated by the tier-1 probe block,
+                                        # which may have declined (redis-0014's
+                                        # runs) — the verify below IS the
+                                        # evidence (one 2-5s targeted build).
+                                        if True:
                                             _ot = (_sides_f1 or {}).get(
                                                 _other, "")
                                             if _ot.strip():
