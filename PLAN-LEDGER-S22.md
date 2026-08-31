@@ -5175,3 +5175,21 @@ whole-file units — queued as D7b).
 
 S27 running total: 9 conversions + 1 NEAR upgrade (0019/0029/0113/
 0118, axum-0013, zenodo-0011, redis-0014, 0078; 0077 NEAR).
+
+### S27 day-5 (2026-09-01, through f87da24)
+
+- **D7b** (39ce407): prompt-load caps for tiny conflicts in heavily-
+  changed files. **protobuf-0001 PASS sim 1.00 in 29 seconds** — the
+  case that looped empty across every prior round resolved first-try:
+  the obligation LISTING caps at 25/side (validator still checks all;
+  count stated, side bodies authoritative) and the preserve-all
+  directive softens above 40 units. The 33K-char prompt was the whole
+  disease.
+- **C12 broadening** (f87da24): >=1 defect suffices for the band
+  retarget (0079's 3-empty + 1-defect shape fell between the triggers).
+  Validation: zenodo-0079 ESC 2 / PASS 1 — its first PASS repeat ever;
+  majority still escalates on the needs_human mix. Honest partial.
+
+S27 running total: 10 conversions + 1 NEAR + 1 first-PASS-repeat
+(0019/0029/0113/0118, axum-0013, zenodo-0011, redis-0014, 0078, 0001;
+0077 NEAR; 0079 partial).
