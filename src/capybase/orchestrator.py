@@ -8959,12 +8959,18 @@ class Orchestrator:
             # Unit-count-aware retry budget: scale down retries when a file has
             # many units, so the total model-call count stays within the wall-
             # time budget. With the default 2 retries (3 attempts), a 78-unit
-            # file needs up to 234 calls ≈ 3500s — far over the 1200s budget.
-            # Scaling to 0 retries (1 attempt) bounds it to 78 calls ≈ 1170s.
+            # file needs up to 234 calls — far over budget. Scaling to 0
+            # retries (1 attempt) bounds it to 78 calls.
+            # D3 (s27) knee fix: the old >5→1 / >20→0 knees starved ordinary
+            # 6-8-unit files (zenodo-0011/0012, sea-orm-0011 died at 1 retry
+            # at sim 0.97-0.99) — post-era-recovery the corpus runs at median
+            # 47s/case and only 2 cases exceed 600s, so the wall-time fear
+            # only justifies scaling at the extremes: >40→0 (the 78-class),
+            # >12→1, else the config default.
             _n_units = len(units)
-            if _n_units > 20:
+            if _n_units > 40:
                 _file_max_retries = 0
-            elif _n_units > 5:
+            elif _n_units > 12:
                 _file_max_retries = 1
             else:
                 _file_max_retries = None  # use config default
