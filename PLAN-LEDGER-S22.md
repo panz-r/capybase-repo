@@ -5149,3 +5149,29 @@ cases reclassified honest.
 
 S27 running total: 8 conversions (0019/0029/0113/0118, axum-0013,
 zenodo-0011, redis-0014 + the s26-counted redis-0055 class).
+
+### S27 day-4 (2026-09-01, 0183aa0) — D7 breaks the window ceiling
+
+The oversized class fell to five coordinated fixes in the entity
+splitter, each exposed by the 0077 fixture: (1) the symmetric branch's
+strict count-mismatch decline was wrong for generated content (45
+pragma entries vs a 7-line #include replacement) — grossly asymmetric
+sides now split the dominant side and broadcast the small one;
+(2) generated-table seams (/* eXxx: */ row markers + interior
+preprocessor conditionals) added as split points — entity boundaries
+cannot fragment a static-const initializer body; (3) _pack_fragments
+BUILDS target-size chunks where the tiny-merge's removal semantics
+absorbed 300 one-line rows into one 469-line survivor; (4) the merge
+decider is the structure-carrying side; (5) gates key on side CONTENT
+not worktree span (padding). 0077/0078: 12 sub-units, largest 41 lines.
+
+Validation: **0078 PASS 0.98** (first try, 528s — was a 49s instant
+ESCALATE for its entire history); **0077 NEAR 0.89** with a PASS
+repeat (was instant ESCALATE). The class is now model-bound, not
+window-bound. protobuf-0001's whole-file unittest.cc is the same
+class's next member (splitting needs the rust/cpp gate check — its
+unit is marker_span=None whole-file; the splitter never touches
+whole-file units — queued as D7b).
+
+S27 running total: 9 conversions + 1 NEAR upgrade (0019/0029/0113/
+0118, axum-0013, zenodo-0011, redis-0014, 0078; 0077 NEAR).
