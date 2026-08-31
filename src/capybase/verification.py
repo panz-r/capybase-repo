@@ -2819,6 +2819,17 @@ def _try_repair_string_literal(
     missing terminator to that line (never removing or editing content
     — the model's text is preserved, just closed).
 
+    Parity runs on the MASKED line (strings/comments hidden): an
+    apostrophe inside a comment ("the virtual machine's program" —
+    sqlite-0113/0118) is not a literal delimiter, but raw parity counted
+    it, the repair appended a stray ' AFTER the comment, and that quote
+    then poisoned string-masking for the rest of the file — every brace
+    below became invisible and the coherence gate reported a phantom
+    "missing closing brace" on a balanced, oracle-equal splice. A
+    genuinely unterminated literal in code stays visible in the masked
+    view (the masker only masks what it can close), so the true case is
+    preserved.
+
     ``language`` gates the Rust lifetime exemption: ``'a`` in Rust is a
     lifetime, not an unterminated char literal (counting it made a
     5-lifetime signature line "unbalanced" and the repair appended a
@@ -2828,6 +2839,8 @@ def _try_repair_string_literal(
     if not text:
         return None
     _rust = (language or "").lower() in ("rust",)
+    _masked_lines = _mask_strings_and_comments(
+        text, language).split("\n")
 
     def _quote_parity(line: str) -> tuple[int, int]:
         """(singles, doubles) count of unescaped quotes.
@@ -2872,7 +2885,7 @@ def _try_repair_string_literal(
         return singles, doubles
 
     bad_lines = []
-    for i, line in enumerate(text.split("\n")):
+    for i, line in enumerate(_masked_lines):
         s, d = _quote_parity(line)
         if s % 2 == 1 or d % 2 == 1:
             bad_lines.append((i, s, d))
@@ -2886,7 +2899,10 @@ def _try_repair_string_literal(
         lines[i] = lines[i] + '"'
     else:
         return None
-    # verify: no remaining unbalanced lines
+    # verify: no remaining unbalanced lines. RAW parity here — the
+    # masker's own char-literal handling is asymmetric on the repaired
+    # shape ('a;' masks unevenly), so masked parity would false-fail the
+    # just-repaired line.
     for line in lines:
         s2, d2 = _quote_parity(line)
         if s2 % 2 == 1 or d2 % 2 == 1:
