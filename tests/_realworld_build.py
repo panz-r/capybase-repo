@@ -204,6 +204,11 @@ def run_command_at_worktree(
 #: timeout; suites that cannot run in the sandbox fail honestly to None.
 C_TEST_COMMANDS: dict[str, str] = {
     "jsonc-history": "ctest --test-dir build --output-on-failure",
+    # D9 (s27): redis's TCL suite runs on system tclsh against the built
+    # binaries — VERIFIED on a materialized tree (era flag build, then
+    # './runtest --single unit/type/string' all-pass). The full suite is
+    # the command; the eval's timeout records None (not False) on overrun.
+    "redis-history": "./runtest",
     # Rust crates: the case worktree IS the crate; cargo test with the
     # probe's timeout. Big suites (tokio) partial-run to a timeout → the
     # probe records None, not False (a timeout is not a test failure).
