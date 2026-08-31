@@ -4990,3 +4990,29 @@ unfindable without it) → D2 (-W rerun, free) → F2 (coherence
 honesty + pp-aware masking) → F3 (echo normalizer) → F4 (side-pick)
 → D3 (cap knee) → D1 (seam ledger, multi-unit cases) → D4/D5 →
 D7 (oversized) → D9 (output-tests audit).
+
+### S27 ANALYSIS PASS 3 — the phantom-brace root cause FOUND AND FIXED (2026-08-31, a67461b)
+
+The 0113 black-box trail ended at verify_file: reproduced the exact
+journal failure on the exact stored candidate + spans — the CLEAN,
+BALANCED splice failed the gate. Bisection: the unconditional
+_try_repair_string_literal ran on the balanced buffer, counted quotes
+on RAW lines, saw the apostrophe in 'the virtual machine's program'
+(a COMMENT in vdbeInt.h), appended a stray ' after the comment — and
+that quote poisoned string-masking for the rest of the file, making
+every brace below invisible → the phantom 'missing closing brace' at
+the file end. A substantial share of the C19 'moving-brace' class was
+MASKING POISONING, not splice structure.
+
+Fix (a67461b): parity detection on MASKED lines (comment apostrophes
+invisible; genuine code-level unterminated quotes stay visible since
+the masker only masks what it can close); post-repair verify keeps raw
+parity (the masker's char-literal handling is asymmetric on the
+repaired shape). Reproduced-verified: 0113's exact splice now PASSES
+verify_file; 2/3 of 0118's stored candidates pass; true unterminated
+literals still repair; 132+75 tests green.
+
+Seam-family validation rerun LAUNCHED (0113/0118/0019/0029/0108/0111 +
+redis-0049 for the -W class). This likely absorbs much of D1's scope —
+the 'seam ledger' may reduce to the genuinely multi-unit boundary
+cases once the phantom failures clear.
