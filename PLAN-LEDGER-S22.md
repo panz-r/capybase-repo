@@ -5042,3 +5042,27 @@ synthesis, redis-0014) → D7 (oversized) → D9 (output-tests).
 
 Net: sprint-27's opening position is +4 PASS over the harvest's table
 (a67461b alone), with F2 next.
+
+### S27 EXECUTION LOG (2026-08-31)
+
+Committed: F2a pristine-side probe veto removed (4473910), F3 echo
+normalizer (2a4752c), D3 cap knee >40→0/>12→1 (51b7e2c), F2b oracle-
+shares at the coherence gate + probe self-exemption (3fe0a85), D0
+gate-buffer provenance (c91e52e), D5 C1c synthesized declarations
+(04ec414). Validations: axum-0013 PASS (F2+phantom); seam batch 4/7.
+
+**0108/0111's final layer (from the F2b validation journals)**: with
+the veto gone, the whole-side probes RUN — and the PRISTINE SIDES
+THEMSELVES fail the targeted per-file compile (0.5s,
+'expected identifier or ( before }' at 1704/1670) while the full make
+gate builds them rc=0. A targeted-vs-full verification gap (sqlite's
+generated headers are era-stale for the side texts). The tier-2 ballot
+chooses current at 0.95 every time; no variant can be verified in-
+session. Disposition: extend the GATE_UNAVAILABLE doctrine to compare
+the oracle against the TARGETED gate the resolver faced (D10) — the
+sim-1.0 merge + oracle-compiling-full-build + everything-fails-
+targeted shape is a sandbox artifact, not a resolver failure.
+
+sea-orm-0011 with the D3 knee: still ESC at 0.79 — deeper than budget
+(genuine rust syntax loop); the knee fix helps the class but not this
+member.
