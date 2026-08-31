@@ -5154,6 +5154,7 @@ class VerificationEngine:
         *,
         repo_root: str = ".",
         whole_text: str | None = None,
+        pristine_side_texts: list[str] | None = None,
     ) -> VerificationResult:
         """Validate the file after *all* units in it have been resolved.
 
@@ -5271,7 +5272,20 @@ class VerificationEngine:
                         and _brace_imbalance_line(_del_repaired, language) is None):
                     whole = _del_repaired
                     features["coherence_repair_applied"] = True
-            if imbalance_line is not None:                # Fix #1 — enrich the message with the brace delta so the model
+            if imbalance_line is not None and pristine_side_texts:
+                # F2 (s27): the oracle-shares doctrine at the coherence gate.
+                # The brace counter is preprocessor-blind — select.c's braces
+                # inside #if branches read as imbalance while gcc compiles
+                # clean. When a PRISTINE side text fails the same counter,
+                # the file's brace count is intrinsically unreliable and the
+                # check cannot attribute anything to the merge: downgrade to
+                # a feature and let the real build gate decide.
+                if any(_brace_imbalance_line(t, language) is not None
+                       for t in pristine_side_texts):
+                    features["coherence_check_inconclusive"] = True
+                    imbalance_line = None
+            if imbalance_line is not None:
+                # Fix #1 — enrich the message with the brace delta so the model
                 # knows WHICH kind of imbalance it is (extra `}` vs unclosed `{`),
                 # not just "unbalanced". The classification matches
                 # _try_balance_braces: walk the cleaned depth to see whether it

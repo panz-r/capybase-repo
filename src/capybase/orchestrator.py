@@ -9369,11 +9369,21 @@ class Orchestrator:
                             pass
                     # When the file_linker dedup ran, validate the deduped
                     # buffer directly (whole_text); otherwise re-splice from
-                    # the per-unit resolutions as before.
+                    # the per-unit resolutions as before. The pristine sides
+                    # ride along (F2): a preprocessor-blind brace count that
+                    # already fails a pristine side cannot attribute the
+                    # imbalance to the merge — the build gate decides.
+                    _pristine = None
+                    try:
+                        _ps_sides, _ = self._micro_stage_sides(path)
+                        _pristine = [t for t in _ps_sides.values() if t.strip()]
+                    except Exception:  # noqa: BLE001 — sides are advisory
+                        _pristine = None
                     file_validation = self.verification.verify_file(
                         path, language, original, spans_and_texts,
                         repo_root=str(self.git.repo),
                         whole_text=buffer if buffer != pre_dedup_buffer else None,
+                        pristine_side_texts=_pristine,
                     )
                     if self.config.journal.enabled and self.config.journal.store_validations:
                         self.journal.store_validation(file_validation)
@@ -16043,9 +16053,12 @@ class Orchestrator:
             except Exception:
                 pass
             self._write_worktree_only(path, text, accepted=None)
+            # The probed text IS pristine — its own brace count cannot veto
+            # it (F2): the compile decides.
             val = self.verification.verify_file(
                 path, language, original, [],
-                repo_root=str(self.git.repo), whole_text=text)
+                repo_root=str(self.git.repo), whole_text=text,
+                pristine_side_texts=[text])
             if not val.passed:
                 continue
             if getattr(val, "resolved_text", None) is not None:
@@ -16219,9 +16232,12 @@ class Orchestrator:
             # fiat, not by build). A pristine corpus side is exactly the
             # candidate worth a real compile; the build is the arbiter.
             self._write_worktree_only(path, text, accepted=None)
+            # The probed text IS pristine — its own brace count cannot veto
+            # it (F2): the compile decides.
             val = self.verification.verify_file(
                 path, language, original, [],
-                repo_root=str(self.git.repo), whole_text=text)
+                repo_root=str(self.git.repo), whole_text=text,
+                pristine_side_texts=[text])
             self.journal.emit(
                 "whole_side_probe",
                 {"side": side, "passed": bool(val.passed),
