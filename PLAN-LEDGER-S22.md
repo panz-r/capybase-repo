@@ -5193,3 +5193,25 @@ S27 running total: 9 conversions + 1 NEAR upgrade (0019/0029/0113/
 S27 running total: 10 conversions + 1 NEAR + 1 first-PASS-repeat
 (0019/0029/0113/0118, axum-0013, zenodo-0011, redis-0014, 0078, 0001;
 0077 NEAR; 0079 partial).
+
+### S27 day-6 (2026-09-01, 63c1c95) — D9 closed
+
+- **redis `./runtest` added** to C_TEST_COMMANDS (VERIFIED on a
+  materialized tree: era-flag build + single-test suite all-pass; the
+  eval's 900s timeout records None on overrun). Wiring validated on
+  redis-0004/0012: output_tests=None is BY DESIGN for both (the
+  command fires only in the WORKING-upgrade band — near-oracle,
+  non-escalated, below threshold).
+- **fmt audited NEGATIVE**: the test tree is era-broken at corpus
+  commits (format-impl-test.cc wants fmt/printf.cc, absent from the
+  archive) — ctest cannot build. Parked with sqlite's testfixture.
+- **zenodo-0079 classified honest-hard**: the replayed side is
+  TRUNCATED at the marker boundary (unclosed dict(), and the oracle
+  weaves in an option visible in neither side (stats-log-frequency
+  from beyond the region). needs_human is a fair model response; the
+  C12-broadened PASS repeat was a lucky weave. Content floor.
+
+D9 complete: jsonc+3 rust crates (existing) + redis (new); sqlite/fmt
+era-parked. S27 queue now empty except the harvest decision (deferred
+per user). Sprint totals: 10 conversions + 1 NEAR + 1 first-PASS-
+repeat, all targeted-run validated.
