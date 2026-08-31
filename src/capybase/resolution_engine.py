@@ -585,10 +585,22 @@ def _structural_context_block(unit: ConflictUnit, *, attempt: int = 0) -> str:
                     # (inlining, splitting). On a retry the validator feedback
                     # is the authoritative signal for what must change.
                     if attempt == 0:
-                        lines.append(
-                            f"Required: preserve ALL units listed above in the merged output "
-                            f"(the file has {len(flat)} structural unit(s))."
-                        )
+                        if len(flat) > 40:
+                            # D7b (s27): "preserve ALL 210 units" over-
+                            # constrains a huge inventory (protobuf-0001's
+                            # unittest.cc) — the directive orients, it does
+                            # not demand verbatim preservation of every
+                            # unit the file ever had.
+                            lines.append(
+                                f"The file has {len(flat)} structural units; "
+                                f"preserve the file's overall structure and "
+                                f"both sides' intent in the conflict region."
+                            )
+                        else:
+                            lines.append(
+                                f"Required: preserve ALL units listed above in the merged output "
+                                f"(the file has {len(flat)} structural unit(s))."
+                            )
             return "\n".join(lines) + "\n\n"
 
         # Single-hunk (or full-file sides): compute the full 3-way diff.

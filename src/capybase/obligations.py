@@ -214,13 +214,31 @@ def render_obligation_block(obligations: Obligations) -> str:
     so the caller omits the block entirely. Designed to drop into the resolve
     prompt's ``sides_text`` (budget-protected, never trimmed).
     """
+    # D7b (s27): cap the LISTING at max_per_side — the obligations are a
+    # file-wide three-way diff, so a tiny conflict in a heavily-changed file
+    # (protobuf-0001: a 2-line region carrying ~400 file-wide additions)
+    # blew the prompt to 33K chars and the model returned empty every
+    # round. The VALIDATOR (obligations_satisfied) still checks every
+    # obligation; only the prompt listing is capped, with the count stated
+    # so the model knows more exist and the side bodies are authoritative.
+    max_per_side = 25
     lines: list[str] = []
     if not obligations.current.empty:
         lines.append("CURRENT_UPSTREAM_SIDE must preserve:")
-        lines.extend(f"  - {s}" for s in obligations.current.summary_lines())
+        _cl = obligations.current.summary_lines()
+        lines.extend(f"  - {x}" for x in _cl[:max_per_side])
+        if len(_cl) > max_per_side:
+            lines.append(
+                f"  …and {len(_cl) - max_per_side} more (the side body below "
+                f"is authoritative — preserve its intent)")
     if not obligations.replayed.empty:
         lines.append("REPLAYED_COMMIT_SIDE must preserve:")
-        lines.extend(f"  - {s}" for s in obligations.replayed.summary_lines())
+        _rl = obligations.replayed.summary_lines()
+        lines.extend(f"  - {x}" for x in _rl[:max_per_side])
+        if len(_rl) > max_per_side:
+            lines.append(
+                f"  …and {len(_rl) - max_per_side} more (the side body below "
+                f"is authoritative — preserve its intent)")
     if not lines:
         return ""
     return "Side obligations (the load-bearing changes — preserve each):\n" + "\n".join(lines) + "\n\n"
