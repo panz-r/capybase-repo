@@ -16204,20 +16204,14 @@ class Orchestrator:
 
         for side, text in sides.items():
             _t0 = _probe_time.monotonic()
-            try:
-                # Brace sanity only for code files — prose/config files
-                # have no brace semantics (same gate as the portfolio).
-                if (language and structural_gate_applies(path)
-                        and not _braces_balanced(text, language)):
-                    self.journal.emit(
-                        "whole_side_probe",
-                        {"side": side, "passed": False,
-                         "declined": "braces"},
-                        step_index=self.step, path=path,
-                    )
-                    continue
-            except Exception:  # noqa: BLE001
-                pass
+            # F2 (s27): NO brace-balance veto on PRISTINE side texts. The
+            # counter is preprocessor-blind — select.c's braces inside #if
+            # branches make BOTH sides "unbalanced" while gcc compiles them
+            # clean, so the veto declined every probe without evidence
+            # (sqlite-0108/0111: the tier-2 ballot chose a side at 0.95
+            # confidence and could never land it — 'no_side_verifies' by
+            # fiat, not by build). A pristine corpus side is exactly the
+            # candidate worth a real compile; the build is the arbiter.
             self._write_worktree_only(path, text, accepted=None)
             val = self.verification.verify_file(
                 path, language, original, [],
