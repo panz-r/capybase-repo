@@ -5066,3 +5066,18 @@ targeted shape is a sandbox artifact, not a resolver failure.
 sea-orm-0011 with the D3 knee: still ESC at 0.79 — deeper than budget
 (genuine rust syntax loop); the knee fix helps the class but not this
 member.
+
+### S27 day-1 scoreboard (2026-08-31, final batch in)
+
+F2b+D3 validation: **zenodo-0011 PASS (0.99)** — the D3 knee converts
+its first member; zenodo-0012 still ESC at 0.97 (the extra budget
+didn't close its unit death — variance-or-genuine, watch in the next
+harvest); 0108/0111 = the D10 targeted-verification gap; sea-orm-0011
+genuine.
+
+S27 running total: 7 conversions from 6 mechanisms (phantom-brace 4,
+F2 axum-0013, D3 zenodo-0011 — plus redis-0055-class already counted
+in the s26 table). Remaining s27 queue: D10 (targeted-vs-full
+GATE_UNAVAILABLE extension — 0108/0111), D5 validation (redis-0014),
+F4 (side-pick — may be absorbed; re-scan), D7 (oversized), D9
+(output-tests). Everything committed locally through 04ec414.
