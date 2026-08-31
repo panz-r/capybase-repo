@@ -909,6 +909,21 @@ def _require_provider() -> ResolvedProvider:
     return _PROVIDER
 
 
+#: Build-target narrowing: for sqlite and redis, compile only the conflict
+#: file's translation unit instead of the full project. sqlite's Makefile
+#: has per-object rules (delete.lo:, update.lo:, etc.) and redis has a %.o
+#: pattern rule. This cuts in-session build verification from ~54s (full
+#: make) to ~2-5s (single object). Falls back to the full build when no
+#: target rule exists. json-c uses cmake (awkward per-object targets).
+#: Hoisted to module scope for _oracle_builds (D10): the GATE_UNAVAILABLE
+#: doctrine compares the oracle against the gate the resolver FACED —
+#: the targeted build, not the full tree build.
+_C_BUILD_TARGETS = {
+    "sqlite-history": "make {stem}.lo",
+    "redis-history": "make {stem}.o",
+}
+
+
 def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     cfg = Config()
     # Endpoint + calibration profile, resolved once in main() from
@@ -1004,10 +1019,6 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # pattern rule. This cuts build verification from ~54s (full make) to
     # ~2-5s (single object). Falls back to full build if no target rule.
     # json-c uses cmake (awkward per-object targets); leave empty.
-    _C_BUILD_TARGETS = {
-        "sqlite-history": "make {stem}.lo",
-        "redis-history": "make {stem}.o",
-    }
     if case.language in ("c", "cpp", "c++"):
         _target = _C_BUILD_TARGETS.get(case.dataset, "")
         if _target:
@@ -1508,7 +1519,29 @@ def _oracle_builds(repo: Path, case: Case, crate_source: Path | None) -> bool | 
     try:
         target.write_text(case.expected_resolved)
         if case.language in ("c", "cpp", "c++"):
-            return _c_builds(repo, case)
+            _full = _c_builds(repo, case)
+            if _full is not True:
+                return _full  # False stays False; None stays undecidable
+            # D10 (s27): the resolver's IN-SESSION gate is the TARGETED
+            # per-file build for sqlite/redis, not the full tree build.
+            # The oracle passing the full gate while failing the targeted
+            # one means the resolver faced a gate the human resolution
+            # ALSO fails (sqlite-0108/0111: pristine sides pass full make
+            # rc=0 yet fail make select.lo on era-stale generated headers
+            # — every variant unverifiable in-session; a sim-1.0 merge
+            # rejected by a sandbox artifact). That shape is
+            # GATE_UNAVAILABLE, so probe the gate the doctrine names: the
+            # SAME one.
+            _target = _C_BUILD_TARGETS.get(case.dataset, "")
+            if _target:
+                from pathlib import PurePosixPath as _PP
+                _stem = _PP(case.path).stem
+                _tp = _run_shell_tree(
+                    _target.format(stem=_stem),
+                    cwd=str(repo), timeout=120)
+                if _tp.returncode != 0:
+                    return False
+            return True
         if case.language == "rust" and crate_source is not None:
             from capybase.adapters import lsp as lsp_mod
             from capybase.verification import (
