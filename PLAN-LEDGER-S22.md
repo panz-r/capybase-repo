@@ -5081,3 +5081,24 @@ in the s26 table). Remaining s27 queue: D10 (targeted-vs-full
 GATE_UNAVAILABLE extension — 0108/0111), D5 validation (redis-0014),
 F4 (side-pick — may be absorbed; re-scan), D7 (oversized), D9
 (output-tests). Everything committed locally through 04ec414.
+
+### S27 day-2 validation results + two corrected dispositions (2026-08-31)
+
+D10+D5 targeted batch (3 cases):
+- **0108/0111: GATE_UNAVAILABLE hypothesis REFUTED** — the oracle
+  PASSES the targeted gate (oracle_builds: True). The shape is: sides
+  fail targeted (stale headers), oracle passes, our sim-1.0 merge
+  fails. That is a GENUINE merge defect on a fair gate — the true
+  D1-residual seam class (only the oracle-quality merge passes; our
+  merge carries an extra closer). D10 stays as a correct guard for
+  real oracle-fails-targeted cases; it simply doesn't fire here.
+- **redis-0014: C1c never engaged** — zero symbol events. The tiered-
+  mode fault-attribution skip (error outside all unit spans) fires
+  BEFORE the C1b/C1c block — and statloc's use site is out-of-span by
+  definition (the injection fix is file-scope; attribution is
+  meaningless for it). D5b queued: exempt undeclared-symbol failures
+  from the attribution skip.
+
+Also landed this window: F4 side-pick rung (861f3b6) — its members
+(protobuf-0001, zenodo-0079) don't overlap 0108/0111 (whose sides fail
+the gate too); validation batch queued next.
