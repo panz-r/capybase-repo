@@ -986,6 +986,65 @@ def _try_member_split_decline(
         for k, span in enumerate(spans)
     ]
 
+_INITIALIZER_ROW_RE = re.compile(r"^\s*/\*\s*e[A-Z]\w*:\s*\*/")
+_PP_SEAM_RE = re.compile(r"^\s*#\s*(?:if|ifdef|ifndef|endif|else)\b")
+
+
+def _initializer_seam_points(text: str, language: str) -> list[int]:
+    """D7 (s27): split seams inside generated initializer tables.
+
+    Entity-boundary detection cannot fragment a `static const T name[] = {...}`
+    body — it is ONE initializer, so a 400-line generated table (sqlite-0077's
+    pragma table) has no interior entity boundaries and the split declined.
+    The table's own row markers ARE safe seams: the `/* ePragTyp: */`-style
+    generated-row comments and interior preprocessor conditionals both start
+    complete entries. Returns 0-based line indices (excluding line 0).
+    """
+    if language not in ("c", "cpp", "c++") or not text:
+        return []
+    return [
+        i for i, ln in enumerate(text.split("\n"))
+        if i > 0 and (_INITIALIZER_ROW_RE.match(ln) or _PP_SEAM_RE.match(ln))
+    ]
+
+
+def _pack_fragments(
+    cur_frags: list[str], rep_frags: list[str], target_lines: int,
+) -> tuple[list[str], list[str]]:
+    """D7 (s27): greedily PACK many small fragments into ~target-line chunks.
+
+    _merge_tiny_fragments REMOVES fragments below the floor — it cannot build
+    target-size chunks from 1-2-line pieces (the generated-table seam case:
+    300 row fragments absorbed into ONE 469-line survivor, defeating the
+    split). Packing accumulates adjacent fragments until the chunk reaches
+    ``target_lines``; the final chunk absorbs the remainder. Sides stay
+    slot-aligned.
+    """
+    def _nblank(x: str) -> int:
+        return sum(1 for ln in x.split("\n") if ln.strip())
+
+    cur_out: list[str] = []
+    rep_out: list[str] = []
+    buf_c: list[str] = []
+    buf_r: list[str] = []
+    for c, r in zip(cur_frags, rep_frags):
+        buf_c.append(c)
+        buf_r.append(r)
+        if _nblank("\n".join(buf_c)) >= target_lines:
+            cur_out.append("\n".join(buf_c))
+            rep_out.append("\n".join(buf_r))
+            buf_c, buf_r = [], []
+    if buf_c:
+        if cur_out and _nblank("\n".join(buf_c)) < target_lines // 3:
+            # a tiny tail absorbs into the last chunk
+            cur_out[-1] = cur_out[-1] + "\n" + "\n".join(buf_c)
+            rep_out[-1] = rep_out[-1] + "\n" + "\n".join(buf_r)
+        else:
+            cur_out.append("\n".join(buf_c))
+            rep_out.append("\n".join(buf_r))
+    return cur_out, rep_out
+
+
 def _split_unit_at_entities(
     unit: ConflictUnit,
     *,
@@ -1037,6 +1096,14 @@ def _split_unit_at_entities(
     # Find entity boundaries on each side independently.
     cur_pts = _side_entity_split_points(cur_text, lang)
     rep_pts = _side_entity_split_points(rep_text, lang)
+    # D7 (s27): for oversized C sides, add the generated-table seams —
+    # entity boundaries alone cannot fragment initializer bodies. Gated on
+    # the larger SIDE's content (what actually needs the window), not the
+    # worktree span (padding inflates it).
+    _side_lines = max(len((cur_text or "").splitlines()),
+                      len((rep_text or "").splitlines()))
+    if _side_lines > 200 and lang in ("c", "cpp", "c++"):
+        cur_pts = sorted(set(cur_pts) | set(_initializer_seam_points(cur_text, lang)))
 
     # A side "carries structure" when it has interior entity boundaries we can
     # split on. The side WITH structure drives the fragment count; the other is
@@ -1045,15 +1112,41 @@ def _split_unit_at_entities(
     cur_has_struct = bool(cur_pts)
     rep_has_struct = bool(rep_pts)
 
+    _broadcasted = False
     if cur_has_struct and rep_has_struct:
         # Symmetric conflict: both sides carry the entities. They must agree on
         # the entity count for the fragments to align — a mismatch means the two
         # sides genuinely disagree on structure (a rename, an add/remove), and
         # splitting would mis-align the sides. Decline; resolve as one block.
         if len(rep_pts) != len(cur_pts):
-            return [unit]
-        cur_frags = _fragment_at_points(cur_text, cur_pts)
-        rep_frags = _fragment_at_points(rep_text, rep_pts)
+            # D7 (s27): a grossly asymmetric entity count with a small
+            # other side is the GENERATED-CONTENT lopsided shape
+            # (sqlite-0077: 45 pragma-table entries vs a 7-line
+            # #include replacement). The strict decline left the whole
+            # 469-line block unsplit and its prompt oversized (13.5K >
+            # 8K window). When one side dominates BOTH in fragments (>=3x)
+            # and lines (>=3x), split the dominant side and broadcast the
+            # small one (continuation-guarded); only genuine symmetric
+            # structural disagreements still decline.
+            _cur_lines = len((cur_text or "").splitlines()) or 1
+            _rep_lines = len((rep_text or "").splitlines()) or 1
+            if (len(cur_pts) >= 3 * max(1, len(rep_pts))
+                    and _cur_lines >= 3 * _rep_lines
+                    and not _is_continuation_shaped(rep_text, lang)):
+                cur_frags = _fragment_at_points(cur_text, cur_pts)
+                rep_frags = _broadcast_fragment(rep_text, len(cur_frags))
+                _broadcasted = True
+            elif (len(rep_pts) >= 3 * max(1, len(cur_pts))
+                    and _rep_lines >= 3 * _cur_lines
+                    and not _is_continuation_shaped(cur_text, lang)):
+                rep_frags = _fragment_at_points(rep_text, rep_pts)
+                cur_frags = _broadcast_fragment(cur_text, len(rep_frags))
+                _broadcasted = True
+            else:
+                return [unit]
+        else:
+            cur_frags = _fragment_at_points(cur_text, cur_pts)
+            rep_frags = _fragment_at_points(rep_text, rep_pts)
     elif cur_has_struct and not rep_has_struct:
         # Lopsided add: current carries the entities, replayed does not. Split
         # CURRENT at its entity boundaries; replayed is the single fragment it
@@ -1069,6 +1162,7 @@ def _split_unit_at_entities(
             return [unit]
         cur_frags = _fragment_at_points(cur_text, cur_pts)
         rep_frags = _broadcast_fragment(rep_text, len(cur_frags))
+        _broadcasted = True
     elif rep_has_struct and not cur_has_struct:
         # Lopsided add (mirror): replayed carries the entities. Split REPLAYED;
         # current is broadcast across the same count. Same continuation guard,
@@ -1077,6 +1171,7 @@ def _split_unit_at_entities(
             return [unit]
         rep_frags = _fragment_at_points(rep_text, rep_pts)
         cur_frags = _broadcast_fragment(cur_text, len(rep_frags))
+        _broadcasted = True
     else:
         # Neither side has interior entity boundaries — nothing useful to
         # split at the entity level. Sprint-19 P5 (journal-only): when the
@@ -1098,7 +1193,26 @@ def _split_unit_at_entities(
     # Drop fragments smaller than min_sub_lines on BOTH sides (a fragment that
     # is tiny in both sides carries no real content). Merge such a fragment into
     # its predecessor. Build the keep-mask over the fragment list.
-    keep = _merge_tiny_fragments(cur_frags, rep_frags, min_sub_lines)
+    # D7 (s27): for OVERSIZED regions the tiny fragments ARE the content —
+    # generated tables (sqlite-0077: 45 pragma entries of ~3 lines) merged
+    # back into 2 mega-fragments, defeating the split's purpose (the prompt
+    # stayed 13.5K tokens over the 8K window). Below the merge floor only
+    # when the region is small enough to need merging.
+    _eff_min_sub = (min_sub_lines if _side_lines < 200
+                    else max(4, _side_lines // 12))
+    _decider = "both"
+    if _broadcasted:
+        _decider = "cur" if cur_has_struct else "rep"
+    keep = _merge_tiny_fragments(
+        cur_frags, rep_frags, _eff_min_sub, decider=_decider)
+    if sum(keep) < 2 or len(cur_frags) > 3 * max(
+            2, _side_lines // max(1, _eff_min_sub)):
+        # Seam-heavy OR merge-degenerate (every fragment below the floor —
+        # the removal-pass absorbs all into one survivor): packing BUILDS
+        # target-size chunks instead.
+        cur_frags, rep_frags = _pack_fragments(
+            cur_frags, rep_frags, _eff_min_sub)
+        keep = [True] * len(cur_frags)
     if sum(keep) < 2:
         _stamp_class_member_candidate(unit, cur_text, rep_text, lang,
                                       "fragments_below_min_sub_lines")
@@ -1299,20 +1413,30 @@ def _broadcast_fragment(text: str, n: int) -> list[str]:
 
 
 def _merge_tiny_fragments(
-    cur_frags: list[str], rep_frags: list[str], min_sub_lines: int
+    cur_frags: list[str], rep_frags: list[str], min_sub_lines: int,
+    *, decider: str = "both",
 ) -> list[bool]:
-    """Return a keep-mask merging fragments tiny in BOTH sides into predecessors.
+    """Return a keep-mask merging tiny fragments into their predecessors.
 
-    A fragment is "tiny" when BOTH its current and replayed versions have fewer
-    than ``min_sub_lines`` non-blank lines. Such a fragment is absorbed into the
-    preceding kept fragment. The first fragment is always kept.
+    A fragment is "tiny" when the deciding side(s) have fewer than
+    ``min_sub_lines`` non-blank lines. ``decider`` selects: "both" (the
+    symmetric case — a fragment must be tiny in both sides to absorb) or
+    "cur"/"rep" (the lopsided broadcast case — the OTHER side's fragments
+    are empty BY CONSTRUCTION, so the structure-carrying side decides
+    alone; using "both" there absorbed the whole split into one survivor).
+    Absorbed fragments join the preceding kept fragment. The first
+    fragment is always kept.
     """
     def _nblank(s: str) -> int:
         return sum(1 for ln in s.split("\n") if ln.strip())
 
     keep = [True] * len(cur_frags)
     for i in range(1, len(cur_frags)):
-        if _nblank(cur_frags[i]) < min_sub_lines and _nblank(rep_frags[i]) < min_sub_lines:
+        _cur_tiny = _nblank(cur_frags[i]) < min_sub_lines
+        _rep_tiny = _nblank(rep_frags[i]) < min_sub_lines
+        tiny = ((_cur_tiny and _rep_tiny) if decider == "both"
+                else (_cur_tiny if decider == "cur" else _rep_tiny))
+        if tiny:
             keep[i] = False  # absorb into predecessor
     return keep
 
