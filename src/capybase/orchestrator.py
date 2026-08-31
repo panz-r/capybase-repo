@@ -10225,6 +10225,71 @@ class Orchestrator:
                                         {"side": _f2_side, "path": path},
                                         step_index=self.step, path=path,
                                     )
+                                    # D11 (s27): the ballot's chosen side
+                                    # fails its build, but the OTHER side's
+                                    # whole-side probe PASSED → land the
+                                    # other. redis-0014: the ballot chose
+                                    # replayed at 0.95 confidence, replayed
+                                    # failed make server.o, and current had
+                                    # passed its probe rounds earlier — the
+                                    # evidence was discarded and the case
+                                    # escalated with a verified answer in
+                                    # hand.
+                                    try:
+                                        _other = ("replayed"
+                                                  if _f2_side == "current"
+                                                  else "current")
+                                        if _compiling.get(_other):
+                                            _ot = (_sides_f1 or {}).get(
+                                                _other, "")
+                                            if _ot.strip():
+                                                self._write_worktree_only(
+                                                    path, _ot, accepted=None)
+                                                _ov = self.verification.verify_file(
+                                                    path, language, original, [],
+                                                    repo_root=str(self.git.repo),
+                                                    whole_text=_ot,
+                                                    pristine_side_texts=[_ot])
+                                                if _ov.passed:
+                                                    _ou = unit.model_copy(
+                                                        update={
+                                                            "unit_id": f"{path}:f1_t2fb",
+                                                            "unit_kind": "whole_file",
+                                                            "marker_span": None})
+                                                    _oc = CandidateResolution(
+                                                        candidate_id=(
+                                                            f"{path}:f1_t2fb:{_other}"),
+                                                        unit_id=_ou.unit_id,
+                                                        model_name="deterministic",
+                                                        resolved_text=_ot,
+                                                        prompt_version=(
+                                                            "llm_subsumption_adjudication_fallback"),
+                                                        provenance=(
+                                                            "deterministic_structural"),
+                                                        self_reported_confidence=0.7,
+                                                        explanation=(
+                                                            f"F1 tier-2 fallback: "
+                                                            f"the adjudicated side "
+                                                            f"{_f2_side} failed its "
+                                                            f"build; {_other} "
+                                                            f"verified"),
+                                                    )
+                                                    self.journal.emit(
+                                                        "f1_tier2_fallback_side",
+                                                        {"chosen": _f2_side,
+                                                         "landed": _other,
+                                                         "path": path},
+                                                        step_index=self.step,
+                                                        path=path)
+                                                    accepted = [(_ou, _oc)]
+                                                    buffer = _ot
+                                                    file_validation = None
+                                                    self._write_and_stage(
+                                                        path, buffer, result,
+                                                        accepted=accepted)
+                                                    continue
+                                    except Exception:  # noqa: BLE001 — fallback is best-effort
+                                        pass
                                 if _f2_text.strip() and _f2_ok:
                                     _f2_unit = unit.model_copy(
                                         update={
