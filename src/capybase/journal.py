@@ -126,6 +126,25 @@ class Journal:
             result.model_dump_json(indent=2),
         )
 
+    def store_gate_buffer(
+        self, path: str, wf_retry: int, buffer: str,
+    ) -> tuple[str, Path]:
+        """D0 (s27): the EXACT whole-file buffer a gate verdict applies to.
+
+        The 0113 forensics: a stored-correct candidate, a balanced
+        reconstruction, and a gate failure on a buffer nothing could
+        re-derive — every gate stall was undebuggable past that point.
+        Content-addressed (sha256[:16]); the hash also rides the
+        file_validated event so divergence vs a locally reconstructed
+        splice is detectable without opening the artifact.
+        """
+        import hashlib as _hl
+        key = _hl.sha256(buffer.encode("utf-8")).hexdigest()[:16]
+        art = self.write_artifact(
+            self.paths.snapshots,
+            f"gate-buffer-{_safe(path)}.r{wf_retry}.{key}.txt", buffer)
+        return key, art
+
     def store_snapshot(self, name: str, data: bytes | str) -> Path:
         return self.write_artifact(self.paths.snapshots, name, data)
 

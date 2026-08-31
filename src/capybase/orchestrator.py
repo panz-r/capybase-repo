@@ -9387,6 +9387,17 @@ class Orchestrator:
                     )
                     if self.config.journal.enabled and self.config.journal.store_validations:
                         self.journal.store_validation(file_validation)
+                    # D0 (s27): store the exact buffer this verdict applies
+                    # to — the 0113 forensics couldn't re-derive the text a
+                    # gate failure was computed on. On failure only (PASS
+                    # buffers re-derive trivially from the accepted set).
+                    _gate_buf_key = None
+                    if not file_validation.passed:
+                        try:
+                            _gate_buf_key, _ = self.journal.store_gate_buffer(
+                                path, wf_retries, buffer)
+                        except Exception:  # noqa: BLE001 — provenance is best-effort
+                            _gate_buf_key = None
                     self.journal.emit(
                         "file_validated",
                         {
@@ -9399,6 +9410,8 @@ class Orchestrator:
                             "coherence_repair_applied": bool(
                                 file_validation.features.get(
                                     "coherence_repair_applied")),
+                            **({"gate_buffer_sha": _gate_buf_key}
+                               if _gate_buf_key else {}),
                         },
                         step_index=self.step,
                         path=path,
