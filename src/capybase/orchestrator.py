@@ -11736,6 +11736,52 @@ class Orchestrator:
                 sides.get("current", ""), sides.get("replayed", ""),
                 base_text or "", spliced)
             if not decls:
+                # C1c (s27): declaration SYNTHESIS for usage-only symbols.
+                # redis-0014's statloc: neither side declares it (the era's
+                # header dropped it) and the prototype derivation declines
+                # (its only occurrence is inside a statement header — the
+                # statement guard, 3ded9ce). Every code occurrence is
+                # '&statloc' in a call argument — the wait3 status-variable
+                # idiom. Synthesize 'int sym;' and let the whole-file gate
+                # verify: a wrong type fails the compile and the candidate
+                # is discarded, so the synthesis is compile-gated.
+                _occ_re = _re_p4a.compile(
+                    r"\b" + _re_p4a.escape(symbol) + r"\b")
+                _addr_re = _re_p4a.compile(
+                    r"&\s*" + _re_p4a.escape(symbol) + r"\b")
+                _occs = [ln for ln in spliced.split("\n")
+                         if _occ_re.search(ln)]
+                _addr_only = bool(_occs) and all(
+                    _addr_re.search(ln) for ln in _occs)
+                if (_addr_only and language in ("c", "cpp", "c++")):
+                    _synth = f"int {symbol};"
+                    _rep_synth = inject_symbol_declaration(
+                        spliced, _synth, language)
+                    if _rep_synth is not None:
+                        _su = unit.model_copy(
+                            update={"marker_span": None,
+                                    "unit_kind": "whole_file"})
+                        _sc = CandidateResolution(
+                            candidate_id=unit.unit_id + ":synthdecl",
+                            unit_id=unit.unit_id,
+                            model_name="deterministic",
+                            resolved_text=_rep_synth,
+                            prompt_version="deterministic_synthesized_declaration",
+                            provenance="deterministic_symbol_injection",
+                            self_reported_confidence=0.7,
+                            explanation=(
+                                f"C1c synthesized declaration: {symbol} "
+                                f"appears only as &{symbol} in call "
+                                f"arguments; injected 'int {symbol};'"),
+                        )
+                        self.journal.emit(
+                            "symbol_inject_applied",
+                            {"kind": "synthesized_declaration",
+                             "symbol": symbol, "decl": _synth,
+                             "path": path},
+                            step_index=self.step, path=path,
+                            unit_id=unit.unit_id)
+                        return [(_su, _sc)]
                 self.journal.emit(
                     "symbol_inject_decl_not_found",
                     {"symbol": symbol, "path": path},
