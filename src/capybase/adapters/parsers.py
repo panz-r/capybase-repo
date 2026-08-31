@@ -7,6 +7,7 @@ reusable by both the extractor and the resolution engine.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 
@@ -320,6 +321,7 @@ def parse_resolution_json(
             meta = _parse_markdown_metadata(raw)
             data = dict(meta) if meta else {}
             data["resolved_text"] = code
+            _strip_snippet_echo(data, warnings)
             if not meta:
                 warnings.append("markdown-code layout: code block found but no metadata JSON")
             return data, warnings
@@ -444,6 +446,36 @@ def _as_dict(data: object, warnings: list[str]) -> tuple[dict, list[str]]:
     if not isinstance(data, dict):
         warnings.append("parsed JSON is not an object")
         return {}, warnings
+    _strip_snippet_echo(data, warnings)
+    return data, warnings
+
+
+_SNIPPET_ECHO_RE = re.compile(r"^\s{0,8}\d{1,6}\s*\|\s?(.*)$")
+
+
+def _strip_snippet_echo(data: dict, warnings: list[str]) -> None:
+    """F3 (s27): strip shattered-prompt snippet prefixes the model echoed.
+
+    The shattered repair prompt renders its window as ``NNNNN | line``; a
+    struggling model sometimes copies the FORMAT into resolved_text —
+    sqlite-0113's garbage candidates carried '      497 |   #define ...'
+    with content pulled from unrelated file regions. When a MAJORITY of
+    lines carry the prefix, strip it from those lines (a legitimate
+    resolution almost never numbers its lines; the majority rule guards
+    the odd real coincidence). In-place on the parsed dict.
+    """
+    text = data.get("resolved_text")
+    if not isinstance(text, str) or not text:
+        return
+    lines = text.split("\n")
+    coded = sum(1 for ln in lines if _SNIPPET_ECHO_RE.match(ln))
+    if len(lines) >= 2 and coded >= max(2, int(len(lines) * 0.6)):
+        data["resolved_text"] = "\n".join(
+            m.group(1) if (m := _SNIPPET_ECHO_RE.match(ln)) else ln
+            for ln in lines
+        )
+        warnings.append(
+            f"stripped shattered-snippet line prefixes from {coded}/{len(lines)} lines")
     return data, warnings
 
 
