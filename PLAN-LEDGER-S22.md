@@ -5237,3 +5237,21 @@ S27 final tally: **11 conversions + 1 NEAR + 1 first-PASS-repeat**
 (0019/0029/0113/0118, axum-0013, zenodo-0011, redis-0014, 0078, 0001,
 redis-0012; 0077 NEAR; 0079 partial; 0040 improved-distribution).
 Every one validated on targeted runs; no full rerun.
+
+### S27 day-8 (2026-09-01, 381ad5c) — sqlite output tests recovered
+
+The day-6 "sqlite testfixture era-broken" negative was a TESTING
+ARTIFACT, twice over: (1) quicktest had run on the raw CONFLICTED
+worktree (the markers in sqliteInt.h were the "errors"); (2) tclConfig.sh
+bakes the build machine's paths (/usr/include/tcl8.6, no tcl.h here).
+With oracle content + the config specs repointed at the extracted dev
+tree: testfixture builds rc=0, quicktest passes rc=0 — end-to-end
+verified. The extraction now also stages the dev lib tree and patches
+every tclConfig.sh's baked specs; main() exports CAPYBASE_TCL_CONFIG_SH.
+
+Validation: sqlite-0109 (NEAR 0.87, in-band) — output_tests=FALSE, the
+merge fails sqlite's own suite (honest evidence, NEAR verdict
+unaffected — the WORKING upgrade needs True); sqlite-0004 (PASS)
+correctly skips the cost. D9 final coverage: sqlite + redis + jsonc +
+3 rust crates; fmt remains the lone negative (test tree genuinely
+absent fmt/printf.cc at corpus commits).
