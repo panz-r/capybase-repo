@@ -5353,3 +5353,22 @@ GATE_UNAVAILABLE reclass, suite-green, harvest-ready.
 GATE_UNAVAILABLE reclassifications.** Projected next harvest ~92% raw.
 Every failure class revisited under current code at least once; suite
 green 6356/0.
+
+### S27 day-14 (2026-09-01) — last never-rerun batch
+
+- **sqlite-0054 PASS 0.99** — the marker-left coin-flip resolved; the
+  16th conversion.
+- redis-0032: ORACLE_DIVERGENT 0.98 (majority; 1 GATE_UNAVAILABLE
+  repeat) — stayed divergent as predicted (the hash_max_zipmap_entries
+  wrong-era-member class, sqlite-0073's family).
+- zenodo-0003 (0.83) and 0014 (0.84): NEAR 3/3 both — the python
+  near-band is STABLE and honest (compiles, below the bar, no test
+  commands to lift them).
+- clickhouse-0013: quota-BLOCKED at setup (heavy tree) — joins
+  sea-orm-0008 in the quota-blocked pair.
+
+**S27 closes at 16 conversions + 1 NEAR + 1 first-PASS-repeat + 2
+GATE_UNAVAILABLE reclassifications.** Every one of the 49 live harvest
+failures has now been revisited under current code or classified as
+era-floor; the non-quota stragglers are all genuine content difficulty
+with journal evidence.
