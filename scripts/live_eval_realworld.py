@@ -745,14 +745,7 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
     # Sprint-26 A5: rust era recovery — patch the yanked/broken deps and
     # vendor them so the cargo gate runs offline (the tokio registry class).
     if case.language == "rust" and crate_source is not None:
-        _vendored = _vendor_rust_deps(repo, case.dataset)
-        if _vendored:
-            # Offline + lint-capped: the vendored era deps carry 2019
-            # rustdoc-attribute drift (verified: --cap-lints warn builds
-            # rc=0); the gate's cargo subprocess inherits this env.
-            os.environ.setdefault("CARGO_NET_OFFLINE", "true")
-            os.environ.setdefault(
-                "RUSTFLAGS", "--cap-lints warn")
+        _vendor_rust_deps(repo, case.dataset)
 
     # For C cases: run the build-prepare step AFTER the rebase, so the build
     # dir is fresh on the final conflicted state. The rebase's git checkouts
@@ -1797,10 +1790,21 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
         td = tempfile.mkdtemp(
             prefix="capy-rw-",
             dir=os.environ.get("CAPYBASE_WORKTREE_DIR", "/tmp"))
+    # Sprint-27: offline + lint-capped env scoped to THIS case when its
+    # deps vendored (the 2019 rustdoc drift needs --cap-lints; the vendor
+    # needs offline). Previously set process-wide on the first vendored
+    # case — LEAKING into every later rust case: a cold-cache non-vendored
+    # case would fail cargo resolution OFFLINE and era-exit falsely (the
+    # 0008 chain's sibling hazard). Restored in the finally below.
+    _prev_net = os.environ.get("CARGO_NET_OFFLINE")
+    _prev_rustflags = os.environ.get("RUSTFLAGS")
     try:
         repo = Path(td) / "r"
         try:
             _materialize_conflict(case, repo, crate_source=crate_source)
+            if (repo / "vendor").is_dir():
+                os.environ["CARGO_NET_OFFLINE"] = "true"
+                os.environ["RUSTFLAGS"] = "--cap-lints warn"
         except _NoConflictError as exc:
             res.elapsed = time.time() - t0
             # Sprint-22 P1: git resolved cleanly — nothing to resolve.
@@ -1927,6 +1931,13 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
             except Exception:  # noqa: BLE001 — probe is best-effort
                 output_tests_result = None
     finally:
+        # Sprint-27: restore the pre-case env (offline/lints were scoped).
+        for _k, _v in (("CARGO_NET_OFFLINE", _prev_net),
+                       ("RUSTFLAGS", _prev_rustflags)):
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
         # D3: when the main thread owns the temp dir, it cleans up after the
         # worker returns or times out. When we own it, clean up here.
         if owns_td:
