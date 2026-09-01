@@ -8182,6 +8182,21 @@ class Orchestrator:
                         "all flagged paths explicitly resolved and "
                         "compile-validated by this session "
                         "(resolved-file provenance)")
+            # D12 (s27): a PRISTINE-SIDE TAKEOVER landing is not a silent
+            # resurrection. redis-0012: f1_compile_clean landed the current
+            # side (compile-verified, oracle-equal at 0.99), the rebase
+            # continued, and the guard stopped on the side's own
+            # "resurrected" lines. The guard exists for LLM-HALLUCINATED
+            # deleted code; a corpus-authored side chosen on build evidence
+            # is an explicit decision — warn, don't stop.
+            if _downgrade_reason is None:
+                _takeover = getattr(self, "_takeover_landed_paths", None)
+                if _takeover and all(
+                        f.path in _takeover for f in findings):
+                    _downgrade_reason = (
+                        "flagged paths landed by a pristine-side takeover "
+                        "(compile-evidenced explicit choice, not an LLM "
+                        "restoration)")
             if _downgrade_reason is not None:
                 self.journal.emit(
                     "resurrection_downgrade",
@@ -10086,6 +10101,9 @@ class Orchestrator:
                                     {"side": _f1_side, "path": path},
                                     step_index=self.step, path=path,
                                 )
+                                if not hasattr(self, "_takeover_landed_paths"):
+                                    self._takeover_landed_paths = {}
+                                self._takeover_landed_paths[path] = _f1_side
                                 _f1_unit = unit.model_copy(
                                     update={
                                         "unit_id": f"{path}:f1_tier1",
@@ -10289,6 +10307,9 @@ class Orchestrator:
                                                     accepted = [(_ou, _oc)]
                                                     buffer = _ot
                                                     file_validation = None
+                                                    if not hasattr(self, "_takeover_landed_paths"):
+                                                        self._takeover_landed_paths = {}
+                                                    self._takeover_landed_paths[path] = _other
                                                     self._write_and_stage(
                                                         path, buffer, result,
                                                         accepted=accepted)
@@ -10317,6 +10338,9 @@ class Orchestrator:
                                     accepted = [(_f2_unit, _f2_cand)]
                                     buffer = _f2_text
                                     file_validation = None
+                                    if not hasattr(self, "_takeover_landed_paths"):
+                                        self._takeover_landed_paths = {}
+                                    self._takeover_landed_paths[path] = _f2_side
                                     # Same as tier-1: land the adjudicated side
                                     # (write + stage) before moving on. The bare
                                     # `continue` discarded the tier-2 choice —
@@ -10387,6 +10411,9 @@ class Orchestrator:
                                     )
                                     accepted = [(_hf_unit, _hf_cand)]
                                     buffer = _heuristic_text
+                                    if not hasattr(self, "_takeover_landed_paths"):
+                                        self._takeover_landed_paths = {}
+                                    self._takeover_landed_paths[path] = _heuristic_side
                                     self._write_and_stage(
                                         path, buffer, result, accepted=accepted)
                                     continue
