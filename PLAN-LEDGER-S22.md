@@ -5276,3 +5276,20 @@ inconsistency in the corpus.
 
 Projected next-harvest standing: 605 PASS + 8-9 WORKING of 660 ≈
 91.7% raw / ~93.5% P+W adj (+1.0pp over row 3), era floor 9.
+
+### S27 day-10 (2026-09-01, 00c7920) — D13, the 13th conversion
+
+The 'compiler authority' mystery solved by reading the EXISTING journal
+provenance (tests_finished carries attributed_merge_errors + stderr
+tails — my earlier query only read the summary): jsonc-0016's stop was
+'json_parse_double defined but not used [-Werror=unused-function]' —
+a PROMOTION attributed to the merge. f609847's doctrine covered the
+verdict and era probe but not the pre-continue attribution loop. D13
+(00c7920) excuses promotions there. **Validation: jsonc-0016 PASS
+1.00** (first try, same 28s); redis-0015 reconfirms PASS 1.00.
+protobuf-0065 stays genuine (keyword-at-seam, candidates inspected
+clean — the splice boundary places 'false' in identifier position;
+D1-residual).
+
+S27 final: **13 conversions + 1 NEAR + 1 first-PASS-repeat**. Projected
+next harvest: ~606 PASS + 8-9 WORKING / 660 ≈ 91.8% raw / ~93.6% P+W.
