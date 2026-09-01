@@ -5215,3 +5215,25 @@ D9 complete: jsonc+3 rust crates (existing) + redis (new); sqlite/fmt
 era-parked. S27 queue now empty except the harvest decision (deferred
 per user). Sprint totals: 10 conversions + 1 NEAR + 1 first-PASS-
 repeat, all targeted-run validated.
+
+### S27 day-7 (2026-09-01, 45f2860) — D12 + regression gate
+
+- **D12** (45f2860): pristine-side takeover landings exempt from the
+  resurrection stop. redis-0012's anatomy: f1_compile_clean landed the
+  CURRENT side (compile-verified, oracle-equal at 0.99), the rebase
+  continued, and the guard STOPPED on the side's own 7 "resurrected"
+  lines — the guard exists for LLM-hallucinated code, not corpus-
+  authored sides chosen on build evidence. All four takeover landing
+  sites record their landings; the guard downgrades to warn.
+  **Validation: redis-0012 PASS 0.99** (resurrection_downgrade
+  journaled exactly as designed).
+- **Splitter regression gate** (pre-harvest discipline): sqlite-0003
+  PASS 0.99 (harvest: PASS — no regression); sqlite-0040 ESC majority
+  with its FIRST PASS + NEAR repeats ever (harvest: ESC — improved,
+  no regression). The D7 dispatch changes are clean on the
+  entity-spanning cohort they most affect.
+
+S27 final tally: **11 conversions + 1 NEAR + 1 first-PASS-repeat**
+(0019/0029/0113/0118, axum-0013, zenodo-0011, redis-0014, 0078, 0001,
+redis-0012; 0077 NEAR; 0079 partial; 0040 improved-distribution).
+Every one validated on targeted runs; no full rerun.
