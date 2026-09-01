@@ -5312,3 +5312,23 @@ failure taxonomy has been revisited under current code at least once;
 the remaining ~45 non-passes are documented floors (9 era, ~7 seams,
 ~6 loops, 6 near, 4 divergent, 4 unit-deaths, 3 gate-class, 2 caps)
 plus quota-invalid stragglers.
+
+### S27 day-12 (2026-09-01, 9137fff) — full-suite regression sweep
+
+The full unit suite (the pre-harvest gate) caught 21 failures the
+per-change subsets missed. Root causes, all fixed (9137fff):
+- 17 test doubles lacked F2b's pristine_side_texts kwarg.
+- The literal repair's masked parity broke the language=None default
+  (the generic masker hides broken char literals) — scoped to c-family.
+- **The promotion rule was over-broad**: gcc tags STRUCTURAL errors too
+  ('expected ; before } [-Wtemplate-body]' — the catalog's
+  cpp_template_body escaped detection as a "promotion"). Categories now
+  curated: explicit -Werror= forms always excused; plain -W tags only
+  in the known warning categories (incl. incompatible-pointer-types,
+  unused-function — the D13/redis-0048 classes, recheck: jsonc-0016
+  still PASS 1.00). Structural categories stay errors.
+- D11's parenthesized provenance defeated the audit regex.
+
+Full suite: **6356 passed / 0 failed** with all sprint-27 changes.
+Sprint-27 stands at 14 conversions + 1 NEAR + 1 first-PASS-repeat + 1
+GATE_UNAVAILABLE reclass, suite-green, harvest-ready.
