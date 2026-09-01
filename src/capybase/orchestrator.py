@@ -10287,8 +10287,7 @@ class Orchestrator:
                                                         resolved_text=_ot,
                                                         prompt_version=(
                                                             "llm_subsumption_adjudication_fallback"),
-                                                        provenance=(
-                                                            "deterministic_structural"),
+                                                        provenance="deterministic_structural",
                                                         self_reported_confidence=0.7,
                                                         explanation=(
                                                             f"F1 tier-2 fallback: "

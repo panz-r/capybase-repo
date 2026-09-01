@@ -454,7 +454,7 @@ def test_post_comment_gate_reverts_on_validation_failure(monkeypatch):
     from capybase.conflict_model import VerificationResult, VerificationFailure
 
     class _StubVerification:
-        def verify_file(self, path, language, original, resolutions, *, repo_root="."):
+        def verify_file(self, path, language, original, resolutions, *, repo_root=".", whole_text=None, pristine_side_texts=None):
             return VerificationResult(
                 candidate_id="c", unit_id="u", passed=False,
                 hard_failures=[VerificationFailure(
@@ -493,7 +493,7 @@ def test_post_comment_gate_passes_clean_buffer(monkeypatch):
     from capybase.conflict_model import VerificationResult
 
     class _StubVerification:
-        def verify_file(self, path, language, original, resolutions, *, repo_root="."):
+        def verify_file(self, path, language, original, resolutions, *, repo_root=".", whole_text=None, pristine_side_texts=None):
             return VerificationResult(
                 candidate_id="c", unit_id="u", passed=True, hard_failures=[],
             )

@@ -251,7 +251,7 @@ class _FakeGit:
 
 
 class _AlwaysPassVerification:
-    def verify_file(self, path, language, original, units, *, repo_root=None,
+    def verify_file(self, path, language, original, units, *, repo_root=None, pristine_side_texts=None,
                     whole_text=None):
         return SimpleNamespace(passed=True, hard_failures=[])
 

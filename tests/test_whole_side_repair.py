@@ -151,7 +151,7 @@ class _PassVer:
         self.ok_texts = ok_texts
         self.calls: list[str | None] = []
 
-    def verify_file(self, path, language, original, units, *, repo_root=None,
+    def verify_file(self, path, language, original, units, *, repo_root=None, pristine_side_texts=None,
                     whole_text=None):
         self.calls.append(whole_text)
         ok = self.ok_texts is None or (whole_text in self.ok_texts)

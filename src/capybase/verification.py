@@ -2839,8 +2839,15 @@ def _try_repair_string_literal(
     if not text:
         return None
     _rust = (language or "").lower() in ("rust",)
-    _masked_lines = _mask_strings_and_comments(
-        text, language).split("\n")
+    # Masked parity only for the c-family (where the comment-apostrophe
+    # false positive lives). The generic masker (language=None) treats a
+    # broken char literal as a string and MASKS it — hiding the defect the
+    # repair exists to fix (test_unterminated_char_literal_fixed); python
+    # prose has no char literals to repair anyway.
+    _use_masked = (language or "").lower() in ("c", "cpp", "c++")
+    _masked_lines = (
+        _mask_strings_and_comments(text, language).split("\n")
+        if _use_masked else text.split("\n"))
 
     def _quote_parity(line: str) -> tuple[int, int]:
         """(singles, doubles) count of unescaped quotes.
@@ -4811,27 +4818,48 @@ _CC_ERROR_FILE_RE = re.compile(r"([^\s:][^\s:]*?)\.([chp]+)(?:\+\+)?:\d+:\d+:\s*
 # Detects gcc/clang -Werror warning promotions: ``error: ... [-Werror=category]``
 # and ``error: ... [-Wcategory]`` — under plain -Werror, gcc 15 renders the
 # plain warning tag on the promoted line (redis-0048: ``error: passing
-# argument 3 of 'intsetGet' ... [-Wincompatible-pointer-types]``). A -W tag
-# names a WARNING option; gcc appends it only to warning diagnostics, so an
-# ``error:`` line carrying ANY -W tag is a promotion, never a real failure.
-# The error:-prefix guard keeps plain ``warning:`` lines out (they carry the
-# same tags but are not promotions).
-_CC_WERROR_TAG_RE = re.compile(r"\[-W[^\]]+\]")
+# argument 3 of 'intsetGet' ... [-Wincompatible-pointer-types]``).
+#
+# The tag ALONE cannot distinguish promotions from real errors: gcc also
+# tags STRUCTURAL syntax errors (``error: expected ';' before '}' token
+# [-Wtemplate-body]`` — the cc-conflict catalog's cpp_template_body).
+# Excused: explicit -Werror=/-Werror+ tags (promotions by construction)
+# and plain -W tags in the KNOWN warning categories (semantic warnings).
+# Structural categories stay errors: they fire on broken code regardless
+# of strictness flags.
+_CC_WERROR_TAG_RE = re.compile(r"\[-W(error[=+])?([^\]]+)\]")
+
+#: Warning-option categories observed as promotions in this corpus —
+#: semantic warnings that can also appear as plain warnings without
+#: -Werror. Structural diagnostics (template-body, return-type, ...)
+#: are NOT here: they indicate genuinely broken code.
+_PROMOTION_W_CATEGORIES = frozenset({
+    "incompatible-pointer-types", "implicit-function-declaration",
+    "unused-function", "unused-variable", "unused-value",
+    "unused-but-set-variable", "missing-braces", "calloc-transposed-args",
+    "format-security", "format", "sign-compare", "int-conversion",
+    "pointer-sign", "discarded-qualifiers", "deprecated-declarations",
+    "uninitialized", "maybe-uninitialized", "unused-result", "pedantic",
+})
 
 
 def _is_cc_werror_warning(msg: str) -> bool:
     """True when a gcc error line is a -Werror warning promotion.
 
     gcc emits ``error: ...`` for -Werror promotions, indistinguishable from
-    real errors except for the trailing ``[-W...]`` tag. Examples:
-    ``error: 'calloc' sizes... [-Werror=calloc-transposed-args]``
-    ``error: passing argument 3 of 'intsetGet'... [-Wincompatible-pointer-types]``
-
-    These are warnings the project's build flags promoted to errors — the code
-    compiled successfully but triggered a strictness flag. Not a merge defect.
+    real errors except for the trailing ``[-W...]`` tag — and even the tag
+    is ambiguous (structural errors carry -Wtemplate-body). Excused:
+    explicit ``-Werror=``/``-Werror+`` tags and plain ``-W`` tags in the
+    known warning categories. Everything else is a real error.
     """
-    return (bool(_CC_WERROR_TAG_RE.search(msg))
-            and not msg.lstrip().startswith(("warning:", "note:")))
+    if msg.lstrip().startswith(("warning:", "note:")):
+        return False
+    m = _CC_WERROR_TAG_RE.search(msg)
+    if m is None:
+        return False
+    if m.group(1):  # -Werror= / -Werror+ form — a promotion by construction
+        return True
+    return m.group(2) in _PROMOTION_W_CATEGORIES
 
 
 def _parse_cc_error_line(msg: str) -> int | None:
