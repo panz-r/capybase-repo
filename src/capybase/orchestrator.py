@@ -14995,9 +14995,16 @@ class Orchestrator:
                                 stalled_sig = sig_counts.most_common(1)[0][0]
                                 # stalled_sig is frozenset(Counter(...).items())
                                 # where each item is ((validator, msg), count).
-                                # Unpack correctly to get bare validator names.
+                                # Unpack to display labels. D6 (s27): cargo/
+                                # rustc gate failures carry an EMPTY validator
+                                # name — the old `or ["(none)"]` rendered them
+                                # as ['(none)'], reading as "no information"
+                                # when the signature's message half carried the
+                                # discrimination (axum-0002's display bug).
+                                # Fall back to the message's first line, head.
                                 validators = sorted(
-                                    {v for (v, _msg), _cnt in stalled_sig}
+                                    {(v if v else _msg[:60])
+                                     for (v, _msg), _cnt in stalled_sig}
                                 ) or ["(none)"]
                                 self.journal.emit(
                                     "candidate_rejected",
