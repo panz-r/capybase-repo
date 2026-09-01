@@ -5293,3 +5293,22 @@ D1-residual).
 
 S27 final: **13 conversions + 1 NEAR + 1 first-PASS-repeat**. Projected
 next harvest: ~606 PASS + 8-9 WORKING / 660 ≈ 91.8% raw / ~93.6% P+W.
+
+### S27 day-11 (2026-09-01) — final batch: 14th conversion + honest reclass
+
+- **redis-0052 PASS 0.99** — the 14th and final targeted conversion.
+- **sqlite-0092 → GATE_UNAVAILABLE (sim 1.00, 3/3)** — honest
+  reclassification, not a pass: the sim-1.0 merge rejected by a gate
+  the oracle shares (the D10 doctrine class). Off the failure rolls.
+- protobuf-0043 holds ESC 0.94 (pure-empty class, grant fired, recovery
+  still empty — genuine).
+- sea-orm-0008: quota-invalid (Errno 122 again — environmental;
+  pending revalidation when tmp frees).
+
+**S27 CLOSE: 14 conversions + 1 NEAR + 1 first-PASS-repeat + 1 honest
+GATE_UNAVAILABLE reclass.** Projected next harvest: ~607 PASS-equivalent
+/ 660 ≈ 92% raw / ~93.7% P+W adj, era floor 9. Every class in the
+failure taxonomy has been revisited under current code at least once;
+the remaining ~45 non-passes are documented floors (9 era, ~7 seams,
+~6 loops, 6 near, 4 divergent, 4 unit-deaths, 3 gate-class, 2 caps)
+plus quota-invalid stragglers.
