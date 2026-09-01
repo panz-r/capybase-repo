@@ -1286,7 +1286,23 @@ _CC_ERROR_LINE_RE = re.compile(r"^\S+?:\d+:\d+:\s*(error:.*)$")
 #: otherwise a case whose only failures are infra-class can PASS the
 #: eval's localized build check yet never stop being era-dead (0038: the
 #: va_arg sed homogenized the last heterogeneous signature member).
-_CC_WERROR_TAG_RE = re.compile(r"\[-W[^\]]+\]\s*$")
+_CC_WERROR_TAG_RE = re.compile(r"\[-W(error[=+])?([^\]]+)\]\s*$")
+
+
+def _is_promotion_tag(ln: str) -> bool:
+    """Aligned with verification's curated rule (s27 day-12): explicit
+    -Werror= forms are promotions by construction; plain -W tags only in
+    the KNOWN warning categories. Structural tags (-Wtemplate-body — real
+    syntax errors) must stay IN the era signature: excluding them here
+    weakened era detection (a false era-negative lets an un-passable case
+    burn its full budget)."""
+    m = _CC_WERROR_TAG_RE.search(ln)
+    if m is None:
+        return False
+    if m.group(1):
+        return True
+    from capybase.verification import _PROMOTION_W_CATEGORIES
+    return m.group(2) in _PROMOTION_W_CATEGORIES
 
 # Environmental failure signatures (sprint-20 E2, post-reboot find): a
 # dependency-fetch/network failure is identical across all three probe
@@ -1342,7 +1358,7 @@ def _compile_error_signature(
                 # across sides BY CONSTRUCTION; letting them into the
                 # signature makes era-dead the default for any era tree
                 # built with strict flags, regardless of content.
-                if _CC_WERROR_TAG_RE.search(ln):
+                if _is_promotion_tag(ln):
                     continue
                 if conflict_path:
                     _loc = re.match(r"^(\S+?):\d+:\d+:", ln)
