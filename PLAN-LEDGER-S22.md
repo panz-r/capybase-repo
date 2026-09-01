@@ -5372,3 +5372,30 @@ GATE_UNAVAILABLE reclassifications.** Every one of the 49 live harvest
 failures has now been revisited under current code or classified as
 era-floor; the non-quota stragglers are all genuine content difficulty
 with journal evidence.
+
+### S27-EXTENDED (2026-09-01, loose leads closed)
+
+- **D6 for real** (2a52241): the no-progress reason renders message
+  heads for unnamed validators (cargo/rustc gates carry empty names —
+  axum-0002's ['(none)'] display bug).
+- **The QUOTA MYSTERY SOLVED**: the eval's case worktrees materialize
+  under `CAPYBASE_WORKTREE_DIR` OR /tmp — `TMPDIR` was a NO-OP for
+  them (tempfile.mkdtemp's explicit dir=). Every Errno 122 was tmpfs
+  pressure on /tmp (shared 30G, other sessions' ~24G). Redirecting
+  CAPYBASE_WORKTREE_DIR=/var/tmp/capy-wt runs the heavy-tree cases
+  clean.
+- **sea-orm-0008 PASS 1.00** — the 17th conversion (the fixpool-PASS /
+  harvest-ESC variance was quota-killing the vendoring all along: the
+  06dee33 revert fired on quota-failed cargo vendor, restoring the
+  unpinned manifest → era probe saw resolution failure → era-dead).
+- clickhouse-0013 finally measured: honest ESC 0.85 ×3 (side-collapse
+  class, genuine).
+- flask-0006: ORACLE_DIVERGENT 0.58 2/3 — the documented oracle-
+  subjective class holds under the full empty machinery.
+- protobuf-0043: prompt now 6.6K tokens (D7b caps working) — the model
+  still declines; honest needs_human class.
+- sea-orm-0011 diagnosed: `expected item after doc comment` — doc
+  comments at fragment seams (D1-residual design class).
+
+**S27-EXTENDED FINAL: 17 conversions + 1 NEAR + 1 first-PASS-repeat +
+2 GATE_UNAVAILABLE reclassifications.** All leads closed.
