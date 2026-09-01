@@ -16971,9 +16971,19 @@ class Orchestrator:
 
             _merged_paths = list(getattr(result, "units_by_path", {}) or {})
             _merged_stems = {Path(p).stem for p in _merged_paths}
+            from capybase.verification import _is_cc_werror_warning
             for ln in _error_lines:
                 if ln.startswith(("make[", "make:", "ninja:")) or "CMake Error" in ln:
                     continue  # build-driver summaries carry no file:line
+                # D13 (s27): a -Werror promotion is not a merge defect —
+                # the same doctrine f609847 applied to the verdict and era
+                # probe, missing HERE. jsonc-0016: 'json_parse_double
+                # defined but not used [-Werror=unused-function]' was
+                # attributed to the merge, tripped the compiler-authority
+                # stop, and the case escalated 3x at 0.98 while the eval's
+                # own build check passed it (compiles=True).
+                if _is_cc_werror_warning(ln):
+                    continue
                 stem, _ = _parse_cc_error_location(ln)
                 if stem is not None and stem in _merged_stems:
                     _attributed.append(ln)
