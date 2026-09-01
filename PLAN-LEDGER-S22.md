@@ -5332,3 +5332,24 @@ per-change subsets missed. Root causes, all fixed (9137fff):
 Full suite: **6356 passed / 0 failed** with all sprint-27 changes.
 Sprint-27 stands at 14 conversions + 1 NEAR + 1 first-PASS-repeat + 1
 GATE_UNAVAILABLE reclass, suite-green, harvest-ready.
+
+### S27 day-13 (2026-09-01, fe59bb8) — final sweep
+
+- **zenodo-0027 PASS 1.00** — the 15th conversion (the python
+  no-progress case; C12-broadening + the s27 stack).
+- **sea-orm-0021 → GATE_UNAVAILABLE 0.98** — the second honest reclass
+  (the test-band NEAR was actually gate-class).
+- **tokio-0046 NEAR 0.88, output_tests=FALSE** — first tokio test
+  measurement: the merge fails the crate's own suite (honest evidence
+  for the near-band).
+- axum-0002 ESC 0.86 genuine (parse-defect loop, `(none)` rendering
+  cosmetic). sea-orm-0014 honest ESC 0.86 (2 surviving repeats; the
+  first died on quota). sea-orm-0008 remains quota-BLOCKED (vendored
+  trees × tmp pressure — consistently; needs a quota-free window).
+- Eval-side era-signature filter aligned with the curated promotion
+  rule (fe59bb8) — structural tagged errors stay IN signatures.
+
+**S27 FINAL: 15 conversions + 1 NEAR + 1 first-PASS-repeat + 2 honest
+GATE_UNAVAILABLE reclassifications.** Projected next harvest ~92% raw.
+Every failure class revisited under current code at least once; suite
+green 6356/0.
