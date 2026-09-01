@@ -5255,3 +5255,24 @@ unaffected — the WORKING upgrade needs True); sqlite-0004 (PASS)
 correctly skips the cost. D9 final coverage: sqlite + redis + jsonc +
 3 rust crates; fmt remains the lone negative (test tree genuinely
 absent fmt/printf.cc at corpus commits).
+
+### S27 day-9 (2026-09-01) — projection audit + 12th conversion
+
+Projected the post-s27 non-P/W set (48) from current data; audited the
+wf-stall members never rerun under current code:
+- **redis-0015 PASS 0.98** (2/1 majority) — its harvest death was the
+  phantom 'extra closing brace' class; the 12th conversion.
+- protobuf-0065 holds ESC at 1.00 (the `expected identifier before
+  'false'` keyword-splice class — genuine).
+- jsonc-0016 holds ESC at 0.98, 3× 28s — the 'compiler authority:
+  pre-continue build failed' class (shared with redis-0026/0048's
+  GATE_UNAVAILABLE shape but not classified there — a deterministic
+  gate mismatch for next-harvest triage).
+
+fmt D9 closed PERMANENTLY negative: the corpus-era test file references
+fmt/printf.cc, a path that NEVER existed in fmt's entire history (the
+src/ layout never carried printf.cc) — the deepest upstream test-tree
+inconsistency in the corpus.
+
+Projected next-harvest standing: 605 PASS + 8-9 WORKING of 660 ≈
+91.7% raw / ~93.5% P+W adj (+1.0pp over row 3), era floor 9.
