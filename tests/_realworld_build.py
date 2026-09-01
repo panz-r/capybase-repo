@@ -209,6 +209,12 @@ C_TEST_COMMANDS: dict[str, str] = {
     # './runtest --single unit/type/string' all-pass). The full suite is
     # the command; the eval's timeout records None (not False) on overrun.
     "redis-history": "./runtest",
+    # D9 (s27): sqlite's quicktest via testfixture — VERIFIED end-to-end
+    # on an oracle-resolved tree (testfixture builds against the extracted
+    # tcl dev tree, quicktest rc=0). The initial "era-broken" diagnosis was
+    # a testing artifact: quicktest on the raw CONFLICTED worktree fails on
+    # markers, and tclConfig.sh bakes foreign paths (both fixed).
+    "sqlite-history": "make quicktest CFLAGS='-std=gnu99 -O1' TCL_CONFIG_SH=" + __import__("os").environ.get("CAPYBASE_TCL_CONFIG_SH", ""),
     # Rust crates: the case worktree IS the crate; cargo test with the
     # probe's timeout. Big suites (tokio) partial-run to a timeout → the
     # probe records None, not False (a timeout is not a test failure).

@@ -283,19 +283,44 @@ def _ensure_dataset_includes() -> None:
                 cwd=td, check=True, capture_output=True, timeout=120)
             deb = next(Path(td).glob("tcl8.6-dev*.deb"))
             _DATASET_INCLUDE_PREFIX.mkdir(parents=True, exist_ok=True)
-            # Extract ONLY the header tree (the .deb also carries tclsh
-            # binaries and Tcl libraries we don't need or want on PATH).
+            # Extract the header tree AND the dev lib tree (tclConfig.sh +
+            # libtcl8.6.so live under usr/lib — the OUTPUT-TEST build of
+            # sqlite's testfixture needs both; D9-s27).
             _sp.run(
-                ["dpkg-deb", "-x", str(deb), str(td + "/x")],
+                ["dpkg-deb", "-x", str(deb), str(_DATASET_INCLUDE_PREFIX / "tcl-lib")],
                 check=True, capture_output=True, timeout=120)
-            src = Path(td, "x", "usr", "include", "tcl8.6")
+            src = _DATASET_INCLUDE_PREFIX / "tcl-lib" / "usr" / "include" / "tcl8.6"
             if src.is_dir():
                 _sp.run(
                     ["cp", "-r", str(src), str(_DATASET_INCLUDE_PREFIX / "tcl8.6")],
                     check=True, capture_output=True, timeout=60)
+        # D9 (s27): tclConfig.sh bakes the BUILD MACHINE's paths
+        # (TCL_INCLUDE_SPEC=/usr/include/tcl8.6, which lacks tcl.h here).
+        # Point both specs at the extracted trees so sqlite's testfixture
+        # builds: VERIFIED end-to-end (testfixture rc=0, quicktest rc=0 on
+        # an oracle-resolved tree).
+        for _cfg in (_DATASET_INCLUDE_PREFIX / "tcl-lib").rglob("tclConfig.sh"):
+            try:
+                _cfg_text = _cfg.read_text()
+                _cfg_text = _cfg_text.replace(
+                    "TCL_INCLUDE_SPEC='-I/usr/include/tcl8.6'",
+                    f"TCL_INCLUDE_SPEC='-I{_DATASET_INCLUDE_PREFIX / 'tcl8.6'}'")
+                _cfg_text = _cfg_text.replace(
+                    "TCL_LIB_SPEC='-L/usr/lib/x86_64-linux-gnu -ltcl8.6'",
+                    "TCL_LIB_SPEC='-L"
+                    + str(_cfg.parent) + " -ltcl8.6'")
+                _cfg.write_text(_cfg_text)
+            except Exception:  # noqa: BLE001 — config patch is best-effort
+                pass
         marker.touch()
     except Exception:  # noqa: BLE001 — best-effort; cases degrade to era
         pass
+
+# The extracted tclConfig.sh path (sqlite's output-test build needs it).
+def _tcl_config_sh() -> str:
+    hits = list((_DATASET_INCLUDE_PREFIX / "tcl-lib").rglob("tclConfig.sh")) \
+        if (_DATASET_INCLUDE_PREFIX / "tcl-lib").is_dir() else []
+    return str(hits[0]) if hits else ""
 
 # Per-case build-command cache: populated by _materialize_conflict after it
 # probes the extracted tree's build system. _config_for reads from here so the
@@ -2036,6 +2061,14 @@ def main():
     _kill_stale_build_processes()
     import atexit
     atexit.register(_kill_stale_build_processes)
+    # D9 (s27): eagerly extract the tcl dev tree (headers + lib +
+    # tclConfig.sh) and expose the config path for sqlite's output-test
+    # command (CAPYBASE_TCL_CONFIG_SH; the command is assembled at import
+    # from the env, so it must be set before cases run).
+    _ensure_dataset_includes()
+    _tcl_cfg = _tcl_config_sh()
+    if _tcl_cfg:
+        os.environ.setdefault("CAPYBASE_TCL_CONFIG_SH", _tcl_cfg)
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument(
