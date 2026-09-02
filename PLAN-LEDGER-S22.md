@@ -5445,3 +5445,25 @@ three gate layers under one promotion doctrine; suite green.**
 
 **S27 + extensions: 21 conversions + 1 NEAR + 1 first-PASS-repeat + 3
 GATE_UNAVAILABLE reclassifications.** Projected next harvest: ~93% raw.
+
+### S27-EXTEND-4 (2026-09-02, 6adc93b) — WORKING band + doc-comment seams
+
+- **Splitter fix** (6adc93b): split points shift backward over doc-
+  comment/attribute runs so they travel WITH their item — sea-orm-0011's
+  six units all died on 'expected item after doc comment' from exactly
+  such a seam.
+- **WORKING band rerun** (7 cases, first time under s27 code):
+  **protobuf-0073 PASS 1.00** (22nd conversion), **zenodo-0091 PASS
+  0.96** (23rd), protobuf-0059 WORKING with a PASS repeat (coin-flip
+  upward), nlohmann-0020 / zenodo-0028 / 0040 / 0088 hold WORKING
+  3/3 (stable graded successes — these are wins already, not failures).
+- clickhouse-0021: NEAR 3/3 at 0.89 (up from 0.85 — stable near-band,
+  no test command to lift it).
+- sea-orm-0011 with the doc fix: still ESC 0.79 — the doc seam was one
+  of several; the region resolves as one block now but the content
+  difficulty remains. Genuine.
+
+**S27 + extensions: 23 conversions + 1 NEAR + 1 first-PASS-repeat + 3
+GATE_UNAVAILABLE reclassifications.** The WORKING band itself is
+confirmed stable: 8 WORKINGs in the harvest are honest graded
+successes, two of which now PASS.
