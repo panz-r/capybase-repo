@@ -5661,3 +5661,32 @@ reclassifications + 16 bug fixes.
 
 S27 cumulative: 25 conversions + 1 NEAR + 1 first-PASS-repeat + 3
 reclassifications + 16 bug fixes + every scoped lead resolved.
+
+### S27-EXTEND-12 (2026-09-02) — mechanism-engagement audit (why six rungs never fired)
+
+Systematic sweep across ALL s27 flights. Engaged: symbol_inject 637,
+empty_terminal_recovery_grant 35, resurrection_downgrade 12,
+f1_tier2_fallback_side 4, shattered_repair_accept 4,
+whole_file_repair_skipped 6 (the ba23f27 guard firing correctly).
+NEVER fired — each explained:
+
+- **side_pick (F4)**: sqlite-0099's trace shows why — the
+  pp-failure's fault-attribution path (nearest_preceding_unit) jumps
+  STRAIGHT to the model re-resolve, returning before the deterministic
+  rungs later in the beam. For attributed cross-unit failures, F4 is
+  shadowed. On 0108-class (unattributed), the sides themselves fail
+  the stale-header gate so F4's verify declines. Armed redundancy; its
+  insertion point is wrong for the pp class (D1 material).
+- **alternation_collapse**: the literal-repair fix removed 0019's
+  failure before the collapse could fire. Layered redundancy.
+- **oscillation_band_rescue (C12)**: its alternation class was
+  absorbed by the terminal grant (35 fires) + the empty machinery.
+- **p6b brace form**: unit-level only; whole-file-gate failures with
+  the same message never reach it (wiring gap, D1 material).
+- **synthesized_declaration (C1c)**: redis-0014 converted via the
+  declaration guard + fallback before C1c's shape recurred.
+- Zero unexplained silent failures — every never-fire has a cause.
+
+S27 cumulative: 25 conversions + 1 NEAR + 1 first-PASS-repeat + 3
+reclassifications + 16 bug fixes + full mechanism-engagement map
+feeding D1's design.
