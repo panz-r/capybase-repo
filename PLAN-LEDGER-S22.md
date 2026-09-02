@@ -5527,3 +5527,24 @@ oracle passes it). These are the canonical D1-design specimens.
 **S27 + extensions (through extend-6): 24 conversions + 1 NEAR + 1
 first-PASS-repeat + 3 GATE_UNAVAILABLE reclassifications + 11 bug
 fixes + 1 documented open lead (in-session cargo state poisoning).**
+
+### S27-EXTEND-7 (2026-09-02) — D0 pays off: the alternation-collapse rung
+
+- **axum-0019's defect SOLVED via D0 gate-buffer provenance**: the
+  failing buffer diffs against the oracle by ONE line — the model
+  merged region 1's side-ALTERNATIVES as CONCATENATION (kept both
+  `.extract::<Option<Self>>()` and `.extract::<Option<Host>>()`).
+  The 'prefix item' error was downstream noise from the chained call.
+  (The standalone-clean cargo checks were correct: the SIDES and oracle
+  all pass; only the merged buffer fails.)
+- **Alternation-collapse rung landed** (unit-tested on the real
+  defect: both collapses emitted). In-session engagement not yet
+  confirmed — the x10 rerun shows a silent decline (fault attribution
+  or exact-line matching at the fault unit); needs a fault_idx trace
+  next session. The rung rides for the harvest regardless.
+
+**S27 cumulative: 24 conversions + 1 NEAR + 1 first-PASS-repeat + 3
+reclassifications + 12 bug fixes + the collapse rung + the cargo-
+state open lead (now better understood: sides/oracle pass standalone;
+only in-session merged buffers fail — the 0019 error was content, not
+cache).**
