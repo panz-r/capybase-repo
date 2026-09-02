@@ -3243,6 +3243,75 @@ def _try_restore_common_lines(
     return result if result != candidate_text else None
 
 
+def _try_alternation_collapse(
+    unit, cand, sides: dict[str, str], verify_fn,
+) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+    """S27-extend (axum-0019): collapse side-ALTERNATIVES merged as concatenation.
+
+    A one-line-per-side alternative conflict (current `.extract::<Self>()`,
+    replayed `.extract::<Host>()`) resolved as BOTH lines concatenated — sim
+    1.00, one extra call chained, 'prefix `item` is unknown' downstream.
+    When the resolved region contains a side's block immediately followed
+    by the OTHER side's block (the union, not a choice), emit two collapse
+    candidates (drop each block) and let the caller's gate verify.
+    """
+    CHNL = chr(10)
+    resolved = cand.resolved_text or ""
+    if not resolved.strip() or unit.marker_span is None:
+        return None
+    cur = (sides.get("current") or "").strip(CHNL)
+    rep = (sides.get("replayed") or "").strip(CHNL)
+    if not cur.strip() or not rep.strip():
+        return None
+    # The unit's region is small; the whole side texts are file-sized — use
+    # only the ALTERNATIVE fragments: the lines of each side that appear in
+    # the resolved region but not in the other side.
+    res_lines = [l for l in resolved.split(CHNL) if l.strip()]
+    cur_only = [l for l in cur.split(CHNL)
+                if l.strip() and l not in rep]
+    rep_only = [l for l in rep.split(CHNL)
+                if l.strip() and l not in cur]
+    if not (1 <= len(cur_only) <= 4 and 1 <= len(rep_only) <= 4):
+        return None  # not a small alternation
+    def _contains_seq(hay: list[str], needle: list[str]) -> bool:
+        n = len(needle)
+        return any(hay[i:i + n] == needle for i in range(len(hay) - n + 1))
+    if not (_contains_seq(res_lines, cur_only) and _contains_seq(res_lines, rep_only)):
+        return None  # both alternatives not present as sequences
+    # Emit the two collapses as candidate texts.
+    out = []
+    for keep, drop, side_name in ((cur_only, rep_only, "current"),
+                                  (rep_only, cur_only, "replayed")):
+        # remove the dropped sequence (first occurrence)
+        n = len(drop)
+        txt_lines = resolved.split(CHNL)
+        for i in range(len(txt_lines) - n + 1):
+            if [l for l in txt_lines[i:i + n]] == drop:
+                txt_lines = txt_lines[:i] + txt_lines[i + n:]
+                break
+        out.append((side_name, CHNL.join(txt_lines)))
+    results = []
+    for side_name, text in out:
+        if not text.strip() or text == resolved:
+            continue
+        results.append((side_name, text))
+    if len(results) < 2:
+        return None
+    cands = []
+    for side_name, text in results:
+        c = cand.model_copy(update={
+            "resolved_text": text,
+            "candidate_id": cand.candidate_id + f":altcol-{side_name[:4]}",
+            "prompt_version": "deterministic_alternation_collapse",
+            "provenance": "deterministic_side_consistency_repair",
+            "explanation": (
+                f"alternation collapse: kept the {side_name} side's "
+                f"alternative (both were concatenated)"),
+        })
+        cands.append((unit, c))
+    return cands
+
+
 def _try_side_consistency_repair(
     failures: list,
     original: str,
@@ -12228,6 +12297,45 @@ class Orchestrator:
             # error is "expected identifier, found keyword `use`" (or similar), the
             # marker span excluded the enclosing wrapper (e.g. ``use crate::{``) and
             # the splice doubled it. Strip the consecutive duplicate statement line.
+            # S27-extend (axum-0019): alternation collapse — a one-line-
+            # per-side alternative merged as CONCATENATION (both kept).
+            # Produce both collapses for the fault unit, splice each,
+            # verify: the first passing one wins.
+            if f"altcol:{_sig}" not in _tried:
+                _tried.add(f"altcol:{_sig}")
+                try:
+                    _ac_sides, _ = self._micro_stage_sides(path)
+                    _ac_frags = {
+                        "current": (accepted[fault_idx][0].current.text
+                                    if fault_idx < len(accepted) else ""),
+                        "replayed": (accepted[fault_idx][0].replayed.text
+                                     if fault_idx < len(accepted) else ""),
+                    }
+                    _ac_out = _try_alternation_collapse(
+                        accepted[fault_idx][0], accepted[fault_idx][1],
+                        _ac_frags or _ac_sides, None)
+                    if _ac_out:
+                        for _acu, _acc in _ac_out:
+                            _ac_spans = [
+                                (u.marker_span, c.resolved_text
+                                 if (u, c) is not (accepted[fault_idx])
+                                 else _acc.resolved_text)
+                                for u, c in accepted]
+                            _ac_spans[fault_idx] = (
+                                _acu.marker_span, _acc.resolved_text)
+                            _ac_val = self.verification.verify_file(
+                                path, language, original, _ac_spans,
+                                repo_root=str(self.git.repo))
+                            if _ac_val.passed:
+                                self.journal.emit(
+                                    "alternation_collapse_applied",
+                                    {"path": path, "sig": _sig[:60]},
+                                    step_index=self.step, path=path)
+                                _ac_list = list(accepted)
+                                _ac_list[fault_idx] = (_acu, _acc)
+                                return _ac_list
+                except Exception:  # noqa: BLE001 — collapse is best-effort
+                    pass
             # F4 (s27): side-pick fallback — when the merged splice fails
             # the gate but a pristine-side splice passes it, the merge is
             # the defect; land the side (protobuf-0001 / zenodo-0079
