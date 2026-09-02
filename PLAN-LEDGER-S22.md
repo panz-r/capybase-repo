@@ -5399,3 +5399,27 @@ with journal evidence.
 
 **S27-EXTENDED FINAL: 17 conversions + 1 NEAR + 1 first-PASS-repeat +
 2 GATE_UNAVAILABLE reclassifications.** All leads closed.
+
+### S27-EXTEND-2 (2026-09-02, through 06f3836) — the last loose leads
+
+- **Offline-env leak FIXED** (5d5535c): CARGO_NET_OFFLINE/RUSTFLAGS
+  were set process-wide by the first vendored case, leaking into every
+  later rust case — a cold-cache non-vendored case would fail cargo
+  resolution offline and era-exit falsely (0008's sibling hazard,
+  latent in every multi-dataset rust run). Now scoped per-case,
+  restored in run_case's finally.
+- **The era floor VALIDATED as genuine** under the corrected worktree
+  dir: the 7 sea-orm members' probes carry real API-drift signatures
+  (E0432 unresolved imports, E0412 missing types — errors PAST
+  dependency resolution, so the vendoring completed and the code
+  genuinely doesn't compile under the 0.18.2-pin era). fmt-0003 also
+  holds. **Floor stands at 9 — no quota artifacts in it.**
+- **Eval _c_builds promotion alignment** (06f3836): the verdict-side
+  build check had NO promotion excuse — eval-stricter-than-session
+  would misgrade accepted merges as not-compiling (blocking PASS).
+  Same curated categories now excused on both sides. Realworld-
+  conflicts suite: 2069 passed / 0 failed.
+
+S27 + extensions final: **17 conversions + 1 NEAR + 1 first-PASS-
+repeat + 2 GATE_UNAVAILABLE reclassifications; floor validated at 9;
+three gate layers under one promotion doctrine; suite green.**
