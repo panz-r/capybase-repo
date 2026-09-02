@@ -12578,6 +12578,29 @@ class Orchestrator:
                 spliced = _resolved_buffer(original, accepted)
             except Exception:  # noqa: BLE001
                 return None
+            # S27-extend (sqlite-0128): a whole-file unit's accepted text IS
+            # the file (_resolved_buffer takes it verbatim). When the file
+            # exceeds what the model can emit in one output, the re-resolve
+            # can only return a REGION FRAGMENT — which gets written as the
+            # entire file and left in the worktree on escalation (0128's
+            # final state: a 6163-line file reduced to a fragment starting
+            # mid-function, sim 0.003). Decline the model re-resolve when
+            # the spliced file is beyond the output window; the escalation
+            # then leaves the pre-repair (splice-shaped) state instead.
+            _wf_max_out = int(getattr(
+                self.config.model, "max_tokens", 8192) or 8192)
+            _wf_est_out = len(spliced) // 4  # ~4 chars/token
+            if _wf_est_out > _wf_max_out * 0.9:
+                self.journal.emit(
+                    "whole_file_repair_skipped",
+                    {"reason": (
+                        f"file beyond model output window "
+                        f"(~{_wf_est_out}t > {_wf_max_out}t) — re-resolve "
+                        f"would emit a fragment as the file"),
+                     "path": path},
+                    step_index=self.step, path=path,
+                )
+                return None
             wf_unit = unit.model_copy(
                 update={"marker_span": None, "unit_kind": "whole_file"}
             )
