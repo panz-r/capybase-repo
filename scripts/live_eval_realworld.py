@@ -1600,7 +1600,38 @@ def _oracle_builds(repo: Path, case: Case, crate_source: Path | None) -> bool | 
                 return None
             new = compute_diagnostic_delta(
                 list(baseline.errors), list(oracle.errors))
-            return len(new) == 0
+            if new:
+                return False
+            # D10-rust (s27): the diagnostic-delta probe says "no new
+            # errors", but the resolver's ACTUAL gate is cargo check's
+            # new-error delta. axum-0019: the tree's file at merge_sha
+            # is byte-identical to the oracle; cargo check fails it
+            # identically on all three texts — a sim-1.0 merge rejected
+            # by a gate the oracle shares. Run the real gate on the
+            # oracle text; errors in the conflict file mean False.
+            from pathlib import Path as _P
+            _tcl = repo / case.path
+            _saved_tcl = _tcl.read_bytes() if _tcl.exists() else None
+            try:
+                _tcl.write_text(case.expected_resolved)
+                _oc = _run_shell_tree("cargo check", cwd=str(repo), timeout=600)
+                if _oc.returncode != 0:
+                    _out = (_oc.stderr or "") + (_oc.stdout or "")
+                    import re as _re_d10r
+                    _stem = _P(case.path).stem
+                    _hit = any(
+                        _re_d10r.search(
+                            rf"\b{_re_d10r.escape(_stem)}\.rs\b", ln)
+                        and "error" in ln.lower()
+                        for ln in _out.splitlines())
+                    if _hit:
+                        return False
+                return True
+            except Exception:  # noqa: BLE001 — probe is best-effort
+                return None
+            finally:
+                if _saved_tcl is not None:
+                    _tcl.write_bytes(_saved_tcl)
         return None
     except Exception:  # noqa: BLE001 — best-effort probe
         return None
