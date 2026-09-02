@@ -5892,6 +5892,45 @@ violation, escalate to the user before implementing.
 5. **Never probe ad-hoc URLs / never guess endpoints.** Endpoint
    resolution is exclusively via provider configs (pre-existing rule,
    restated for completeness).
+6. **STRICT validation — not passed → FAIL; passed but INVALID →
+   FAIL.** No silent degradation anywhere in the settings chain.
+   `PromptProfile.from_dict` raises on invalid/unknown axes (named
+   message); `ModelProfile.load` raises on a present-but-invalid file
+   (only absence returns None → the entry points then fail); the
+   prompt section is REQUIRED; `resolve_provider` wraps errors as
+   `ProviderError("INVALID: <detail>")`; `apply_to_config` propagates
+   (no swallow). Clear error messages naming the axis, the bad value,
+   the valid options, and the fix (`capybase calibrate`).
+7. **If a calibrated profile does not work with the model it was
+   created for, that is a BUG IN THE CALIBRATION — fix the
+   calibration, never work around it in code.** A workaround tuned to
+   one model's symptom will fail on a different model; the defect
+   stays and the workaround rots. The profile is empirical knowledge
+   (the calibrate command tested the prompt layouts and stored what
+   works best FOR THIS SPECIFIC MODEL). Circumventing it discards
+   that information and gives WORSE results on the model it was made
+   for. And hard-coding a choice for one model in code sabotages
+   every other model: any constant that should have been a profile
+   axis is architecture damage. The ONLY correct responses to a
+   profile/model mismatch are (a) fix the calibration data
+   (re-run/repair `capybase calibrate`), or (b) add a NEW calibrated
+   axis so every model gets its own measured choice. Never (c) edit
+   the profile to match whatever the code happened to be doing
+   (that is inverting the architecture — the e2b/json_v6 incident:
+   "aligning" the profile to the uncalibrated leak treated the bug as
+   the baseline and the calibration as the error), and never (d) special-case
+   the model in code.
+
+**Why this section exists, in one paragraph:** the calibration
+profile is the mechanism by which capybase adapts to a model — it
+ENCODES measured facts (this model parses markdown fences reliably;
+that one needs JSON escaping; this one wants instructions on top).
+Every workaround bypasses those facts and every hard-coded choice
+removes a decision from the profile where other models could have
+their own answer. The architecture is: calibrate once per model,
+pass it explicitly everywhere, trust it completely, fix it when it's
+wrong. Anything else is sabotage of future models' performance
+dressed up as a fix for today's symptom.
 
 Rationale: sprint-26/27 found two instances of "architecture decay by
 accretion" — the ambient repo-local profile silently shadowing the
