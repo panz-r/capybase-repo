@@ -5423,3 +5423,25 @@ with journal evidence.
 S27 + extensions final: **17 conversions + 1 NEAR + 1 first-PASS-
 repeat + 2 GATE_UNAVAILABLE reclassifications; floor validated at 9;
 three gate layers under one promotion doctrine; suite green.**
+
+### S27-EXTEND-3 (2026-09-02, ba23f27) — the fragment bug + final never-rerun sweep
+
+- **Fragment-as-file bug FIXED** (ba23f27): sqlite-0128 traced to the
+  whole-file model re-resolve on a 6163-line file — the model can only
+  emit a region FRAGMENT, which for a marker_span=None unit IS the
+  file: written verbatim and left in the worktree on escalation (final
+  state started mid-function, compiled, sim 0.003). The re-resolve now
+  declines beyond ~90% of the output window.
+- **True never-rerun sweep** (8 cases under current code, corrected
+  worktree dir): **redis-0013 PASS 1.00** (18th), **redis-0040 PASS
+  1.00** (19th — the oracle-subjective coin-flip), **sqlite-0073 PASS
+  1.00** (20th — the "wrong-era member" case: the D11/F4/side-pick
+  stack converted what I'd dispositioned genuine — the lesson: a
+  diagnosis under OLD code is provisional), **sqlite-0128 PASS 0.95**
+  (21st — the fragment fix's first beneficiary). **sqlite-0039 →
+  GATE_UNAVAILABLE 1.00 ×3** (3rd honest reclass — the ccs_syntax loop
+  was gate-class under the D13 alignment). axum-0019 (1.00 seam),
+  sea-orm-0007 (0.91 loop), sqlite-0099 (0.78 pp-seam) hold genuine.
+
+**S27 + extensions: 21 conversions + 1 NEAR + 1 first-PASS-repeat + 3
+GATE_UNAVAILABLE reclassifications.** Projected next harvest: ~93% raw.
