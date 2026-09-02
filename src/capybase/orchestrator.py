@@ -16611,12 +16611,32 @@ class Orchestrator:
                 path, language, original, [],
                 repo_root=str(self.git.repo), whole_text=text,
                 pristine_side_texts=[text])
+            _probe_payload = {
+                "side": side, "passed": bool(val.passed),
+                "duration_s": round(_probe_time.monotonic() - _t0, 1),
+                "hard_failures": [
+                    f.message for f in val.hard_failures][:3]}
+            if not val.passed and language == "rust":
+                # S27-extend instrumentation: the in-session cargo env
+                # fails pristine sides that pass standalone (axum-0019 —
+                # offline reproduction exhausted including the full eval
+                # env). Capture the RAW cargo output + the cargo-relevant
+                # env subset so the delta is readable from the journal.
+                try:
+                    _diag = subprocess.run(
+                        ["cargo", "check", "--message-format=short"],
+                        cwd=str(self.git.repo),
+                        capture_output=True, text=True, timeout=300)
+                    _probe_payload["diag_rc"] = _diag.returncode
+                    _probe_payload["diag_tail"] = (
+                        (_diag.stderr or "")[-600:])
+                    _probe_payload["env"] = {
+                        k: v for k, v in os.environ.items()
+                        if k.startswith(("CARGO", "RUST", "CC", "PATH"))}
+                except Exception:  # noqa: BLE001 — diagnostic is best-effort
+                    pass
             self.journal.emit(
-                "whole_side_probe",
-                {"side": side, "passed": bool(val.passed),
-                 "duration_s": round(_probe_time.monotonic() - _t0, 1),
-                 "hard_failures": [
-                     f.message for f in val.hard_failures][:3]},
+                "whole_side_probe", _probe_payload,
                 step_index=self.step, path=path,
             )
             if val.passed:
