@@ -5784,3 +5784,50 @@ Projected next harvest: ~94% raw / ~95.5% P+W adj.
 
 **S27 closes at: 31 conversions + 1 NEAR + 1 first-PASS-repeat + 3
 reclassifications + 18 fixes.** Projected harvest: ~94.2% raw.
+
+### ARCHITECTURE AUDIT (2026-09-02, calibration-faithfulness)
+
+**The intended architecture**: prompt format/layout via the calibrated
+PromptProfile (10 axes); later presentation routes through the profile
+layer. Findings:
+
+**A. SPRINT-CAUSED (fixed now):**
+1. The D1 seam rule landed ONLY in _RESOLVE_RULES_JSON_V6 — layout
+   inconsistency (markdown_code profiles lost it). FIXED: added to
+   _RESOLVE_RULES_MD (both layouts verified carrying it).
+2. The v6 byte-identity invariant ("default profile renders the
+   pre-profile v6 strings verbatim") is BROKEN by the seam rule —
+   documented attribution-baseline change, not silently.
+
+**B. SPRINT-CAUSED (acceptable, documented):**
+3. B9 directive: appended to `rules` inside _resolve_prompt_parts —
+   rides the rules block through _compose_resolve_prompt → follows
+   the profile's position axis (verified BOTTOM + TOP_HEAVY). Env-
+   gated, off by default. Profile-faithful.
+4. D5c declaration guard: appended to the repair prompt's feedback
+   region — content-level (failure-derived, like feedback itself);
+   the repair prompt's LAYOUT is profile-driven (verified both
+   layouts render correctly with the guard).
+5. D7b caps (obligations, inventory directive): content truncation,
+   layout-neutral.
+
+**C. PRE-EXISTING gaps (NOT sprint-caused, flagged for decision):**
+6. `apply_to_config` (provider path) applies capability+quality but
+   NOT the named profile's PROMPT section — the prompt section only
+   reaches production via the repo-local ambient artifact
+   (.rebase-agent/memory/model_profile.json). The provider-named e2b
+   profile says markdown_code; the repo-local chat profile says
+   json_v6 — they disagree, and production follows the repo-local
+   one. The eval never wires calibration.model_profile_path (the
+   worktree lacks the file) → evals run the DEFAULT profile. By
+   luck the repo-local chat calibration also says json_v6, so
+   eval≈production today — but a markdown_code recalibration would
+   NOT reach evals, and would reach production only via the
+   repo-local copy.
+7. build_recovery_prompt + build_shattered_repair_prompt: hardcoded
+   layouts, no active_profile routing (s20/s25 vintage rescue paths).
+
+**D. What still works (verified):** profile round-trip, R5 retry
+ladder (variant tag #top), rule_emphasis FORMATTED rendering, repair
+prompt under both layouts, the orchestrator's set_active_profile
+activation with env overrides winning.
