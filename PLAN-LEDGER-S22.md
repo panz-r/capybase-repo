@@ -5548,3 +5548,23 @@ reclassifications + 12 bug fixes + the collapse rung + the cargo-
 state open lead (now better understood: sides/oracle pass standalone;
 only in-session merged buffers fail — the 0019 error was content, not
 cache).**
+
+### S27-EXTEND-7 trace complete (2026-09-02, ac0573c)
+
+- The collapse rung now tries every unit (ac0573c — attribution
+  independence). Unit-level test against the REAL x10 gate buffer:
+  unit 1 fires, producing both correct collapses. The rung is right.
+- **The residual blocker is environmental, not content**: the x10
+  journal shows whole_side_repair_declined/no_side_verifies — the
+  PRISTINE SIDES fail in-session cargo checks while passing
+  standalone (twice-verified rc=0). The collapse's verify_file hits
+  the same wall. The in-session cargo gate fails on correct content;
+  candidates: workspace feature-state from the baseline check, the
+  runner's write/restore dance interacting with cargo fingerprints,
+  or mtime-granularity staleness. NEXT SESSION: reproduce by running
+  the runner's exact check() sequence (blanked baseline → side) in
+  the materialized tree.
+
+S27 cumulative stands: 24 conversions + 1 NEAR + 1 first-PASS-repeat
++ 3 reclassifications + 13 fixes + the collapse rung (correct, blocked
+by the in-session cargo environment for 0019's class).
