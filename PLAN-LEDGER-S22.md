@@ -5489,3 +5489,29 @@ predating the CAPYBASE_WORKTREE_DIR fix): 4 suspects, all resolved:
 **S27 + extensions FINAL: 24 conversions + 1 NEAR + 1 first-PASS-
 repeat + 3 GATE_UNAVAILABLE reclassifications.** Every tainted result
 re-validated; every hold is genuine with clean-run evidence.
+
+### S27-EXTEND-6 (2026-09-02, 7b4b2bc + open lead) — axum-0019's full anatomy + a new open lead
+
+- **D10-rust** (7b4b2bc): the oracle probe now runs the REAL cargo
+  gate after the diagnostic-delta passes — conflict-file errors →
+  oracle_builds=False → GATE_UNAVAILABLE for sim>=0.95 escalations.
+  (Doctrinally correct regardless of 0019's outcome: the rust probe
+  was blind to the actual in-session gate.)
+- **axum-0019's anatomy, fully mapped**: the tree's host.rs at
+  merge_sha is byte-identical to BOTH the current side AND the oracle.
+  Standalone cargo check on the oracle text: **rc=0, zero errors**
+  (verified twice, fresh target dir). Yet the in-session side probes
+  fail in 0.3s with 'prefix `item` is unknown' (a rustc macro-path
+  error). The runner (adapters/lsp.py) writes-then-checks in the
+  SHARED worktree target/ — incremental state persists across
+  baseline/after/probe invocations.
+- **OPEN LEAD (for the harvest)**: in-session cargo probes on heavy-
+  macro crates can fail with cached/incremental state that a clean
+  build does not reproduce. Candidate mitigations: per-gate CARGO_
+  TARGET_DIR isolation (cost: full rebuilds) or a double-check to
+  absorb stale state. axum-0019 stays ESCALATE — the model's merge is
+  oracle-identical and the gate rejects it on state the oracle itself
+  would clear.
+
+sqlite-0108/0111 batch still in flight alongside; results recorded
+when complete.
