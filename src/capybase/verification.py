@@ -2839,12 +2839,15 @@ def _try_repair_string_literal(
     if not text:
         return None
     _rust = (language or "").lower() in ("rust",)
-    # Masked parity only for the c-family (where the comment-apostrophe
-    # false positive lives). The generic masker (language=None) treats a
-    # broken char literal as a string and MASKS it — hiding the defect the
-    # repair exists to fix (test_unterminated_char_literal_fixed); python
-    # prose has no char literals to repair anyway.
-    _use_masked = (language or "").lower() in ("c", "cpp", "c++")
+    # Masked parity for c-family AND rust (both maskers are
+    # language-aware and handle char-literal-with-quote correctly: rust's
+    # `'"'` masks as a unit — raw parity counted its inner double-quote
+    # and the repair appended a stray `"` to PRISTINE axum-0019 sides).
+    # The generic masker (language=None) treats a broken char literal as
+    # a string and MASKS it — hiding the defect the repair exists to fix
+    # (test_unterminated_char_literal_fixed); python prose has no char
+    # literals to repair anyway.
+    _use_masked = (language or "").lower() in ("c", "cpp", "c++", "rust")
     _masked_lines = (
         _mask_strings_and_comments(text, language).split("\n")
         if _use_masked else text.split("\n"))
@@ -5258,7 +5261,19 @@ class VerificationEngine:
         # The divergence line is recorded in detail for attribution + feedback.
         # Reported under the "syntax" validator name (it IS a syntax error) so
         # the existing test assertions and the risk/retry path treat it uniformly.
-        if language in ("rust", "python", "c", "cpp", "c++") and self.config.require_syntax_if_supported:
+        # F2b-ordered (s27-extend): the pristine exemption must precede ANY
+        # repair mutation. Previously the repairs ran first and the exemption
+        # only cleared the failure — but `whole` was already corrupted, so
+        # the syntax check ran on repaired-garbage and failed (axum-0019:
+        # the literal repair appended a stray quote to a PRISTINE side,
+        # "coherence repair applied without compiler verification", and the
+        # whole-side probes declined a compiling side).
+        _pristine_imbalanced = bool(pristine_side_texts) and any(
+            _brace_imbalance_line(t, language) is not None
+            for t in pristine_side_texts)
+        if (language in ("rust", "python", "c", "cpp", "c++")
+                and self.config.require_syntax_if_supported
+                and not _pristine_imbalanced):
             imbalance_line = _brace_imbalance_line(whole, language)
             if imbalance_line is not None:
                 # Sprint-21 coherence-repair rung: before failing, attempt the
