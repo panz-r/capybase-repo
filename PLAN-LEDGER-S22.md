@@ -5854,3 +5854,47 @@ the default). Spot batch under the calibrated layout: sqlite-0004
 PASS 1.00, redis-0004 PASS 1.00 — the markdown layout works end-to-
 end with the full sprint-27 stack (the seam rule has MD parity from
 the audit fix).
+
+---
+
+## CONSTRAINTS (architecture invariants — 2026-09-02, user directive)
+
+These are standing rules. A change that violates any of them is a bug
+regardless of what it fixes. If a sprint task seems to require a
+violation, escalate to the user before implementing.
+
+1. **capybase must NOT run without being passed a profile.** There is
+   NO default profile and NO profile discovery from the repo or the
+   workspace. Settings are passed EXPLICITLY at launch: for an eval,
+   the harness resolves the provider config and passes it INTO the
+   script and then into capybase (`--provider NAME` →
+   `resolve_provider` → `apply_to_config`). Applies to ALL settings —
+   provider, endpoint, model, and the calibration profiles for prompt
+   AND embeddings. A launch without a resolution is an error that
+   exits, never a guess, never a fallback, never an auto-create.
+2. **The provider-named profile is COMPLETE and the only path.**
+   Capability, quality, prompt (PromptProfile via set_active_profile),
+   and safety (PolicyConfig overlay) all flow from the one named
+   profile through apply_to_config. No section is silently skipped; no
+   secondary ambient artifact overrides or shadows it.
+3. **No ambient/repo-local calibration.**
+   `calibration.model_profile_path` defaults to "" — an empty path
+   means "no ambient overlay", not "search somewhere". The historical
+   `.rebase-agent/memory/model_profile.json` ambient load is removed;
+   do not reintroduce it.
+4. **Prompt presentation follows the calibration profile.** Layout,
+   framing, position, and emphasis axes come from the calibrated
+   PromptProfile. Any new prompt content (rules, directives, guards)
+   must carry LAYOUT PARITY (both json_v6 and markdown_code) and ride
+   the profile-driven composition (as the B9 directive and D5c guard
+   do). A prompt change that only edits one layout's constants is a
+   bug.
+5. **Never probe ad-hoc URLs / never guess endpoints.** Endpoint
+   resolution is exclusively via provider configs (pre-existing rule,
+   restated for completeness).
+
+Rationale: sprint-26/27 found two instances of "architecture decay by
+accretion" — the ambient repo-local profile silently shadowing the
+provider's prompt calibration (evals ran the default layout for every
+harvest), and a prompt rule landing in one layout only. Both were
+silent because nothing defined the invariant. This section does.
