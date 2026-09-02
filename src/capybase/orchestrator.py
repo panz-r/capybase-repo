@@ -12202,6 +12202,55 @@ class Orchestrator:
                             step_index=self.step, path=path,
                         )
         if not skip_deterministic:
+            # F4-HOISTED (s27-extend-12): the side-pick runs FIRST in the
+            # beam. Its old position (after the attribution logic) was
+            # shadowed for pp-class failures — the nearest-preceding-unit
+            # attribution jumped straight to the model re-resolve and
+            # returned before the deterministic rungs ran (sqlite-0099's
+            # trace). A verifying side is the cheapest correct answer;
+            # everything else (model included) costs more.
+            if f"sidepick:{_sig}" not in _tried:
+                _tried.add(f"sidepick:{_sig}")
+                try:
+                    for _sp_side, _sp_cands in _whole_file_side_candidates(units):
+                        _sp_spans = [
+                            (u.marker_span, c.resolved_text)
+                            for u, c in _sp_cands]
+                        _sp_val = self.verification.verify_file(
+                            path, language, original, _sp_spans,
+                            repo_root=str(self.git.repo),
+                            whole_text=_resolved_buffer(original, _sp_cands),
+                            pristine_side_texts=(
+                                [t for t in (self._micro_stage_sides(path)[0]
+                                 or {}).values() if t.strip()] or None),
+                        )
+                        self._journal_validation(
+                            _sp_cands[0][0], _sp_cands[0][1], _sp_val)
+                        if _sp_val.passed:
+                            _sp_unit = _sp_cands[0][0].model_copy(
+                                update={"marker_span": None,
+                                        "unit_kind": "whole_file"})
+                            _sp_cand = _sp_cands[0][1].model_copy(
+                                update={
+                                    "candidate_id": (
+                                        _sp_cands[0][1].candidate_id
+                                        + f":sidepick-{_sp_side}"),
+                                    "prompt_version": "deterministic_side_pick",
+                                    "provenance": "deterministic_structural",
+                                    "self_reported_confidence": 0.7,
+                                    "explanation": (
+                                        f"F4 side-pick: merged splice "
+                                        f"failed the gate; the {_sp_side} "
+                                        f"splice verifies"),
+                                })
+                            self.journal.emit(
+                                "side_pick_applied",
+                                {"side": _sp_side, "path": path,
+                                 "sig": _sig[:60], "hoisted": True},
+                                step_index=self.step, path=path)
+                            return [(_sp_unit, _sp_cand)]
+                except Exception:  # noqa: BLE001 — side-pick is best-effort
+                    pass
             # Storage-class relocation repair (s24 cycle-J, the C1b-promotion
             # item from the reviewer synthesis): gcc's "invalid storage class
             # for function X" means the model's merge declared X inside a
