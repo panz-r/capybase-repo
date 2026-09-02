@@ -5515,3 +5515,15 @@ re-validated; every hold is genuine with clean-run evidence.
 
 sqlite-0108/0111 batch still in flight alongside; results recorded
 when complete.
+
+### S27-EXTEND-6 final (2026-09-02)
+
+sqlite-0108/0111 rerun under the full current stack (clean worktree
+dir): both hold ESCALATE at sim 1.00 with oracle_builds=True — the
+genuine seam class confirmed twice more. The select.c merges carry an
+extra closer the model reproduces every round; the gate is fair (the
+oracle passes it). These are the canonical D1-design specimens.
+
+**S27 + extensions (through extend-6): 24 conversions + 1 NEAR + 1
+first-PASS-repeat + 3 GATE_UNAVAILABLE reclassifications + 11 bug
+fixes + 1 documented open lead (in-session cargo state poisoning).**
