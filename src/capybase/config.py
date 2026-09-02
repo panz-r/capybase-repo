@@ -1315,8 +1315,9 @@ def _relocate_calibration_paths(cfg: "Config", config_dir: Path) -> None:
     other value (an absolute path, or a different relative path) is a deliberate
     override and is left untouched.
     """
-    if cfg.calibration.model_profile_path == _REPO_DEFAULT_PROFILE_PATH:
-        cfg.calibration.model_profile_path = str(config_dir / _PROFILE_FILENAME)
+    # CONSTRAINTS #3: no remap, no discovery. The legacy repo-relative
+    # default is left untouched (explicit is explicit); the default is ""
+    # and nothing rewrites it.
     if cfg.calibration.model_path == _REPO_DEFAULT_CALIBRATION_PATH:
         cfg.calibration.model_path = str(config_dir / _CALIBRATION_FILENAME)
 

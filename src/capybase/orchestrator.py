@@ -4318,68 +4318,13 @@ def _extract_alternates(
 
 
 def _apply_model_profile(config: Config, repo_root: Path, journal: Journal) -> Config:
-    """Overlay the calibrated model profile onto ``config.model`` if present.
-
-    "Profile wins": the profile's tuned knobs override the [model] settings, but
-    ONLY when its model name matches. Returns ``config`` unchanged (and journals
-    nothing) when no profile exists or the names mismatch — so a repo without a
-    profile behaves exactly as before. The overlay touches only the four tuned
-    knobs; every other field keeps its value. Capability flags
-    (``enable_embedding_rag``, ``embedding_min_similarity``) follow the SAME
-    name-match gate — a profile fit for another model never leaks them through.
+    """Deprecated shim — the provider path (apply_to_config) is the ONLY
+    calibration source (CONSTRAINTS #2/#3). Kept as a no-op so the init
+    call site and any external callers stay stable; it never loads a
+    profile, never applies one, and never warns. Remove at the next
+    interface cleanup.
     """
-    profile_path = config.calibration.model_profile_path
-    if not profile_path:
-        # No ambient calibration (by design): the provider-named profile via
-        # apply_to_config is the canonical source. Nothing to overlay here.
-        return config
-    resolved = Path(profile_path)
-    if not resolved.is_absolute():
-        resolved = repo_root / profile_path
-    try:
-        from capybase.calibration_profile import ModelProfile, apply_profile
-
-        profile = ModelProfile.load(resolved)
-    except Exception:  # noqa: BLE001 - never crash on a bad artifact path/config
-        return config
-    if profile is None:
-        return config
-    # The name match is the gate for EVERYTHING the profile carries — tuned
-    # knobs AND capability flags. ``apply_profile`` would warn + no-op on a
-    # mismatch, but we re-check here FIRST so capability flags don't leak
-    # through when ``overridden`` is empty merely because no ModelConfig knob
-    # differed. Nudge the user to recalibrate, then leave config untouched.
-    if profile.model != config.model.model:
-        warnings.warn(
-            f"Model profile is for {profile.model!r} but active model is "
-            f"{config.model.model!r}; ignoring the profile. Run "
-            f"`capybase recalibrate` to fit it for the current model.",
-            stacklevel=2,
-        )
-        return config
-    new_model, overridden = apply_profile(config.model, profile)
-    if overridden:
-        journal.emit(
-            "model_profile_applied",
-            {
-                "model": profile.model,
-                "overridden_knobs": overridden,
-                "profile_path": str(resolved),
-            },
-        )
-        config = config.model_copy(update={"model": new_model})
-    # Capability flags (e.g. embedding RAG, the calibrated floor) apply even when
-    # no ModelConfig knob changed — but only after the name match above passed.
-    config = _apply_profile_capability_flags(config, profile)
-    # Prompt-rendering profile: applies the calibrated PromptProfile section as
-    # the process-wide active profile. Env override wins (see _apply_prompt_profile).
-    _apply_prompt_profile(profile)
-    # Safety profile: overlays calibrated retry budgets + escalation thresholds
-    # onto PolicyConfig so retry/escalation policy is per-model rather than
-    # config-only (feedback §2.1). Only applies when the section is non-default.
-    config = _apply_safety_profile(config, profile)
     return config
-
 
 def _apply_safety_profile(config: Config, profile: "object") -> Config:
     """Overlay the profile's safety section onto PolicyConfig.
