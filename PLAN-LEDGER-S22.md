@@ -5710,3 +5710,28 @@ feeding D1's design.
 
 **S27 cumulative: 26 conversions + 1 NEAR + 1 first-PASS-repeat + 3
 reclassifications + 17 fixes.** Projected next harvest: ~93.5% raw.
+
+### S27-EXTEND-14 (2026-09-02) — D1's design note, now with measured evidence
+
+sqlite-0108's seam problem, precisely characterized (the P6b-beam idea
+tested and declined with cause):
+- The stored gate buffers show N=2-5 unclosed opens per round; the
+  balancer APPENDS closers (fires, "coherence repair applied") but the
+  result doesn't compile — the closers must sit at seam positions, not
+  EOF.
+- Per-region measurement: the ORACLE's region 0 content carries Δ+2
+  (constructs opened inside the region, closed AFTER it — spanning the
+  boundary) and region 1 Δ-1; BOTH SIDES' region contents are Δ0. Our
+  model merges produce Δ0+Δ0 = 0 where the file needs +1. **Per-unit
+  side selection cannot fix this** — neither side carries the oracle's
+  cross-boundary opens. Only a weave that opens constructs across the
+  seam does.
+- D1's design requirement is now exact: the resolver needs either
+  (a) a prompt contract that regions MAY leave constructs open (the
+  file-level gate checks balance — the model is currently pushed
+  toward self-balanced fragments), or (b) seam-aware assembly that
+  grafts the deficit closers at measured positions. (a) is one prompt
+  line + validation; the honest first experiment for sprint-28.
+
+S27 cumulative: 26 conversions + 1 NEAR + 1 first-PASS-repeat + 3
+reclassifications + 17 fixes + D1's measured design note.
