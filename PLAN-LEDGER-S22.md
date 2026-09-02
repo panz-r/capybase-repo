@@ -5618,3 +5618,26 @@ only protects them going forward.
 **The signature class is fully dispositioned.** S27 cumulative: 25
 conversions + 1 NEAR + 1 first-PASS-repeat + 3 reclassifications + 15
 bug fixes + the collapse rung + live-probe instrumentation.
+
+### S27-EXTEND-10 (2026-09-02, 55fbd17) — python parity + the 0040 lead scoped
+
+- **Python joins masked literal parity** (55fbd17): '# don't do this'
+  comments corrupted via raw parity (rare only because the exactly-one-
+  bad-line condition declines multi-apostrophe files). The python
+  repair becomes mostly inert under masking — the safe direction.
+  C-family and rust already masked; harvest python sweep showed ZERO
+  corruption signatures in practice (the decline condition was
+  protecting us).
+- **sqlite-0040 scoped** (sim 0.015 terminal state): the deterministic
+  PREPROCESSOR repair path mints a whole-file unit whose final state
+  lacks the tcl includes ('Tcl_Interp unknown at line 13' ×5 rounds —
+  the pp repair's #endif edit disabled the include block). The
+  oracle-splice itself carries a pp imbalance (line 3730) that
+  _try_balance_preprocessor DECLINES to fix — so the pp path should
+  not have landed anything... yet rounds 3-5 show 'coherence repair
+  applied'. The pp-repair's minted text needs the same fragment guard
+  as ba23f27 (whole-file unit texts must be full buffers). Scoped for
+  the next pass; 0040 stays ESC.
+
+S27 cumulative: 25 conversions + 1 NEAR + 1 first-PASS-repeat + 3
+reclassifications + 16 bug fixes.
