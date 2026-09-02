@@ -5831,3 +5831,26 @@ layer. Findings:
 ladder (variant tag #top), rule_emphasis FORMATTED rendering, repair
 prompt under both layouts, the orchestrator's set_active_profile
 activation with env overrides winning.
+
+### ARCHITECTURE ENFORCEMENT (2026-09-02, cb060f6) — calibration required, provider-named, complete
+
+Per the user's decision: **there is no default calibration profile. Never
+repo-local. Not passing one is an error that exits capybase.**
+
+- `apply_to_config` (the provider path) applies the COMPLETE profile:
+  capability+quality (as before) + the PROMPT section via
+  set_active_profile (calibrate's env-override axes still win) + the
+  safety section onto PolicyConfig. One canonical source.
+- `calibration.model_profile_path` defaults to "" — the repo-local
+  ambient path is GONE; the orchestrator skips overlay when empty.
+- CLI resolution commands resolve --provider / CAPYBASE_PROVIDER and
+  exit(2) with fix instructions without one; calibrate writes to the
+  config-dir artifact.
+- config-dir tests updated to the no-ambient contract.
+
+**E2E verified live**: the eval now runs under the CALIBRATED
+markdown_code layout (e2b profile — previously silently json_v6 via
+the default). Spot batch under the calibrated layout: sqlite-0004
+PASS 1.00, redis-0004 PASS 1.00 — the markdown layout works end-to-
+end with the full sprint-27 stack (the seam rule has MD parity from
+the audit fix).
