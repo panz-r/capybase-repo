@@ -16623,7 +16623,9 @@ class Orchestrator:
                 # env). Capture the RAW cargo output + the cargo-relevant
                 # env subset so the delta is readable from the journal.
                 try:
-                    _diag = subprocess.run(
+                    import subprocess as _sp_diag
+                    import os as _os_diag
+                    _diag = _sp_diag.run(
                         ["cargo", "check", "--message-format=short"],
                         cwd=str(self.git.repo),
                         capture_output=True, text=True, timeout=300)
@@ -16631,7 +16633,7 @@ class Orchestrator:
                     _probe_payload["diag_tail"] = (
                         (_diag.stderr or "")[-600:])
                     _probe_payload["env"] = {
-                        k: v for k, v in os.environ.items()
+                        k: v for k, v in _os_diag.environ.items()
                         if k.startswith(("CARGO", "RUST", "CC", "PATH"))}
                 except Exception:  # noqa: BLE001 — diagnostic is best-effort
                     pass
