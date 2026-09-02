@@ -2847,7 +2847,8 @@ def _try_repair_string_literal(
     # a string and MASKS it — hiding the defect the repair exists to fix
     # (test_unterminated_char_literal_fixed); python prose has no char
     # literals to repair anyway.
-    _use_masked = (language or "").lower() in ("c", "cpp", "c++", "rust")
+    _use_masked = (language or "").lower() in (
+        "c", "cpp", "c++", "rust", "python")
     _masked_lines = (
         _mask_strings_and_comments(text, language).split("\n")
         if _use_masked else text.split("\n"))
