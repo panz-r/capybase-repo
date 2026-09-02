@@ -5602,3 +5602,19 @@ side-probe fixes together clear the whole class.
 **S27 cumulative: 25 conversions + 1 NEAR + 1 first-PASS-repeat + 3
 GATE_UNAVAILABLE reclassifications + 15 bug fixes.** Every open lead
 from the sprint's own ledger is now closed.
+
+### S27-EXTEND-9 (2026-09-02) — corruption-signature audit complete
+
+Swept the harvest for the rust literal-repair corruption's journal
+signature ("coherence repair applied without compiler verification"):
+5 cases total. axum-0019 converted (extend-8). sea-orm-0027 rerun
+WITH the fix: ORACLE_DIVERGENT 0.68 3/3 — its divergence is NOT
+corruption-driven (the repair fired but the verdict tracks a real
+content gap; honest divergent, final disposition). The three
+PASS-with-signature cases (sea-orm-0004 0.975, tokio-0117 1.0,
+sea-orm-0020 1.0) survived the corruption — no action needed; the fix
+only protects them going forward.
+
+**The signature class is fully dispositioned.** S27 cumulative: 25
+conversions + 1 NEAR + 1 first-PASS-repeat + 3 reclassifications + 15
+bug fixes + the collapse rung + live-probe instrumentation.
