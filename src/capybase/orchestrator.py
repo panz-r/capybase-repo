@@ -4329,6 +4329,10 @@ def _apply_model_profile(config: Config, repo_root: Path, journal: Journal) -> C
     name-match gate — a profile fit for another model never leaks them through.
     """
     profile_path = config.calibration.model_profile_path
+    if not profile_path:
+        # No ambient calibration (by design): the provider-named profile via
+        # apply_to_config is the canonical source. Nothing to overlay here.
+        return config
     resolved = Path(profile_path)
     if not resolved.is_absolute():
         resolved = repo_root / profile_path

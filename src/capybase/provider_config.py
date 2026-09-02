@@ -331,4 +331,34 @@ def apply_to_config(
     cfg.model, overridden = apply_profile(
         cfg.model, resolved.profile, force=force_profile
     )
+    # The provider-named profile is the COMPLETE calibration: its prompt
+    # section becomes the process-wide active PromptProfile (the eval/live
+    # prompt layout follows the calibration; no repo-local ambient path).
+    # Explicit env overrides still win (the calibrate A/B axes).
+    _env_axes = (
+        "CAPYBASE_PROMPT_LAYOUT", "CAPYBASE_PROMPT_HISTORY",
+        "CAPYBASE_PROMPT_POSITION", "CAPYBASE_PROMPT_OUTLINE",
+        "CAPYBASE_PROMPT_EXAMPLES", "CAPYBASE_PROMPT_VARIANT",
+    )
+    if not any(os.environ.get(_v, "").strip() for _v in _env_axes):
+        try:
+            from capybase.prompt_profile import set_active_profile
+            set_active_profile(resolved.profile.prompt.profile)
+        except Exception:  # noqa: BLE001 — advisory; never break resolution
+            pass
+    # Safety section: calibrated retry budgets + escalation thresholds onto
+    # PolicyConfig (per-model policy, not config-only).
+    _safety = getattr(resolved.profile, "safety", None)
+    if _safety is not None and not _safety.is_default:
+        cfg.policy.max_retries_per_unit = _safety.max_retries_per_unit
+        cfg.policy.max_critic_retries_per_unit = (
+            _safety.max_critic_retries_per_unit)
+        cfg.policy.max_recovery_retries_per_unit = (
+            _safety.max_recovery_retries_per_unit)
+        cfg.policy.critic_confidence_escalate_threshold = (
+            _safety.critic_confidence_escalate_threshold)
+        overridden = list(overridden) + [
+            "safety.max_retries_per_unit",
+            "safety.max_recovery_retries_per_unit",
+        ]
     return cfg, overridden

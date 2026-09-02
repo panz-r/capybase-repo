@@ -1128,7 +1128,11 @@ class CalibrationConfig(BaseModel):
     # tuned knobs (max_tokens, json_mode, capture_token_entropy,
     # generation_timeout_seconds) override the [model] settings at runtime —
     # "Profile wins". Inert when absent/mismatched/corrupt (never crashes).
-    model_profile_path: str = ".rebase-agent/memory/model_profile.json"
+    # Empty by default: there is NO ambient calibration. The provider-named
+    # profile (apply_to_config) is the canonical source; a live run without
+    # one is an error at the entry points. An explicit non-empty path is a
+    # deliberate override (tests, experiments) — never repo-local by default.
+    model_profile_path: str = ""
     escalate_threshold: float = 0.7
     min_examples_for_calibration: int = 50
     # Consensus entropy above this → escalate (high-entropy splits mean no

@@ -67,7 +67,7 @@ def test_calibration_paths_resolve_to_config_dir(tmp_path, monkeypatch):
     repo.mkdir()
     monkeypatch.chdir(repo)
     cfg = Config.load(config_dir=cdir)
-    assert cfg.calibration.model_profile_path == str(cdir / "model_profile.json")
+    assert cfg.calibration.model_profile_path == ""  # no ambient default (arch decision)
     assert cfg.calibration.model_path == str(cdir / "calibration.json")
 
 
@@ -112,9 +112,7 @@ def test_explicit_path_file_still_works(tmp_path, monkeypatch):
     # Calibration paths still relocate to the default config dir even when a
     # file path is given directly (the relocation is independent of how the toml
     # was found).
-    assert cfg.calibration.model_profile_path == str(
-        default_config_dir() / "model_profile.json"
-    )
+    assert cfg.calibration.model_profile_path == ""  # no ambient default
 
 
 def test_xdg_config_home_respected(tmp_path, monkeypatch):
@@ -143,7 +141,7 @@ def test_defaults_when_nothing_present(tmp_path, monkeypatch):
     assert cfg.model.model == "vibethink"  # built-in default
     assert cfg.source_path is None
     # Calibration paths still point at the config dir (relocated defaults).
-    assert cfg.calibration.model_profile_path == str(cdir / "model_profile.json")
+    assert cfg.calibration.model_profile_path == ""  # no ambient default (arch decision)
 
 
 def test_config_dir_relative_path_expanded(tmp_path, monkeypatch):
@@ -156,9 +154,7 @@ def test_config_dir_relative_path_expanded(tmp_path, monkeypatch):
     monkeypatch.chdir(repo)
     # Pass a ~-relative dir; Config.load must expand it.
     cfg = Config.load(config_dir="~/myconfig")
-    assert cfg.calibration.model_profile_path == str(
-        (tmp_path / "myconfig" / "model_profile.json")
-    )
+    assert cfg.calibration.model_profile_path == ""  # no ambient default
 
 
 # ---------------------------------------------------------------------------

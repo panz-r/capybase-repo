@@ -107,6 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="disable the comment jury entirely for this run (shorthand for "
              "--jury-mode off)",
     )
+    p.add_argument(
+        "--provider", metavar="NAME", default=None,
+        help="provider config name under the providers dir (or an explicit "
+             ".json path); carries the endpoint AND the required calibration "
+             "profile (env: CAPYBASE_PROVIDER)",
+    )
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("inspect", help="detect conflicts and write a review bundle; no mutation")
@@ -906,10 +912,15 @@ def main(argv: list[str] | None = None) -> int:
         config.future.enable_shadow_jury = False  # explicit mode wins over legacy
 
     # The global --profile overrides the profile location for BOTH reading
-    # (run/inspect/manual: the orchestrator overlay loads it from here) and
-    # writing (calibrate writes it here). When unset, fall back to the config's
-    # [calibration] model_profile_path (which itself defaults to the memory dir).
-    profile_path = args.profile or config.calibration.model_profile_path
+    # (provider resolution / explicit path) and writing (calibrate writes it
+    # here). When unset, calibrate writes to the config-dir artifact (there
+    # is no repo-local ambient default anymore).
+    if args.profile:
+        profile_path = args.profile
+    elif args.command in ("calibrate", "recalibrate"):
+        profile_path = str(Path(args.config) / "model_profile.json")
+    else:
+        profile_path = config.calibration.model_profile_path
     if args.profile:
         config.calibration.model_profile_path = args.profile
 
@@ -955,6 +966,26 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "provider":
         return _run_provider(args)
 
+    # A calibration profile is REQUIRED for resolution runs — there is no
+    # default and no ambient fallback. The provider mechanism is the
+    # canonical source (endpoint + full calibration); refuse to start
+    # without one (same contract as the endpoint: never guess).
+    from capybase.provider_config import (
+        ProviderError, apply_to_config, resolve_provider,
+    )
+    try:
+        _resolved = resolve_provider(
+            provider=getattr(args, "provider", None))
+        config, _knobs = apply_to_config(config, _resolved)
+    except ProviderError as exc:
+        print(
+            f"capybase: error: {exc}\n"
+            "A calibration profile is required for resolution runs — there "
+            "is no default. Pass --provider NAME (see `capybase provider "
+            "list`) or set CAPYBASE_PROVIDER.",
+            file=sys.stderr,
+        )
+        return 2
     try:
         session = getattr(args, "session", None) or getattr(args, "resume", None)
         # Color: --color forces on, --no-color forces off, default auto-detects
