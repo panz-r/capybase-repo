@@ -5754,3 +5754,15 @@ A regression batch on solid cases follows.
 
 **S27 cumulative: 30 conversions + 1 NEAR + 1 first-PASS-repeat + 3
 reclassifications + 18 fixes.** Projected harvest: ~94% raw.
+
+### Regression batch: the D1 prompt line is CLEAN (2026-09-02)
+
+Six solid/known cases under the new prompt: 4/4 PASS cases hold PASS
+1.00 first-try (axum-0001, redis-0004, sqlite-0004, sqlite-0033);
+both NEAR band members hold their exact prior sims (tokio-0046 0.88,
+zenodo-0003 0.83, 3/3 stable). No retries, no drift, no regression.
+
+**S27 closes at: 30 conversions + 1 NEAR + 1 first-PASS-repeat + 3
+GATE_UNAVAILABLE reclassifications + 18 bug fixes + the seam-class
+prompt contract + full mechanism map + D1's measured design note.**
+Projected next harvest: ~94% raw / ~95.5% P+W adj.
