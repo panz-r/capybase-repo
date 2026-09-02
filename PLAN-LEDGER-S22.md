@@ -5568,3 +5568,13 @@ cache).**
 S27 cumulative stands: 24 conversions + 1 NEAR + 1 first-PASS-repeat
 + 3 reclassifications + 13 fixes + the collapse rung (correct, blocked
 by the in-session cargo environment for 0019's class).
+
+**Reproduction attempts exhausted offline**: the runner's exact
+check() sequence (blanked baseline → current side) on the materialized
+tree: both 0 errors. The 0019 in-session failure requires the live
+session's state. NEXT-SESSION PLAN: add probe instrumentation (journal
+the cargo command, env diff, and stderr head on every
+whole_side_probe failure), rerun 0019, read the delta. The 0.3-0.5s
+probe durations suggest an immediate failure (lock/manifest/env), not
+a real compile — but the parsed 'prefix item' error contradicts that,
+so only live instrumentation settles it.
