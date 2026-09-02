@@ -5578,3 +5578,27 @@ whole_side_probe failure), rerun 0019, read the delta. The 0.3-0.5s
 probe durations suggest an immediate failure (lock/manifest/env), not
 a real compile — but the parsed 'prefix item' error contradicts that,
 so only live instrumentation settles it.
+
+### S27-EXTEND-8 (2026-09-02) — axum-0019 PASS; the "cargo env" lead closed as a verification bug
+
+The live instrumentation nailed it: the diagnostic cargo check at the
+failing probe's exact moment returned rc=0 — cargo was never broken.
+Reproduced verify_file offline → **two coordinated bugs**:
+1. The literal repair's RAW parity counted the double-quote inside
+   rust's `'"'` char literal as unpaired → appended a stray quote to
+   PRISTINE side text ("coherence repair applied without compiler
+   verification" = the corruption's own journal signature, visible in
+   every 0019-era run). Rust now uses masked parity (the rust-aware
+   masker handles quote-in-char-literal correctly).
+2. The pristine exemption ran AFTER the repair ladder — `whole` was
+   already corrupted when the syntax check ran. The exemption now
+   precedes any mutation.
+
+**Validation: axum-history-0019 PASS sim 1.00 first try** — the 25th
+conversion. The "in-session cargo env" open lead is CLOSED (the
+environment was never broken); the alternation-collapse rung + the
+side-probe fixes together clear the whole class.
+
+**S27 cumulative: 25 conversions + 1 NEAR + 1 first-PASS-repeat + 3
+GATE_UNAVAILABLE reclassifications + 15 bug fixes.** Every open lead
+from the sprint's own ledger is now closed.
