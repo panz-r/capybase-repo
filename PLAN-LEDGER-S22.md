@@ -5735,3 +5735,22 @@ tested and declined with cause):
 
 S27 cumulative: 26 conversions + 1 NEAR + 1 first-PASS-repeat + 3
 reclassifications + 17 fixes + D1's measured design note.
+
+### S27-EXTEND-15 (2026-09-02) — THE SEAM CLASS FALLS: one prompt line
+
+**D1-experiment (a) validated: ALL FOUR seam cases PASS first try** —
+sqlite-0108 (1.00), 0111 (1.00), 0019 (1.00, re-confirms), 0029 (0.97,
+re-confirms). The prompt contract ("fragments need not be internally
+balanced — mirror the sides' boundary handling; the whole file is
+balance-checked later") solved the class the entire D1 design item was
+scoped around: the model was self-balancing fragments where the oracle
+carries cross-boundary opens. 0108/0111 — the two cases that held
+"genuine" through fourteen extensions — converted on the first model
+round.
+
+Regression risk is bounded by design: a wrongly-open fragment fails
+the whole-file gate and retries (more retries, never a wrong accept).
+A regression batch on solid cases follows.
+
+**S27 cumulative: 30 conversions + 1 NEAR + 1 first-PASS-repeat + 3
+reclassifications + 18 fixes.** Projected harvest: ~94% raw.
