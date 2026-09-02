@@ -12304,24 +12304,25 @@ class Orchestrator:
             if f"altcol:{_sig}" not in _tried:
                 _tried.add(f"altcol:{_sig}")
                 try:
-                    _ac_sides, _ = self._micro_stage_sides(path)
-                    _ac_frags = {
-                        "current": (accepted[fault_idx][0].current.text
-                                    if fault_idx < len(accepted) else ""),
-                        "replayed": (accepted[fault_idx][0].replayed.text
-                                     if fault_idx < len(accepted) else ""),
-                    }
-                    _ac_out = _try_alternation_collapse(
-                        accepted[fault_idx][0], accepted[fault_idx][1],
-                        _ac_frags or _ac_sides, None)
-                    if _ac_out:
+                    # The failing gate error (cargo/rustc) often carries no
+                    # file:line the attribution can trust — the alternation
+                    # may sit at ANY unit. Try every unit, not just the
+                    # attributed fault.
+                    for _ac_idx in range(len(accepted)):
+                        _acu0, _acc0 = accepted[_ac_idx]
+                        _ac_frags = {
+                            "current": _acu0.current.text or "",
+                            "replayed": _acu0.replayed.text or "",
+                        }
+                        _ac_out = _try_alternation_collapse(
+                            _acu0, _acc0, _ac_frags, None)
+                        if not _ac_out:
+                            continue
                         for _acu, _acc in _ac_out:
                             _ac_spans = [
-                                (u.marker_span, c.resolved_text
-                                 if (u, c) is not (accepted[fault_idx])
-                                 else _acc.resolved_text)
+                                (u.marker_span, c.resolved_text)
                                 for u, c in accepted]
-                            _ac_spans[fault_idx] = (
+                            _ac_spans[_ac_idx] = (
                                 _acu.marker_span, _acc.resolved_text)
                             _ac_val = self.verification.verify_file(
                                 path, language, original, _ac_spans,
@@ -12329,10 +12330,11 @@ class Orchestrator:
                             if _ac_val.passed:
                                 self.journal.emit(
                                     "alternation_collapse_applied",
-                                    {"path": path, "sig": _sig[:60]},
+                                    {"path": path, "unit": _acu.unit_id,
+                                     "sig": _sig[:60]},
                                     step_index=self.step, path=path)
                                 _ac_list = list(accepted)
-                                _ac_list[fault_idx] = (_acu, _acc)
+                                _ac_list[_ac_idx] = (_acu, _acc)
                                 return _ac_list
                 except Exception:  # noqa: BLE001 — collapse is best-effort
                     pass
