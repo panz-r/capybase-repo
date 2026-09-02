@@ -695,6 +695,26 @@ def _side_entity_split_points(side_text: str, language: str) -> list[int]:
         p for p in points
         if _prefix_delimiter_depths_zero(side_text, p)
     ]
+    # S27-extend (sea-orm-0011): never split between a doc comment /
+    # attribute run and the item it annotates. A point at the ITEM line
+    # sends the doc comment to the PREVIOUS fragment, whose spliced text
+    # then ends with a dangling doc comment — 'expected item after doc
+    # comment' on compile, the exact failure 0011's six error.rs units
+    # all died on. Walk each point backward over the comment/attribute
+    # run that precedes it so the run travels WITH its item.
+    lines = side_text.split("\n")
+    _attach = re.compile(r"^\s*(?://[/!].*|#[^!].*|/\*.*)?")
+    def _shift_before_annotations(pt: int) -> int:
+        j = pt
+        while j > 0:
+            prev = lines[j - 1].strip()
+            if (prev.startswith(("///", "//!", "//", "#[", "/*", "*", "#"))
+                    and not prev.startswith(("#!", "#else", "#endif", "#if"))):
+                j -= 1
+            else:
+                break
+        return j
+    points = sorted({ _shift_before_annotations(p) for p in points if p > 0 } or points)
     return points
 
 
