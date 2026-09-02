@@ -5918,3 +5918,22 @@ the prompt section — the exact collapse mode the audit found). The
 hardened version removes the loader outright: there is no conditional
 left to satisfy; the orchestrator CANNOT load a profile from a path at
 all. Explicitness is structural, not a flag.
+
+### CORRECTION (2026-09-02, user) — the e2b profile IS the real calibration
+
+I erred: I "aligned" the e2b profile's prompt.output_layout to json_v6,
+reasoning that the layout every validated run effectively used was the
+baseline worth preserving. That had it backwards — the json_v6 runs
+were running on the UNCALIBRATED default that leaked through the
+broken wiring (the provider's prompt section was silently dropped).
+The e2b profile in ~/.config/capybase/ IS the real calibration
+(written by `capybase calibrate` 2026-07-12; it A/B-tested layouts and
+picked markdown_code). RESTORED to markdown_code; the appended note
+removed. The spot-check under markdown_code already showed it works
+(sqlite-0004 / redis-0004 both PASS 1.00), and per the user: with the
+real calibration applied, results should IMPROVE, not regress — the
+pre-sprint numbers were achieved despite the worse effective profile.
+
+Consequence: the next harvest runs under the calibrated
+markdown_code for the first time — expected >= the json_v6 numbers,
+and any deltas attribute cleanly to the calibrated layout.
