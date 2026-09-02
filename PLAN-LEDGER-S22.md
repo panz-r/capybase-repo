@@ -5937,3 +5937,29 @@ pre-sprint numbers were achieved despite the worse effective profile.
 Consequence: the next harvest runs under the calibrated
 markdown_code for the first time — expected >= the json_v6 numbers,
 and any deltas attribute cleanly to the calibrated layout.
+
+### CONSTRAINTS §6 — STRICT VALIDATION (2026-09-02, user directive)
+
+"No workarounds, no improvised paths": not passed → FAIL with clear
+error; passed but INVALID → FAIL with clear error. Implemented:
+
+- `PromptProfile.from_dict`: invalid axis values RAISE ValueError
+  naming the axis, the bad value, and the valid options; UNKNOWN axis
+  names raise (a typo must not silently no-op); missing keys still
+  default (a profile need not pin every axis). `example_limit` gets a
+  named message rather than int()'s opaque one.
+- `ModelProfile.load`: only an ABSENT file returns None; a present-
+  but-invalid file RAISES with the concrete problem (invalid JSON,
+  missing prompt section, bad axis...). The "corrupt profile is a
+  no-op" contract is gone.
+- `ModelProfile.from_dict`: the prompt section is REQUIRED — a
+  profile without one fails naming the fix (recalibrate).
+- `resolve_provider` wraps load errors as ProviderError with the
+  "INVALID: <detail>" prefix; the CLI/eval print it and exit(2).
+- `apply_to_config`'s prompt-section try/except swallow REMOVED —
+  errors propagate.
+
+E2E verified: bogus axis → "INVALID: prompt profile axis
+'output_layout' has invalid value 'bogus' — valid: ['json_v6',
+'markdown_code']"; unknown axis → named; missing prompt section →
+named with the recalibrate fix; the real e2b profile loads clean.

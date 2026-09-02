@@ -426,16 +426,19 @@ class ModelProfile:
             embedding_calibration=_coerce_calibration(_sec("retrieval", "embedding_calibration", {})),
             fusion_method=str(_sec("retrieval", "fusion_method", "") or ""),
         )
-        # The prompt section: a nested dict (the PromptProfile.to_dict() output).
-        # Graceful-absence: a missing/corrupt section degrades to the default
-        # (PromptProfile.from_dict ignores unknown values), never raises.
-        prompt_section = PromptProfileSection()
+        # The prompt section: a nested dict (the PromptProfile.to_dict()
+        # output). STRICT (user directive): an INVALID section fails the
+        # load with the underlying message — never a silent default. A
+        # MISSING section is a legacy profile: it also fails, naming the
+        # fix (recalibrate) — the profile is the required calibration and
+        # must be complete.
         raw_prompt = d.get("prompt")
-        if isinstance(raw_prompt, dict):
-            try:
-                prompt_section = PromptProfileSection(profile=PromptProfile.from_dict(raw_prompt))
-            except Exception:  # noqa: BLE001 - graceful absence
-                pass
+        if not isinstance(raw_prompt, dict):
+            raise ValueError(
+                "calibration profile has no 'prompt' section — the profile "
+                "must be complete (run `capybase calibrate` to write it)")
+        prompt_section = PromptProfileSection(
+            profile=PromptProfile.from_dict(raw_prompt))
         # The safety section: retry budgets + escalation thresholds.
         # Graceful-absence: a missing/corrupt section → defaults.
         safety_section = SafetyProfile()
@@ -473,20 +476,24 @@ class ModelProfile:
 
     @classmethod
     def load(cls, path: str | Path) -> "ModelProfile | None":
-        """Load a profile from JSON, or return None if absent/corrupt/invalid.
-
-        A corrupt, partial, or invalid file is treated as "no profile":
-        resolution must never crash on a bad artifact, and must never overlay
-        an unsafe knob from one. The CLI's ``calibrate`` command is the way to
-        (re)write a valid one.
+        """Load a profile from JSON. STRICT (user directive 2026-09-02):
+        an INVALID file raises ValueError with the concrete problem —
+        callers surface it as a fatal error with a clear message. Only
+        an ABSENT file returns None (the entry points then fail with
+        "no profile configured"). Silent degradation was the workaround
+        class this directive removes.
         """
         p = Path(path)
         if not p.is_file():
             return None
         try:
             return cls.from_dict(json.loads(p.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, KeyError, ValueError, TypeError, AttributeError):
-            return None
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"calibration profile {p} is not valid JSON: {exc}") from exc
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ValueError(
+                f"calibration profile {p} is invalid: {exc}") from exc
 
     def save(self, path: str | Path) -> None:
         """Write the profile as pretty JSON, creating parent dirs."""

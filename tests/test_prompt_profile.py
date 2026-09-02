@@ -244,10 +244,19 @@ def test_to_from_dict_round_trip():
     assert p2 == p
 
 
-def test_from_dict_ignores_unknown_values():
-    """A corrupt/unknown value falls back to the default (graceful absence)."""
-    p = pp.PromptProfile.from_dict({"output_layout": "nonsense", "example_limit": "x"})
-    assert p == pp.DEFAULT_PROFILE
+def test_from_dict_rejects_invalid_values():
+    """STRICT (user directive 2026-09-02): an invalid axis value RAISES
+    with a clear message naming the axis and valid options — never a
+    silent fallback to default."""
+    import pytest
+    with pytest.raises(ValueError, match="output_layout.*invalid.*json_v6"):
+        pp.PromptProfile.from_dict({"output_layout": "nonsense"})
+    with pytest.raises(ValueError, match="example_limit|invalid literal"):
+        pp.PromptProfile.from_dict({"example_limit": "x"})
+    with pytest.raises(ValueError, match="unknown axis"):
+        pp.PromptProfile.from_dict({"layoutt": "json_v6"})
+    # missing keys still default (a profile need not pin every axis)
+    assert pp.PromptProfile.from_dict({}) == pp.DEFAULT_PROFILE
 
 
 # ---------------------------------------------------------------------------

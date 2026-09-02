@@ -289,25 +289,49 @@ class PromptProfile:
 
     @classmethod
     def from_dict(cls, d: dict | None) -> "PromptProfile":
-        """Build a profile from a dict, ignoring unknown/invalid values.
-
-        Mirrors the graceful-absence contract of the other calibration sections:
-        a missing or corrupt key falls back to its default rather than raising.
+        """Build a profile from a dict. STRICT (user directive 2026-09-02):
+        an invalid axis value RAISES ValueError naming the axis — never a
+        silent fallback to default. A missing key uses the default (the
+        profile need not pin every axis); an UNKNOWN/misspelled axis name
+        in the dict is likewise an error (typos must not silently no-op).
         """
         if not isinstance(d, dict):
-            return cls()
+            raise ValueError(
+                f"prompt profile section must be an object, got {type(d).__name__}")
+
+        _known = {
+            "output_layout", "history_framing", "instruction_position",
+            "outline", "example_limit", "rule_emphasis",
+            "conflict_summary_mode", "side_ordering", "parse_repair_mode",
+            "retry_schedule",
+        }
+        _unknown = sorted(set(d) - _known)
+        if _unknown:
+            raise ValueError(
+                f"prompt profile has unknown axis(es) {_unknown!r} — "
+                f"known axes: {sorted(_known)}")
 
         def _enum(EnumCls, key, default):
             raw = d.get(key, default.value)
             try:
                 return EnumCls(str(raw))
             except ValueError:
-                return default
+                valid = [e.value for e in EnumCls]
+                raise ValueError(
+                    f"prompt profile axis {key!r} has invalid value "
+                    f"{raw!r} — valid: {valid}") from None
 
         try:
             example_limit = int(d.get("example_limit", 2))
         except (TypeError, ValueError):
-            example_limit = 2
+            raise ValueError(
+                f"prompt profile axis 'example_limit' has invalid value "
+                f"{d.get('example_limit')!r} — must be a non-negative "
+                f"integer") from None
+        if example_limit < 0:
+            raise ValueError(
+                f"prompt profile axis 'example_limit' must be >= 0, "
+                f"got {example_limit}")
         return cls(
             output_layout=_enum(OutputLayout, "output_layout", OutputLayout.JSON_V6),
             history_framing=_enum(HistoryFraming, "history_framing", HistoryFraming.UNTRUSTED),

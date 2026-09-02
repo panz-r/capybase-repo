@@ -290,7 +290,14 @@ def resolve_provider(
 
     # --- load the calibration profile (required, never auto-created) ------
     prof_path = profile_path_for(cfg.profile, config_dir)
-    prof = ModelProfile.load(prof_path)
+    try:
+        prof = ModelProfile.load(prof_path)
+    except ValueError as exc:
+        raise ProviderError(
+            f"calibration profile {cfg.profile!r} at {prof_path} is "
+            f"INVALID: {exc}. Fix the profile (or re-run "
+            "`capybase calibrate`) — invalid settings are never silently "
+            "ignored.") from exc
     if prof is None:
         raise ProviderError(
             f"calibration profile {cfg.profile!r} could not be loaded from "
@@ -341,11 +348,10 @@ def apply_to_config(
         "CAPYBASE_PROMPT_EXAMPLES", "CAPYBASE_PROMPT_VARIANT",
     )
     if not any(os.environ.get(_v, "").strip() for _v in _env_axes):
-        try:
-            from capybase.prompt_profile import set_active_profile
-            set_active_profile(resolved.profile.prompt.profile)
-        except Exception:  # noqa: BLE001 — advisory; never break resolution
-            pass
+        from capybase.prompt_profile import set_active_profile
+        # STRICT: an invalid prompt section raises (surfaced by callers as
+        # a fatal ProviderError with the concrete axis/value message).
+        set_active_profile(resolved.profile.prompt.profile)
     # Safety section: calibrated retry budgets + escalation thresholds onto
     # PolicyConfig (per-model policy, not config-only).
     _safety = getattr(resolved.profile, "safety", None)
