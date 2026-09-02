@@ -5641,3 +5641,23 @@ bug fixes + the collapse rung + live-probe instrumentation.
 
 S27 cumulative: 25 conversions + 1 NEAR + 1 first-PASS-repeat + 3
 reclassifications + 16 bug fixes.
+
+### S27-EXTEND-11 (2026-09-02) — 0040 lead resolved; mutilated-state audit CLEAN
+
+- **0040's harvest-era sim 0.015 root-caused**: ALL 18 stored candidates
+  for sub-unit #s1 (covering the tcl include region) have EMPTY
+  resolved_text — the splice wrote empty for the include span →
+  'Tcl_Interp unknown' × 5 repair rounds on a mutilated buffer. The
+  pp-repair was never the minting source (it splices from the full
+  buffer); the scoped fragment-guard concern does NOT manifest.
+  Under CURRENT code: 5-run majority ESC at sim 0.96 with a PASS
+  repeat — the empty-machinery now keeps the terminal state
+  near-oracle. Variance-band member, not a bug.
+- **Mutilated-state audit across ALL s27 reruns**: every escalated
+  sim<0.5 hit is a quota-era SETUP failure; the latest verdicts for
+  all of them are 0.85-1.0 (or PASS/divergent-genuine). **Zero
+  mutilated terminal states under current code.** The
+  restore-on-escalate concern is closed with evidence.
+
+S27 cumulative: 25 conversions + 1 NEAR + 1 first-PASS-repeat + 3
+reclassifications + 16 bug fixes + every scoped lead resolved.
