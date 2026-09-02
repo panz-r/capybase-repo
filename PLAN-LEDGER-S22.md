@@ -5932,6 +5932,22 @@ pass it explicitly everywhere, trust it completely, fix it when it's
 wrong. Anything else is sabotage of future models' performance
 dressed up as a fix for today's symptom.
 
+**The unseen-model reality (user directive, 2026-09-02):** capybase
+will in reality run on models we have NEVER SEEN. That is the entire
+reason the calibration layer exists — it is the only component that
+learns a new model's behavior at first contact. Hard-coding for one
+case/model combination is therefore not merely unhelpful, it is
+DECEITFUL: it fakes a result (this model passes!) while quietly
+destroying the system's ability to handle any other model. When a
+real user arrives with their new model, the calibration path was
+short-circuited, the hard-coded assumption is wrong, and the run
+FAILS — nothing productive was achieved, only the appearance of it
+while we were the sole user. Development-speed gains from
+special-casing are counterfeit: they mortgage every future model's
+correctness for one today-symptom. The corollary for eval work: an
+eval result obtained by bypassing calibration measures NOTHING about
+how capybase behaves for users; it is a number about our workaround.
+
 Rationale: sprint-26/27 found two instances of "architecture decay by
 accretion" — the ambient repo-local profile silently shadowing the
 provider's prompt calibration (evals ran the default layout for every
