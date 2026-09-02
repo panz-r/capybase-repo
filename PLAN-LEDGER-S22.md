@@ -5898,3 +5898,23 @@ accretion" — the ambient repo-local profile silently shadowing the
 provider's prompt calibration (evals ran the default layout for every
 harvest), and a prompt rule landing in one layout only. Both were
 silent because nothing defined the invariant. This section does.
+
+### CONSTRAINTS enforcement hardening (2026-09-02, 8eb4ea5)
+
+The first pass kept a residual path: the orchestrator's
+`_apply_model_profile` would still load a profile when
+`model_profile_path` was explicitly non-empty — a SECOND source that
+could shadow the provider's calibration. Removed entirely (no-op
+shim), and the config-load remap of the legacy repo-relative default
+is gone too. One source, one path.
+
+**"The orchestrator skips its overlay when empty" — what that meant
+and why it wasn't enough:** the first implementation made the
+orchestrator's profile loader a conditional — IF the path is empty,
+skip; IF non-empty, load and overlay. That still permitted a second
+calibration source (anything setting the path could inject a profile
+AFTER apply_to_config had applied the provider's, silently shadowing
+the prompt section — the exact collapse mode the audit found). The
+hardened version removes the loader outright: there is no conditional
+left to satisfy; the orchestrator CANNOT load a profile from a path at
+all. Explicitness is structural, not a flag.
