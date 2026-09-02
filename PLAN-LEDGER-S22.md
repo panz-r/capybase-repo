@@ -5467,3 +5467,25 @@ GATE_UNAVAILABLE reclassifications.** Projected next harvest: ~93% raw.
 GATE_UNAVAILABLE reclassifications.** The WORKING band itself is
 confirmed stable: 8 WORKINGs in the harvest are honest graded
 successes, two of which now PASS.
+
+### S27-EXTEND-5 (2026-09-02) — quota-taint audit + strong majorities
+
+Systematic audit of every s27 batch for quota-tainted results (runs
+predating the CAPYBASE_WORKTREE_DIR fix): 4 suspects, all resolved:
+- **axum-0002 PASS 1.00** (24th conversion — first try, no repeats
+  needed; the case with a PASS repeat in its 3-run set now passes
+  outright under the full current stack).
+- sea-orm-0014: clean rerun, 5/5 ESC at 0.86 — GENUINE (the sim-0.00
+  was taint; the real difficulty is the deep syntax loop).
+- sea-orm-0027: clean rerun, 5/5 ORACLE_DIVERGENT at 0.68 — genuine
+  one-side merge divergence (the s24 shape, unchanged).
+- sqlite-0040: 5-run majority ESC (1 ORACLE_DIVERGENT repeat) at 0.96
+  — the tcl-recovery case is a genuine near-miss band member, not a
+  coin-flip conversion.
+- protobuf-0065 localized offline: the failure sits in a 43-line
+  member-init list (region 0, lines 249-291) — the model drops one
+  token at sim 1.00. Genuine model-accuracy class, no mechanism gap.
+
+**S27 + extensions FINAL: 24 conversions + 1 NEAR + 1 first-PASS-
+repeat + 3 GATE_UNAVAILABLE reclassifications.** Every tainted result
+re-validated; every hold is genuine with clean-run evidence.
