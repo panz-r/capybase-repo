@@ -5690,3 +5690,23 @@ NEVER fired — each explained:
 S27 cumulative: 25 conversions + 1 NEAR + 1 first-PASS-repeat + 3
 reclassifications + 16 bug fixes + full mechanism-engagement map
 feeding D1's design.
+
+### S27-EXTEND-13 (2026-09-02) — F4 hoisted; 0065 PASS (26th) + 0099 WORKING
+
+- **F4 side-pick hoisted to the beam TOP** (its old position was
+  shadowed by the attribution path). Validation batch (0099, 0065,
+  0012):
+  - **protobuf-0065 PASS 1.00 first try** — the 26th conversion. The
+    43-line member-init-list holdout (a genuine-model-accuracy call
+    for ten extensions) converted; the D13-attributed attribution
+    path no longer burns the first model round on the misattributed
+    unit.
+  - **sqlite-0099 → WORKING majority** (0.78; was ESC) — the pp-seam
+    case lands a graded verdict.
+  - zenodo-0012 holds ESC 0.97 (genuine near-band).
+  - side_pick itself still 0 direct fires (the sides fail their own
+    gates on these cases) — the hoist's benefit came via beam-order
+    side effects. The rung stays armed for its true shape.
+
+**S27 cumulative: 26 conversions + 1 NEAR + 1 first-PASS-repeat + 3
+reclassifications + 17 fixes.** Projected next harvest: ~93.5% raw.
