@@ -1251,6 +1251,14 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
                     or "CMake Error" in ln or ln.startswith("ninja:")
                     or "Error 1" in ln or "Error 2" in ln):
                 continue
+            # Sprint-27: promotion excuse aligned with the in-session gate
+            # (D13's doctrine, the curated categories) — without this, a
+            # promoted warning in the conflict file failed the EVAL's
+            # build while the orchestrator's gate correctly accepted the
+            # merge: eval-stricter-than-session would misgrade a passing
+            # resolution as not-compiling.
+            if _is_promotion_tag(ln):
+                continue
             m = _file_re.search(ln)
             if m:
                 stem = _P(m.group(1) + "." + m.group(2)).stem
