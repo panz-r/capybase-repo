@@ -5766,3 +5766,21 @@ zenodo-0003 0.83, 3/3 stable). No retries, no drift, no regression.
 GATE_UNAVAILABLE reclassifications + 18 bug fixes + the seam-class
 prompt contract + full mechanism map + D1's measured design note.**
 Projected next harvest: ~94% raw / ~95.5% P+W adj.
+
+### S27-EXTEND-16 (2026-09-02) — seam-prompt sweep of remaining high-sim escalates
+
+- **protobuf-0043 PASS 1.00 first try** (31st conversion) — the
+  needs_human holdout (6.6K prompt, model declined every round)
+  converts under the seam contract.
+- redis-0049 (0.97), sea-orm-0007 (0.91), zenodo-0012 (0.97),
+  zenodo-0079 (0.96): hold ESC 3/3 — their difficulty is content-level
+  (deleted-member references, syntax loops, truncated-side weaves),
+  not seam-shape. Genuine, now confirmed under the seam prompt.
+- sqlite-0040: ORACLE_DIVERGENT majority at 0.00-reading repeats —
+  the tcl include class; the one remaining odd terminal state,
+  scoped: the empty-splice on the include-span unit (the machinery
+  keeps near-oracle states elsewhere; this case's #s1 unit still
+  empties). Recorded for the harvest's triage.
+
+**S27 closes at: 31 conversions + 1 NEAR + 1 first-PASS-repeat + 3
+reclassifications + 18 fixes.** Projected harvest: ~94.2% raw.
