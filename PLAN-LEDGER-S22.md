@@ -6018,3 +6018,22 @@ E2E verified: bogus axis → "INVALID: prompt profile axis
 'output_layout' has invalid value 'bogus' — valid: ['json_v6',
 'markdown_code']"; unknown axis → named; missing prompt section →
 named with the recalibrate fix; the real e2b profile loads clean.
+
+### THE THREE-TIER TEST SPLIT (2026-09-03, user-confirmed)
+
+1. **pytest / tests/** — unit tests only. No large datasets, nothing
+   external fetched, no real repos. 3,990 tests, ~32s at -n 6. The
+   per-change regression gate.
+2. **corpus-tests / corpus/** — real downloaded repos, processed and
+   extracted (fetch_mergeconflict_datasets.py). Runs DETERMINISTIC
+   cases: the human merge M through the real verification floors
+   (py_compile / gcc / cargo in worktrees). Zero model calls.
+   `corpus/run.sh`, own runner, never pytest.
+3. **live-eval / scripts/live_eval_realworld.py** — real repos,
+   ACTUAL model calls through the full orchestrator. Requires
+   `--provider` + calibration profile (CONSTRAINTS §1-7 apply in
+   full). The harvest/README numbers come from here.
+
+A test in the wrong tier is a bug. Anything needing fetched data is
+not in pytest; anything making model calls is not in the corpus
+suite; anything deterministic is not in live-eval.
