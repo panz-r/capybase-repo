@@ -6058,3 +6058,78 @@ Results vs the json_v6 baselines:
 
 The markdown_code layout is confirmed correct AND at least neutral-to-
 positive live. Harvest under calibration is cleared to run.
+
+---
+
+## SPRINT-27 OPEN DEFECTS (2026-09-03 — found during the sprint, unfixed; repair work belongs to sprint-27)
+
+### S27-DEF-1. scenario_checks_pending.py — the rebase-scenario family is not runnable
+
+The scenario corpus family (7 checks: source-commit plans, OID
+resolution, history-service answers, branch-intent, source-tip
+compiles) moved to corpus/ but was never ported to run.py — it sits
+as `corpus/scenario_checks_pending.py`, still pytest-style, excluded
+from the runner. It needs: check ports to checks.py (mechanical),
+the runner's dispatch extended for the scenario loader, and a
+data-presence skip. REPAIR: port + wire + verify against the mined
+scenarios.
+
+### S27-DEF-2. corpus runner lacks the C build-verdict parallelism guard
+
+run.py runs check_c_build_verdict cases sequentially in the main
+loop, but each builds a REAL worktree + configure + make (600s
+timeout each). With ~50 C cases present this is hours serial. The
+pytest-era serial_build cap existed for memory reasons (concurrent
+full builds risk OOM). REPAIR: a bounded worker pool (2-3 concurrent
+builds max) in run.py, or at minimum document the wall-time and let
+subsets be run per-dataset.
+
+### S27-DEF-3. apply_to_config silently ignores a provider profile with no safety/prompt sections missing keys?
+
+No — sections are validated strictly (b404190). Real defect instead:
+**the safety overlay does not journal/report**. apply_to_config
+applies safety knobs onto cfg.policy but returns only the
+capability/quality `overridden` list; a run with safety overrides
+leaves no journal event (the orchestrator's model_profile_applied
+event died with the ambient path). REPAIR: extend apply_to_config's
+returned knobs list (it already appends safety.* — verify) and add a
+journaling hook or startup log line so live runs record WHICH
+calibration profile + sections were applied (audit trail for
+harvest attribution).
+
+### S27-DEF-4. eval harness duplicate constant surface
+
+scripts/live_eval_realworld.py imports C_BUILD_COMMANDS/
+C_TEST_COMMANDS from corpus/_realworld_build.py, but C_PREPARE_COMMANDS
+still lives in the eval script itself — the era config is split
+across two files in two trees. REPAIR: consolidate the three maps
+in one place (corpus/_realworld_build.py or a new shared module) so
+the corpus checks and the eval harness cannot drift.
+
+### S27-DEF-5. unit-test suite has never had the efficiency audit
+
+The user directive (no repeated setup/teardown per test, shared
+session-scoped fixtures, no exact-duplicate cases) is queued but not
+executed over the 222 unit files. The suite is fast (32s) so this is
+hygiene, not urgency. REPAIR: audit pass — find function-scoped
+fixtures that build expensive objects per-test (VerificationEngine,
+git repos), promote to module/session scope; hash-scan test bodies
+for exact replicas.
+
+### S27-DEF-6. the _gitshim.py copy can drift from tests/conftest.py's git()
+
+corpus/_gitshim.py is a verbatim copy of the conftest helper (copied
+because corpus left pytest). Two copies of the same function will
+drift. REPAIR: move the helper to a shared non-test module (e.g.
+capybase/testing_support.py or corpus/git_util.py) and import from
+both; delete the copy.
+
+### S27-DEF-7. flask-0006 verdict-label instability (DIVERGENT vs ESCALATE at 0.54-0.58)
+
+Observed twice with sim within 0.04 but the verdict flipping between
+ORACLE_DIVERGENT and ESCALATE. The distinction (marker-free-but-
+compiles-fails → DIVERGENT; escalates mid-loop → ESCALATE) wobbles on
+this oracle-subjective case. Not yet a defect in a mechanism — a
+classification-stability observation. REPAIR (low priority): check
+whether the empty-class verdict chain is deterministic under the
+calibrated layout; if it is variance, document as coin-flip band.
