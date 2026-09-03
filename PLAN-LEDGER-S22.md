@@ -6025,6 +6025,11 @@ side-pick engagements ever; the churn guard admits 0099's asymmetric
 shape, the side lands, gates pass, the graded verdict is unchanged).
 The revived rungs engage and behave as designed.
 
+**Systemic hardening:** the four rung excepts (side-pick ×2, p6b beam,
+alternation collapse) now journal `repair_rung_error` with the rung
+name + exception — the next silently-swallowed NameError becomes a
+one-line journal find instead of a forensics session. Gate 4,027/0.
+
 ### S27-EXTEND-20 (2026-09-04) — full deterministic corpus run + sprint-28 design seed
 
 **Corpus `all` end-to-end** (the combined session+scenario+realworld

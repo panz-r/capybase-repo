@@ -12372,8 +12372,18 @@ class Orchestrator:
                                  "sig": _sig[:60], "hoisted": True},
                                 step_index=self.step, path=path)
                             return [(_sp_unit, _sp_cand)]
-                except Exception:  # noqa: BLE001 — side-pick is best-effort
-                    pass
+                except Exception as _rung_exc:  # noqa: BLE001 — side-pick is best-effort
+                    # S27-extend-21: journal the error — a silently swallowed
+                    # NameError here kept this rung dead for an entire sprint
+                    # (the units/language bug).
+                    try:
+                        self.journal.emit(
+                            "repair_rung_error",
+                            {"rung": "side_pick",
+                             "error": f"{type(_rung_exc).__name__}: {_rung_exc}"},
+                            step_index=self.step, path=path)
+                    except Exception:  # noqa: BLE001
+                        pass
             # P6b beam rung (s27-extend-21): whole-file-gate failures with
             # delimiter/brace-shaped messages now reach the splice-level
             # surgery — previously it existed ONLY at candidate level, so
@@ -12437,8 +12447,15 @@ class Orchestrator:
                                          "sig": _sig[:60]},
                                         step_index=self.step, path=path)
                                     return _p6b_new
-                except Exception:  # noqa: BLE001 — p6b rung is best-effort
-                    pass
+                except Exception as _rung_exc:  # noqa: BLE001 — p6b rung is best-effort
+                    try:
+                        self.journal.emit(
+                            "repair_rung_error",
+                            {"rung": "p6b_beam",
+                             "error": f"{type(_rung_exc).__name__}: {_rung_exc}"},
+                            step_index=self.step, path=path)
+                    except Exception:  # noqa: BLE001
+                        pass
             # Storage-class relocation repair (s24 cycle-J, the C1b-promotion
             # item from the reviewer synthesis): gcc's "invalid storage class
             # for function X" means the model's merge declared X inside a
@@ -12573,8 +12590,15 @@ class Orchestrator:
                                 _ac_list = list(accepted)
                                 _ac_list[_ac_idx] = (_acu, _acc)
                                 return _ac_list
-                except Exception:  # noqa: BLE001 — collapse is best-effort
-                    pass
+                except Exception as _rung_exc:  # noqa: BLE001 — collapse is best-effort
+                    try:
+                        self.journal.emit(
+                            "repair_rung_error",
+                            {"rung": "alternation_collapse",
+                             "error": f"{type(_rung_exc).__name__}: {_rung_exc}"},
+                            step_index=self.step, path=path)
+                    except Exception:  # noqa: BLE001
+                        pass
             # F4 (s27): side-pick fallback — when the merged splice fails
             # the gate but a pristine-side splice passes it, the merge is
             # the defect; land the side (protobuf-0001 / zenodo-0079
@@ -12627,8 +12651,15 @@ class Orchestrator:
                                  "sig": _sig[:60]},
                                 step_index=self.step, path=path)
                             return [(_sp_unit, _sp_cand)]
-                except Exception:  # noqa: BLE001 — side-pick is best-effort
-                    pass
+                except Exception as _rung_exc:  # noqa: BLE001 — side-pick is best-effort
+                    try:
+                        self.journal.emit(
+                            "repair_rung_error",
+                            {"rung": "side_pick_fallback",
+                             "error": f"{type(_rung_exc).__name__}: {_rung_exc}"},
+                            step_index=self.step, path=path)
+                    except Exception:  # noqa: BLE001
+                        pass
             det = _try_deterministic_prefix_dedup(
                 failures, original, accepted, fault_idx
             )
