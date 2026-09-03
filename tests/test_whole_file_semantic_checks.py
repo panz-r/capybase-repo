@@ -44,14 +44,63 @@ def _cc_available() -> bool:
         return False
 
 
-def _verify_file(whole: str, language: str = "python", path: str = "app.py"):
+def _verify_file(whole: str, language: str = "python", path: str = "app.py",
+                 original: str | None = None):
     """Run verify_file with the whole resolved file as a single whole-file span.
 
     The semantic checks analyze the fully-spliced ``whole``; the span/splice
     plumbing is irrelevant to them, so we feed ``whole`` directly via a
     None-span (whole-file) resolution.
+
+    ``original=None`` passes an EMPTY baseline — the pure detection shape:
+    with no pre-merge text known, every duplicate flags. (A marker-free
+    non-empty original is its OWN baseline under the pristine-side doctrine —
+    see test_pristine_side_duplicate_suppressed — and would suppress these.)
     """
-    return _engine().verify_file(path, language, whole, [(None, whole)])
+    if original is None:
+        original = ""
+    return _engine().verify_file(path, language, original, [(None, whole)],
+                                 whole_text=whole)
+
+
+# ---------------------------------------------------------------------------
+# Baseline doctrine (pristine-side verifications — the sqlite-0040 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_pristine_side_duplicate_suppressed():
+    """A marker-free original is a pure side/pristine text — not a merge.
+
+    Nothing is "merge-introduced", so pre-existing duplicates (sqlite's
+    tclsqlite.c defines TTYPE_enum twice inside one function — legal C, one
+    per if-block; the ORACLE itself carries it) must NOT flag. This false
+    positive silently vetoed the F1 tier-1 takeover in sqlite-0040's
+    d40d105a flight (the side compiled rc=0 yet verify failed)."""
+    dup_text = (
+        "def dbobjcmd(sub):\n"
+        "    if sub == 'trace':\n"
+        "        class TTYPE_enum: pass\n"
+        "    if sub == 'txn':\n"
+        "        class TTYPE_enum: pass\n"
+    )
+    res = _verify_file(dup_text, original=dup_text)
+    dup_failures = [f for f in res.hard_failures
+                    if "more than once" in str(getattr(f, "message", ""))]
+    assert not dup_failures, (
+        f"pristine side text falsely flagged: {[str(f.message) for f in dup_failures]}"
+    )
+
+
+def test_merge_introduced_duplicate_still_fires_with_marker_free_original():
+    """A marker-free original WITHOUT the duplicate + a whole WITH it = the
+    merge introduced it — must still hard-fail (the check's core purpose)."""
+    original = "def foo():\n    return 1\n"
+    whole = original + "def foo():\n    return 2\n"
+    res = _verify_file(whole, original=original)
+    assert any("more than once" in str(getattr(f, "message", ""))
+               for f in res.hard_failures), (
+        f"merge-introduced duplicate not flagged: {[str(getattr(f,'message','')) for f in res.hard_failures]}"
+    )
 
 
 # ---------------------------------------------------------------------------

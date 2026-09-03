@@ -9836,9 +9836,17 @@ class Orchestrator:
                             break  # time budget exhausted
                         if _phase2_model_used:
                             break  # only 1 model re-resolve allowed in tiered mode
-                    else:
-                        if wf_retries >= wf_budget:
-                            break
+                    if wf_retries >= wf_budget:
+                        # The COUNT budget applies in BOTH modes. Tiered mode
+                        # previously bypassed it (only time/model breaks):
+                        # sqlite-0040's d40d105a flight ran 1,221 deterministic
+                        # beam cycles inside its 200s cap — two repairs
+                        # oscillating (line_replace at line 1 vs derived
+                        # prototype), each ~0.16s, spinning until the time
+                        # budget died. Design v2's tiered contract is ONE
+                        # deterministic beam pass + 1 model re-resolve; the
+                        # configured max_whole_file_repair_retries must hold.
+                        break
                     # Attribute the failure to a unit and re-resolve it with the
                     # file-level failures as concrete repair feedback.
                     wf_retries += 1
@@ -10059,6 +10067,25 @@ class Orchestrator:
                                                 repo_root=str(self.git.repo),
                                                 whole_text=_f1_text)
                                             if not _f1_check.passed:
+                                                # Journal the veto — the
+                                                # d40d105a forensics needed a
+                                                # full flight replay because
+                                                # this decline was silent
+                                                # (the duplicate-definition
+                                                # false-positive on pristine
+                                                # sqlite tclsqlite.c).
+                                                self.journal.emit(
+                                                    "f1_side_verify_failed",
+                                                    {
+                                                        "phase": "A_tier1",
+                                                        "side": _f1_side,
+                                                        "path": path,
+                                                        "hard_failures": [
+                                                        str(f.message)[:120]
+                                                        for f in _f1_check.hard_failures[:3]],
+                                                    },
+                                                    step_index=self.step, path=path,
+                                                )
                                                 _f1_side = None
                                                 _f1_text = ""
                                         else:
@@ -10085,6 +10112,24 @@ class Orchestrator:
                                                 path, language, _side_text, [],
                                                 repo_root=str(self.git.repo),
                                                 whole_text=_side_text)
+                                            if not _side_check.passed:
+                                                # Same observability as Phase A:
+                                                # a side marked non-compiling on
+                                                # a non-probe hard failure was
+                                                # previously indistinguishable
+                                                # from a real compile failure.
+                                                self.journal.emit(
+                                                    "f1_side_verify_failed",
+                                                    {
+                                                        "phase": "B_sides",
+                                                        "side": _side_name,
+                                                        "path": path,
+                                                        "hard_failures": [
+                                                        str(f.message)[:120]
+                                                        for f in _side_check.hard_failures[:3]],
+                                                    },
+                                                    step_index=self.step, path=path,
+                                                )
                                             _compiling[_side_name] = bool(_side_check.passed)
                                         self._f1_compile_clean_mech.set_compiling_sides(
                                             _compiling)

@@ -360,7 +360,7 @@ def resolve_c_build(repo: Path, dataset: str,
     has_autotools = ((repo / "configure.ac").exists()
                      or (repo / "Makefile.am").exists())
     has_configure = ((repo / "configure").exists()
-                     and bool(repo / "configure").stat().st_mode & 0o111)
+                     and bool((repo / "configure").stat().st_mode & 0o111))
     has_makefile = (repo / "Makefile").exists()
     return _c_build_pair(has_cmake, has_autotools, has_configure,
                          has_makefile, dataset, default_prepare)

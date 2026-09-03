@@ -6487,14 +6487,24 @@ class VerificationEngine:
             # syntax check owns reporting that. Record not-checked and stop.
             return
         features["duplicate_definition_checked"] = True
-        # Baseline-aware: compute the duplicates in the marker-blanked original
-        # and suppress any (kind, name) pair that already existed pre-conflict.
+        # Baseline-aware: compute the duplicates in the pre-conflict text and
+        # suppress any (kind, name) pair that already existed pre-conflict.
         # This prevents false-positives on real-world patterns like config
-        # overrides or matplotlib fig reassignment that are legitimate in the
-        # original code (the oracle ITSELF can contain these "duplicates").
+        # overrides or block-scoped C enums (sqlite's tclsqlite.c defines
+        # TTYPE_enum twice inside one giant function — legal C, one per if
+        # block, and the parser models the whole function body as one scope).
+        # With markers, the baseline is the marker-blanked original. WITHOUT
+        # markers the original is a pure side/pristine text — not a conflict,
+        # so nothing is "merge-introduced": the text IS its own baseline and
+        # the check must not fire (pristine-side verifications — F1 takeovers,
+        # compile-clean side probes — were falsely vetoed on exactly this:
+        # 29 sqlite cases carry such patterns and the ORACLE itself has one).
         baseline_keys: set[tuple[str, str]] = set()
-        if original and contains_markers(original):
-            baseline_text = _blank_markers(original, language or "python")
+        if original:
+            baseline_text = (
+                _blank_markers(original, language or "python")
+                if contains_markers(original) else original
+            )
             if language == "python":
                 baseline_dupes = _py_duplicate_definitions(baseline_text)
             else:

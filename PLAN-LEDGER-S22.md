@@ -6191,7 +6191,61 @@ member; harvest tallies it as DIVERGENT either way.
 
 ---
 
-### S27-POST-REGISTER. era-aware C oracle builds unified (found during DEF-2 verification)
+### S27-EXTEND-17 (2026-09-03) — sqlite-0040's variance mechanism fully mapped: two real defects + one silent veto
+
+Forensics on the x-batch7 flight d40d105a (the 0.00-reading DIVERGENT
+repeat) found the complete causal chain, offline:
+
+1. The model's #s1 candidate (the include-span sub-unit) came back
+   TRUNCATED mid-function (144B vs the ~2900B span) and dropped the
+   init_all_cmd block — accepted with an obligation WARNING (drops are
+   warnings by design; the model may restructure).
+2. The splice broke; the whole-file repair loop then ran **1,221
+   deterministic cycles inside the 200s time cap**, oscillating between
+   two repairs (symbol_inject line_replace at line 1 vs derived
+   prototype) — each fix introduces the other's failure.
+3. At exhaustion, F1 tier-1 ENGAGED (replayed side subsumes, churn 840
+   vs 2), its side probes PASSED (gcc rc=0 — the side compiles), but the
+   orchestrator's verify_file VETOED the pristine side on a
+   duplicate-definition hard failure — **silently** (no journal event).
+   Phase B declined; the tier-2 ballot voted weave → ESCALATE.
+
+**Defect A (verification.py, FIXED): marker-free originals skipped the
+baseline.** The duplicate-definition check is baseline-aware ("only
+duplicates the MERGE introduces") but computed the baseline ONLY when
+the original contained conflict markers. Pristine-side verifies (F1
+takeovers, compile-clean side probes) pass marker-free originals → no
+baseline → pre-existing duplicates flagged as merge-introduced. The
+triggering pattern is legal C: tclsqlite.c defines `enum TTYPE_enum`
+twice inside one giant function (one per if-block; C block scoping,
+which the abstract parser doesn't model — it treats the whole function
+body as one scope). **29 sqlite cases carry such parser-level
+duplicates on pristine sides; the ORACLE itself carries one.** FIX: a
+marker-free original is its own baseline (a pure side text is not a
+merge — nothing is "introduced"). Merge-introduced duplicates still
+fire (verified: python + C, plus the existing detection tests now run
+under an explicit no-baseline shape).
+
+**Defect B (orchestrator.py, FIXED): tiered mode bypassed the repair
+COUNT budget.** With `max_whole_file_repair_seconds > 0` the loop's
+only breaks were time-out and model-used; `max_whole_file_repair_
+retries` (eval sets 1) was a dead letter. That's how 1,221 cycles fit
+in 200s (~0.16s each). FIX: the count budget applies in BOTH modes
+(design v2's tiered contract is ONE deterministic beam pass + 1 model
+re-resolve; the post-loop final deterministic shot is unchanged).
+
+**Observability (orchestrator.py):** `f1_side_verify_failed` journal
+events added in Phase A (tier-1 side verify) and Phase B (sides
+compile prep) with the hard-failure heads — the veto that needed a
+full flight replay to find is now one journal line.
+
+Offline validation: the exact verify_file call on the pristine
+replayed side passes post-fix; introduced-duplicate detection holds;
+semantic-checks file 49/49; full unit gate 3,990/0 @ -n 6. Live ×5
+rerun under the fixed stack: in flight, results below.
+
+S27 cumulative: 32 conversions + 1 NEAR + 1 first-PASS-repeat + 3
+reclassifications + 21 fixes.
 
 The first pooled c-subset run (1,101 checks) recorded sqlite-history
 0121-0133 human merges as `compiled=False` — the corpus check ran a
