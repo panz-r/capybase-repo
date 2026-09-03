@@ -6306,6 +6306,48 @@ skeleton-intent WORKING 0.78.
 GATE_UNAVAILABLE reclassifications + 21 fixes.** Projected harvest:
 ~94.5% raw / ~96% P+W adj.
 
+### S27-EXTEND-17d (2026-09-03) — the latent-veto map is corpus-wide; harvest launch template
+
+Full-corpus pristine-side duplicate sweep (structural parser on
+current/replayed for C/C++/rust; stdlib ast for python): the EXTEND-17
+defect-A false positive was NOT a sqlite quirk — **every major dataset
+carries parser-level duplicates on pristine sides**: nlohmann 70
+side-hits, sqlite 56, protobuf 52, redis 36, clickhouse 21, axum 20,
+jsonc 15, fmt 12, tokio 7, serde 4, python 74. Severity split: the
+C/rust path had NO kind-demotion (hard failures — the real veto);
+python's hits are ALL `variable`-kind (flask-0004: 27/27 variables →
+warning severity, demoted by design) — python was never hard-vetoed
+by this check. Blast radius among non-PASS cases: only sqlite-0040
+(converted); the remaining band (sea-orm-0007/0014, zenodo-0012/
+0079/0003, tokio-0046, clickhouse-0013/0021, flask-0006, sqlite-0039/
+0099) carries ZERO pristine-side duplicates — no further conversion
+candidates from defect A. sqlite-0039's GATE_UNAVAILABLE is the
+separate ccs_syntax class (not dupe-driven).
+
+Corpus python subset re-verified after the resolver surgery: 349
+checks, 0 failures.
+
+**Harvest launch template (s27-final stack)** — for when the user
+calls it (NOT launched; full rerun is deferred by directive):
+
+    #!/bin/bash
+    # S27-final full harvest — first under the real calibrated
+    # markdown_code profile. Stack through bf26725; gate 3996/0 @ -n 6.
+    export CAPYBASE_WORKTREE_DIR=/var/tmp/capy-wt   # REQUIRED (tmpfs
+      # quota incidents otherwise; the s26 harvester predated this)
+    export TMPDIR=/var/tmp
+    cd /w/capybase
+    env CAPYBASE_SKIP_SIZE_GUARD=1 .venv/bin/python \
+      scripts/live_eval_realworld.py \
+      --provider nova-gemma4 \
+      --repeat-nonpass 3 \
+      --out /var/tmp/capybase-live/s27/full-harvest.json \
+      --preserve-flights /var/tmp/capybase-live/s27/flights-harvest
+
+The startup banner will print the calibration audit line
+(profile path, sections, prompt layout) — verify it reads
+markdown_code before walking away. Expected: ~94.5% raw / ~96% P+W.
+
 ### S27-POST-REGISTER. era-aware C oracle builds unified (found during DEF-2 verification)
 
 The first pooled c-subset run (1,101 checks) recorded sqlite-history
