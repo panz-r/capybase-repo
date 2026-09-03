@@ -5973,6 +5973,58 @@ The two surfaces untouched since the audit-2 surgery, both green:
   connectivity failures still refuse — provider config stays
   canonical).
 
+### S27-EXTEND-21 (2026-09-04) — the sprint-28 wiring items pulled in; the DEAD-RUNG discovery
+
+Bringing the two deferred wiring items into s27 surfaced something
+bigger: **three deterministic rungs have been silently dead the whole
+sprint.** `_whole_file_repair`'s side-pick (BOTH sites) and the
+alternation-collapse rung referenced `units` and `language` — NEITHER
+defined in that scope — so each NameError'd inside its best-effort
+`except` and never ran. Zero `side_pick_applied` /
+`alternation_collapse_applied` events across every stored flight;
+extend-13's "side_pick still 0 direct fires" and extend-7's "silent
+decline" were this bug, not the documented causes. An AST sweep for
+the class (loads never assigned/module-global/builtin) finds no other
+instances — only benign closure captures.
+
+Repairs in this extension:
+1. **Scope fix**: `units`/`language` defined once at the beam top (a
+   file's units share one language). The side-pick (both sites) and
+   alternation-collapse rungs are LIVE for the first time.
+2. **Churn guard on side-pick** (new): a side splice DROPS the loser's
+   changes; on a symmetric two-sided conflict it loses content the
+   model repair could merge (surfaced immediately by
+   test_whole_file_repair_recovers_and_accepts). The guard requires
+   ASYMMETRY — loser churn ≤ 25% of winner's AND within F1 tier-1's
+   absolute cap (sqlite-0040's 2/840 and redis-0049's 2/40 pass; the
+   symmetric 8/8 fixture declines). The absolute F1 threshold alone
+   mis-scales on small files.
+3. **P6b extracted + wired into the beam**: the splice-level
+   delimiter/brace surgery (previously inline in the candidate loop
+   only) is now ONE implementation —
+   `verification.splice_level_delimiter_repair` +
+   `delimiter_failure_shape` — used by BOTH the candidate-level P6b
+   check and a new beam rung (`p6b:{sig}`, tried-registry gated,
+   file-level verified). Whole-file-gate failures with
+   delimiter/brace-shaped messages reach the surgery for the first
+   time (extend-12's wiring gap closed).
+4. **Tiered unattributed skip fixed**: the skip used to `return None`
+   BEFORE the deterministic rungs (contradicting its own comment —
+   "the deterministic beam still runs"); it now gates only the MODEL
+   re-resolve (`_skip_model_re_resolve`), so side-pick/storage-class/
+   p6b/alternation rungs run for the unattributed cross-unit class.
+
+Tests: tests/test_dead_rung_repairs.py (shape classification, the
+shared surgery incl. the empty-region decline, the churn guard's
+asymmetric/symmetric/none cases); gate 4,027/0 @ -n 6.
+
+**Live validation:** sqlite-0004 PASS 0.999 first try (guard holds);
+sqlite-0099 WORKING 3/3 @ 0.772 (its exact prior band) — with
+**side_pick_applied firing in ALL THREE sessions** (the first recorded
+side-pick engagements ever; the churn guard admits 0099's asymmetric
+shape, the side lands, gates pass, the graded verdict is unchanged).
+The revived rungs engage and behave as designed.
+
 ### S27-EXTEND-20 (2026-09-04) — full deterministic corpus run + sprint-28 design seed
 
 **Corpus `all` end-to-end** (the combined session+scenario+realworld

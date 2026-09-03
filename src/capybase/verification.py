@@ -3029,6 +3029,100 @@ def _try_balance_braces_iterated(
     return None
 
 
+def delimiter_failure_shape(messages: list[str]) -> str | None:
+    """Classify failure messages into P6b's splice-repair shapes.
+
+    Returns ``"delim"`` (unmatched paren/bracket), ``"brace"`` (mismatched
+    closing delimiter / brace imbalance / unmatched brace), or ``None``.
+    Single source for both the candidate-level P6b check and the
+    whole-file repair beam rung (s27-extend-21: they were two copies of
+    the same string heuristics).
+    """
+    for m in messages:
+        if ("unmatched '" in m and ("}" not in m) and (")" in m or "]" in m)):
+            return "delim"
+    for m in messages:
+        if ("mismatched closing delimiter" in m
+                or "brace imbalance detected" in m
+                or ("unmatched '" in m and "}" in m)):
+            return "brace"
+    return None
+
+
+def splice_level_delimiter_repair(
+    original_worktree_text: str,
+    marker_span: tuple[int, int],
+    resolved_text: str,
+    messages: list[str],
+    language: str | None,
+) -> tuple[str, str] | None:
+    """P6b's splice-level delimiter/brace surgery — the single implementation.
+
+    Splices ``resolved_text`` into the unit's worktree text, repairs the
+    delimiter/brace imbalance on the SPLICED WHOLE FILE (position-correct,
+    unlike a whole-buffer balancer whose append lands at EOF), remaps the
+    marker span through the line diff (the brace repair may delete lines),
+    and extracts the repaired REGION back out so the result stays
+    splice-safe for any caller.
+
+    Returns ``(repaired_region, form)`` with form in ``{"delim", "brace"}``,
+    or None when the messages aren't a repairable shape / the repair didn't
+    change anything / the extracted region is empty.
+
+    Used by BOTH the candidate-level P6b check (unit validation failures)
+    and the whole-file repair beam rung (whole-file gate failures) —
+    s27-extend-21 closed the wiring gap where whole-file-gate failures with
+    the same message shape never reached this surgery.
+    """
+    shape = delimiter_failure_shape(messages)
+    if shape is None or not resolved_text.strip() or marker_span is None:
+        return None
+    from capybase.adapters.parsers import splice_resolution
+
+    try:
+        spliced = splice_resolution(
+            original_worktree_text, marker_span, resolved_text)
+    except Exception:  # noqa: BLE001 — splice on bad spans is caller's error
+        return None
+    repaired = None
+    if shape == "delim":
+        if _delimiter_imbalance_line(spliced, language) is not None:
+            repaired = _try_repair_delimiter(spliced, language)
+            if (repaired is not None
+                    and _delimiter_imbalance_line(repaired, language) is not None):
+                repaired = None
+    if repaired is None:  # brace shape, or the delim repair declined
+        braced = _try_balance_braces(spliced, language)
+        if braced is not None and braced != spliced:
+            repaired = braced
+            shape = "brace"
+    if repaired is None:
+        return None
+    # Remap the marker span through the line diff (the brace repair may
+    # have deleted lines; the paren repair is single-char, indices never
+    # move but the remap is harmless for it).
+    start, end = marker_span
+    sp_lines = repaired.split("\n")
+    orig_lines = spliced.split("\n")
+    del_before = del_inside = 0
+    if len(orig_lines) != len(sp_lines):
+        import difflib as _dl
+
+        sm = _dl.SequenceMatcher(None, orig_lines, sp_lines, autojunk=False)
+        for tag, i1, i2, _j1, _j2 in sm.get_opcodes():
+            if tag == "delete":
+                if i2 <= start:
+                    del_before += i2 - i1
+                elif i1 < end + 1:
+                    del_inside += min(i2, end + 1) - max(i1, start)
+    rs = start - del_before
+    re_ = end - del_before - del_inside
+    region = "\n".join(sp_lines[rs:re_ + 1])
+    if not region.strip():
+        return None
+    return region, shape
+
+
 def _try_balance_braces(text: str, language: str | None = None) -> str | None:
     """Deterministically repair a single brace imbalance, or return None.
 

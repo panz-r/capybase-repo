@@ -11613,6 +11613,38 @@ class Orchestrator:
         self._pipeline_instance = pipe
         return pipe
 
+    def _side_pick_churn_ok(self, path: str) -> bool | None:
+        """The F4 side-pick's churn guard (s27-extend-21).
+
+        A side splice DROPS the loser side's changes; on a genuinely
+        two-sided conflict that loses content the model repair could have
+        merged. The condition is ASYMMETRY (the absolute F1 tier-1
+        threshold mis-scales on small files, where both sides sit under
+        it while both making real changes): land a side only when the
+        loser's churn is a small fraction of the winner's (≤ 25%) AND
+        within F1 tier-1's absolute cap. sqlite-0040 (2/840) and
+        redis-0049 (2/40) pass; a symmetric two-hunk conflict (8/8)
+        declines. Returns True/False, or None when sides are unavailable
+        (allowed — the rung's file-level verify remains the final gate).
+        """
+        try:
+            sides, base = self._micro_stage_sides(path)
+            if not sides or not (base or "").strip():
+                return None
+            from capybase.mechanisms import _side_churn
+            cur = sides.get("current", "")
+            rep = sides.get("replayed", "")
+            if not cur.strip() or not rep.strip():
+                return None
+            churns = sorted(
+                (_side_churn(base, cur), _side_churn(base, rep)))
+            lo, hi = churns
+            if hi == 0:
+                return None  # neither side changed — not side-pick territory
+            return lo <= 30 and (lo / hi) <= 0.25
+        except Exception:  # noqa: BLE001 — guard is advisory
+            return None
+
     def _micro_stage_sides(self, path):
         try:
             ts = _true_stage_sides(self.git, path)
@@ -12076,6 +12108,18 @@ class Orchestrator:
         """
         fault_idx = _attribute_whole_file_failure(failures, [u for u, _ in accepted])
 
+        # S27-extend-21 (the dead-rung fix): the deterministic rungs below
+        # reference ``units`` and ``language`` — NEITHER was defined in this
+        # scope, so the side-pick rungs (both sites) and the alternation
+        # collapse silently NameError'd inside their best-effort excepts and
+        # NEVER ran (zero side_pick_applied / alternation_collapse_applied
+        # events across every stored flight — extend-13's "0 direct fires"
+        # and extend-7's "silent decline" were this bug, not the documented
+        # causes). Defined once, from the accepted units (a file's units
+        # share one language).
+        units = [u for u, _ in accepted]
+        language = units[0].language if units else None
+
         # C4 (sprint-22): per-(step, path) tried-repair registry keyed by
         # failure signature. A deterministic repair that already FAILED for
         # this exact signature never re-runs (axum-0013: the model re-resolve
@@ -12179,6 +12223,7 @@ class Orchestrator:
         # conditional) rather than skipping — the model CAN fix it when it sees
         # the conditional context.
         _tiered_active = self.config.policy.max_whole_file_repair_seconds > 0
+        _skip_model_re_resolve = False
         if fault_idx < 0:
             fault_idx = max(0, len(accepted) - 1)
             _is_pp_failure = any(
@@ -12221,12 +12266,21 @@ class Orchestrator:
                     and not _is_undeclared
                     and not deterministic_only and _tiered_active
                     and len(accepted) > 1):
+                # S27-extend-21 (F4 wiring): this skip used to `return None`
+                # immediately — shadowing the side-pick/storage-class/other
+                # deterministic rungs below for exactly the class they can
+                # fix (an unattributed cross-unit failure that one side's
+                # wholesale splice resolves). The comment's contract ("the
+                # deterministic beam still runs") now holds: gate the MODEL
+                # re-resolve instead of the whole beam.
                 self.journal.emit(
                     "whole_file_repair_skipped",
-                    {"reason": "fault attribution: error outside all unit spans (tiered mode)"},
+                    {"reason": "fault attribution: error outside all unit spans (tiered mode) — model re-resolve only; deterministic rungs still run"},
                     step_index=self.step, path=path,
                 )
-                return None
+                _skip_model_re_resolve = True
+            else:
+                _skip_model_re_resolve = False
             if _is_pp_failure:
                 # Nearest-preceding-unit attribution for the cross-unit
                 # preprocessor case. The error line sits in the gap between
@@ -12270,7 +12324,15 @@ class Orchestrator:
             # returned before the deterministic rungs ran (sqlite-0099's
             # trace). A verifying side is the cheapest correct answer;
             # everything else (model included) costs more.
-            if f"sidepick:{_sig}" not in _tried:
+            # S27-extend-21 (churn guard): the side splice DROPS the loser
+            # side's changes, so on a genuinely TWO-SIDED conflict (both
+            # sides changed significantly) taking a side loses content —
+            # the model repair should get its chance at the merge first.
+            # Same condition + threshold as F1 tier-1 (the mechanism that
+            # owns this decision class): land a side only when the loser
+            # side ≈ base (near-one-sided).
+            _sp_guard = self._side_pick_churn_ok(path)
+            if f"sidepick:{_sig}" not in _tried and _sp_guard is not False:
                 _tried.add(f"sidepick:{_sig}")
                 try:
                     for _sp_side, _sp_cands in _whole_file_side_candidates(units):
@@ -12311,6 +12373,71 @@ class Orchestrator:
                                 step_index=self.step, path=path)
                             return [(_sp_unit, _sp_cand)]
                 except Exception:  # noqa: BLE001 — side-pick is best-effort
+                    pass
+            # P6b beam rung (s27-extend-21): whole-file-gate failures with
+            # delimiter/brace-shaped messages now reach the splice-level
+            # surgery — previously it existed ONLY at candidate level, so
+            # this failure class never got it (extend-12's wiring gap).
+            # Operates on the attributed unit's accepted candidate; the
+            # repaired region is verified at FILE level before landing.
+            if f"p6b:{_sig}" not in _tried:
+                _tried.add(f"p6b:{_sig}")
+                try:
+                    from capybase.verification import (
+                        delimiter_failure_shape,
+                        splice_level_delimiter_repair,
+                    )
+                    _p6b_msgs = [getattr(f, "message", "") or ""
+                                 for f in failures]
+                    if delimiter_failure_shape(_p6b_msgs) is not None:
+                        _p6b_u, _p6b_c = accepted[max(0, fault_idx)]
+                        if (_p6b_u.marker_span is not None
+                                and _p6b_c.resolved_text):
+                            _p6b = splice_level_delimiter_repair(
+                                _p6b_u.original_worktree_text,
+                                _p6b_u.marker_span,
+                                _p6b_c.resolved_text,
+                                _p6b_msgs, _p6b_u.language)
+                            if _p6b is not None:
+                                _p6b_region, _p6b_form = _p6b
+                                _p6b_cand = _p6b_c.model_copy(update={
+                                    "resolved_text": _p6b_region,
+                                    "candidate_id": (
+                                        _p6b_c.candidate_id
+                                        + f":p6b-{_p6b_form}"),
+                                    "provenance":
+                                        "deterministic_structural",
+                                    "self_reported_confidence": 0.8,
+                                    "explanation": (
+                                        f"P6b beam rung: {_p6b_form}-shaped "
+                                        f"whole-file failure repaired at the "
+                                        f"splice level"),
+                                })
+                                _p6b_new = list(accepted)
+                                _p6b_new[max(0, fault_idx)] = (
+                                    _p6b_u, _p6b_cand)
+                                try:
+                                    _p6b_val = (
+                                        self.verification.verify_file(
+                                            path, language, original,
+                                            [(u.marker_span,
+                                              c.resolved_text)
+                                             for u, c in _p6b_new],
+                                            repo_root=str(self.git.repo),
+                                            whole_text=_resolved_buffer(
+                                                original, _p6b_new)))
+                                except Exception:  # noqa: BLE001
+                                    _p6b_val = None
+                                if _p6b_val is not None and _p6b_val.passed:
+                                    self.journal.emit(
+                                        "p6b_beam_repair",
+                                        {"path": path,
+                                         "unit": _p6b_u.unit_id,
+                                         "form": _p6b_form,
+                                         "sig": _sig[:60]},
+                                        step_index=self.step, path=path)
+                                    return _p6b_new
+                except Exception:  # noqa: BLE001 — p6b rung is best-effort
                     pass
             # Storage-class relocation repair (s24 cycle-J, the C1b-promotion
             # item from the reviewer synthesis): gcc's "invalid storage class
@@ -12455,7 +12582,9 @@ class Orchestrator:
             # while both sides compile). Degrades honestly to NEAR on
             # merge-wanting oracles — still ahead of an ESCALATE that
             # re-merges into the same gate failure every round.
-            if f"sidepick:{_sig}" not in _tried:
+            # S27-extend-21: the same churn guard as the hoisted site —
+            # no side-landing on two-sided conflicts (content loss).
+            if f"sidepick:{_sig}" not in _tried and _sp_guard is not False:
                 _tried.add(f"sidepick:{_sig}")
                 try:
                     _sp_sides, _ = self._micro_stage_sides(path)
@@ -12717,7 +12846,7 @@ class Orchestrator:
         # deterministic repairs above may still close the case (a recurring
         # splice-junction brace imbalance the LLM keeps re-introducing). None
         # of the deterministic repairs fired → no deterministic fix available.
-        if deterministic_only:
+        if deterministic_only or _skip_model_re_resolve:
             return None
         unit, _old_cand = accepted[fault_idx]
         # Enriched feedback: build a splice-context snippet (the resolved file
@@ -14080,90 +14209,44 @@ class Orchestrator:
             # (_try_balance_braces) owns the repair; unlike the paren form
             # it may REMOVE lines, so the marker span is re-mapped through
             # a line diff before the region is extracted back out.
-            _p6b_delim = any(
-                "unmatched '" in (getattr(f, "message", "") or "")
-                and (")" in f.message or "]" in f.message)
-                and "}" not in f.message
-                for f in validation.hard_failures)
-            _p6b_brace = any(
-                ("mismatched closing delimiter" in (getattr(f, "message", "") or "")
-                 or "brace imbalance detected" in (getattr(f, "message", "") or "")
-                 or ("unmatched '" in (getattr(f, "message", "") or "")
-                     and "}" in f.message))
-                for f in validation.hard_failures)
+            # S27-extend-21: the surgery lives in ONE place —
+            # verification.splice_level_delimiter_repair — shared with the
+            # whole-file repair beam rung (whole-file-gate failures with the
+            # same shape previously never reached it).
             if (not validation.passed
                     and unit.marker_span is not None
-                    and cand.resolved_text
-                    and (_p6b_delim or _p6b_brace)):
+                    and cand.resolved_text):
                 try:
-                    from capybase.adapters.parsers import splice_resolution
                     from capybase.verification import (
-                        _delimiter_imbalance_line,
-                        _try_balance_braces,
-                        _try_repair_delimiter,
+                        splice_level_delimiter_repair,
                     )
-                    _spliced = splice_resolution(
+                    _p6b = splice_level_delimiter_repair(
                         unit.original_worktree_text,
-                        unit.marker_span, cand.resolved_text)
-                    _repaired_splice = None
-                    if _p6b_delim and (
-                            _delimiter_imbalance_line(_spliced, unit.language)
-                            is not None):
-                        _repaired_splice = _try_repair_delimiter(
-                            _spliced, unit.language)
-                        if (_repaired_splice is not None
-                                and _delimiter_imbalance_line(
-                                    _repaired_splice, unit.language) is not None):
-                            _repaired_splice = None
-                    if _repaired_splice is None and _p6b_brace:
-                        _braced = _try_balance_braces(
-                            _spliced, unit.language)
-                        if _braced is not None and _braced != _spliced:
-                            _repaired_splice = _braced
-                    if _repaired_splice is not None:
-                        # Extract the repaired region back out of the
-                        # splice so the candidate stays splice-safe. The
-                        # brace repair may have deleted lines — remap the
-                        # marker span through a line diff first (the paren
-                        # repair is single-char, indices never move).
-                        _start, _end = unit.marker_span
-                        _sp_lines = _repaired_splice.split("\n")
-                        _orig_lines = _spliced.split("\n")
-                        _del_before = 0
-                        _del_inside = 0
-                        if len(_orig_lines) != len(_sp_lines):
-                            import difflib as _dl_g5
-                            _sm = _dl_g5.SequenceMatcher(
-                                None, _orig_lines, _sp_lines, autojunk=False)
-                            for _tag, _i1, _i2, _j1, _j2 in _sm.get_opcodes():
-                                if _tag == "delete":
-                                    if _i2 <= _start:
-                                        _del_before += _i2 - _i1
-                                    elif _i1 < _end + 1:
-                                        _del_inside += (
-                                            min(_i2, _end + 1)
-                                            - max(_i1, _start))
-                        _rs = _start - _del_before
-                        _re_ = _end - _del_before - _del_inside
-                        _region = "\n".join(_sp_lines[_rs:_re_ + 1])
-                        if _region.strip():
-                            _repaired_cand = cand.model_copy(
-                                update={"resolved_text": _region})
-                            _r_val = self.verification.verify(
-                                unit, _repaired_cand)
-                            self._journal_validation(
-                                unit, _repaired_cand, _r_val)
-                            if _r_val.passed:
-                                self.journal.emit(
-                                    "p6b_splice_delimiter_repair",
-                                    {"candidate_id": cand.candidate_id,
-                                     "unit_id": unit.unit_id,
-                                     "form": "brace" if _del_before or _del_inside or _p6b_brace else "delim"},
-                                    step_index=self.step, path=unit.path,
-                                    unit_id=unit.unit_id)
-                                cand = _repaired_cand
-                                validation = _r_val
-                                outcome.validation = validation
+                        unit.marker_span,
+                        cand.resolved_text,
+                        [getattr(f, "message", "") or ""
+                         for f in validation.hard_failures],
+                        unit.language,
+                    )
+                    if _p6b is not None:
+                        _region, _p6b_form = _p6b
+                        _repaired_cand = cand.model_copy(
+                            update={"resolved_text": _region})
+                        _r_val = self.verification.verify(
+                            unit, _repaired_cand)
+                        self._journal_validation(
+                            unit, _repaired_cand, _r_val)
+                        if _r_val.passed:
+                            self.journal.emit(
+                                "p6b_splice_delimiter_repair",
+                                {"candidate_id": cand.candidate_id,
+                                 "unit_id": unit.unit_id,
+                                 "form": _p6b_form},
+                                step_index=self.step, path=unit.path,
+                                unit_id=unit.unit_id)
+                            cand = _repaired_cand
+                            validation = _r_val
+                            outcome.validation = validation
                 except Exception:  # noqa: BLE001 — repair is best-effort
                     pass
             # Sprint-19 P2: track this attempt's quality against a stashed
