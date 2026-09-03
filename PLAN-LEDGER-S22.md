@@ -6348,6 +6348,24 @@ The startup banner will print the calibration audit line
 (profile path, sections, prompt layout) — verify it reads
 markdown_code before walking away. Expected: ~94.5% raw / ~96% P+W.
 
+### S27-EXTEND-17e (2026-09-03) — the two newest conversions are unanimous; post-fix flight health clean
+
+`--repeat-all 3` on the EXTEND-17 conversion pair (the majority-of-3
+yardstick — a first-try PASS can itself be variance): **redis-0049
+PASS ×3 at 0.966, sqlite-0040 PASS ×3 at 1.00.** Both solid.
+
+Post-fix flight health sweep (all 15 d1fix sessions): whole-file
+repair retries ≤ 1 everywhere (count budget holding), ZERO
+f1_side_verify_failed events (the duplicate false-veto is gone), and
+sqlite-0099's F1 takeover now LANDS in 2/3 runs — the mechanism that
+upgraded it from ESC to the graded WORKING 0.78. sea-orm-0007 and
+the zenodo pair run 0 repair retries (pre-repair model-level
+failure) — confirming their content-class disposition.
+
+**S27 closes: 34 conversions (all repeat-validated where re-run) +
+1 NEAR + 1 first-PASS-repeat + 3 GATE_UNAVAILABLE reclassifications
++ 21 fixes; gate 3,996/0 @ -n 6; harvest ready on call.**
+
 ### S27-POST-REGISTER. era-aware C oracle builds unified (found during DEF-2 verification)
 
 The first pooled c-subset run (1,101 checks) recorded sqlite-history
