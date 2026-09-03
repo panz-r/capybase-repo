@@ -337,6 +337,40 @@ recomputes from the per-case extracts committed under `docs/results/`
 commit, commands, and flip-audit recipe; the prior `s22r2/`
 remains for comparison).
 
+## Test suites
+
+Three tiers, deliberately separated — a test in the wrong tier is a
+bug. Anything needing fetched data is not in pytest; anything making
+model calls is not in the corpus suite; anything deterministic is not
+in live-eval.
+
+| | pytest (unit) | corpus-tests | live-eval |
+|---|---|---|---|
+| **What it runs** | unit tests for every mechanism: parsers, verifiers, repair rungs, orchestrator flows (mocked gates) | the human merge M (the oracle) through the real verification floors: `py_compile`, `gcc -fsyntax-only`, `cargo check` in a per-case git worktree | the full orchestrator on real conflicts — actual model calls, full pipeline, majority-of-3 verdicts |
+| **Data** | self-contained fixtures; nothing external fetched | real downloaded repos, processed and extracted (fetch script below) | the same real repos |
+| **Model calls** | never | never (deterministic) | yes — through the provider config + calibration profile |
+| **Entry point** | `pytest tests/ -n 6` | `./corpus/run.sh [python\|rust\|all]` | `scripts/live_eval_realworld.py --provider NAME` |
+| **Wall time** | ~32 s (3,990 tests, 6 workers) | minutes (own runner — never pytest) | hours |
+| **Purpose** | the per-change regression gate | validates the verifier + the corpus oracle against real-world conflict shapes | the measured product: harvests, README numbers |
+
+After clone and build (`.venv` created per Setup below):
+
+```bash
+# 1. unit — always runnable, no prerequisites
+.venv/bin/python -m pytest tests/ -q -n 6
+
+# 2. corpus — one-time fetch (~325MB+ archives; licenses require
+#    attribution, not redistribution — everything fetched is gitignored)
+.venv/bin/python scripts/fetch_mergeconflict_datasets.py --language python --limit 50
+./corpus/run.sh python        # or rust, or all
+
+# 3. live-eval — requires a provider + calibration profile (Setup steps
+#    3 and 5); a run without one is an error, by design
+.venv/bin/python scripts/live_eval_realworld.py --provider my-provider \
+    --repeat-nonpass 3 --out /tmp/results.json \
+    --preserve-flights /tmp/flights
+```
+
 ### Corpus
 
 661 non-git-resolvable rebase conflicts mined from upstream histories
