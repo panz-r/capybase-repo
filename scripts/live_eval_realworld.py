@@ -2288,6 +2288,14 @@ def main():
     except ProviderError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    # DEF-3: the calibration audit trail — which profile, which sections,
+    # which prompt layout is in force for this run (harvest attribution).
+    _, _, _cal_report = apply_to_config(Config(), _PROVIDER)
+    print(
+        f"calibration: {_cal_report['profile_model']} @ "
+        f"{_cal_report['profile_path']} — sections "
+        f"{','.join(_cal_report['sections'])}, prompt "
+        f"{_cal_report['prompt_layout']}")
     print(_PROVIDER.provider.describe())
 
     cfg0 = _config_for(cases[0])
