@@ -122,7 +122,10 @@ def test_disjoint_edits_insertions_in_different_spots():
 
 
 def test_disjoint_edits_overlapping_returns_unresolved():
-    # Both sides change the SAME line → real conflict → unresolved (defer to LLM).
+    # Both sides change the SAME line → real conflict → unresolved (defer to
+    # LLM). Covers both decline paths on one input: the disjoint-edit overlap
+    # check declines AND zealous merge bails (rule None either way). The
+    # former zealous-section replica of this case was removed (DEF-5 audit).
     base = "x = 1"
     current = "x = 2"
     replayed = "x = 3"
@@ -240,16 +243,6 @@ def test_zealous_resolves_mixed_one_sided_and_disjoint():
     if r.resolved:
         assert r.rule in ("disjoint_edits", "zealous_merge")
         assert r.text == "a = 9\nb = 1\nc = 9"
-
-
-def test_zealous_bails_on_genuine_two_sided_same_span():
-    # Both sides change the same line differently → genuine conflict → None.
-    base = "x = 1"
-    current = "x = 2"
-    replayed = "x = 3"
-    r = resolve_structurally(_unit(base, current, replayed))
-    assert not r.resolved
-    assert r.rule is None
 
 
 def test_zealous_bails_on_genuine_two_sided_overlapping_span():

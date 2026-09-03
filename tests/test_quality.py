@@ -98,12 +98,9 @@ def test_is_correct_containment_wrapped_merge():
 
 
 def test_is_correct_rejects_missing_side():
-    # Drops the replayed side → wrong.
-    assert not _is_correct('["core", "s"]', '["core", "s", "r"]')
-
-
-def test_is_correct_rejects_picks_one_side():
-    # Just the current side, not both → wrong.
+    # Resolution missing the replayed side — whether dropped or only the
+    # current side picked, the merged text is the same wrong input → wrong.
+    # (Formerly two exact-replica tests; DEF-5 audit merged them.)
     assert not _is_correct('["core", "s"]', '["core", "s", "r"]')
 
 

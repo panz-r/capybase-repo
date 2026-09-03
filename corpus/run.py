@@ -36,6 +36,38 @@ def _run_check(fn, case, *args) -> tuple[str, str]:
         return "fail", traceback.format_exc(limit=2)[-300:]
 
 
+def _run_build_pool(items, max_workers: int = 2):
+    """Run (name, fn, case) toolchain checks in a bounded thread pool.
+
+    DEF-2: real builds (worktree + configure + make / cargo, 600s timeouts)
+    must not run unbounded — concurrent full builds risk OOM (the pytest-era
+    serial_build cap existed for exactly this). Two workers balance wall
+    time against memory; the checks' own Python is trivial under the GIL —
+    the concurrency is in the compiler/cargo subprocesses. Concurrent
+    ``git worktree add`` on one clone is safe (unique mkdtemp names, 8/8
+    race-test on sqlite-history).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from corpus.checks import SKIP
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(fn, case, Path("/tmp")): name
+                   for name, fn, case in items}
+        for fut in as_completed(futures):
+            name = futures[fut]
+            try:
+                r = fut.result()
+                results.append((name, ("skip", "") if r is SKIP
+                                else ("pass", "")))
+            except AssertionError as exc:
+                results.append((name, ("fail", str(exc)[:200])))
+            except Exception:  # noqa: BLE001
+                results.append((name, ("fail",
+                                       traceback.format_exc(limit=2)[-300:])))
+    return results
+
+
 def main() -> int:
     subset = sys.argv[1] if len(sys.argv) > 1 else "all"
     if subset == "scenarios":
@@ -54,6 +86,23 @@ def main() -> int:
     failures: list[tuple[str, str]] = []
     ran = skipped = 0
 
+    # DEF-2: toolchain checks (real builds in worktrees) are collected and
+    # run at the end in a bounded pool; everything else runs inline (fast,
+    # no subprocesses). Names must match checks.py's checks_for /
+    # scenario_checks_for yields.
+    build_names = {"build_verdict", "cargo_verdict", "tip_build", "tip_cargo"}
+    build_items: list[tuple[str, object, object]] = []
+
+    def record(status_msg: tuple[str, str], name: str):
+        nonlocal ran, skipped
+        status, msg = status_msg
+        if status == "skip":
+            skipped += 1
+            return
+        ran += 1
+        if status == "fail":
+            failures.append((name, msg))
+
     # Session cases (extracted-testdata/sessions — no clones needed)
     from corpus.session_loader import load_session_cases
     session_cases = load_session_cases()
@@ -69,13 +118,7 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="corpus-run-") as td:
             for case in session_cases:
                 for name, fn in sess_fns:
-                    status, msg = _run_check(fn, case, Path(td))
-                    if status == "skip":
-                        skipped += 1
-                        continue
-                    ran += 1
-                    if status == "fail":
-                        failures.append((f"{case.id}:{name}", msg))
+                    record(_run_check(fn, case, Path(td)), f"{case.id}:{name}")
 
     # Rebase scenarios (mined multi-commit history; clones needed)
     if subset in ("all", "scenarios", "rust", "c"):
@@ -88,26 +131,27 @@ def main() -> int:
             print(f"corpus: {len(scenarios)} rebase scenarios")
             for scenario in scenarios:
                 for name, fn in checks.scenario_checks_for(scenario):
-                    status, msg = _run_check(fn, scenario, Path("/tmp"))
-                    if status == "skip":
-                        skipped += 1
-                        continue
-                    ran += 1
-                    if status == "fail":
-                        failures.append((f"{scenario.id}:{name}", msg))
+                    if name in build_names:
+                        build_items.append((f"{scenario.id}:{name}", fn, scenario))
+                    else:
+                        record(_run_check(fn, scenario, Path("/tmp")),
+                               f"{scenario.id}:{name}")
 
     with tempfile.TemporaryDirectory(prefix="corpus-run-") as td:
         for i, case in enumerate(cases, 1):
             for name, fn in checks.checks_for(case):
-                status, msg = _run_check(fn, case, Path(td))
-                if status == "skip":
-                    skipped += 1
+                if name in build_names:
+                    build_items.append((f"{case.id}:{name}", fn, case))
                     continue
-                ran += 1
-                if status == "fail":
-                    failures.append((f"{case.id}:{name}", msg))
+                record(_run_check(fn, case, Path(td)), f"{case.id}:{name}")
             if i % 200 == 0:
                 print(f"  ... {i}/{len(cases)} ({len(failures)} failures so far)")
+
+    if build_items:
+        print(f"  build pool: {len(build_items)} toolchain checks (2 workers)")
+        for name, (status, msg) in _run_build_pool(build_items):
+            record((status, msg), name)
+
     print(f"\ncorpus: {ran} checks ran, {skipped} skipped, "
           f"{len(failures)} failures")
     for name, msg in failures[:20]:

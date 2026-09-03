@@ -6074,7 +6074,7 @@ the runner's dispatch extended for the scenario loader, and a
 data-presence skip. REPAIR: port + wire + verify against the mined
 scenarios.
 
-### S27-DEF-2. corpus runner lacks the C build-verdict parallelism guard
+### S27-DEF-2. corpus runner lacks the C build-verdict parallelism guard — CLOSED
 
 run.py runs check_c_build_verdict cases sequentially in the main
 loop, but each builds a REAL worktree + configure + make (600s
@@ -6083,6 +6083,21 @@ pytest-era serial_build cap existed for memory reasons (concurrent
 full builds risk OOM). REPAIR: a bounded worker pool (2-3 concurrent
 builds max) in run.py, or at minimum document the wall-time and let
 subsets be run per-dataset.
+
+**CLOSED (DEF-2).** run.py now routes all four toolchain checks
+(`build_verdict`, `cargo_verdict`, scenario `tip_build`, `tip_cargo`)
+through `_run_build_pool` — a 2-worker ThreadPoolExecutor (the checks'
+Python is trivial under the GIL; the concurrency is in the compiler
+subprocesses, matching the old serial_build memory rationale).
+Race-safety verified empirically first: 8 concurrent `git worktree
+add` on the sqlite-history clone, 8/8 succeed (unique mkdtemp worktree
+names). First full c-subset run through the pool: **1,101 checks ran,
+0 skipped, 0 failures, 19m36s wall / 62m CPU** — ~3 cores busy, so
+the pool parallelizes effectively. Honest-oracle note from that run:
+sqlite-history human merges 0121-0133 record `compiled=False` (Tcl
+absent → regression-test targets fail; 0130-0132 additionally stale
+configure scripts in old commits) — recorded per policy, not check
+failures; the checks assert only that the build ran.
 
 ### S27-DEF-3. apply_to_config silently ignores a provider profile with no safety/prompt sections missing keys?
 
@@ -6106,7 +6121,7 @@ across two files in two trees. REPAIR: consolidate the three maps
 in one place (corpus/_realworld_build.py or a new shared module) so
 the corpus checks and the eval harness cannot drift.
 
-### S27-DEF-5. unit-test suite has never had the efficiency audit
+### S27-DEF-5. unit-test suite has never had the efficiency audit — CLOSED
 
 The user directive (no repeated setup/teardown per test, shared
 session-scoped fixtures, no exact-duplicate cases) is queued but not
@@ -6115,6 +6130,30 @@ hygiene, not urgency. REPAIR: audit pass — find function-scoped
 fixtures that build expensive objects per-test (VerificationEngine,
 git repos), promote to module/session scope; hash-scan test bodies
 for exact replicas.
+
+**CLOSED (DEF-5)** — evidence-based audit, not pattern-guessing:
+- **Fixtures**: 10 fixtures across all 212 files (the suite is
+  helper-function based by design; per-test repo isolation is
+  correctness, not waste). Zero fixtures doing expensive work
+  (VerificationEngine/git/Orchestrator/TemporaryDirectory) — nothing
+  to promote.
+- **Exact replicas**: AST-hash scan (bodies, then bodies+decorators)
+  found 3 groups. Two were real replicas and were removed:
+  `test_quality.py::test_is_correct_rejects_picks_one_side` (merged
+  into `..._rejects_missing_side` — identical input, both defect
+  descriptions collapse to one marker text) and
+  `test_structural_resolver.py::test_zealous_bails_on_genuine_two_
+  sided_same_span` (deleted; survivor's comment now documents that
+  both decline paths — disjoint-overlap check AND zealous bail — are
+  covered by the one input). The third group
+  (`test_c_skeleton.py::test_empty_file` vs the cpp twin) is
+  legitimate: same smoke against two different modules.
+- **Where time actually goes** (`--durations=40`): top costs are
+  deliberate — r45 final-only config runs a real pytest subprocess
+  (2.0s), timeout-kill test (1.5s), spinner frame timing (1.1s),
+  pyright LSP subprocess tests (1.0/0.97s). No setup entry above
+  0.37s. Gate after edits: **3,988 passed / 0 failed, 37.5s @ -n 6**
+  (3,990 − the 2 removed replicas).
 
 ### S27-DEF-6. the _gitshim.py copy can drift from tests/conftest.py's git()
 
