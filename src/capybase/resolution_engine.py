@@ -1034,6 +1034,12 @@ _RESOLVE_CONTRACT_JSON_V6 = (
     "```\n\n"
 )
 
+#: Audit-2 polish: the markdown-code output CARRIAGE — one phrase, every
+#: layout-branched renderer appends its own metadata schema after it (the
+#: repair/recovery/shatter arms had drifted into three wordings of the same
+#: instruction). The v6 carriage lives only in the canonical constants.
+_MD_CODE_CARRIAGE_END = " (raw code, no escaping of newlines or quotes), then ONE ```json fenced object"
+
 #: D1 (s27): the seam rule — shared by BOTH layout rule sets verbatim (the
 #: per-layout rule variants below embed it; single source so a wording fix
 #: cannot land in one layout and miss the other — the audit-2 D3 repair).
@@ -2196,8 +2202,8 @@ def _recovery_tail_note(profile: PromptProfile) -> str:
     every profile)."""
     if profile.output_layout is OutputLayout.MARKDOWN_CODE:
         return (
-            "Emit the merged code as a RAW fenced code block (no escaping of\n"
-            "newlines or quotes), then the ```json metadata block; nothing after it."
+            "Emit the merged code as a fenced code block"
+            + _MD_CODE_CARRIAGE_END + "; nothing after it."
         )
     return (
         "Escape newlines as \\n and double quotes as \\\" inside resolved_text. "
@@ -2469,8 +2475,8 @@ def _render_repair_output(profile: PromptProfile) -> str:
     """
     if profile.output_layout is OutputLayout.MARKDOWN_CODE:
         return (
-            "OUTPUT: emit the COMPLETE corrected replacement text as a fenced code block "
-            "(raw code, no escaping of newlines or quotes), then ONE ```json fenced object:\n"
+            "OUTPUT: emit the COMPLETE corrected replacement text as a fenced code block"
+            + _MD_CODE_CARRIAGE_END + ":\n"
             "```json\n"
             "{\n"
             '  "plan": "<one sentence per failure: why + the fix>",\n'
@@ -4260,7 +4266,7 @@ def build_shattered_repair_prompt(
     if profile.output_layout is OutputLayout.MARKDOWN_CODE:
         output_block = (
             "- Output the corrected version of ONLY the lines shown above as a\n"
-            "  fenced code block (raw lines, no escaping), then ONE ```json object:\n"
+            "  fenced code block" + _MD_CODE_CARRIAGE_END + ":\n"
             '  {"explanation": "<one short sentence>"}'
         )
     else:
