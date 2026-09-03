@@ -5954,6 +5954,25 @@ moved one anyway:
 GATE_UNAVAILABLE reclassifications + 30 fixes. Projected harvest:
 ~95% raw / ~96.5% P+W adj.
 
+### S27-EXTEND-19 (2026-09-04) — cross-surface validation of the unified prompt subsystem
+
+The two surfaces untouched since the audit-2 surgery, both green:
+
+- **Deterministic scenario corpus**: 281 checks, 0 failures (3m07s,
+  real cargo) — the orchestrator changes (oscillation tracker, mirror
+  rewrite, f1 events) hold on the history/plan machinery.
+- **Synthetic live_eval.py — 4/4 PASS** (py_simple 34s, py_multi_unit
+  11s, rust_impl 46s, rust_port_test 63s): the first run of the OTHER
+  harness under the unified subsystem, markdown_code, calibration
+  banner printing. One harness defect found+fixed on the way: the
+  /models probe HARD-REFUSED on alias endpoints (single-model servers
+  list the GGUF id while accepting the configured alias — exactly the
+  nova-gemma4 endpoint the realworld harness uses daily). The probe's
+  own comment already promised "a miss here is a warning, not a
+  refusal"; the code now honors that (advisory mismatch, real
+  connectivity failures still refuse — provider config stays
+  canonical).
+
 ### ARCHITECTURE AUDIT (2026-09-02, calibration-faithfulness)
 
 **The intended architecture**: prompt format/layout via the calibrated

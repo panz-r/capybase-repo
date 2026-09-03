@@ -500,11 +500,18 @@ def _probe_endpoint() -> bool:
             ok = target_model in all_ids
             print(f"  reachable. available models: {all_ids}", flush=True)
         if not ok:
+            # Advisory only (matches the comment's contract): single-model
+            # servers list the underlying GGUF id while accepting the
+            # configured alias — the realworld harness runs against exactly
+            # such endpoints daily. The provider config is canonical; an
+            # /models listing mismatch must not veto the resolution.
             print(
-                f"  WARNING: target model '{target_model}' not available — eval "
-                f"will fail.", flush=True
+                f"  WARNING: target model '{target_model}' not in the listed "
+                f"ids — continuing (alias servers accept it); requests will "
+                f"fail loudly if the server rejects the name.",
+                flush=True,
             )
-        return ok
+        return True
     except Exception as e:
         print(f"  UNREACHABLE: {e}", flush=True)
         return False
