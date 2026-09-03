@@ -5973,6 +5973,38 @@ The two surfaces untouched since the audit-2 surgery, both green:
   connectivity failures still refuse — provider config stays
   canonical).
 
+### S27-EXTEND-20 (2026-09-04) — full deterministic corpus run + sprint-28 design seed
+
+**Corpus `all` end-to-end** (the combined session+scenario+realworld
+dispatch — the c and python subsets had run separately, never the
+merged path under the pool + era-aware checks): **2,366 checks ran,
+365 skipped, 0 failures, 23m39s wall / 70m CPU** (the 2-worker build
+pool). The skips are honest (no-clone datasets, absent merge SHAs,
+unknown-build commits at old tips). The deterministic dataset-QA
+surface is fully green under the final sprint-27 stack.
+
+**Sprint-28 design seed — D1 material** (consolidated from extend-12's
+mechanism-engagement audit + extend-14's measured seam evidence; both
+are WIRING gaps where a mechanism exists but its insertion point never
+fires for a known failure shape):
+
+1. **p6b brace-form wiring**: the brace-form repair exists at UNIT
+   level but whole-file-gate failures carrying the same message shape
+   never reach it. Evidence: extend-12 (zero fires, "wiring gap").
+   Design: route whole-file brace-form signatures to the p6b rung (or
+   hoist a p6b-equivalent into the deterministic beam) — bounded by
+   the same signature-dedup registry the beam uses.
+2. **F4 side-pick insertion for the pp class**: for ATTRIBUTED
+   cross-unit failures, the attribution path jumps to the model
+   re-resolve, returning before the deterministic rungs later in the
+   beam (sqlite-0099's trace). The extend-13 hoist fixed the TOP of
+   the beam; the attributed path needs the same treatment or an F4
+   probe before the model round.
+3. Both are INSURANCE for the harvest (no current band member needs
+   them — the seam class converted via the prompt contract), but the
+   pp-attributed shape recurs across C corpora; worth sprint-28 wire-up
+   with unit tests against the stored 0099 trace.
+
 ### ARCHITECTURE AUDIT (2026-09-02, calibration-faithfulness)
 
 **The intended architecture**: prompt format/layout via the calibrated
