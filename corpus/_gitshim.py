@@ -30,10 +30,3 @@ def git(repo: Path, *args: str, input_text: str | None = None, check: bool = Tru
             f"git {args} failed (rc={proc.returncode}): {proc.stderr.strip()}"
         )
     return proc
-
-
-@pytest.fixture
-def repo(tmp_path: Path) -> Path:
-    """An initialized git repo with identity configured."""
-    git(tmp_path, "init", "-q", "-b", "main")
-    return tmp_path

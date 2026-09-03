@@ -38,11 +38,15 @@ def _run_check(fn, case, *args) -> tuple[str, str]:
 
 def main() -> int:
     subset = sys.argv[1] if len(sys.argv) > 1 else "all"
-    cases = load_realworld_cases()
-    if subset != "all":
-        cases = [c for c in cases if c.language == subset]
+    if subset == "scenarios":
+        # scenario-only run: skip the realworld-case dispatch entirely
+        cases = []
+    else:
+        cases = load_realworld_cases()
+        if subset != "all":
+            cases = [c for c in cases if c.language == subset]
     print(f"corpus: {len(cases)} cases ({subset})")
-    if not cases:
+    if not cases and subset != "scenarios":
         print("no data present — fetch via scripts/fetch_mergeconflict_datasets.py (corpus/README.md)")
         return 0
 
@@ -72,6 +76,25 @@ def main() -> int:
                     ran += 1
                     if status == "fail":
                         failures.append((f"{case.id}:{name}", msg))
+
+    # Rebase scenarios (mined multi-commit history; clones needed)
+    if subset in ("all", "scenarios", "rust", "c"):
+        try:
+            from corpus.rebase_scenario_loader import load_rebase_scenarios
+            scenarios = load_rebase_scenarios()
+        except Exception:  # noqa: BLE001 — no mined data
+            scenarios = []
+        if scenarios:
+            print(f"corpus: {len(scenarios)} rebase scenarios")
+            for scenario in scenarios:
+                for name, fn in checks.scenario_checks_for(scenario):
+                    status, msg = _run_check(fn, scenario, Path("/tmp"))
+                    if status == "skip":
+                        skipped += 1
+                        continue
+                    ran += 1
+                    if status == "fail":
+                        failures.append((f"{scenario.id}:{name}", msg))
 
     with tempfile.TemporaryDirectory(prefix="corpus-run-") as td:
         for i, case in enumerate(cases, 1):

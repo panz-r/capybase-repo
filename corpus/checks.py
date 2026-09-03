@@ -183,3 +183,173 @@ def check_session_placeholder_flag_honest(case, _tmp: Path):
     else:
         assert stub not in case.accepted_resolution, (
             f"{case.id}: is_placeholder_resolution=False but the stub is present")
+
+
+# ---------------------------------------------------------------------------
+# Rebase-scenario checks (from the former tests/test_rebase_scenarios.py —
+# DEF-1 port; bodies verbatim, pytest idioms became SKIP returns)
+# ---------------------------------------------------------------------------
+
+def _scenario_to_plan(scenario):
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+    from capybase.history import ReplayCommit, RebasePlan
+    commits = [
+        ReplayCommit(
+            oid=c["oid"], parent_oid=c.get("parent_oid", ""),
+            subject=c.get("subject", ""), body_summary=c.get("body_summary", ""),
+            touched_files=c.get("touched_files", []),
+            diffstat=c.get("diffstat", {}),
+            patch_id=c.get("patch_id", ""),
+            index=i,
+        )
+        for i, c in enumerate(scenario.source_commits)
+    ]
+    return RebasePlan(
+        source_commits=commits,
+        target_base_oid=scenario.merge_base_oid,
+        target_tip_oid=scenario.target_tip_oid,
+        source_tip_oid=scenario.source_tip_oid,
+        created_at="mined",
+    )
+
+
+def _scenario_clone(scenario):
+    from corpus.rebase_scenario_loader import git_history_repo_path
+    clone = git_history_repo_path(scenario.dataset)
+    if not (clone / ".git").exists():
+        return None
+    return clone
+
+
+def check_scenario_plan_valid(scenario, _tmp: Path):
+    plan = _scenario_to_plan(scenario)
+    assert len(plan.source_commits) >= 1
+    for c in plan.source_commits:
+        assert c.oid
+        assert c.subject is not None
+    first = plan.source_commits[0]
+    assert plan.index_of(first.oid) == 0
+
+
+def check_scenario_blobs_match_markers(scenario, _tmp: Path):
+    for step in scenario.conflict_steps:
+        assert step.marker_text, f"step {step.step} has empty marker text"
+        assert "<<<<<<<" in step.marker_text, (
+            f"step {step.step} marker text has no conflict markers")
+        assert step.base or step.current or step.replayed, (
+            f"step {step.step} all three blobs empty (malformed)")
+
+
+def check_scenario_oids_resolve(scenario, _tmp: Path):
+    from corpus._gitshim import git
+    clone = _scenario_clone(scenario)
+    if clone is None:
+        return SKIP
+    out = git(clone, "rev-parse", "--verify", scenario.source_tip_oid,
+              check=False)
+    assert out.stdout.strip() == scenario.source_tip_oid, (
+        f"source_tip_oid {scenario.source_tip_oid[:8]} does not resolve "
+        f"in the clone")
+    source_oids = {c["oid"] for c in scenario.source_commits}
+    for step in scenario.conflict_steps:
+        if step.replayed_commit_oid:
+            assert step.replayed_commit_oid in source_oids, (
+                f"step {step.step} replayed_commit_oid not in the source "
+                f"sequence")
+
+
+def check_scenario_history_service(scenario, _tmp: Path):
+    from capybase.conflict_model import ConflictSide, ConflictUnit
+    from capybase.git_backend import GitBackend
+    from capybase.history import HistoryQueryService, region_key_from_unit
+    clone = _scenario_clone(scenario)
+    if clone is None:
+        return SKIP
+    gb = GitBackend(clone)
+    plan = _scenario_to_plan(scenario)
+    svc = HistoryQueryService(plan, git=gb)
+    for step in scenario.conflict_steps:
+        unit = ConflictUnit(
+            session_id="corpus", step_index=step.step, path=step.path,
+            language=scenario.language, conflict_type="UU",
+            unit_id=f"{step.path}:{step.step}",
+            unit_kind="text_marker_block",
+            base=ConflictSide(label="BASE", text=step.base or ""),
+            current=ConflictSide(label="CURRENT_UPSTREAM_SIDE",
+                                text=step.current or ""),
+            replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE",
+                                 text=step.replayed or ""),
+            original_worktree_text=step.marker_text or "",
+            marker_span=(0, max(0, len((step.marker_text or "").splitlines()) - 1)),
+        )
+        ctx = svc.for_conflict(unit,
+                               replayed_commit_oid=step.replayed_commit_oid)
+        assert ctx.current_replay_commit is not None, (
+            f"history service couldn't locate the replayed commit for "
+            f"step {step.step}")
+        assert ctx.source_commit_count == len(scenario.source_commits)
+        assert ctx.region_detection_method in ("none", "heuristic", "diff")
+
+
+def check_scenario_branch_intent(scenario, _tmp: Path):
+    from capybase.branch_intent import build_branch_intent
+    from capybase.git_backend import GitBackend
+    clone = _scenario_clone(scenario)
+    if clone is None:
+        return SKIP
+    gb = GitBackend(clone)
+    plan = _scenario_to_plan(scenario)
+    patches = {}
+    for c in plan.source_commits[:20]:
+        try:
+            patches[c.oid] = gb.commit_patch(c.oid)
+        except Exception:  # noqa: BLE001
+            patches[c.oid] = b""
+    intent = build_branch_intent(plan, patches)
+    assert intent is not None
+
+
+def check_scenario_source_tip_compiles_rust(scenario, _tmp: Path):
+    if scenario.language != "rust":
+        return SKIP
+    import shutil as _sh
+    if not _sh.which("cargo"):
+        return SKIP
+    clone = _scenario_clone(scenario)
+    if clone is None:
+        return SKIP
+    from corpus._realworld_cargo import DEFAULT_TIMEOUT, cargo_check_at_worktree
+    verdict = cargo_check_at_worktree(
+        clone, scenario.source_tip_oid, timeout=DEFAULT_TIMEOUT)
+    assert verdict.ran, f"cargo check did not run for {scenario.id}"
+    print(f"  {scenario.id}: source tip cargo: {verdict.verdict}")
+
+
+def check_scenario_source_tip_builds_c(scenario, _tmp: Path):
+    if scenario.language != "c":
+        return SKIP
+    cmd = C_BUILD_COMMANDS.get(scenario.dataset)
+    if not cmd:
+        return SKIP
+    clone = _scenario_clone(scenario)
+    if clone is None:
+        return SKIP
+    from corpus._realworld_cargo import DEFAULT_TIMEOUT
+    verdict = run_command_at_worktree(
+        clone, scenario.source_tip_oid, cmd, timeout=DEFAULT_TIMEOUT)
+    assert verdict.ran, f"build did not run for {scenario.id}: {verdict.errors}"
+    if not verdict.compiled:
+        print(f"  {scenario.id}: source tip did not build ({cmd}): "
+              f"{verdict.errors[:2]}")
+
+
+def scenario_checks_for(scenario):
+    yield "plan_valid", check_scenario_plan_valid
+    yield "blobs_match", check_scenario_blobs_match_markers
+    yield "oids_resolve", check_scenario_oids_resolve
+    yield "history_service", check_scenario_history_service
+    yield "branch_intent", check_scenario_branch_intent
+    if scenario.language == "rust":
+        yield "tip_cargo", check_scenario_source_tip_compiles_rust
+    if scenario.language == "c":
+        yield "tip_build", check_scenario_source_tip_builds_c
