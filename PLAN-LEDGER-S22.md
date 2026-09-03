@@ -6037,3 +6037,24 @@ named with the recalibrate fix; the real e2b profile loads clean.
 A test in the wrong tier is a bug. Anything needing fetched data is
 not in pytest; anything making model calls is not in the corpus
 suite; anything deterministic is not in live-eval.
+
+### CALIBRATION-ON CANARY (2026-09-03) — 10 cases, markdown_code, ZERO regressions + one conversion
+
+First live eval under the real calibrated layout (e2b markdown_code;
+layout confirmed in the stored prompts). Canary selection: 5 regression
+guards (sprint conversions), 3 band members, 2 stable canaries.
+
+Results vs the json_v6 baselines:
+- **ALL 5 regression guards hold PASS 1.00 first-try** (0108, 0055,
+  0001, 0043, 0013) — the sprint's mechanisms are layout-robust.
+- **sqlite-0077 PASS 1.00 (was NEAR 0.89)** — the 32nd conversion: the
+  D7 split + the md layout (raw fenced output, no JSON escaping)
+  closes the sim gap the band member carried.
+- tokio-0046 (0.88) and zenodo-0003 (0.83): identical sims — stable
+  honest band.
+- redis-0004 PASS 1.00 (canary holds).
+- flask-0006: ESC 0.54 vs DIVERGENT 0.58 — same oracle-subjective
+  class, verdict-label noise (both sub-bar; sim within 0.04).
+
+The markdown_code layout is confirmed correct AND at least neutral-to-
+positive live. Harvest under calibration is cleared to run.
