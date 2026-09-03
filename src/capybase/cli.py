@@ -915,10 +915,15 @@ def main(argv: list[str] | None = None) -> int:
     # (provider resolution / explicit path) and writing (calibrate writes it
     # here). When unset, calibrate writes to the config-dir artifact (there
     # is no repo-local ambient default anymore).
+    # Both calibrators write to the config-dir artifact (no repo-local
+    # ambient default); resolution commands never reach this block (they
+    # resolve the provider path instead).
     if args.profile:
         profile_path = args.profile
-    elif args.command in ("calibrate", "recalibrate"):
-        profile_path = str(Path(args.config) / "model_profile.json")
+    elif args.command in ("calibrate", "recalibrate", "calibrate-embeddings"):
+        from capybase.config import default_config_dir
+        _cfg_dir = Path(args.config) if args.config else default_config_dir()
+        profile_path = str(_cfg_dir / "model_profile.json")
     else:
         profile_path = config.calibration.model_profile_path
     if args.profile:

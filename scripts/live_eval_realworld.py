@@ -87,7 +87,7 @@ from capybase.provider_config import (  # noqa: E402
     resolve_provider,
 )
 from capybase.resolution_engine import ResolutionEngine  # noqa: E402
-from tests._realworld_build import (  # noqa: E402
+from corpus._realworld_build import (  # noqa: E402
     C_BUILD_COMMANDS,
     C_TEST_COMMANDS,
 )

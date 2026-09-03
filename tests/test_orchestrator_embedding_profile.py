@@ -87,12 +87,34 @@ def _patch_embeddings_client(monkeypatch, *, vectors=None):
 # ---------------------------------------------------------------------------
 
 
+
+
+def _applied_cfg(repo: Path, profile: ModelProfile, *, model: str = "vibethink", cfg_retriever: str = "lexical") -> Config:
+    """Apply a profile the way production does — via apply_to_config (the
+    provider path). The orchestrator's ambient overlay was REMOVED (the
+    provider-named profile is the only calibration source); these tests
+    exercise the real path, not a removed one."""
+    from capybase.provider_config import (
+        ProviderConfig, ResolvedProvider, apply_to_config,
+    )
+    path = _profile_path(repo)
+    profile.save(path)
+    cfg = _cfg(repo, model=model, retriever=cfg_retriever)
+    resolved = ResolvedProvider(
+        provider=ProviderConfig(
+            base_url=cfg.model.base_url, model=model,
+            api_key=cfg.model.api_key, profile=str(path)),
+        profile=profile, profile_path=path,
+    )
+    cfg, _knobs = apply_to_config(cfg, resolved)
+    return cfg
+
 def test_profile_embedding_min_similarity_reaches_retriever(repo: Path, monkeypatch):
     """A matching profile's ``embedding_min_similarity`` overrides the config
     default AND is the floor the built EmbeddingRetriever uses."""
     _profile(embedding_min_similarity=0.71).save(_profile_path(repo))
     _patch_embeddings_client(monkeypatch)
-    cfg = _cfg(repo, retriever="embedding")
+    cfg = _applied_cfg(repo, _profile(embedding_min_similarity=0.71), cfg_retriever="embedding")
 
     orch = Orchestrator(cfg, repo=str(repo))
 
@@ -119,11 +141,10 @@ def test_default_floor_when_no_profile(repo: Path, monkeypatch):
 def test_capability_flag_flips_retriever_to_embedding(repo: Path, monkeypatch):
     """``enable_embedding_rag`` in a matching profile flips the retriever from
     lexical to embedding at orchestrator init."""
-    _profile(enable_embedding_rag=True, embedding_min_similarity=0.6).save(
-        _profile_path(repo)
-    )
+    _rag_profile = _profile(enable_embedding_rag=True, embedding_min_similarity=0.6)
+    _rag_profile.save(_profile_path(repo))
     _patch_embeddings_client(monkeypatch)
-    cfg = _cfg(repo, retriever="lexical")  # user has lexical configured
+    cfg = _applied_cfg(repo, _rag_profile, cfg_retriever="lexical")  # user has lexical configured
 
     orch = Orchestrator(cfg, repo=str(repo))
 
@@ -132,25 +153,22 @@ def test_capability_flag_flips_retriever_to_embedding(repo: Path, monkeypatch):
     assert retriever.min_similarity == 0.6  # calibrated floor applied too
 
 
-def test_mismatched_model_does_not_apply_floor(repo: Path, monkeypatch):
-    """A profile for a different model is ignored entirely — the floor stays at
-    the config default and the retriever keeps lexical mode, AND the user is
-    nudged to recalibrate."""
+def test_mismatched_model_is_intentional_reuse(repo: Path, monkeypatch):
+    """Provider-path semantics: an explicitly selected profile applies despite
+    a different recorded model name (force=True — intentional reuse). The
+    capability flag + floor land; a UserWarning documents the reuse."""
     import warnings
 
-    _profile(model="other-model", enable_embedding_rag=True,
-             embedding_min_similarity=0.9).save(_profile_path(repo))
+    _mismatch = _profile(model="other-model", enable_embedding_rag=True,
+                         embedding_min_similarity=0.9)
     _patch_embeddings_client(monkeypatch)
-    cfg = _cfg(repo, model="vibethink", retriever="lexical")
-
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        orch = Orchestrator(cfg, repo=str(repo))
+        cfg = _applied_cfg(repo, _mismatch, cfg_retriever="lexical")
 
-    retriever = orch.context_builder.retriever
-    assert isinstance(retriever, LexicalRetriever)  # flag NOT applied
-    assert orch.config.memory.embedding_min_similarity == 0.35  # default
-    assert any("recalibrate" in str(w.message) for w in caught)
+    orch = Orchestrator(cfg, repo=str(repo))
+    assert orch.config.memory.embedding_min_similarity == 0.9  # applied
+    assert any("intentional reuse" in str(w.message) for w in caught)
 
 
 def test_explicit_config_floor_used_without_profile(repo: Path, monkeypatch):
@@ -200,7 +218,11 @@ def test_profile_calibration_envelope_reaches_retriever(repo: Path, monkeypatch)
         embedding_calibration=_envelope_with_fit(),
     ).save(_profile_path(repo))
     _patch_embeddings_client(monkeypatch)
-    cfg = _cfg(repo, retriever="lexical")  # profile flips it to embedding
+    cfg = _applied_cfg(repo, _profile(
+        enable_embedding_rag=True,
+        embedding_min_similarity=0.6,
+        embedding_calibration=_envelope_with_fit(),
+    ), cfg_retriever="lexical")
 
     orch = Orchestrator(cfg, repo=str(repo))
 
@@ -242,7 +264,11 @@ def test_hybrid_retriever_built_from_config(repo: Path, monkeypatch):
         embedding_calibration=_envelope_with_fit(),
     ).save(_profile_path(repo))
     _patch_embeddings_client(monkeypatch)
-    cfg = _cfg(repo, retriever="hybrid")
+    cfg = _applied_cfg(repo, _profile(
+        enable_embedding_rag=True,
+        embedding_min_similarity=0.6,
+        embedding_calibration=_envelope_with_fit(),
+    ), cfg_retriever="hybrid")
 
     orch = Orchestrator(cfg, repo=str(repo))
 
@@ -266,7 +292,11 @@ def test_hybrid_fusion_method_from_profile(repo: Path, monkeypatch):
         fusion_method="dbsf",
     ).save(_profile_path(repo))
     _patch_embeddings_client(monkeypatch)
-    cfg = _cfg(repo, retriever="hybrid")
+    cfg = _applied_cfg(repo, _profile(
+        enable_embedding_rag=True,
+        embedding_min_similarity=0.6,
+        fusion_method="dbsf",
+    ), cfg_retriever="hybrid")
 
     orch = Orchestrator(cfg, repo=str(repo))
 

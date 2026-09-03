@@ -45,7 +45,7 @@ from pathlib import Path
 
 # Reuse the proven worktree-cleanup helper from the cargo harness — it's fully
 # generic (prunes orphaned worktrees in the shared clone).
-from tests._realworld_cargo import cleanup_orphan_worktrees
+from corpus._realworld_cargo import cleanup_orphan_worktrees
 
 
 # Per-dataset build commands for the C corpus. These are the sensible defaults

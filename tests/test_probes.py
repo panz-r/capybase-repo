@@ -1141,7 +1141,17 @@ def test_safety_profile_round_trip():
 
 
 def test_safety_profile_missing_is_default():
-    """A profile without a safety section loads with defaults (backward compat)."""
+    """A profile without a SAFETY section loads with defaults (that section
+    is optional); the PROMPT section is required (STRICT load)."""
+    import pytest as _pytest
     from capybase.calibration_profile import ModelProfile
-    mp = ModelProfile.from_dict({"model": "x", "max_tokens": 4096})
+    _prompt = {"output_layout": "json_v6", "history_framing": "untrusted",
+               "instruction_position": "bottom", "outline": "none",
+               "example_limit": 2, "rule_emphasis": "plain",
+               "conflict_summary_mode": "full", "side_ordering": "current_first",
+               "parse_repair_mode": "auto_repair", "retry_schedule": "standard"}
+    mp = ModelProfile.from_dict(
+        {"model": "x", "max_tokens": 4096, "prompt": _prompt})
     assert mp.safety.is_default is True
+    with _pytest.raises(ValueError, match="no 'prompt' section"):
+        ModelProfile.from_dict({"model": "x", "max_tokens": 4096})

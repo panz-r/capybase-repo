@@ -354,6 +354,24 @@ def apply_to_config(
         set_active_profile(resolved.profile.prompt.profile)
     # Safety section: calibrated retry budgets + escalation thresholds onto
     # PolicyConfig (per-model policy, not config-only).
+    # Capability flags + embeddings calibration (enable_embedding_rag flips
+    # config.memory.retriever; embedding_min_similarity/calibration/fusion
+    # from calibrate-embeddings ride onto MemoryConfig). Previously applied
+    # by the orchestrator's ambient overlay — now the provider path's job.
+    _prof = resolved.profile
+    if getattr(_prof, "enable_embedding_rag", False):
+        if cfg.memory.enabled and cfg.future.enable_rag:
+            if cfg.memory.retriever == "lexical":
+                cfg.memory.retriever = "embedding"
+    _emb_sim = getattr(_prof, "embedding_min_similarity", None)
+    if _emb_sim is not None:
+        cfg.memory.embedding_min_similarity = float(_emb_sim)
+    _emb_cal = getattr(_prof, "embedding_calibration", None)
+    if _emb_cal:
+        cfg.memory.embedding_calibration = dict(_emb_cal)
+    _fusion = getattr(_prof, "fusion_method", None)
+    if _fusion:
+        cfg.memory.fusion_method = str(_fusion)
     _safety = getattr(resolved.profile, "safety", None)
     if _safety is not None and not _safety.is_default:
         cfg.policy.max_retries_per_unit = _safety.max_retries_per_unit

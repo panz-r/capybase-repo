@@ -59,6 +59,17 @@ def _profile(**over) -> ModelProfile:
 # ---------------------------------------------------------------------------
 
 
+
+
+#: A valid prompt section for from_dict inputs (STRICT load requires one).
+_PROMPT = {
+    "output_layout": "json_v6", "history_framing": "untrusted",
+    "instruction_position": "bottom", "outline": "none",
+    "example_limit": 2, "rule_emphasis": "plain",
+    "conflict_summary_mode": "full", "side_ordering": "current_first",
+    "parse_repair_mode": "auto_repair", "retry_schedule": "standard",
+}
+
 def test_to_dict_from_dict_roundtrip():
     p = _profile()
     d = p.to_dict()
@@ -70,8 +81,14 @@ def test_to_dict_from_dict_roundtrip():
 
 
 def test_from_dict_tolerates_missing_optional_fields():
-    # A minimal/older profile blob should still load with sane defaults.
-    p = ModelProfile.from_dict({"model": "x", "max_tokens": 4096})
+    # A minimal/older profile blob still loads with sane defaults for the
+    # capability/quality fields — but the prompt section is REQUIRED
+    # (STRICT: the profile must be complete).
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="no 'prompt' section"):
+        ModelProfile.from_dict({"model": "x", "max_tokens": 4096})
+    p = ModelProfile.from_dict(
+        {"model": "x", "max_tokens": 4096, "prompt": _PROMPT})
     assert p.model == "x"
     assert p.max_tokens == 4096
     assert p.json_mode is True  # default
@@ -81,7 +98,8 @@ def test_from_dict_tolerates_missing_optional_fields():
 
 
 def test_from_dict_coerces_non_list_notes_to_single_item():
-    p = ModelProfile.from_dict({"model": "x", "max_tokens": 1, "notes": "oops"})
+    p = ModelProfile.from_dict(
+        {"model": "x", "max_tokens": 1, "notes": "oops", "prompt": _PROMPT})
     assert p.notes == ["oops"]
 
 
@@ -91,7 +109,8 @@ def test_from_dict_backward_compatible_without_mechanism_fields():
     (samples=1, all mechanisms off) — no crash, no behavior change."""
     p = ModelProfile.from_dict(
         {"model": "vibethink", "max_tokens": 4096, "json_mode": True,
-         "capture_token_entropy": False, "generation_timeout_seconds": 60}
+         "capture_token_entropy": False, "generation_timeout_seconds": 60,
+         "prompt": _PROMPT}
     )
     assert p.max_tokens == 4096
     assert p.samples == 1  # default
@@ -104,11 +123,12 @@ def test_from_dict_backward_compatible_without_mechanism_fields():
 # ---------------------------------------------------------------------------
 
 
-def test_prompt_section_defaults_when_omitted():
-    """A profile without a `prompt` key loads with the default (v6 JSON) profile."""
-    from capybase.prompt_profile import DEFAULT_PROFILE
-    p = ModelProfile.from_dict({"model": "x", "max_tokens": 4096})
-    assert p.prompt.profile == DEFAULT_PROFILE
+def test_prompt_section_missing_is_an_error():
+    """STRICT: a profile without a `prompt` key FAILS the load — the
+    profile is the required calibration and must be complete."""
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="no 'prompt' section"):
+        ModelProfile.from_dict({"model": "x", "max_tokens": 4096})
 
 
 def test_prompt_section_round_trips_non_default_layout():
@@ -138,14 +158,14 @@ def test_prompt_section_save_load_roundtrip(tmp_path: Path):
     assert loaded.prompt.profile.instruction_position is InstructionPosition.TOP_HEAVY
 
 
-def test_prompt_section_corrupt_value_degrades_to_default():
-    """An unknown output_layout value falls back to the default (graceful absence)."""
-    from capybase.prompt_profile import DEFAULT_PROFILE
-    p = ModelProfile.from_dict({
-        "model": "x", "max_tokens": 4096,
-        "prompt": {"output_layout": "nonsense", "example_limit": "x"},
-    })
-    assert p.prompt.profile == DEFAULT_PROFILE
+def test_prompt_section_corrupt_value_is_an_error():
+    """STRICT: an invalid axis value fails the load with a named message."""
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="output_layout.*invalid"):
+        ModelProfile.from_dict({
+            "model": "x", "max_tokens": 4096,
+            "prompt": {"output_layout": "nonsense", "example_limit": 2},
+        })
 
 
 def test_save_load_roundtrip(tmp_path: Path):
@@ -162,24 +182,30 @@ def test_load_returns_none_when_absent(tmp_path: Path):
 
 
 @pytest.mark.parametrize("bad", ["not json", "{"])
-def test_load_returns_none_when_malformed_json(tmp_path: Path, bad: str):
+def test_malformed_json_raises_clear_error(tmp_path: Path, bad: str):
+    """STRICT: a present-but-malformed profile raises (the entry points
+    surface it as a fatal error); only an ABSENT file returns None."""
+    import pytest as _pytest
     path = tmp_path / "bad.json"
     path.write_text(bad, encoding="utf-8")
-    # Resolution must never crash on an unreadable artifact file.
-    assert ModelProfile.load(path) is None
+    with _pytest.raises(ValueError, match="not valid JSON"):
+        ModelProfile.load(path)
 
 
-def test_load_returns_none_when_not_an_object(tmp_path: Path):
+def test_non_object_profile_raises(tmp_path: Path):
+    import pytest as _pytest
     path = tmp_path / "bad.json"
     path.write_text("[]", encoding="utf-8")
-    # A JSON array isn't a profile object: indexing ``d.get(...)`` fails.
-    assert ModelProfile.load(path) is None
+    with _pytest.raises(ValueError, match="invalid"):
+        ModelProfile.load(path)
 
 
 def test_load_partial_blob_fills_defaults(tmp_path: Path):
     """A valid-but-minimal blob is NOT corrupt — it loads with defaults."""
     path = tmp_path / "minimal.json"
-    path.write_text('{"model": "x", "max_tokens": 4096}', encoding="utf-8")
+    path.write_text(
+        json.dumps({"model": "x", "max_tokens": 4096, "prompt": _PROMPT}),
+        encoding="utf-8")
     p = ModelProfile.load(path)
     assert p is not None
     assert p.model == "x"
@@ -339,14 +365,14 @@ def test_profile_fusion_method_default_empty():
 
 def test_from_dict_backward_compatible_without_fusion_method():
     """An older profile (pre-hybrid) omits fusion_method; it loads as "" (→ rrf)."""
-    p = ModelProfile.from_dict({"model": "vibethink", "max_tokens": 4096})
+    p = ModelProfile.from_dict({"model": "vibethink", "max_tokens": 4096, "prompt": _PROMPT})
     assert p.fusion_method == ""
 
 
 def test_from_dict_backward_compatible_without_embedding_fields():
     """An older profile (pre-calibrate-embeddings) omits the embedding fields.
     It must still load, defaulting the floor to 0.35 and the envelope to {}."""
-    p = ModelProfile.from_dict({"model": "vibethink", "max_tokens": 4096})
+    p = ModelProfile.from_dict({"model": "vibethink", "max_tokens": 4096, "prompt": _PROMPT})
     assert p.embedding_min_similarity == 0.35
     assert p.embedding_calibration == {}
 
@@ -355,7 +381,8 @@ def test_from_dict_coerces_non_dict_calibration_to_empty():
     """A corrupt calibration envelope (non-dict) degrades to {} — the profile's
     never-crash-on-load contract."""
     p = ModelProfile.from_dict(
-        {"model": "x", "max_tokens": 1, "embedding_calibration": ["not", "a", "dict"]}
+        {"model": "x", "max_tokens": 1, "prompt": _PROMPT,
+         "embedding_calibration": ["not", "a", "dict"]}
     )
     assert p.embedding_calibration == {}
 
@@ -514,7 +541,7 @@ def test_from_dict_loads_legacy_flat_format():
         "model": "legacy",
         "max_tokens": 4096, "json_mode": True, "capture_token_entropy": False,
         "generation_timeout_seconds": 60, "samples": 2,
-        "embedding_min_similarity": 0.42,
+        "embedding_min_similarity": 0.42, "prompt": _PROMPT,
     })
     assert p is not None
     assert p.max_tokens == 4096

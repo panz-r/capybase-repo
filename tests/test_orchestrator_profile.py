@@ -62,9 +62,31 @@ def _cfg_with_profile_path(repo: Path, model: str = "vibethink") -> Config:
     return cfg
 
 
+
+
+def _applied_cfg(repo: Path, profile: ModelProfile, *, model: str = "vibethink") -> Config:
+    """Apply a profile the way production does — via apply_to_config (the
+    provider path). The orchestrator's ambient overlay was REMOVED (the
+    provider-named profile is the only calibration source); these tests
+    exercise the real path, not a removed one."""
+    from capybase.provider_config import (
+        ProviderConfig, ResolvedProvider, apply_to_config,
+    )
+    path = _write_profile(repo, profile)
+    cfg = Config()
+    cfg.model.model = model
+    resolved = ResolvedProvider(
+        provider=ProviderConfig(
+            base_url=cfg.model.base_url, model=model,
+            api_key=cfg.model.api_key, profile=str(path)),
+        profile=profile, profile_path=path,
+    )
+    cfg, _knobs = apply_to_config(cfg, resolved)
+    return cfg
+
 def test_matching_profile_overlays_knobs_at_init(repo: Path):
     _write_profile(repo, _profile())  # model="vibethink", max_tokens=16384
-    cfg = _cfg_with_profile_path(repo)
+    cfg = _applied_cfg(repo, _profile())
 
     orch = Orchestrator(cfg, repo=str(repo))
 
@@ -78,37 +100,30 @@ def test_matching_profile_overlays_knobs_at_init(repo: Path):
     assert orch.resolution_engine.config.json_mode is False
 
 
-def test_matching_profile_emits_journal_event(repo: Path):
-    _write_profile(repo, _profile())
-    cfg = _cfg_with_profile_path(repo)
-
+def test_provider_path_applies_knobs_no_orchestrator_event(repo: Path):
+    """The model_profile_applied journal event belonged to the REMOVED ambient
+    overlay. Under the provider path, application happens in apply_to_config
+    (before the orchestrator exists); the orchestrator journal carries nothing.
+    The knobs must still land on the config the orchestrator receives."""
+    path = _write_profile(repo, _profile())
+    cfg = _applied_cfg(repo, _profile())
+    assert cfg.model.max_tokens == 16384  # applied by the provider path
     orch = Orchestrator(cfg, repo=str(repo))
-
-    events = orch.journal.read_events()
-    applied = [e for e in events if e.event_type == "model_profile_applied"]
-    assert len(applied) == 1
-    payload = applied[0].payload
-    assert payload["model"] == "vibethink"
-    assert "max_tokens" in payload["overridden_knobs"]
-    assert "model_profile.json" in payload["profile_path"]
-
-
-def test_mismatched_model_profile_is_noop(repo: Path):
-    _write_profile(repo, _profile(model="qwen-coder"))  # different model
-    cfg = _cfg_with_profile_path(repo)
-    original_max = cfg.model.max_tokens
-
-    import warnings
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        orch = Orchestrator(cfg, repo=str(repo))
-
-    assert orch.config.model.max_tokens == original_max  # unchanged
     events = orch.journal.read_events()
     assert not [e for e in events if e.event_type == "model_profile_applied"]
-    # The user is nudged to recalibrate (the profile was fit for another model).
-    assert any("recalibrate" in str(w.message) for w in caught)
+
+
+def test_mismatched_model_profile_is_intentional_reuse(repo: Path):
+    """Provider-path semantics: an explicitly selected profile applies even
+    when its recorded model name differs (force=True — intentional reuse).
+    A UserWarning documents the reuse; the knobs land."""
+    import warnings
+    _write_profile(repo, _profile(model="qwen-coder"))  # different model
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cfg = _applied_cfg(repo, _profile(model="qwen-coder"))
+    assert cfg.model.max_tokens == 16384  # applied despite the name mismatch
+    assert any("intentional reuse" in str(w.message) for w in caught)
 
 
 def test_absent_profile_is_noop(repo: Path):
@@ -137,7 +152,7 @@ def test_corrupt_profile_is_noop(repo: Path):
 
 def test_overlay_only_changes_tuned_knobs(repo: Path):
     _write_profile(repo, _profile())
-    cfg = _cfg_with_profile_path(repo)
+    cfg = _applied_cfg(repo, _profile())
     cfg.model.temperature = 0.42  # a non-tuned knob
     cfg.model.sampling_temperature = 0.95  # a non-tuned knob
 
@@ -162,9 +177,10 @@ def test_matching_profile_applies_prompt_section(repo: Path, monkeypatch):
     from capybase.prompt_profile import OutputLayout, PromptProfile, set_active_profile
 
     set_active_profile(None)  # start clean
-    _write_profile(repo, _profile(prompt=PromptProfileSection(
-        profile=PromptProfile(output_layout=OutputLayout.MARKDOWN_CODE))))
-    cfg = _cfg_with_profile_path(repo)
+    _markdown_profile = _profile(prompt=PromptProfileSection(
+        profile=PromptProfile(output_layout=OutputLayout.MARKDOWN_CODE)))
+    _write_profile(repo, _markdown_profile)
+    cfg = _applied_cfg(repo, _markdown_profile)
     # Clear any prompt env vars so the orchestrator applies the section.
     for v in ("CAPYBASE_PROMPT_LAYOUT", "CAPYBASE_PROMPT_HISTORY",
               "CAPYBASE_PROMPT_POSITION", "CAPYBASE_PROMPT_OUTLINE",
@@ -205,7 +221,7 @@ def test_absent_prompt_section_leaves_default_active(repo: Path):
 
     set_active_profile(None)
     _write_profile(repo, _profile())  # no prompt section → default
-    cfg = _cfg_with_profile_path(repo)
+    cfg = _applied_cfg(repo, _profile())
 
     Orchestrator(cfg, repo=str(repo))
 
@@ -231,7 +247,7 @@ def test_safety_profile_overrides_retry_budget(repo: Path, monkeypatch):
         monkeypatch.delenv(v, raising=False)
 
     _write_profile(repo, _profile(safety=SafetyProfile(max_retries_per_unit=7)))
-    cfg = _cfg_with_profile_path(repo)
+    cfg = _applied_cfg(repo, _profile(safety=SafetyProfile(max_retries_per_unit=7)))
     original = cfg.policy.max_retries_per_unit
 
     orch = Orchestrator(cfg, repo=str(repo))
@@ -241,7 +257,7 @@ def test_safety_profile_overrides_retry_budget(repo: Path, monkeypatch):
 def test_safety_profile_default_is_noop(repo: Path):
     """A default SafetyProfile leaves PolicyConfig unchanged."""
     _write_profile(repo, _profile())  # safety section is default
-    cfg = _cfg_with_profile_path(repo)
+    cfg = _applied_cfg(repo, _profile())
     original = cfg.policy.max_retries_per_unit
 
     orch = Orchestrator(cfg, repo=str(repo))

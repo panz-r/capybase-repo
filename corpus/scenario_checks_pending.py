@@ -37,17 +37,17 @@ from capybase.history import (
     ReplayCommit,
     region_key_from_unit,
 )
-from tests._realworld_cargo import (
+from corpus._realworld_cargo import (
     DEFAULT_TIMEOUT,
     cargo_check_at_worktree,
     cleanup_orphan_worktrees,
 )
-from tests._realworld_build import (
+from corpus._realworld_build import (
     C_BUILD_COMMANDS,
     run_command_at_worktree,
 )
-from tests.conftest import git
-from tests.rebase_scenario_loader import (
+from corpus._gitshim import git
+from corpus.rebase_scenario_loader import (
     RebaseScenarioCase,
     git_history_repo_path,
     load_rebase_scenarios,
