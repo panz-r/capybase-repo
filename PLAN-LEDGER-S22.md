@@ -5857,6 +5857,56 @@ mirror call the same builder propose() used, not a re-implementation),
 D3/D4 (shared constants/frame helper), U1 (apply the axis at config
 application).
 
+### ARCHITECTURE AUDIT 2 — REPAIRS LANDED (2026-09-03, user-approved: "align on intended architecture; we will fix any regressions; long-term health")
+
+All audit-2 findings repaired in one batch; gate 4,021/0 @ -n 6 (18 new
+regression tests in tests/test_prompt_arch_repairs.py); corpus python
+subset 349/0; live smoke sqlite-0004 PASS 1.00 51s through the rewired
+path, and the stored journal prompt (now byte-identical to the sent
+prompt BY CONSTRUCTION) renders under the calibrated markdown_code
+layout with the shared seam rule.
+
+- **D1 FIXED** — ONE retry implementation: `retry_prompt_with_trims`
+  (the single builder; `build_retry_prompt` wraps it). Built on
+  `_resolve_prompt_parts` + `_compose_resolve_prompt`, so
+  instruction_position now applies on retries too (the former inline
+  copy concatenated sections directly). The D5c declaration guard is
+  IN the live prompt (via the shared `_missing_symbol_decl_guard`
+  helper — formerly journal-only), and the layout-hardcoded tail is
+  gone (the contract carries its own closing instruction).
+- **D1b FIXED** — repair-round memory is ENGINE-owned and per-unit
+  (`_repair_failure_history`/`_repair_prev_texts`, bounded at 12,
+  deduped against double-calls per round): the failed-patch memory and
+  candidate-diff feedback now reach the MODEL (formerly journal-only),
+  and the orchestrator's cross-unit-leaking single list is deleted.
+- **D2 FIXED** — the attempt-prompt dispatch is ONE method:
+  `ResolutionEngine.build_attempt_prompt` (recovery / shatter / repair
+  / retry / resolve, with version tagging). `_propose_impl`,
+  `propose_recovery`, and the orchestrator's journal mirror all call
+  it; the mirror's 130-line hand-rolled copy is deleted. The R5 ladder
+  activation stays with the callers (deterministic-in-attempt, exact).
+  Test fakes without the method skip the best-effort mirror.
+- **V1/V2/V3 FIXED** — recovery (`_render_recovery_output` +
+  `_recovery_tail_note`), two-pass code (uses
+  `_render_output_contract`), and shattered-repair prompts all branch
+  on the calibrated output layout. Every code-output path now follows
+  the profile.
+- **D3 FIXED** — `_RULE_SEAM_D1` is one constant embedded in both
+  layout rule sets (byte-identity preserved; test pins single-source).
+- **D4 FIXED** — `_json_decision_footer` shared by all four
+  adjudication prompts.
+- **U1 FIXED** — the prompt profile's `retry_schedule` axis applies at
+  provider-config time (LIGHT→1, AGGRESSIVE→3 onto
+  policy.max_retries_per_unit, journaled as `prompt.retry_schedule`;
+  STANDARD leaves policy untouched).
+
+Net effect: prompt-building is now ONE subsystem — the profile drives
+every code-output path, mechanisms and the journal share one dispatch,
+and two sprint fixes (D5c guard, failed-patch memory) that had silently
+never reached the model are live. Expected behavioral deltas in the
+harvest: retries carry the decl guard + position axis; repairs carry
+prior-attempt memory; recovery/two-pass/shatter follow markdown_code.
+
 ### ARCHITECTURE AUDIT (2026-09-02, calibration-faithfulness)
 
 **The intended architecture**: prompt format/layout via the calibrated

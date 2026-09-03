@@ -1723,6 +1723,13 @@ def _safe_conf(value) -> float:
         return 0.0
 
 
+def _json_decision_footer(schema: str) -> str:
+    """The decision-prompt footer shared by every adjudication prompt
+    (audit-2 D4: four hand-rolled copies of this frame). ``schema`` is the
+    literal JSON schema the model must emit — nothing else."""
+    return f"Respond with ONLY a JSON object:\n{schema}"
+
+
 def _whole_side_adjudication_prompt(
     path: str, language: str | None,
     base_text: str, sides: dict[str, str],
@@ -1768,8 +1775,7 @@ refined structure — typically the replayed commit's pass); versus which is a
 deliberate larger change (massive deletion, rewrite) that the other side
 predates and cannot subsume.
 
-Respond with ONLY a JSON object:
-{{"choice": "current" or "replayed", "confidence": <0.0-1.0>, "reason": "<one sentence>"}}"""
+{_json_decision_footer('{"choice": "current" or "replayed", "confidence": <0.0-1.0>, "reason": "<one sentence>"}')}"""
 
 
 def _subsumption_adjudication_prompt(
@@ -1827,8 +1833,7 @@ A region-level merge that weaves the smaller side's changes into the rewrite com
 keep        — the smaller side's changes add functionality or fixes that the rewrite does not provide; they must survive the merge.
 superseded  — the rewrite already provides the same behavior, deleted the code the smaller side touched, or the smaller side's edits are cosmetic on regions the rewrite reformatted; the correct result is the rewriting side's file verbatim.
 
-Respond with ONLY a JSON object:
-{{"verdict": "keep" or "superseded", "confidence": <0.0-1.0>, "reason": "<one sentence>"}}"""
+{_json_decision_footer('{"verdict": "keep" or "superseded", "confidence": <0.0-1.0>, "reason": "<one sentence>"}')}"""
 
 
 def _clip_side_diff(base_text: str, side_text: str, max_diff_lines: int = 150) -> str:
@@ -1885,8 +1890,7 @@ Decide the correct outcome:
 keep        — the non-compiling side's changes add functionality or fixes that the compiling side does not provide; they must be repaired into the merge rather than dropped.
 superseded  — the compiling side already provides the same behavior, deleted the code the other side touched, or the other side's edits are cosmetic; the correct result is the compiling side's file verbatim.
 
-Respond with ONLY a JSON object:
-{{"verdict": "keep" or "superseded", "confidence": <0.0-1.0>, "reason": "<one sentence>"}}"""
+{_json_decision_footer('{"verdict": "keep" or "superseded", "confidence": <0.0-1.0>, "reason": "<one sentence>"}')}"""
 
 
 def _whole_side_repair_prompt_both(
@@ -1926,8 +1930,7 @@ current     — the correct merge is CURRENT's file verbatim; REPLAYED's changes
 replayed    — the correct merge is REPLAYED's file verbatim; CURRENT's changes on this file are superseded.
 neither     — the correct merge must weave BOTH sides' changes; the compile failure should be repaired in the woven merge instead of substituting a whole side.
 
-Respond with ONLY a JSON object:
-{{"choice": "current" or "replayed" or "neither", "confidence": <0.0-1.0>, "reason": "<one sentence>"}}"""
+{_json_decision_footer('{"choice": "current" or "replayed" or "neither", "confidence": <0.0-1.0>, "reason": "<one sentence>"}')}"""
 
 
 def _classify_build_error_lines(
@@ -13738,28 +13741,22 @@ class Orchestrator:
             # the accept report can show why each few-shot example was chosen.
             outcome.retrieval_explanations = list(context.retrieval_explanations)
             if self.config.journal.enabled and self.config.journal.store_prompts:
-                from capybase.resolution_engine import (
-                    PROMPT_REPAIR,
-                    PROMPT_RETRY,
-                    PROMPT_RESOLVE,
-                    build_repair_prompt,
-                    build_resolve_prompt,
-                    build_retry_prompt,
-                )
-
-                # Mirror propose()'s dispatch so the journaled prompt matches the
-                # ACTUAL prompt sent to the model. Previously this always used
-                # build_retry_prompt on any failure, which mismatches a retry that
-                # took the PROMPT_REPAIR path (candidate+targeted-fix) — making the
-                # audit trail misleading.
-                # Mirror the R5 retry ladder: propose() activates one
-                # presentation variant per retry attempt and restores the
-                # base profile before returning, so the prompt built HERE
-                # (for the audit trail) must run under the SAME variant the
-                # model actually saw — retry_profile_variant is deterministic
-                # in the attempt index, so recomputing it is exact.
+                # Audit-2 D2: the journal mirror no longer re-implements
+                # propose()'s dispatch — it calls the SAME shared builder the
+                # model path uses (ResolutionEngine.build_attempt_prompt), so
+                # the journaled prompt is byte-identical to the sent one BY
+                # CONSTRUCTION (the former mirror copy had already diverged:
+                # the D5c declaration guard and the failed-patch memory lived
+                # only here, never reaching the model).
+                # The R5 ladder variant is recomputed around the call —
+                # retry_profile_variant is deterministic in the attempt index,
+                # so the mirror builds under exactly the variant the model saw.
+                # Best-effort: test fakes without the shared builder skip the
+                # mirror (journal + oversized check) entirely.
+                _attempt_builder = getattr(
+                    self.resolution_engine, "build_attempt_prompt", None)
                 _mirror_ladder_base = None
-                if retry_count >= 1:
+                if _attempt_builder is not None and retry_count >= 1:
                     try:
                         from capybase.prompt_profile import (
                             active_profile as _mp_ap,
@@ -13776,100 +13773,48 @@ class Orchestrator:
                     except Exception:  # noqa: BLE001 — mirror is best-effort
                         _mirror_ladder_base = None
                 try:
-                    if pending_recovery:
-                        from capybase.resolution_engine import build_recovery_prompt
-                        pv = "cegis_recovery.v1"
-                        prompt = build_recovery_prompt(unit, context, failures, budget=self.resolution_engine.token_budget)
-                    elif failures and prev_candidate and prev_candidate.resolved_text:
-                        pv = PROMPT_REPAIR
-                        # Build prior-attempt summaries for failed-patch memory.
-                        # Each summary is one line: the failure validator + message.
-                        # D1 (sprint-23): accumulate actual per-round failure
-                        # signatures — the OLD code rebuilt from CURRENT failures
-                        # each round, making every prior summary identical
-                        if not hasattr(self, '_repair_failure_history'):
-                            self._repair_failure_history: list[str] = []
-                        _current_sig = "; ".join(
-                            f"{f.validator}: {f.message[:60]}" for f in failures[:2])
-                        if _current_sig and _current_sig not in [
-                                s.split(": ", 1)[-1] for s in self._repair_failure_history]:
-                            self._repair_failure_history.append(
-                                f"attempt {retry_count + 1}: {_current_sig}")
-                        prior_summaries = list(self._repair_failure_history)
-                        # Candidate-diff feedback (s23): the model sees WHAT
-                        # CHANGED between its attempts — the REPL discipline.
-                        # Without the diff, the model reproduces a near-identical
-                        # candidate that fails the same way.
-                        if len(outcome.attempts) >= 2:
-                            import difflib as _dl_cdf
-                            _prev_text = (outcome.attempts[-2].resolved_text or "")[:4000]
-                            _curr_text = (prev_candidate.resolved_text or "")[:4000]
-                            if _prev_text and _curr_text:
-                                _diff_lines = list(_dl_cdf.unified_diff(
-                                    _prev_text.splitlines()[:50],
-                                    _curr_text.splitlines()[:50],
-                                    fromfile="previous_attempt",
-                                    tofile="current_attempt",
-                                    lineterm=""))[:20]
-                                if len(_diff_lines) > 2:  # not just the headers
-                                    prior_summaries.append(
-                                        "CHANGES SINCE LAST ATTEMPT:\n"
-                                        + "\n".join(_diff_lines))
-                        for prev_attempt in outcome.attempts:
-                            # The outcome's attempts list carries the candidates that
-                            # were tried. We need the VALIDATION that rejected them.
-                            # The candidate's parse_warnings/explanation carry the
-                            # failure info.
-                            if prev_attempt is prev_candidate:
-                                continue
-                            summary_parts = []
-                            for f in failures:
-                                summary_parts.append(f"{f.validator}: {f.message[:60]}")
-                            if summary_parts:
-                                prior_summaries.append("; ".join(summary_parts[:2]))
-                        prompt = build_repair_prompt(unit, context, prev_candidate, failures, attempt=retry_count, prior_attempt_summaries=prior_summaries or None, budget=self.resolution_engine.token_budget)
-                    elif failures:
-                        pv = PROMPT_RETRY
-                        prompt = build_retry_prompt(unit, context, failures, budget=self.resolution_engine.token_budget)
-                    else:
-                        pv = PROMPT_RESOLVE
-                        prompt = build_resolve_prompt(unit, context, budget=self.resolution_engine.token_budget)
-                    # Post-construction oversized check: the pre-construction guard
-                    # (_llm_oversized_for_window) measures only the windowed marker
-                    # block, assuming augmentation is trimmable. But the obligations
-                    # block is budget-PROTECTED (folded into sides_text), so a prompt
-                    # with whole-file sides + obligations can blow the window without
-                    # the pre-guard catching it. Measure the ACTUAL prompt size here
-                    # and escalate as "oversized" before burning an HTTP-400 round-
-                    # trip. Surfaced in the C live-eval (sqlite-history-0005): a
-                    # 148KB prompt (37K tokens vs 8K window) hit HTTP 400.
-                    # Threshold: only fire when the prompt exceeds the window AND is
-                    # large in absolute terms (>10K tokens). This catches the
-                    # whole-file-sides blowup (37K tokens) without pre-empting
-                    # legitimately-tight prompts (a few hundred tokens over a small
-                    # window may still produce usable output — the model decides).
-                    _window = int(getattr(self.config.model, "context_window", 0) or 0)
-                    if _window > 0:
-                        _prompt_t = estimate_tokens(prompt)
-                        if _prompt_t > _window and _prompt_t > 10000:
-                            self.journal.emit(
-                                "llm_skipped_oversized_prompt",
-                                {"prompt_tokens": _prompt_t, "window": _window,
-                                 "prompt_chars": len(prompt)},
-                                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
-                            )
-                            # Sprint-19 P5 (journal-only): correlate the skip
-                            # with a measured class-member split candidate when
-                            # one exists (the protobuf-0055 class).
-                            self._journal_class_member_candidate(unit)
-                            outcome.escalated = True
-                            outcome.retry_count = retry_count
-                            outcome.reason = (
-                                f"oversized prompt: {_prompt_t}t > {_window}t window "
-                                f"(obligations/sides exceeded the context window)"
-                            )
-                            return outcome
-                    self.journal.store_prompt(unit.unit_id, retry_count, prompt)
+                    if _attempt_builder is not None:
+                        prompt, _pv, _trims = _attempt_builder(
+                            unit, context,
+                            failures=failures, prev_candidate=prev_candidate,
+                            pending_recovery=pending_recovery, attempt=retry_count,
+                        )
+                        # Post-construction oversized check: the pre-construction
+                        # guard (_llm_oversized_for_window) measures only the
+                        # windowed marker block, assuming augmentation is
+                        # trimmable. But the obligations block is budget-PROTECTED
+                        # (folded into sides_text), so a prompt with whole-file
+                        # sides + obligations can blow the window without the
+                        # pre-guard catching it. Measure the ACTUAL prompt size
+                        # here and escalate as "oversized" before burning an
+                        # HTTP-400 round-trip. Surfaced in the C live-eval
+                        # (sqlite-history-0005): a 148KB prompt (37K tokens vs
+                        # 8K window) hit HTTP 400. Threshold: only fire when the
+                        # prompt exceeds the window AND is large in absolute
+                        # terms (>10K tokens) — catches the whole-file-sides
+                        # blowup without pre-empting legitimately-tight prompts.
+                        _window = int(getattr(self.config.model, "context_window", 0) or 0)
+                        if _window > 0:
+                            _prompt_t = estimate_tokens(prompt)
+                            if _prompt_t > _window and _prompt_t > 10000:
+                                self.journal.emit(
+                                    "llm_skipped_oversized_prompt",
+                                    {"prompt_tokens": _prompt_t, "window": _window,
+                                     "prompt_chars": len(prompt)},
+                                    step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+                                )
+                                # Sprint-19 P5 (journal-only): correlate the skip
+                                # with a measured class-member split candidate when
+                                # one exists (the protobuf-0055 class).
+                                self._journal_class_member_candidate(unit)
+                                outcome.escalated = True
+                                outcome.retry_count = retry_count
+                                outcome.reason = (
+                                    f"oversized prompt: {_prompt_t}t > {_window}t window "
+                                    f"(obligations/sides exceeded the context window)"
+                                )
+                                return outcome
+                        self.journal.store_prompt(unit.unit_id, retry_count, prompt)
                 finally:
                     if _mirror_ladder_base is not None:
                         from capybase.prompt_profile import (

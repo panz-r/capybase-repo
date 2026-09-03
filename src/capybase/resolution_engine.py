@@ -1034,16 +1034,23 @@ _RESOLVE_CONTRACT_JSON_V6 = (
     "```\n\n"
 )
 
-_RESOLVE_RULES_JSON_V6 = (
-    "CRITICAL rules:\n"
-    "- PRESERVE leading indentation. If the bodies start with 4 spaces, EVERY line\n"
-    "  of resolved_text must start with 4 spaces. Getting this wrong causes a syntax\n"
-    "  error and rejection.\n"
+#: D1 (s27): the seam rule — shared by BOTH layout rule sets verbatim (the
+#: per-layout rule variants below embed it; single source so a wording fix
+#: cannot land in one layout and miss the other — the audit-2 D3 repair).
+_RULE_SEAM_D1 = (
     "- D1 (s27): the fragment need NOT be internally balanced. If a construct\n"
     "  (function, #if block, initializer) opens INSIDE the conflict and closes\n"
     "  AFTER it in the surrounding file, your output should leave it open —\n"
     "  mirror how the sides handle boundaries. The whole file is balance-checked\n"
     "  later; do not add closing braces/endifs just to self-balance the fragment.\n"
+)
+
+_RESOLVE_RULES_JSON_V6 = (
+    "CRITICAL rules:\n"
+    "- PRESERVE leading indentation. If the bodies start with 4 spaces, EVERY line\n"
+    "  of resolved_text must start with 4 spaces. Getting this wrong causes a syntax\n"
+    "  error and rejection.\n"
+    + _RULE_SEAM_D1 +
     "- No conflict markers (``<<<<<<<`` / ``=======`` / ``>>>>>>>``).\n"
     "- Do not add or change the enclosing def/class line.\n"
     "- Escape newlines as \\n and double quotes as \\\" inside resolved_text.\n"
@@ -1106,11 +1113,7 @@ _RESOLVE_RULES_MD = (
     "- PRESERVE leading indentation. If the bodies start with 4 spaces, EVERY line\n"
     "  of the merged code must start with 4 spaces. Getting this wrong causes a\n"
     "  syntax error and rejection.\n"
-    "- D1 (s27): the fragment need NOT be internally balanced. If a construct\n"
-    "  (function, #if block, initializer) opens INSIDE the conflict and closes\n"
-    "  AFTER it in the surrounding file, your output should leave it open —\n"
-    "  mirror how the sides handle boundaries. The whole file is balance-checked\n"
-    "  later; do not add closing braces/endifs just to self-balance the fragment.\n"
+    + _RULE_SEAM_D1 +
     "- No conflict markers (``<<<<<<<`` / ``=======`` / ``>>>>>>>``).\n"
     "- Do not add or change the enclosing def/class line.\n"
     "- Do NOT put the merged code inside the JSON — put it in its own fenced code\n"
@@ -2073,54 +2076,56 @@ def build_outline_resolve_prompt(
     return prompt, tag
 
 
-def build_retry_prompt(
+def retry_prompt_with_trims(
     unit: ConflictUnit,
     context: ContextBundle,
     failures: Iterable[VerificationFailure],
     budget: TokenBudget | None = None,
-) -> str:
+) -> tuple[str, list[dict]]:
+    """THE retry prompt (single implementation — audit-2 D1).
+
+    Returns ``(prompt, trims)`` so the caller (``propose``) can journal the
+    budget trims without re-deriving parts. Built on ``_resolve_prompt_parts``
+    + ``_compose_resolve_prompt`` so the profile's layout/position/framing
+    axes apply exactly as on the fresh-resolve path (the former inline retry
+    in ``propose`` concatenated intro+data+contract+rules directly, silently
+    ignoring ``instruction_position``).
+    """
     feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
-    # D5c (s27): when the failure names a MISSING SYMBOL, forbid the model
-    # from inventing a declaration for it. redis-0014's circular death: the
-    # repair round added a WRONG declaration (struct rusage statloc — the
-    # 'invalid operands' error), which rotated the failure signature and
-    # exhausted the phase-2 budget before the deterministic C1 injection
-    # (which knows the right shape) could land. The pipeline owns
-    # declarations; the model owns the merge.
-    _missing_syms = []
-    for f in failures:
-        _msg = getattr(f, "message", "") or ""
-        for _pat in (
-            r"['\"](\w+)['\"] was not declared",
-            r"['\"](\w+)['\"] undeclared",
-            r"cannot find (\w+) in this scope",
-            r"undeclared identifier ['\"](\w+)['\"]",
-        ):
-            import re as _re_d5c
-            for m in _re_d5c.finditer(_pat, _msg):
-                if m.group(1) not in _missing_syms:
-                    _missing_syms.append(m.group(1))
-    _decl_guard = ""
-    if _missing_syms:
-        _decl_guard = (
-            "\n### declaration guard\n"
-            "Do NOT add, invent, or guess a declaration for: "
-            + ", ".join(_missing_syms[:4])
-            + ". The pipeline injects declarations deterministically; a wrong\n"
-            "guessed type breaks the build differently. Fix ONLY the merge "
-            "code.\n")
-    inner = build_resolve_prompt(unit, context, budget=budget)
-    return f"""Your previous merge attempt was rejected. Fix it.
+    # D5c (s27) declaration guard — the shared helper (also used by the
+    # repair path). This guard previously lived only in the orchestrator's
+    # journal-mirror copy of the retry prompt; the model never saw it.
+    _decl_guard = _missing_symbol_decl_guard(failures)
+    parts = _resolve_prompt_parts(unit, context, budget=budget)
+    inner = _compose_resolve_prompt(
+        active_profile(),
+        intro=parts["intro"], data=parts["data"],
+        contract=parts["contract"], rules=parts["rules"],
+    )
+    # The output contract inside ``inner`` already carries the layout's own
+    # closing instruction ("Output the ```json block last" / "code block
+    # first, then json") — the former wrapper tail hardcoded the v6 wording
+    # (a layout leak under markdown_code profiles).
+    prompt = f"""Your previous merge attempt was rejected. Fix it.
 
 {inner}
 
 ### validator feedback (previous attempt failed these checks)
 {feedback}
 {_decl_guard}
-
-Address every failure above; do not repeat the mistake. End with the ```json
-fenced answer as instructed.
+Address every failure above; do not repeat the mistake.
 """
+    return prompt, parts["trims"]
+
+
+def build_retry_prompt(
+    unit: ConflictUnit,
+    context: ContextBundle,
+    failures: Iterable[VerificationFailure],
+    budget: TokenBudget | None = None,
+) -> str:
+    """The retry prompt (string form — wraps :func:`retry_prompt_with_trims`)."""
+    return retry_prompt_with_trims(unit, context, failures, budget=budget)[0]
 
 
 PROMPT_RECOVERY = "cegis_recovery.v1"
@@ -2155,6 +2160,7 @@ def build_recovery_prompt(
         "\n".join(_render_failure(f) for f in (failures or []))
         or "- (the previous attempt self-reported it could not merge; no specific validator failure)"
     )
+    profile = active_profile()
     parts = _resolve_prompt_parts(unit, context, budget=budget or TokenBudget())
     # Recovery framing: the same DATA (the sides + structural anchor) as a fresh
     # resolve, but a CUSTOM contract+rules block. The standard contract/rules
@@ -2178,20 +2184,57 @@ YOUR TASK — reason step by step:
 3. What is the smallest merge that keeps BOTH changes? (one sentence)
 4. Emit that merge.
 
-CRITICAL: PRESERVE leading indentation exactly. No conflict markers. Escape
-newlines as \\n and double quotes as \\" inside resolved_text. Output the
-```json block last; nothing after it.
+CRITICAL: PRESERVE leading indentation exactly. No conflict markers. {_recovery_tail_note(profile)}
 
-Output ONE ```json fenced object — do NOT include a needs_human field (this is a
-recovery attempt; you MUST produce a merge):
-```json
-{{
-  "resolved_text": "<the merged replacement text, exact indentation>",
-  "explanation": "<one short sentence>",
-  "self_reported_confidence": 0.0
-}}
-```
+{_render_recovery_output(profile)}
 """
+
+
+def _recovery_tail_note(profile: PromptProfile) -> str:
+    """Layout-specific closing instruction for the recovery prompt (audit-2 V1:
+    the recovery path previously hardcoded the v6 escape instructions under
+    every profile)."""
+    if profile.output_layout is OutputLayout.MARKDOWN_CODE:
+        return (
+            "Emit the merged code as a RAW fenced code block (no escaping of\n"
+            "newlines or quotes), then the ```json metadata block; nothing after it."
+        )
+    return (
+        "Escape newlines as \\n and double quotes as \\\" inside resolved_text. "
+        "Output the ```json block last; nothing after it."
+    )
+
+
+def _render_recovery_output(profile: PromptProfile) -> str:
+    """The recovery output schema, branched on the profile's layout (V1).
+
+    Both variants strip the ``needs_human`` escape hatch (the recovery retry
+    must produce a merge) and keep the same metadata keys; only the code
+    carriage differs (raw fenced block vs escaped JSON string).
+    """
+    if profile.output_layout is OutputLayout.MARKDOWN_CODE:
+        return (
+            "Output the merged replacement text as a fenced code block, then ONE "
+            "```json fenced metadata object — do NOT include a needs_human field "
+            "(this is a recovery attempt; you MUST produce a merge):\n"
+            "```json\n"
+            "{\n"
+            '  "explanation": "<one short sentence>",\n'
+            '  "self_reported_confidence": 0.0\n'
+            "}\n"
+            "```"
+        )
+    return (
+        "Output ONE ```json fenced object — do NOT include a needs_human field "
+        "(this is a recovery attempt; you MUST produce a merge):\n"
+        "```json\n"
+        "{\n"
+        '  "resolved_text": "<the merged replacement text, exact indentation>",\n'
+        '  "explanation": "<one short sentence>",\n'
+        '  "self_reported_confidence": 0.0\n'
+        "}\n"
+        "```"
+    )
 
 
 def _missing_symbol_decl_guard(failures) -> str:
@@ -2744,6 +2787,11 @@ def build_code_prompt(
             f"Strategy: {strategy}\n"
             f"Steps:\n{step_text}\n\n"
         )
+    # Audit-2 V2: the output contract comes from the profile's layout (the
+    # same contract+rules the single-pass resolve uses) — this path previously
+    # hardcoded the v6 ```json schema under every profile.
+    profile = active_profile()
+    contract, rules = _render_output_contract(profile)
     return f"""{plan_block}Resolve ONE git merge conflict by merging BOTH sides into one
 coherent result. Be CONCISE. A prior analysis identified these intents:
 
@@ -2759,15 +2807,8 @@ Replayed/local side changed:
 REPLAYED_COMMIT_SIDE body (exact, including leading spaces):
 {rep_lines}
 
-Output a ```json fenced object:
-{{
-  "resolved_text": "<the merged replacement text, exact indentation>",
-  "explanation": "<one sentence>",
-  "self_reported_confidence": 0.0,
-  "preserved_current_side": true,
-  "preserved_replayed_commit_side": true
-}}
-"""
+{contract}
+{rules}"""
 
 
 def build_plan_search_prompt(unit: ConflictUnit, context: ContextBundle) -> str:
@@ -3227,6 +3268,113 @@ class ResolutionEngine:
             Path(log_prompts_dir) if log_prompts_dir else None
         )
         self._prompt_log_counter: int = 0
+        # Audit-2 D1b: repair-round memory, OWNED BY THE ENGINE (it builds
+        # the repair prompts). Per-unit keyed — the former orchestrator copy
+        # was a single list leaked across units in multi-unit files, and the
+        # prior-attempt summaries it computed were only ever shown to the
+        # JOURNAL MIRROR's copy of the prompt, never to the model. Bounded
+        # (last 12 rounds) so a long session cannot grow it unboundedly.
+        self._repair_failure_history: dict[str, list[str]] = {}
+        self._repair_prev_texts: dict[str, list[str]] = {}
+
+    def build_attempt_prompt(
+        self,
+        unit: ConflictUnit,
+        context: ContextBundle,
+        *,
+        failures: list[VerificationFailure] | None = None,
+        prev_candidate: CandidateResolution | None = None,
+        pending_recovery: bool = False,
+        attempt: int = 0,
+        shatter: bool = False,
+        budget: TokenBudget | None = None,
+    ) -> tuple[str, str, list[dict]]:
+        """THE attempt-prompt dispatch (single implementation — audit-2 D1/D2).
+
+        Both the model path (``_propose_impl``) and the orchestrator's
+        journal/oversized mirror call THIS — there is exactly one copy of the
+        dispatch and one copy of each prompt text. Builds under the CURRENTLY
+        ACTIVE profile (the R5 ladder activation stays with the callers:
+        ``propose`` wraps the whole build+sample, the mirror recomputes the
+        same deterministic variant around its call).
+
+        Returns ``(prompt, prompt_version, trims)``.
+        """
+        prompt_trims: list[dict] = []
+        _budget = budget or self.token_budget
+        if pending_recovery:
+            pv = "cegis_recovery.v1"
+            prompt = build_recovery_prompt(unit, context, failures, budget=_budget)
+            return prompt, pv, prompt_trims
+        if shatter and prev_candidate and prev_candidate.resolved_text:
+            # The context-shattering repair (s25 item 4): replace the full
+            # repair prompt with the diff-only window — the loop's
+            # attractor is the repetitive context itself.
+            pv = "shattered_repair.v1"
+            prompt = build_shattered_repair_prompt(
+                unit, prev_candidate, list(failures or []))
+            return prompt, pv, prompt_trims
+        if failures and prev_candidate and prev_candidate.resolved_text:
+            pv = PROMPT_REPAIR
+            # D1b: prior-attempt memory (failure signatures + candidate
+            # diffs) computed from ENGINE-owned per-unit history — the model
+            # now actually receives it (formerly journal-mirror-only).
+            hist = self._repair_failure_history.setdefault(unit.unit_id, [])
+            prevs = self._repair_prev_texts.setdefault(unit.unit_id, [])
+            _current_sig = "; ".join(
+                f"{f.validator}: {f.message[:60]}" for f in failures[:2])
+            if _current_sig and _current_sig not in [
+                    s.split(": ", 1)[-1] for s in hist]:
+                hist.append(f"attempt {attempt + 1}: {_current_sig}")
+            del hist[:-12]
+            prior_summaries = list(hist)
+            if len(prevs) >= 1 and prevs[-1] and prev_candidate.resolved_text:
+                import difflib as _dl_cdf
+                _diff_lines = list(_dl_cdf.unified_diff(
+                    prevs[-1].splitlines()[:50],
+                    prev_candidate.resolved_text.splitlines()[:50],
+                    fromfile="previous_attempt",
+                    tofile="current_attempt",
+                    lineterm=""))[:20]
+                if len(_diff_lines) > 2:  # not just the headers
+                    prior_summaries.append(
+                        "CHANGES SINCE LAST ATTEMPT:\n" + "\n".join(_diff_lines))
+            # The journal mirror and the model path both call this builder per
+            # round — append-once per round (dedup against the last entry).
+            if not prevs or prevs[-1] != prev_candidate.resolved_text:
+                prevs.append(prev_candidate.resolved_text)
+            del prevs[:-12]
+            prompt = build_repair_prompt(
+                unit, context, prev_candidate, failures, attempt=attempt,
+                prior_attempt_summaries=prior_summaries or None, budget=_budget)
+            prof_tag = active_profile().tag()
+            if prof_tag:
+                pv = PROMPT_REPAIR + prof_tag
+            return prompt, pv, prompt_trims
+        if failures:
+            pv = PROMPT_RETRY
+            prompt, prompt_trims = retry_prompt_with_trims(
+                unit, context, failures, budget=_budget)
+            prof_tag = active_profile().tag()
+            if prof_tag:
+                pv = PROMPT_RETRY + prof_tag
+            return prompt, pv, prompt_trims
+        # Fresh resolve: routes through _resolve_prompt_parts + the profile's
+        # layout/framing/position axes, prepending the outline preamble when
+        # the outline axis is active. The profile tag is folded into the
+        # version for offline attribution.
+        outline_prompt, outline_tag = build_outline_resolve_prompt(
+            unit, context, budget=_budget)
+        prof_tag = active_profile().tag()
+        if prof_tag:
+            pv = PROMPT_RESOLVE + prof_tag
+        elif outline_tag:
+            pv = PROMPT_RESOLVE + outline_tag
+        else:
+            pv = PROMPT_RESOLVE
+        parts = _resolve_prompt_parts(unit, context, budget=_budget)
+        prompt_trims = parts["trims"]
+        return outline_prompt, pv, prompt_trims
 
     def _log_prompt(
         self, prompt: str, *, unit: ConflictUnit | None = None,
@@ -3419,58 +3567,15 @@ class ResolutionEngine:
         shatter: bool = False,
     ) -> list[CandidateResolution]:
         """The candidate-generation body (called by :meth:`propose`)."""
-        prompt_trims: list[dict] = []
-        if shatter and prev_candidate and prev_candidate.resolved_text:
-            # The context-shattering repair (s25 item 4): replace the full
-            # repair prompt with the diff-only window — the loop's
-            # attractor is the repetitive context itself.
-            prompt_version = "shattered_repair.v1"
-            prompt = build_shattered_repair_prompt(
-                unit, prev_candidate, list(failures or []))
-        elif failures and prev_candidate and prev_candidate.resolved_text:
-            prompt_version = PROMPT_REPAIR
-            # The repair prompt carries sides+candidate+feedback only; build it
-            # via the public builder (string). Trims stay empty (sides protected).
-            # The profile tag (layout, etc.) is folded into the version so offline
-            # eval attributes repair outcomes to the output layout too.
-            prompt = build_repair_prompt(unit, context, prev_candidate, failures, attempt=attempt)
-            prof_tag = active_profile().tag()
-            if prof_tag:
-                prompt_version = PROMPT_REPAIR + prof_tag
-        elif failures:
-            prompt_version = PROMPT_RETRY
-            # Retry: resolve-parts (budget-trimmed) + feedback. Read the trims
-            # from _resolve_prompt_parts directly so we can journal them.
-            parts = _resolve_prompt_parts(unit, context, budget=self.token_budget)
-            prompt_trims = parts["trims"]
-            inner = parts["intro"] + parts["data"] + parts["contract"] + parts["rules"]
-            feedback = "\n".join(_render_failure(f) for f in failures) or "- (no specific failures reported)"
-            prompt = (
-                "Your previous merge attempt was rejected. Fix it.\n\n"
-                f"{inner}\n\n"
-                "### validator feedback (previous attempt failed these checks)\n"
-                f"{feedback}\n\n"
-                "Address every failure above; do not repeat the mistake. End with the "
-                "```json\nfenced answer as instructed.\n"
-            )
-        else:
-            prompt_version = PROMPT_RESOLVE
-            # Prompt-rendering profile: build the prompt via build_outline_resolve_prompt
-            # (which routes through _resolve_prompt_parts + the profile's layout /
-            # framing / position axes, and prepends the outline preamble when the
-            # outline axis is active). The full profile tag (layout + position +
-            # outline + ...) is folded into prompt_version for offline attribution.
-            outline_prompt, outline_tag = build_outline_resolve_prompt(
-                unit, context, budget=self.token_budget
-            )
-            prof_tag = active_profile().tag()
-            if prof_tag:
-                prompt_version = PROMPT_RESOLVE + prof_tag
-            elif outline_tag:
-                prompt_version = PROMPT_RESOLVE + outline_tag
-            parts = _resolve_prompt_parts(unit, context, budget=self.token_budget)
-            prompt_trims = parts["trims"]
-            prompt = outline_prompt
+        # Audit-2 D1/D2: the dispatch lives in ONE place — build_attempt_prompt —
+        # shared with the orchestrator's journal/oversized mirror (the former
+        # inline retry prompt diverged from build_retry_prompt: the D5c
+        # declaration guard and the failed-patch memory were journal-only).
+        prompt, prompt_version, prompt_trims = self.build_attempt_prompt(
+            unit, context,
+            failures=failures, prev_candidate=prev_candidate,
+            attempt=attempt, shatter=shatter,
+        )
         # Prompt-size diagnostic (oversized-splitting Problem 3): surface the
         # actual byte/token cost of the prompt the model receives, so the eval
         # can tell whether a rejected-by-guard case would have fit the window
@@ -3711,7 +3816,8 @@ class ResolutionEngine:
         code to repair). The orchestrator calls this when risk.decide grants a
         recovery retry (the __recovery_retry__ followup marker).
         """
-        prompt = build_recovery_prompt(unit, context, failures, budget=self.token_budget)
+        prompt, _pv, _trims = self.build_attempt_prompt(
+            unit, context, failures=failures, pending_recovery=True)
         resp = self._one(unit, context, prompt, PROMPT_RECOVERY)
         return [resp] if resp is not None else []
 
@@ -4148,6 +4254,20 @@ def build_shattered_repair_prompt(
     lo = max(0, (err_line or len(lines) // 2) - window)
     hi = min(len(lines), (err_line or len(lines) // 2) + window + 1)
     snippet = "\n".join(f"{i + 1:5d}| {lines[i]}" for i in range(lo, hi))
+    # Audit-2 V3: branch the output instruction on the profile's layout (this
+    # path previously hardcoded the v6 JSON schema under every profile).
+    profile = active_profile()
+    if profile.output_layout is OutputLayout.MARKDOWN_CODE:
+        output_block = (
+            "- Output the corrected version of ONLY the lines shown above as a\n"
+            "  fenced code block (raw lines, no escaping), then ONE ```json object:\n"
+            '  {"explanation": "<one short sentence>"}'
+        )
+    else:
+        output_block = (
+            "- Output the corrected version of ONLY the lines shown above, as a JSON\n"
+            "  object: {\"resolved_text\": \"<the corrected snippet lines, joined with \\n>\"}"
+        )
     return f"""Your previous merge attempt failed ONE validation. Fix it locally.
 
 file: {unit.path}
@@ -4160,9 +4280,8 @@ The failing region (line numbers are from your previous output):
 ```
 
 RULES:
-- Output the corrected version of ONLY the lines shown above, as a JSON
-  object: {{"resolved_text": "<the corrected snippet lines, joined with \\n>"}}
+{output_block}
 - Do NOT reformat, rename, or restructure anything outside the error.
 - Make the SMALLEST change that fixes the error.
 
-Respond with ONLY the JSON object."""
+Respond with ONLY the corrected lines (code block first under the markdown layout, or the JSON object under the JSON layout)."""

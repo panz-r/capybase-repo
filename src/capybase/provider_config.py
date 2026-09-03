@@ -389,6 +389,19 @@ def apply_to_config(
             "safety.max_retries_per_unit",
             "safety.max_recovery_retries_per_unit",
         ]
+    # Audit-2 U1: the prompt profile's retry_schedule axis was calibration-
+    # DOE-only (nothing read it at runtime). The provider path is the complete
+    # calibration, so the axis maps onto policy.max_retries_per_unit here —
+    # AFTER the safety section (a NON-default retry_schedule is the newer
+    # prompt-calibration signal; STANDARD leaves whatever policy carries).
+    from capybase.prompt_profile import RetrySchedule
+    _rs = resolved.profile.prompt.profile.retry_schedule
+    if _rs is not RetrySchedule.STANDARD:
+        cfg.policy.max_retries_per_unit = {
+            RetrySchedule.LIGHT: 1,
+            RetrySchedule.AGGRESSIVE: 3,
+        }[_rs]
+        overridden = list(overridden) + ["prompt.retry_schedule"]
     report = {
         "profile_path": str(getattr(resolved, "profile_path", "") or ""),
         "profile_model": getattr(resolved.profile, "model", ""),
