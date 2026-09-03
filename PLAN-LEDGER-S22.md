@@ -5907,6 +5907,16 @@ never reached the model are live. Expected behavioral deltas in the
 harvest: retries carry the decl guard + position axis; repairs carry
 prior-attempt memory; recovery/two-pass/shatter follow markdown_code.
 
+**AUDIT-2 validation batch (targeted ×3):** redis-0014 PASS 0.970
+first try (the D5c guard's historical case — conversion holds under
+the repaired stack); sea-orm-0014 ESC 3/3 at 0.858 and zenodo-0012 ESC
+3/3 at 0.971 MODEL_NEEDS_HUMAN — both at their EXACT prior
+dispositions (no regression from the now-live memory or the recovery
+relayout; both content-level). Machinery engagement verified in the
+flights: all 3 zenodo recovery prompts render under markdown_code
+(V1 live), all 4 sea-orm repair prompts carry PRIOR FAILED ATTEMPTS
+(D1b live — the memory reaches the model for the first time).
+
 ### ARCHITECTURE AUDIT (2026-09-02, calibration-faithfulness)
 
 **The intended architecture**: prompt format/layout via the calibrated
