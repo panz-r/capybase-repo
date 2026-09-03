@@ -5785,6 +5785,78 @@ Projected next harvest: ~94% raw / ~95.5% P+W adj.
 **S27 closes at: 31 conversions + 1 NEAR + 1 first-PASS-repeat + 3
 reclassifications + 18 fixes.** Projected harvest: ~94.2% raw.
 
+### ARCHITECTURE AUDIT 2 (2026-09-03, prompt-building subsystem — user-directed)
+
+Question: is the calibration profile in use for ALL prompt-building, and
+is prompt-building one reusable subsystem? Answer: **the resolve/repair
+core is fully profile-driven and single-implementation; four specific
+debt sites sit outside it.**
+
+**SOUND (verified):**
+- Canonical resolve chain: propose() → build_outline_resolve_prompt →
+  _resolve_prompt_parts + _render_output_contract + _compose_resolve_
+  prompt — ONE implementation; all render axes consulted
+  (output_layout, history_framing, instruction_position,
+  rule_emphasis, conflict_summary_mode, side_ordering, example_limit,
+  parse_repair_mode at engine:4012, outline via the `outline` field).
+- Repair path: build_repair_prompt → _render_repair_output(profile),
+  layout-branched.
+- R5 retry ladder: variants DERIVED from the calibrated base profile
+  (no hardcoded defaults); the orchestrator's journal mirror recomputes
+  the exact variant per attempt.
+- Block-capture + adjudication prompts are decision-shaped (verdict
+  JSON, no code emission) — layout-neutral by design, consistent with
+  the axes' scope.
+
+**VIOLATIONS (calibration not in use):**
+- **V1. build_recovery_prompt (resolution_engine:2129, LIVE via
+  propose_recovery)**: hardcodes the v6 JSON-escaped contract
+  ("Escape newlines as \\n …", inline ```json schema). Under
+  markdown_code the recovery retry contradicts the calibrated layout.
+- **V2. build_code_prompt (resolution_engine:2710, live via
+  propose_two_pass when config.model.two_pass — default OFF)**:
+  hardcodes the v6 ```json schema. Same class.
+
+**DIVERGENT DUPLICATES (the one-implementation bar):**
+- **D1. The retry prompt exists TWICE, diverged**: the LIVE one is
+  inline in propose() (engine:3443 — no D5c declaration guard, a
+  hardcoded "End with the ```json fenced answer" tail); the
+  build_retry_prompt (engine:2076, WITH the D5c guard) is used ONLY by
+  the orchestrator's journal mirror (13833). Consequences: the D5c
+  missing-symbol guard is JOURNAL-ONLY (the model never sees it on the
+  retry path), and the stored journal prompt differs from the prompt
+  actually sent — defeating the mirror's documented purpose.
+- **D2. The journal mirror (orchestrator:13745-13878)** re-implements
+  propose()'s dispatch by hand — a second selection copy to keep in
+  sync (already out of sync, per D1).
+- **D3. The D1-seam rule text is byte-duplicated** in
+  _RESOLVE_RULES_JSON_V6 and _RESOLVE_RULES_MD (the per-layout rule
+  variants are legitimate; the shared 6-line seam block should be one
+  constant both append).
+- **D4. Four adjudication prompts** (orchestrator:1771/1830/1888/1929)
+  each hand-roll the "Respond with ONLY a JSON object" frame — they
+  share _clip_side_diff but not a decision-prompt frame helper.
+
+**UNWIRED CALIBRATION DATA:**
+- **U1. retry_schedule axis**: its docstring maps STANDARD/LIGHT/
+  AGGRESSIVE to max_retries_per_unit 2/1/3, but nothing applies it at
+  runtime — only the calibration DOE probe reads it. A profile
+  calibrated LIGHT/AGGRESSIVE silently does not change retry counts
+  (they come from config.policy).
+
+Why the calibration canary missed all of this: its 10 cases never
+entered recovery (needs_human self-report) or two-pass (default off)
+paths, and the retry-path divergence is invisible in verdicts (the
+guard only matters on missing-symbol retries).
+
+Repair priorities when directed: D1 first (a live mechanism — the D5c
+guard — currently never reaches the model; collapse the retry prompt to
+ONE builder used by both propose() and the mirror), then V1/V2 (route
+both legacy builders through _render_output_contract), D2 (have the
+mirror call the same builder propose() used, not a re-implementation),
+D3/D4 (shared constants/frame helper), U1 (apply the axis at config
+application).
+
 ### ARCHITECTURE AUDIT (2026-09-02, calibration-faithfulness)
 
 **The intended architecture**: prompt format/layout via the calibrated
