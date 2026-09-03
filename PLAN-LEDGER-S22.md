@@ -6241,11 +6241,34 @@ full flight replay to find is now one journal line.
 
 Offline validation: the exact verify_file call on the pristine
 replayed side passes post-fix; introduced-duplicate detection holds;
-semantic-checks file 49/49; full unit gate 3,990/0 @ -n 6. Live ×5
-rerun under the fixed stack: in flight, results below.
+semantic-checks file 49/49; full unit gate 3,990/0 @ -n 6.
 
-S27 cumulative: 32 conversions + 1 NEAR + 1 first-PASS-repeat + 3
-reclassifications + 21 fixes.
+**Live validation: sqlite-0040 PASS 1.00 FIRST TRY (161s) — the 33rd
+conversion.** The flight's anatomy is the fix pair working exactly as
+designed: 4 sub-unit candidates accepted → one verify fail → **one**
+whole_file_repair (count budget holding) → second verify fail →
+**f1_tier1_takeover side=replayed LANDS** (the journal event that
+never fired before) → sim 1.00. The case that held "genuine variance
+band, ESC 0.96 majority with 0.00 DIVERGENT repeats" through the
+entire sprint was two silent defects stacked.
+
+Regression-risk check for the count-budget change: swept all recent
+s27 flights for sessions with max whole_file_repair retry >= 2 —
+every one ESCALATED anyway (model-used break was ending them at 2-3);
+every recent PASS (0108/0111/0019/0029/0077, canary + x15) used <= 1
+repair retry. d40d105a was the only deterministic-only spinner (its
+re-resolve was declined by the ba23f27 output-window guard, so the
+model-used break never fired). No PASS path depended on retries 2+.
+
+One paren regression during the resolver move (bool(path).stat())
+crashed the eval's materializer on configure-carrying trees — caught
+by the first live launch (instant ESC, "setup failed"), fixed, and
+now unit-covered (tests/test_realworld_build_resolver.py, 6 tests:
+dir/sha probe agreement, executable-bit handling, verified-map
+preference, honest declines).
+
+S27 cumulative: **33 conversions** + 1 NEAR + 1 first-PASS-repeat +
+3 reclassifications + 21 fixes. Projected harvest: ~94.4% raw.
 
 The first pooled c-subset run (1,101 checks) recorded sqlite-history
 0121-0133 human merges as `compiled=False` — the corpus check ran a
