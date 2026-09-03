@@ -6270,6 +6270,23 @@ preference, honest declines).
 S27 cumulative: **33 conversions** + 1 NEAR + 1 first-PASS-repeat +
 3 reclassifications + 21 fixes. Projected harvest: ~94.4% raw.
 
+### S27-EXTEND-17b (2026-09-03) — breadth batch: redis-0049 converts (34th); 0099 band confirmed
+
+Targeted exhaustion-class batch under the EXTEND-17 fixes:
+- **redis-0049 PASS 0.966 first try** — the 34th conversion. Held
+  "genuine ESC 3/3" at 0.97 through extend-16; now the normal path
+  accepts first try (112 events, ONE repair cycle, no takeover, no
+  side veto — the count budget holding at 1 + accept).
+- **sqlite-0099 WORKING 0.78 3/3** — the pp-seam case's graded band
+  is stable and honest (skeleton-intent candidate: idiomatic-rewrite
+  class, sim<0.80 with skeleton>=0.85). No regression from either fix.
+
+S27 cumulative: **34 conversions** + 1 NEAR + 1 first-PASS-repeat +
+3 reclassifications + 21 fixes. Projected harvest: ~94.5% raw /
+~96% P+W adj.
+
+### S27-POST-REGISTER. era-aware C oracle builds unified (found during DEF-2 verification)
+
 The first pooled c-subset run (1,101 checks) recorded sqlite-history
 0121-0133 human merges as `compiled=False` — the corpus check ran a
 STATIC per-dataset command (`./configure && make -j4`) while the eval
