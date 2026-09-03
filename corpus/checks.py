@@ -13,7 +13,11 @@ from pathlib import Path
 
 from capybase.config import Config
 from capybase.verification import VerificationEngine
-from corpus._realworld_build import C_BUILD_COMMANDS, run_command_at_worktree
+from corpus._realworld_build import (
+    C_PREPARE_COMMANDS,
+    resolve_c_build_at_sha,
+    run_command_at_worktree,
+)
 from capybase.adapters.parsers import parse_marker_blocks
 from capybase.verification import contains_markers
 from corpus.realworld_loader import RealWorldCase, git_history_repo_path
@@ -71,17 +75,38 @@ def check_c_gcc_verdict(case: RealWorldCase, tmp: Path):
         print(f"  {case.id}: human merge did not pass gcc: {msgs}")
 
 
+def _era_c_build_command(clone: Path, sha: str, dataset: str) -> str:
+    """The era-aware prepare+build chain for a commit, as one shell command.
+
+    Resolves (prepare, build) by probing the TREE at ``sha`` (git ls-tree —
+    no worktree needed), exactly as the eval harness's build gate does for
+    its materialized trees (corpus._realworld_build.resolve_c_build_at_sha;
+    era-aware: autoreconf for stale-configure eras, per-dataset CFLAGS and
+    include flags). Empty string = no build system known at that commit.
+    """
+    default_prepare = C_PREPARE_COMMANDS.get(dataset, "")
+    if "{jobs}" in default_prepare:
+        # Resolve here (not $(nproc)): the chained command runs through a
+        # shell, but keep the form identical to the eval's resolution.
+        import os as _os
+        default_prepare = default_prepare.format(jobs=max(4, _os.cpu_count() or 4))
+    prepare, build = resolve_c_build_at_sha(clone, sha, dataset, default_prepare)
+    if build == "true":
+        return ""  # unknown build system — no whole-tree oracle build
+    return f"{prepare} && {build}" if prepare else build
+
+
 def check_c_build_verdict(case: RealWorldCase, _tmp: Path):
     if case.language != "c":
         return SKIP
-    cmd = C_BUILD_COMMANDS.get(case.dataset)
-    if not cmd:
-        return SKIP  # no build command registered for this dataset
     if not case.merge_sha:
         return SKIP
     clone = git_history_repo_path(case.dataset)
     if not (clone / ".git").exists():
         return SKIP  # clone not fetched
+    cmd = _era_c_build_command(clone, case.merge_sha, case.dataset)
+    if not cmd:
+        return SKIP  # no build system detected at this commit
     verdict = run_command_at_worktree(clone, case.merge_sha, cmd, timeout=600)
     assert verdict.ran, (
         f"{case.id}: build did not run (worktree/command failure): "
@@ -328,11 +353,11 @@ def check_scenario_source_tip_compiles_rust(scenario, _tmp: Path):
 def check_scenario_source_tip_builds_c(scenario, _tmp: Path):
     if scenario.language != "c":
         return SKIP
-    cmd = C_BUILD_COMMANDS.get(scenario.dataset)
-    if not cmd:
-        return SKIP
     clone = _scenario_clone(scenario)
     if clone is None:
+        return SKIP
+    cmd = _era_c_build_command(clone, scenario.source_tip_oid, scenario.dataset)
+    if not cmd:
         return SKIP
     from corpus._realworld_cargo import DEFAULT_TIMEOUT
     verdict = run_command_at_worktree(

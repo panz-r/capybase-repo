@@ -91,6 +91,7 @@ from corpus._realworld_build import (  # noqa: E402
     C_BUILD_COMMANDS,
     C_PREPARE_COMMANDS,
     C_TEST_COMMANDS,
+    resolve_c_build,
 )
 from capybase.verification import (  # noqa: E402
     _ccache_enabled,
@@ -113,27 +114,14 @@ PASS_THRESHOLD = float(os.environ.get("CAPYBASE_PASS_THRESHOLD", "0.90"))
 #
 # IMPORTANT: json-c and other C repos changed build systems across their history
 # (older commits used autotools/configure.ac, newer use cmake). The per-dataset
-# default here is the PREFERRED prepare for the majority commit; the materializer
-# probes the extracted tree and adapts (cmake → autotools fallback) per case.
-#: Sprint-26 A1 (era recovery): per-dataset CFLAGS injected into the
-#: autotools prepare (``_resolve_c_build``'s configure branches IGNORE
-#: C_PREPARE_COMMANDS — verified: sqlite era trees have configure.ac, so
-#: the default never flows). sqlite: gcc 15's default -std=gnu23 makes
-#: K&R empty-paren declarations mean (void), conflicting with the lemon.c
-#: definitions ('FindActions'). VERIFIED on two commits: rc2 -> rc0.
-C_DATASET_CFLAGS: dict[str, str] = {
-    "sqlite-history": "-std=gnu99",
-}
-
-#: Sprint-26 A1: extra INCLUDE paths per dataset, extracted from .debs
-#: (no root: ``apt-get download tcl8.6-dev && dpkg-deb -x``). The sqlite
-#: tclsqlite.c cases need tcl.h — VERIFIED: sqlite-0065 builds rc=0 with
-#: this path + gnu99. Populated lazily on first use; empty when the
-#: extraction isn't available (those cases stay era-dead honestly).
-_DATASET_INCLUDE_PREFIX = Path("/tmp/capybase-era-includes")
-_DATASET_EXTRA_INCLUDES: dict[str, list[str]] = {
-    "sqlite-history": ["tcl8.6"],  # -> _DATASET_INCLUDE_PREFIX/tcl8.6
-}
+# default in C_PREPARE_COMMANDS is the PREFERRED prepare for the majority commit;
+# the era-aware resolver (corpus._realworld_build.resolve_c_build) probes the
+# extracted tree and adapts (cmake → autotools fallback) per case, injecting
+# per-dataset era CFLAGS + include flags (C_DATASET_CFLAGS /
+# dataset_include_flags — also in corpus._realworld_build). The era headers
+# under /tmp/capybase-era-includes are extracted EAGERLY here by
+# _ensure_dataset_includes (a network fetch that cannot live in the corpus
+# suite); the corpus side reads the prefix passively.
 
 
 #: Sprint-26 A5 (era recovery): the validated rust dep patches. Old tokio
@@ -236,29 +224,19 @@ def _vendor_rust_deps(repo: Path, dataset: str) -> bool:
         return False
 
 
-def _dataset_include_flags(dataset: str) -> str:
-    """'-I<prefix>/tcl8.6' style flags for the dataset's era headers."""
-    if dataset not in _DATASET_EXTRA_INCLUDES:
-        return ""
-    _ensure_dataset_includes()
-    flags = []
-    for sub in _DATASET_EXTRA_INCLUDES[dataset]:
-        p = _DATASET_INCLUDE_PREFIX / sub
-        if p.is_dir():
-            flags.append(f"-I{p}")
-    return " ".join(flags)
-
-
 def _ensure_dataset_includes() -> None:
     """Extract era headers (tcl8.6-dev) into the local prefix if absent.
 
-    Runs once per process. Best-effort: on any failure the prefix stays
-    empty and the prepare simply omits the -I flags (the tcl cases then
-    fail the gate and classify era honestly, as before).
+    Runs once per process (called eagerly at startup so the corpus-side
+    passive ``dataset_include_flags`` finds the prefix for every case).
+    Best-effort: on any failure the prefix stays empty and the prepare
+    simply omits the -I flags (the tcl cases then fail the gate and
+    classify era honestly, as before).
     """
-    if _DATASET_INCLUDE_PREFIX.exists():
+    from corpus._realworld_build import DATASET_INCLUDE_PREFIX
+    if DATASET_INCLUDE_PREFIX.exists():
         return
-    marker = _DATASET_INCLUDE_PREFIX.parent / ".era-includes.ok"
+    marker = DATASET_INCLUDE_PREFIX.parent / ".era-includes.ok"
     if marker.exists():
         return
     try:
@@ -269,29 +247,29 @@ def _ensure_dataset_includes() -> None:
                 ["apt-get", "download", "tcl8.6-dev"],
                 cwd=td, check=True, capture_output=True, timeout=120)
             deb = next(Path(td).glob("tcl8.6-dev*.deb"))
-            _DATASET_INCLUDE_PREFIX.mkdir(parents=True, exist_ok=True)
+            DATASET_INCLUDE_PREFIX.mkdir(parents=True, exist_ok=True)
             # Extract the header tree AND the dev lib tree (tclConfig.sh +
             # libtcl8.6.so live under usr/lib — the OUTPUT-TEST build of
             # sqlite's testfixture needs both; D9-s27).
             _sp.run(
-                ["dpkg-deb", "-x", str(deb), str(_DATASET_INCLUDE_PREFIX / "tcl-lib")],
+                ["dpkg-deb", "-x", str(deb), str(DATASET_INCLUDE_PREFIX / "tcl-lib")],
                 check=True, capture_output=True, timeout=120)
-            src = _DATASET_INCLUDE_PREFIX / "tcl-lib" / "usr" / "include" / "tcl8.6"
+            src = DATASET_INCLUDE_PREFIX / "tcl-lib" / "usr" / "include" / "tcl8.6"
             if src.is_dir():
                 _sp.run(
-                    ["cp", "-r", str(src), str(_DATASET_INCLUDE_PREFIX / "tcl8.6")],
+                    ["cp", "-r", str(src), str(DATASET_INCLUDE_PREFIX / "tcl8.6")],
                     check=True, capture_output=True, timeout=60)
         # D9 (s27): tclConfig.sh bakes the BUILD MACHINE's paths
         # (TCL_INCLUDE_SPEC=/usr/include/tcl8.6, which lacks tcl.h here).
         # Point both specs at the extracted trees so sqlite's testfixture
         # builds: VERIFIED end-to-end (testfixture rc=0, quicktest rc=0 on
         # an oracle-resolved tree).
-        for _cfg in (_DATASET_INCLUDE_PREFIX / "tcl-lib").rglob("tclConfig.sh"):
+        for _cfg in (DATASET_INCLUDE_PREFIX / "tcl-lib").rglob("tclConfig.sh"):
             try:
                 _cfg_text = _cfg.read_text()
                 _cfg_text = _cfg_text.replace(
                     "TCL_INCLUDE_SPEC='-I/usr/include/tcl8.6'",
-                    f"TCL_INCLUDE_SPEC='-I{_DATASET_INCLUDE_PREFIX / 'tcl8.6'}'")
+                    f"TCL_INCLUDE_SPEC='-I{DATASET_INCLUDE_PREFIX / 'tcl8.6'}'")
                 _cfg_text = _cfg_text.replace(
                     "TCL_LIB_SPEC='-L/usr/lib/x86_64-linux-gnu -ltcl8.6'",
                     "TCL_LIB_SPEC='-L"
@@ -305,8 +283,9 @@ def _ensure_dataset_includes() -> None:
 
 # The extracted tclConfig.sh path (sqlite's output-test build needs it).
 def _tcl_config_sh() -> str:
-    hits = list((_DATASET_INCLUDE_PREFIX / "tcl-lib").rglob("tclConfig.sh")) \
-        if (_DATASET_INCLUDE_PREFIX / "tcl-lib").is_dir() else []
+    from corpus._realworld_build import DATASET_INCLUDE_PREFIX
+    hits = list((DATASET_INCLUDE_PREFIX / "tcl-lib").rglob("tclConfig.sh")) \
+        if (DATASET_INCLUDE_PREFIX / "tcl-lib").is_dir() else []
     return str(hits[0]) if hits else ""
 
 # Per-case build-command cache: populated by _materialize_conflict after it
@@ -537,81 +516,6 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     return p
 
 
-def _resolve_c_build(repo: Path, dataset: str, default_prepare: str) -> tuple[str, str]:
-    """Probe the extracted tree's build system and return (prepare_cmd, build_cmd).
-
-    C repos change build systems across their history (json-c moved from
-    autotools to cmake). The per-dataset ``default_prepare`` is preferred, but
-    when its prerequisite is absent we fall back to a working alternative so
-    the build gate isn't a false rejector of correct resolutions.
-
-    Returns (prepare, build) command strings. ``prepare`` runs once in
-    _materialize_conflict; ``build`` is the in-loop gate command. Both use
-    ``shell=True``.
-
-    Detection order:
-      1. cmake  — CMakeLists.txt present → cmake -B build ... / cmake --build build
-      2. autotools — configure.ac or Makefile.am present → autoreconf+configure / make
-      3. pre-configured — a ``configure`` script exists → ./configure / make
-      4. ready — a Makefile exists (redis) → (no prepare) / make
-      5. unknown → (no prepare) / true (brace-balance + gcc -fsyntax-only only)
-    """
-    has_cmake = (repo / "CMakeLists.txt").exists()
-    has_autotools = (repo / "configure.ac").exists() or (repo / "Makefile.am").exists()
-    has_configure = (repo / "configure").exists() and (repo / "configure").stat().st_mode & 0o111
-    has_makefile = (repo / "Makefile").exists()
-
-    if has_cmake:
-        # Default prepare is cmake; use it. Build with cmake --build.
-        if default_prepare and "cmake" in default_prepare:
-            return default_prepare, "cmake --build build"
-        return ("cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
-                "cmake --build build")
-    if has_autotools:
-        # Generate configure from configure.ac, run it, then build derived
-        # headers only (not the full project — that takes too long for
-        # the case budget). The headers (parse.h, opcodes.h, sqlite3.h, etc.)
-        # are needed for gcc -fsyntax-only verification. The build_cmd stays
-        # "make -j{jobs}" so verify_file can do targeted builds (.lo/.o).
-        # The job count is resolved in Python (not $(nproc)) because the
-        # TestRunner invokes the pre_continue command WITHOUT a shell —
-        # a literal -j$(nproc) argument is an invalid make option (usage
-        # text, rc=2, no attributable error lines).
-        _jobs = max(4, (os.cpu_count() or 4))
-        _cfg = C_DATASET_CFLAGS.get(dataset, "")
-        _inc = _dataset_include_flags(dataset)
-        _cflags = f"{_cfg} {_inc}".strip()
-        # export: the ';' between autoreconf and configure would otherwise
-        # scope the env prefix to autoreconf only (verified: without export,
-        # configure omits -std from CFLAGS/BCC and lemon.c fails again).
-        _env = f"export CFLAGS='{_cflags}'; " if _cflags else ""
-        return (f"{_env}autoreconf -fi >/dev/null 2>&1; ./configure >/dev/null 2>&1",
-                f"make -j{_jobs}")
-    if has_configure:
-        _jobs = max(4, (os.cpu_count() or 4))
-        _cfg = C_DATASET_CFLAGS.get(dataset, "")
-        _inc = _dataset_include_flags(dataset)
-        _cflags = f"{_cfg} {_inc}".strip()
-        _env = f"export CFLAGS='{_cflags}'; " if _cflags else ""
-        return (f"{_env}./configure >/dev/null 2>&1",
-                f"make -j{_jobs}")
-    if has_makefile:
-        _jobs = max(4, (os.cpu_count() or 4))
-        # Sprint-26 C18 site-2: redis's ready-Makefile in-loop gate needs the
-        # same era stack as the probe gate (C_BUILD_COMMANDS site): -lm link
-        # order, -fno-common, and gnu99 (bundled hiredis K&R). Scoped to the
-        # redis dataset so other ready-Makefile trees keep the plain gate.
-        if dataset == "redis-history":
-            return ("", "make -j{j} CC='cc -std=gnu99 -fcommon "
-                    "-Wl,--no-as-needed' CFLAGS='-std=gnu99 -fcommon' "
-                    "MALLOC=libc FORCE_LIBC_MALLOC=yes".format(j=_jobs))
-        return ("", f"make -j{_jobs}")
-    # Unknown build system — no whole-tree gate. The CcsSyntaxValidator
-    # (gcc -fsyntax-only) still gates per-unit; brace-balance is the only
-    # whole-file check. This is honest (we can't build what we can't detect).
-    return ("", "true")
-
-
 def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None = None) -> None:
     """Build a git history that produces the case's conflict markers on disk.
 
@@ -754,7 +658,7 @@ def _materialize_conflict(case: Case, repo: Path, *, crate_source: Path | None =
             # make option (usage text, rc=2, no attributable errors).
             default_prepare = default_prepare.format(
                 jobs=max(4, (os.cpu_count() or 4)))
-        prepare, build_cmd = _resolve_c_build(repo, case.dataset, default_prepare)
+        prepare, build_cmd = resolve_c_build(repo, case.dataset, default_prepare)
         prepare_ok = True
 
         # Fix sqlite's tool/lemon.c: the parser generator has K&R-style
@@ -1201,7 +1105,7 @@ def _c_builds(repo: Path, case: Case) -> bool | None:
     defines globals that multiply-define under -fno-common.
     """
     # Prefer the adaptively-detected build command (set by _materialize_conflict
-    # via _resolve_c_build), which matches whatever prepare actually ran. Falls
+    # via resolve_c_build), which matches whatever prepare actually ran. Falls
     # back to the static per-dataset default.
     cmd = _DETECTED_BUILD_CMD.get(case.id) or C_BUILD_COMMANDS.get(case.dataset, "")
     if not cmd or cmd == "true":

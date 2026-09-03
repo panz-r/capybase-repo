@@ -237,3 +237,161 @@ C_PREPARE_COMMANDS: dict[str, str] = {
     "clickhouse-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
     "protobuf-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -Dprotobuf_BUILD_TESTS=OFF",
 }
+
+
+# ---------------------------------------------------------------------------
+# Era-aware (prepare, build) resolution — the single decision shared by the
+# eval harness's build gate and the corpus oracle-build checks (moved from
+# scripts/live_eval_realworld.py so the two cannot drift; DEF-4 completion).
+# ---------------------------------------------------------------------------
+
+#: Per-dataset era CFLAGS (sqlite's K&R-era sources need gnu99).
+C_DATASET_CFLAGS: dict[str, str] = {
+    "sqlite-history": "-std=gnu99",
+}
+
+#: Sprint-26 A1: extra INCLUDE paths per dataset, extracted from .debs
+#: (no root: ``apt-get download tcl8.6-dev && dpkg-deb -x``). The sqlite
+#: tclsqlite.c cases need tcl.h — VERIFIED: sqlite-0065 builds rc=0 with
+#: this path + gnu99. Populated EAGERLY by the eval harness (a network
+#: fetch — lives there, not here); this module only READS the prefix.
+#: Empty when the extraction isn't available (those cases stay era-dead
+#: honestly).
+DATASET_INCLUDE_PREFIX = Path("/tmp/capybase-era-includes")
+DATASET_EXTRA_INCLUDES: dict[str, list[str]] = {
+    "sqlite-history": ["tcl8.6"],  # -> DATASET_INCLUDE_PREFIX/tcl8.6
+}
+
+
+def dataset_include_flags(dataset: str) -> str:
+    """'-I<prefix>/tcl8.6' style flags for the dataset's era headers.
+
+    PASSIVE — reads whatever the eval harness already extracted; never
+    fetches. The corpus suite is deterministic-only by contract.
+    """
+    if dataset not in DATASET_EXTRA_INCLUDES:
+        return ""
+    flags = []
+    for sub in DATASET_EXTRA_INCLUDES[dataset]:
+        p = DATASET_INCLUDE_PREFIX / sub
+        if p.is_dir():
+            flags.append(f"-I{p}")
+    return " ".join(flags)
+
+
+def _c_build_pair(has_cmake: bool, has_autotools: bool, has_configure: bool,
+                  has_makefile: bool, dataset: str,
+                  default_prepare: str) -> tuple[str, str]:
+    """The (prepare, build) decision, given a tree's build-system flags.
+
+    C repos change build systems across their history (json-c moved from
+    autotools to cmake). The per-dataset ``default_prepare`` is preferred,
+    but when its prerequisite is absent we fall back to a working
+    alternative so the build gate isn't a false rejector.
+
+    Detection order:
+      1. cmake  — CMakeLists.txt present → cmake -B build ... / cmake --build build
+      2. autotools — configure.ac or Makefile.am present → autoreconf+configure / make
+      3. pre-configured — a ``configure`` script exists → ./configure / make
+      4. ready — a Makefile exists (redis) → (no prepare) / make
+      5. unknown → (no prepare) / true (brace-balance + gcc -fsyntax-only only)
+    """
+    import os as _os
+
+    if has_cmake:
+        # Default prepare is cmake; use it. Build with cmake --build.
+        if default_prepare and "cmake" in default_prepare:
+            return default_prepare, "cmake --build build"
+        return ("cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+                "cmake --build build")
+    if has_autotools:
+        # Generate configure from configure.ac, run it, then build derived
+        # headers only (not the full project — that takes too long for
+        # the case budget). The headers (parse.h, opcodes.h, sqlite3.h, etc.)
+        # are needed for gcc -fsyntax-only verification. The build_cmd stays
+        # "make -j{jobs}" so verify_file can do targeted builds (.lo/.o).
+        # The job count is resolved in Python (not $(nproc)) because the
+        # TestRunner invokes the pre_continue command WITHOUT a shell —
+        # a literal -j$(nproc) argument is an invalid make option (usage
+        # text, rc=2, no attributable error lines).
+        _jobs = max(4, (_os.cpu_count() or 4))
+        _cflags = f"{C_DATASET_CFLAGS.get(dataset, '')} " \
+                  f"{dataset_include_flags(dataset)}".strip()
+        # export: the ';' between autoreconf and configure would otherwise
+        # scope the env prefix to autoreconf only (verified: without export,
+        # configure omits -std from CFLAGS/BCC and lemon.c fails again).
+        _env = f"export CFLAGS='{_cflags}'; " if _cflags else ""
+        return (f"{_env}autoreconf -fi >/dev/null 2>&1; ./configure >/dev/null 2>&1",
+                f"make -j{_jobs}")
+    if has_configure:
+        _jobs = max(4, (_os.cpu_count() or 4))
+        _cflags = f"{C_DATASET_CFLAGS.get(dataset, '')} " \
+                  f"{dataset_include_flags(dataset)}".strip()
+        _env = f"export CFLAGS='{_cflags}'; " if _cflags else ""
+        return (f"{_env}./configure >/dev/null 2>&1",
+                f"make -j{_jobs}")
+    if has_makefile:
+        # A ready-Makefile tree. If the static per-dataset map carries an
+        # era-VERIFIED command (redis: the C18 stack — -lm link order,
+        # -fno-common, gnu99 hiredis — verified in sprint-26), use it
+        # verbatim; scaling -j to cpu_count is unverified territory for
+        # old Makefiles. (Redis 0040/0047/0048 fail DETERMINISTICALLY at
+        # any -j — gcc 15 rejects their era const/struct-drift code —
+        # honest oracle records, not build-system issues.)
+        _verified = C_BUILD_COMMANDS.get(dataset)
+        if _verified:
+            return "", _verified
+        _jobs = max(4, (_os.cpu_count() or 4))
+        return ("", f"make -j{_jobs}")
+    # Unknown build system — no whole-tree gate. The CcsSyntaxValidator
+    # (gcc -fsyntax-only) still gates per-unit; brace-balance is the only
+    # whole-file check. This is honest (we can't build what we can't detect).
+    return ("", "true")
+
+
+def resolve_c_build(repo: Path, dataset: str,
+                    default_prepare: str) -> tuple[str, str]:
+    """Probe an extracted tree's build system; return (prepare, build).
+
+    ``prepare`` runs once before the in-loop gate; ``build`` is the
+    gate command. Both use ``shell=True``.
+    """
+    has_cmake = (repo / "CMakeLists.txt").exists()
+    has_autotools = ((repo / "configure.ac").exists()
+                     or (repo / "Makefile.am").exists())
+    has_configure = ((repo / "configure").exists()
+                     and bool(repo / "configure").stat().st_mode & 0o111)
+    has_makefile = (repo / "Makefile").exists()
+    return _c_build_pair(has_cmake, has_autotools, has_configure,
+                         has_makefile, dataset, default_prepare)
+
+
+def resolve_c_build_at_sha(clone: Path, sha: str, dataset: str,
+                           default_prepare: str) -> tuple[str, str]:
+    """Same decision, probed via ``git ls-tree`` at a commit (no worktree).
+
+    For oracle-build checks that materialize a worktree only to build in
+    it: the probe reads the tree's top-level entries + modes straight from
+    the object store.
+    """
+    out = _git(clone, "ls-tree", "--", sha)
+    if out.returncode != 0:
+        # Unresolvable sha — treat as an unknown build system (honest
+        # decline, the caller's worktree add will fail loudly anyway).
+        return "", "true"
+    names: set[str] = set()
+    exec_names: set[str] = set()
+    for line in out.stdout.splitlines():
+        # "<mode> <type> <oid>\t<name>" — top level only (no slash in name).
+        meta, _, name = line.partition("\t")
+        if not name or "/" in name:
+            continue
+        names.add(name)
+        if meta.startswith("100755"):
+            exec_names.add(name)
+    return _c_build_pair(
+        "CMakeLists.txt" in names,
+        "configure.ac" in names or "Makefile.am" in names,
+        "configure" in exec_names,
+        "Makefile" in names,
+        dataset, default_prepare)

@@ -6188,3 +6188,51 @@ mechanism bug — the label wobble is input variance on the documented
 oracle-subjective empty class, with sim pinned at 0.54-0.58 (well
 below the 0.80 NEAR bar). Case remains a permanent non-PASS band
 member; harvest tallies it as DIVERGENT either way.
+
+---
+
+### S27-POST-REGISTER. era-aware C oracle builds unified (found during DEF-2 verification)
+
+The first pooled c-subset run (1,101 checks) recorded sqlite-history
+0121-0133 human merges as `compiled=False` — the corpus check ran a
+STATIC per-dataset command (`./configure && make -j4`) while the eval
+harness had long been era-aware (`_resolve_c_build`: tree-probed
+autoreconf for stale-configure eras, per-dataset CFLAGS, extracted
+tcl includes). The stale-configure cases (0130-0132) were false
+oracle-negatives — exactly the drift DEF-4's consolidation was meant
+to prevent, one map over.
+
+REPAIRED in the same session: the decision logic moved to
+`corpus/_realworld_build.py` as `resolve_c_build` (dir-probing, the
+eval's path) + `resolve_c_build_at_sha` (git-ls-tree probing — the
+corpus checks probe the tree at the commit without a worktree),
+sharing one `_c_build_pair`. The era-include extraction
+(`apt-get download tcl8.6-dev`) stays EAGER in the eval (a network
+fetch — startup call); the corpus side reads the prefix PASSIVELY
+(`dataset_include_flags`), honoring the deterministic-only corpus
+contract. corpus checks (`check_c_build_verdict`,
+`check_scenario_source_tip_builds_c`) now resolve per-commit and
+chain `prepare && build`.
+
+VERIFIED live: sqlite-0121/0130/0132 — the exact cases that recorded
+`compiled=False` — now build rc=0 in 6-7s each under the era-aware
+chain. Eval `--help` + runpy import OK; the 46 eval-loading unit
+tests pass; full unit gate 3,988/0 @ -n 6.
+
+Full c-subset rerun through the era-aware checks: **1,101 checks ran,
+0 skipped, 0 failures, 13m55s** (was 19m36s — sqlite builds mostly
+succeed now). Oracle-not-building records shrank 13 → 6:
+- FIXED (now compile): sqlite 0121-0133 (Tcl-absent + stale-configure
+  eras — autoreconf + era includes do it).
+- REMAINING honest records (era code vs gcc 15, deterministic —
+  verified by direct rebuild at both -j4 and -j12): redis-0040/0047/
+  0048 (const char** / intsetGet incompatible-pointer / struct config
+  member drift), sqlite-0069/0084 (era tsrc/ tcl-script assumptions),
+  sqlite-0109 (SorterRecord pointer mismatch). These oracles genuinely
+  do not build under the modern toolchain — recorded per policy.
+- Methodology note recorded: the first pooled run's log was piped
+  through `tail -15`, which HID its redis records — the apparent
+  "-j12 regression" was a log artifact; redis 0040/0047/0048 fail
+  identically at -j4. The makefile branch now prefers the era-VERIFIED
+  C_BUILD_COMMANDS entry verbatim (no cpu-scaled -j for ready-Makefile
+  trees with a verified stack).
