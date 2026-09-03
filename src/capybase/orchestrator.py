@@ -1997,6 +1997,48 @@ def _is_compile_flavored_failure(hard_failures) -> bool:
     return False
 
 
+class RepairOscillationTracker:
+    """Detects deterministic repair cycles in the whole-file repair loop.
+
+    A deterministic repair applied to a given failure state produces the
+    same successor state every time — so if the loop returns to a failure
+    signature whose repair round was already deterministic-only, the next
+    pass repeats identically. The d40d105a flight (sqlite-0040): the
+    symbol_inject line_replace and the derived-prototype path undid each
+    other, A→B→A→B, for 1,221 iterations until the time budget died. The
+    retry-count budget bounds the spin; this tracker stops it semantically
+    (which matters for production configs with higher budgets).
+
+    Model repairs are stochastic and deliberately NOT tracked: a second
+    model attempt at the same signature may legitimately differ.
+    """
+
+    def __init__(self) -> None:
+        self._deterministic_signatures: set[tuple[str, ...]] = set()
+
+    @staticmethod
+    def signature(hard_failures) -> tuple[str, ...]:
+        """The failure state's identity: the sorted set of hard-failure
+        messages (order-independent — validator order is not semantic)."""
+        return tuple(sorted(
+            str(getattr(f, "message", f)) for f in hard_failures))
+
+    def is_cycle(self, signature: tuple[str, ...]) -> bool:
+        """True when this exact failure state was already repaired
+        deterministically — the next deterministic pass is a repeat."""
+        return signature in self._deterministic_signatures
+
+    def record(self, accepted: list, signature: tuple[str, ...]) -> None:
+        """Record a completed repair round. The signature is tracked only
+        when the round's candidates were deterministic-only (no model
+        call) — same provenance convention as the tiered-budget check."""
+        if accepted and all(
+            str(getattr(c, "provenance", "") or "").startswith("deterministic")
+            for _u, c in accepted
+        ):
+            self._deterministic_signatures.add(signature)
+
+
 def _empty_repair_side_fallback(
     accepted: list,
 ) -> list | None:
@@ -9329,6 +9371,7 @@ class Orchestrator:
             buffer = resolved_files[path]
             if self.config.validation.require_whole_file_validation and units:
                 wf_retries = 0
+                _osc = RepairOscillationTracker()
                 # Separate whole-file repair budget. 0 mirrors the per-unit
                 # budget (legacy behavior); a higher value grants more repair
                 # cycles for multi-hunk conflicts where the deterministic brace
@@ -9847,6 +9890,26 @@ class Orchestrator:
                         # deterministic beam pass + 1 model re-resolve; the
                         # configured max_whole_file_repair_retries must hold.
                         break
+                    _osc_sig = _osc.signature(file_validation.hard_failures)
+                    if _osc.is_cycle(_osc_sig):
+                        # A deterministic repair already ran from this exact
+                        # failure state and the loop returned to it — the
+                        # next pass is a guaranteed repeat (d40d105a's
+                        # A→B→A cycle). Stop here; the budget bounds it, this
+                        # stops it semantically for higher-budget configs.
+                        self.journal.emit(
+                            "whole_file_repair_oscillation",
+                            {
+                                "retry": wf_retries,
+                                "failures": [
+                                    f.message
+                                    for f in file_validation.hard_failures[:3]
+                                ],
+                            },
+                            step_index=self.step,
+                            path=path,
+                        )
+                        break
                     # Attribute the failure to a unit and re-resolve it with the
                     # file-level failures as concrete repair feedback.
                     wf_retries += 1
@@ -9911,6 +9974,7 @@ class Orchestrator:
                         )
                         if _used_model:
                             _phase2_model_used = True
+                    _osc.record(accepted, _osc_sig)
                 if file_validation is None or not file_validation.passed:
                     # Final deterministic repair attempt. The cheap O(n) repairs
                     # (brace balance, prefix dedup, boundary echo, import dedup)

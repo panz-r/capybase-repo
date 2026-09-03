@@ -6366,6 +6366,23 @@ failure) — confirming their content-class disposition.
 1 NEAR + 1 first-PASS-repeat + 3 GATE_UNAVAILABLE reclassifications
 + 21 fixes; gate 3,996/0 @ -n 6; harvest ready on call.**
 
+### S27-EXTEND-17f (2026-09-03) — semantic cycle stop for the repair loop
+
+The EXTEND-17 count-budget fix BOUNDS the d40d105a oscillation; a
+production config with a higher `max_whole_file_repair_retries` would
+still burn its full budget on the A→B→A deterministic cycle.
+`RepairOscillationTracker` (orchestrator) stops it semantically: a
+deterministic repair from a given failure state always produces the
+same successor, so RETURNING to a signature whose round was
+deterministic-only is a guaranteed repeat — break + journal
+`whole_file_repair_oscillation`. Model rounds are stochastic and
+deliberately untracked (a second model attempt at the same signature
+may differ). Provenance convention matches the tiered-budget check
+(empty provenance = model-costly, conservative). 7 unit tests (order-
+independence, A→B→A detection, model/mixed rounds untracked); gate
+4,003/0 @ -n 6; live smoke sqlite-0004 PASS 1.00 46s with the tracker
+in the loop.
+
 ### S27-POST-REGISTER. era-aware C oracle builds unified (found during DEF-2 verification)
 
 The first pooled c-subset run (1,101 checks) recorded sqlite-history
