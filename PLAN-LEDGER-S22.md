@@ -6285,6 +6285,27 @@ S27 cumulative: **34 conversions** + 1 NEAR + 1 first-PASS-repeat +
 3 reclassifications + 21 fixes. Projected harvest: ~94.5% raw /
 ~96% P+W adj.
 
+### S27-EXTEND-17c (2026-09-03) — high-sim ESC trio holds genuine; the conversion campaign plateaus
+
+The three highest-sim remaining escalations under the EXTEND-17 fixes,
+×3 each: **sea-orm-0007 ESC 0.914**, **zenodo-0012 ESC 0.971**
+(MODEL_NEEDS_HUMAN — the model declines at 0.97), **zenodo-0079 ESC
+0.963** (TIMEOUT_CONVERGENCE). All sims at their exact prior values —
+content-level difficulty (the syntax loop, truncated-side weaves),
+unmoved by the exhaustion-class repairs. Honest band members.
+
+The targeted-conversion campaign has converged: every recent batch
+either converts (0040, 0049) or confirms a stable band. Remaining
+non-PASS set is fully dispositioned: genuine ESCs (0007/0012/0079/
+0014/0027/0013-class), the NEAR band (tokio-0046 0.88, zenodo-0003
+0.83, clickhouse-0021 0.89), WORKING graded successes, flask-0006
+coin-flip DIVERGENT, sqlite-0039 GATE_UNAVAILABLE, sqlite-0099
+skeleton-intent WORKING 0.78.
+
+**S27 final: 34 conversions + 1 NEAR + 1 first-PASS-repeat + 3
+GATE_UNAVAILABLE reclassifications + 21 fixes.** Projected harvest:
+~94.5% raw / ~96% P+W adj.
+
 ### S27-POST-REGISTER. era-aware C oracle builds unified (found during DEF-2 verification)
 
 The first pooled c-subset run (1,101 checks) recorded sqlite-history
