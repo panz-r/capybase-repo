@@ -5917,6 +5917,19 @@ flights: all 3 zenodo recovery prompts render under markdown_code
 (V1 live), all 4 sea-orm repair prompts carry PRIOR FAILED ATTEMPTS
 (D1b live — the memory reaches the model for the first time).
 
+**AUDIT-2 NEAR-band batch (×3, first under live repair memory):**
+tokio-0046 NEAR 3/3 @ 0.884 and zenodo-0003 NEAR 3/3 @ 0.825 — exact
+prior bands; clickhouse-0021 NEAR majority 2/3 @ 0.871 (one ESC repeat
+within its variance; majority holds). The NEAR band is stable under
+the repaired stack — the failed-patch memory does not move
+content-level near-misses. No conversions, no regressions.
+
+**Carriage polish (fb2ff55):** the three markdown-code carriage
+phrases (repair/recovery/shatter renderers) unified into one
+_MD_CODE_CARRIAGE_END constant — three drifted wordings of the same
+instruction are now one; the v6 carriage lives only in the canonical
+constants. Gate 4,021/0.
+
 ### ARCHITECTURE AUDIT (2026-09-02, calibration-faithfulness)
 
 **The intended architecture**: prompt format/layout via the calibrated
