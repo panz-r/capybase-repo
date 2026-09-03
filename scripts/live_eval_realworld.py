@@ -89,6 +89,7 @@ from capybase.provider_config import (  # noqa: E402
 from capybase.resolution_engine import ResolutionEngine  # noqa: E402
 from corpus._realworld_build import (  # noqa: E402
     C_BUILD_COMMANDS,
+    C_PREPARE_COMMANDS,
     C_TEST_COMMANDS,
 )
 from capybase.verification import (  # noqa: E402
@@ -114,20 +115,6 @@ PASS_THRESHOLD = float(os.environ.get("CAPYBASE_PASS_THRESHOLD", "0.90"))
 # (older commits used autotools/configure.ac, newer use cmake). The per-dataset
 # default here is the PREFERRED prepare for the majority commit; the materializer
 # probes the extracted tree and adapts (cmake → autotools fallback) per case.
-C_PREPARE_COMMANDS: dict[str, str] = {
-    "redis-history": "",
-    "jsonc-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-    "sqlite-history": "./configure && make -j{jobs}",
-    # Sprint-26 A3 (era recovery): BuildTests=OFF removes doctest's
-    # altStackMem[4*SIGSTKSZ] (glibc made SIGSTKSZ non-constant) AND the 2
-    # allocator_traits-drift errors in unit-allocator — both lived in the
-    # test tree. The CXX flags demote the type_error::create mismatches to
-    # warnings. VERIFIED offline: rc=0, zero errors, full 38/38 recovery.
-    "nlohmann-json-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DJSON_BuildTests=OFF -DCMAKE_CXX_FLAGS='-DSIGSTKSZ=32768 -std=c++11 -fpermissive -Wno-error'",
-    "clickhouse-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-    "protobuf-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -Dprotobuf_BUILD_TESTS=OFF",
-}
-
 #: Sprint-26 A1 (era recovery): per-dataset CFLAGS injected into the
 #: autotools prepare (``_resolve_c_build``'s configure branches IGNORE
 #: C_PREPARE_COMMANDS — verified: sqlite era trees have configure.ac, so

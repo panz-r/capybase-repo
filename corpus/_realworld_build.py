@@ -222,3 +222,18 @@ C_TEST_COMMANDS: dict[str, str] = {
     "sea-orm-history": "cargo test --quiet",
     "tokio-history": "cargo test --quiet --lib",
 }
+
+
+C_PREPARE_COMMANDS: dict[str, str] = {
+    "redis-history": "",
+    "jsonc-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+    "sqlite-history": "./configure && make -j{jobs}",
+    # Sprint-26 A3 (era recovery): BuildTests=OFF removes doctest's
+    # altStackMem[4*SIGSTKSZ] (glibc made SIGSTKSZ non-constant) AND the 2
+    # allocator_traits-drift errors in unit-allocator — both lived in the
+    # test tree. The CXX flags demote the type_error::create mismatches to
+    # warnings. VERIFIED offline: rc=0, zero errors, full 38/38 recovery.
+    "nlohmann-json-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DJSON_BuildTests=OFF -DCMAKE_CXX_FLAGS='-DSIGSTKSZ=32768 -std=c++11 -fpermissive -Wno-error'",
+    "clickhouse-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+    "protobuf-history": "cmake -B build -S . -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -Dprotobuf_BUILD_TESTS=OFF",
+}
