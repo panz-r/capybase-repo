@@ -5930,6 +5930,30 @@ _MD_CODE_CARRIAGE_END constant — three drifted wordings of the same
 instruction are now one; the v6 carriage lives only in the canonical
 constants. Gate 4,021/0.
 
+### S27-EXTEND-18 (2026-09-04) — the WORKING band under the current stack: nlohmann-0020 converts (35th)
+
+The oldest-verified band (last rerun in extend-4, before the seam
+prompt and all EXTEND-17/audit-2 changes) rerun ×3 under the unified
+prompt subsystem. Offline forensics first: the WORKING shape is
+STRUCTURAL — multi-unit files where some units resolve via source
+portfolio (current only) or deterministic lint transforms; compiles +
+tests pass + preservation holds, the oracle weaves those units
+differently (the documented "oracle-convergence alone may be too
+strict" class). Repair quality is not the blocker — but the stack
+moved one anyway:
+
+- **nlohmann-json-history-0020 PASS 0.991 first try** — the 35th
+  conversion (the 8-unit lint-transform/combination-search case;
+  stable WORKING through extend-4).
+- protobuf-0059 WORKING 3/3 @ 0.774; zenodo-0088 WORKING 3/3 @ 0.89 —
+  exactly stable.
+- zenodo-0028 WORKING 2/3 @ 0.897 and zenodo-0040 WORKING 2/3 @ 0.76 —
+  one variance ESC repeat each; graded majorities hold.
+
+**S27 cumulative: 35 conversions** + 1 NEAR + 1 first-PASS-repeat + 3
+GATE_UNAVAILABLE reclassifications + 30 fixes. Projected harvest:
+~95% raw / ~96.5% P+W adj.
+
 ### ARCHITECTURE AUDIT (2026-09-02, calibration-faithfulness)
 
 **The intended architecture**: prompt format/layout via the calibrated
