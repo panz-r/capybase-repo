@@ -6061,7 +6061,7 @@ positive live. Harvest under calibration is cleared to run.
 
 ---
 
-## SPRINT-27 OPEN DEFECTS (2026-09-03 — found during the sprint, unfixed; repair work belongs to sprint-27)
+## SPRINT-27 DEFECT REGISTER (2026-09-03 — found during the sprint; ALL CLOSED as of debe382+DEF-7: DEF-1,2,3,4,5,6 repaired, DEF-7 documented-variance)
 
 ### S27-DEF-1. scenario_checks_pending.py — the rebase-scenario family is not runnable
 
@@ -6163,7 +6163,7 @@ drift. REPAIR: move the helper to a shared non-test module (e.g.
 capybase/testing_support.py or corpus/git_util.py) and import from
 both; delete the copy.
 
-### S27-DEF-7. flask-0006 verdict-label instability (DIVERGENT vs ESCALATE at 0.54-0.58)
+### S27-DEF-7. flask-0006 verdict-label instability (DIVERGENT vs ESCALATE at 0.54-0.58) — CLOSED (variance, documented)
 
 Observed twice with sim within 0.04 but the verdict flipping between
 ORACLE_DIVERGENT and ESCALATE. The distinction (marker-free-but-
@@ -6172,3 +6172,19 @@ this oracle-subjective case. Not yet a defect in a mechanism — a
 classification-stability observation. REPAIR (low priority): check
 whether the empty-class verdict chain is deterministic under the
 calibrated layout; if it is variance, document as coin-flip band.
+
+**CLOSED (DEF-7) — variance, documented as coin-flip band.** Targeted
+rerun under the real calibrated markdown_code profile
+(nova-gemma4, `--case flask-history-0006 --repeat-nonpass 4`, flights
+preserved at /var/tmp/capy-evals/def7-flask0006): **4/4 repeats
+ORACLE_DIVERGENT**, sim 0.576, every run marker-free + compiling.
+Flight forensics: the three completed sessions' first LLM responses
+have distinct content hashes (b541…/6389…/9e30…, 1267-1479B) — the
+model samples differently each run, so the resolution text differs;
+given each output the chain is deterministic (all such outputs here
+land marker-free+compiling → DIVERGENT; the one historical ESCALATE
+was a sampled output that failed a gate mid-loop). Conclusion: no
+mechanism bug — the label wobble is input variance on the documented
+oracle-subjective empty class, with sim pinned at 0.54-0.58 (well
+below the 0.80 NEAR bar). Case remains a permanent non-PASS band
+member; harvest tallies it as DIVERGENT either way.

@@ -551,6 +551,14 @@ def main() -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     print(_PROVIDER.provider.describe())
+    # Calibration audit banner (DEF-3 symmetry with live_eval_realworld):
+    # one dry apply on a bare Config so the run log records which profile
+    # file, sections, and prompt layout every case will run under.
+    _, _, _cal_report = apply_to_config(Config(), _PROVIDER)
+    print(f"calibration: {_cal_report['profile_model']} @ "
+          f"{_cal_report['profile_path']} — sections "
+          f"{','.join(_cal_report['sections'])}, prompt "
+          f"{_cal_report['prompt_layout']}")
 
     builders = _selected_builders()
     if not _probe_endpoint():
