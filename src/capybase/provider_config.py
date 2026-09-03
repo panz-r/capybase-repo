@@ -324,7 +324,11 @@ def apply_to_config(
     its recorded model name differs from the endpoint's model id (the
     orchestrator's implicit name-match gate only governs ambient profiles).
 
-    Returns ``(config, overridden_knob_names)``.
+    Returns ``(config, overridden_knob_names, application_report)`` — the
+    report names the profile (path + model), which sections applied, and
+    the calibrated prompt layout, so entry points can journal the audit
+    trail (the old model_profile_applied event died with the ambient
+    path; live runs must still record WHICH calibration was in force).
     """
     p = resolved.provider
     cfg.model.base_url = p.base_url
@@ -385,4 +389,16 @@ def apply_to_config(
             "safety.max_retries_per_unit",
             "safety.max_recovery_retries_per_unit",
         ]
-    return cfg, overridden
+    report = {
+        "profile_path": str(getattr(resolved, "profile_path", "") or ""),
+        "profile_model": getattr(resolved.profile, "model", ""),
+        "prompt_layout": resolved.profile.prompt.profile.output_layout.value,
+        "sections": (
+            ["capability", "quality", "prompt", "safety"] +
+            (["embeddings"] if (
+                getattr(resolved.profile, "enable_embedding_rag", False)
+                or getattr(resolved.profile, "embedding_min_similarity", None)
+                is not None) else [])),
+        "overridden_knobs": list(overridden),
+    }
+    return cfg, overridden, report

@@ -981,7 +981,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         _resolved = resolve_provider(
             provider=getattr(args, "provider", None))
-        config, _knobs = apply_to_config(config, _resolved)
+        config, _knobs, _report = apply_to_config(config, _resolved)
+        print(
+            f"calibration: {_report['profile_model']} @ "
+            f"{_report['profile_path']} — sections "
+            f"{','.join(_report['sections'])}, prompt "
+            f"{_report['prompt_layout']}", file=sys.stderr)
     except ProviderError as exc:
         print(
             f"capybase: error: {exc}\n"

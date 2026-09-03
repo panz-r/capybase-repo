@@ -159,7 +159,7 @@ def test_embeddings_endpoint_passthrough(tmp_path: Path, real_profile_loader) ->
         "base_url": "http://embed.example:8085/v1", "model": "embed",
     })
     r = resolve_provider(provider="acme", environ=_no_env(), config_dir=tmp_path)
-    cfg, _ = apply_to_config(Config(), r)
+    cfg, _, _report = apply_to_config(Config(), r)
     assert cfg.memory.embeddings_base_url == "http://embed.example:8085/v1"
     assert cfg.memory.embeddings_model == "embed"
     assert cfg.model.base_url == "http://server-a.example:8086/v1"
@@ -187,7 +187,7 @@ def test_apply_to_config_sets_endpoint_and_profile_knobs(tmp_path: Path, real_pr
     _write_profile(tmp_path, "e2b")
     _write_provider(tmp_path, "acme")
     r = resolve_provider(provider="acme", environ=_no_env(), config_dir=tmp_path)
-    cfg, knobs = apply_to_config(Config(), r)
+    cfg, knobs, _report = apply_to_config(Config(), r)
     assert cfg.model.base_url == "http://server-a.example:8086/v1"
     assert cfg.model.model == "chat"
     assert cfg.model.max_tokens == 1234  # from the profile (forced)

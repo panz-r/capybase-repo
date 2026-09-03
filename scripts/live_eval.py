@@ -245,7 +245,7 @@ def _config_for(scenario: Scenario, *, critic_enabled: bool = True) -> Config:
     # (provider_config.resolve_provider); the harness tuning below layers on
     # top of the profile's knobs.
     resolved = _require_provider()
-    cfg, _profile_knobs = apply_to_config(cfg, resolved)
+    cfg, _profile_knobs, _cal_report = apply_to_config(cfg, resolved)
     cfg.model.temperature = 0.2
     cfg.model.max_tokens = 8192  # headroom for <think>-style reasoning chains
     cfg.model.json_mode = True

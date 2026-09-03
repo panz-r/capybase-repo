@@ -81,7 +81,7 @@ def _applied_cfg(repo: Path, profile: ModelProfile, *, model: str = "vibethink")
             api_key=cfg.model.api_key, profile=str(path)),
         profile=profile, profile_path=path,
     )
-    cfg, _knobs = apply_to_config(cfg, resolved)
+    cfg, _knobs, _report = apply_to_config(cfg, resolved)
     return cfg
 
 def test_matching_profile_overlays_knobs_at_init(repo: Path):

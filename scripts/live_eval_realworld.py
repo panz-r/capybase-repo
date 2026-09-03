@@ -952,7 +952,7 @@ def _config_for(case: Case, *, has_crate: bool = False) -> Config:
     # the knobs the harness knows better empirically; CAPYBASE_CONTEXT_WINDOW
     # and friends remain the final per-run env overrides.
     resolved = _require_provider()
-    cfg, _profile_knobs = apply_to_config(cfg, resolved)
+    cfg, _profile_knobs, _cal_report = apply_to_config(cfg, resolved)
     cfg.model.temperature = 0.2
     # A/B kill switch for the whole-file takeover mechanisms (regression
     # attribution): setting CAPYBASE_DISABLE_TAKEOVER=1 runs the pre-af41b2e
