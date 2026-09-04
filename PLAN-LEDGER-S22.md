@@ -7461,3 +7461,30 @@ corpus.
 
 Gate 4,067/0; stage-1 checklist fully checked in
 docs/deterministic-reuse-design.md.
+
+### S27-EXTEND-48 (2026-09-04) — deterministic-reuse stage 2 BEGUN: the claim-3 fix + the shared model
+
+- **Scope-qualified field collisions (claim 3, verified coverage bug)
+  — FIXED**: named_field_union's global existing-name scan (which
+  suppressed a valid insertion when ANY unrelated struct carried the
+  same field name) replaced by a per-destination-struct collision
+  check inside _try_insert_field — the field name must not exist in
+  THIS struct; an unrelated struct's same-named field is a different
+  entity. Regression test pins the two-struct case.
+- **capybase/deterministic_model.py — the shared primitive model
+  LANDED**: EditTransaction (source-hash CAS, bounds, no-overlap,
+  descending-order apply — all enforced at apply time, raising on any
+  violation; transactional semantics), TextEdit/SourceSpan,
+  PrimitiveStatus (APPLIED/NOT_APPLICABLE/AMBIGUOUS/BLOCKED),
+  OutcomeKind (the proposal's four-way: not-applicable ≠ declined ≠
+  proposed ≠ internal-error), PrimitiveResult with the certificate.
+  7 tests pin the universal rules; the existing primitives adopt
+  incrementally (each port wraps its edit in EditTransaction.apply).
+- **Live trio (informative, no harvest)**: sea-orm-0001 PASS 1.00
+  (116s — the field-heavy rust case, exactly the class the claim-3 fix
+  affects), sqlite-0004 PASS 1.00, axum-0019 PASS 0.98 — all exact
+  prior bands. Zero regressions under stage-2 code.
+
+Gate 4,075/0. Stage-2 checklist updated in the design doc; the
+KeyedCollectionMerge engine port (under shadow mode) is the next
+bounded item.

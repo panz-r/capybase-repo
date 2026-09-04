@@ -48,12 +48,24 @@ acceptance policy: tier A should require D0/D1 provenance.
   tier A refined to require D0/D1.
 - The conformance-test checklist (as tests on whatever engine exists).
 
-**Adopt next (stage 2, post-harvest or as a bounded follow-up):**
-- `KeyedCollectionMerge` + `EditTransaction`/`TextEdit`/
-  `PrimitiveResult` (the proposal's P1) — the biggest honest dedup;
-  ported in its order (manifest arrays → fields → items → attributes →
-  imports) under SHADOW MODE with divergence recording before any
-  switch. The scope-qualified identity fix (claim 3) rides this.
+**Adopt next (stage 2 — BEGUN pre-harvest, shadow-gated):**
+- **Scope-qualified identities (claim 3) — FIXED**: the named-field
+  union's global name scan replaced by a per-destination-struct
+  collision check (the field name must not exist in THIS struct; an
+  unrelated struct's same-named field is a different entity).
+  Regression test pins the two-struct case.
+- **`capybase/deterministic_model.py` — the shared primitive model
+  LANDED**: `EditTransaction` (source-hash CAS, bounds, no-overlap,
+  descending apply, atomicity — all enforced), `TextEdit`/`SourceSpan`,
+  `PrimitiveStatus`/`OutcomeKind` (the proposal's four-way distinction:
+  not-applicable ≠ declined ≠ proposed ≠ internal-error), and
+  `PrimitiveResult` with the certificate. 7 tests pin the universal
+  rules. The existing primitives adopt it incrementally — each port
+  wraps its edit in `EditTransaction.apply`.
+- **`KeyedCollectionMerge` engine** — the biggest honest dedup; ported
+  in the proposal's order (manifest arrays → fields → items →
+  attributes → imports) under SHADOW MODE with divergence recording
+  before any switch.
 - One orchestrator-inline repair ported behind the mechanisms registry
   as the pattern proof.
 - Capability-based language checks replacing name checks (the
@@ -99,3 +111,15 @@ acceptance policy: tier A should require D0/D1 provenance.
 6. [x] Live confirmation: three informative cases under stage-1 code
    (sqlite-0004 C, tokio-0046 rust, zenodo-0003 python) — verdicts and
    sims unchanged; acceptance reasons D-class-annotated.
+
+## Stage 2 checklist (begun)
+
+1. [x] Scope-qualified field collisions (claim 3): per-destination-
+   struct check replaces the global scan. Regression test.
+2. [x] `deterministic_model.py`: EditTransaction / TextEdit /
+   PrimitiveStatus / OutcomeKind / PrimitiveResult — 7 tests.
+3. [ ] `KeyedCollectionMerge` engine (generic) + manifest-array port
+   under shadow mode.
+4. [ ] Remaining ports (fields → items → attributes → imports).
+5. [ ] One orchestrator repair behind the registry.
+6. [ ] Confidence-float removal (0.85/0.9 on deterministic repairs).

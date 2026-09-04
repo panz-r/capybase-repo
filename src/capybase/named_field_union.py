@@ -111,16 +111,13 @@ def propose_named_field_union(
                              "after_hash": before_hash},
             )
 
-        # --- Idempotency: drop fields whose name already exists. ---
-        existing_field_names = set()
-        for cl in resolved_text.splitlines():
-            name = _field_name(cl)
-            if name:
-                existing_field_names.add(name)
-        fresh = [
-            line for line in candidate_fields
-            if _field_name(line) not in existing_field_names
-        ]
+        # --- Idempotency (scope-qualified, reuse-design claim 3). ---
+        # The OLD global scan suppressed a valid insertion when ANY
+        # unrelated struct carried the same field name — a coverage bug
+        # failing toward not-inserting (escalate). The real collision
+        # check is per-destination-struct: _try_insert_field locates the
+        # struct, and the per-struct existing-name scan below decides.
+        fresh = list(candidate_fields)
         if not fresh:
             return ImportUnionResult(
                 status=STATUS_NOT_APPLICABLE, text=resolved_text,
@@ -245,6 +242,13 @@ def _try_insert_field(
     close_line = find_container_close_line(cand_lines_plain, header_idx, language="rust")
     if close_line is None:
         return None
+
+    # SCOPE-QUALIFIED collision (reuse-design claim 3): the field name
+    # must not already exist in THIS struct — not anywhere in the file.
+    # An unrelated struct's same-named field is a different entity.
+    for k in range(header_idx + 1, close_line):
+        if _field_name(cand_lines_plain[k]) == field_name:
+            return None  # genuine collision in the destination
 
     # Detect indentation from existing fields.
     indent = ""

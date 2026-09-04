@@ -132,3 +132,50 @@ class TestProposeNamedFieldUnion:
         assert r.status == STATUS_APPLIED
         assert "timeout" in r.text
         assert "name" in r.text
+
+
+def test_unrelated_struct_same_field_name_does_not_suppress():
+    """Reuse-design claim 3 (verified): a field named ``timeout`` in an
+    UNRELATED struct must not suppress inserting a different ``timeout``
+    field into its own struct — scope-qualified collision."""
+    from capybase.named_field_union import propose_named_field_union
+
+    class Obligation:
+        operation = "added"
+        status = "MISSING"
+        exclusive = False
+        line = "    timeout: Duration,"
+
+    other_side = """pub struct ServerConfig {
+    host: String,
+    timeout: Duration,
+}
+
+pub struct ClientConfig {
+    retries: u32,
+}"""
+
+    candidate = """pub struct ServerConfig {
+    host: String,
+}
+
+pub struct ClientConfig {
+    retries: u32,
+    timeout: Duration,  // UNRELATED struct has the same field name
+}"""
+
+    result = propose_named_field_union(
+        candidate, [Obligation()], other_side_text=other_side)
+    # The timeout field MUST be inserted into ServerConfig — the
+    # ClientConfig timeout is a different entity (different scope).
+    if result.status == "applied":
+        lines = result.text.splitlines()
+        # timeout appears in BOTH structs now.
+        timeout_count = sum(1 for l in lines if "timeout" in l)
+        assert timeout_count >= 2, (
+            f"expected timeout in both structs, got {timeout_count}: {result.text}")
+    else:
+        # If it declined, the certificate should say why — but the
+        # decline must NOT be "already present" (that's the old bug).
+        assert "already present" not in str(result.certificate), (
+            f"declined with the OLD global-scan reason: {result.certificate}")
