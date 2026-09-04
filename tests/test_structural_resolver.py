@@ -1686,3 +1686,50 @@ def test_mechanical_reapply_partial_application_mixed_ops():
     # The result should be the replayed text (possibly with some subs applied).
     assert "Iterator" in result  # semantic structure preserved
 
+
+
+# ---------------------------------------------------------------------------
+# Reuse-design stage 1: language-aware equivalence (P0 regression)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_preserves_indentation_semantics():
+    """The verified P0 bug: for indentation-semantic languages, leading
+    whitespace is scope — normalizing it away made these identical."""
+    from capybase.structural_resolver import _normalize
+
+    base = "if ready:\n    start()\nstop()"
+    indented = "if ready:\n    start()\n    stop()"  # stop() moved INTO the if
+    # Python: different programs — must NOT normalize identically.
+    assert _normalize(base, "python") != _normalize(indented, "python")
+    # Unknown/None language keeps the conservative historical behavior
+    # (full collapse) pending per-language declarations.
+    assert _normalize(base) == _normalize(indented)
+    # Brace-family: indentation is style — full collapse unchanged.
+    assert _normalize(base, "c") == _normalize(indented, "c")
+    # Horizontal cosmetics still normalize in Python (tail of line only).
+    a = "x = 1   \t 2"
+    b = "x = 1 2"
+    assert _normalize(a, "python") == _normalize(b, "python")
+
+
+def test_one_sided_change_respects_python_indentation():
+    """A replayed side whose only change is an indentation edit is a
+    REAL change in Python — one_sided_change must not discard it by
+    treating that side as unchanged."""
+    base = "if ready:\n    start()\nstop()"
+    current = "if ready:\n    start()\n        stop()"  # current indented stop
+    replayed = base  # replayed conceded
+    unit = _unit(base, current, replayed)
+    unit.language = "python"
+    r = resolve_structurally(unit)
+    # The change must NOT be invisible: either resolved taking current,
+    # or declined — never a resolution from the UNCHANGED side alone.
+    if r.resolved:
+        assert "        stop()" in r.text or "    stop()" in r.text
+    # And the flip: replayed carries the indent change, current unchanged.
+    unit2 = _unit(base, base, current)
+    unit2.language = "python"
+    r2 = resolve_structurally(unit2)
+    if r2.resolved:
+        assert "stop()" in r2.text

@@ -146,7 +146,20 @@ def intent_coverage_score(
     return min(cur_cov, rep_cov)
 
 
-def _normalize(text: str) -> str:
+#: Languages where LEADING WHITESPACE is semantic (scope, not style).
+#: Reuse-proposal P0 (verified 2026-09-04): the old all-languages
+#: normalize collapsed each line's leading whitespace, so
+#: ``if ready:/    start()/stop()`` vs the same with ``stop()`` indented
+#: normalized IDENTICALLY — identical_sides could merge the sides and
+#: one_sided_change could discard an indentation change that moved a
+#: statement's scope.
+_INDENTATION_SEMANTIC = frozenset({
+    "python", "py", "yaml", "yml", "makefile", "make", "elm",
+    "haskell", "hs", "coffee", "haml", "slim", "jade", "pug", "stylus",
+})
+
+
+def _normalize(text: str, language: str | None = None) -> str:
     """Whitespace-only normalization for the identical-sides check.
 
     We do NOT use quality.py's punctuation-stripping normalize here: for
@@ -161,9 +174,30 @@ def _normalize(text: str) -> str:
     differing only by ``\\n`` vs space were treated as identical, silently
     picking one and dropping the other's structural intent. Now each line is
     independently whitespace-stripped, with newline boundaries preserved.
+
+    LANGUAGE-AWARE (reuse design stage 1): for indentation-semantic
+    languages (Python, YAML, Makefiles, ...) LEADING whitespace is
+    preserved — ``stop()`` at module scope and inside an ``if`` are
+    different programs. Brace-family languages keep the full horizontal
+    collapse (indentation is style there); unknown text gets the
+    conservative full collapse too pending per-language declarations
+    (the proposal's no-assumed-syntax principle).
     """
     if not text:
         return ""
+    lang = (language or "").strip().lower()
+    if lang in _INDENTATION_SEMANTIC:
+        # Preserve leading whitespace; normalize only each line's tail
+        # (trailing space, collapsed runs AFTER the indent).
+        out = []
+        for line in text.split("\n"):
+            stripped = line.lstrip()
+            if not stripped:
+                out.append("")
+                continue
+            indent = line[: len(line) - len(stripped)]
+            out.append(indent + " ".join(stripped.split()))
+        return "\n".join(out)
     lines = text.split("\n")
     # Strip trailing/leading space within each line, collapse runs of
     # spaces/tabs to a single space — but keep newlines as line separators.
@@ -322,6 +356,9 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         current = unit.current.text or ""
         replayed = unit.replayed.text or ""
         base = unit.base.text or ""
+    # Language-aware equivalence (reuse design stage 1): indentation-
+    # semantic languages preserve leading whitespace in _normalize.
+    _lang = (unit.language or "").strip().lower() or None
 
     # When the parent conflict has large side-size asymmetry (one side rewrote
     # while the other made a small edit), the union/additive rules can produce
@@ -344,7 +381,7 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         return StructuralResolution(rule="delete_side", text=deleted)
 
     # Rule 2: identical sides (modulo whitespace) → that side is the merge.
-    if _normalize(current) == _normalize(replayed):
+    if _normalize(current, _lang) == _normalize(replayed, _lang):
         # Prefer the non-empty side; if both empty, empty is the resolution.
         text = current if current.strip() else replayed
         return StructuralResolution(rule="identical_sides", text=text)
@@ -433,8 +470,8 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         return StructuralResolution(rule="lint_vs_refactor", text=lint_res)
 
     # Rule 3: one-sided change. Only one side diverged from base → take it.
-    cur_changed = _normalize(current) != _normalize(base)
-    rep_changed = _normalize(replayed) != _normalize(base)
+    cur_changed = _normalize(current, _lang) != _normalize(base, _lang)
+    rep_changed = _normalize(replayed, _lang) != _normalize(base, _lang)
     if cur_changed and not rep_changed:
         # Current diverged, replayed conceded to base → but current may have
         # legitimately built on base; emit current.

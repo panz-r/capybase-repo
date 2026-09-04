@@ -7397,3 +7397,41 @@ model saying that it is confident." — now implemented:
 4 tests; gate 4,063/0 (one non-reproducing parallel flake on the
 intermediate run — the known timing class). The candidate-ref design
 is now implemented to its last paragraph.
+
+### S27-EXTEND-46 (2026-09-04) — the deterministic-reuse proposal: verified, judged, stage 1 begun
+
+The external source-structure/reuse proposal was analyzed with every
+factual claim verified against the code FIRST:
+
+- **Claim 1 (_normalize erases indentation) — CONFIRMED, real
+  correctness bug**: `" ".join(line.split())` per line normalized
+  `if ready:/    start()/stop()` identically to the same with stop()
+  indented into the if — feeding identical_sides (merging the sides)
+  and one_sided_change (discarding the change). FIXED (stage 1):
+  `_normalize(text, language)` preserves leading whitespace for
+  indentation-semantic languages (python/yaml/makefile/...); brace
+  family keeps the horizontal collapse (indentation is style there);
+  unknown text stays conservative pending per-language declaration.
+  Language threaded through resolve_structurally's two decision
+  sites. 2 regression tests (the proposal's example + the
+  one_sided flip). Gate 4,065/0; corpus python 349/0.
+- **Claim 2 (alias drift) — CONFIRMED**: 4 sites re-spell alias
+  knowledge (config jury gate, resolution_engine token sets,
+  structural_resolver language list, orchestrator rust/rs). Stage-1
+  consolidation queued (extends the langs.py work).
+- **Claim 3 (global name scans in keyed unions) — CONFIRMED but
+  judged a COVERAGE bug, not safety** (fails toward not-inserting →
+  escalate). The scope-qualified identity fix rides stage 2's
+  KeyedCollectionMerge engine, not a pre-harvest patch.
+
+**Judgment**: adopt the architecture (syntax discovery language-
+specific; merge algebra/transactions/evidence/policy shared), staged
+per docs/deterministic-reuse-design.md — stage 1 pre-harvest (the
+correctness fix + alias consolidation + SafetyClass D0-D3 wired into
+acceptance tiers), stage 2 post-harvest (the KeyedCollectionMerge
+engine under shadow mode, scope-qualified identities, one orchestrator
+repair ported behind the registry), the package restructure deferred
+until engines exist to fill it. The proposal's 70-80% sharing estimate
+is plausible; its own migration staging is honest; its P2 (new
+language codecs) is post-harvest BY DEFINITION for a 4-language
+corpus.
