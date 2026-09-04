@@ -12520,8 +12520,15 @@ class Orchestrator:
                                         unit_id=unit.unit_id)
                                     _tried.add(f"storclass:{_sig}")
                                     return [(_sc_unit, _sc_cand)]
-                    except Exception:  # noqa: BLE001 — relocation is best-effort
-                        pass
+                    except Exception as _rung_exc:  # noqa: BLE001 — relocation is best-effort
+                        try:
+                            self.journal.emit(
+                                "repair_rung_error",
+                                {"rung": "storage_class_relocation",
+                                 "error": f"{type(_rung_exc).__name__}: {_rung_exc}"},
+                                step_index=self.step, path=path)
+                        except Exception:  # noqa: BLE001
+                            pass
             # Deterministic #if/#endif balance repair: the entity-splitting + splice
             # pipeline can leave a whole-file preprocessor imbalance that no single
             # sub-unit owns (a conflict region sliced mid-file). Try a single-edit

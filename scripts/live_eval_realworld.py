@@ -389,6 +389,7 @@ def _classify_terminal_reason(reason: str) -> str:
       TIMEOUT_CAPABILITY  — per-case timeout on a small file (model can't solve it)
       REPAIR_FAILURE      — whole-file repair couldn't resolve a unit
       TOOLCHAIN_ERA       — preflight: sides+oracle all fail the gate identically
+      SETUP_FAILED        — infrastructure/setup failure (not a resolver outcome)
       OTHER               — uncategorized
     """
     r = (reason or "").lower()
@@ -402,6 +403,12 @@ def _classify_terminal_reason(reason: str) -> str:
     # Safety skips (not real conflicts).
     if "no conflict" in r or "skipped (no conflict)" in r:
         return "SAFE_SKIP"
+    # s27-extend-27: infrastructure/setup failures (git lock errors,
+    # materializer exceptions) are NOT resolver outcomes — clickhouse-0003
+    # sat in the ESCALATE column for weeks on a git-lock write failure.
+    # Classified distinctly so summaries stop counting infra as capability.
+    if r.startswith("setup failed"):
+        return "SETUP_FAILED"
     if "too large" in r or "oversized" in r:
         return "OVERSIZED"
     if "case timeout" in r:
@@ -2426,17 +2433,23 @@ def main():
     print(f"SKELETON-INTENT CANDIDATES: {idiomatic_ct}  (sim < 0.80 but "
           f"skeleton >= 0.85 — idiomatic rewrites; eval-only diagnostic)")
     print(f"wall:       {elapsed:.0f}s ({elapsed/60:.1f}m) [this run only]")
-    # Real-conflict pass rate: excludes SAFE_SKIP (no real conflict) from the
-    # denominator. This is the honest metric — a SAFE_SKIP isn't a resolution
-    # the system produced, it's a case git already resolved cleanly.
-    real_conflicts = [r for r in results if r.terminal_reason != "SAFE_SKIP"]
+    # Real-conflict pass rate: excludes SAFE_SKIP (no real conflict) and
+    # SETUP_FAILED (infrastructure failure — not a resolver outcome) from
+    # the denominator. This is the honest metric — neither is a resolution
+    # the system produced.
+    _excluded = ("SAFE_SKIP", "SETUP_FAILED")
+    real_conflicts = [
+        r for r in results if r.terminal_reason not in _excluded]
     real_pass = sum(1 for r in real_conflicts if r.verdict == "PASS")
     real_work = sum(1 for r in real_conflicts if r.verdict == "WORKING")
     safe_skip_ct = sum(1 for r in results if r.terminal_reason == "SAFE_SKIP")
+    setup_fail_ct = sum(
+        1 for r in results if r.terminal_reason == "SETUP_FAILED")
     # Explicit denominator breakdown so pass-rate comparisons are meaningful
     # across runs (Sprint 8: 64/76 vs Sprint 9: 52/75 — the denominator
     # changed by 1 with no explanation).
-    print(f"total: {len(results)} | SAFE_SKIP: {safe_skip_ct} | real conflicts: {len(real_conflicts)}")
+    print(f"total: {len(results)} | SAFE_SKIP: {safe_skip_ct} | "
+          f"SETUP_FAILED: {setup_fail_ct} | real conflicts: {len(real_conflicts)}")
     if real_conflicts:
         print(f"real-conflict PASS rate: {real_pass}/{len(real_conflicts)} = "
               f"{real_pass/len(real_conflicts)*100:.0f}%")

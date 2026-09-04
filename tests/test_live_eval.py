@@ -119,3 +119,22 @@ def test_gate_unavailable_requires_high_sim():
 def test_pass_never_overridden():
     r = _rec(matches_oracle=0.99, oracle_builds=False)
     assert _verdict(r) == "PASS"
+
+
+def test_setup_failed_matches_infrastructure_failures():
+    """s27-extend-27: git-lock/materializer setup failures are NOT resolver
+    outcomes — clickhouse-0003 sat in the ESCALATE column for weeks on a
+    git-lock write failure before this class existed."""
+    assert _classify(
+        "setup failed: RuntimeError: git ('add', '-A') failed: fatal: "
+        "unable to write lock file"
+    ) == "SETUP_FAILED"
+    assert _classify(
+        "setup failed: AttributeError: 'bool' object has no attribute 'stat'"
+    ) == "SETUP_FAILED"
+
+
+def test_setup_failed_not_matched_mid_reason():
+    """Only the reason PREFIX counts — a resolver outcome that happens to
+    mention 'setup' stays classified by its own class."""
+    assert _classify("could not resolve after setup phase") != "SETUP_FAILED"
