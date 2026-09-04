@@ -8012,3 +8012,22 @@ harness work (0003 append-merge + retag; 0029 path-dep rewrite).
 The plausible era floor is 9 → 2. No code changed in this entry —
 investigation only; the recovery items are candidates for the next
 round's era config, to be validated by targeted reruns first.
+
+### Sprint-26 era-recovery follow-up tasks (added 2026-09-05, from EXTEND-67)
+
+The s26 era recovery closed the floor 167 → 9; EXTEND-67's per-case
+investigation shows 7 of the final 9 are within reach of the same
+config/harness mechanisms. Three tasks join the sprint-26 series
+(A-series continuation), each gated by a targeted rerun before any
+harvest claim:
+
+| # | Task | Cases | Effort | Status |
+|---|------|-------|--------|--------|
+| A6 | sea-orm: add `[patch.crates-io] sea-query = { git = ".../sea-query.git", tag = "0.18.2" }` for trees whose manifest lacks the git dep (today's patch pins only sea-query-derive) — the 0.17.x line never shipped `FromValueTuple` (added 2021-10-12, first in 0.18.0), so `^0.17.1` cannot resolve the era import. Gate: 5× targeted rerun; accept partial recovery if further 0.17→0.18 API mismatches surface — record them, don't chase them | sea-orm 0015–0019 (5) | SMALL (one patch-table entry + rerun) | TODO |
+| A7 | vendoring append-merge: `_vendor_rust_deps` must MERGE into an existing `[patch.crates-io]` (or skip when present) instead of appending a second table — the append produced the `duplicate key` failure on 0003, and the exception path returns without restoring the manifest (fix that too). Then retag 0003's own dead branch dep (`sqlite-bind-decimals` is gone from SeaQL/sea-query — pin the era rev/tag) | sea-orm-0003 | MEDIUM (harness fix + archaeology for the rev) | TODO |
+| A8 | sibling path-dep rewrite: 0029's manifest carries `sea-query = { path = "../sea-query", version = "^0.11" }` — rewrite the fragment via RUST_DEP_REWRITES to drop the path (crates.io/git resolution) or materialize the sibling at the era SHA | sea-orm-0029 (1) | SMALL-MEDIUM (rewrite + offline vendor validation) | TODO |
+
+Accepted floor (unchanged): protobuf-0055 (merge tree internally
+inconsistent — un-passable by any resolver) and fmt-0003 (libstdc++
+drift, no era compiler on host). If A6–A8 land and validate, the era
+floor moves 9 → 2 and the README adj% denominators follow.
