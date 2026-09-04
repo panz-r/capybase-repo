@@ -179,6 +179,13 @@ def build_parser() -> argparse.ArgumentParser:
              "promote with `capybase promote`.",
     )
     rb_p.add_argument(
+        "--fresh",
+        action="store_true", dest="fresh",
+        help="re-run even when a fingerprint-matching retained candidate "
+             "exists (default: reuse the already-tested candidate — same "
+             "source/target OIDs, config, profile, and toolchain)",
+    )
+    rb_p.add_argument(
         "--autostash",
         action="store_true",
         help="autostash dirty changes before rebasing (like git rebase --autostash)",
@@ -1087,6 +1094,7 @@ def main(argv: list[str] | None = None) -> int:
             report = run_candidate_rebase(
                 config, repo=args.repo, target=args.target,
                 autostash=args.autostash,
+                reuse=not getattr(args, "fresh", False),
             )
             print(report.summary())
             return 0 if report.would_succeed else 1

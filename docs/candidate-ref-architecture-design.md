@@ -171,12 +171,17 @@ ConflictUnit → CandidateResolution[] → Evidence[] → PolicyDecision
   `unknown` + `acceptance_trust`), the tier-table policy module
   (consuming the trust events), and `suspected_validator_error`
   demoted to evidence-only.
-- **P4 — OUTSTANDING**: promotable/reusable artifacts — when a later
-  request's fingerprints (source+target OIDs, config, profile,
-  toolchain) match a retained candidate's session_state.json, return
-  the already-tested candidate instead of re-running the
-  nondeterministic model pass; plus the OID-verified transition resume
-  (state-file transitions; resume-or-refuse on restart).
+- **P4 — LANDED** (extend-35): fingerprint-matched reuse — when a
+  later run's fingerprints (source ref+OID, target+OID, config,
+  profile, AND toolchain) all match a retained successful un-promoted
+  candidate, the run returns it with ZERO model calls (`--fresh`
+  forces a re-run; names unique-ify on same-second collisions). A
+  toolchain mismatch blocks reuse (unknown-is-not-pass at the artifact
+  level). Transitions are recorded in the state file
+  (snapshot/completed with their input OIDs); an interrupted state
+  (outcome=None) is NEVER reused — and git's own design (the branch
+  advances only at completion) means there is nothing mid-series to
+  resume from, which is a safety property, not a gap.
 - **P5 — OUTSTANDING**: remote lease publication (service mode,
   default-off, explicit `--force-with-lease=<ref>:<oid>`).
 

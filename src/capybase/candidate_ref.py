@@ -66,8 +66,21 @@ class CandidateReport:
     steps: list[dict] = field(default_factory=list)
     llm_calls: int = 0
     state_path: str = ""
+    reused: bool = False
+    reused_from: str = ""
 
     def summary(self) -> str:
+        if self.reused:
+            return "\n".join([
+                f"CANDIDATE (reused): retained candidate matches every "
+                f"fingerprint — no model run needed",
+                f"  source {self.source_ref} @ {self.source_oid[:8]} "
+                f"UNTOUCHED",
+                f"  candidate @ {self.candidate_oid[:8]} "
+                f"(previously tested)",
+                f"  prior state: {self.reused_from}",
+                f"  promote: `capybase promote`",
+            ])
         if self.would_succeed:
             lines = [
                 f"CANDIDATE: rebase complete on {self.candidate_ref}",
@@ -129,6 +142,48 @@ def _write_state(path: Path, state: dict) -> None:
     path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
+def _matching_retained_candidate(
+    repo: Path, state: dict,
+) -> tuple[dict, Path] | None:
+    """A retained SUCCESSFUL candidate whose fingerprints ALL match.
+
+    The reuse contract (design P4): same source ref+OID, same target+OID,
+    same config and profile fingerprints, same toolchain environment.
+    A toolchain mismatch blocks reuse — the recorded evidence was
+    produced under that toolchain, and pretending otherwise would be the
+    unknown-is-not-pass mistake at the artifact level.
+    """
+    root = repo / CANDIDATES_DIR
+    if not root.is_dir():
+        return None
+    want = state["fingerprints"]
+    for sp in sorted(root.glob("*/session_state.json"), reverse=True):
+        try:
+            prior = json.loads(sp.read_text())
+        except Exception:  # noqa: BLE001
+            continue
+        if prior.get("outcome") != "success":
+            # outcome=None = an interrupted run (the worktree died
+            # mid-series; git only advances the branch at completion, so
+            # there is nothing mid-series to resume from by construction
+            # — a safety property, not a gap). Never reused.
+            continue
+        if (prior.get("source_ref") == state["source_ref"]
+                and prior.get("source_oid") == state["source_oid"]
+                and prior.get("target") == state["target"]
+                and prior.get("target_oid") == state["target_oid"]
+                and prior.get("fingerprints", {}).get("config")
+                == want.get("config")
+                and prior.get("fingerprints", {}).get("profile")
+                == want.get("profile")
+                and prior.get("fingerprints", {}).get("toolchain")
+                == want.get("toolchain")
+                and not prior.get("promoted")
+                and prior.get("candidate_oid")):
+            return prior, sp
+    return None
+
+
 def run_candidate_rebase(
     config: Config,
     repo: str | Path,
@@ -136,6 +191,7 @@ def run_candidate_rebase(
     *,
     autostash: bool = False,
     resolution_engine=None,
+    reuse: bool = True,
 ) -> CandidateReport:
     """Run the entire rebase on a candidate branch; never touch the source.
 
@@ -160,7 +216,20 @@ def run_candidate_rebase(
     report.target_oid = _resolve_oid(git, target)
     ts = time.strftime("%Y%m%d-%H%M%S")
     source_slug = report.source_ref.replace("/", "-")
-    report.candidate_ref = f"{CANDIDATE_BRANCH_PREFIX}/{source_slug}@{ts}"
+    # Unique-ify: two runs in the same second (or a retained candidate
+    # from a --fresh rerun) must not collide on the branch/dir name.
+    base_ref = f"{CANDIDATE_BRANCH_PREFIX}/{source_slug}@{ts}"
+    _uniq = ""
+    while True:
+        probe = f"{base_ref}{_uniq}"
+        res = git._run(
+            ["rev-parse", "--verify", "--quiet",
+             f"refs/heads/{probe}"], what="candidate name probe")
+        if not res.ok:
+            report.candidate_ref = probe
+            break
+        _uniq = ("-2" if _uniq == "" else
+                 f"-{int(_uniq[1:]) + 1}")
     state = {
         "mode": "candidate",
         "created": ts,
@@ -176,7 +245,31 @@ def run_candidate_rebase(
         },
         "outcome": None,
         "candidate_oid": None,
+        "transitions": [
+            {"name": "snapshot", "source_oid": report.source_oid,
+             "target_oid": report.target_oid, "at": ts},
+        ],
     }
+
+    # P4 reuse: a retained candidate that matches EVERY fingerprint is the
+    # already-tested answer — skip the nondeterministic model run. The
+    # artifact is the same bytes under the same contract; re-running would
+    # buy variance, not information.
+    if reuse:
+        match = _matching_retained_candidate(Path(repo), state)
+        if match is not None:
+            prior, prior_path = match
+            report.reused = True
+            report.reused_from = str(prior_path)
+            report.would_succeed = True
+            report.candidate_oid = prior["candidate_oid"]
+            report.candidate_ref = prior["candidate_ref"].removeprefix(
+                "refs/heads/")
+            report.state_path = str(prior_path)
+            _log.info(
+                "candidate reuse: %s matches all fingerprints",
+                prior_path)
+            return report
 
     # SIGTERM-safe teardown (mirrors dryrun: without this, a killed run
     # orphans the worktree — Python's default SIGTERM skips finally).
@@ -242,6 +335,12 @@ def run_candidate_rebase(
             report.candidate_oid = _resolve_oid(
                 git, f"refs/heads/{report.candidate_ref}")
             state["candidate_oid"] = report.candidate_oid
+        state.setdefault("transitions", []).append({
+            "name": "completed",
+            "outcome": state["outcome"],
+            "candidate_oid": state["candidate_oid"],
+            "at": time.strftime("%Y%m%d-%H%M%S"),
+        })
         _write_state(candidate_dir / "session_state.json", state)
         report.state_path = str(candidate_dir / "session_state.json")
 

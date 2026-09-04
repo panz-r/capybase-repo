@@ -7123,3 +7123,31 @@ Outstanding-task updates: P2 marked LANDED in the design doc; the
 restart-resume piece moved into P4 (shares the fingerprint-matching
 machinery); P4's description now covers both reuse and transition
 resume.
+
+### S27-EXTEND-35 (2026-09-04) — candidate-ref P4 LANDED: reuse + transitions
+
+- **Fingerprint-matched reuse**: a run whose fingerprints (source
+  ref+OID, target+OID, config, profile, toolchain) all match a
+  retained successful un-promoted candidate RETURNS it — zero model
+  calls (the design's "a successful dry run is a promotable
+  artifact"). `--fresh` forces a re-run. A toolchain mismatch blocks
+  reuse: evidence from a different toolchain is not the same evidence
+  (unknown-is-not-pass at the artifact level). An interrupted state
+  (outcome=None) is never reused — and git's branch-advances-only-at-
+  completion semantics mean mid-series resume is unrecoverable BY
+  DESIGN (a safety property; documented in the design doc).
+- **Transitions recorded** in session_state.json (snapshot/completed
+  with input OIDs) — the audit trail P2's future resume extensions
+  build on.
+- **Name uniquifying**: same-second reruns append -2, -3… (a real
+  collision the toolchain-mismatch test surfaced — the second run
+  legitimately proceeds and must not collide with the retained
+  candidate's branch).
+- 5 new tests (reuse with zero calls + branch count 1; --fresh
+  reruns; toolchain mismatch blocks; interrupted never reused;
+  transitions recorded). Gate 4,050/0.
+
+Outstanding-task updates: P4 marked LANDED in the design doc; P3
+remainder (tier-table policy module + evidence envelope completion +
+suspected_validator_error demotion) and P5 (lease publication,
+default-off) remain.

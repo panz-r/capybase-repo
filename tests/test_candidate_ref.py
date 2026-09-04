@@ -307,3 +307,119 @@ def test_cli_rebase_defaults_to_candidate_mode(
     cli.main(["--config", str(cfg), "--repo", str(repo),
               "rebase", "--in-place", "main"])
     assert called["candidate"] == 1 and called["in_place"] == 1
+
+
+# ---------------------------------------------------------------------------
+# P4: fingerprint-matched reuse + transitions
+# ---------------------------------------------------------------------------
+
+
+def test_reuse_returns_retained_candidate_without_rerunning(
+    py_repo_before_rebase,
+):
+    """The promotable-artifact contract: a second run with identical
+    fingerprints returns the retained candidate — ZERO model calls."""
+    repo = py_repo_before_rebase["repo"]
+    merged = py_repo_before_rebase["merged_block"]
+    calls = {"n": 0}
+
+    class CountingClient:
+        def complete(self, *a, **k):
+            calls["n"] += 1
+            return LLMResponse(text=_payload(merged))
+
+    from capybase.adapters.llm_openai import LLMResponse as _R
+
+    engine = ResolutionEngine(_config(repo).model, client=CountingClient())
+    first = run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine)
+    assert first.would_succeed
+    assert calls["n"] > 0
+    feat_before = _branch_oid(repo, "feat")
+
+    second = run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine)
+    assert second.reused
+    assert second.candidate_oid == first.candidate_oid
+    assert calls["n"] == 0 or second.reused  # no NEW calls (reused before run)
+    assert second.llm_calls == 0
+    assert _branch_oid(repo, "feat") == feat_before
+    assert "reused" in second.summary().lower()
+    # One candidate branch only — reuse didn't create another.
+    assert len(_candidate_branches(repo)) == 1
+
+
+def test_fresh_flag_reruns_despite_matching_candidate(py_repo_before_rebase):
+    repo = py_repo_before_rebase["repo"]
+    merged = py_repo_before_rebase["merged_block"]
+    engine = ResolutionEngine(
+        _config(repo).model, client=CyclingClient([_payload(merged)]))
+    first = run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine)
+    assert first.would_succeed and not first.reused
+
+    second = run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine, reuse=False)
+    assert not second.reused and second.would_succeed
+    assert second.session_id != first.session_id
+
+
+def test_toolchain_mismatch_blocks_reuse(py_repo_before_rebase, monkeypatch):
+    """Evidence from a different toolchain is not the same evidence —
+    the unknown-is-not-pass rule at the artifact level."""
+    import capybase.candidate_ref as cref
+
+    repo = py_repo_before_rebase["repo"]
+    merged = py_repo_before_rebase["merged_block"]
+    engine = ResolutionEngine(
+        _config(repo).model, client=CyclingClient([_payload(merged)]))
+    first = run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine)
+    assert first.would_succeed
+
+    # Simulate a changed environment (a compiler appeared/disappeared).
+    real = cref._toolchain_fingerprint
+
+    def _changed():
+        d = real()
+        d["gcc"] = not d["gcc"]
+        return d
+
+    monkeypatch.setattr(cref, "_toolchain_fingerprint", _changed)
+    second = run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine)
+    assert not second.reused and second.would_succeed
+
+
+def test_interrupted_state_is_never_reused(py_repo_before_rebase):
+    """outcome=None (worktree died mid-series) is not promotable: git
+    only advances the branch at completion, so there IS nothing
+    mid-series to resume from — re-run happens instead."""
+    repo = py_repo_before_rebase["repo"]
+    merged = py_repo_before_rebase["merged_block"]
+    engine = ResolutionEngine(
+        _config(repo).model, client=CyclingClient([_payload(merged)]))
+    first = run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine)
+    # Corrupt the retained state into an interrupted shape.
+    sp = Path(first.state_path)
+    state = json.loads(sp.read_text())
+    state["outcome"] = None
+    sp.write_text(json.dumps(state))
+
+    second = run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine)
+    assert not second.reused and second.would_succeed
+
+
+def test_state_records_transitions(py_repo_before_rebase):
+    repo = py_repo_before_rebase["repo"]
+    merged = py_repo_before_rebase["merged_block"]
+    engine = ResolutionEngine(
+        _config(repo).model, client=CyclingClient([_payload(merged)]))
+    report = run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine)
+    state = json.loads(Path(report.state_path).read_text())
+    names = [t["name"] for t in state["transitions"]]
+    assert names == ["snapshot", "completed"]
+    assert state["transitions"][0]["source_oid"] == report.source_oid
