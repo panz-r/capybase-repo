@@ -7488,3 +7488,24 @@ docs/deterministic-reuse-design.md.
 Gate 4,075/0. Stage-2 checklist updated in the design doc; the
 KeyedCollectionMerge engine port (under shadow mode) is the next
 bounded item.
+
+### S27-EXTEND-49 (2026-09-04) — the KeyedCollectionMerge engine (stage 2 core)
+
+**capybase/keyed_collection.py** — the ONE keyed-collection lifecycle:
+filter → idempotency → per-item edits through EditTransaction (the
+universal rules enforced) → local validity → certificate. The
+`CollectionCodec` protocol holds only the language/construct half
+(applicable items, already-present, try-edit, local validity).
+`shadow_compare` records old-vs-new divergences for the port process.
+`PrimitiveResult`'s OutcomeKind distinguishes not-applicable /
+declined / proposed / internal-error (the conflation the proposal
+named).
+
+6 tests over a minimal line-append codec (the manifest-array SET
+shape): apply, idempotent, declined (no destination), blocked
+(validity), never-raises (None text → INTERNAL_ERROR), shadow
+divergence recording. Gate 4,081/0.
+
+Next bounded item: the manifest_union port to the engine under shadow
+mode (old primitive authoritative, divergences recorded before any
+switch).

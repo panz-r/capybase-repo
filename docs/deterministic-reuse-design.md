@@ -118,8 +118,17 @@ acceptance policy: tier A should require D0/D1 provenance.
    struct check replaces the global scan. Regression test.
 2. [x] `deterministic_model.py`: EditTransaction / TextEdit /
    PrimitiveStatus / OutcomeKind / PrimitiveResult — 7 tests.
-3. [ ] `KeyedCollectionMerge` engine (generic) + manifest-array port
-   under shadow mode.
-4. [ ] Remaining ports (fields → items → attributes → imports).
-5. [ ] One orchestrator repair behind the registry.
-6. [ ] Confidence-float removal (0.85/0.9 on deterministic repairs).
+3. [x] `KeyedCollectionMerge` engine (generic):
+   `capybase/keyed_collection.py` — the ONE lifecycle (filter →
+   idempotency → transactional edits through EditTransaction → local
+   validity → certificate) with the `CollectionCodec` protocol (the
+   language/construct-specific half: applicable items, already-present,
+   try-edit, local validity) and `shadow_compare` for the
+   old-vs-new divergence recording. 6 tests over a minimal line-append
+   codec (the manifest-array shape — SET semantics).
+4. [ ] Manifest-array port to the engine under shadow mode (the real
+   manifest_union drives old; the engine+codec drives new;
+   divergences recorded).
+5. [ ] Remaining ports (fields → items → attributes → imports).
+6. [ ] One orchestrator repair behind the registry.
+7. [ ] Confidence-float removal (0.85/0.9 on deterministic repairs).
