@@ -56,38 +56,27 @@ capybase calibrate --dry-run    # capabilities-only check, no profile written
 capybase calibrate --list-tasks # show available task-family corpora
 ```
 
-**How it works.** The calibration runs a multi-fidelity epoch search:
+**How it works.** A multi-fidelity epoch search over 13 factors spanning
+prompt-rendering and mechanism axes (full reference:
+`docs/PROMPT_FACTORS.md`):
 
-1. **Capability probe** — measures JSON success rate, thinking-chain length,
-   instruction-following, and corpus correctness on a stratified spot-check.
-   Models that are near-perfect on *both* parseability and real-merge
-   correctness trigger an early-exit (the DOE is skipped, defaults locked in).
-2. **Epoch 1 (screening)** — a Resolution-IV fractional-factorial design (16
-   runs) samples all factor variations on a small corpus prefix. Main effects
-   + t-stats rank which factors genuinely drive performance.
-3. **Epoch 2 (refinement)** — a full factorial on the top-3 factors + the
-   best Epoch-1 survivors, on a larger corpus prefix. Discovers configurations
-   the screening couldn't represent.
-4. **Epoch 3 (tie-breaker)** — the top-2 finalists on the full corpus. Runs
+1. **Capability probe** — JSON success, thinking-chain length,
+   instruction-following, and corpus correctness on a spot-check;
+   near-perfect models exit early with defaults locked in.
+2. **Epoch 1 (screening)** — a 16-run fractional-factorial design ranks
+   which factors genuinely drive performance.
+3. **Epoch 2 (refinement)** — full factorial on the top-3 factors plus
+   survivors, on a larger corpus prefix.
+4. **Epoch 3 (tie-breaker)** — the top-2 finalists on the full corpus;
    only when Epoch 2 couldn't separate them.
 
-**Anytime halt.** Each epoch is a valid stopping point. Ctrl-C at any time
-after the first completed evaluation returns the best-so-far configuration
-and writes the profile — no lost work.
-
-The 13 calibration factors span prompt-rendering axes (`output_layout`,
-`instruction_position`, `history_framing`, `example_limit`, `rule_emphasis`,
-`conflict_summary_mode`, `side_ordering`, `parse_repair_mode`, `retry_schedule`)
-and mechanism axes (`samples`, `diverse_sampling`, `prompt_variants`,
-`enable_self_consistency`). The capability signals drive which subset is
-screened; `--enable-factor` forces specific factors for manual exploration.
-
-The profile is written to `~/.config/capybase/model_profile.json` (the shared
-config dir, so it's available across all repos — the model doesn't vary by
-directory) and applied on every run when the model name matches. For
-noise-robust calibration on thinking models, use `--calibrate-reps 3` (majority
-vote across replicated evals). See `docs/PROMPT_FACTORS.md` for the factor
-reference.
+**Anytime halt.** Ctrl-C after the first completed evaluation returns the
+best-so-far configuration and writes the profile — no lost work. Capability
+signals drive which factors get screened; `--enable-factor` forces specific
+ones. The profile lands in `~/.config/capybase/model_profile.json` (shared
+across repos) and applies on every run when the model name matches. For
+noise-robust calibration on thinking models, use `--calibrate-reps 3`
+(majority vote across replicated evals).
 
 ### 4. (Optional) Calibrate embeddings RAG
 
@@ -180,12 +169,6 @@ B model-assisted or any unknown oracle; C verifier disagreement) and tier
 B/C candidates require your explicit `--approve` on promote/publish — the
 review act.
 
-Before each legacy-mode rebase, capybase records a backup branch
-`capybase/backup/<branch>@<ts>` at the pre-rebase HEAD and aborts on
-escalation so the repo returns to its original HEAD. `--dry-run` runs the full
-pipeline (real LLM calls, genuine conflicts) in a throwaway worktree without
-moving your branch.
-
 When auto-resolution fails and a TTY is present, capybase drops into an
 interactive menu (paste a resolution, edit the file, skip, or abort).
 `--no-interactive` suppresses this for CI.
@@ -223,17 +206,14 @@ runs the full validation pipeline before it's applied.
    lines (current-only, replayed-only, both orders, shared+distinct) and
    validated through the full pipeline. When one passes, the conflict resolves
    with zero model calls.
-3. **Whole-file fast path** (default on) — when the full-file context says one
-   side rewrote the file wholesale (churn ratio ≥ 0.90 with dominant churn),
-   that side's pristine merge-index stage file is taken directly. Files with
-   few conflict units require an LLM subsumption adjudication first (the
-   loser may carry features worth weaving); a build fail-fast declines the
-   swap when the winner fails the per-file build for merge-relevant reasons.
-   A wholesale winner floor additionally guarantees the final resolution
-   never drops the dominant rewrite, whichever path resolved the file. A
-   mid-band variant (churn ratio 0.55–0.90 with ≥ 2.5× dominance) fires the
-   same swap only when the adjudication confirms the winner subsumes the
-   loser.
+3. **Whole-file fast path** (default on) — when one side rewrote the file
+   wholesale (churn ratio ≥ 0.90 with dominant churn), its pristine
+   merge-index stage file is taken directly. Files with few conflict units,
+   and the mid-band variant (0.55–0.90 with ≥ 2.5× dominance), require an
+   LLM subsumption adjudication first — the loser may carry features worth
+   weaving. A build fail-fast declines swaps the winner can't survive, and
+   the wholesale-winner floor guarantees the final resolution never drops
+   the dominant rewrite.
 4. **Combination search** (default on) — enumerates order-preserving
    interleavings of the two sides for the best combination.
 5. **Block-capture** (default on) — for large modify/delete conflicts: makes a
@@ -321,15 +301,13 @@ emit long thinking chains. Three knobs matter:
 ## Status
 
 Python, Rust, and C/C++ are supported end to end. The deterministic layers
-(structural rules, source-derived candidate portfolio, SBCR combination
-search, whole-file fast path, wholesale winner floor, refactoring-aware
-merge, post-candidate obligation repair, gcc-diagnostic repair) run
-model-free before or instead of further LLM calls. The
-verifier-model critic is wired and default-on. RAG experience replay
-(`[memory]`) is wired and ON IN ACTUAL USE — the store self-populates
-from the user's own accepted resolutions under their toolchain — but
-DISABLED IN EVAL RUNS by policy (a seeded store replays stale
-resolutions and breaks baseline comparability). Self-consistency is
+(structural rules, source portfolio, SBCR combination search, whole-file
+fast path, wholesale-winner floor, refactoring-aware merge, post-candidate
+obligation repair, gcc-diagnostic repair) run model-free before or instead
+of further LLM calls. The verifier-model critic is default-on. RAG
+experience replay self-populates from your accepted resolutions and is on
+in actual use, but disabled in eval runs by policy (a seeded store replays
+stale resolutions and breaks baseline comparability). Self-consistency is
 wired but off by default.
 
 ### Results
@@ -349,25 +327,19 @@ language at a time, fixes landing between rounds.
 
 #### Current round (s26)
 
-All cases on the uniform commit `d8cc231` (sprint-26 era recovery:
-per-dataset era configs — sqlite gnu99 + tcl includes, nlohmann cmake
-flags, redis link-order; rust dep vendoring with era tag pins; the A0
-output-cap removal; C12 empty-oscillation retarget; C17 missing-make-
-target classification; G5/G11 P6b brace+scope splice repair; the
-one-shot terminal recovery grant; era-probe -Werror/sibling excuses
-covering both -W tag renderings; vendoring side-effect revert); Δ is
-versus the prior full round (`e9513c5`). 676 cases ran; 16
-git-resolvable skips leave the 660-row denominator below. The era
-floor collapsed from 167 to 9 (C's entire 98-case era class recovered
-by configuration); the 14 harvest rows invalidated by two mid-run
-regressions (vendoring poisoning, -Werror signature homogenization) —
-both diagnosed and fixed the same day — are overridden by their
-fix-validation rerun verdicts in the extracts. Flip audit vs the prior
-round: 156 up, 5 down (all sim ≥ 0.99 gate stalls, documented oracle-
-subjective variance, or known big-file classes) — zero mechanism
-regressions. Calibration A/Bs: the refactor-vs-functional resolve
-directive (B9) and self-consistency n=3 (B10) are both evidence-
-neutral on their specimen sets and stay off by default.
+All cases on the uniform commit `d8cc231` — the sprint-26 era-recovery
+round (per-dataset toolchain-era configs for the C corpora, Rust
+dependency vendoring with era tag pins, and a set of splice/repair
+fixes; the full list is in `docs/results/s26/meta.json`). Δ is versus
+the prior full round (`e9513c5`). 676 cases ran; 16 git-resolvable
+skips leave the 660-row denominator below. The era floor collapsed
+from 167 to 9. Two mid-run regressions were diagnosed and fixed the
+same day; their 14 invalidated rows are overridden by fix-validation
+rerun verdicts in the extracts. Flip audit vs the prior round: 156 up,
+5 down (all sim ≥ 0.99 gate stalls, oracle-subjective variance, or
+known big-file classes) — zero mechanism regressions. The calibration
+A/Bs (B9 resolve directive, B10 self-consistency n=3) were
+evidence-neutral and stay off by default.
 
 | lang | cases | PASS | WORKING | era-dead | PASS % | adj % | P+W adj % | Δ P+W |
 |------|-------|------|---------|----------|--------|-----------|-----------|-------|
