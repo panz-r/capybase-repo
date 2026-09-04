@@ -6085,6 +6085,44 @@ disposition measured under the fully-live machinery. Final: 35
 conversions + 1 NEAR + 1 first-PASS-repeat + 3 GATE_UNAVAILABLE
 reclassifications + 30 fixes + 9 architecture repairs. Gate 4,027/0.
 
+### S27-EXTEND-24 (2026-09-04) — the rigorous harvest projection (evidence-based, replaces the ~95% estimate)
+
+Merged the s26 full-harvest baseline (676 cases) with EVERY results
+file since (4,507 files, chronological latest-wins per case, 72
+verdict deltas applied). **Projected: PASS 623/676 = 92.2% raw,
+P+W 629/676 = 93.0%** — the ledger's prior ~95% estimate was
+optimistic. Non-PASS remainder, all with post-s26 measurements:
+
+- ESCALATE 25 (16 cpp — 14 clickhouse + fmt-0003 + protobuf-0005;
+  4 python, 3 rust, 2 c)
+- ESCALATE_TOOLCHAIN 8 (7 rust — the era-dead class, incl. the
+  tokio-0109 census "un-passable under eval toolchain")
+- NEAR 6, WORKING 6, GATE_UNAVAILABLE 5, ORACLE_DIVERGENT 3
+
+**Recency audit of the cpp ESC band**: clickhouse-0013 measured today
+(current stack); the other 13–14 carry Aug 30–Sep 2 verdicts —
+PRE-EXTEND-17/audit-2/dead-rung machinery. Given s27's pattern
+(long-held "genuine" cases converting once machinery was right:
+0040, 0049, nlohmann-0020), a per-dataset sample (clickhouse-0001,
+protobuf-0005, fmt-0003 ×3) was run to calibrate the band.
+
+**Band sample result — the band is NOT machinery-recoverable; the
+projection stands at 92.2% raw / 93.0% P+W:**
+- clickhouse-0001 + protobuf-0005: ESC ×3, terminal SAFE_SKIP, sim
+  0.0 — the CAPACITY class (files beyond the window; resolution never
+  attempts). The upside path is the oversized-splitting design (docs/
+  oversized-splitting-design*.md, pending) — sprint-28 material.
+- fmt-0003: ESC ×3 at sim 0.995, REPAIR_FAILURE — the validated
+  era-floor (near-oracle merge that cannot pass fmt's era gate).
+
+Every non-PASS class in the projection is now characterized and
+measured under the current stack: content-level ESCs, the capacity
+SAFE_SKIPs, the rust era-toolchain dead (tokio-0109 census), the NEAR/
+WORKING graded bands, shared-gate GATE_UNAVAILABLEs, and the
+oracle-subjective DIVERGENTs. The harvest expectation is 92.2% raw /
+93.0% P+W, with headroom to ~94% only via the oversized-splitting
+work.
+
 ### S27-EXTEND-20 (2026-09-04) — full deterministic corpus run + sprint-28 design seed
 
 **Corpus `all` end-to-end** (the combined session+scenario+realworld
