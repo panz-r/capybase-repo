@@ -244,11 +244,19 @@ runs the full validation pipeline before it's applied.
    gives the model global awareness the windowed conflict region can't provide.
    An empty first response fast-fails to verified single-side candidates
    instead of burning retries.
-7. **CEGIS repair** — failures feed back as counterexamples; the model
+7. **Post-candidate obligation repair** (default on) — change-accounting
+   derives what each side added that the LLM candidate dropped; a cascade of
+   deterministic primitives restores it mechanically (no second model call):
+   import-leaf union, deletion application, attribute/meta union, struct-field
+   union, keyed-item union, anchor-based block insertion, and TOML manifest
+   union. The collection-shaped primitives run one shared engine
+   (`keyed_collection.py`) with per-construct codecs; each claims the
+   obligations it closes.
+8. **CEGIS repair** — failures feed back as counterexamples; the model
    re-resolves with the broken output + the specific failure, bounded by retry
    policy. Failed-patch memory carries summaries of prior attempts so the
    model doesn't repeat the same fix.
-8. **Deterministic repair beam** — seven model-free repair mechanisms run
+9. **Deterministic repair beam** — seven model-free repair mechanisms run
    before re-invoking the LLM: gcc-diagnostic-driven repair (missing `;`,
    missing `}`, stray characters), side-consistency restore, brace/semicolon
    consensus, and others. For C/C++, the compiler's own diagnostics drive the
@@ -315,7 +323,8 @@ emit long thinking chains. Three knobs matter:
 Python, Rust, and C/C++ are supported end to end. The deterministic layers
 (structural rules, source-derived candidate portfolio, SBCR combination
 search, whole-file fast path, wholesale winner floor, refactoring-aware
-merge, gcc-diagnostic repair) run model-free before the LLM. The
+merge, post-candidate obligation repair, gcc-diagnostic repair) run
+model-free before or instead of further LLM calls. The
 verifier-model critic is wired and default-on. RAG experience replay
 (`[memory]`) is wired and ON IN ACTUAL USE — the store self-populates
 from the user's own accepted resolutions under their toolchain — but
@@ -386,7 +395,7 @@ in live-eval.
 | **Data** | self-contained fixtures; nothing external fetched | real downloaded repos, processed and extracted (fetch script below) | the same real repos |
 | **Model calls** | never | never (deterministic) | yes — through the provider config + calibration profile |
 | **Entry point** | `pytest tests/ -n 6` | `./corpus/run.sh [python\|rust\|all]` | `scripts/live_eval_realworld.py --provider NAME` |
-| **Wall time** | ~32 s (3,990 tests, 6 workers) | minutes (own runner — never pytest) | hours |
+| **Wall time** | ~38 s (4,204 tests, 6 workers) | minutes (own runner — never pytest) | hours |
 | **Purpose** | the per-change regression gate | validates the verifier + the corpus oracle against real-world conflict shapes | the measured product: harvests, README numbers |
 
 After clone and build (`.venv` created per Setup below):

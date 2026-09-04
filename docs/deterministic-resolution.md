@@ -25,12 +25,22 @@ ordering is cheapest-first (least computation, highest confidence):
 
 | # | Layer | Module | Provenance | Gate |
 |---|-------|--------|------------|------|
+| 0 | Step-shape / edit-pattern reuse | orchestrator (memory caches) | `deterministic_structural` | always on; replays a sibling unit's accepted resolution when the conflict shape matches |
 | 1 | Exact-history reuse | `exact_reuse.py` | `exact_history_reuse` | always on |
 | 2 | Structural resolver | `structural_resolver.py` | `deterministic_structural` | `enable_structural_resolver` (default on) |
 | 3 | Combination search (SBCR) | `sbcr.py` | `combination_search` | `enable_combination_search` (default on) |
 | 4 | Test-gated side picker | orchestrator | `test_gated_side` | `tests.required` + a specific test command |
 | 5 | Block capture | resolution_engine | `block_capture` | `enable_block_capture` (default on); modify/delete only |
-| 6 | LLM resolution | resolution_engine | `plain_llm` / `history_augmented_llm` | fallback |
+| 6 | Source-derived candidate portfolio | orchestrator | `deterministic_source_*` (current-only, replayed-only, both orders, shared+distinct) | `enable_source_portfolio` (default on) |
+| 7 | LLM resolution | resolution_engine | `plain_llm` / `history_augmented_llm` | fallback |
+
+Two further deterministic mechanisms operate at FILE level, outside the
+per-unit cascade: the **whole-file fast path** (one side rewrote the file
+wholesale — churn ratio ≥ 0.90 dominant, or the 0.55–0.90 mid-band with ≥ 2.5×
+dominance plus subsumption adjudication — takes that side's pristine merge-index
+stage file) and the **wholesale-winner floor** on the final resolution. After
+an LLM candidate exists, the **post-candidate obligation-repair cascade**
+(below) runs before CEGIS.
 
 An out-of-band **deterministic brace repair** (`deterministic_brace_repair`,
 whole-file post-splice) runs in the Phase-2 CEGIS path to fix splice-junction
@@ -421,8 +431,11 @@ order):
 
 | Provenance | Meaning |
 |---|---|
-| `deterministic_structural` | Structural resolver (rules 1–11, incl. `refactoring_aware_merge`) |
+| `deterministic_structural` | Structural resolver (rules 1–11, incl. `refactoring_aware_merge`) and step-shape/edit-pattern reuse |
 | `deterministic_brace_repair` | Whole-file post-splice brace repair |
+| `deterministic_gcc_fixit` / `deterministic_cc_repair` / `deterministic_preprocessor_repair` / `deterministic_symbol_injection` / `deterministic_use_dedup` / `deterministic_dup_eradication` / `deterministic_side_consistency_repair` / `deterministic_side_consensus_repair` | Deterministic repair beam (compiler-diagnostic, preprocessor, duplicate, and side-consistency repairs) |
+| `deterministic_source_current_only` / `_replayed_only` / `_cur_rep` / `_rep_cur` / `_shared` / `_union` | Source-derived candidate portfolio (which source lines the candidate was assembled from) |
+| `micro_patch_repair` | Micro-patch repair |
 | `exact_history_reuse` | Verbatim replay of a prior accepted resolution |
 | `combination_search` | SBCR order-preserving interleaving search |
 | `test_gated_side` | Test-gated side picker (exactly one side passed) |
@@ -431,15 +444,20 @@ order):
 | `plain_llm` | LLM resolved (no history augmentation) |
 | `manual` | Human provided the resolution interactively |
 
+LLM candidates improved by the post-candidate obligation primitives carry the
+primitive names as suffixes on the base provenance (e.g.
+`plain_llm+import_union+named_field_union`) — the candidate stays LLM-authored;
+the primitives only close mechanically-satisfiable obligations.
+
 Provenance is immutable except for one case: `plain_llm` may be re-stamped to
 `history_augmented_llm` when RAG context is confirmed to have been used. No
 deterministic, reuse, or manual provenance is ever overwritten.
 
 The drift detector uses provenance as its primary gate: deterministic
-resolutions (`deterministic_structural`, `exact_history_reuse`,
-`combination_search`, `test_gated_side`, `block_capture`,
-`deterministic_brace_repair`) can never produce semantic drift by construction,
-so drift signals are only evaluated for LLM-produced resolutions.
+resolutions (every `deterministic_*` provenance, `exact_history_reuse`,
+`combination_search`, `test_gated_side`, `block_capture`) can never produce
+semantic drift by construction, so drift signals are only evaluated for
+LLM-produced resolutions.
 
 ---
 
@@ -480,8 +498,15 @@ A minimal re-implementation of the deterministic cascade needs:
    **character-level similarity** to both parents, exhaustive for small spaces
    and hill-climbed over adjacent cross-side swaps for large ones, with a
    shrinkage guard and fitness floor.
-4. **Validation** — a compile floor (splice + compile the whole file), plus
+4. **Obligation-driven candidate repair** — after a candidate exists, diff it
+   against both sides to derive the additive lines it dropped, then restore
+   them mechanically: import trees by leaf, named items by name within their
+   destination container (scope-qualified collision), attribute/meta lists by
+   set union, residual blocks by anchor lines. One shared lifecycle
+   (filter → idempotency → transactional edits → local validity →
+   certificate) with per-construct codecs.
+5. **Validation** — a compile floor (splice + compile the whole file), plus
    both-sides-represented and splice-scope checks, applied to every candidate
    before acceptance.
-5. **Decline-on-doubt semantics throughout** — every layer that cannot prove
+6. **Decline-on-doubt semantics throughout** — every layer that cannot prove
    correctness returns `None`, so the LLM is always the fallback.
