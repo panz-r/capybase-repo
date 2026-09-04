@@ -161,4 +161,8 @@ acceptance policy: tier A should require D0/D1 provenance.
    last use) resolved all 3 recorded divergences. All five ports at
    full shadow agreement.
 9. [ ] One orchestrator repair behind the registry.
-10. [ ] Confidence-float removal (0.85/0.9 on deterministic repairs).
+10. [x] Confidence-float removal: 17 floats zeroed on deterministic
+   repairs; the SafetyClass exemption (D0/D1 → bypass the
+   model-opinion floor) replaces them. The floats were gaming a gate
+   designed for MODEL self-reports. Test proves a deterministic-
+   structural candidate at confidence 0.0 passes strict mode.

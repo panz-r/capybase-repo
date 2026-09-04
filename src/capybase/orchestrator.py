@@ -2461,7 +2461,7 @@ def _try_deterministic_brace_repair(
         resolved_text=repaired,
         prompt_version="deterministic_brace_repair",
         provenance="deterministic_brace_repair",
-        self_reported_confidence=0.9,
+        self_reported_confidence=0.0,
         explanation="deterministic brace-balance repair (splice junction)",
     )
     return [(wf_unit, wf_cand)], "repaired"
@@ -2526,7 +2526,7 @@ def _try_deterministic_preprocessor_repair(
         resolved_text=repaired,
         prompt_version="deterministic_preprocessor_repair",
         provenance="deterministic_preprocessor_repair",
-        self_reported_confidence=0.9,
+        self_reported_confidence=0.0,
         explanation="deterministic #if/#endif balance repair (cross-unit splice)",
     )
     return [(wf_unit, wf_cand)]
@@ -2664,7 +2664,7 @@ def _try_gcc_fixit_repair(
         prompt_version="gcc_fixit.v1",
         resolved_text=repaired,
         provenance="deterministic_gcc_fixit",
-        self_reported_confidence=0.85,
+        self_reported_confidence=0.0,
     )
     return [(wf_unit, wf_cand)]
 
@@ -2853,7 +2853,7 @@ def _try_deterministic_cc_repair(
         resolved_text=repaired,
         prompt_version="deterministic_cc_repair",
         provenance="deterministic_cc_repair",
-        self_reported_confidence=0.85,
+        self_reported_confidence=0.0,
         explanation=f"deterministic cc repair ({category} at line {error_line})",
     )
     return [(wf_unit, wf_cand)]
@@ -3113,7 +3113,7 @@ def _try_duplicate_eradication_repair(
         resolved_text=repaired,
         prompt_version="deterministic_dup_eradication",
         provenance="deterministic_dup_eradication",
-        self_reported_confidence=0.9,
+        self_reported_confidence=0.0,
         explanation=(f"duplicate-definition eradication: removed the "
                      f"'{name}' copy at lines {victim[0] + 1}-{victim[1] + 1} ({diag})"),
     )
@@ -3483,7 +3483,7 @@ def _try_side_consistency_repair(
         resolved_text=repaired,
         prompt_version="deterministic_side_consistency_repair",
         provenance="deterministic_side_consistency_repair",
-        self_reported_confidence=0.8,
+        self_reported_confidence=0.0,
         explanation="deterministic side-consistency repair (common-line restore or novel-line delete)",
     )
     return [(wf_unit, wf_cand)]
@@ -3690,7 +3690,7 @@ def _try_side_consensus_repair(
         resolved_text=repaired,
         prompt_version="deterministic_side_consensus_repair",
         provenance="deterministic_side_consensus_repair",
-        self_reported_confidence=0.85,
+        self_reported_confidence=0.0,
         explanation=f"deterministic side-consensus repair ({reason})",
     )
     return [(wf_unit, wf_cand)]
@@ -10260,7 +10260,7 @@ class Orchestrator:
                                     resolved_text=_f1_text,
                                     prompt_version="deterministic_near_one_sided",
                                     provenance="deterministic_structural",
-                                    self_reported_confidence=0.85,
+                                    self_reported_confidence=0.0,
                                     explanation=(
                                         f"F1 tier-1: near-one-sided — "
                                         f"{_f1_side} side subsumes"),
@@ -10431,7 +10431,7 @@ class Orchestrator:
                                                         prompt_version=(
                                                             "llm_subsumption_adjudication_fallback"),
                                                         provenance="deterministic_structural",
-                                                        self_reported_confidence=0.7,
+                                                        self_reported_confidence=0.0,
                                                         explanation=(
                                                             f"F1 tier-2 fallback: "
                                                             f"the adjudicated side "
@@ -10472,7 +10472,7 @@ class Orchestrator:
                                         resolved_text=_f2_text,
                                         prompt_version="llm_subsumption_adjudication",
                                         provenance="deterministic_structural",
-                                        self_reported_confidence=0.75,
+                                        self_reported_confidence=0.0,
                                         explanation=(
                                             f"F1 tier-2: LLM adjudicated "
                                             f"{_f2_side} subsumes"),
@@ -10545,7 +10545,7 @@ class Orchestrator:
                                         resolved_text=_heuristic_text,
                                         prompt_version="deterministic_churn_fallback",
                                         provenance="deterministic_structural",
-                                        self_reported_confidence=0.6,
+                                        self_reported_confidence=0.0,
                                         explanation=(
                                             f"F1 churn fallback: tier-2 "
                                             f"unavailable, both sides compile, "
@@ -11974,7 +11974,7 @@ class Orchestrator:
                 resolved_text=repaired,
                 prompt_version="deterministic_line_replacement",
                 provenance="deterministic_symbol_injection",
-                self_reported_confidence=0.85,
+                self_reported_confidence=0.0,
                 explanation=(
                     f"C1b line replacement: line {err_idx+1} corrupted; "
                     f"replaced with parent verbatim: {replacement[:80]}"),
@@ -12012,7 +12012,7 @@ class Orchestrator:
                                     resolved_text=repaired,
                                     prompt_version="deterministic_derived_prototype",
                                     provenance="deterministic_symbol_injection",
-                                    self_reported_confidence=0.85,
+                                    self_reported_confidence=0.0,
                                     explanation=(
                                         f"C1b derived prototype from {side_name}: "
                                         f"{proto[:80]}"),
@@ -12064,7 +12064,7 @@ class Orchestrator:
                             resolved_text=_rep_synth,
                             prompt_version="deterministic_synthesized_declaration",
                             provenance="deterministic_symbol_injection",
-                            self_reported_confidence=0.7,
+                            self_reported_confidence=0.0,
                             explanation=(
                                 f"C1c synthesized declaration: {symbol} "
                                 f"appears only as &{symbol} in call "
@@ -12101,7 +12101,7 @@ class Orchestrator:
                 resolved_text=repaired,
                 prompt_version="deterministic_symbol_injection",
                 provenance="deterministic_symbol_injection",
-                self_reported_confidence=0.9,
+                self_reported_confidence=0.0,
                 explanation=(
                     f"deterministic symbol injection: '{decls[0][:80]}' "
                     f"from {provenance} side (compiler-missing symbol "
@@ -12535,7 +12535,7 @@ class Orchestrator:
                                         prompt_version=(
                                             "deterministic_storage_class_relocation"),
                                         provenance="deterministic_symbol_injection",
-                                        self_reported_confidence=0.85,
+                                        self_reported_confidence=0.0,
                                         explanation=(
                                             f"storage-class relocation: moved "
                                             f"misplaced declaration to file scope: "
@@ -13189,7 +13189,7 @@ class Orchestrator:
             resolved_text=new_buffer,
             prompt_version="micro_patch_repair",
             provenance="micro_patch_repair",
-            self_reported_confidence=0.8,
+            self_reported_confidence=0.0,
             explanation=(f"micro patch at line {err_line}: {err_msg[:80]}"),
         )
         self.journal.emit(

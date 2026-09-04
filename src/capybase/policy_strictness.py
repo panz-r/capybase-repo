@@ -117,6 +117,14 @@ class StrictnessPolicy:
         # ci mode: also gate on confidence. unattended adds the same floor (the
         # _block_reason band check already fired above; the confidence floor is
         # the extra unattended gate, but ci applies it too for caution).
+        # SafetyClass exemption (reuse-design stage 2): D0/D1 candidates
+        # don't need a model-opinion floor — their mechanism's exactness
+        # IS their ticket. The floats on deterministic repairs (0.85/0.9)
+        # were gaming this gate; the SafetyClass carries the real meaning.
+        from capybase.langs import safety_class_for
+        _sc = safety_class_for(getattr(candidate, "provenance", None))
+        if _sc is not None and _sc.value in ("exact", "structural"):
+            return True, ""  # D0/D1: exactness, not opinion, admits it
         conf = float(getattr(candidate, "self_reported_confidence", 0.0) or 0.0)
         if conf < self.min_confidence:
             # Deterministic confidence override: when the model's self-reported

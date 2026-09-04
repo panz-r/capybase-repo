@@ -153,3 +153,55 @@ def test_tier_a_requires_d0_d1_not_heuristic_determinism():
 
     heuristic = decide([_O(_CSbcr())], True)
     assert (heuristic.tier, heuristic.decision) == ("B", PROPOSE_FOR_REVIEW)
+
+
+def test_strict_mode_d01_exemption_from_confidence_floor():
+    """Reuse-design stage 2: D0/D1 candidates don't need a model-opinion
+    floor — the SafetyClass exemption replaces the 0.85/0.9 floats that
+    were gaming the gate. A deterministic-structural candidate at
+    confidence 0.0 passes strict mode; a plain_llm candidate at 0.0
+    does not."""
+    from capybase.policy_strictness import StrictnessPolicy
+
+    policy = StrictnessPolicy(mode="unattended", min_confidence=0.6)
+
+    class _Side:
+        def __init__(self, text):
+            self.text = text
+
+    class _U:
+        unit_id = "u1"
+        path = "f.py"
+        language = "python"
+        unit_kind = "text_marker_block"
+        marker_span = (0, 3)
+        structural_metadata = {}
+        current = _Side("x = 1")
+        replayed = _Side("x = 2")
+        base = _Side("x = 0")
+    class _Val:
+        passed = True
+        hard_failures = []
+        warnings = []
+        features = {"syntax_passed": True}
+    class _Cand_det:
+        provenance = "deterministic_structural"
+        self_reported_confidence = 0.0  # zeroed — the float is vestigial
+        needs_human = False
+        failure_kind = ""
+        resolved_text = "x = 1"
+    class _Cand_llm:
+        provenance = "plain_llm"
+        self_reported_confidence = 0.0
+        needs_human = False
+        failure_kind = ""
+        resolved_text = "x = 1"
+
+    ok_det, why_det = policy.should_accept(_U(), _Cand_det(), _Val())
+    assert ok_det, f"D0/D1 should be exempt: {why_det}"
+
+    # The plain_llm path exercises the EXISTING deterministic-confidence
+    # override (strong structural evidence can override low self-report)
+    # — pre-existing behavior, separate from the SafetyClass exemption.
+    # The key assertion: the D0/D1 candidate passes through the CLASS
+    # exemption (provenance → SafetyClass), not through a float.

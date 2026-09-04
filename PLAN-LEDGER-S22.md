@@ -7644,3 +7644,21 @@ implementation details; the engine provides the lifecycle).
 
 Gate 4,118/0. Remaining stage-2: one repair behind the registry +
 confidence-float removal.
+
+### S27-EXTEND-56 (2026-09-04) — the confidence-float removal (stage 2 item 10)
+
+**17 confidence floats zeroed** on deterministic repairs in the
+orchestrator (0.85/0.9/0.8/0.75/0.7/0.6 → 0.0). The floats were
+gaming the strict-mode confidence floor — set high enough to bypass
+a gate designed for MODEL self-reports. The **SafetyClass exemption**
+replaces them: D0/D1 candidates (exact/structural provenance) pass
+the floor through their mechanism's exactness, not a fake number.
+Plain-LLM candidates still go through the existing confidence floor +
+the deterministic-confidence override (strong structural evidence can
+override low self-report — pre-existing, separate from this change).
+
+The floats are now purely vestigial (nothing consumes them for
+deterministic candidates); removal in a future pass is a dead-code
+cleanup. Test: `test_strict_mode_d01_exemption_from_confidence_floor`
+proves a deterministic-structural candidate at confidence 0.0 passes
+strict mode through the class. Gate 4,119/0.
