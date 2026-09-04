@@ -7812,3 +7812,69 @@ Zero regressions — the engine produces identical results on real cases.
 Gate 4,160/0. The design doc's stage-3 item is checked; the remaining
 four primitives (fields, items, attributes, imports) follow the same
 switch pattern with their shadow-verified codecs.
+
+### S27-EXTEND-63 (2026-09-04) — THE SWITCHES #2–#4: fields, items, attributes on the engine
+
+Each follows the manifest pattern: the primitive's public function
+becomes a thin adapter (engine result → ImportUnionResult, original
+certificate keys, same mechanism_id `v1`), the codec carries the exact
+original semantics. These three are CLEAN replacements (old inline
+lifecycle deleted — no dead code, unlike #1 which kept the old body
+unreachable after the adapter return).
+
+- **named_field_union** (d033cc8): `already_present` always False
+  (idempotency decided by the scope-qualified collision inside
+  try_edit — the original's shape); `local_validity` always True (the
+  original had no gate; zero-regression bar forbids new BLOCKED paths
+  on mid-repair candidates); repr/serde risk flags accumulate on the
+  codec. 12+6 tests unchanged, gate 4,160/0. Live field-dense:
+  sea-orm-history-0020 PASS 0.98, axum-history-0026 PASS 1.00,
+  axum-history-0011 PASS 1.00 — all match s26 PASS (serde-0001 was
+  the intended third but is 585K > the 48K window guard, same as s26).
+- **keyed_item_union** (6201b21): no channel filter (matches original),
+  per-container collision in try_edit, `edit_notes` preserve the
+  original `insert <name> before line <N>` cert format; dropped a
+  duplicated dead None-check in `_find_destination_container`.
+- **attribute_meta_union** (6201b21): REAL already_present pre-check
+  (normalized-line membership); try_edit returns a line-REPLACEMENT
+  span — the union rewrites one attribute line in place. The shadow
+  test CAUGHT that `_try_union_one_attribute` mutates the lines list
+  in place (the codec must snapshot before diffing) — the shadow
+  suite doing exactly its job. 13+11 tests unchanged.
+- Live (#3+#4): tokio-history-0117 PASS 1.00, sea-orm-history-0027
+  ORACLE_DIVERGENT 0.68 (exact prior band — divergent-band behavior
+  preserved too), axum-history-0034 PASS 0.97 — all match s26.
+
+### S27-EXTEND-64 (2026-09-04) — THE SWITCH #5 (imports) + a record defect found and fixed
+
+**Record defect (dd7598d)**: its commit message and design-doc entry
+claimed the import codec had gained the separate-line fallback and
+reached 8/8 shadow agreement — but that commit only touched docs and
+the ledger. The codec was never changed, and the shadow test's lenient
+assertions (three cases explicitly allowed to diverge) let the claim
+pass unchallenged. Manual comparison at switch time showed 2 real
+divergences (separate_import, rename). Corrected by: implementing the
+fallback in the production codec AND the test codec, making the
+shadow test STRICT (no tolerated divergences), and re-verifying 8/8
+exact agreement manually. Lesson recorded in the design doc: a
+divergence-clearing commit must touch the codec, not just the docs.
+
+**import_union switch**: `_import_codec()` — engine unit is the LEAF
+(the original's unit of obligation, rendered as a canonical
+single-leaf use line); `already_present` is the §2 path-keyed
+pre-filter; `try_edit` re-derives destinations from the running text
+(sequential leaf edits to the same group converge to the original's
+one-shot merge); the per-destination preconditions gate accumulates
+on the codec; `local_validity` = bracket balance + leaf round-trip.
+The language-specific tree machinery (`parse_use_leaves`,
+`_merge_into_group_line`, `_add_separate_use_line`) stays in
+import_union.py — the codec delegates. 46 existing + 8 strict shadow
+tests pass; gate 4,160/0. Live: tokio-history-0115/0114/0116
+(import-dense, all s26 PASS).
+
+**ALL FIVE primitives now run the engine as the authoritative
+implementation.** The per-primitive inline lifecycles are gone
+(4 of 5 deleted outright); one lifecycle + five codecs + three
+new-language codecs (Python, JS/TS, Go) remain. The full harvest
+(user's call, EXTEND-17d template) provides the definitive
+zero-regression confirmation on the whole corpus.

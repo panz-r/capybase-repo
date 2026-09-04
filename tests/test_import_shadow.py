@@ -17,6 +17,7 @@ import pytest
 from capybase.change_accounting import BranchObligation, classify_channel
 from capybase.import_union import (
     ImportLeaf,
+    _add_separate_use_line,
     _merge_into_group_line,
     parse_use_leaves,
     propose_import_union,
@@ -62,18 +63,17 @@ class ImportCodec:
 
     def already_present(self, text, item):
         to_add = parse_use_leaves(item)
-        if to_add is None:
+        if not to_add:
             return True
-        # Check if all leaves' introduced names are already in the text.
+        # §2 contract: keyed on the FULL PATH (not binding) — a
+        # same-binding-different-path leaf is a collision, not presence.
+        existing_paths = set()
         for line in text.splitlines():
             existing = parse_use_leaves(line)
-            if existing is None:
-                continue
-            existing_names = {l.binding for l in existing if l.binding}
-            for leaf in to_add:
-                if leaf.binding and leaf.binding not in existing_names:
-                    return False
-        return True
+            if existing:
+                for l in existing:
+                    existing_paths.add(l.path)
+        return all(l.path in existing_paths for l in to_add)
 
     def try_edit(self, text, item, context):
         to_add = parse_use_leaves(item)
@@ -89,6 +89,22 @@ class ImportCodec:
                 start = text.index(line)
                 end = start + len(line)
                 return (start, end, merged)
+        # Separate-line fallback: insert as new use line(s) adjacent to
+        # the last use line (delegates to the primitive's own helper).
+        use_lines = [l for l in text.splitlines()
+                     if parse_use_leaves(l) is not None]
+        if use_lines:
+            result = _add_separate_use_line(use_lines[-1], to_add, text)
+            if result is not None:
+                new_text, _added = result
+                # One insertion span: end of the anchor line.
+                lines = text.splitlines(keepends=True)
+                anchor = use_lines[-1].rstrip("\n")
+                for i, ln in enumerate(lines):
+                    if ln.rstrip("\n") == anchor:
+                        pos = sum(len(l) for l in lines[:i + 1])
+                        pos = min(pos, len(text))
+                        return (pos, pos, new_text[pos:pos + (len(new_text) - len(text))])
         return None
 
     def local_validity(self, text):
@@ -131,28 +147,10 @@ def test_shadow_import_agrees(name, resolved, missing):
         mechanism_id="rust.import_engine/v0")
     old_status = str(old.status).lower()
     new_status = new.status.value
-    if name in ("rename", "grouped_add", "separate_import"):
-        # Known divergences (shadow-recorded): the old primitive's
-        # separate-line insertion fallback isn't in the codec yet.
-        # Status may differ (old applies, engine declines); the switch
-        # decision comes after the fallback is implemented.
-        pass
-    else:
-        assert old_status == new_status, (
-            f"{name}: old={old_status} new={new_status} "
-            f"reason={new.certificate.get('reason', '')[:80]}")
+    assert old_status == new_status, (
+        f"{name}: old={old_status} new={new_status} "
+        f"reason={new.certificate.get('reason', '')[:80]}")
     if old_status == "applied":
-        if name in ("rename", "grouped_add", "separate_import"):
-            # Known divergences (shadow-recorded):
-            # - rename: the old primitive strips the alias and inserts
-            #   as a separate line; the codec's group-merge returns None
-            #   (needs the separate-line fallback).
-            # - grouped_add: _merge_into_group_line handles the group
-            #   merge differently than the old primitive's destination
-            #   finder for the same shape.
-            assert new_status in ("not_applicable", "applied"), (
-                f"{name}: unexpected engine status {new_status}")
-        else:
-            assert old.text == new.candidate, (
-                f"{name}: texts differ:\n  old: {old.text[:120]}\n"
-                f"  new: {(new.candidate or '')[:120]}")
+        assert old.text == new.candidate, (
+            f"{name}: texts differ:\n  old: {old.text[:120]}\n"
+            f"  new: {(new.candidate or '')[:120]}")

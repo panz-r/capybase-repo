@@ -205,6 +205,69 @@ codec. Both are safe pre-harvest (tests only, no behavior change).
    targeted cases (tokio-0046, sea-orm-0001, axum-0019 — all
    Cargo.toml-heavy rust cases) confirms zero regression.
 
+## Stage 3: The remaining switches (all five primitives on the engine)
+
+Each switch follows the manifest pattern: the primitive's public
+function becomes a thin adapter (engine result → ImportUnionResult,
+original certificate keys, same mechanism_id `v1`), and a codec in the
+same module carries the exact original semantics. Switches #2–#4 are
+CLEAN replacements (the old inline lifecycle is deleted, no dead
+code); #1 kept the old body as unreachable text after the adapter
+return (a wart, harmless — the functions below it are still used).
+
+4. [x] **named_field_union** (switch #2): `_field_codec()` —
+   `already_present` always False (idempotency decided by the
+   scope-qualified collision inside `try_edit`, matching the
+   original); `local_validity` always True (the original had no
+   gate — the zero-regression bar forbids new BLOCKED paths on
+   mid-repair candidates); repr/serde risk flags accumulate on the
+   codec. 12 existing + 6 shadow tests unchanged; gate 4,160/0.
+   Live (field-dense cases): sea-orm-history-0020 PASS 0.98,
+   axum-history-0026 PASS 1.00, axum-history-0011 PASS 1.00 — all
+   match the s26 PASS baseline (serde-history-0001 was the intended
+   third but is 585K > the 48K window guard, as in s26).
+5. [x] **keyed_item_union** (switch #3): `_item_codec()` — no channel
+   filter (the original had none; `_is_rust_item` rejects comments),
+   idempotency via per-container collision in `try_edit`,
+   `edit_notes` carry the original `insert <name> before line <N>`
+   certificate format. Also dropped a duplicated dead None-check in
+   `_find_destination_container`. 12 existing + 6 shadow unchanged.
+6. [x] **attribute_meta_union** (switch #4): `_attribute_codec()` —
+   a REAL `already_present` pre-check (normalized-line membership,
+   the original's up-front drop); `try_edit` returns a
+   line-REPLACEMENT span (the union rewrites one attribute line in
+   place; the codec snapshots the lines before diffing because
+   `_try_union_one_attribute` mutates in place — the shadow test
+   CAUGHT this, exactly its job). 13 existing + 11 shadow unchanged.
+   Live (#3+#4 together): tokio-history-0117 PASS 1.00,
+   sea-orm-history-0027 ORACLE_DIVERGENT 0.68 (exact prior band —
+   the switch preserves divergent-band behavior too),
+   axum-history-0034 PASS 0.97 — all match s26.
+7. [x] **import_union** (switch #5): `_import_codec()` — the engine's
+   unit is the LEAF (rendered as a canonical single-leaf use line;
+   the original's unit of obligation), `already_present` is the §2
+   path-keyed pre-filter, `try_edit` re-derives destinations from the
+   running text (sequential leaf edits to the same group converge to
+   the original's one-shot merge), the per-destination preconditions
+   gate (visibility / cfg domain / binding collision / glob)
+   accumulates on the codec, and `local_validity` = bracket balance
+   + leaf round-trip. The genuinely language-specific tree machinery
+   (`parse_use_leaves`, `_merge_into_group_line`,
+   `_add_separate_use_line`) stays put — the codec delegates.
+
+   **Record correction (dd7598d)**: that commit's message and doc
+   entry claimed the import codec had gained the separate-line
+   fallback and reached 8/8 — but the commit only touched docs and
+   the ledger; the codec was never changed, and the shadow test's
+   lenient assertions (three cases allowed to diverge) masked it.
+   Manual comparison showed 2 real divergences (separate_import,
+   rename) at switch time. The production codec above implements the
+   fallback, the shadow test is now STRICT (no tolerated
+   divergences), and the manual comparison confirms 8/8 exact
+   agreement. Lesson recorded: a shadow suite that tolerates known
+   divergences must re-run the comparison when the "fix" lands, and
+   a divergence-clearing commit must touch the codec, not just docs.
+
 ## Additional correctness fixes (stage 2.5 continuation)
 
 4. [x] **Keyed-item scope-qualified collision** (claim-3 for the second

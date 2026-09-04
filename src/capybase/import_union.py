@@ -619,6 +619,203 @@ def _add_separate_use_line(
     return "".join(out), added
 
 
+def _render_leaf_line(leaf: ImportLeaf) -> str:
+    """Render one leaf as a canonical single-leaf ``use`` line.
+
+    The engine's unit of obligation is the leaf (matching the original:
+    obligation lines decompose into leaves and the leaf is the unit of
+    union). The rendered line round-trips through ``parse_use_leaves``
+    back to the same leaf identity (path, binding, visibility, cfg, kind).
+    """
+    head = ""
+    if leaf.cfg:
+        head += leaf.cfg + " "
+    if leaf.visibility:
+        head += leaf.visibility + " "
+    tail = "::".join(leaf.path)
+    if leaf.alias:
+        tail += f" as {leaf.alias}"
+    elif leaf.kind == "glob":
+        # path's last segment is the glob's module; render the star form.
+        tail = "::".join(leaf.path[:-1]) + "::*" if len(leaf.path) > 1 else "*"
+    return f"{head}use {tail};"
+
+
+def _import_codec():
+    """The Rust import codec for the KeyedCollectionMerge engine.
+
+    Stage 3 (the SWITCH, primitive #5 of 5). Carries the exact union
+    semantics of the original inline lifecycle, DELEGATING to the
+    genuinely language-specific tree machinery
+    (``parse_use_leaves`` / ``_merge_into_group_line`` /
+    ``_add_separate_use_line``) — the codec is an adapter, not a
+    reimplementation:
+
+    - engine items are LEAVES (rendered as canonical single-leaf use
+      lines) — the original's unit of obligation;
+    - ``already_present`` is the §2 path-keyed pre-filter (a leaf whose
+      FULL PATH is in any candidate use line is accounted for; same
+      binding from a different path is a collision, not presence);
+    - ``try_edit`` re-derives destinations from the RUNNING text (the
+      original computed destinations once, but sequential leaf edits
+      to the same group only converge if each edit sees the extended
+      group — final text identical);
+    - the per-destination preconditions gate (visibility / cfg domain /
+      binding collision / glob) accumulates on ``preconditions`` for
+      the certificate;
+    - ``local_validity`` = bracket balance + leaf round-trip over the
+      closed paths (the original's transactional check);
+    - certificate state (closed paths, edit strings, unresolved paths)
+      accumulates on the codec for the adapter.
+    """
+
+    class _ImportCodec:
+        def __init__(self) -> None:
+            self.closed_paths: list[str] = []
+            self.edit_strings: list[str] = []
+            self.unresolved_paths: list[str] = []
+            self.preconditions: dict[str, bool] = {
+                "same_visibility": True,
+                "same_cfg_domain": True,
+                "binding_collision": False,
+                "contains_glob": False,
+            }
+            self._blocked = False
+
+        def applicable_obligations(self, obligations):
+            # The parser is the authority on whether a line is an
+            # actionable import — NOT the channel label (a
+            # ``#[cfg(...)] use`` is classified "directive" but still
+            # unions). An exclusive import is a CHOICE — to the model.
+            out = []
+            for ob in obligations or []:
+                if getattr(ob, "operation", "") != "added":
+                    continue
+                if getattr(ob, "exclusive", False):
+                    continue
+                line = getattr(ob, "line", "") or ""
+                if not line.strip():
+                    continue
+                leaves = parse_use_leaves(line)
+                if leaves is None:
+                    continue
+                for leaf in leaves:
+                    out.append(_render_leaf_line(leaf))
+            return out
+
+        def already_present(self, text, item):
+            to_add = parse_use_leaves(item)
+            if not to_add:
+                return True
+            leaf = to_add[0]
+            existing_paths = set()
+            for dl in _find_use_lines(text):
+                dl_leaves = parse_use_leaves(dl)
+                if dl_leaves:
+                    for l in dl_leaves:
+                        existing_paths.add(l.path)
+            return leaf.path in existing_paths
+
+        def try_edit(self, text, item, context):
+            if self._blocked:
+                return None
+            to_add = parse_use_leaves(item)
+            if not to_add:
+                return None
+            leaf = to_add[0]
+            prefix = leaf.path[:-1]
+            if not prefix:
+                self.unresolved_paths.append("::".join(leaf.path))
+                return None
+            # A glob import interacts with everything; never auto-union.
+            if leaf.kind == "glob":
+                self.preconditions["contains_glob"] = True
+                self.unresolved_paths.append("::".join(leaf.path))
+                return None
+            dest_lines = _find_use_lines(text)
+            if not dest_lines:
+                self.unresolved_paths.append("::".join(leaf.path))
+                return None
+            dest_line = _best_destination(dest_lines, prefix)
+            if dest_line is None:
+                self.unresolved_paths.append("::".join(leaf.path))
+                return None
+            dest_leaves = parse_use_leaves(dest_line)
+            if dest_leaves is None:
+                self.unresolved_paths.append("::".join(leaf.path))
+                return None
+            dest_vis = {l.visibility for l in dest_leaves}
+            dest_cfg = {l.cfg for l in dest_leaves}
+            # Visibility + SYMMETRIC cfg-domain agreement (a gated sibling
+            # vs an unconditional leaf changes semantics — refuse).
+            if leaf.visibility not in dest_vis:
+                self.preconditions["same_visibility"] = False
+            if leaf.cfg not in dest_cfg:
+                self.preconditions["same_cfg_domain"] = False
+            if not self.preconditions["same_visibility"] \
+                    or not self.preconditions["same_cfg_domain"]:
+                self.unresolved_paths.append("::".join(leaf.path))
+                return None
+            # Binding collision: the candidate already binds the same name
+            # from a DIFFERENT path.
+            existing_bindings: dict[str, tuple] = {}
+            for dl in dest_leaves:
+                ident = _leaf_identity(dl)
+                if ident[0] == "binding":
+                    existing_bindings[ident[1]] = dl.path
+            ident = _leaf_identity(leaf)
+            if ident[0] == "binding":
+                existing_path = existing_bindings.get(ident[1])
+                if existing_path is not None and existing_path != leaf.path:
+                    self.preconditions["binding_collision"] = True
+            if self.preconditions["binding_collision"]:
+                self.unresolved_paths.append("::".join(leaf.path))
+                return None
+
+            # Prefer extending an existing brace group...
+            new_line = _merge_into_group_line(dest_line, dest_leaves, [leaf])
+            if new_line is not None:
+                lines = text.splitlines(keepends=True)
+                dest_stripped = dest_line.rstrip("\n")
+                for i, ln in enumerate(lines):
+                    if ln.rstrip("\n") == dest_stripped:
+                        ending = "\n" if ln.endswith("\n") else ""
+                        start = sum(len(l) for l in lines[:i])
+                        self.edit_strings.append(new_line.strip())
+                        self.closed_paths.append("::".join(leaf.path))
+                        return (start, start + len(ln),
+                                new_line.rstrip("\n") + ending)
+                return None  # destination vanished — unresolved
+            # ...fall back to a separate line adjacent to the destination.
+            result = _add_separate_use_line(dest_line, [leaf], text)
+            if result is None:
+                self.unresolved_paths.append("::".join(leaf.path))
+                return None
+            new_text, added = result
+            # Derive the insertion span: exactly one line was inserted
+            # after the destination (position = end of dest line).
+            lines = text.splitlines(keepends=True)
+            dest_stripped = dest_line.rstrip("\n")
+            for i, ln in enumerate(lines):
+                if ln.rstrip("\n") == dest_stripped:
+                    pos = sum(len(l) for l in lines[:i + 1])
+                    pos = min(pos, len(text))
+                    line_text = added[0] + "\n" if added else ""
+                    self.edit_strings.extend(added)
+                    self.closed_paths.append("::".join(leaf.path))
+                    return (pos, pos, line_text)
+            return None
+
+        def local_validity(self, text):
+            ok = _brackets_balanced(text) and \
+                _roundtrip_confirms(text, self.closed_paths)
+            if not ok:
+                self._blocked = True
+            return ok
+
+    return _ImportCodec()
+
+
 def propose_import_union(
     resolved_text: str, missing_obligations: list,
 ) -> ImportUnionResult:
@@ -632,276 +829,57 @@ def propose_import_union(
             additive (non-exclusive) executable ``added`` import lines are
             candidates for union; everything else is ignored.
 
+    Stage 3 (the SWITCH): the KeyedCollectionMerge engine runs the
+    lifecycle; this function is a thin adapter mapping the engine's
+    :class:`PrimitiveResult` to the wire format (original certificate
+    keys, ``rust.use_leaf_union/v1``). The use-tree parsing and
+    group-merging stay in this module — the codec delegates to them.
+
     Returns an :class:`ImportUnionResult`. The function NEVER raises on
     unrecognized input — it returns NOT_APPLICABLE / AMBIGUOUS / BLOCKED so
     the caller's control flow is undisturbed. Internal errors are caught and
     mapped to BLOCKED (transactional rollback).
     """
-    try:
-        before_hash = hashlib.sha256(
-            (resolved_text or "").encode("utf-8")
-        ).hexdigest()[:16]
+    from capybase.deterministic_model import PrimitiveStatus
+    from capybase.keyed_collection import merge_keyed_collection
 
-        # --- Filter obligations to additive import additions. ---
-        # We act on: operation added, not exclusive, and the line parses as a
-        # Rust ``use`` statement. We deliberately do NOT gate on channel ==
-        # "executable": a ``#[cfg(...)] use ...`` line is classified as
-        # "directive" by change_accounting (the ``#[`` fires the directive
-        # regex before the executable fallback), but it is still an import we
-        # can union. The parser (parse_use_leaves) is the authority on whether
-        # a line is an actionable import, not the channel label.
-        # (An exclusive import is a CHOICE — e.g. a::X vs b::X at the same
-        # binding — and must go to the model, not be unioned.)
-        candidate_lines: list[str] = []
-        for ob in missing_obligations or []:
-            if getattr(ob, "operation", "") != "added":
-                continue
-            if getattr(ob, "exclusive", False):
-                continue
-            line = getattr(ob, "line", "") or ""
-            if not line.strip():
-                continue
-            # Authority check: is this a Rust use statement we understand?
-            if parse_use_leaves(line) is None:
-                continue
-            candidate_lines.append(line)
-        if not candidate_lines:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "no additive import obligations",
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
+    codec = _import_codec()
+    result = merge_keyed_collection(
+        codec, resolved_text, missing_obligations,
+        other_side_text="",
+        mechanism_id="rust.use_leaf_union/v1",
+    )
 
-        # --- Parse each candidate import line into leaves. ---
-        # A line that doesn't parse (nested group, multi-line, malformed) is
-        # AMBIGUOUS for THAT line — skip it, don't fail the whole call. We
-        # only fail (AMBIGUOUS) when a parseable line's union is blocked by a
-        # safety condition (collision, glob, etc.).
-        add_leaves: list[ImportLeaf] = []
-        skipped_lines: list[str] = []
-        for line in candidate_lines:
-            leaves = parse_use_leaves(line)
-            if leaves is None:
-                skipped_lines.append(line.strip()[:80])
-                continue
-            add_leaves.extend(leaves)
-        if not add_leaves:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "no parseable import leaves",
-                             "skipped": skipped_lines,
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        # --- Locate destination ``use`` lines in the candidate. ---
-        # For each missing leaf, find a destination import whose path prefix
-        # matches the leaf's prefix (path[:-1]). This is the "compatible
-        # destination" requirement — we don't invent insertion points in v1.
-        dest_lines = _find_use_lines(resolved_text)
-        if not dest_lines:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "no destination use lines in candidate",
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        # --- Global idempotency pre-filter (the §2 contract). ---
-        # A leaf whose FULL PATH is already present in any candidate import
-        # line is already accounted for — drop it before any edit is attempted.
-        # This makes re-entry a clean no-op: once a leaf is inserted, it's no
-        # longer "missing." (Without this, the group-extend path correctly
-        # dedupes within one group, but the separate-line fallback would add a
-        # duplicate ``use util::X;``.)
-        #
-        # We key on the FULL PATH (not binding), so a same-binding-different-
-        # path leaf (``a::Client`` present, want ``b::Client``) is NOT treated
-        # as already-present — it's a collision, handled later by the
-        # per-destination binding-collision gate. ``_`` aliases key on path
-        # too (multiple ``Trait as _`` coexist).
-        existing_paths: set[tuple[str, ...]] = set()
-        for dl in dest_lines:
-            dl_leaves = parse_use_leaves(dl)
-            if dl_leaves:
-                for l in dl_leaves:
-                    existing_paths.add(l.path)
-        add_leaves = [l for l in add_leaves if l.path not in existing_paths]
-        if not add_leaves:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "all leaves already present (idempotent)",
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        # --- Group missing leaves by destination. ---
-        # A destination is chosen by longest-matching path prefix. Multiple
-        # leaves may target the same destination (extend the group once).
-        assignments: dict[str, list[ImportLeaf]] = {}
-        unresolved: list[ImportLeaf] = []
-        for leaf in add_leaves:
-            prefix = leaf.path[:-1]
-            if not prefix:
-                unresolved.append(leaf)
-                continue
-            # Glob / rename leaves: we only union plain ``name`` additions in
-            # v1 (the safe subset). Globs and renames carry interaction risk.
-            if leaf.kind in ("glob",):
-                # A glob import interacts with everything; never auto-union.
-                unresolved.append(leaf)
-                continue
-            dest = _best_destination(dest_lines, prefix)
-            if dest is None:
-                unresolved.append(leaf)
-                continue
-            assignments.setdefault(dest, []).append(leaf)
-
-        if not assignments:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "no compatible destination imports",
-                             "unresolved_leaves": len(unresolved),
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        # --- Apply the safe-auto-union gate per destination. ---
-        edited_text = resolved_text
-        closed: list[str] = []
-        edits: list[str] = []
-        preconditions_all: dict[str, bool] = {
-            "same_visibility": True,
-            "same_cfg_domain": True,
-            "binding_collision": False,
-            "contains_glob": False,
-        }
-        blocked = False
-        for dest_line, leaves in assignments.items():
-            dest_leaves = parse_use_leaves(dest_line)
-            if dest_leaves is None:
-                # Destination didn't parse — can't safely edit it. Leave the
-                # leaves unresolved (NOT_APPLICABLE for them), don't BLOCK.
-                unresolved.extend(leaves)
-                continue
-            dest_vis = {l.visibility for l in dest_leaves}
-            dest_cfg = {l.cfg for l in dest_leaves}
-            # Precondition: visibility + cfg must match between source and dest.
-            # The cfg check is SYMMETRIC: if dest has cfg and source doesn't
-            # (or vice versa), they're different cfg domains — the source leaf
-            # would be unconditionally imported while its sibling is gated,
-            # which changes semantics. Refuse rather than risk it.
-            for leaf in leaves:
-                if leaf.visibility not in dest_vis:
-                    preconditions_all["same_visibility"] = False
-                if leaf.cfg not in dest_cfg:
-                    preconditions_all["same_cfg_domain"] = False
-                if leaf.kind == "glob":
-                    preconditions_all["contains_glob"] = True
-            if not preconditions_all["same_visibility"] or not preconditions_all["same_cfg_domain"]:
-                unresolved.extend(leaves)
-                continue
-            # Precondition: no binding collision. A collision is when the
-            # candidate already binds the same name from a DIFFERENT path.
-            existing_bindings: dict[str, tuple] = {}
-            for dl in dest_leaves:
-                ident = _leaf_identity(dl)
-                if ident[0] == "binding":
-                    existing_bindings[ident[1]] = dl.path
-            for leaf in leaves:
-                ident = _leaf_identity(leaf)
-                if ident[0] == "binding":
-                    existing_path = existing_bindings.get(ident[1])
-                    if existing_path is not None and existing_path != leaf.path:
-                        preconditions_all["binding_collision"] = True
-            if preconditions_all["binding_collision"]:
-                unresolved.extend(leaves)
-                continue
-
-            # --- Attempt the edit. ---
-            # Prefer extending an existing brace group; fall back to a new
-            # separate ``use`` line adjacent to the destination.
-            new_line = _merge_into_group_line(dest_line, dest_leaves, leaves)
-            applied_via = "group_extend"
-            if new_line is None:
-                # Fall back to a separate line. We don't handle multi-leaf
-                # separate-line insertion in the fallback for now — only the
-                # group-extend path handles multiple leaves cleanly. A single
-                # leaf can always become a separate line.
-                if len(leaves) == 1:
-                    result = _add_separate_use_line(dest_line, leaves, edited_text)
-                    if result is None:
-                        unresolved.extend(leaves)
-                        continue
-                    edited_text, added = result
-                    edits.extend(added)
-                    for leaf in leaves:
-                        closed.append("::".join(leaf.path))
-                    applied_via = "separate_line"
-                else:
-                    unresolved.extend(leaves)
-                    continue
-            else:
-                # Replace the destination line in-place with the extended group.
-                edited_text, ok = _replace_line(edited_text, dest_line, new_line)
-                if not ok:
-                    unresolved.extend(leaves)
-                    continue
-                edits.append(new_line.strip())
-                for leaf in leaves:
-                    closed.append("::".join(leaf.path))
-
-            # --- Local validity check (transactional). ---
-            if not _brackets_balanced(edited_text):
-                blocked = True
-                break
-            # Round-trip: re-extract leaves from the edited line and confirm
-            # the closed paths are now present.
-            if not _roundtrip_confirms(edited_text, closed):
-                blocked = True
-                break
-
-        if blocked:
-            return ImportUnionResult(
-                status=STATUS_BLOCKED, text=resolved_text,
-                certificate={"reason": "local validity check failed (brace imbalance or round-trip)",
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        if not closed:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "no leaves could be safely unioned",
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        after_hash = hashlib.sha256(
-            edited_text.encode("utf-8")
-        ).hexdigest()[:16]
-        return ImportUnionResult(
-            status=STATUS_APPLIED, text=edited_text,
-            certificate={
-                "primitive": "rust.use_leaf_union/v1",
-                "closed_obligations": closed,
-                "remaining_obligations": len(unresolved),
-                "edits": edits,
-                "preconditions": preconditions_all,
-                "risk_tier": RISK_TIER_A,
-                "before_hash": before_hash,
-                "after_hash": after_hash,
-                "skipped_lines": skipped_lines,
-                "unresolved": ["::".join(l.path) for l in unresolved],
-            },
-        )
-    except Exception:  # noqa: BLE001 — transactional: never break the loop
-        return ImportUnionResult(
-            status=STATUS_BLOCKED, text=resolved_text,
-            certificate={"reason": "internal error (transactional rollback)",
-                         "before_hash": ""},
-        )
+    _status_map = {
+        PrimitiveStatus.APPLIED: STATUS_APPLIED,
+        PrimitiveStatus.NOT_APPLICABLE: STATUS_NOT_APPLICABLE,
+        PrimitiveStatus.AMBIGUOUS: STATUS_AMBIGUOUS,
+        PrimitiveStatus.BLOCKED: STATUS_BLOCKED,
+    }
+    _reason_map = {
+        "no applicable items": "no additive import obligations",
+        "all items already present (idempotent)":
+            "all leaves already present (idempotent)",
+        "no items could be safely inserted":
+            "no leaves could be safely unioned",
+        "local validity check failed":
+            "local validity check failed (brace imbalance or round-trip)",
+    }
+    text = result.candidate if result.candidate is not None else resolved_text
+    cert = dict(result.certificate)
+    cert["primitive"] = "rust.use_leaf_union/v1"
+    if "reason" in cert:
+        cert["reason"] = _reason_map.get(cert["reason"], cert["reason"])
+    if result.status == PrimitiveStatus.APPLIED:
+        cert["closed_obligations"] = list(codec.closed_paths)
+        cert["remaining_obligations"] = len(codec.unresolved_paths)
+        cert["edits"] = list(codec.edit_strings)
+        cert["preconditions"] = dict(codec.preconditions)
+        cert["risk_tier"] = RISK_TIER_A
+        cert["skipped_lines"] = []
+        cert["unresolved"] = list(codec.unresolved_paths)
+    return ImportUnionResult(
+        status=_status_map[result.status], text=text, certificate=cert)
 
 
 # ---------------------------------------------------------------------------
