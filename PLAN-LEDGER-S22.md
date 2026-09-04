@@ -6944,6 +6944,21 @@ landed; the remaining design item is oversized-splitting's final goal
 scenarios 281/0, all 2,366/0; synthetic live 4/4.** The harvest
 launches from the EXTEND-17d template when called.
 
+**POST-ARCHITECTURE ADDENDUM (extends 31–41, 2026-09-04):** after the
+close-out above, sprint-27 analyzed, planned, and FULLY IMPLEMENTED the
+candidate-ref architecture (docs/candidate-ref-architecture-design.md,
+user-directed): never mutate the source branch (candidate mode is the
+`capybase rebase` default; `--in-place` opts back), UNKNOWN-is-not-pass
+(evidence semantics through quality/risk/reports), the acceptance
+policy as sole decider (tier table; promote/publish require `--approve`
+for tier B/C), expected-OID CAS promotion, fingerprint-matched artifact
+reuse (zero model calls), lease-protected remote publication (explicit
+OID, opt-in), and strict `--config`. 40+ new tests; every flow
+live-verified against the real endpoint (tier A, tier B, consent both
+ways, CAS, reuse) with live-caught defects fixed (the calibration gate
+misplacement, backup-branch clutter, the silent config fallback).
+Gate at the architecture's close: 4,057/0.
+
 ### S27-EXTEND-29 (2026-09-04) — the last stragglers: complete to the final case
 
 The 7 remaining pre-Sep-3 verdicts (the last in the corpus), ×3 each

@@ -214,3 +214,29 @@ ConflictUnit → CandidateResolution[] → Evidence[] → PolicyDecision
 - The corpus and eval harness (materialized trees; unaffected).
 - The backup-ref machinery (stays as legacy-mode safety and as the
   belt-under-braces for candidate mode's snapshot).
+
+## Service mode — operator notes (P5 companion)
+
+For an unattended service operating in a disposable clone:
+
+1. **Run candidate mode** (`capybase rebase <target>` — the default). The
+   source branch is never touched; the artifact (candidate branch +
+   `.rebase-agent/candidates/<id>/` audit bundle) is retained.
+2. **Apply your own review policy to the tier**: the state file's
+   `policy` block is the machine-readable decision (tier A/B/C,
+   decision, reasons). A service with its own review pipeline reads it
+   and either approves (`promote --approve` / `publish --approve`) or
+   holds the artifact. Tier A is AUTO_APPLY by design — deterministic
+   resolutions with complete oracles need no human; anything less is
+   the service operator's explicit call, never a silent default.
+3. **Publish with the lease**: `capybase publish --approve` when the
+   tier demands it. The lease expectation is the REMOTE OID from the
+   snapshot; a concurrent push breaks it and refuses — re-run the
+   candidate against the new tip instead of forcing. `--dry-run`
+   rehearses.
+4. **Idempotent retries**: re-running the same request against the same
+   OIDs/config/profile/toolchain REUSES the retained candidate (zero
+   model calls). Deleting the retained state forces a fresh run.
+5. **Never** bridge the consent gate by pre-approving in config: the
+   `--approve` flag is deliberately per-invocation so the approval act
+   is auditable in the service's own logs.
