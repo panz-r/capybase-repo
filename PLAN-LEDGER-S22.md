@@ -6030,6 +6030,27 @@ alternation collapse) now journal `repair_rung_error` with the rung
 name + exception — the next silently-swallowed NameError becomes a
 one-line journal find instead of a forensics session. Gate 4,027/0.
 
+### S27-EXTEND-22 (2026-09-04) — C-family predicates unified; the ESC band confirmed under LIVE rungs
+
+**Cross-language sharing (10958e2):** the C-family membership test
+`language in ("c", "cpp", "c++")` was re-spelled at 26 sites across
+six modules (plus `("cpp","c++")` variants) — a future alias or
+spelling change would silently diverge per-site. Now ONE source:
+`capybase.langs.is_c_family` / `is_cpp` (exact-match semantics,
+behavior-identical; the three pre-existing locals named `is_cpp`
+renamed `_cpp_lang` to stop shadowing the import). Gate 4,027/0;
+corpus python subset 349/0.
+
+**The designed-class band under the LIVE rungs (×3):** sea-orm-0007
+ESC 3/3 @ 0.914 and zenodo-0079 ESC 3/3 @ 0.963 — exact prior
+dispositions, and ZERO revived-rung engagement across all six sessions
+(no side_pick_applied, no alternation_collapse_applied, no p6b_beam,
+no repair_rung_error). Their difficulty is content-level
+(TIMEOUT_CONVERGENCE terminal — the case timeout caps convergence),
+not the gate-failure/alternation shapes the rungs target. These two
+now carry the strongest possible disposition: measured with the full
+machinery alive.
+
 ### S27-EXTEND-20 (2026-09-04) — full deterministic corpus run + sprint-28 design seed
 
 **Corpus `all` end-to-end** (the combined session+scenario+realworld
