@@ -7210,3 +7210,22 @@ default); UNKNOWN is not pass (evidence + tiers + promotion consent);
 the acceptance policy is the sole decider; promotion is an expected-
 OID CAS; a tested candidate is a reusable artifact; remote
 publication is lease-protected and explicitly initiated.
+
+### S27-EXTEND-38 (2026-09-04) — design follow-ups: docs + the flip's blast radius
+
+- **run-live-test.sh pinned**: its MODE=rebase contract is "advance the
+  fixture branch" — the script now passes `--in-place` explicitly (the
+  default flip would have silently changed its semantics; MODE=run, the
+  default, was never affected).
+- **README**: the Use section now documents the candidate-ref
+  architecture — the default's meaning ("never mutates your branch"),
+  the retained audit bundle + fingerprints, --in-place/--fresh, promote
+  (expected-OID CAS), publish (explicit lease, opt-in), and the
+  acceptance-policy paragraph (unknown-is-not-pass, tiers, --approve as
+  the review act).
+
+Remaining follow-ups (recorded for sprint-28+, none blocking): the
+eventual legacy-mode removal decision; per-validator evidence-envelope
+deepening (scope/strength/command fingerprints — the policy's
+read-layer suffices today); service-mode operator documentation for
+unattended publish flows.

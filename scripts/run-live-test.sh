@@ -66,6 +66,13 @@ CAPYBASE="${CAPYBASE:-$VENV/bin/capybase}"
 # Fixture selection: arg1 = fixture (replayed branch base name), arg2 = mode.
 FIXTURE="${1:-python-uu}"
 MODE="${2:-run}"
+# P2 default flip: `capybase rebase` now runs candidate mode (source never
+# touched). This script's contract for MODE=rebase is "advance the fixture
+# branch" (it inspects the resolved tree afterward) — pin the legacy
+# in-place mode explicitly. `run` (the default) is unaffected.
+if [ "$MODE" = "rebase" ]; then
+  MODE="rebase --in-place"
+fi
 # Map each fixture to its upstream branch. Fixture and upstream names don't
 # always share a prefix (e.g. text-uu-simple -> text-uu-upstream), so derive
 # from a lookup rather than string interpolation.

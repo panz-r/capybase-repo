@@ -135,16 +135,52 @@ git config core.hooksPath hooks
 
 ## Use
 
-### Safety-first rebase
+### Safety-first rebase (candidate-ref architecture)
 
 ```bash
 capybase check                       # git + LLM + tools ready? (no mutation)
 capybase rebase --dry-run <target>   # rehearse in a throwaway worktree
-capybase rebase <target>             # real rebase, owns start → finish
+capybase rebase <target>             # the WHOLE rebase on a candidate branch
+capybase promote [--approve]         # expected-OID CAS onto the source branch
+capybase publish [--approve]         # lease-protected remote publication
 capybase status                      # read-only: latest session + backups
 ```
 
-Before each rebase, capybase records a backup branch
+**The default is candidate mode**: `capybase rebase <target>` never mutates
+your branch. The entire replay runs in a linked worktree on a visible
+candidate branch `capybase/candidate/<branch>@<ts>`, pinned at the pre-run
+source OID. On success the candidate branch plus an audit bundle
+(`.rebase-agent/candidates/<id>/` — journal, prompts, accept reports, and a
+`session_state.json` recording the source/target OIDs and config/profile/
+toolchain fingerprints) are retained. On escalation the candidate is deleted
+and your branch was never touched — no abort-and-restore dance to get wrong.
+
+- `--in-place` opts back into the legacy mode (the rebase runs on your
+  checked-out branch; a backup branch `capybase/backup/<branch>@<ts>` is
+  recorded first and escalation aborts back to the original HEAD).
+- `--dry-run` stays the throwaway rehearsal (worktree and branch removed).
+- `--fresh` forces a re-run even when a fingerprint-matching retained
+  candidate exists (by default, an identical request — same OIDs, config,
+  profile, toolchain — REUSES the already-tested candidate with zero model
+  calls).
+- `capybase promote` lands the candidate with
+  `git update-ref <source> <candidate> <expected-source-oid>` — an atomic
+  compare-and-swap that refuses on any drift (both OIDs named; never
+  forces). `--checkout` also refreshes a clean checked-out tree.
+- `capybase publish` (service mode) pushes the candidate with the EXPLICIT
+  lease `--force-with-lease=<ref>:<expected-remote-oid>` — a remote that
+  moved since the run refuses; never the implicit lease. Purely opt-in:
+  nothing ever publishes on its own.
+
+**Acceptance is a policy, not a feeling.** A check that could not run is
+recorded as UNKNOWN, never as a pass (missing toolchains lower trust —
+reports say "NOT CHECKED", risk rises, and the acceptance tier degrades).
+Each accepted step is graded (tier A deterministic + complete oracles;
+B model-assisted or any unknown oracle; C verifier disagreement) and tier
+B/C candidates require your explicit `--approve` on promote/publish — the
+review act.
+
+Before each legacy-mode rebase, capybase records a backup branch
 `capybase/backup/<branch>@<ts>` at the pre-rebase HEAD and aborts on
 escalation so the repo returns to its original HEAD. `--dry-run` runs the full
 pipeline (real LLM calls, genuine conflicts) in a throwaway worktree without
