@@ -7151,3 +7151,34 @@ Outstanding-task updates: P4 marked LANDED in the design doc; P3
 remainder (tier-table policy module + evidence envelope completion +
 suspected_validator_error demotion) and P5 (lease publication,
 default-off) remain.
+
+### S27-EXTEND-36 (2026-09-04) — candidate-ref P3 remainder LANDED: the acceptance policy decides
+
+- **capybase/acceptance.py** — the sole decider (the design's
+  fundamental rule: the resolver never decides its own output is
+  safe). The tier table: A (deterministic + complete oracles) →
+  AUTO_APPLY; B (model-assisted, or ANY unknown oracle) →
+  PROPOSE_FOR_REVIEW; C (verifier disagreement riding an accepted
+  unit — suspected_validator_error — or failing evidence on an
+  accepted unit) → STOP. Computed per step (the acceptance_trust
+  events now carry tier+decision+reasons), aggregated over the whole
+  series from the journal (any STOP dominates, then any PROPOSE) into
+  the candidate's session_state.
+- **`capybase promote` enforces it**: tier-B/C candidates refuse
+  without the human's `--approve` (the review act — "unknown is not
+  pass" now reaches promotion). ORDER: drift/existence invariants
+  first (a moved branch outranks the consent question), then the
+  policy gate, then the CAS.
+- **suspected_validator_error's roles are now both evidence-shaped**:
+  on failing candidates a request-to-investigate
+  (escalate-and-preserve, already gated so a model assertion can't
+  override a passed one); on accepted ones, tier-C verifier-
+  disagreement evidence.
+- The Evidence envelope: the policy's read-layer over validation
+  features (UnitEvidence) — validators unchanged, one decision point.
+- 2 new tests (the tier table's four rows; promote refuses tier B
+  then succeeds with --approve) + 3 P2 mechanics tests updated to
+  approve their fixture's model-assisted tier. Gate 4,052/0.
+
+Outstanding: **P5 only** — lease-protected remote publication (service
+mode, default-off, explicit `--force-with-lease=<ref>:<oid>`).

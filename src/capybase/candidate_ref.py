@@ -68,6 +68,9 @@ class CandidateReport:
     state_path: str = ""
     reused: bool = False
     reused_from: str = ""
+    policy_decision: str = ""
+    policy_tier: str = ""
+    policy_reasons: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         if self.reused:
@@ -88,6 +91,10 @@ class CandidateReport:
                 f"  candidate @ {self.candidate_oid[:8]} "
                 f"({len(self.steps)} step(s), llm_calls={self.llm_calls})",
                 f"  audit bundle: {self.state_path}",
+                (f"  POLICY: {self.policy_decision} (tier "
+                 f"{self.policy_tier})"
+                 + (f" — {self.policy_reasons[0]}" if self.policy_reasons
+                    else "")),
                 "  promote (P2 will automate; expected-OID CAS):",
                 f"    git update-ref {self.source_ref_full} "
                 f"{self.candidate_oid} {self.source_oid}",
@@ -324,6 +331,40 @@ def run_candidate_rebase(
             for s in intermediate.steps
         ]
 
+        # The acceptance policy for the WHOLE series (the candidate-ref
+        # design: the promotion side consumes the decision). The per-step
+        # policy is journaled as acceptance_trust events; aggregate them —
+        # any STOP dominates, then any PROPOSE_FOR_REVIEW, else AUTO_APPLY.
+        _tiers: dict[str, list[str]] = {"A": [], "B": [], "C": []}
+        _decisions = {"A": "AUTO_APPLY", "B": "PROPOSE_FOR_REVIEW",
+                      "C": "STOP"}
+        try:
+            for _line in orch.paths.journal.read_text(
+                    encoding="utf-8").splitlines():
+                try:
+                    _ev = json.loads(_line)
+                except json.JSONDecodeError:
+                    continue
+                if _ev.get("event_type") == "acceptance_trust":
+                    _p = _ev.get("payload", {})
+                    _t = _p.get("tier", "B")
+                    _rs = _p.get("reasons") or []
+                    _tiers.setdefault(_t, []).append(
+                        "; ".join(str(r) for r in _rs)[:120])
+        except Exception:  # noqa: BLE001 — aggregation is best-effort
+            pass
+        report.policy_tier = ("C" if _tiers["C"]
+                              else "B" if _tiers["B"]
+                              else "A" if _tiers["A"] else "B")
+        report.policy_decision = _decisions[report.policy_tier]
+        report.policy_reasons = [
+            r for r in (_tiers["C"] + _tiers["B"]) if r][:4]
+        state["policy"] = {
+            "decision": report.policy_decision,
+            "tier": report.policy_tier,
+            "reasons": report.policy_reasons,
+        }
+
         # 5. Retain the audit bundle (the worktree is about to go; the
         #    artifact must outlive it) and finalize the state file.
         if orch.paths.root.exists():
@@ -439,6 +480,7 @@ def promote_candidate(
     state_path: str | Path | None = None,
     checkout: bool = False,
     keep_ref: bool = False,
+    approve: bool = False,
 ) -> PromoteResult:
     """Atomically promote a retained candidate onto its source ref.
 
@@ -510,6 +552,22 @@ def promote_candidate(
         result.refused_reason = (
             f"candidate commit {result.candidate_oid[:8]} no longer exists "
             "in the object store (was it gc'd?)"
+        )
+        return result
+
+
+    # The acceptance policy gates promotion (the design's tier table):
+    # AUTO_APPLY promotes; PROPOSE_FOR_REVIEW / STOP require the human's
+    # explicit --approve (the review act). "Unknown is not pass" — a
+    # candidate whose oracles could not run never silently lands.
+    _policy = state.get("policy") or {}
+    _tier = _policy.get("tier", "B")
+    if _tier in ("B", "C") and not approve:
+        result.refused_reason = (
+            f"acceptance policy is {_policy.get('decision', 'PROPOSE_FOR_REVIEW')} "
+            f"(tier {_tier})"
+            + (f" — {_policy.get('reasons', [''])[0]}" if _policy.get("reasons") else "")
+            + " — promote with --approve after review (unknown is not pass)"
         )
         return result
 

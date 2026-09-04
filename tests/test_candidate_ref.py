@@ -194,7 +194,7 @@ def test_promote_cas_moves_source_exactly(py_repo_before_rebase):
     report, feat_before = _successful_candidate(
         repo, py_repo_before_rebase["merged_block"])
 
-    result = promote_candidate(repo)
+    result = promote_candidate(repo, approve=True)
     assert result.promoted, result.summary()
     # The source moved to EXACTLY the candidate OID.
     assert _branch_oid(repo, "feat") == report.candidate_oid
@@ -237,7 +237,7 @@ def test_promote_checkout_updates_clean_tree_refuses_dirty(
     git(repo, "checkout", "-q", "feat")
 
     # Clean tree + --checkout → the worktree follows the ref.
-    result = promote_candidate(repo, checkout=True)
+    result = promote_candidate(repo, checkout=True, approve=True)
     assert result.promoted, result.summary()
     assert result.checked_out_updated
     assert git(repo, "rev-parse", "HEAD").stdout.strip() == report.candidate_oid
@@ -246,7 +246,7 @@ def test_promote_checkout_updates_clean_tree_refuses_dirty(
     report2, feat2 = _successful_candidate(
         repo, py_repo_before_rebase["merged_block"])
     (repo / "uncommitted.txt").write_text("dirty\n")
-    result2 = promote_candidate(repo, checkout=True)
+    result2 = promote_candidate(repo, checkout=True, approve=True)
     assert not result2.promoted
     assert "uncommitted" in result2.summary().lower()
     assert _branch_oid(repo, "feat") == report.candidate_oid  # unmoved
@@ -423,3 +423,71 @@ def test_state_records_transitions(py_repo_before_rebase):
     names = [t["name"] for t in state["transitions"]]
     assert names == ["snapshot", "completed"]
     assert state["transitions"][0]["source_oid"] == report.source_oid
+
+
+# ---------------------------------------------------------------------------
+# P3 remainder: the tier-table policy gates promotion
+# ---------------------------------------------------------------------------
+
+
+def test_policy_module_tier_table():
+    """acceptance.decide's table: deterministic+complete → A; unknown
+    oracle → B; verifier disagreement on an accepted unit → C/STOP."""
+    from capybase.acceptance import AUTO_APPLY, PROPOSE_FOR_REVIEW, STOP, decide
+
+    class _U:
+        unit_id = "u1"
+    class _V:
+        features = {"syntax_passed": True}
+        warnings = []
+    class _C_det:
+        provenance = "deterministic_structural"
+        suspected_validator_error = False
+    class _O:
+        def __init__(self, val, cand):
+            self.unit = _U(); self.validation = val; self.accepted = cand
+
+    det = decide([_O(_V(), _C_det())], True)
+    assert (det.tier, det.decision) == ("A", AUTO_APPLY)
+
+    class _C_model:
+        provenance = "plain_llm"
+        suspected_validator_error = False
+    model = decide([_O(_V(), _C_model())], True)
+    assert (model.tier, model.decision) == ("B", PROPOSE_FOR_REVIEW)
+
+    class _V_unknown:
+        features = {"syntax_outcome": "unknown"}
+        warnings = []
+    unk = decide([_O(_V_unknown(), _C_det())], True)
+    assert (unk.tier, unk.decision) == ("B", PROPOSE_FOR_REVIEW)
+    assert any("unknown" in r.lower() for r in unk.reasons)
+
+    class _C_disagree:
+        provenance = "deterministic_structural"
+        suspected_validator_error = True
+    dis = decide([_O(_V(), _C_disagree())], True)
+    assert (dis.tier, dis.decision) == ("C", STOP)
+    assert "verifier disagreement" in dis.reasons[0].lower()
+
+
+def test_promote_refuses_tier_b_without_approve(py_repo_before_rebase):
+    """The test fixtures resolve via the LLM (plain_llm provenance) —
+    tier B. Promotion refuses; --approve is the review act."""
+    repo = py_repo_before_rebase["repo"]
+    merged = py_repo_before_rebase["merged_block"]
+    engine = ResolutionEngine(
+        _config(repo).model, client=CyclingClient([_payload(merged)]))
+    report = run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine)
+    assert report.would_succeed
+    assert report.policy_tier == "B", report.policy_reasons
+
+    refused = promote_candidate(repo)
+    assert not refused.promoted
+    assert "--approve" in refused.summary()
+    assert _branch_oid(repo, "feat") != report.candidate_oid  # unmoved
+
+    approved = promote_candidate(repo, approve=True)
+    assert approved.promoted, approved.summary()
+    assert _branch_oid(repo, "feat") == report.candidate_oid

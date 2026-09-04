@@ -157,6 +157,13 @@ def build_parser() -> argparse.ArgumentParser:
              "it — its commit is reachable from the source ref)",
     )
     promo_p.add_argument(
+        "--approve", action="store_true",
+        help="approve a tier-B/C candidate for promotion (the review act: "
+             "the acceptance policy proposed review — unknown oracles or "
+             "model-assisted resolutions without full independent "
+             "evidence — and promotion refuses without this)",
+    )
+    promo_p.add_argument(
         "--repo", default=".",
         help="repository to promote in (default: current directory)",
     )
@@ -1079,7 +1086,7 @@ def main(argv: list[str] | None = None) -> int:
         from capybase.candidate_ref import promote_candidate
         result = promote_candidate(
             args.repo, state_path=args.state, checkout=args.checkout,
-            keep_ref=args.keep_ref)
+            keep_ref=args.keep_ref, approve=args.approve)
         print(result.summary())
         return 0 if result.promoted else 1
     if args.command == "rebase":

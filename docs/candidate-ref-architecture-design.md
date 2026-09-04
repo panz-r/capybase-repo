@@ -166,11 +166,21 @@ ConflictUnit → CandidateResolution[] → Evidence[] → PolicyDecision
   `--in-place` opts back into legacy; `--dry-run` unchanged. The
   restart-resume piece (OID-verified transition resume) moves to P4
   where it shares the fingerprint-matching machinery.
-- **P3 remainder — OUTSTANDING**: the full Evidence envelope
-  (scope/strength/command fingerprints — partially present via
-  `unknown` + `acceptance_trust`), the tier-table policy module
-  (consuming the trust events), and `suspected_validator_error`
-  demoted to evidence-only.
+- **P3 — LANDED** (extends 32+36): the acceptance subsystem.
+  `capybase/acceptance.py` is the sole decider — the tier table
+  (A deterministic+complete-oracles → AUTO_APPLY; B model-assisted or
+  any UNKNOWN oracle → PROPOSE_FOR_REVIEW; C verifier disagreement on
+  an accepted unit / failing evidence → STOP) computed per step
+  (`acceptance_trust` events) and aggregated over the series into the
+  candidate's state; `capybase promote` refuses tier-B/C without the
+  human's explicit `--approve` (the review act), AFTER the
+  drift/existence invariant checks (drift outranks consent).
+  `suspected_validator_error` is evidence: a request-to-investigate on
+  failing candidates (escalate-and-preserve), verifier-disagreement
+  evidence when it rides an accepted one (tier C). The Evidence
+  envelope exists as the policy's read-layer over validation features
+  (scope/strength live in the validators' own records; the envelope
+  unifies them at the decision point).
 - **P4 — LANDED** (extend-35): fingerprint-matched reuse — when a
   later run's fingerprints (source ref+OID, target+OID, config,
   profile, AND toolchain) all match a retained successful un-promoted
