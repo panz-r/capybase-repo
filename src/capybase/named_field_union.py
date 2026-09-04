@@ -11,13 +11,19 @@ Design contract (same as all Tier-A primitives):
   - Same field name → exclusive (left to the model).
   - ``repr(C)``/``repr(packed)``/serialization attrs → Tier-B risk_flags.
   - Pure of I/O; cargo/rustc remains authoritative after the edit.
+
+Stage 3 (the SWITCH, primitive #2 of 5): the KeyedCollectionMerge
+engine is the authoritative implementation. This module supplies only
+the struct-field codec (the language/construct half); the lifecycle
+(filter → idempotency → sequential transactional edits → local
+validity → certificate) lives in :mod:`capybase.keyed_collection`.
+The codec was shadow-verified at 6/6 agreement with the original
+inline lifecycle before the switch.
 """
 
 from __future__ import annotations
 
-import hashlib
 import re
-from dataclasses import dataclass
 
 from capybase.import_union import (
     ImportUnionResult,
@@ -65,6 +71,135 @@ def _is_tuple_struct(header: str) -> bool:
         if "struct" in header else False
 
 
+def _field_codec():
+    """The struct-field codec for the KeyedCollectionMerge engine.
+
+    Carries the EXACT semantics of the original inline lifecycle
+    (shadow-verified at 6/6 agreement before the switch):
+
+    - ``already_present`` always False — the original code decided
+      idempotency inside the insert attempt: the scope-qualified
+      collision check (per-destination-struct, claim-3 fix) returns
+      "no safe insertion" for an existing field, which surfaces as
+      ``unresolved`` rather than an early idempotent exit. The
+      engine's pre-check must not front-run that decision.
+    - ``local_validity`` always True — the original had NO local
+      validity gate; candidate text mid-repair may be legitimately
+      unbalanced, and the zero-regression bar for the switch forbids
+      new BLOCKED paths.
+    - ``risk_flags`` accumulates on the codec instance (one
+      ``order_sensitive_attribute`` per insert attempt into a struct
+      carrying repr/serde attributes — duplicates preserved, matching
+      the original's per-field append).
+    """
+
+    class _StructFieldCodec:
+        def __init__(self) -> None:
+            self.risk_flags: list[str] = []
+
+        def applicable_obligations(self, obligations):
+            from capybase.change_accounting import classify_channel
+            out = []
+            for ob in obligations or []:
+                if getattr(ob, "operation", "") != "added":
+                    continue
+                if getattr(ob, "status", "") != "MISSING":
+                    continue
+                if getattr(ob, "exclusive", False):
+                    continue
+                line = getattr(ob, "line", "") or ""
+                if not line.strip():
+                    continue
+                if classify_channel(line) in (
+                        "comment", "formatting", "directive"):
+                    continue
+                # Must look like a struct field: name: Type
+                if _field_name(line) is None:
+                    continue
+                out.append(line)
+            return out
+
+        def already_present(self, text, item):
+            return False
+
+        def try_edit(self, text, item, context):
+            field_name = _field_name(item)
+            if field_name is None:
+                return None
+            if not context:
+                return None
+            other_lines = context.splitlines()
+            field_line_idx = None
+            for i, ol in enumerate(other_lines):
+                if _field_name(ol) == field_name:
+                    field_line_idx = i
+                    break
+            if field_line_idx is None:
+                return None
+            # Walk backwards to the struct header in the other side.
+            struct_name = None
+            struct_header_line = None
+            for j in range(field_line_idx - 1, -1, -1):
+                stripped = other_lines[j].strip()
+                m = _STRUCT_HEADER_RE.match(stripped)
+                if m:
+                    struct_name = m.group(2)
+                    struct_header_line = stripped
+                    break
+            if struct_name is None:
+                return None
+            # Tuple structs: fields are positional, not named.
+            if _is_tuple_struct(struct_header_line):
+                return None
+            # Find the same struct header in the candidate.
+            cand_lines_plain = text.splitlines()
+            header_idx = None
+            for i, cl in enumerate(cand_lines_plain):
+                if _STRUCT_HEADER_RE.match(cl.strip()) and struct_name in cl:
+                    header_idx = i
+                    break
+            if header_idx is None:
+                return None
+            # repr/serialization attrs → order-sensitive risk flag.
+            for k in range(max(0, header_idx - 5), header_idx):
+                if _ORDER_SENSITIVE_ATTR_RE.search(cand_lines_plain[k]):
+                    self.risk_flags.append("order_sensitive_attribute")
+                    break
+            close_line = find_container_close_line(
+                cand_lines_plain, header_idx, language="rust")
+            if close_line is None:
+                return None
+            # SCOPE-QUALIFIED collision (claim 3): the name must not
+            # exist in THIS struct — not anywhere in the file.
+            for k in range(header_idx + 1, close_line):
+                if _field_name(cand_lines_plain[k]) == field_name:
+                    return None
+            # Detect indentation from existing fields.
+            indent = ""
+            for k in range(header_idx + 1, close_line):
+                if _field_name(cand_lines_plain[k]):
+                    stripped = cand_lines_plain[k].lstrip()
+                    indent = cand_lines_plain[k][
+                        :len(cand_lines_plain[k]) - len(stripped)]
+                    break
+            field_text = item.rstrip()
+            if not field_text.endswith(","):
+                field_text += ","
+            if indent:
+                field_text = indent + field_text.strip()
+            # Insert before the closing brace (keepends offsets are
+            # the exact string positions).
+            cand_lines = text.splitlines(keepends=True)
+            pos = sum(len(l) for l in cand_lines[:close_line])
+            pos = min(pos, len(text))
+            return (pos, pos, field_text + "\n")
+
+        def local_validity(self, text):
+            return True
+
+    return _StructFieldCodec()
+
+
 def propose_named_field_union(
     resolved_text: str, missing_obligations: list,
     *, other_side_text: str = "",
@@ -76,200 +211,54 @@ def propose_named_field_union(
     If the field name doesn't collide, transplant the field before the struct's
     closing brace.
 
+    Stage 3 (the SWITCH): the KeyedCollectionMerge engine runs the
+    lifecycle; this function is a thin adapter mapping the engine's
+    :class:`PrimitiveResult` to the wire format
+    (:class:`ImportUnionResult`, original certificate keys,
+    ``rust.named_field_union/v1``).
+
     Returns an :class:`ImportUnionResult`. Never raises.
     """
-    try:
-        before_hash = hashlib.sha256(
-            (resolved_text or "").encode("utf-8")
-        ).hexdigest()[:16]
+    from capybase.deterministic_model import PrimitiveStatus
+    from capybase.keyed_collection import merge_keyed_collection
 
-        # --- Filter to additive obligations that look like struct fields. ---
-        candidate_fields: list[str] = []
-        for ob in missing_obligations or []:
-            if getattr(ob, "operation", "") != "added":
-                continue
-            if getattr(ob, "status", "") != "MISSING":
-                continue
-            if getattr(ob, "exclusive", False):
-                continue
-            line = getattr(ob, "line", "") or ""
-            if not line.strip():
-                continue
-            from capybase.change_accounting import classify_channel
-            if classify_channel(line) in ("comment", "formatting", "directive"):
-                continue
-            # Must look like a struct field: name: Type
-            if _field_name(line) is None:
-                continue
-            candidate_fields.append(line)
+    codec = _field_codec()
+    result = merge_keyed_collection(
+        codec, resolved_text, missing_obligations,
+        other_side_text=other_side_text,
+        mechanism_id="rust.named_field_union/v1",
+    )
 
-        if not candidate_fields:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "no additive field obligations",
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        # --- Idempotency (scope-qualified, reuse-design claim 3). ---
-        # The OLD global scan suppressed a valid insertion when ANY
-        # unrelated struct carried the same field name — a coverage bug
-        # failing toward not-inserting (escalate). The real collision
-        # check is per-destination-struct: _try_insert_field locates the
-        # struct, and the per-struct existing-name scan below decides.
-        fresh = list(candidate_fields)
-        if not fresh:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "all fields already present",
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        edited_text = resolved_text
-        closed: list[str] = []
-        edits: list[str] = []
-        risk_flags: list[str] = []
-        unresolved: list[str] = []
-
-        for field_line in fresh:
-            result = _try_insert_field(
-                edited_text, field_line, other_side_text, risk_flags)
-            if result is not None:
-                edited_text = result
-                closed.append(_normalize(field_line))
-                edits.append(f"insert field {_field_name(field_line)}")
-            else:
-                unresolved.append(field_line.strip()[:60])
-
-        if not closed:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "no fields could be inserted",
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        after_hash = hashlib.sha256(
-            edited_text.encode("utf-8")
-        ).hexdigest()[:16]
-        cert = {
-            "primitive": "rust.named_field_union/v1",
-            "closed_obligations": closed,
-            "remaining_obligations": len(unresolved),
-            "edits": edits,
-            "preconditions": {"no_name_collision": True},
-            "risk_tier": RISK_TIER_A,
-            "before_hash": before_hash,
-            "after_hash": after_hash,
-            "unresolved": unresolved,
-        }
-        if risk_flags:
-            cert["risk_flags"] = risk_flags
-        return ImportUnionResult(
-            status=STATUS_APPLIED, text=edited_text,
-            certificate=cert,
-        )
-    except Exception:  # noqa: BLE001
-        return ImportUnionResult(
-            status=STATUS_BLOCKED, text=resolved_text,
-            certificate={"reason": "internal error", "before_hash": ""},
-        )
-
-
-def _try_insert_field(
-    text: str, field_line: str, other_side_text: str,
-    risk_flags: list[str],
-) -> str | None:
-    """Try to insert one struct field into the candidate.
-
-    Returns the edited text, or None when no safe insertion is possible.
-    """
-    field_name = _field_name(field_line)
-    if field_name is None:
-        return None
-
-    # Find the destination struct by looking at the other side.
-    if not other_side_text:
-        return None
-    other_lines = other_side_text.splitlines()
-    field_line_idx = None
-    for i, ol in enumerate(other_lines):
-        if _field_name(ol) == field_name:
-            field_line_idx = i
-            break
-    if field_line_idx is None:
-        return None
-
-    # Walk backwards to find the struct header.
-    struct_name = None
-    struct_header_line = None
-    for j in range(field_line_idx - 1, -1, -1):
-        stripped = other_lines[j].strip()
-        m = _STRUCT_HEADER_RE.match(stripped)
-        if m:
-            struct_name = m.group(2)
-            struct_header_line = stripped
-            break
-    if struct_name is None:
-        return None
-
-    # Refuse tuple structs (fields are positional, not named).
-    if _is_tuple_struct(struct_header_line):
-        return None
-
-    # Find the same struct header in the candidate.
-    # Use splitlines() (no keepends) for the brace scan, then re-split with
-    # keepends for insertion. find_container_close_line joins lines with \n,
-    # so keepends lines (which already have \n) would produce double-newline
-    # offsets.
-    cand_lines_plain = text.splitlines()
-    header_idx = None
-    for i, cl in enumerate(cand_lines_plain):
-        if _STRUCT_HEADER_RE.match(cl.strip()) and struct_name in cl:
-            header_idx = i
-            break
-    if header_idx is None:
-        return None
-
-    # Check for repr/serialization attrs → Tier-B risk flag.
-    for k in range(max(0, header_idx - 5), header_idx):
-        if _ORDER_SENSITIVE_ATTR_RE.search(cand_lines_plain[k]):
-            risk_flags.append("order_sensitive_attribute")
-            break
-
-    # Find the struct's closing brace.
-    close_line = find_container_close_line(cand_lines_plain, header_idx, language="rust")
-    if close_line is None:
-        return None
-
-    # SCOPE-QUALIFIED collision (reuse-design claim 3): the field name
-    # must not already exist in THIS struct — not anywhere in the file.
-    # An unrelated struct's same-named field is a different entity.
-    for k in range(header_idx + 1, close_line):
-        if _field_name(cand_lines_plain[k]) == field_name:
-            return None  # genuine collision in the destination
-
-    # Detect indentation from existing fields.
-    indent = ""
-    for k in range(header_idx + 1, close_line):
-        fn = _field_name(cand_lines_plain[k])
-        if fn:
-            stripped = cand_lines_plain[k].lstrip()
-            indent = cand_lines_plain[k][:len(cand_lines_plain[k]) - len(stripped)]
-            break
-
-    # Extract the full field text from the obligation line (with trailing comma).
-    field_text = field_line.rstrip()
-    if not field_text.endswith(","):
-        field_text += ","
-    if indent:
-        field_text = indent + field_text.strip()
-
-    # Insert before the closing brace (use keepends for the actual splice).
-    cand_lines = text.splitlines(keepends=True)
-    cand_lines.insert(close_line, field_text + "\n")
-    return "".join(cand_lines)
+    _status_map = {
+        PrimitiveStatus.APPLIED: STATUS_APPLIED,
+        PrimitiveStatus.NOT_APPLICABLE: STATUS_NOT_APPLICABLE,
+        PrimitiveStatus.AMBIGUOUS: STATUS_AMBIGUOUS,
+        PrimitiveStatus.BLOCKED: STATUS_BLOCKED,
+    }
+    _reason_map = {
+        "no applicable items": "no additive field obligations",
+        "no items could be safely inserted": "no fields could be inserted",
+        "all items already present (idempotent)":
+            "all fields already present",
+    }
+    text = result.candidate if result.candidate is not None else resolved_text
+    cert = dict(result.certificate)
+    cert["primitive"] = "rust.named_field_union/v1"
+    if "reason" in cert:
+        cert["reason"] = _reason_map.get(cert["reason"], cert["reason"])
+    if result.status == PrimitiveStatus.APPLIED:
+        # Certificate keys of the original inline lifecycle.
+        cert["closed_obligations"] = [
+            _normalize(c) for c in result.closed_obligations or []]
+        cert["edits"] = [
+            f"insert field {_field_name(c)}"
+            for c in result.closed_obligations or []]
+        cert["preconditions"] = {"no_name_collision": True}
+        cert["risk_tier"] = RISK_TIER_A
+        if codec.risk_flags:
+            cert["risk_flags"] = codec.risk_flags
+    return ImportUnionResult(
+        status=_status_map[result.status], text=text, certificate=cert)
 
 
 __all__ = ["propose_named_field_union"]
