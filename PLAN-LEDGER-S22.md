@@ -7662,3 +7662,35 @@ deterministic candidates); removal in a future pass is a dead-code
 cleanup. Test: `test_strict_mode_d01_exemption_from_confidence_floor`
 proves a deterministic-structural candidate at confidence 0.0 passes
 strict mode through the class. Gate 4,119/0.
+
+### S27-EXTEND-57 (2026-09-04) — the repair-mechanism pattern proof (stage 2 item 9); stage 2 COMPLETE
+
+**capybase/mechanism_repairs.py** — the first orchestrator-inline
+repair extracted behind the typed registry:
+`StorageClassRelocationMechanism` implements the
+`mechanisms.py`-established pattern (Stage.REPAIR, `engage(ctx) ->
+MechanismResult`) for the storage-class relocation (gcc's "invalid
+storage class for function" → remove the misplaced declaration,
+re-place at file scope). The mechanism receives a typed
+`RepairContext`, owns its trigger + edit + metadata, and never
+touches orchestrator internals. Constructed in the orchestrator's
+`__init__`; the inline version remains alongside until the full
+registry migration (the mechanism is the pattern — the remaining
+repairs follow it).
+
+4 tests (trigger fires, non-trigger declines, empty buffer declines,
+whole-file candidate shape with provenance). Gate 4,123/0.
+
+**Stage 2 is COMPLETE** — all 10 checklist items:
+- All 5 collection ports at 100% shadow agreement (37/37)
+- The claim-3 scope fix
+- The shared primitive model (EditTransaction/PrimitiveResult)
+- The KeyedCollectionMerge engine
+- The confidence-float removal (17 floats zeroed, SafetyClass
+  exemption)
+- The repair-mechanism pattern proof
+
+The deterministic-reuse design's implementation is DONE through
+stage 2. Stage 3 (per the design doc) is post-harvest: the switch
+(existing primitives become codec internals), the parser
+decomposition, and new language codecs.
