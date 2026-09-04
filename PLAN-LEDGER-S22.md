@@ -7280,3 +7280,19 @@ Gate 4,056/0. The architecture is live-verified end-to-end.
 Every flow of the candidate-ref architecture is now live-verified:
 candidate default, tier A and tier B policies, the consent gate both
 ways, CAS promotion, and fingerprint reuse. Gate 4,056/0.
+
+### S27-EXTEND-41 (2026-09-04) — strict --config: the smoke lesson institutionalized
+
+The EXTEND-40 lesson (a file-path --config silently fell back to
+defaults and lost the run's [future] overrides) is now a loud failure:
+`Config.load` raises NotADirectoryError naming the file and the fix
+(pass the file's directory, or use a repo-local ./capybase.toml); the
+CLI prints it cleanly and exits 2. An ABSENT dir keeps first-run
+"no config" semantics; only a present non-directory refuses — the
+strict-validation doctrine applied to the config surface (the same
+class as the profile gate: never guess, name the mistake).
+
+The new strictness immediately caught a test passing a file where the
+contract is a directory (the dispatch test) — working as intended.
+Tests pin all three behaviors (file → named refusal; directory →
+loads; absent → defaults). Gate 4,057/0.

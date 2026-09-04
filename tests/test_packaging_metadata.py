@@ -57,3 +57,35 @@ def test_no_empty_extras():
     extras = _pyproject()["project"]["optional-dependencies"]
     for name, deps in extras.items():
         assert deps, f"optional-dependency {name!r} is empty — remove it"
+
+
+def test_config_file_path_fails_loudly(tmp_path, monkeypatch):
+    """--config naming a FILE must refuse, not silently default (the live
+    tier-B smoke lost its overrides this way; s27-extend-41)."""
+    from capybase.config import Config
+
+    f = tmp_path / "capybase.toml"
+    f.write_text("[tests]\npre_continue = 'echo hi'\n")
+    try:
+        Config.load(config_dir=f)
+    except NotADirectoryError as exc:
+        assert "DIRECTORY" in str(exc)
+        assert str(f) in str(exc)
+    else:
+        raise AssertionError("file-path --config must raise")
+
+    # The correct contract still works: the directory. chdir to tmp so
+    # no repo-local ./capybase.toml overrides it (repo-local precedence)
+    # — and drop the file written above, which would BE that override.
+    f.unlink()
+    monkeypatch.chdir(tmp_path)
+    d = tmp_path / "cfgdir"
+    d.mkdir()
+    (d / "capybase.toml").write_text(
+        "[tests]\npre_continue = 'echo hi'\n")
+    cfg = Config.load(config_dir=d)
+    assert cfg.tests.pre_continue == "echo hi"
+
+    # An absent dir stays "no config" (first-run semantics unchanged).
+    cfg2 = Config.load(config_dir=tmp_path / "does-not-exist")
+    assert cfg2.tests.pre_continue != "echo hi"

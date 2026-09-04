@@ -980,7 +980,11 @@ def main(argv: list[str] | None = None) -> int:
     # capybase.toml + calibration artifacts from it, so the user repo need not
     # carry any capybase config. A repo-local ./capybase.toml still wins (per-repo
     # overrides); see Config.load for the full precedence.
-    config = Config.load(config_dir=args.config)
+    try:
+        config = Config.load(config_dir=args.config)
+    except NotADirectoryError as exc:
+        print(f"capybase: error: {exc}", file=sys.stderr)
+        return 2
 
     # Comment jury CLI override (mutually exclusive group). --no-jury is the
     # one-action opt-out; --jury-mode sets an explicit mode. Both override the

@@ -1214,6 +1214,17 @@ class Config(BaseModel):
         experience store stays repo-relative (repo-specific merge patterns).
         """
         cdir = Path(config_dir).expanduser() if config_dir else default_config_dir()
+        # STRICT (s27-extend-41): --config naming an existing FILE must not
+        # silently fall back to defaults (the live tier-B smoke lost its
+        # [future] overrides exactly this way — a file path made the
+        # <dir>/capybase.toml lookup miss and the run used defaults). The
+        # contract is a DIRECTORY; an absent dir stays "no config" (first
+        # run), but a present non-directory is a user error — name it.
+        if config_dir is not None and cdir.exists() and not cdir.is_dir():
+            raise NotADirectoryError(
+                f"--config expects a DIRECTORY containing capybase.toml, "
+                f"got the file: {cdir} — pass the file's directory "
+                f"(or use a repo-local ./capybase.toml)")
         resolved = _resolve_config_path(path, cdir)
         if resolved is None:
             cfg = cls()

@@ -288,8 +288,9 @@ def test_cli_rebase_defaults_to_candidate_mode(
         cli.Orchestrator, "rebase",
         lambda self, *a, **k: (called.__setitem__("in_place", called["in_place"] + 1)) or type("R", (), {"escalated": False})())
 
-    cfg = tmp_path / "c.toml"
-    cfg.write_text("")
+    cfg_dir = tmp_path / "cfgdir"
+    cfg_dir.mkdir()
+    (cfg_dir / "capybase.toml").write_text("")
 
     # The strict calibration gate: resolution commands refuse without a
     # provider. Inject a synthetic ResolvedProvider (in-memory profile)
@@ -307,10 +308,10 @@ def test_cli_rebase_defaults_to_candidate_mode(
     )
     monkeypatch.setattr(pcfg, "resolve_provider", lambda **k: _fake)
 
-    cli.main(["--config", str(cfg), "--repo", str(repo), "rebase", "main"])
+    cli.main(["--config", str(cfg_dir), "--repo", str(repo), "rebase", "main"])
     assert called["candidate"] == 1 and called["in_place"] == 0
 
-    cli.main(["--config", str(cfg), "--repo", str(repo),
+    cli.main(["--config", str(cfg_dir), "--repo", str(repo),
               "rebase", "--in-place", "main"])
     assert called["candidate"] == 1 and called["in_place"] == 1
 
