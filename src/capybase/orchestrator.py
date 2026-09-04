@@ -58,7 +58,7 @@ from capybase.test_output import _tool_of as _tool_of_test_cmd
 from capybase.config import Config
 from capybase.consensus import rank_by_consensus
 from capybase.preflight import run_rebase_preflight
-from capybase.langs import is_c_family, is_cpp
+from capybase.langs import is_c_family, is_cpp, any_of as _lang_any_of
 
 # Sentinel for "not in cache" (distinguishes a cached None from a cache miss).
 _MISSING = object()
@@ -1630,13 +1630,13 @@ def _shared_context_duplicate_definitions(
             r"(?:const\s*)?(?:noexcept\s*)?\{\s*$")]
         skip_names = {"if", "for", "while", "switch", "catch", "do", "else",
                       "return", "sizeof", "typeof"}
-    elif lang in ("python", "py"):
+    elif lang in _lang_any_of("python"):
         patterns = [
             _re.compile(r"^\s*def\s+\w+\s*\(.*\)\s*(->\s*[^:]+)?:"),
             _re.compile(r"^\s*class\s+\w+"),
         ]
         skip_names = set()
-    elif lang in ("rust", "rs"):
+    elif lang in _lang_any_of("rust"):
         patterns = [
             _re.compile(r"^\s*(?:pub\s+)?(?:\w+\s+)*fn\s+\w+[^{]*\{\s*$"),
             _re.compile(r"^\s*(?:pub\s+)?(?:struct|enum|trait)\s+\w+"),
@@ -10774,9 +10774,8 @@ class Orchestrator:
         journal the final report or write a review bundle (the caller,
         :meth:`_reconcile_comments`, does that once after the §10 loop settles)."""
         lang = (language or "").strip().lower()
-        if lang not in (
-            "rust", "rs", "python", "py",
-            "javascript", "js", "typescript", "ts",
+        if lang not in _lang_any_of(
+            "rust", "python", "javascript", "typescript",
         ):
             return None
         try:

@@ -7435,3 +7435,29 @@ until engines exist to fill it. The proposal's 70-80% sharing estimate
 is plausible; its own migration staging is honest; its P2 (new
 language codecs) is post-harvest BY DEFINITION for a 4-language
 corpus.
+
+### S27-EXTEND-47 (2026-09-04) — deterministic-reuse stage 1 COMPLETE
+
+- **Alias consolidation (claim 2)**: `langs.canonical_language` +
+  `any_of` — SIX re-spelled sites now derive from one map (jury gate's
+  dict, comment masker, resolver code-language + indentation sets,
+  orchestrator inline pairs, value-classifier routing, comment
+  reconciler/verifiers). Adding an alias updates every set.
+- **SafetyClass D0–D3**: provenance→class map in langs.py; unlisted
+  `deterministic-*` defaults conservative-STRUCTURAL; SBCR and
+  compiler fixits honestly HEURISTIC. **Acceptance tier A now requires
+  D0/D1** — the reproducible-search-vs-algebra conflation is fixed
+  (pinned by test: `combination_search` → B despite its deterministic
+  label). `UnitEvidence.deterministic` follows the CLASS (exact reuse
+  has no "deterministic" prefix but is the purest D0 — caught by the
+  test that first failed).
+- **Live confirmation (3 informative cases, no full harvest)**:
+  sqlite-0004 PASS 1.00, tokio-0046 NEAR 0.88, zenodo-0003 NEAR 0.83 —
+  exact prior bands; all three resolved model-assisted this run (which
+  mechanism fires varies) and graded tier B honestly. No verdict or
+  sim regressions under stage-1 code.
+- The confidence floats on deterministic repairs (0.85/0.9) remain —
+  stage 2 removes them alongside the repair-construction port.
+
+Gate 4,067/0; stage-1 checklist fully checked in
+docs/deterministic-reuse-design.md.

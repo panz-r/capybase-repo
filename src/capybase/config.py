@@ -1375,11 +1375,9 @@ def jury_eligible(future: "FutureConfig", language: str | None) -> bool:
     allowed = getattr(future, "jury_eligible_languages", []) or []
     if not allowed:
         return True  # empty allowlist = gate inert
-    lang = (language or "").strip().lower()
-    # Normalize common aliases so "py" matches "python".
-    aliases = {"py": "python", "rs": "rust",
-               "js": "javascript", "ts": "typescript"}
-    lang = aliases.get(lang, lang)
-    allowed_norm = {aliases.get(a.strip().lower(), a.strip().lower())
-                    for a in allowed}
+    from capybase.langs import canonical_language
+    lang = canonical_language(language)
+    # Aliases resolve through the ONE canonical map (reuse-design
+    # stage 1: this gate previously re-spelled its own alias dict).
+    allowed_norm = {canonical_language(a) for a in allowed}
     return lang in allowed_norm

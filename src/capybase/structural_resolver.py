@@ -153,10 +153,12 @@ def intent_coverage_score(
 #: normalized IDENTICALLY — identical_sides could merge the sides and
 #: one_sided_change could discard an indentation change that moved a
 #: statement's scope.
-_INDENTATION_SEMANTIC = frozenset({
-    "python", "py", "yaml", "yml", "makefile", "make", "elm",
-    "haskell", "hs", "coffee", "haml", "slim", "jade", "pug", "stylus",
-})
+from capybase.langs import any_of as _lang_any_of
+
+_INDENTATION_SEMANTIC = _lang_any_of(
+    "python", "yaml", "makefile", "elm", "haskell",
+    "coffee", "haml", "slim", "jade", "stylus",
+)
 
 
 def _normalize(text: str, language: str | None = None) -> str:
@@ -2161,11 +2163,12 @@ _TEXT_VALUE_MAX_LINES = 8
 #: Code languages where the prose rule must NOT fire (a ``x = 1`` value bump in
 #: a .py file is a real assignment, not prose). Markdown/text/yaml/toml/None
 #: (unknown) qualify for the prose rule.
-_CODE_LANGUAGES_FOR_TEXT_RULE = frozenset({
-    "python", "py", "rust", "rs", "javascript", "js", "typescript", "ts",
-    "jsx", "tsx", "go", "golang", "java", "c", "cpp", "c++", "csharp", "cs",
-    "kotlin", "swift", "scala", "dart", "php",
-})
+from capybase.langs import any_of as _lang_any_of
+
+_CODE_LANGUAGES_FOR_TEXT_RULE = _lang_any_of(
+    "python", "rust", "javascript", "typescript", "go", "java",
+    "c", "cpp", "csharp", "kotlin", "swift", "scala", "dart", "php",
+)
 
 
 def _try_generalized_mini_conflict(

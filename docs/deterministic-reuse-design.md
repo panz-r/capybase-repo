@@ -74,11 +74,28 @@ acceptance policy: tier A should require D0/D1 provenance.
 ## Stage 1 checklist
 
 1. [x] Claim verification (above).
-2. [ ] `_normalize` → language-aware: an EquivalencePolicy-shaped fix
+2. [x] `_normalize` → language-aware: an EquivalencePolicy-shaped fix
    (indentation-sensitive languages preserve leading whitespace;
-   brace-family keeps horizontal collapse ONLY as a declared cosmetic
-   rule for the lint check; unknown text = line endings only).
-   Regression test from the proposal's example. Corpus + gates after.
-3. [ ] Alias resolution from one source (langs.py); the four sites.
-4. [ ] SafetyClass + acceptance refinement.
-5. [ ] Ledger + this document updated.
+   brace-family keeps horizontal collapse — indentation is style
+   there; unknown text = conservative collapse pending per-language
+   declarations). Regression test from the proposal's example.
+   Corpus + gates after.
+3. [x] Alias resolution from one source (langs.py): `canonical_language`
+   + `any_of` builder; SIX re-spelled sites consolidated (the jury
+   gate's dict, the comment masker, the resolver's code-language and
+   indentation sets, the orchestrator's inline pairs, the value
+   classifier's routing sets, comment reconciler/verifiers). Adding an
+   alias now updates every set.
+4. [x] SafetyClass (D0–D3) in langs.py with the provenance→class map
+   (unlisted `deterministic-*` defaults conservative-STRUCTURAL);
+   acceptance tier A refined to require D0/D1 — SBCR and compiler
+   fixits (D3, despite the deterministic label) now grade through the
+   evidence tiers. `UnitEvidence.deterministic` follows the CLASS
+   (exact reuse carries no "deterministic" prefix but is the purest
+   D0). The `self_reported_confidence=0.85/0.9` floats on
+   deterministic repairs remain — removal is stage 2 (it touches every
+   repair's construction; the class now carries the meaning they faked).
+5. [x] Ledger + this document updated.
+6. [x] Live confirmation: three informative cases under stage-1 code
+   (sqlite-0004 C, tokio-0046 rust, zenodo-0003 python) — verdicts and
+   sims unchanged; acceptance reasons D-class-annotated.

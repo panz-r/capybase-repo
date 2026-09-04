@@ -33,6 +33,16 @@ PROPOSE_FOR_REVIEW = "PROPOSE_FOR_REVIEW"
 STOP = "STOP"
 
 
+def _safety_class(outcome) -> "SafetyClass | None":
+    """The mechanism's D-class (reuse-design stage 1): reproducibility is
+    not correctness. SBCR is a reproducible SEARCH (D3-heuristic); exact
+    reuse is true algebra (D0). Tier A's "deterministic" was conflating
+    them."""
+    from capybase.langs import safety_class_for
+    cand = getattr(outcome, "accepted", None)
+    return safety_class_for(getattr(cand, "provenance", None))
+
+
 @dataclass
 class UnitEvidence:
     """One accepted unit's evidence, derived from the validation result.
@@ -49,6 +59,7 @@ class UnitEvidence:
     markers_remaining: bool      # features["markers_remaining"]
     verifier_disagreement: bool  # accepted while suspected_validator_error
     obligations_dropped: bool    # warnings survived on the accepted unit
+    safety: str | None = None    # D-class ("exact"/"structural"/"policy"/"heuristic")
 
 
 @dataclass
@@ -69,10 +80,14 @@ def _unit_evidence(outcome) -> UnitEvidence:
     cand = getattr(outcome, "accepted", None)
     prov = str(getattr(cand, "provenance", "") or "")
     warnings = list(getattr(val, "warnings", None) or []) if val is not None else []
+    _sc = _safety_class(outcome)
     return UnitEvidence(
         unit_id=str(getattr(outcome, "unit", None) and outcome.unit.unit_id
                     or getattr(outcome, "unit_id", "") or "?"),
-        deterministic=prov.startswith("deterministic"),
+        # Non-model = a D-class exists (exact reuse has no "deterministic"
+        # prefix but is the purest D0 — the class, not the string, decides).
+        deterministic=_sc is not None,
+        safety=_sc.value if _sc is not None else None,
         syntax_unknown=feats.get("syntax_outcome") == "unknown",
         syntax_failed=feats.get("syntax_passed") is False,
         markers_remaining=bool(feats.get("markers_remaining")),
@@ -127,10 +142,17 @@ def decide(
             f"{', '.join(unknown[:4])}")
         return PolicyDecision("B", PROPOSE_FOR_REVIEW, reasons)
 
-    # Tier A: deterministic resolutions with complete oracles.
-    if evidence and all(e.deterministic for e in evidence):
+    # Tier A: D0/D1-class resolutions with complete oracles. "Deterministic"
+    # alone is NOT enough — a reproducible heuristic (SBCR, compiler fixits)
+    # is D3 and needs the evidence tiers; a policy choice (D2) is
+    # configurable, not exact. (Reuse-design stage 1.)
+    classes = [e.safety for e in evidence]
+    if evidence and all(
+            e.deterministic and e.safety in ("exact", "structural")
+            for e in evidence):
         return PolicyDecision("A", AUTO_APPLY, [
-            f"deterministic resolution(s): {len(evidence)} unit(s)"])
+            f"D0/D1 deterministic resolution(s): {len(evidence)} unit(s) "
+            f"({', '.join(sorted({c or '?' for c in classes}))})"])
 
     # Model-assisted: the strength of the independent behavioral evidence
     # decides. Tests passing = strong independent evidence (tier B

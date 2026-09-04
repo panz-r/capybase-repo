@@ -343,15 +343,13 @@ def set_mask_deferred_comments(enabled: bool) -> None:
 # Languages whose comments mask_deferable_comments handles reliably. Outside
 # this set the masker is a no-op (the sides pass through unchanged) — graceful
 # degradation, never wrong output.
-_MASKING_LANGUAGES = frozenset({
-    "rust", "rs",
-    "python", "py",
-    "javascript", "js", "typescript", "ts",
-    "go", "golang",
-    "c", "cpp", "c++", "java", "kotlin", "swift", "scala", "dart",
-    "csharp", "cs",
-    "php",
-})
+from capybase.langs import any_of as _lang_any_of
+
+_MASKING_LANGUAGES = _lang_any_of(
+    "rust", "python", "javascript", "typescript", "go",
+    "c", "cpp", "java", "kotlin", "swift", "scala", "dart",
+    "csharp", "php",
+)
 
 
 def _mask_sides_deferred(unit, cur: str, base: str, rep: str) -> tuple[str, str, str]:

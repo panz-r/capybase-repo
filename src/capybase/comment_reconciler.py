@@ -165,7 +165,8 @@ def build_comment_ledger(
     # STRING LITERALS, not comments, so enumerate_comment_spans misses them.
     # K3: docstrings are classified like comments (DEFERRED unless they match
     # MACHINE/LEGAL/DOCTEST) and reconciled via the triple-quote prefix.
-    include_docstrings = lang in ("python", "py")
+    from capybase.langs import any_of as _lang_any_of
+    include_docstrings = lang in _lang_any_of("python")
     raw_by_version: dict[str, list[ClassifiedComment]] = {}
     for vname, vtext, _vents in versions:
         spans = enumerate_comment_spans(vtext, lang)

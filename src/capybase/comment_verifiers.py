@@ -355,7 +355,8 @@ def _check_doc_signature_mismatch(plan, frontier, resolved_text, lang) -> list[C
     ``keep``/``preserve_verbatim`` are exempt. Degrades gracefully when the
     enclosing function can't be identified (no false positives).
     """
-    if lang not in ("python", "py"):
+    from capybase.langs import any_of as _lang_any_of
+    if lang not in _lang_any_of("python"):
         return []
     try:
         from capybase.adapters.docstring_parser import (

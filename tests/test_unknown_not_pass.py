@@ -106,3 +106,50 @@ def test_evidence_envelope_unknown_and_absent():
         unit = _U(); validation = _ValBare(); accepted = object()
 
     assert evidence_envelope(_O2()) == []
+
+
+def test_safety_class_taxonomy():
+    """D0-D3 (reuse-design stage 1): reproducibility is not correctness."""
+    from capybase.langs import SafetyClass, safety_class_for
+
+    assert safety_class_for("exact_history_reuse") == SafetyClass.EXACT
+    assert safety_class_for("combination_search") == SafetyClass.HEURISTIC
+    assert safety_class_for("deterministic_symbol_injection") == SafetyClass.HEURISTIC
+    assert safety_class_for("plain_llm") is None
+    # Unlisted deterministic-* provenances default conservative-STRUCTURAL.
+    assert safety_class_for("deterministic_new_thing") == SafetyClass.STRUCTURAL
+
+
+def test_tier_a_requires_d0_d1_not_heuristic_determinism():
+    """The acceptance refinement: a reproducible SEARCH (D3) must not
+    reach AUTO_APPLY on its mechanism label alone — it needs the
+    evidence tiers like any model-assisted resolution."""
+    from capybase.acceptance import AUTO_APPLY, PROPOSE_FOR_REVIEW, decide
+
+    class _U:
+        unit_id = "u1"
+
+    class _V:
+        features = {"syntax_passed": True}
+        warnings = []
+
+    class _CExact:
+        provenance = "exact_history_reuse"
+        suspected_validator_error = False
+
+    class _O:
+        unit = _U(); validation = _V(); accepted = None
+
+        def __init__(self, cand):
+            self.accepted = cand
+
+    exact = decide([_O(_CExact())], True)
+    assert (exact.tier, exact.decision) == ("A", AUTO_APPLY)
+    assert "D0/D1" in exact.reasons[0]
+
+    class _CSbcr:
+        provenance = "combination_search"       # deterministic label, D3
+        suspected_validator_error = False
+
+    heuristic = decide([_O(_CSbcr())], True)
+    assert (heuristic.tier, heuristic.decision) == ("B", PROPOSE_FOR_REVIEW)

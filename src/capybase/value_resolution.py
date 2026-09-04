@@ -332,15 +332,16 @@ def _classify_family_a(base: str, cur: str, rep: str) -> ValueResolution | None:
 # Entry point
 # ---------------------------------------------------------------------------
 
+from capybase.langs import any_of as _lang_any_of
+
 #: Languages routed to the ast-based Python classifier.
-_PY_LANGS = frozenset({"python", "py"})
+_PY_LANGS = _lang_any_of("python")
 
 #: Languages routed to the regex-based Family-A classifier (brace-delimited).
-_A_LANGS = frozenset({
-    "rust", "rs", "javascript", "js", "typescript", "ts", "jsx", "tsx",
-    "go", "golang", "java", "c", "cpp", "c++", "csharp", "cs",
-    "kotlin", "swift", "scala", "dart", "php",
-})
+_A_LANGS = _lang_any_of(
+    "rust", "javascript", "typescript", "go", "java",
+    "c", "cpp", "csharp", "kotlin", "swift", "scala", "dart", "php",
+)
 
 
 def classify_value_resolution(
