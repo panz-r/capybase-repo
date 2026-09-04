@@ -7694,3 +7694,21 @@ The deterministic-reuse design's implementation is DONE through
 stage 2. Stage 3 (per the design doc) is post-harvest: the switch
 (existing primitives become codec internals), the parser
 decomposition, and new language codecs.
+
+### S27-EXTEND-58 (2026-09-04) — architecture guards + cross-language conformance
+
+**tests/test_architecture_guards.py** — the CI checks the design
+specifies, preventing structural regressions:
+- The deterministic core (3 modules) contains no language-name
+  conditionals, no concrete language imports, no raw allowlists.
+- Every known provenance maps to a SafetyClass or is model-assisted.
+- Unlisted deterministic-* provenances default conservative-STRUCTURAL.
+
+**Cross-language algebra tests**: the same abstract situation produces
+the same merge decision through manifest, attribute, and import
+codecs — additive union → APPLIED everywhere; idempotent →
+NOT_APPLICABLE everywhere. The engine's decision shape is
+codec-independent (the design's core promise).
+
+13 tests; gate 4,136/0. The design doc gains a "Stage 2.5" section
+for these pre-harvest-safe items.

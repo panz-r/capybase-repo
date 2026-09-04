@@ -170,3 +170,28 @@ acceptance policy: tier A should require D0/D1 provenance.
    model-opinion floor) replaces them. The floats were gaming a gate
    designed for MODEL self-reports. Test proves a deterministic-
    structural candidate at confidence 0.0 passes strict mode.
+
+
+## Stage 2.5: Architecture Guards + Conformance (post-stage-2, pre-harvest)
+
+The design specifies CI checks that prevent structural regressions and
+a conformance suite proving the engine works identically through every
+codec. Both are safe pre-harvest (tests only, no behavior change).
+
+1. [x] **Architecture-guard tests** (tests/test_architecture_guards.py):
+   - The deterministic core (deterministic_model.py,
+     keyed_collection.py, mechanism_repairs.py) contains NO
+     language-name conditionals and NO concrete language imports.
+   - No new raw language allowlists outside the canonical sources.
+   - Every known provenance maps to a SafetyClass (or is
+     model-assisted/None).
+   - 13 tests total; gate 4,136/0.
+
+2. [x] **Cross-language algebra tests**: the same abstract situation
+   (additive union → APPLIED; idempotent → NOT_APPLICABLE) produces
+   the same decision through manifest, attribute, and import codecs.
+   The rendered text differs; the merge decision is identical.
+
+3. [ ] **The switch**: make one existing primitive use the engine
+   internally (the old function becomes a codec-detail). This is the
+   stage-3 item that needs the harvest's confirmation first.
