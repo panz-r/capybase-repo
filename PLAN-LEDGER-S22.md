@@ -7027,3 +7027,42 @@ artifacts → remote lease publication (service mode, default-OFF —
 capybase stays local-first). The per-unit CEGIS loop, prompt subsystem,
 jury, corpus, and eval are untouched — they produce candidates and
 evidence; the subsystem consumes them.
+
+### S27-EXTEND-32 (2026-09-04) — candidate-ref design P3-slice LANDED: UNKNOWN is not pass
+
+The first implementation slice of
+docs/candidate-ref-architecture-design.md (user: "Begin! part of
+sprint 27"):
+
+- **VerificationCheckResult.unknown** — the evidence outcome flag;
+  features convention `syntax_outcome: "unknown"`, syntax_passed
+  ABSENT on unknown paths (never True).
+- **Every lying site fixed**: the per-unit Ccs validator's
+  not-available / vanished / exception paths (×3) now record unknown;
+  the brace-defer path records NEITHER pass nor unknown (the
+  whole-file gate owns it — no double-count); the rust whole-file
+  path tracks unknown through vanished-rustc, include_str
+  location-undecidability, AND a msg-belt for _compile_rust's own
+  not-checked returns; the C whole-file vanished-tool path likewise.
+- **Consumers honor it**: quality withholds credit (absent key);
+  risk adds a +0.2 unknown bump (a failure's 0.3 still outranks it);
+  the accept report prints "- ! syntax NOT CHECKED (unknown — reduced
+  trust)" instead of silence.
+- **Trust tier journaled**: each accepted step emits
+  `acceptance_trust` (tier A clean; B when any unit carries an
+  unknown oracle) — the future promotion policy's input.
+- Acceptance remains compatibility-neutral (minimal installs still
+  pass) — enforcement arrives with P1/P2's candidate-ref, where
+  PROPOSE_FOR_REVIEW means "leave the candidate branch, don't
+  promote".
+
+3 new tests (unknown-not-pass contract, risk ordering, report line) +
+2 pinned tests updated to the honest contract. Gate 4,036/0. Live
+smoke sqlite-0004: PASS 1.00, tier A, zero unknowns — healthy
+toolchain paths unaffected.
+
+**P0 mutation-site audit (for P1)**: the orchestrator's mutation
+surface is create_backup_ref (7039), the rebase drive + stage_paths
+(5424), abort ×3 (5191/7184/7274), and the in-tree candidate/verify
+writes — 109 self.git touchpoints total, all in run()'s loop; the
+eval/corpus paths already run isolated in worktrees.

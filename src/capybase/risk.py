@@ -499,6 +499,12 @@ def _risk_score(feats: dict) -> float:
         score += 0.3
     if not feats.get("syntax_passed", True):
         score += 0.3
+    # Candidate-ref design P3 (s27): UNKNOWN is not pass — an oracle that
+    # could not run must raise risk, just less than a failure it would have
+    # caught. (syntax_passed is ABSENT on the unknown paths — the default
+    # True would otherwise silently skip this.)
+    if feats.get("syntax_outcome") == "unknown":
+        score += 0.2
     # Pre-resolution conflict severity: high-severity conflicts
     # (large + definition-touching) get a small risk bump. Encoded low=0/med=1/high=2.
     severity = feats.get("conflict_severity", 1.0)

@@ -56,6 +56,15 @@ class VerificationCheckResult:
     message: str = ""
     detail: dict = field(default_factory=dict)
     features: dict[str, float | int | str | bool] = field(default_factory=dict)
+    # Candidate-ref design P3 (s27): the acceptance subsystem's core rule —
+    # UNKNOWN IS NOT PASS. True when this oracle could not run (missing/
+    # vanished tool, undecidable location). ``passed`` stays True for
+    # acceptance-compatibility (minimal installs must not hard-fail), but
+    # the evidence records the truth: features["<oracle>_outcome"] = "unknown",
+    # quality scores withhold credit, risk bumps, and the completion trust
+    # tier degrades. A check that did not run must never look like one that
+    # passed.
+    unknown: bool = False
 
 
 @runtime_checkable
@@ -3582,14 +3591,17 @@ class _StandaloneSyntaxValidator:
             return VerificationCheckResult(
                 name=self.name, passed=True,
                 message="spliced text has unbalanced braces; deferring to whole-file check",
-                features={fk: False, "syntax_passed": True},
+                # The whole-file gate owns syntax here — this check claims
+                # neither pass nor unknown (no credit, no double-count).
+                features={fk: False},
             )
         tool = self._resolve_compiler(ctx.config)
         if tool is None:
             return VerificationCheckResult(
                 name=self.name, passed=True,
                 message=f"{self._lang_label()} compiler not available; syntax not checked",
-                features={fk: False, "syntax_passed": True},
+                features={fk: False, "syntax_outcome": "unknown"},
+                unknown=True,
             )
         try:
             ok, msg = self._compile(spliced, tool, ctx.config)
@@ -3597,13 +3609,15 @@ class _StandaloneSyntaxValidator:
             return VerificationCheckResult(
                 name=self.name, passed=True,
                 message=f"{self._lang_label()} compiler vanished; syntax not checked",
-                features={fk: False, "syntax_passed": True},
+                features={fk: False, "syntax_outcome": "unknown"},
+                unknown=True,
             )
         except Exception as exc:  # noqa: BLE001 - never crash resolution
             return VerificationCheckResult(
                 name=self.name, passed=True,
                 message=f"{self._lang_label()} syntax check error: {exc}",
-                features={fk: False, "syntax_passed": True},
+                features={fk: False, "syntax_outcome": "unknown"},
+                unknown=True,
             )
         if not ok and self._is_resolution_error(msg):
             return VerificationCheckResult(
@@ -5597,6 +5611,7 @@ class VerificationEngine:
                 # Loose .rs (no Cargo.toml) or cargo absent: standalone rustc is
                 # the only option and is correct here (no crate paths to resolve).
                 rustc = _resolve(self.config.rustc_path)
+                syntax_unknown = False
                 if rustc is not None:
                     syntax_checked = True
                     edition = self.config.rust_edition or _infer_rust_edition(
@@ -5606,9 +5621,14 @@ class VerificationEngine:
                         ok, msg = _compile_rust(
                             whole, rustc_path=rustc, edition=edition
                         )
+                        if "not checked" in (msg or ""):
+                            # _compile_rust's own undecidable-location
+                            # paths — UNKNOWN is not pass.
+                            syntax_unknown = True
                     except FileNotFoundError:
                         ok = True  # tool vanished between resolve & run → skip
                         msg = "rustc not available; syntax not checked"
+                        syntax_unknown = True  # UNKNOWN is not pass (P3-slice)
                     # E2 (sprint-23): include_str!/include_bytes! resolve
                     # relative to the ORIGINAL file's directory; a temp-copy
                     # compile cannot see them (axum-0005/0033: include_str'd
@@ -5618,6 +5638,7 @@ class VerificationEngine:
                         ok = True
                         msg = ("rustc standalone: include_str/include_bytes "
                                "undecidable from a temp copy; not checked")
+                        syntax_unknown = True  # location-undecidable
                     # Standalone rustc on a loose .rs can't resolve crate::
                     # / super:: paths (no Cargo.toml context), so it FALSE-
                     # POSITIVES on E0432/E0433 for any correct file that does
@@ -5652,7 +5673,15 @@ class VerificationEngine:
                         )
                 features["syntax_checked"] = syntax_checked
                 features["syntax_passed"] = syntax_ok
+                if syntax_unknown:
+                    # UNKNOWN is not pass: the oracle never produced a
+                    # verdict. syntax_passed is ABSENT (not True) — consumers
+                    # withhold credit; risk adds the unknown bump explicitly.
+                    features.pop("syntax_passed", None)
+                    features["syntax_outcome"] = "unknown"
         elif is_c_family(language):
+            # UNKNOWN is not pass (P3-slice): the vanished-tool path marks it.
+            _cc_syntax_unknown = False
             # C/C++ whole-file verification. Two paths:
             #
             # 1. When a user-supplied build command (``cc_build_command``) is
@@ -6130,6 +6159,7 @@ class VerificationEngine:
                     except FileNotFoundError:
                         ok = True  # tool vanished between resolve & run → skip
                         msg = "C/C++ compiler not available; syntax not checked"
+                        _cc_syntax_unknown = True  # UNKNOWN is not pass
                     # Standalone gcc runs in /tmp with no -I flags, so it cannot
                     # resolve project-internal headers (#include "json.h",
                     # "server.h"). A missing-header fatal error is an artifact
@@ -6167,6 +6197,10 @@ class VerificationEngine:
                         )
             features["syntax_checked"] = syntax_checked
             features["syntax_passed"] = syntax_ok
+            if _cc_syntax_unknown:
+                # UNKNOWN is not pass: absent syntax_passed + explicit outcome.
+                features.pop("syntax_passed", None)
+                features["syntax_outcome"] = "unknown"
         elif language == "toml" and Path(path).name == "Cargo.toml":
             # A dependency/manifest conflict in Cargo.toml. ``detect_language``
             # classifies it as ``"toml"`` (not ``"rust"``), so it never reached

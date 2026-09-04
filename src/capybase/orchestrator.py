@@ -17562,6 +17562,27 @@ class Orchestrator:
             )
             if not body:
                 return
+            # Candidate-ref design P3 (s27): the acceptance trust tier.
+            # Tier A = deterministic resolutions + every required oracle ran.
+            # Any UNKNOWN oracle (missing toolchain, undecidable location)
+            # degrades the step to B — journal it so the completion state and
+            # the future promotion policy can see reduced trust explicitly.
+            _unknown_units = [
+                o.unit.unit_id if hasattr(o, "unit") else str(i)
+                for i, o in enumerate(result.outcomes)
+                if (getattr(getattr(o, "validation", None), "features", {}) or {})
+                .get("syntax_outcome") == "unknown"
+            ]
+            _tier = "B" if _unknown_units else "A"
+            self.journal.emit(
+                "acceptance_trust",
+                {
+                    "step_index": result.step_index,
+                    "tier": _tier,
+                    "unknown_oracle_units": _unknown_units[:8],
+                },
+                step_index=result.step_index,
+            )
             report = self.paths.final / "accept-report.md"
             header = f"## step {result.step_index}\n\n"
             # Append (one section per step); create on first write.

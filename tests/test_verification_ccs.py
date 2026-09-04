@@ -302,9 +302,13 @@ def test_ccs_syntax_validator_skips_when_compiler_absent(monkeypatch):
     monkeypatch.setattr(vmod, "_resolve_tool", lambda name: None)
     u = _unit(worktree=_C_WORKTREE, language="c", marker_span=_C_SPAN)
     res = _verify(CcsSyntaxValidator(), u, _candidate("    return n + 1\n"))
-    assert res.passed
+    assert res.passed  # acceptance-neutral (minimal installs must not fail)
     assert res.features["ccs_syntax_checked"] is False
-    assert res.features["syntax_passed"] is True
+    # P3-slice (s27): UNKNOWN IS NOT PASS — a check that never ran no
+    # longer claims syntax_passed=True; the evidence records the truth.
+    assert "syntax_passed" not in res.features
+    assert res.features["syntax_outcome"] == "unknown"
+    assert res.unknown is True
 
 
 def test_ccs_syntax_validator_skips_unbalanced_braces():
@@ -318,7 +322,10 @@ def test_ccs_syntax_validator_skips_unbalanced_braces():
     res = _verify(CcsSyntaxValidator(), u, _candidate("    g(); {\n"))
     assert res.passed, res.message
     assert res.features["ccs_syntax_checked"] is False
-    assert res.features["syntax_passed"] is True
+    # Deferred to the whole-file gate: neither pass nor unknown here (no
+    # credit, no double-count when the whole-file oracle runs).
+    assert "syntax_passed" not in res.features
+    assert res.unknown is False
 
 
 @skip_no_gxx

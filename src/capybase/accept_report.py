@@ -185,6 +185,10 @@ def _validation_lines(validation: Any) -> list[str]:
         lines.append("- syntax passed")
     elif syntax is False:
         lines.append("- ! syntax failed")
+    elif feats.get("syntax_outcome") == "unknown":
+        # UNKNOWN is not pass (P3-slice): the compile oracle never produced
+        # a verdict — reduced-trust acceptance.
+        lines.append("- ! syntax NOT CHECKED (unknown — reduced trust)")
     # Hard-failure count, when non-zero, is worth surfacing (a passed validation
     # has none; a non-zero count means warnings survived).
     hard = getattr(validation, "hard_failures", None) or []
