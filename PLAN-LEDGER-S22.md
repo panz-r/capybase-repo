@@ -6106,22 +6106,41 @@ PRE-EXTEND-17/audit-2/dead-rung machinery. Given s27's pattern
 0040, 0049, nlohmann-0020), a per-dataset sample (clickhouse-0001,
 protobuf-0005, fmt-0003 ×3) was run to calibrate the band.
 
-**Band sample result — the band is NOT machinery-recoverable; the
-projection stands at 92.2% raw / 93.0% P+W:**
-- clickhouse-0001 + protobuf-0005: ESC ×3, terminal SAFE_SKIP, sim
-  0.0 — the CAPACITY class (files beyond the window; resolution never
-  attempts). The upside path is the oversized-splitting design (docs/
-  oversized-splitting-design*.md, pending) — sprint-28 material.
-- fmt-0003: ESC ×3 at sim 0.995, REPAIR_FAILURE — the validated
-  era-floor (near-oracle merge that cannot pass fmt's era gate).
+### S27-EXTEND-25 (2026-09-04) — CORRECTION: the definitive projection; SAFE_SKIP re-characterized
 
-Every non-PASS class in the projection is now characterized and
-measured under the current stack: content-level ESCs, the capacity
-SAFE_SKIPs, the rust era-toolchain dead (tokio-0109 census), the NEAR/
-WORKING graded bands, shared-gate GATE_UNAVAILABLEs, and the
-oracle-subjective DIVERGENTs. The harvest expectation is 92.2% raw /
-93.0% P+W, with headroom to ~94% only via the oversized-splitting
-work.
+Two corrections to EXTEND-24, from reading the actual reasons:
+
+1. **SAFE_SKIP ≠ capacity.** clickhouse-0001 + protobuf-0005 are
+   "git rebase resolved cleanly (no conflict)" — the reconstructed
+   trees don't conflict (a harness/dataset materialization artifact),
+   NOT the oversized/window class EXTEND-24 claimed. The eval EXCLUDES
+   them from the real-conflict denominator ("real-conflict PASS rate:
+   0/1").
+2. **fmt-0003's failure is genuine and correctly gated**: the whole-
+   file validation rejects a `class ChronoTest_In` redefinition that
+   appears in NEITHER the oracle nor either side — the model's merge
+   introduced it; the duplicate-definition check (the EXTEND-17
+   repair) caught a true both-sides/invention defect. Not a false
+   positive.
+
+**The definitive projection** (re-merged with terminal reasons):
+676 total − 16 SAFE_SKIP (13 cpp clickhouse-class, 1 c, 2 python) =
+**660 real conflicts — PASS 623/660 = 94.4%, P+W 629/660 = 95.3%**.
+The raw-over-676 number (92.2%) mixed denominator-excluded cases in;
+the harvest's real-conflict metric is 94.4% — the original ~95%
+estimate was correct. Non-PASS among real conflicts: 9 genuine
+ESCALATE + 8 era-toolchain (rust, incl. tokio-0109 class) + 6 NEAR +
+6 WORKING + 5 GATE_UNAVAILABLE + 3 DIVERGENT.
+
+**Entity-splitting status check** (design v3, the docs/oversized-*
+files): the machinery IS live (`#s{k}` sub-units seen in sqlite-0040
+flights; the 6adc93b doc-comment splitter fix rides it) and the
+splice/attribution assumptions held all sprint. The design's final
+goal — removing the harness's 48K load guard — remains undone; its
+target population (load-time-dropped cases) is SEPARATE from the
+SAFE_SKIP class and is the one remaining ~1-2% upside path.
+
+**S27 final projection: 94.4% real-conflict PASS / 95.3% P+W.**
 
 ### S27-EXTEND-20 (2026-09-04) — full deterministic corpus run + sprint-28 design seed
 
