@@ -114,6 +114,12 @@ def test_candidate_success_retains_branch_and_never_touches_source(
     assert (session_dir / "journal.jsonl").exists()
     # No orphaned worktree.
     assert _worktree_count(repo) == 1
+    # The in-worktree run's legacy backup branches are pruned (the
+    # source never moved — they're pointless clutter in candidate mode).
+    leftovers = [b for b in git(
+        repo, "branch", "--list", "capybase/backup/*").stdout.splitlines()
+        if "candidate" in b]
+    assert leftovers == [], leftovers
 
 
 def test_candidate_escalation_deletes_candidate_and_never_touches_source(

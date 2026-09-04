@@ -7229,3 +7229,30 @@ eventual legacy-mode removal decision; per-validator evidence-envelope
 deepening (scope/strength/command fingerprints — the policy's
 read-layer suffices today); service-mode operator documentation for
 unattended publish flows.
+
+### S27-EXTEND-39 (2026-09-04) — the architecture's first LIVE end-to-end run
+
+A real repo + the real endpoint through the actual CLI, first time:
+
+1. `capybase --provider nova-gemma4 rebase main` (the new default):
+   CANDIDATE complete on `capybase/candidate/feat@<ts>` — **feat
+   UNTOUCHED** (same OID before/after), resolved deterministically
+   (llm_calls=0, the source portfolio), **POLICY: AUTO_APPLY (tier A)**,
+   audit bundle retained in the real repo with OIDs + fingerprints, the
+   expected-OID CAS line printed.
+2. `capybase promote` → **PROMOTED: feat -> the candidate OID exactly**
+   ("compare-and-swap from c340e22d held"), state + journal record
+   everything (acceptance_trust tier A, session_completed, promoted).
+
+The live run caught two real defects the hermetic suite couldn't:
+- **promote/publish sat behind the calibration gate** — pure git
+  operations refusing without a provider. Moved to the no-orchestrator
+  section with check/status (the gate's own doctrine: it gates
+  RESOLUTION).
+- **the inner legacy machinery's backup branches cluttered success
+  runs** — now pruned in both outcomes (the source never moved);
+  fixed with a first version that over-pruned (deleted the retained
+  success candidate — caught immediately by the invariant tests, split
+  into delete_branch vs backup-prune).
+
+Gate 4,056/0. The architecture is live-verified end-to-end.

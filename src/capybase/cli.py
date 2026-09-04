@@ -1051,6 +1051,23 @@ def main(argv: list[str] | None = None) -> int:
         return _run_metrics(config, repo=args.repo)
     if args.command == "provider":
         return _run_provider(args)
+    # promote/publish: pure git operations over retained candidate state —
+    # no resolution, no LLM, so the calibration gate does not apply (they
+    # run offline; the policy consent lives in the state file + --approve).
+    if args.command == "promote":
+        from capybase.candidate_ref import promote_candidate
+        result = promote_candidate(
+            args.repo, state_path=args.state, checkout=args.checkout,
+            keep_ref=args.keep_ref, approve=args.approve)
+        print(result.summary())
+        return 0 if result.promoted else 1
+    if args.command == "publish":
+        from capybase.candidate_ref import publish_candidate
+        result = publish_candidate(
+            args.repo, state_path=args.state, remote=args.remote,
+            approve=args.approve, dry_run=args.dry_run)
+        print(result.summary())
+        return 0 if result.published else 1
 
     # A calibration profile is REQUIRED for resolution runs — there is no
     # default and no ambient fallback. The provider mechanism is the
@@ -1103,20 +1120,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         result = orch.run()
         return 1 if result.escalated else 0
-    if args.command == "publish":
-        from capybase.candidate_ref import publish_candidate
-        result = publish_candidate(
-            args.repo, state_path=args.state, remote=args.remote,
-            approve=args.approve, dry_run=args.dry_run)
-        print(result.summary())
-        return 0 if result.published else 1
-    if args.command == "promote":
-        from capybase.candidate_ref import promote_candidate
-        result = promote_candidate(
-            args.repo, state_path=args.state, checkout=args.checkout,
-            keep_ref=args.keep_ref, approve=args.approve)
-        print(result.summary())
-        return 0 if result.promoted else 1
     if args.command == "rebase":
         # P2 default flip: the candidate mode is the default (the design's
         # "never mutate the source branch"); --in-place opts back into the

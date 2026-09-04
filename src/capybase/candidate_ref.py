@@ -429,11 +429,14 @@ def run_candidate_rebase(
         if worktree_path is not None and worktree_path.exists():
             git.remove_worktree(worktree_path, force=True)
         git.prune_worktrees()
-        if not report.would_succeed:
-            # Nothing to promote: delete the candidate branch + the
-            # session-tagged backups the in-worktree run created (the
-            # source never moved, so they're pointless — dryrun's rule).
-            _delete_candidate_refs(git, report.candidate_ref)
+        # The in-worktree run's legacy machinery creates backup branches
+        # (capybase/backup/capybase-candidate-<id>@...) in the shared
+        # store — pointless in candidate mode (the source never moved),
+        # in BOTH outcomes. The candidate BRANCH is retained on success
+        # (the artifact) and deleted on escalation (nothing to promote).
+        _delete_candidate_refs(
+            git, report.candidate_ref,
+            delete_branch=not report.would_succeed)
         for _sig, _prev in _prev_handlers.items():
             try:
                 signal.signal(_sig, _prev)  # type: ignore[arg-type]
@@ -446,14 +449,20 @@ def run_candidate_rebase(
         )
 
 
-def _delete_candidate_refs(git: GitBackend, candidate_ref: str) -> None:
-    """Delete the candidate branch + session-tagged backup refs."""
+def _delete_candidate_refs(
+    git: GitBackend, candidate_ref: str, *, delete_branch: bool = True,
+) -> None:
+    """Session cleanup: the candidate branch (escalation only — success
+    RETAINS it) + the in-worktree run's legacy backup branches (always:
+    the source never moved, so they are pointless in candidate mode)."""
     candidate_id = candidate_ref.split("@", 1)[-1]
-    try:
-        git._run(
-            ["branch", "-D", candidate_ref], what="delete candidate branch")
-    except Exception:  # noqa: BLE001 — best-effort cleanup
-        _log.debug("candidate branch already gone", exc_info=True)
+    if delete_branch:
+        try:
+            git._run(
+                ["branch", "-D", candidate_ref],
+                what="delete candidate branch")
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            _log.debug("candidate branch already gone", exc_info=True)
     for ref in list(git.list_backup_refs()):
         if candidate_id and candidate_id in ref:
             try:
