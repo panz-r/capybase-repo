@@ -136,15 +136,26 @@ class RustItemCodec:
             km = self._ITEM_NAME.match(cand_lines[k])
             if km and km.group(2) == name:
                 return None  # genuine collision
-        # Insert before the closing brace.
-        indent = "    "
+        # Detect the container's item indentation from existing items.
+        indent = ""
+        for k in range(cont_idx + 1, close_idx):
+            ln = cand_lines[k]
+            if ln.strip() and self._ITEM_NAME.match(ln):
+                stripped = ln.lstrip()
+                indent = ln[:len(ln) - len(stripped)]
+                break
+        # Insert before the closing brace, re-indented to the container's
+        # depth (matching the existing primitive — the known divergence fix).
         pos = sum(len(l) + 1 for l in cand_lines[:close_idx])
         pos = min(pos, len(text))
         # Add the blank line separator if the container isn't empty.
         has_content = any(l.strip() for l in cand_lines[cont_idx+1:close_idx])
         prefix = "\n" if has_content else ""
-        return (pos, pos, prefix + indent + subtree.replace(
-            "\n", "\n" + indent if not subtree.startswith("    ") else "\n") + "\n")
+        # Re-indent: add the container's indent to every non-blank line.
+        reindented = "\n".join(
+            (indent + ln if ln.strip() else ln)
+            for ln in subtree.splitlines())
+        return (pos, pos, prefix + reindented + "\n")
 
     def local_validity(self, text):
         return text.count("{") == text.count("}")
@@ -188,16 +199,6 @@ def test_shadow_item_agrees(name, resolved, other, missing):
         f"{name}: old={old_status} new={new_status} "
         f"reason={new.certificate.get('reason', '')[:80]}")
     if old_status == "applied":
-        if name == "method_insert":
-            # Known divergence: the existing primitive re-indents the
-            # transplanted subtree to match the container's depth; the
-            # codec preserves the other side's original indentation.
-            # Both produce the correct scope; the byte-level text differs.
-            # (Shadow mode records, not blocks — the switch decision
-            # comes after all divergences are understood.)
-            assert old.text.splitlines()[-1] == new.candidate.splitlines()[-1], (
-                f"{name}: closing brace differs")
-        else:
-            assert old.text == new.candidate, (
-                f"{name}: texts differ:\n  old: {old.text[:120]}\n"
-                f"  new: {(new.candidate or '')[:120]}")
+        assert old.text == new.candidate, (
+            f"{name}: texts differ:\n  old: {old.text[:120]}\n"
+            f"  new: {(new.candidate or '')[:120]}")

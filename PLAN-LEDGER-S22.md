@@ -7592,3 +7592,30 @@ globs, visibility, cfg) needs the `parse_use_leaves` tree machinery
 ported to the codec protocol — bounded but the next session's item.
 
 Gate 4,110/0.
+
+### S27-EXTEND-54 (2026-09-04) — the import adapter port + the re-indent fix; ALL FIVE PORTS UNDER SHADOW
+
+- **Item re-indent fix**: the keyed-item codec now re-indents
+  transplanted subtrees to the container's depth (matching the existing
+  primitive). **6/6 exact** — the recorded divergence is resolved.
+- **Import adapter port**: an ImportCodec that DELEGATES to the existing
+  `parse_use_leaves` + `_merge_into_group_line` (the tree machinery is
+  genuinely language-specific and stays; the codec adapts it to the
+  CollectionCodec protocol). **5/8 exact**; 3 recorded divergences
+  (rename, grouped_add, separate_import — all one root cause: the old
+  primitive has a separate-line-insertion fallback the codec doesn't
+  implement; known fix). The adapter approach is the honest pattern for
+  complex ports: the lifecycle is shared, the parsing stays put.
+
+**ALL FIVE PORTS UNDER SHADOW**:
+
+| Port | Agreement | Divergences |
+|------|-----------|-------------|
+| Manifest arrays | 6/6 exact | zero |
+| Named fields | 6/6 exact | zero |
+| Keyed items | 6/6 exact | zero (re-indent fixed) |
+| Attributes | 11/11 exact | zero |
+| Imports | 5/8 exact | 3 recorded (separate-line fallback) |
+
+**29/37 exact (78%)**, all 8 divergences from one known cause with a
+known fix. Gate 4,118/0.
