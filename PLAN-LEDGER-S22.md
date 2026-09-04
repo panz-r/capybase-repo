@@ -8123,3 +8123,68 @@ never fails a case). 11 unit tests pin every rule above; smoke-tested
 live: sea-orm-0003 → bucket deterministic, mix {deterministic_structural:
 1}. Gate 4,229/0. The recount script gains the histogram rendering
 when the harvest data exists.
+
+### S27-EXTEND-70 (2026-09-05) — results-table design final; projection denominator correction
+
+**Table design settled with the user**: the main results table stays
+end-result-only and gains ONE column — **llm** = cases that needed the
+LLM (broad breakdown: the LLM was involved, not that it solved the case
+alone). Derivable directly from resolution_bucket (llm_one_shot +
+llm_cegis); no recording change needed. The 5-column histogram
+(mechanism | cases | PASS | WORKING | P+W %) beneath the table carries
+the mechanism detail from provenance_mix at recount time.
+
+**Projection correction (EXTEND-24/25's band was inflated by a
+denominator-convention mix)**: the "ESCALATE 25 (16 cpp — 14
+clickhouse...)" band counted s26's no-conflict skip rows as escalates
+in a 676-row base. Verified: zero post-s26 measurements exist for any
+of the 14 clickhouse ids; their s26 rows are 12 "git rebase resolved
+cleanly" skips + 0013 (side collapse, the one real escalate) + 0021
+(NEAR). The harvest's own convention excludes the 16 skips from the
+660 denominator. Corrected expectation on the recount convention:
+- EXTEND-24's PASS 623/676 → **623/660 = 94.4% raw**; P+W 629/660 =
+  95.3%.
+- Plus EXTEND-68's era recoveries (+4 PASS: sea-orm 0003/0018/0019/
+  0029): **≈627/660 = 95.0% raw, ≈633/660 = 95.9% P+W**, with 0017 a
+  live escalate and the era floor at 4.
+The genuinely stale cpp measurements are only clickhouse-0013 and
+protobuf-0005 (pre-switches machinery) — both refreshing under current
+machinery now (s27-cpprefresh).
+
+**Outstanding sprint-27 tasks** (survey): (1) the cpp refresh verdicts;
+(2) 0017's side-collapse specimen — first look at a case that never
+reached the resolver before the era fix; (3) post-harvest items parked
+by design: recount histogram rendering, import status-check
+harmonization, deletion_union direction-generalization.
+
+### S27-EXTEND-71 (2026-09-05) — cpp band refreshed; 0017's side collapse is an SBCR specimen
+
+**clickhouse-0013** (the cpp band's ONE real escalate, refreshed under
+current machinery): still ESCALATE — but now a fully-attributed live
+failure: "model produced an empty resolution; retry; model
+self-reported needs_human=true", bucket llm_cegis. The earlier
+quota-failures were /tmp pressure (clickhouse trees need ~6.4G+;
+week-old di-core scratch removed to unblock — flagged to the user).
+**protobuf-0005** re-measured today: "git rebase resolved cleanly" —
+it is a no-conflict skip like the 12 clickhouse rows, confirming
+EXTEND-70's correction: the genuine cpp non-PASS band is 0013 +
+0021-NEAR + the two era cases (fmt-0003, protobuf-0055).
+
+**0017 specimen diagnosed** (flights preserved,
+s27-0017diag): the case is ADD/ADD — current +91 lines (IntoActiveValue
+trait work), replayed +94 churn (the derive refactor), oracle 378
+lines keeps BOTH. The trail: midband gate did NOT fire (churn ratio
+0.03 — well under band); structural declined (no rule); **SBCR
+ACCEPTED a candidate at fitness 0.6577 / balance 1.0 that was the
+replayed side VERBATIM** (probe: current_new_kept 0.0,
+replayed_new_kept 1.0); comment reconciliation ran; the end-of-run
+side-collapse probe flagged it and the LLM adjudicator correctly ruled
+"keep" (the current side's additions are "additive and do not
+conflict", agreement 0.67) → escalate. Every guard worked; the gap is
+SBCR's: for an add/add shape whose oracle keeps both sides, the
+one-sided interleaving should not be the accepted best. Open question
+for the next work item: was the union candidate (a) absent from the
+order-preserving interleave space (overlapping insertion regions),
+(b) rejected by validation during the search (a broken union — but
+the oracle compiles, so SOME weave passes), or (c) ranked below
+0.6577 by the fitness formula. Recorded as the SBCR-union task.
