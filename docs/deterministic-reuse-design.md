@@ -210,10 +210,11 @@ codec. Both are safe pre-harvest (tests only, no behavior change).
 Each switch follows the manifest pattern: the primitive's public
 function becomes a thin adapter (engine result → ImportUnionResult,
 original certificate keys, same mechanism_id `v1`), and a codec in the
-same module carries the exact original semantics. Switches #2–#4 are
-CLEAN replacements (the old inline lifecycle is deleted, no dead
-code); #1 kept the old body as unreachable text after the adapter
-return (a wart, harmless — the functions below it are still used).
+same module carries the exact original semantics. All five are CLEAN
+replacements — the old inline lifecycles are deleted outright (the
+manifest switch was initially committed with its old body as dead
+text after the adapter return; that was cleaned up afterwards, along
+with the two then-unreferenced `_try_*` helpers).
 
 4. [x] **named_field_union** (switch #2): `_field_codec()` —
    `already_present` always False (idempotency decided by the
