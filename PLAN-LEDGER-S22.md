@@ -8023,11 +8023,71 @@ harvest claim:
 
 | # | Task | Cases | Effort | Status |
 |---|------|-------|--------|--------|
-| A6 | sea-orm: add `[patch.crates-io] sea-query = { git = ".../sea-query.git", tag = "0.18.2" }` for trees whose manifest lacks the git dep (today's patch pins only sea-query-derive) — the 0.17.x line never shipped `FromValueTuple` (added 2021-10-12, first in 0.18.0), so `^0.17.1` cannot resolve the era import. Gate: 5× targeted rerun; accept partial recovery if further 0.17→0.18 API mismatches surface — record them, don't chase them | sea-orm 0015–0019 (5) | SMALL (one patch-table entry + rerun) | TODO |
-| A7 | vendoring append-merge: `_vendor_rust_deps` must MERGE into an existing `[patch.crates-io]` (or skip when present) instead of appending a second table — the append produced the `duplicate key` failure on 0003, and the exception path returns without restoring the manifest (fix that too). Then retag 0003's own dead branch dep (`sqlite-bind-decimals` is gone from SeaQL/sea-query — pin the era rev/tag) | sea-orm-0003 | MEDIUM (harness fix + archaeology for the rev) | TODO |
-| A8 | sibling path-dep rewrite: 0029's manifest carries `sea-query = { path = "../sea-query", version = "^0.11" }` — rewrite the fragment via RUST_DEP_REWRITES to drop the path (crates.io/git resolution) or materialize the sibling at the era SHA | sea-orm-0029 (1) | SMALL-MEDIUM (rewrite + offline vendor validation) | TODO |
+| A6 | sea-orm: add `[patch.crates-io] sea-query = { git = ".../sea-query.git", tag = "0.18.2" }` for trees whose manifest lacks the git dep (today's patch pins only sea-query-derive) — the 0.17.x line never shipped `FromValueTuple` (added 2021-10-12, first in 0.18.0), so `^0.17.1` cannot resolve the era import. Gate: 5× targeted rerun; accept partial recovery if further 0.17→0.18 API mismatches surface — record them, don't chase them | sea-orm 0015–0019 (5) | SMALL (one patch-table entry + rerun) | DONE (EXTEND-68): +requirement rewrite (cargo ignores version-incompatible patches); 0017-0019 recovered, 0015/0016 intrinsic |
+| A7 | vendoring append-merge: `_vendor_rust_deps` must MERGE into an existing `[patch.crates-io]` (or skip when present) instead of appending a second table — the append produced the `duplicate key` failure on 0003, and the exception path returns without restoring the manifest (fix that too). Then retag 0003's own dead branch dep (`sqlite-bind-decimals` is gone from SeaQL/sea-query — pin the era rev/tag) | sea-orm-0003 | MEDIUM (harness fix + archaeology for the rev) | DONE (EXTEND-68): retag rev 890e22c + section-merge + entry-dedup; 0003 PASS, 0002 preserved |
+| A8 | sibling path-dep rewrite: 0029's manifest carries `sea-query = { path = "../sea-query", version = "^0.11" }` — rewrite the fragment via RUST_DEP_REWRITES to drop the path (crates.io/git resolution) or materialize the sibling at the era SHA | sea-orm-0029 (1) | SMALL-MEDIUM (rewrite + offline vendor validation) | DONE (EXTEND-68): path dropped, 0.12.0; 0029 PASS |
 
 Accepted floor (unchanged): protobuf-0055 (merge tree internally
 inconsistent — un-passable by any resolver) and fmt-0003 (libstdc++
-drift, no era compiler on host). If A6–A8 land and validate, the era
-floor moves 9 → 2 and the README adj% denominators follow.
+drift, no era compiler on host). A6–A8 landed and validated (EXTEND-68): era floor 9 → 4
+(0015/0016 intrinsic, fmt-0003, protobuf-0055); 0017 left the era
+class for a live resolution escalate. README adj% denominators follow
+at the next harvest.
+
+### S27-EXTEND-68 (2026-09-05) — A6/A7/A8 EXECUTED: era floor 9 → 4, live-validated
+
+The s26 follow-up tasks landed the same day they were recorded, each
+validated offline (era trees materialized at the merge SHAs, patched,
+vendored, `cargo check`) before the live rerun.
+
+**Harness changes** (scripts/live_eval_realworld.py):
+- RUST_DEP_REWRITES["sea-orm-history"] += three fragments — the
+  `^0.17.1`→`0.18.2` requirement bump (A6), the dead
+  `sqlite-bind-decimals` branch → `rev = 890e22c` (A7; the branch was
+  PR #480, merged the same day as 0003's tree), and 0029's
+  `path = "../sea-query", ^0.11` → `version = "0.12.0"` (A8).
+- RUST_DEP_PATCHES["sea-orm-history"] gains the sea-query tag-0.18.2
+  entry (A6) — the semver gate scopes it: cargo IGNORES
+  version-incompatible patches, so ^0.11-0.16 and ^0.21+ eras are
+  untouched (this same mechanism initially defeated the patch until
+  the requirement rewrite was added — the "was not used in the crate
+  graph" warning is the tell).
+- `_merge_patch_entries`: ONE [patch.crates-io] section (A7), entries
+  for already-pinned packages SKIPPED, and the vendoring
+  exception/timeout path now restores the manifest+lockfile (it used
+  to return poisoned — the recorded duplicate-key probe failure).
+  10 unit tests pin all of it (tests/test_rust_dep_vendoring.py).
+  The entry-level dedup was caught by the LIVE rerun: 0003's own
+  table pins sea-query by rev; inserting our tag entry re-made the
+  duplicate one level down (`failed to load source`).
+
+**Offline validation** (per distinct tree):
+- b582d3aac (0017) and 7bc647709 (0018/0019): rc=0 with
+  rewrite+patch.
+- 5339696da (0015/0016): rc=101 — residual errors ALL in
+  src/entity/active_model.rs (bare `DatabaseConnection` ×4,
+  `Self: ActiveModelBehavior` bound ×2): the branch's own file
+  mid-rework, dependency-independent → INTRINSIC (the sea-orm twin
+  of protobuf-0055).
+- 29da37b4f (0003): rc=0 with the retag alone.
+- 73ed4b6f8 (0029): path-drop resolves the workspace; the remaining
+  `sea_query::IntoCondition` (the unshipped-API class) resolves at
+  0.12.0 → rc=0.
+
+**Live rerun** (6 targeted cases, nova-gemma4):  # endpoint-guard: allow
+- sea-orm-0003 **PASS 1.00** (was ESCALATE_TOOLCHAIN)
+- sea-orm-0018 **PASS 1.00**, sea-orm-0019 **PASS 0.92**,
+  sea-orm-0029 **PASS 1.00** (all were ESCALATE_TOOLCHAIN)
+- sea-orm-0002 **PASS 1.00** — preserved. Side-finding: 0002's s26
+  PASS no longer reproduces without the retag — upstream deleted the
+  sqlite-bind-decimals branch AFTER the s26 harvest (2026-08-30).
+  Git-branch deps rot; the retag protects it. Census note: any
+  future era audit should ls-remote the era's branch deps.
+- sea-orm-0017 **ESCALATE 0.82** — era class LEFT (the toolchain now
+  compiles); a live resolution escalate (side collapse in
+  active_model.rs). Fresh resolver territory: these trees never
+  reached the resolver before.
+
+**Net**: era-dead 9 → 4 (0015/0016 intrinsic, fmt-0003, protobuf-0055);
++4 real-conflict PASSes (0003, 0018, 0019, 0029) and one preserved
+(0002) pending the next harvest's recount. Gate 4,218/0.

@@ -138,8 +138,14 @@ RUST_DEP_PATCHES: dict[str, list[str]] = {
     # sea-orm sub-item: the git tag's workspace carries sea-query-derive
     # while crates.io also supplies it via other deps — unify on ONE
     # source or `cargo vendor` dies on the duplicate (validated E2E).
+    # The sea-query entry (A6) redirects the `^0.17.1` trees to the tag
+    # that carries FromValueTuple; cargo IGNORES the patch wherever the
+    # tag's semver doesn't satisfy a tree's own requirement, so older
+    # (^0.11-0.16) and newer (^0.21+) eras are untouched by it.
     "sea-orm-history": [
         '[patch.crates-io]\n'
+        'sea-query = { git = '
+        '"https://github.com/SeaQL/sea-query.git", tag = "0.18.2" }\n'
         'sea-query-derive = { git = '
         '"https://github.com/SeaQL/sea-query.git", tag = "0.18.2" }\n',
     ],
@@ -160,8 +166,69 @@ RUST_DEP_REWRITES: dict[str, list[tuple[str, str]]] = {
             'sea-query.git", features',
             'sea-query.git", tag = "0.18.2", features',
         ),
+        # A6: the `^0.17.1` trees (0015-0019, merges of 2021-10-12/13)
+        # import sea_query::FromValueTuple, which NO 0.17.x ever shipped
+        # (trait added 2021-10-12, first in 0.18.0). The version bump is
+        # REQUIRED alongside the patch: cargo silently ignores
+        # version-incompatible [patch.crates-io] entries ("was not used
+        # in the crate graph"), so the patch alone redirects nothing.
+        # Validated offline: with rewrite+patch, the b582d3aac and
+        # 7bc647709 trees cargo check rc=0 (0017-0019 recover); the
+        # 5339696da tree stays broken in active_model.rs (0015/0016 are
+        # intrinsic — dependency-independent errors).
+        (
+            'sea-query = { version = "^0.17.1", features',
+            'sea-query = { version = "0.18.2", features',
+        ),
+        # A7: `sqlite-bind-decimals` was deleted upstream (post-s26;
+        # sea-orm-0002's s26 PASS no longer reproduces). The branch is
+        # PR #480, merged to master as 890e22c (2022-10-17, the same
+        # day as 0003's merge) — pin the rev. Validated offline: 0003's
+        # tree (duplicate-key fixed) checks rc=0 with this rewrite.
+        (
+            'branch = "sqlite-bind-decimals"',
+            'rev = "890e22c39b86a5f1ee65fb1e454270b813da505e"',
+        ),
+        # A8: 0029's tree expects a SIBLING sea-query checkout
+        # (path dep) the isolated worktree never materializes. Dropping
+        # the path lets crates.io resolve; ^0.11 lacks IntoCondition
+        # (the unshipped-API class again) — 0.12.0 has it. Validated
+        # offline: rc=0.
+        (
+            'sea-query = { path = "../sea-query", version = "^0.11" }',
+            'sea-query = { version = "0.12.0" }',
+        ),
     ],
 }
+
+
+def _merge_patch_entries(toml_text: str, patch_entries: list[str]) -> str:
+    """Add patch entries to the manifest keeping ONE [patch.crates-io].
+
+    Appending a second `[patch.crates-io]` table to a tree that already
+    has one is a duplicate-key cargo error for every probe and rerun
+    alike — sea-orm-0003's recorded `error: duplicate key` era-dead was
+    exactly this. Entries whose package name the section already pins
+    are SKIPPED (a second `sea-query = ...` key is the same error one
+    level down; and the tree's own pin is there deliberately).
+    """
+    header = "[patch.crates-io]"
+
+    def _key(entry: str) -> str:
+        return entry.split("=", 1)[0].strip()
+
+    lines = toml_text.splitlines(keepends=True)
+    for i, ln in enumerate(lines):
+        if ln.strip() == header:
+            j = i + 1
+            while j < len(lines) and not lines[j].lstrip().startswith("["):
+                j += 1
+            existing = {_key(l) for l in lines[i + 1:j] if "=" in l}
+            fresh = [e for e in patch_entries if _key(e) not in existing]
+            addition = "".join(e + "\n" for e in fresh)
+            return "".join(lines[:j]) + addition + "".join(lines[j:])
+    return (toml_text.rstrip("\n") + "\n\n" + header + "\n"
+            + "".join(e + "\n" for e in patch_entries))
 
 
 def _vendor_rust_deps(repo: Path, dataset: str) -> bool:
@@ -179,6 +246,25 @@ def _vendor_rust_deps(repo: Path, dataset: str) -> bool:
     if not ct.exists() or (repo / "vendor").is_dir():
         return False
     import subprocess as _sp
+
+    def _revert(_orig_toml, _lock, _orig_lock) -> None:
+        # REVERT every vendoring side effect: a poisoned Cargo.toml
+        # (patch section or tag pin the tree's own deps can't resolve
+        # with) breaks cargo for ALL THREE era probes identically — a
+        # false toolchain-dead that stole 13 s24-PASS tokio cases
+        # (0001-0013: their era's lockfile can't vendor with the
+        # security-framework pin; the leftover patch then failed every
+        # probe's cargo check). Restore the manifest + lockfile and drop
+        # any partial vendor dir; the case then runs on its materialized
+        # state.
+        ct.write_bytes(_orig_toml)
+        if _orig_lock is not None:
+            _lock.write_bytes(_orig_lock)
+        elif _lock.exists():
+            _lock.unlink()
+        import shutil as _shutil
+        _shutil.rmtree(repo / "vendor", ignore_errors=True)
+
     try:
         _orig_toml = ct.read_bytes()
         _lock = repo / "Cargo.lock"
@@ -189,28 +275,20 @@ def _vendor_rust_deps(repo: Path, dataset: str) -> bool:
                 _text = _text.replace(_old, _new)
             ct.write_text(_text, encoding="utf-8")
         if patches:
-            with ct.open("a") as f:
-                f.write("\n" + "\n".join(patches))
+            # each patch block is '[patch.crates-io]\n<entry>...' — keep
+            # just the entries; the section header is (re)created once.
+            entries = [ln.strip() for blk in patches
+                       for ln in blk.splitlines()
+                       if ln.strip() and ln.strip() != "[patch.crates-io]"]
+            ct.write_text(
+                _merge_patch_entries(
+                    ct.read_text(encoding="utf-8"), entries),
+                encoding="utf-8")
         v = _sp.run(
             ["cargo", "vendor", "vendor"],
             cwd=str(repo), capture_output=True, text=True, timeout=600)
         if v.returncode != 0 or not (repo / "vendor").is_dir():
-            # REVERT every vendoring side effect: a poisoned Cargo.toml
-            # (patch section or tag pin the tree's own deps can't
-            # resolve with) breaks cargo for ALL THREE era probes
-            # identically — a false toolchain-dead that stole 13
-            # s24-PASS tokio cases (0001-0013: their era's lockfile
-            # can't vendor with the security-framework pin; the
-            # leftover patch then failed every probe's cargo check).
-            # Restore the manifest + lockfile and drop any partial
-            # vendor dir; the case then runs on its materialized state.
-            ct.write_bytes(_orig_toml)
-            if _orig_lock is not None:
-                _lock.write_bytes(_orig_lock)
-            elif _lock.exists():
-                _lock.unlink()
-            import shutil as _shutil
-            _shutil.rmtree(repo / "vendor", ignore_errors=True)
+            _revert(_orig_toml, _lock, _orig_lock)
             return False
         # The config cargo prints verbatim; write it ourselves (stable form).
         (repo / ".cargo").mkdir(exist_ok=True)
@@ -221,6 +299,14 @@ def _vendor_rust_deps(repo: Path, dataset: str) -> bool:
             'directory = "vendor"\n')
         return True
     except Exception:  # noqa: BLE001 — vendoring is best-effort
+        # The exception path (vendor timeout, unexpected error) used to
+        # return WITHOUT restoring — the rewritten/patched manifest then
+        # failed every era probe identically (the duplicate-key class).
+        # Restore here too; restore failures degrade to best-effort.
+        try:
+            _revert(_orig_toml, _lock, _orig_lock)
+        except Exception:  # noqa: BLE001
+            pass
         return False
 
 
