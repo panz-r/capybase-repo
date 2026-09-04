@@ -7734,3 +7734,30 @@ for these pre-harvest-safe items.
   backward compatibility with display code.
 
 Gate 4,137/0.
+
+### S27-EXTEND-60 (2026-09-04) — the Python import codec (first new language) + live validation
+
+**PythonImportCodec** — the design's first new language codec beyond
+Rust/TOML: handles `import X`, `from X import Y`, `from X import a, b`,
+relative imports (`from . import X`), and `from __future__ import`.
+Semantic identity: (module, names) tuples — a module-level presence
+check for bare imports, a subset check for from-imports (adding `Dict`
+when `List` is present is additive). Insertion: adjacent to the last
+import (or after comments/docstring at the top when none exist).
+8 tests through the engine (insertion, idempotency, partial
+from-import, relative, no-imports-at-top, non-import declined,
+never-raises). Gate 4,145/0.
+
+The codec proves the design's cross-language claim: the
+KeyedCollectionMerge engine works identically for a new language
+through the same CollectionCodec protocol — no engine changes needed.
+
+**Live validation of the correctness fixes** (4 informative cases,
+no harvest):
+- sea-orm-0001 **PASS 0.981** (field-heavy rust — exercises the
+  scope-qualified collision fix)
+- sqlite-0004 **PASS 0.999** (C — exercises the full stack)
+- tokio-0046 **NEAR 0.884** (rust — its stable band)
+- flask-0006 **ORACLE_DIVERGENT 0.576** (its coin-flip band)
+All exact prior sims — zero regressions from the scope fixes or the
+NullAdapter change.

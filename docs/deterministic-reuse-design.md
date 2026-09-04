@@ -205,3 +205,11 @@ codec. Both are safe pre-harvest (tests only, no behavior change).
 5. [x] **NullAdapter: no assumed comment syntax** (reuse-design P0):
    unknown text returns empty comment_line_prefixes — no `#` or `//`
    assumptions for unrecognized languages.
+
+6. [x] **Python import codec** (first new language): 8 tests through
+   the engine — the cross-language claim proven for Python via the
+   same CollectionCodec protocol (no engine changes).
+7. [x] **Live validation**: 4 cases at exact prior sims (sea-orm-0001
+   PASS 0.98, sqlite-0004 PASS 1.00, tokio-0046 NEAR 0.88,
+   flask-0006 DIVERGENT 0.58) — zero regressions from the scope fixes
+   or NullAdapter.
