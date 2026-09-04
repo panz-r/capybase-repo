@@ -155,6 +155,16 @@ def build_parser() -> argparse.ArgumentParser:
              "it would succeed WITHOUT moving the branch pointer. Real LLM calls "
              "are made — this proves the real pipeline, it doesn't simulate it.",
     )
+    rb_p.add_argument(
+        "--candidate",
+        action="store_true",
+        dest="candidate",
+        help="run the entire rebase on a RETAINED candidate branch "
+             "(capybase/candidate/<branch>@<ts>) in a linked worktree — the "
+             "source branch is never touched. On success the candidate branch + "
+             "audit bundle are kept for promotion (the report prints the exact "
+             "expected-OID update-ref). P2 adds `capybase promote`.",
+    )
     inter_group = rb_p.add_mutually_exclusive_group()
     inter_group.add_argument(
         "-i", "--interactive",
@@ -1023,6 +1033,18 @@ def main(argv: list[str] | None = None) -> int:
         result = orch.run()
         return 1 if result.escalated else 0
     if args.command == "rebase":
+        if getattr(args, "candidate", False):
+            # Candidate-ref mode (candidate-ref-architecture-design P1):
+            # the whole rebase on a retained candidate branch; the source
+            # is never touched. On success the promotable artifact (branch
+            # + audit bundle + OID/fingerprint state) is kept.
+            from capybase.candidate_ref import run_candidate_rebase
+            report = run_candidate_rebase(
+                config, repo=args.repo, target=args.target,
+                autostash=args.autostash,
+            )
+            print(report.summary())
+            return 0 if report.would_succeed else 1
         if getattr(args, "dry_run", False):
             # Rehearse in a throwaway worktree: never moves the branch pointer.
             # Uses real LLM calls (the point of a rehearsal); no orchestrator

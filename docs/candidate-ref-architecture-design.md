@@ -136,27 +136,43 @@ ConflictUnit → CandidateResolution[] → Evidence[] → PolicyDecision
 | B | model-assisted + strong independent behavioral evidence (tests/build pass, obligations held) | PROPOSE_FOR_REVIEW (candidate branch) |
 | C | any required oracle UNKNOWN, verifier disagreement, high-risk file/operation, resurrection-class signals | STOP + review bundle |
 
-## Migration plan (staged, sprint-28 scope)
+## Migration plan (staged — P0/P3-slice/P1 LANDED in sprint-27)
 
-- **P0 — ground-truth audit**: enumerate every mutation site in
-  `run()` (writes, ref ops, index ops, worktree touches) and every
-  "not checked" path in verification.py → the defect list with tests
-  pinning current behavior.
-- **P1 — candidate-ref skeleton**: worktree + candidate-ref creation;
-  the orchestrator's existing per-unit loop runs inside it unchanged
-  (the loop is already location-agnostic — the eval runs it in
-  worktrees); source branch untouched; legacy mode flag.
-- **P2 — CAS promotion + audit bundle retention + restart resume**
-  (state file + OID verification).
-- **P3 — acceptance subsystem**: evidence envelope; UNKNOWN semantics
-  (the three verified sites fixed first — these are shippable
-  independently of the ref work and land earliest); policy module with
-  the tier table; suspected_validator_error demoted to evidence.
-- **P4 — promotable artifacts** (fingerprint contract + skip rerun).
-- **P5 — remote lease publication** (service mode, default-off).
-- P3's first slice (UNKNOWN-not-pass) is the highest value/risk ratio
-  and does not depend on P1/P2 — it can land in sprint-27/28
-  immediately.
+- **P0 — LANDED** (extend-32): mutation surface enumerated (109 git
+  touchpoints in run()'s loop; abort ×3; backup-ref creation; staging)
+  and every "not checked" path named.
+- **P3-slice — LANDED** (extend-32): UNKNOWN IS NOT PASS — the
+  `unknown` outcome + `syntax_outcome` convention at every lying site;
+  quality withholds credit, risk adds the +0.2 unknown bump, the
+  accept report prints NOT CHECKED, and each accepted step journals
+  `acceptance_trust` (tier A/B) — the promotion policy's input.
+- **P1 — LANDED** (extend-33): `capybase/candidate_ref.py` +
+  `capybase rebase --candidate`. Snapshot (source/target OIDs +
+  config/profile/toolchain fingerprints) → linked worktree pinned at
+  the source OID on `capybase/candidate/<branch>@<ts>` → the existing
+  orchestrator loop unchanged inside → success RETAINS the candidate
+  branch + audit bundle (`.rebase-agent/candidates/<id>/session/` +
+  `session_state.json`), escalation deletes the candidate; the source
+  branch is untouched by construction (4 hermetic invariant tests).
+  The legacy in-place mode remains the default until P2's promote
+  command exists (`--in-place` becomes the opt-out then).
+- **P2 — OUTSTANDING**: CAS promotion (`capybase promote` —
+  `update-ref <source> <candidate> <expected_source_oid>`, refusing on
+  drift) + OID-verified restart resume (transitions in
+  session_state.json; the journal's git_head fields are the audit
+  trail, the state file the resumable index) + default flip
+  (candidate becomes the desktop default, `--in-place` the opt-out).
+- **P3 remainder — OUTSTANDING**: the full Evidence envelope
+  (scope/strength/command fingerprints — partially present via
+  `unknown` + `acceptance_trust`), the tier-table policy module
+  (consuming the trust events), and `suspected_validator_error`
+  demoted to evidence-only.
+- **P4 — OUTSTANDING**: promotable dry-run artifacts — when a later
+  request's fingerprints match a retained candidate's
+  session_state.json, promote instead of re-running the model. The
+  state file P1 writes is already the contract.
+- **P5 — OUTSTANDING**: remote lease publication (service mode,
+  default-off, explicit `--force-with-lease=<ref>:<oid>`).
 
 ### What does not change
 

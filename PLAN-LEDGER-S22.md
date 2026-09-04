@@ -7066,3 +7066,33 @@ surface is create_backup_ref (7039), the rebase drive + stage_paths
 (5424), abort ×3 (5191/7184/7274), and the in-tree candidate/verify
 writes — 109 self.git touchpoints total, all in run()'s loop; the
 eval/corpus paths already run isolated in worktrees.
+
+### S27-EXTEND-33 (2026-09-04) — candidate-ref P1 LANDED: the rebase away from the user's branch
+
+`capybase rebase --candidate` (design P1, user-directed "Begin!"):
+
+- **capybase/candidate_ref.py**: SNAPSHOT (source ref+OID, target OID,
+  config/profile/toolchain fingerprints) → linked worktree PINNED at
+  the source OID on `capybase/candidate/<branch>@<ts>` (add_worktree
+  gained the explicit start_point param) → the orchestrator's existing
+  loop runs inside unchanged → success RETAINS the candidate branch +
+  audit bundle (`.rebase-agent/candidates/<id>/session/` +
+  `session_state.json` with the OIDs + fingerprints P2's promotion
+  verifies); escalation deletes the candidate (AFTER worktree
+  teardown — git refuses -D on a checked-out branch; caught by the
+  hermetic tests). SIGTERM-safe teardown mirrors dryrun; the report
+  prints the exact expected-OID `update-ref` promotion line.
+- **CLI**: `--candidate` on the rebase command (opt-in; becomes the
+  default at P2 when `capybase promote` exists — legacy in-place
+  remains available).
+- **4 hermetic invariant tests** (source untouched in BOTH outcomes;
+  candidate retained at the rebased OID with correct state; escalation
+  deletes; no orphaned worktrees; the CAS line's explicit-OID form).
+  Gate 4,040/0.
+
+Outstanding-task descriptions updated in the design doc: P0/P3-slice/
+P1 = LANDED; P2 (promote command + OID resume + default flip), P3
+remainder (evidence envelope, tier policy, suspected_validator_error
+demotion), P4 (promotable artifacts — P1's state file is already the
+contract), P5 (lease publication) carry refined descriptions of what
+now exists to build on.

@@ -347,14 +347,16 @@ class GitBackend:
     # ------------------------------------------------------------------ worktrees (dry-run)
 
     def add_worktree(
-        self, path: str | Path, *, new_branch: str | None = None, detach: bool = False
+        self, path: str | Path, *, new_branch: str | None = None,
+        detach: bool = False, start_point: str = "HEAD",
     ) -> GitResult:
         """Create a linked worktree at ``path``.
 
-        Either create it on ``new_branch`` starting at the current HEAD (used by
+        Either create it on ``new_branch`` starting at ``start_point`` (used by
         dry-run so the rehearsal has its own throwaway branch and never moves the
-        user's branch) or ``--detach`` at HEAD. Shares the object store, so this
-        is cheap even for large repos.
+        user's branch; the candidate-ref mode pins the SNAPSHOT oid explicitly)
+        or ``--detach`` at ``start_point``. Shares the object store, so this is
+        cheap even for large repos.
         """
         # Exactly one mode: a new throwaway branch, or a detached HEAD. Reject
         # both-set (ambiguous) and neither-set (would check out HEAD on the
@@ -366,7 +368,7 @@ class GitBackend:
             args += ["-b", new_branch]
         elif detach:
             args += ["--detach"]
-        args += [str(path), "HEAD"]
+        args += [str(path), start_point]
         return self._run(args, what="worktree add")
 
     def remove_worktree(self, path: str | Path, *, force: bool = True) -> GitResult:
