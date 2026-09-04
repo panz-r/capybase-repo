@@ -6173,6 +6173,25 @@ P+W 631/660 = 95.6%**; genuine ESCALATE among real conflicts down to
 7 (all with current dispositions: 0013, fmt-0003, 0007, 0011, 0014,
 0012, 0079).
 
+### S27-EXTEND-27 (2026-09-04) — SETUP_FAILED class; PASS-freshness audit + regression sample 4/4
+
+- **SETUP_FAILED terminal class (a6ec3a4)**: infrastructure/setup
+  failures (git-lock, materializer exceptions) classify distinctly
+  and are excluded from the real-conflict denominator alongside
+  SAFE_SKIP, counted separately in summaries — infra noise no longer
+  inflates the ESCALATE column (the clickhouse-0003 lesson). The
+  storage-class relocation rung joined the repair_rung_error
+  journaling. 2 classifier tests; gate 4,029/0.
+- **PASS-freshness audit**: 577 s26 PASSes — 0 never re-measured, but
+  99% carry pre-EXTEND-17 latest measurements. Structurally safe
+  (first-try PASS prompts are byte-identical; the fixes touch
+  failure/retry/exhaustion paths), and now spot-checked:
+- **Regression sample (one per language from the pre-fix pool, ×1)**:
+  flask-0001 PASS 0.97, protobuf-0002 PASS 0.99, sea-orm-0001 PASS
+  0.98, sqlite-0001 PASS 0.97 — **4/4 first-try PASS, zero
+  regressions**. The harvest's --repeat-nonpass 3 methodology remains
+  the net for any residual variance.
+
 ### S27-EXTEND-20 (2026-09-04) — full deterministic corpus run + sprint-28 design seed
 
 **Corpus `all` end-to-end** (the combined session+scenario+realworld
