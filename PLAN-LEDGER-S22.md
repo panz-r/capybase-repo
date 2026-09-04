@@ -7256,3 +7256,27 @@ The live run caught two real defects the hermetic suite couldn't:
   into delete_branch vs backup-prune).
 
 Gate 4,056/0. The architecture is live-verified end-to-end.
+
+### S27-EXTEND-40 (2026-09-04) — the remaining live flows: tier-B consent, P4 reuse
+
+- **Tier B live**: deterministic layers disabled via config → the model
+  resolved (llm_calls=1), the policy read exactly
+  "PROPOSE_FOR_REVIEW (tier B) — model-assisted unit(s); test gate
+  passed". `capybase promote` REFUSED without --approve (feat
+  unchanged) and PROMOTED on the explicit review act — the consent
+  gate verified live in both directions.
+- **P4 reuse live**: a second identical run returned "CANDIDATE
+  (reused): retained candidate matches every fingerprint — no model
+  run needed" — zero LLM calls, the previously-tested candidate
+  returned. (An intermediate run that deleted the retained state
+  correctly did NOT reuse — the artifact is the contract.)
+- Smoke lesson recorded: `--config` takes a DIRECTORY containing
+  capybase.toml (the config-dir contract), not a file path — a
+  wrong-path load falls back to defaults silently for the run (the
+  hermetic tests inject Config objects directly and never see this).
+  Follow-up noted: consider failing loudly when --config names a
+  non-directory.
+
+Every flow of the candidate-ref architecture is now live-verified:
+candidate default, tier A and tier B policies, the consent gate both
+ways, CAS promotion, and fingerprint reuse. Gate 4,056/0.
