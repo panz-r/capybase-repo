@@ -145,6 +145,10 @@ acceptance policy: tier A should require D0/D1 provenance.
    diverge on ordering). One design insight recorded: the batch
    transaction model and sequential insertion model differ on
    multi-insert ordering — sequential is authoritative.
-6. [ ] Remaining ports (items → attributes → imports).
-7. [ ] One orchestrator repair behind the registry.
-8. [ ] Confidence-float removal (0.85/0.9 on deterministic repairs).
+6. [x] Keyed-item port: RustItemCodec — 5/6 shadow agreement (the
+   method-insert case diverges on subtree re-indentation: the existing
+   primitive re-indents to container depth, the codec preserves source
+   indentation — same scope, different bytes; RECORDED, known fix).
+7. [ ] Remaining ports (attributes → imports).
+8. [ ] One orchestrator repair behind the registry.
+9. [ ] Confidence-float removal (0.85/0.9 on deterministic repairs).

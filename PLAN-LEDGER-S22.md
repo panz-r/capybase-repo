@@ -7544,3 +7544,25 @@ proven: codec → engine → shadow → switch.
   distinction is now documented in the engine + the design doc.
 - Gate 4,093/0. Two of five ports proven under shadow (manifest 6/6,
   fields 6/6); items/attributes/imports follow the same pattern.
+
+### S27-EXTEND-52 (2026-09-04) — the keyed-item port: 5/6 exact, 1 recorded divergence
+
+**RustItemCodec** (subtree extraction with attribute walk-back,
+container match, scope-qualified collision, macro_rules! refusal):
+**5/6 shadow cases agree exactly** (collision, idempotent, macro,
+no-destination, no-other-side). The method-insert case agrees on
+status and scope but diverges on byte-level text — the existing
+primitive re-indents the transplanted subtree to the container's
+depth; the codec preserves the source indentation. Both produce the
+correct scope; the divergence is RECORDED (shadow mode's purpose —
+the switch decision comes after all divergences are understood, and
+this one has a known cause + known fix: the codec needs the
+re-indentation pass the existing primitive has).
+
+**Three of five ports proven under shadow**:
+- manifest arrays: 6/6 exact
+- named fields: 6/6 exact
+- keyed items: 5/6 exact + 1 recorded (indentation)
+- attributes + imports: remaining
+
+Gate 4,099/0.
