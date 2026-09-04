@@ -6993,3 +6993,37 @@ Three packaging inconsistencies (user-directed):
    pip extra).
 
 Gate 4,033/0 @ -n 6 (4 new metadata tests).
+
+### S27-EXTEND-31 (2026-09-04) — external proposal analyzed: candidate-ref architecture + acceptance subsystem
+
+**Verdict: good fit — it completes our own philosophy rather than
+replacing it.** Design recorded in
+docs/candidate-ref-architecture-design.md. Key grounding from the code:
+
+- The current mutate-then-abort model (backup ref +
+  `git rebase --abort` ×3 sites) is step one of the proposal's
+  "never mutate the source branch"; the completion is natural, and
+  the precursors are in place (linked-worktree isolation is
+  battle-tested in corpus/eval; the journal already persists
+  per-event git_head OIDs; candidate envelopes carry fingerprints).
+- **The proposal's "unknown silently improves scores" criticism is
+  literally true here**: verification.py's missing-compiler /
+  vanished-compiler / exception paths return `passed=True` with
+  `syntax_passed: True` for checks that never ran. The eval
+  compensates (GATE_UNAVAILABLE) but the production acceptance path
+  does not.
+- **The model-decides-safety inversion exists**:
+  `suspected_validator_error` (the repair prompt's self-report) flows
+  into acceptance — useful evidence, wrong role.
+- Calibration-from-history is cheap for us: the corpus + verdict
+  history sprint-27 assembled IS the calibration source the proposal
+  calls for.
+
+**Staged plan (P0–P5)**: ground-truth audit of every mutation site →
+candidate-ref skeleton (legacy mode kept) → CAS promotion + OID-guarded
+resume → acceptance subsystem (the UNKNOWN-not-pass slice lands FIRST —
+highest value/risk, independent of the ref work) → promotable dry-run
+artifacts → remote lease publication (service mode, default-OFF —
+capybase stays local-first). The per-unit CEGIS loop, prompt subsystem,
+jury, corpus, and eval are untouched — they produce candidates and
+evidence; the subsystem consumes them.
