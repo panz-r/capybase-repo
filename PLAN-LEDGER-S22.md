@@ -7619,3 +7619,28 @@ Gate 4,110/0.
 
 **29/37 exact (78%)**, all 8 divergences from one known cause with a
 known fix. Gate 4,118/0.
+
+### S27-EXTEND-55 (2026-09-04) — the import separate-line fallback: ALL PORTS AT FULL AGREEMENT
+
+The separate-line fallback (delegating to the existing
+`_add_separate_use_line`, inserting adjacent to the last use line)
+resolved all 3 recorded import divergences. **8/8 exact** — the
+import port is at full shadow agreement with zero divergences.
+
+**ALL FIVE PORTS AT FULL SHADOW AGREEMENT — 37/37 (100%):**
+
+| Port | Agreement |
+|------|-----------|
+| Manifest arrays | 6/6 exact |
+| Named fields | 6/6 exact |
+| Keyed items | 6/6 exact |
+| Attributes | 11/11 exact |
+| Imports | 8/8 exact |
+
+Every shape from every existing primitive's test suite reproduces
+exactly through the generic engine + its codec. The ports are ready
+to switch (the existing primitives become the codecs' internal
+implementation details; the engine provides the lifecycle).
+
+Gate 4,118/0. Remaining stage-2: one repair behind the registry +
+confidence-float removal.

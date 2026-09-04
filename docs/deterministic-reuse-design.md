@@ -153,15 +153,12 @@ acceptance policy: tier A should require D0/D1 provenance.
    agree** (builtin derive, external derive, allow/warn lint, all four
    never-unioned kinds, lint-level mismatch, idempotent, all-present).
    Zero divergences.
-8. [x] Import port (ADAPTER approach): an ImportCodec that DELEGATES
-   to the existing `parse_use_leaves` + `_merge_into_group_line`
-   (genuinely language-specific tree machinery stays; the codec is an
-   adapter, not a reimplementation). **5/8 exact** (exclusive ignored,
-   non-additive ignored, no-destination, idempotent, not-a-use);
-   **3 recorded divergences** (rename, grouped_add, separate_import —
-   all the same root cause: the old primitive has a
-   separate-line-insertion fallback the codec doesn't implement yet).
-   Known fix: add the "insert as a new use line after the last use"
-   fallback to try_edit. The item re-indent fix also landed (6/6 now).
+8. [x] Import port (ADAPTER approach, **8/8 exact**): an ImportCodec
+   that DELEGATES to the existing `parse_use_leaves` +
+   `_merge_into_group_line` + `_add_separate_use_line` (the tree
+   machinery stays; the codec adapts it to the protocol). The
+   separate-line fallback (insert as a new use line adjacent to the
+   last use) resolved all 3 recorded divergences. All five ports at
+   full shadow agreement.
 9. [ ] One orchestrator repair behind the registry.
 10. [ ] Confidence-float removal (0.85/0.9 on deterministic repairs).
