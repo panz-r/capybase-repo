@@ -7526,3 +7526,21 @@ arithmetic — the universal rules working as designed). Gate 4,087/0.
 The port is ready to switch when the remaining codecs exist (fields →
 items → attributes → imports — the proposal's order). The pattern is
 proven: codec → engine → shadow → switch.
+
+### S27-EXTEND-51 (2026-09-04) — the named-field port + the sequential-transaction design insight
+
+- **StructFieldCodec** (scope-qualified collision per claim-3,
+  sequential insert before the closing brace): **6/6 shadow cases
+  agree** with the existing named_field_union on status AND text
+  (field insert, same-name collision, idempotent reapply,
+  no-destination, no-other-side, multiple fields).
+- **Engine design insight** (found by the multiple-fields shadow):
+  same-position insertions legitimately DIVERGE between a batch
+  EditTransaction (descending-order apply → reverse insertion order)
+  and sequential running application (each edit sees prior edits →
+  natural order). Sequential is authoritative (matching all existing
+  primitives); the EditTransaction is the audit RECORD (source-hash +
+  edit list for the certificate), not a batch re-application. This
+  distinction is now documented in the engine + the design doc.
+- Gate 4,093/0. Two of five ports proven under shadow (manifest 6/6,
+  fields 6/6); items/attributes/imports follow the same pattern.

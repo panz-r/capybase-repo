@@ -133,6 +133,18 @@ acceptance policy: tier A should require D0/D1 provenance.
    suite — **6/6 shadow cases agree** on status AND applied text.
    Zero divergences; the port is ready to switch when the remaining
    codecs exist.
-5. [ ] Remaining ports (fields → items → attributes → imports).
-6. [ ] One orchestrator repair behind the registry.
-7. [ ] Confidence-float removal (0.85/0.9 on deterministic repairs).
+5. [x] Named-field port under SHADOW MODE: a StructFieldCodec
+   (scope-qualified collision per the claim-3 fix, sequential insert
+   before the closing brace) — **6/6 shadow cases agree** on status
+   AND text (field insert, collision, idempotent, no-destination,
+   no-other-side, multiple fields). The engine now applies codec
+   calls SEQUENTIALLY (each try_edit sees the text after prior
+   insertions — matching the existing primitives' behavior), with
+   the EditTransaction as the audit RECORD (source-hash + edit list),
+   not a batch re-application (same-position insertions legitimately
+   diverge on ordering). One design insight recorded: the batch
+   transaction model and sequential insertion model differ on
+   multi-insert ordering — sequential is authoritative.
+6. [ ] Remaining ports (items → attributes → imports).
+7. [ ] One orchestrator repair behind the registry.
+8. [ ] Confidence-float removal (0.85/0.9 on deterministic repairs).

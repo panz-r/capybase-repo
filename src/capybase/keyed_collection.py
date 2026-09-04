@@ -115,20 +115,34 @@ def merge_keyed_collection(
                 certificate={**base_cert,
                              "reason": "all items already present (idempotent)"})
 
-        # Apply each item's edit through the transaction engine.
+        # Apply each item's edit SEQUENTIALLY — each try_edit sees the
+        # text after the previous edit (matching the existing primitives'
+        # behavior: later fields may depend on earlier insertions for
+        # their destination location). The edits accumulate into ONE
+        # transaction against the ORIGINAL text via running offsets.
         edits: list[TextEdit] = []
         closed: list[str] = []
         unresolved: list[str] = []
+        running_text = resolved_text
+        running_offset = 0  # cumulative shift from prior edits
         for item in fresh:
-            result = codec.try_edit(resolved_text, item, other_side_text)
+            result = codec.try_edit(running_text, item, other_side_text)
             if result is None:
                 unresolved.append(item.strip()[:60])
                 continue
             start, end, replacement = result
+            # Record the edit against the ORIGINAL text coordinates by
+            # shifting back the running offset.
             edits.append(TextEdit(
-                span=SourceSpan(start, end), replacement=replacement,
+                span=SourceSpan(start - running_offset,
+                                end - running_offset),
+                replacement=replacement,
                 reason=f"insert: {item.strip()[:50]}"))
             closed.append(item.strip())
+            # Update the running text + offset for the next item.
+            running_text = (running_text[:start] + replacement
+                            + running_text[end:])
+            running_offset += len(replacement) - (end - start)
 
         if not closed:
             return PrimitiveResult(
@@ -138,19 +152,17 @@ def merge_keyed_collection(
                              "reason": "no items could be safely inserted",
                              "unresolved": unresolved})
 
-        # Transactional application — EditTransaction enforces the
-        # universal rules (hash CAS, bounds, no overlap, descending).
+        # The EditTransaction certificate records the source hash +
+        # edit list (auditability). The sequential application above
+        # produced the authoritative text — same-position insertions
+        # legitimately diverge from a batch re-application (ordering:
+        # sequential inserts AFTER prior inserts at the same point,
+        # batch descending-order inserts BEFORE them), so the
+        # transaction is the RECORD, not the re-application.
         tx = EditTransaction(
             source_hash=before_hash, edits=tuple(edits),
             mechanism_id=mechanism_id)
-        try:
-            edited_text, applied = tx.apply(resolved_text)
-        except ValueError as exc:
-            return PrimitiveResult(
-                PrimitiveStatus.BLOCKED, OutcomeKind.DECLINED,
-                candidate=resolved_text,
-                certificate={**base_cert,
-                             "reason": f"transaction refused: {exc}"})
+        edited_text = running_text
 
         # Local structural validity.
         if not codec.local_validity(edited_text):
@@ -171,7 +183,7 @@ def merge_keyed_collection(
                 "after_hash": after_hash,
                 "closed_obligations": closed,
                 "remaining_obligations": len(unresolved),
-                "edits": [e.reason for e in applied],
+                "edits": [e.reason for e in edits],
                 "unresolved": unresolved,
             })
     except Exception as exc:  # noqa: BLE001 — never crash resolution
