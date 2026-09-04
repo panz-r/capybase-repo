@@ -7096,3 +7096,30 @@ remainder (evidence envelope, tier policy, suspected_validator_error
 demotion), P4 (promotable artifacts — P1's state file is already the
 contract), P5 (lease publication) carry refined descriptions of what
 now exists to build on.
+
+### S27-EXTEND-34 (2026-09-04) — candidate-ref P2 LANDED: promote + the default flip
+
+- **`capybase promote`** (candidate_ref.promote_candidate): the
+  expected-OID compare-and-swap — `git update-ref <source>
+  <candidate> <expected_old>`. Any drift refuses with BOTH OIDs named
+  (never forces); a missing candidate commit refuses; the promotion is
+  recorded into the retained state file; the consumed candidate branch
+  is deleted (`--keep-ref` retains). `--checkout` refreshes a clean
+  checked-out tree after the CAS — and its dirty-tree precondition is
+  verified BEFORE the ref ever moves (never half-promote).
+- **Default flipped**: plain `capybase rebase <target>` now runs the
+  candidate mode — the design's "never mutate the source branch" is
+  the desktop default; `--in-place` opts back into legacy
+  mutate-and-abort; `--dry-run` unchanged (still the throwaway
+  rehearsal).
+- 5 new tests (CAS moves the source to exactly the candidate OID +
+  state + branch consumption; drift refuses with both OIDs and retains
+  the candidate; --checkout clean-refresh + dirty-refuse-before-move;
+  no-candidate clean refusal; the CLI dispatch flip via a synthetic
+  ResolvedProvider through the strict calibration gate). Gate
+  4,045/0.
+
+Outstanding-task updates: P2 marked LANDED in the design doc; the
+restart-resume piece moved into P4 (shares the fingerprint-matching
+machinery); P4's description now covers both reuse and transition
+resume.

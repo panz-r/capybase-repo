@@ -168,3 +168,142 @@ def test_candidates_dir_layout(py_repo_before_rebase):
     state_path = Path(report.state_path)
     assert CANDIDATES_DIR in str(state_path)
     assert state_path.is_relative_to(repo if isinstance(repo, Path) else Path(repo))
+
+
+# ---------------------------------------------------------------------------
+# P2: compare-and-swap promotion
+# ---------------------------------------------------------------------------
+
+from capybase.candidate_ref import promote_candidate  # noqa: E402
+
+
+def _successful_candidate(repo, merged_block):
+    """Run a candidate to success; return (report, feat_before)."""
+    feat_before = _branch_oid(repo, "feat")
+    engine = ResolutionEngine(
+        _config(repo).model, client=CyclingClient([_payload(merged_block)])
+    )
+    report = run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine)
+    assert report.would_succeed, report.summary()
+    return report, feat_before
+
+
+def test_promote_cas_moves_source_exactly(py_repo_before_rebase):
+    repo = py_repo_before_rebase["repo"]
+    report, feat_before = _successful_candidate(
+        repo, py_repo_before_rebase["merged_block"])
+
+    result = promote_candidate(repo)
+    assert result.promoted, result.summary()
+    # The source moved to EXACTLY the candidate OID.
+    assert _branch_oid(repo, "feat") == report.candidate_oid
+    assert _branch_oid(repo, "feat") != feat_before
+    # The state file records the promotion.
+    state = json.loads(Path(result.state_path).read_text())
+    assert state["promoted"]["to"] == report.candidate_oid
+    # The consumed candidate branch is deleted by default.
+    assert _candidate_branches(repo) == []
+
+
+def test_promote_refuses_on_drift(py_repo_before_rebase):
+    """THE rule: any drift refuses, never forces — both OIDs named."""
+    repo = py_repo_before_rebase["repo"]
+    report, feat_before = _successful_candidate(
+        repo, py_repo_before_rebase["merged_block"])
+    # Simulate drift: the source branch moved after the candidate ran.
+    git(repo, "commit", "--allow-empty", "-q", "-m", "drift")
+    drifted = _branch_oid(repo, "feat")
+
+    result = promote_candidate(repo)
+    assert not result.promoted
+    assert "DRIFT" in result.summary()
+    assert drifted[:8] in result.summary()
+    assert feat_before[:8] in result.summary()
+    # The source was NOT moved to the candidate.
+    assert _branch_oid(repo, "feat") == drifted
+    # The candidate branch is retained for inspection.
+    assert len(_candidate_branches(repo)) == 1
+
+
+def test_promote_checkout_updates_clean_tree_refuses_dirty(
+    py_repo_before_rebase,
+):
+    repo = py_repo_before_rebase["repo"]
+    report, feat_before = _successful_candidate(
+        repo, py_repo_before_rebase["merged_block"])
+    # feat is NOT checked out here (HEAD is on it in these fixtures?
+    # drive both branches of the checkout dance explicitly).
+    git(repo, "checkout", "-q", "feat")
+
+    # Clean tree + --checkout → the worktree follows the ref.
+    result = promote_candidate(repo, checkout=True)
+    assert result.promoted, result.summary()
+    assert result.checked_out_updated
+    assert git(repo, "rev-parse", "HEAD").stdout.strip() == report.candidate_oid
+
+    # Dirty tree + --checkout → refused BEFORE any ref move.
+    report2, feat2 = _successful_candidate(
+        repo, py_repo_before_rebase["merged_block"])
+    (repo / "uncommitted.txt").write_text("dirty\n")
+    result2 = promote_candidate(repo, checkout=True)
+    assert not result2.promoted
+    assert "uncommitted" in result2.summary().lower()
+    assert _branch_oid(repo, "feat") == report.candidate_oid  # unmoved
+
+
+def test_promote_no_candidate_refuses_cleanly(py_repo_before_rebase):
+    repo = py_repo_before_rebase["repo"]
+    result = promote_candidate(repo)
+    assert not result.promoted
+    assert "no retained successful candidate" in result.summary()
+
+
+def test_cli_rebase_defaults_to_candidate_mode(
+    py_repo_before_rebase, monkeypatch, tmp_path,
+):
+    """P2 default flip: plain `capybase rebase <tgt>` routes to the
+    candidate mode; --in-place opts back into the legacy path."""
+    import capybase.candidate_ref as cref
+    from capybase import cli
+
+    repo = py_repo_before_rebase["repo"]
+    called = {"candidate": 0, "in_place": 0}
+
+    class _Rep:
+        would_succeed = True
+        def summary(self):
+            return "fake candidate report"
+
+    monkeypatch.setattr(
+        cref, "run_candidate_rebase",
+        lambda *a, **k: (called.__setitem__("candidate", called["candidate"] + 1), _Rep())[1])
+    monkeypatch.setattr(
+        cli.Orchestrator, "rebase",
+        lambda self, *a, **k: (called.__setitem__("in_place", called["in_place"] + 1)) or type("R", (), {"escalated": False})())
+
+    cfg = tmp_path / "c.toml"
+    cfg.write_text("")
+
+    # The strict calibration gate: resolution commands refuse without a
+    # provider. Inject a synthetic ResolvedProvider (in-memory profile)
+    # so the DISPATCH is what's under test.
+    import capybase.provider_config as pcfg
+    from capybase.calibration_profile import ModelProfile
+    from capybase.provider_config import ProviderConfig, ResolvedProvider
+
+    _mp = ModelProfile(model="fake-model")
+    _fake = ResolvedProvider(
+        provider=ProviderConfig(
+            name="t", profile="synthetic", base_url="http://x",
+            model="fake-model", api_key="k"),
+        profile=_mp, profile_path="synthetic",
+    )
+    monkeypatch.setattr(pcfg, "resolve_provider", lambda **k: _fake)
+
+    cli.main(["--config", str(cfg), "--repo", str(repo), "rebase", "main"])
+    assert called["candidate"] == 1 and called["in_place"] == 0
+
+    cli.main(["--config", str(cfg), "--repo", str(repo),
+              "rebase", "--in-place", "main"])
+    assert called["candidate"] == 1 and called["in_place"] == 1

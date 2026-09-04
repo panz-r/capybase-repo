@@ -134,6 +134,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--session", default=None, help="show a specific session id (default: latest)",
     )
 
+    promo_p = sub.add_parser(
+        "promote",
+        help="compare-and-swap a retained candidate branch onto its source "
+             "ref: `git update-ref <source> <candidate> <expected-old>` — "
+             "refuses on any drift, never forces",
+    )
+    promo_p.add_argument(
+        "state", nargs="?", default=None,
+        help="path to the candidate's session_state.json (default: the "
+             "newest retained successful candidate)",
+    )
+    promo_p.add_argument(
+        "--checkout", action="store_true",
+        help="also refresh the checked-out worktree when the promoted "
+             "branch is checked out and the tree is clean "
+             "(git reset --hard <candidate>; refused on a dirty tree)",
+    )
+    promo_p.add_argument(
+        "--keep-ref", action="store_true", dest="keep_ref",
+        help="keep the candidate branch after promotion (default: delete "
+             "it — its commit is reachable from the source ref)",
+    )
+    promo_p.add_argument(
+        "--repo", default=".",
+        help="repository to promote in (default: current directory)",
+    )
     rb_p = sub.add_parser(
         "rebase",
         help="own the entire rebase: start it, resolve conflicts, finish",
@@ -141,6 +167,16 @@ def build_parser() -> argparse.ArgumentParser:
     rb_p.add_argument(
         "target",
         help="the upstream/branch to rebase onto (passed to `git rebase <target>`)",
+    )
+    rb_p.add_argument(
+        "--in-place",
+        action="store_true",
+        dest="in_place",
+        help="run the rebase directly on the checked-out branch (the "
+             "legacy mutate-and-abort mode with a backup ref). Default "
+             "since P2: the candidate mode — the whole rebase runs on a "
+             "retained candidate branch and the source is never touched; "
+             "promote with `capybase promote`.",
     )
     rb_p.add_argument(
         "--autostash",
@@ -1032,12 +1068,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         result = orch.run()
         return 1 if result.escalated else 0
+    if args.command == "promote":
+        from capybase.candidate_ref import promote_candidate
+        result = promote_candidate(
+            args.repo, state_path=args.state, checkout=args.checkout,
+            keep_ref=args.keep_ref)
+        print(result.summary())
+        return 0 if result.promoted else 1
     if args.command == "rebase":
-        if getattr(args, "candidate", False):
-            # Candidate-ref mode (candidate-ref-architecture-design P1):
-            # the whole rebase on a retained candidate branch; the source
-            # is never touched. On success the promotable artifact (branch
-            # + audit bundle + OID/fingerprint state) is kept.
+        # P2 default flip: the candidate mode is the default (the design's
+        # "never mutate the source branch"); --in-place opts back into the
+        # legacy mutate-and-abort path; --dry-run stays the throwaway
+        # rehearsal; an explicit --candidate is still accepted (no-op
+        # equivalent of the new default).
+        if not getattr(args, "in_place", False) and not (
+                getattr(args, "dry_run", False)):
             from capybase.candidate_ref import run_candidate_rebase
             report = run_candidate_rebase(
                 config, repo=args.repo, target=args.target,

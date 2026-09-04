@@ -156,21 +156,27 @@ ConflictUnit → CandidateResolution[] → Evidence[] → PolicyDecision
   branch is untouched by construction (4 hermetic invariant tests).
   The legacy in-place mode remains the default until P2's promote
   command exists (`--in-place` becomes the opt-out then).
-- **P2 — OUTSTANDING**: CAS promotion (`capybase promote` —
-  `update-ref <source> <candidate> <expected_source_oid>`, refusing on
-  drift) + OID-verified restart resume (transitions in
-  session_state.json; the journal's git_head fields are the audit
-  trail, the state file the resumable index) + default flip
-  (candidate becomes the desktop default, `--in-place` the opt-out).
+- **P2 — LANDED** (extend-34): `capybase promote` — the expected-OID
+  CAS (`update-ref <source> <candidate> <expected_old>`; drift refuses
+  with BOTH OIDs named, never forces; the consumed candidate branch is
+  deleted, `--keep-ref` retains; the promotion is recorded in the
+  state file). `--checkout` refreshes a clean checked-out tree
+  (refused BEFORE any ref move on a dirty tree — never half-promote).
+  **Default flipped**: plain `capybase rebase` now runs candidate mode;
+  `--in-place` opts back into legacy; `--dry-run` unchanged. The
+  restart-resume piece (OID-verified transition resume) moves to P4
+  where it shares the fingerprint-matching machinery.
 - **P3 remainder — OUTSTANDING**: the full Evidence envelope
   (scope/strength/command fingerprints — partially present via
   `unknown` + `acceptance_trust`), the tier-table policy module
   (consuming the trust events), and `suspected_validator_error`
   demoted to evidence-only.
-- **P4 — OUTSTANDING**: promotable dry-run artifacts — when a later
-  request's fingerprints match a retained candidate's
-  session_state.json, promote instead of re-running the model. The
-  state file P1 writes is already the contract.
+- **P4 — OUTSTANDING**: promotable/reusable artifacts — when a later
+  request's fingerprints (source+target OIDs, config, profile,
+  toolchain) match a retained candidate's session_state.json, return
+  the already-tested candidate instead of re-running the
+  nondeterministic model pass; plus the OID-verified transition resume
+  (state-file transitions; resume-or-refuse on restart).
 - **P5 — OUTSTANDING**: remote lease publication (service mode,
   default-off, explicit `--force-with-lease=<ref>:<oid>`).
 
