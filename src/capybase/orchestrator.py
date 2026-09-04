@@ -58,6 +58,7 @@ from capybase.test_output import _tool_of as _tool_of_test_cmd
 from capybase.config import Config
 from capybase.consensus import rank_by_consensus
 from capybase.preflight import run_rebase_preflight
+from capybase.langs import is_c_family, is_cpp
 
 # Sentinel for "not in cache" (distinguishes a cached None from a cache miss).
 _MISSING = object()
@@ -2503,7 +2504,7 @@ def _try_deterministic_preprocessor_repair(
     if fault_idx < 0 or fault_idx >= len(accepted):
         return None
     _lang = accepted[fault_idx][0].language if 0 <= fault_idx < len(accepted) else None
-    if _lang not in ("c", "cpp", "c++"):
+    if not is_c_family(_lang):
         return None
     unit, _old_cand = accepted[fault_idx]
     try:
@@ -2563,7 +2564,7 @@ def _try_gcc_fixit_repair(
         return None
     unit, _old_cand = accepted[fault_idx]
     lang = unit.language or ""
-    if lang not in ("c", "cpp", "c++"):
+    if not is_c_family(lang):
         return None
 
     # Only run when there's a compile failure with a parse error. Check the
@@ -2578,8 +2579,8 @@ def _try_gcc_fixit_repair(
 
     # Resolve the gcc binary path (same resolver as CcsSyntaxValidator).
     from capybase.adapters.lsp import _resolve as _resolve_cc
-    is_cpp = lang in ("cpp", "c++")
-    cc = _resolve_cc("g++" if is_cpp else "gcc")
+    _cpp_lang = is_cpp(lang)
+    cc = _resolve_cc("g++" if _cpp_lang else "gcc")
     if cc is None:
         return None  # no compiler → can't get fix-its
 
@@ -2587,8 +2588,8 @@ def _try_gcc_fixit_repair(
     if not spliced:
         return None
 
-    std = "c++17" if is_cpp else "c11"
-    suffix = ".cpp" if is_cpp else ".c"
+    std = "c++17" if _cpp_lang else "c11"
+    suffix = ".cpp" if _cpp_lang else ".c"
     import tempfile
     import subprocess as _sp_fixit
     with tempfile.NamedTemporaryFile(
@@ -2703,7 +2704,7 @@ def _try_deterministic_cc_repair(
         return None
     unit, _old_cand = accepted[fault_idx]
     _lang = unit.language
-    if _lang not in ("c", "cpp", "c++"):
+    if not is_c_family(_lang):
         return None
     # Find the first classifiable failure message.
     category = None
@@ -3048,7 +3049,7 @@ def _try_duplicate_eradication_repair(
     if fault_idx < 0 or fault_idx >= len(accepted):
         return None
     unit, _old_cand = accepted[fault_idx]
-    if unit.language not in ("c", "cpp", "c++"):
+    if not is_c_family(unit.language):
         return None
     # Entity name from the diagnostic: gcc/clang quote it after
     # "redefinition of" (possibly with return type / params — take the
@@ -3405,7 +3406,7 @@ def _try_side_consistency_repair(
     # common-line restore) is designed for the structural defect profile of
     # C weak-model output. For Python/Rust, deleting "novel" lines can
     # remove legitimate reconciliation code the model produced.
-    if _lang not in ("c", "cpp", "c++"):
+    if not is_c_family(_lang):
         return None
 
     try:
@@ -3583,7 +3584,7 @@ def _try_side_consensus_repair(
         return None
     unit, _old_cand = accepted[fault_idx]
     _lang = unit.language
-    if _lang not in ("c", "cpp", "c++"):
+    if not is_c_family(_lang):
         return None
 
     try:
@@ -12018,7 +12019,7 @@ class Orchestrator:
                          if _occ_re.search(ln)]
                 _addr_only = bool(_occs) and all(
                     _addr_re.search(ln) for ln in _occs)
-                if (_addr_only and language in ("c", "cpp", "c++")):
+                if (_addr_only and is_c_family(language)):
                     _synth = f"int {symbol};"
                     _rep_synth = inject_symbol_declaration(
                         spliced, _synth, language)

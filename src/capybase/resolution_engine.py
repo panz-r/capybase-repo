@@ -69,6 +69,7 @@ from capybase.config import ModelConfig
 
 _log = logging.getLogger("capybase.resolution")
 from capybase.consensus import ConsensusReport, rank_by_consensus
+from capybase.langs import is_c_family
 
 PROMPT_RESOLVE = "resolve_text_block.v6"
 PROMPT_RETRY = "cegis_retry.v6"
@@ -650,7 +651,7 @@ def _function_local_context(unit: ConflictUnit) -> str:
     signature from the side text directly (the side text IS the entity the
     sub-unit resolves), which is content-aligned by construction.
     """
-    if unit.language not in ("c", "cpp", "c++"):
+    if not is_c_family(unit.language):
         return ""
     # Entity-split sub-units: derive context from the side text, not marker_span.
     if unit.structural_metadata.get("parent_unit_id"):
@@ -1333,7 +1334,7 @@ def _fit_to_budget(
     # whole file. Computed once per unit; cached in structural_metadata.
     _skeleton_block = ""
     _orig_text = unit.original_worktree_text or unit.base.text or ""
-    if _orig_text and len(_orig_text) > _SIDES_MAX_CHARS and unit.language in ("c", "cpp", "c++"):
+    if _orig_text and len(_orig_text) > _SIDES_MAX_CHARS and is_c_family(unit.language):
         cached_skeleton = unit.structural_metadata.get("_c_skeleton_rendered")
         if cached_skeleton is not None:
             _skeleton_block = cached_skeleton

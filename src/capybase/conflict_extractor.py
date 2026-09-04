@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 # ``language.EXTENSION_TO_LANGUAGE``; aliased locally as ``_EXT_LANG`` so the
 # detect_language reads naturally.
 from capybase.adapters.language import EXTENSION_TO_LANGUAGE as _EXT_LANG
+from capybase.langs import is_c_family
 
 
 def detect_language(path: str) -> str | None:
@@ -679,7 +680,7 @@ def _side_entity_split_points(side_text: str, language: str) -> list[int]:
     # Phase 2 repair couldn't attribute). Drop any split point whose line sits
     # at a non-zero conditional depth; the splitter then either splits at the
     # remaining safe boundaries or declines (resolves as one block).
-    if language in ("c", "cpp", "c++") and points:
+    if is_c_family(language) and points:
         points = _drop_points_inside_preprocessor_conditional(side_text, points)
     # Delimiter-depth safety: a true top-level entity boundary sits where the
     # running depth of ``{}``/``()``/``[]`` (strings, char literals, and
@@ -1020,7 +1021,7 @@ def _initializer_seam_points(text: str, language: str) -> list[int]:
     generated-row comments and interior preprocessor conditionals both start
     complete entries. Returns 0-based line indices (excluding line 0).
     """
-    if language not in ("c", "cpp", "c++") or not text:
+    if not is_c_family(language) or not text:
         return []
     return [
         i for i, ln in enumerate(text.split("\n"))
@@ -1122,7 +1123,7 @@ def _split_unit_at_entities(
     # worktree span (padding inflates it).
     _side_lines = max(len((cur_text or "").splitlines()),
                       len((rep_text or "").splitlines()))
-    if _side_lines > 200 and lang in ("c", "cpp", "c++"):
+    if _side_lines > 200 and is_c_family(lang):
         cur_pts = sorted(set(cur_pts) | set(_initializer_seam_points(cur_text, lang)))
 
     # A side "carries structure" when it has interior entity boundaries we can

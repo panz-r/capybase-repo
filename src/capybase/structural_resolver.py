@@ -61,6 +61,7 @@ from typing import Literal
 from capybase.conflict_model import ConflictUnit
 from capybase.diff import line_matcher
 from capybase.merge_intent import classify_side, direction
+from capybase.langs import is_c_family
 
 Rule = Literal[
     "identical_sides", "one_sided_change", "disjoint_edits", "zealous_merge",
@@ -3063,7 +3064,7 @@ def _try_directive_union(unit) -> str | None:
     ``#`` directives.
     """
     lang = unit.language
-    if lang not in ("c", "cpp", "c++"):
+    if not is_c_family(lang):
         return None
     base = unit.base.text or ""
     current = unit.current.text or ""

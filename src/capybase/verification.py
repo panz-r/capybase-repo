@@ -36,6 +36,7 @@ from capybase.conflict_model import (
     VerificationResult,
     VerificationWarning,
 )
+from capybase.langs import is_c_family, is_cpp
 
 
 @dataclass
@@ -2356,7 +2357,7 @@ def _structural_validate(
         ))
 
     # 3. Preprocessor imbalance (C/C++ only).
-    if language in ("c", "cpp", "c++"):
+    if is_c_family(language):
         pp_line = _preprocessor_imbalance_line(text)
         if pp_line is not None:
             failures.append(VerificationFailure(
@@ -2367,7 +2368,7 @@ def _structural_validate(
 
     # 4. Parenthesis/bracket imbalance (lightweight — only for C/C++ where
     # unbalanced parens are common model defects).
-    if language in ("c", "cpp", "c++"):
+    if is_c_family(language):
         masked = _mask_strings_and_comments(text, language)
         paren_d = masked.count("(") - masked.count(")")
         bracket_d = masked.count("[") - masked.count("]")
@@ -3011,7 +3012,7 @@ def _try_balance_braces_iterated(
         # created "expected identifier before 'if'" despite balancing).
         # A quick heuristic: the result shouldn't have syntax-keyword lines
         # at brace-depth 0 that don't look like top-level constructs.
-        if language in ("c", "cpp", "c++"):
+        if is_c_family(language):
             for i, line in enumerate(current.split("\n")):
                 stripped = line.strip()
                 # A line starting with 'if' or 'for' at depth 0 (no
@@ -3700,9 +3701,9 @@ class CcsSyntaxValidator(_StandaloneSyntaxValidator):
         return None
 
     def _resolve_compiler(self, cfg: object) -> str | None:
-        is_cpp = self._is_cpp  # set in _compile via the ctx language
-        cc_default = "g++" if is_cpp else "gcc"
-        return _resolve_tool(getattr(cfg, "cxx_path" if is_cpp else "cc_path", cc_default))
+        _cpp_lang = self._is_cpp  # set in _compile via the ctx language
+        cc_default = "g++" if _cpp_lang else "gcc"
+        return _resolve_tool(getattr(cfg, "cxx_path" if _cpp_lang else "cc_path", cc_default))
 
     @property
     def _is_cpp(self) -> bool:
@@ -3711,7 +3712,7 @@ class CcsSyntaxValidator(_StandaloneSyntaxValidator):
 
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
         # Stash whether this unit is C++ so _resolve_compiler picks g++/cpp_std.
-        self._lang_is_cpp = ctx.unit.language in ("cpp", "c++")
+        self._lang_is_cpp = is_cpp(ctx.unit.language)
         self._unit_path = ctx.unit.path or ""
         # Source-portfolio candidates copy one side verbatim. "Undeclared
         # identifier" errors in these candidates are REAL — the side's code
@@ -3724,18 +3725,18 @@ class CcsSyntaxValidator(_StandaloneSyntaxValidator):
         return super().verify(ctx)
 
     def _compile(self, spliced: str, tool: str, cfg: object) -> tuple[bool, str]:
-        is_cpp = self._is_cpp
-        std = getattr(cfg, "cpp_std" if is_cpp else "c_std", "c++17" if is_cpp else "c11")
+        _cpp_lang = self._is_cpp
+        std = getattr(cfg, "cpp_std" if _cpp_lang else "c_std", "c++17" if _cpp_lang else "c11")
         # Use the header suffix when the unit is a header file — gcc infers
         # the language from the suffix, and header suffixes produce more
         # accurate diagnostics than .c/.cpp for header content.
         _path = getattr(self, "_unit_path", "") or ""
         _is_header = _path.endswith((".h", ".hpp", ".hh", ".hxx", ".H"))
         if _is_header:
-            suffix = ".hpp" if is_cpp else ".h"
+            suffix = ".hpp" if _cpp_lang else ".h"
             timeout = 10.0  # headers should compile fast; avoid blocking on complex includes
         else:
-            suffix = ".cpp" if is_cpp else ".c"
+            suffix = ".cpp" if _cpp_lang else ".c"
             timeout = 30.0
         # Include paths: the per-unit Phase A gate doesn't have access to the
         # repo root (only Phase B verify_file does). Headers compile without
@@ -4838,7 +4839,7 @@ def _try_compile_commands(
             return None
         # The compiler is the first token; flags follow. Find the source file
         # in the arguments and replace it with our temp file.
-        suffix = ".cpp" if language in ("cpp", "c++") else ".c"
+        suffix = ".cpp" if is_cpp(language) else ".c"
         with _tf_cc.NamedTemporaryFile(suffix=suffix, delete=False, mode="w") as tmp:
             tmp.write(source_text)
             tmp_path = tmp.name
@@ -5472,7 +5473,7 @@ class VerificationEngine:
         # #ifdef guards, and #else without matching #if. Build-pass can't detect
         # these when the region is platform-guarded (e.g. #ifdef SQLITE_MUTEX_W32
         # stripped on Linux, hiding conflict markers inside the region).
-        if language in ("c", "cpp", "c++") and self.config.require_syntax_if_supported:
+        if is_c_family(language) and self.config.require_syntax_if_supported:
             pp_line = _preprocessor_imbalance_line(whole)
             if pp_line is not None:
                 # Sprint-21 coherence-repair rung (preprocessor arm —
@@ -5651,7 +5652,7 @@ class VerificationEngine:
                         )
                 features["syntax_checked"] = syntax_checked
                 features["syntax_passed"] = syntax_ok
-        elif language in ("c", "cpp", "c++"):
+        elif is_c_family(language):
             # C/C++ whole-file verification. Two paths:
             #
             # 1. When a user-supplied build command (``cc_build_command``) is
@@ -5730,15 +5731,15 @@ class VerificationEngine:
                     from capybase.adapters.lsp import _resolve as _resolve_cc_fb
                     _cc_fb = _resolve_cc_fb(
                         getattr(self.config, "cxx_path", "g++")
-                        if language in ("cpp", "c++")
+                        if is_cpp(language)
                         else getattr(self.config, "cc_path", "gcc")
                     )
                     if _cc_fb is None:
                         return False, f"{reason}: no fallback compiler"
                     _std_fb = (getattr(self.config, "cpp_std", "c++17")
-                               if language in ("cpp", "c++")
+                               if is_cpp(language)
                                else getattr(self.config, "c_std", "c11"))
-                    _suffix_fb = ".cpp" if language in ("cpp", "c++") else ".c"
+                    _suffix_fb = ".cpp" if is_cpp(language) else ".c"
                     _inc_fb = [str(repo_root)]
                     _fdir = (Path(repo_root) / path).parent
                     if str(_fdir) != str(repo_root):
@@ -6101,12 +6102,12 @@ class VerificationEngine:
             else:
                 # Fallback: standalone gcc/g++ -fsyntax-only (the original path).
                 from capybase.adapters.lsp import _resolve as _resolve_cc
-                is_cpp = language in ("cpp", "c++")
-                cc = _resolve_cc(self.config.cxx_path if is_cpp else self.config.cc_path)
+                _cpp_lang = is_cpp(language)
+                cc = _resolve_cc(self.config.cxx_path if _cpp_lang else self.config.cc_path)
                 if cc is not None:
                     syntax_checked = True
-                    std = self.config.cpp_std if is_cpp else self.config.c_std
-                    suffix = ".cpp" if is_cpp else ".c"
+                    std = self.config.cpp_std if _cpp_lang else self.config.c_std
+                    suffix = ".cpp" if _cpp_lang else ".c"
                     # Header files (#include "sibling.h") need -I paths to
                     # resolve project-internal type definitions (u8, BtCursor,
                     # sqlite3_vfs defined in sqliteInt.h etc.). Pass the repo

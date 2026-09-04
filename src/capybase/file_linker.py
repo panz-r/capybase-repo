@@ -35,6 +35,7 @@ from capybase.import_union import (
     _leaf_identity,
     _parse_visibility_and_attrs,
 )
+from capybase.langs import is_c_family
 
 
 def _brackets_balanced(s: str) -> bool:
@@ -75,7 +76,7 @@ def deduplicate_imports(
     # C/C++ #include dedup: exact-line duplicate removal (preserve first
     # occurrence, don't reorder). Simpler than Rust use-tree parsing —
     # #include is always a single line with no tree structure.
-    if language in ("c", "cpp", "c++"):
+    if is_c_family(language):
         return _deduplicate_cpp_includes(text)
 
     # Rust use-statement dedup (tree-aware).
