@@ -6943,3 +6943,24 @@ landed; the remaining design item is oversized-splitting's final goal
 **Gates at close: unit 4,029/0 @ -n 6; corpus python 349/0, c 1,101/0,
 scenarios 281/0, all 2,366/0; synthetic live 4/4.** The harvest
 launches from the EXTEND-17d template when called.
+
+### S27-EXTEND-29 (2026-09-04) — the last stragglers: complete to the final case
+
+The 7 remaining pre-Sep-3 verdicts (the last in the corpus), ×3 each
+under the current stack:
+
+- **redis-0048 PASS 0.994 first try — the 39th conversion.** Its
+  standing GATE_UNAVAILABLE (08-30) predated the era-aware build
+  resolver; the intsetGet/gcc-15 oracle-build blocker it recorded is
+  exactly the class the resolver move fixed.
+- jsonc-0004 WORKING 3/3 @ 0.858; sea-orm-0027 DIVERGENT 3/3 @ 0.682
+  (its exact extend-9 disposition); redis-0032 DIVERGENT majority @
+  0.773; sqlite-0109 NEAR majority @ 0.875; zenodo-0014 NEAR 3/3 @
+  0.843; zenodo-0036 NEAR majority 2/3 @ 0.881 (one PASS repeat —
+  coin-flip band).
+
+**Final: 39 conversions. Projection: PASS 627/660 = 95.0%
+real-conflict, P+W 633/660 = 95.9%.** Every one of the 676 corpus
+cases now carries a current-stack measurement — the audit is complete
+to the last case; the ledger's expectation and the harvest's print
+should agree.
