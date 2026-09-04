@@ -6142,6 +6142,37 @@ SAFE_SKIP class and is the one remaining ~1-2% upside path.
 
 **S27 final projection: 94.4% real-conflict PASS / 95.3% P+W.**
 
+### S27-EXTEND-26 (2026-09-04) — residual-class enumeration; two stale verdicts found; 48K framing corrected
+
+Enumerated every remaining non-PASS real-conflict class with latest
+reasons and dates:
+
+- **ESCALATE_TOOLCHAIN 8**: 7 sea-orm (0003/0015-0019/0029) = the
+  VALIDATED era floor (extend-2's API-drift signatures; preflight
+  class, machinery-independent) + protobuf-0055. Hold; no rerun
+  warranted.
+- **ESCALATE 9**: 7 carry current dispositions (0013, fmt-0003, 0007,
+  0011, 0014, 0012, 0079). **Two are stale/tainted**:
+  clickhouse-0003 [08-31] "git add -A failed: fatal: unable to write
+  lock" — an INFRA artifact (the worktree-dir class), resolution never
+  ran; jsonc-0007 [08-31] MODEL_EMPTY "no specific reason recorded".
+  Both rerun ×3 under the current stack (in flight).
+- **48K-guard framing corrected**: the 291-case over-48K population
+  (135 c / 91 cpp / 51 rust / 14 python) is ALREADY INSIDE the 676
+  via CAPYBASE_SKIP_SIZE_GUARD — the harvest includes them. Guard
+  removal is a ROBUSTNESS gain (unsupervised runs without the env),
+  not additional cases; EXTEND-25's "~1-2% upside" framing withdrawn.
+
+**Stale-pair result — BOTH convert first try (36th + 37th
+conversions):** clickhouse-0003 PASS 1.00 (the "ESCALATE" was a
+git-lock infra artifact; the resolution had never run), jsonc-0007
+PASS 0.997 (the vague MODEL_EMPTY was stale). The residual-class
+enumeration methodology pays: reading reasons + dates found two fake
+holds. **Updated projection: PASS 625/660 = 94.7% real-conflict,
+P+W 631/660 = 95.6%**; genuine ESCALATE among real conflicts down to
+7 (all with current dispositions: 0013, fmt-0003, 0007, 0011, 0014,
+0012, 0079).
+
 ### S27-EXTEND-20 (2026-09-04) — full deterministic corpus run + sprint-28 design seed
 
 **Corpus `all` end-to-end** (the combined session+scenario+realworld
