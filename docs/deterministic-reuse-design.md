@@ -195,3 +195,13 @@ codec. Both are safe pre-harvest (tests only, no behavior change).
 3. [ ] **The switch**: make one existing primitive use the engine
    internally (the old function becomes a codec-detail). This is the
    stage-3 item that needs the harvest's confirmation first.
+
+## Additional correctness fixes (stage 2.5 continuation)
+
+4. [x] **Keyed-item scope-qualified collision** (claim-3 for the second
+   primitive): per-destination-container check replaces the global name
+   scan. Verified: attribute_meta (flat semantics) and import_union
+   (path-keyed) do NOT have the issue.
+5. [x] **NullAdapter: no assumed comment syntax** (reuse-design P0):
+   unknown text returns empty comment_line_prefixes — no `#` or `//`
+   assumptions for unrecognized languages.

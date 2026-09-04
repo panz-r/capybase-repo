@@ -128,16 +128,11 @@ def propose_keyed_item_union(
                              "after_hash": before_hash},
             )
 
-        # --- Idempotency: drop items whose name already exists. ---
-        existing_names = set()
-        for cl in resolved_text.splitlines():
-            name = _item_name(cl)
-            if name:
-                existing_names.add(name)
-        fresh = [
-            line for line in candidate_items
-            if _item_name(line) not in existing_names
-        ]
+        # --- Idempotency (scope-qualified, matching the named-field fix).
+        # The per-container collision check happens after
+        # _find_destination_container locates the destination (below).
+        # A same-named item in an UNRELATED container is a different entity.
+        fresh = list(candidate_items)
         if not fresh:
             return ImportUnionResult(
                 status=STATUS_NOT_APPLICABLE, text=resolved_text,
@@ -167,6 +162,33 @@ def propose_keyed_item_union(
                 continue
 
             container_close_line, indent = dest_info
+
+            # SCOPE-QUALIFIED collision (claim-3 fix, matching named-field):
+            # the item name must not already exist in THIS container —
+            # not anywhere in the file. Find the container header by
+            # scanning backward for the first impl/mod/trait line.
+            _cand = edited_text.splitlines()
+            _container_start = 0
+            for _k in range(container_close_line - 1, -1, -1):
+                if _is_rust_item(_cand[_k]) and any(
+                        kw in _cand[_k] for kw in ("impl ", "mod ", "trait ")):
+                    _container_start = _k
+                    break
+            for _k in range(_container_start, container_close_line):
+                if _item_name(_cand[_k]) == item_name_str:
+                    # Genuine collision in the destination container.
+                    unresolved.append(item_line.strip()[:60])
+                    break  # skip this item (don't continue outer loop)
+            else:
+                # No collision — proceed with insertion (falls through to
+                # the extraction + insertion below). This else clause on
+                # the for loop runs when no collision was found.
+                pass
+            # Check if we hit a collision (the for-else pattern: if we
+            # broke out, skip this item by continuing the outer loop).
+            if any(_item_name(_cand[_k]) == item_name_str
+                   for _k in range(_container_start, container_close_line)):
+                continue  # skip this item
 
             # Extract the full item subtree from the other side.
             item_subtree = _extract_item_subtree(other_side_text, item_line)

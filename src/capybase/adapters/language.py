@@ -363,7 +363,11 @@ class NullAdapter:
 
     @property
     def comment_line_prefixes(self) -> tuple[str, ...]:
-        return ("#", "//")
+        # Reuse-design P0: unknown text has NO assumed comment syntax —
+        # treating # or // as comments can silently mask code as comments
+        # (the proposal's NullAdapter finding). Callers use
+        # startswith(prefixes); an empty tuple means no line is a comment.
+        return ()
 
     @property
     def source_extension(self) -> str:

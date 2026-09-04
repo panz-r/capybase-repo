@@ -7712,3 +7712,25 @@ codec-independent (the design's core promise).
 
 13 tests; gate 4,136/0. The design doc gains a "Stage 2.5" section
 for these pre-harvest-safe items.
+
+### S27-EXTEND-59 (2026-09-04) — the remaining correctness items: keyed-item scope fix + NullAdapter
+
+- **Keyed-item scope-qualified collision (claim-3 fix, second
+  primitive)**: keyed_item_union's global name scan (same issue as
+  named_field_union — a method named `process` in an UNRELATED impl
+  suppressed inserting a different `process` into its own impl)
+  replaced by a per-destination-container check: find the container
+  header by scanning backward for impl/mod/trait, check item names
+  only within that span. Regression test pins the two-impl case.
+  Verified: attribute_meta_union does NOT have this issue (flat
+  semantics, no containers); import_union does NOT (path-keyed, not
+  name-keyed — the correct identity for imports).
+- **NullAdapter: no assumed comment syntax (reuse-design P0)**:
+  unknown text previously treated both `#` and `//` as comment-line
+  prefixes — silently masking code as comments for unrecognized
+  languages. Now returns an empty tuple (callers use
+  `startswith(prefixes)` — always False, so no line is a comment for
+  unknown text). The `comment_prefix` property stays `"#"` for
+  backward compatibility with display code.
+
+Gate 4,137/0.

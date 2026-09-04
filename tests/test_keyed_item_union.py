@@ -135,3 +135,39 @@ class TestProposeKeyedItemUnion:
         )
         assert r.status == STATUS_APPLIED
         assert "VERSION" in r.text
+
+
+def test_unrelated_container_same_item_name_does_not_suppress():
+    """Claim-3 fix for keyed items: a method named ``process`` in an
+    UNRELATED impl must not suppress inserting a different ``process``
+    method into its own impl — scope-qualified collision."""
+    resolved = """impl Handler {
+    fn handle(&self) {}
+}
+
+impl Processor {
+    fn process(&self) {}
+}"""
+    other = """impl Handler {
+    fn handle(&self) {}
+
+    fn process(&self) {
+        // handler-specific process
+    }
+}
+
+impl Processor {
+    fn process(&self) {}
+}"""
+    r = propose_keyed_item_union(
+        resolved, [_ob("    fn process(&self) {")],
+        other_side_text=other,
+    )
+    if r.status == STATUS_APPLIED:
+        lines = r.text.splitlines()
+        process_count = sum(1 for l in lines if "fn process" in l)
+        assert process_count >= 2, (
+            f"expected process in both impls, got {process_count}")
+    else:
+        assert "already present" not in str(r.certificate), (
+            f"declined with the OLD global-scan reason: {r.certificate}")
