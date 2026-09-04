@@ -7339,3 +7339,19 @@ Sprint-28's list is now exactly: whatever the HARVEST surfaces (the
 only legitimate deferral class), plus per-validator envelope coverage
 beyond the compile oracle (marker/brace/jury oracles reporting through
 the same envelope) if measurement says it pays.
+
+### S27-EXTEND-43 (2026-09-04) — the envelope's live gap found and closed
+
+The first live envelope smoke (sqlite-0004, PASS 1.00) fired 3
+acceptance_evidence events — all with EMPTY tool/duration. Cause: the
+units took the per-unit Ccs validator's DEFER path (standalone-compile
+showed resolution-type errors → verdict deferred to the whole-file
+gate), and that path's features carried `syntax_passed: True` without
+the fingerprint. The oracle HAD run — the evidence just wasn't
+recorded. Fixed: the defer path now carries syntax_scope/tool/
+duration_ms like every other ran path.
+
+Re-smoke: all three units journal
+`syntax pass | tool: gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0 | 6-8 ms` —
+the acceptance evidence is complete and attributable live. Corpus
+python subset 349/0; gate 4,059/0.

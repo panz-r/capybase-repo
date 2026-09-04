@@ -3628,7 +3628,17 @@ class _StandaloneSyntaxValidator:
                     f"{self._lang_label()} standalone-compile showed resolution/type "
                     f"errors (not a syntax defect); deferring to whole-file check"
                 ),
-                features={fk: True, "syntax_passed": True},
+                # The oracle RAN (and deferred its verdict to the whole-file
+                # gate) — the evidence fingerprint still applies (s27-42:
+                # the live smoke showed defer-path units losing their tool/
+                # duration records).
+                features={
+                    fk: True, "syntax_passed": True,
+                    "syntax_scope": "unit",
+                    "syntax_tool": _tool_version(tool),
+                    "syntax_duration_ms": int(
+                        (_ev_time.perf_counter() - _ev_t0) * 1000),
+                },
             )
         return VerificationCheckResult(
             name=self.name,
