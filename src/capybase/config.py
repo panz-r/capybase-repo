@@ -634,6 +634,11 @@ class FutureConfig(BaseModel):
     # trivial conflicts, never produces a worse merge. Default ON (safe-by-
     # construction); flip off to force the model to handle every conflict.
     enable_structural_resolver: bool = True
+    #: Calibrated-confidence priors (candidate-ref design P3): a json of
+    #: historical per-class pass rates (capybase.calibration_priors
+    #: derives it from eval results). When set, acceptance reasons carry
+    #: the class prior — informing review, never flipping a tier.
+    calibration_priors_path: str = ""
     # Search-based combination resolution (SBCR): AFTER the
     # structural resolver declines and BEFORE the LLM, search order-preserving
     # interleavings of the two sides for the best combination (mean similarity

@@ -83,7 +83,10 @@ def _unit_evidence(outcome) -> UnitEvidence:
     )
 
 
-def decide(outcomes, tests_passed: bool | None) -> PolicyDecision:
+def decide(
+    outcomes, tests_passed: bool | None,
+    class_prior: dict | None = None,
+) -> PolicyDecision:
     """The tier-table policy over a step's accepted units.
 
     ``outcomes`` are the per-unit resolution outcomes (objects with
@@ -133,13 +136,20 @@ def decide(outcomes, tests_passed: bool | None) -> PolicyDecision:
     # decides. Tests passing = strong independent evidence (tier B
     # candidate-branch per the design); tests absent = weaker still.
     model_assisted = [e.unit_id for e in evidence if not e.deterministic]
-    if tests_passed is True:
-        return PolicyDecision("B", PROPOSE_FOR_REVIEW, [
-            f"model-assisted unit(s): {', '.join(model_assisted[:4])}; "
-            f"test gate passed (strong independent behavioral evidence)"])
-    return PolicyDecision("B", PROPOSE_FOR_REVIEW, [
+    # Calibrated confidence (design P3's final piece): the class prior
+    # from observed historical outcomes ANNOTATES the review decision —
+    # it never flips a tier (evidence decides; a prior alone promoting
+    # would be the resolver-decides-safety mistake in statistical dress).
+    from capybase.calibration_priors import prior_reason
+    _prior = prior_reason(class_prior)
+    base = (
         f"model-assisted unit(s): {', '.join(model_assisted[:4])}; "
-        f"no test-gate evidence (tests_passed={tests_passed!r})"])
+        f"test gate passed (strong independent behavioral evidence)"
+        if tests_passed is True else
+        f"model-assisted unit(s): {', '.join(model_assisted[:4])}; "
+        f"no test-gate evidence (tests_passed={tests_passed!r})")
+    reasons = [base] + ([_prior] if _prior else [])
+    return PolicyDecision("B", PROPOSE_FOR_REVIEW, reasons)
 
 
 @dataclass

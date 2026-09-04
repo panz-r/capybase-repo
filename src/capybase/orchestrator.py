@@ -11626,6 +11626,25 @@ class Orchestrator:
         self._pipeline_instance = pipe
         return pipe
 
+    def _class_prior(self) -> dict | None:
+        """The conflict-class prior from the configured calibration table.
+
+        Loaded once from ``config.future.calibration_priors_path`` (a
+        priors json derived from historical results via
+        capybase.calibration_priors); None (priors disabled) when unset,
+        absent, or the sample is too small. Informs the review decision;
+        never flips a tier.
+        """
+        cached = getattr(self, "_class_prior_cache", None)
+        if cached is not None:
+            return cached[0]
+        from capybase.calibration_priors import load_priors, prior_for
+        path = getattr(self.config.future, "calibration_priors_path", "") or ""
+        prior = (prior_for(load_priors(path), getattr(
+            self, "_prior_language", None)) if path else None)
+        self._class_prior_cache = (prior,)
+        return prior
+
     def _side_pick_churn_ok(self, path: str) -> bool | None:
         """The F4 side-pick's churn guard (s27-extend-21).
 
@@ -17580,7 +17599,14 @@ class Orchestrator:
             # degrades to B (PROPOSE_FOR_REVIEW); verifier disagreement on
             # an accepted unit is C (STOP-class review signal).
             from capybase.acceptance import decide as _policy_decide
-            _policy = _policy_decide(result.outcomes, result.tests_passed)
+            self._prior_language = next(
+                (getattr(getattr(o, "unit", None), "language", None)
+                 for o in result.outcomes
+                 if getattr(o, "unit", None) is not None), None)
+            _tp = self._class_prior()
+            _policy = _policy_decide(
+                result.outcomes, result.tests_passed,
+                class_prior=_tp)
             self.journal.emit(
                 "acceptance_trust",
                 {
@@ -17588,6 +17614,7 @@ class Orchestrator:
                     "tier": _policy.tier,
                     "decision": _policy.decision,
                     "reasons": _policy.reasons[:4],
+                    "class_prior": _tp,
                 },
                 step_index=result.step_index,
             )

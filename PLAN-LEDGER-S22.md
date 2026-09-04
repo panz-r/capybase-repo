@@ -7371,3 +7371,29 @@ The envelope's complete live-verified matrix: C unit-scope (gcc
 (outcome+tool on file_validated; the cargo dance's duration stays in
 build_state's economics — not duplicated), prose exemption (axum-0001
 CHANGELOG: zero events, correct). Gate 4,059/0.
+
+### S27-EXTEND-45 (2026-09-04) — calibrated confidence: the design's last unimplemented paragraph
+
+"Confidence should be calibrated from observed historical outcomes for
+the relevant conflict class. It should not come from the proposing
+model saying that it is confident." — now implemented:
+
+- **capybase/calibration_priors.py**: `derive_priors` from any results
+  file (SAFE_SKIP/SETUP_FAILED excluded; WORKING is a graded success,
+  NOT a pass — conflating would inflate confidence); `prior_for`
+  requires a meaningful sample (n >= 20 — a 2-case 100% is an
+  anecdote); `save/load` for the table.
+- **Wiring**: `config.future.calibration_priors_path` enables it;
+  acceptance reasons and the acceptance_trust event carry the class
+  prior. THE BOUNDARY: priors annotate review, NEVER flip a tier —
+  evidence decides (a prior alone promoting would be the
+  resolver-decides-safety mistake in statistical dress). Pinned by
+  test at both prior strengths (92% and 35% — same tier, informed
+  reasons).
+- **Derived from sprint-27's merged measurement** (the existing data —
+  no harvest needed): c 96.1% (n=204), cpp 96.8% (n=154), rust 93.3%
+  (n=194), python 91.7% (n=108) — all above the sample minimum.
+
+4 tests; gate 4,063/0 (one non-reproducing parallel flake on the
+intermediate run — the known timing class). The candidate-ref design
+is now implemented to its last paragraph.

@@ -204,7 +204,15 @@ ConflictUnit → CandidateResolution[] → Evidence[] → PolicyDecision
   ever publishes (capybase stays local-first; publishing is the
   service operator's explicit act).
 
-**All stages P0–P5 are LANDED (sprint-27).**
+**All stages P0–P5 are LANDED (sprint-27)** — including the design's
+final acceptance paragraph: calibrated confidence
+(`capybase/calibration_priors.py` derives per-class historical pass
+rates from any results file; `config.future.calibration_priors_path`
+enables them). Priors ANNOTATE the review reasons — never flip a tier
+(evidence decides; a prior alone promoting would be the
+resolver-decides-safety mistake in statistical dress). Derived from
+sprint-27's merged measurement: c 96.1% (n=204), cpp 96.8% (n=154),
+rust 93.3% (n=194), python 91.7% (n=108).
 
 ### What does not change
 
