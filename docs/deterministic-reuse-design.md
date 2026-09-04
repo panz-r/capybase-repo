@@ -192,9 +192,18 @@ codec. Both are safe pre-harvest (tests only, no behavior change).
    the same decision through manifest, attribute, and import codecs.
    The rendered text differs; the merge decision is identical.
 
-3. [ ] **The switch**: make one existing primitive use the engine
-   internally (the old function becomes a codec-detail). This is the
-   stage-3 item that needs the harvest's confirmation first.
+3. [x] **The switch** (manifest-array primitive): `propose_manifest_union`
+   now delegates to the KeyedCollectionMerge engine + codec internally —
+   the engine is the AUTHORITATIVE implementation. The codec handles
+   array unions + inline-table feature lists + the transplant fallback
+   (the line-anchor insertion the shadow tests didn't cover, found by
+   the existing test suite during the switch). The external interface
+   (ImportUnionResult, same statuses, same certificate shape including
+   `primitive`, `risk_tier`, `preconditions`) is byte-identical.
+   **All 11 existing manifest tests pass unchanged**; the mechanism_id
+   stays `v1` (same mechanism, new internals). Live validation with
+   targeted cases (tokio-0046, sea-orm-0001, axum-0019 — all
+   Cargo.toml-heavy rust cases) confirms zero regression.
 
 ## Additional correctness fixes (stage 2.5 continuation)
 

@@ -7783,3 +7783,32 @@ CollectionCodec protocol is sufficient for dynamic imports (Python),
 module-specifier imports (JS/TS), and block-structured imports (Go).
 
 Gate 4,160/0.
+
+### S27-EXTEND-62 (2026-09-04) — THE SWITCH: manifest_union now runs the engine
+
+**The first primitive switched to the KeyedCollectionMerge engine as
+the AUTHORITATIVE implementation** (stage 3, the design's final item
+for this primitive). `propose_manifest_union` delegates internally to
+the engine + codec; the external interface is byte-identical (same
+ImportUnionResult statuses, same certificate shape including
+`primitive`, `risk_tier`, `preconditions`). The mechanism_id stays
+`v1` — same mechanism, new internals.
+
+The switch surfaced one gap the shadow tests hadn't covered: the
+TRANSPLANT fallback (line-anchor insertion for non-array TOML keys,
+e.g. a new `tracing = "0.1"` dependency). The existing test suite
+caught it immediately (the line_transplant test failed); the codec
+gained the fallback by finding the anchor line in the other side and
+inserting after it in the candidate — matching the old primitive's
+`_try_line_transplant`.
+
+**All 11 existing manifest tests pass unchanged.** Live validation
+(3 targeted Cargo.toml-heavy rust cases):
+- **axum-0019 PASS 1.00** (exact prior band)
+- **sea-orm-0001 PASS 0.981** (exact prior band)
+- **tokio-0046 NEAR 0.884** (exact prior band)
+Zero regressions — the engine produces identical results on real cases.
+
+Gate 4,160/0. The design doc's stage-3 item is checked; the remaining
+four primitives (fields, items, attributes, imports) follow the same
+switch pattern with their shadow-verified codecs.

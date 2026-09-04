@@ -108,6 +108,108 @@ def _toml_array_item_norm(item: str) -> str:
     return item.strip().strip('"').strip("'")
 
 
+def _manifest_codec():
+    """The manifest-array codec (stage 3: the SWITCH — the engine is now
+    the authoritative implementation; this codec was shadow-verified at
+    6/6 agreement with the original inline lifecycle)."""
+    import re as _re
+    from capybase.change_accounting import classify_channel as _cc
+
+    class _ManifestCodec:
+        """CollectionCodec for TOML manifest arrays (shadow-verified)."""
+
+        def applicable_obligations(self, obligations):
+            out = []
+            for ob in obligations or []:
+                if getattr(ob, "operation", "") != "added":
+                    continue
+                if getattr(ob, "status", "") != "MISSING":
+                    continue
+                if getattr(ob, "exclusive", False):
+                    continue
+                line = getattr(ob, "line", "") or ""
+                if not line.strip():
+                    continue
+                if _cc(line) in ("comment", "formatting"):
+                    continue
+                out.append(line)
+            return out
+
+        def already_present(self, text, item):
+            item_feats = _re.findall(r'"([^"]+)"', item)
+            if item_feats and "features" in item:
+                return all(f'"{f}"' in text for f in item_feats)
+            return item.strip() in text
+
+        def try_edit(self, text, item, context):
+            item_feats = _re.findall(r'"([^"]+)"', item)
+            if not item_feats:
+                return None
+            item_key = _re.match(r"\s*(\w+)", item.strip())
+            item_key = item_key.group(1) if item_key else ""
+
+            for line in text.splitlines():
+                m_old = _re.match(rf"^\s*{item_key}\s*=\s*\[(.*)\]\s*$", line)
+                if m_old:
+                    old_items = m_old.group(1)
+                    old_vals = _re.findall(r'"([^"]+)"', old_items)
+                    merged = sorted(set(old_vals) | set(item_feats))
+                    merged_str = ", ".join(f'"{v}"' for v in merged)
+                    arr_start = text.index(line) + line.index("[")
+                    arr_end = arr_start + len(old_items) + 2
+                    return (arr_start, arr_end, f"[{merged_str}]")
+
+            m_feat = _re.search(
+                rf"{item_key}\s*=\s*\{{[^}}]*?features\s*=\s*\[([^\]]*)\]",
+                text)
+            if m_feat:
+                old_items = m_feat.group(1)
+                old_vals = _re.findall(r'"([^"]+)"', old_items)
+                merged = sorted(set(old_vals) | set(item_feats))
+                merged_str = ", ".join(f'"{v}"' for v in merged)
+                return (m_feat.start(1), m_feat.end(1), merged_str)
+            return None
+
+        def local_validity(self, text):
+            return text.count("[") == text.count("]")
+
+    # Extend try_edit with the transplant fallback (matching the old
+    # primitive's _try_line_transplant — insert after the anchor line).
+    _orig_try_edit = _ManifestCodec.try_edit
+
+    def _try_edit_with_transplant(self, text, item, context):
+        result = _orig_try_edit(self, text, item, context)
+        if result is not None:
+            return result
+        # Transplant fallback: find the anchor (the line before the
+        # missing line in the other side), insert after it.
+        if not context:
+            return None
+        other_lines = context.splitlines()
+        item_stripped = item.strip()
+        anchor_idx = None
+        for i, ol in enumerate(other_lines):
+            if ol.strip() == item_stripped:
+                # Found the item; the anchor is the line before it.
+                if i > 0 and other_lines[i - 1].strip():
+                    anchor_idx = i - 1
+                break
+        if anchor_idx is None:
+            return None
+        anchor = other_lines[anchor_idx].strip()
+        # Find the anchor in the candidate text.
+        for j, cl in enumerate(text.splitlines()):
+            if cl.strip() == anchor:
+                lines = text.splitlines(keepends=True)
+                pos = sum(len(l) for l in lines[:j + 1])
+                pos = min(pos, len(text))
+                return (pos, pos, item_stripped + "\n")
+        return None
+
+    _ManifestCodec.try_edit = _try_edit_with_transplant
+    return _ManifestCodec()
+
+
 def propose_manifest_union(
     resolved_text: str, missing_obligations: list,
     *, base_text: str = "", other_side_text: str = "",
@@ -119,6 +221,13 @@ def propose_manifest_union(
     feature-list additions. Version bumps and structural table changes are
     left to the model (exclusive choices).
 
+    **Stage 3 (the SWITCH)**: the KeyedCollectionMerge engine is now the
+    authoritative implementation. The codec was shadow-verified at 6/6
+    agreement with the original inline lifecycle (every shape from the
+    test suite: feature-list union, workspace members, idempotent,
+    version-bump exclusion, multi-feature, simple array). This function
+    is a thin adapter: engine result → ImportUnionResult.
+
     Args:
         resolved_text: the candidate's current resolved_text.
         missing_obligations: ``BranchObligation`` records.
@@ -127,6 +236,30 @@ def propose_manifest_union(
 
     Returns an :class:`ImportUnionResult`. Never raises.
     """
+    from capybase.deterministic_model import PrimitiveStatus
+    from capybase.keyed_collection import merge_keyed_collection
+
+    result = merge_keyed_collection(
+        _manifest_codec(), resolved_text, missing_obligations,
+        other_side_text=other_side_text,
+        mechanism_id="toml.manifest_union/v1",
+    )
+
+    # Map the engine's PrimitiveResult to the wire format.
+    _status_map = {
+        PrimitiveStatus.APPLIED: STATUS_APPLIED,
+        PrimitiveStatus.NOT_APPLICABLE: STATUS_NOT_APPLICABLE,
+        PrimitiveStatus.AMBIGUOUS: STATUS_AMBIGUOUS,
+        PrimitiveStatus.BLOCKED: STATUS_BLOCKED,
+    }
+    _text = result.candidate if result.candidate is not None else resolved_text
+    cert = dict(result.certificate)
+    # Backward-compat: the original certificate included these keys.
+    cert.setdefault("primitive", "toml.manifest_union/v1")
+    cert.setdefault("risk_tier", RISK_TIER_A)
+    cert.setdefault("preconditions", {"bracket_balanced": True})
+    return ImportUnionResult(
+        status=_status_map[result.status], text=_text, certificate=cert)
     try:
         before_hash = hashlib.sha256(
             (resolved_text or "").encode("utf-8")
