@@ -9478,6 +9478,7 @@ class Orchestrator:
                                 path, wf_retries, buffer)
                         except Exception:  # noqa: BLE001 — provenance is best-effort
                             _gate_buf_key = None
+                    _ff = file_validation.features or {}
                     self.journal.emit(
                         "file_validated",
                         {
@@ -9485,6 +9486,17 @@ class Orchestrator:
                             "hard_failures": [
                                 f.message for f in file_validation.hard_failures
                             ],
+                            # Evidence envelope (s27-43): the file-scope
+                            # oracle fingerprint lands here — the unit-level
+                            # events carry unit scope; the whole-file gate's
+                            # tool/duration/outcome journals on its own event.
+                            "syntax_outcome": (
+                                "unknown" if _ff.get("syntax_outcome") == "unknown"
+                                else ("pass" if _ff.get("syntax_passed") is True
+                                      else ("fail" if _ff.get("syntax_passed") is False
+                                            else None))),
+                            "syntax_tool": _ff.get("syntax_tool"),
+                            "syntax_duration_ms": _ff.get("syntax_duration_ms"),
                             "wf_retry": wf_retries,
                             # Sprint-21 coherence rung: auditable firing.
                             "coherence_repair_applied": bool(

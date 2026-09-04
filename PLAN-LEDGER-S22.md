@@ -7355,3 +7355,19 @@ Re-smoke: all three units journal
 `syntax pass | tool: gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0 | 6-8 ms` —
 the acceptance evidence is complete and attributable live. Corpus
 python subset 349/0; gate 4,059/0.
+
+### S27-EXTEND-44 (2026-09-04) — the file-scope evidence boundary; the envelope matrix complete
+
+The rust live check (tokio-0046: unit events `rustc 1.92.0 | 43-81ms`)
+exposed the last boundary: the whole-file gate's fingerprints landed
+in the Phase-2 validation FEATURES but `file_validated` events never
+carried them. Wired: the event now includes syntax_outcome /
+syntax_tool / syntax_duration_ms. Live re-check (tokio-0046):
+`file_validated: True | outcome: pass | tool: cargo 1.92.0` — the
+crate-aware gate honestly identifies as cargo (the resolved oracle).
+
+The envelope's complete live-verified matrix: C unit-scope (gcc
+15.2.0, 6-8ms), rust unit-scope (rustc 1.92.0, 43-81ms), file-scope
+(outcome+tool on file_validated; the cargo dance's duration stays in
+build_state's economics — not duplicated), prose exemption (axum-0001
+CHANGELOG: zero events, correct). Gate 4,059/0.
