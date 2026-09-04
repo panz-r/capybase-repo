@@ -8091,3 +8091,35 @@ vendored, `cargo check`) before the live rerun.
 **Net**: era-dead 9 → 4 (0015/0016 intrinsic, fmt-0003, protobuf-0055);
 +4 real-conflict PASSes (0003, 0018, 0019, 0029) and one preserved
 (0002) pending the next harvest's recount. Gate 4,218/0.
+
+### S27-EXTEND-69 (2026-09-05) — mechanism reporting wired: the next results table gets its histogram data
+
+Design agreed with the user, landing pre-harvest so the data exists
+after the next run:
+
+- **Primary table stays end-result only** (verdicts + rates). The
+  mechanism breakdown lives in a HISTOGRAM beneath it (5 columns:
+  mechanism | cases | PASS | WORKING | P+W %), not mixed into the main
+  table.
+- **Bucket rule = "who produced the accepted candidate"** (user's
+  words): deterministic (zero model calls anywhere in the case) |
+  llm_one_shot | llm_cegis (some unit accepted an LLM candidate only
+  after >=2 LLM attempts — the model saw a validated failure). Case
+  level is a total order (any LLM ⇒ llm; any cegis unit ⇒ cegis), so
+  the three columns add up to PASS+WORKING exactly.
+- LLM-involved = plain_llm / history_augmented_llm (hybrid suffixes
+  plain_llm+import_union etc. included — the model produced the
+  accepted text, closure finished it), block_capture (the model DECIDED
+  keep/delete), micro_patch_repair (model-repaired from build
+  feedback). Best-of-N sampling appends one attempt per round — stays
+  one-shot; a mechanism-switch (structural decline → LLM accept) is
+  NOT cegis; only repeated LLM attempts are.
+
+**Implementation**: CaseResult += resolution_bucket +
+provenance_mix (per-unit accepted-provenance counter, hybrids intact —
+the histogram's finer rows derive from it); classify_resolution_bucket()
+lifts from StepResult.outcomes at the orch.run() call site (advisory —
+never fails a case). 11 unit tests pin every rule above; smoke-tested
+live: sea-orm-0003 → bucket deterministic, mix {deterministic_structural:
+1}. Gate 4,229/0. The recount script gains the histogram rendering
+when the harvest data exists.

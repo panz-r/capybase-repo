@@ -406,6 +406,62 @@ class _NoConflictError(Exception):
     don't conflict at git's merge level). The harness skips it as a non-conflict."""
 
 
+#: Provenance prefixes marking an LLM-involved accepted candidate:
+#: authored by the model (``plain_llm``/``history_augmented_llm`` —
+#: hybrid suffixes like ``plain_llm+import_union`` count: deterministic
+#: closure finished an LLM candidate), DECIDED by the model
+#: (``block_capture``: keep/delete is an LLM call even though the splice
+#: is mechanical), or model-repaired from build feedback
+#: (``micro_patch_repair`` — CEGIS-shaped by construction).
+_LLM_PROV_PREFIXES = (
+    "plain_llm", "history_augmented_llm", "block_capture",
+    "micro_patch_repair",
+)
+
+
+def classify_resolution_bucket(outcomes) -> tuple[str, dict]:
+    """Who produced the accepted candidates (the results histogram).
+
+    Bucket rule (case level, total order — every accepted case lands in
+    exactly one bucket):
+
+    - ``deterministic`` — accepted units exist and NONE is LLM-authored
+      (zero model calls for the case).
+    - ``llm_one_shot``  — some accepted unit is LLM-authored and no unit
+      needed more than one LLM attempt.
+    - ``llm_cegis``     — some unit accepted an LLM candidate only after
+      >=2 LLM attempts (the model saw a validated failure and re-solved
+      — the CEGIS loop). Best-of-N sampling within one round appends a
+      single attempt, so it stays one-shot.
+
+    Unresolved/escalated units are ignored (escalations are the verdict
+    columns' job). Returns ``(bucket, provenance_mix)``; the mix counts
+    per-unit accepted-provenance strings (hybrids included) for the
+    histogram's finer rows. ``""`` when nothing was accepted.
+    """
+    mix: dict = {}
+    llm_units = 0
+    cegis_units = 0
+    for o in outcomes or []:
+        acc = getattr(o, "accepted", None)
+        if acc is None:
+            continue
+        prov = (getattr(acc, "provenance", "") or "")
+        mix[prov] = mix.get(prov, 0) + 1
+        if not prov.startswith(_LLM_PROV_PREFIXES):
+            continue
+        llm_units += 1
+        llm_attempts = sum(
+            1 for c in (getattr(o, "attempts", None) or [])
+            if (getattr(c, "provenance", "") or "").startswith(
+                _LLM_PROV_PREFIXES))
+        if llm_attempts > 1:
+            cegis_units += 1
+    if llm_units == 0:
+        return ("deterministic" if mix else ""), mix
+    return ("llm_cegis" if cegis_units else "llm_one_shot"), mix
+
+
 @dataclass
 class CaseResult:
     id: str
@@ -436,6 +492,13 @@ class CaseResult:
     # --preserve-flights copies the session dir out; None otherwise. The flight
     # manifest maps case_id → session_id → artifacts for replay.
     session_id: str = ""
+    # Mechanism reporting (the results histogram): the case-level bucket
+    # for WHO produced the accepted candidates (deterministic |
+    # llm_one_shot | llm_cegis; "" when nothing was accepted), plus the
+    # raw per-unit accepted-provenance counter for the histogram's finer
+    # rows (hybrids like plain_llm+import_union included).
+    resolution_bucket: str = ""
+    provenance_mix: dict = field(default_factory=dict)
     # Variance-aware evaluation (--repeat-nonpass): all verdicts observed
     # across the repeat runs for this case, in order (first run first).
     # Empty when the case passed first try or repeats are off. The stored
@@ -1866,6 +1929,15 @@ def run_case(case: Case, client: OpenAICompatibleClient, *,
             step = orch.run()
             res.escalated = bool(step.escalated)
             res.reason = step.reason or ""
+            # Mechanism reporting: who produced the accepted candidates
+            # (the results histogram). Single-step scenarios: the last
+            # step's outcomes are the case's units.
+            try:
+                (res.resolution_bucket,
+                 res.provenance_mix) = classify_resolution_bucket(
+                    getattr(step, "outcomes", None))
+            except Exception:  # noqa: BLE001 — reporting is advisory
+                res.resolution_bucket, res.provenance_mix = "", {}
         except Exception as exc:
             # A swallowed orchestrator exception is undiagnosable from the
             # truncated reason alone (jsonc-0001's TypeError hid for a whole
