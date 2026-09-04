@@ -36,7 +36,7 @@ from capybase.conflict_model import (
     VerificationResult,
     VerificationWarning,
 )
-from capybase.langs import is_c_family, is_cpp
+from capybase.langs import DUPLICATE_CHECK_LANGUAGES, LITERAL_MASK_LANGUAGES, has_structural_tooling, is_c_family, is_cpp
 
 
 @dataclass
@@ -851,7 +851,7 @@ class IntentCoverageValidator:
         unit = ctx.unit
         lang = unit.language
         floor = getattr(ctx.config, "min_preservation_ratio", 0.5)
-        if not floor or lang not in ("python", "rust"):
+        if not floor or not has_structural_tooling(lang):
             return VerificationCheckResult(
                 name=self.name, passed=True,
                 message="intent coverage skipped (disabled or unsupported language)",
@@ -942,7 +942,7 @@ class UnattributedCodeValidator:
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
         unit = ctx.unit
         lang = unit.language
-        if lang not in ("python", "rust"):
+        if not has_structural_tooling(lang):
             return VerificationCheckResult(
                 name=self.name, passed=True,
                 message="unattributed code skipped (unsupported language)",
@@ -1171,7 +1171,7 @@ class DependencyPreservationValidator:
 
     def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
         lang = ctx.unit.language
-        if lang not in ("python", "rust"):
+        if not has_structural_tooling(lang):
             return self._pass("dependency check skipped (unsupported language)")
         try:
             from capybase.adapters import structural
@@ -2849,7 +2849,7 @@ def _try_repair_string_literal(
     # (test_unterminated_char_literal_fixed); python prose has no char
     # literals to repair anyway.
     _use_masked = (language or "").lower() in (
-        "c", "cpp", "c++", "rust", "python")
+        LITERAL_MASK_LANGUAGES)
     _masked_lines = (
         _mask_strings_and_comments(text, language).split("\n")
         if _use_masked else text.split("\n"))
@@ -5367,7 +5367,7 @@ class VerificationEngine:
         _pristine_imbalanced = bool(pristine_side_texts) and any(
             _brace_imbalance_line(t, language) is not None
             for t in pristine_side_texts)
-        if (language in ("rust", "python", "c", "cpp", "c++")
+        if (language in DUPLICATE_CHECK_LANGUAGES
                 and self.config.require_syntax_if_supported
                 and not _pristine_imbalanced):
             imbalance_line = _brace_imbalance_line(whole, language)

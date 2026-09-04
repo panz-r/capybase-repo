@@ -21,3 +21,26 @@ def is_c_family(language: str | None) -> bool:
 def is_cpp(language: str | None) -> bool:
     """The C++ spellings specifically (file-suffix / compiler selection)."""
     return language in _CPP
+
+
+#: Languages with STRUCTURAL-PARSE tooling (tree-sitter/ast-backed checks:
+#: preservation coverage, symbol-declaration lookup, cross-file slicing).
+#: Six sites gated on this set re-spelled; one source now (s27-extend-25).
+STRUCTURAL_LANGUAGES = ("python", "rust")
+
+
+def has_structural_tooling(language: str | None) -> bool:
+    """Whether the structural-parse backed checks apply to this language."""
+    return language in STRUCTURAL_LANGUAGES
+
+
+#: Languages where the literal repair uses MASKED parity (the language-aware
+#: masker handles quote-in-char-literal / apostrophe-in-comment correctly).
+#: Same value as DUPLICATE_CHECK_LANGUAGES today but they evolve for
+#: different reasons (lexer support vs parser availability) — kept separate
+#: and named at the source so a future addition lands in the right set.
+LITERAL_MASK_LANGUAGES = ("c", "cpp", "c++", "rust", "python")
+
+#: Languages covered by the whole-file duplicate-definition check
+#: (stdlib ast for python, the abstract parser for the rest).
+DUPLICATE_CHECK_LANGUAGES = ("rust", "python", "c", "cpp", "c++")

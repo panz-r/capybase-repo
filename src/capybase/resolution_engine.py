@@ -69,7 +69,7 @@ from capybase.config import ModelConfig
 
 _log = logging.getLogger("capybase.resolution")
 from capybase.consensus import ConsensusReport, rank_by_consensus
-from capybase.langs import is_c_family
+from capybase.langs import has_structural_tooling, is_c_family
 
 PROMPT_RESOLVE = "resolve_text_block.v6"
 PROMPT_RETRY = "cegis_retry.v6"
@@ -2971,7 +2971,7 @@ def _dropped_units_evidence(
     concrete evidence rather than guessing.
     """
     lang = unit.language
-    if lang not in ("python", "rust"):
+    if not has_structural_tooling(lang):
         return ""
     try:
         from capybase.adapters import structural
@@ -3075,7 +3075,7 @@ def _deterministic_preservation(
     try:
         from capybase.adapters import structural
 
-        if lang in ("python", "rust") and structural.is_available(lang):
+        if has_structural_tooling(lang) and structural.is_available(lang):
             cur_cov = structural.preservation_coverage(base_lines, cur_lines, candidate.resolved_text, lang)
             rep_cov = structural.preservation_coverage(base_lines, rep_lines, candidate.resolved_text, lang)
             if cur_cov is not None:

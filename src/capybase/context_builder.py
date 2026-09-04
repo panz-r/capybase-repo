@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from capybase.conflict_model import ContextBundle, ConflictUnit, TokenBudget
+from capybase.langs import has_structural_tooling
 
 if TYPE_CHECKING:
     from capybase.memory.retriever import Retriever
@@ -401,7 +402,7 @@ def _slice_dependencies(unit: ConflictUnit, builder: "ContextBuilder") -> list:
     if not builder.cross_file_slice:
         return []
     lang = unit.language
-    if lang not in ("python", "rust"):
+    if not has_structural_tooling(lang):
         return []
     try:
         from capybase.adapters import structural
