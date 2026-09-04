@@ -149,6 +149,13 @@ acceptance policy: tier A should require D0/D1 provenance.
    method-insert case diverges on subtree re-indentation: the existing
    primitive re-indents to container depth, the codec preserves source
    indentation — same scope, different bytes; RECORDED, known fix).
-7. [ ] Remaining ports (attributes → imports).
-8. [ ] One orchestrator repair behind the registry.
-9. [ ] Confidence-float removal (0.85/0.9 on deterministic repairs).
+7. [x] Attribute-meta port: AttributeCodec — **11/11 shadow cases
+   agree** (builtin derive, external derive, allow/warn lint, all four
+   never-unioned kinds, lint-level mismatch, idempotent, all-present).
+   Zero divergences.
+8. [ ] Import port — the most complex (1008 lines: nested use trees,
+   renames, globs, visibility, cfg attributes). The codec needs the
+   `parse_use_leaves` tree machinery ported to the protocol; a bounded
+   but non-trivial task for the next session.
+9. [ ] One orchestrator repair behind the registry.
+10. [ ] Confidence-float removal (0.85/0.9 on deterministic repairs).

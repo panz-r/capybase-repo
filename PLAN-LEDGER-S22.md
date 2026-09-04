@@ -7566,3 +7566,29 @@ re-indentation pass the existing primitive has).
 - attributes + imports: remaining
 
 Gate 4,099/0.
+
+### S27-EXTEND-53 (2026-09-04) — the attribute port: 11/11; four of five proven
+
+**AttributeCodec** (derive/allow/warn union; deny/forbid/cfg/repr
+refused; external derives flagged; idempotent; lint-level mismatch):
+**11/11 shadow cases agree** with the existing
+`propose_attribute_meta_union` — zero divergences on every shape from
+its test suite. The simplest codec yet: the attribute policy IS the
+codec (the unionable/never sets are the entire language-specific
+surface).
+
+**Four of five ports proven under shadow**:
+
+| Port | Agreement | Divergences |
+|------|-----------|-------------|
+| Manifest arrays | 6/6 exact | zero |
+| Named fields | 6/6 exact | zero |
+| Keyed items | 5/6 + 1 | re-indentation (known fix) |
+| Attributes | 11/11 exact | zero |
+| Imports | remaining | — |
+
+The import port (the largest: 1008 lines, nested use trees, renames,
+globs, visibility, cfg) needs the `parse_use_leaves` tree machinery
+ported to the codec protocol — bounded but the next session's item.
+
+Gate 4,110/0.
