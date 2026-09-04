@@ -6890,3 +6890,56 @@ succeed now). Oracle-not-building records shrank 13 → 6:
   identically at -j4. The makefile branch now prefers the era-VERIFIED
   C_BUILD_COMMANDS entry verbatim (no cpu-scaled -j for ready-Makefile
   trees with a verified stack).
+
+---
+
+## SPRINT-27 FINAL CLOSE-OUT (2026-09-04, through a1a7b06)
+
+**The headline: 38 conversions, projection 626/660 = 94.8%
+real-conflict PASS / 95.8% P+W — every case in the corpus dispositioned
+under the fully-live machinery, and the harvest expectation calibrated
+to evidence.**
+
+The sprint's arc, consolidated:
+
+1. **Mechanism fixes (the seam class and beyond)**: the D1 seam prompt
+   contract (one prompt line converted the class the whole design item
+   scoped), phantom-brace masking, alternation-collapse rung, F4
+   hoist, D10-rust oracle probe, terminal recovery grant, promotion
+   curation, the splitter doc-comment fix, fragment-as-file guard.
+2. **The duplicate-definition pair (EXTEND-17)**: pristine-side
+   verifies no longer flag legal pre-existing patterns (29 sqlite
+   cases + the oracle itself carried them); the whole-file repair
+   count budget applies in tiered mode (was: 1,221-cycle oscillation);
+   the oscillation tracker stops cycles semantically.
+3. **The dead-rung discovery (EXTEND-21)**: three deterministic rungs
+   (side-pick ×2, alternation collapse) silently NameError'd for the
+   entire sprint — revived with an asymmetry churn guard; P6b's splice
+   surgery extracted to one implementation shared by candidate and
+   beam paths; the tiered unattributed skip gates only the model.
+4. **Architecture audit-2 + repairs**: prompt-building unified as ONE
+   subsystem (single dispatch, single retry implementation, every
+   code-output path on the calibrated layout; the D5c guard and
+   failed-patch memory reached the model for the first time); the
+   retry_schedule axis wired; language predicates consolidated
+   (C-family + structural + named sets in capybase.langs).
+5. **Harness honesty**: era-aware C oracle builds unified (corpus +
+   eval one resolver), SETUP_FAILED class (infra ≠ capability),
+   f1_side_verify_failed / repair_rung_error observability, the
+   live_eval.py probe advisory.
+6. **The audit methodology itself**: verdict labels lie, reasons
+   don't — the reason+date audit and the census-driven sweep flushed
+   five artifact verdicts (clickhouse-0003, jsonc-0007, sea-orm-0021
+   + two SAFE_SKIP recharacterizations) worth 3 of the 38 conversions.
+
+**Remaining non-PASS (all current, all characterized)**: 7 genuine
+content-level ESC; 8 validated era-toolchain (sea-orm floor +
+protobuf-0055); 6 NEAR; 6 WORKING; 5 shared-gate GATE_UNAVAILABLE;
+3 oracle-subjective DIVERGENT; 16 no-conflict SAFE_SKIPs
+(denominator-excluded). Known sprint-28 material: the p6b/F4 wiring
+landed; the remaining design item is oversized-splitting's final goal
+(guard removal — robustness, not cases).
+
+**Gates at close: unit 4,029/0 @ -n 6; corpus python 349/0, c 1,101/0,
+scenarios 281/0, all 2,366/0; synthetic live 4/4.** The harvest
+launches from the EXTEND-17d template when called.
