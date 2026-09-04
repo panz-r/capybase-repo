@@ -269,6 +269,65 @@ with the two then-unreferenced `_try_*` helpers).
    divergences must re-run the comparison when the "fix" lands, and
    a divergence-clearing commit must touch the codec, not just docs.
 
+## Stage 4: Post-switch consolidation
+
+With all five primitives on the engine, three consolidation items
+complete the reuse arc pre-harvest: the shared wire adapter, the
+conformance suite, and the lifecycle census.
+
+8. [x] **Shared wire adapter** (`to_wire_result` in
+   keyed_collection.py): the five `propose_*` functions repeated the
+   same engine→wire mapping (~30 lines each: status translation,
+   text fallback, the `primitive` key, reason remapping, APPLIED-cert
+   extension). One shared mapping now serves all five; each adapter
+   reduces to codec + engine + `to_wire_result(..., reason_map=...,
+   applied_cert=...)`. The wire type keeps its historical home in
+   import_union (moving it is the deferred package restructure). Side
+   effect: manifest's NOT_APPLICABLE certificates regain the
+   pre-switch shape (risk_tier/preconditions were being setdefault-ed
+   on them; the original only set them on APPLIED). A sixth primitive
+   is now ~a codec + a 10-line adapter.
+9. [x] **Codec conformance suite**
+   (tests/test_codec_conformance.py, 44 tests): the proposal's
+   conformance checklist as ONE parametrized suite over all five
+   public functions — never-raises on hostile input (including an
+   obligation object whose attribute access raises → BLOCKED with
+   the original text), determinism, idempotent re-entry, the
+   added/non-exclusive filter contract, APPLIED-certificate keys
+   (mechanism id, risk_tier A, before/after hashes), and
+   transactional honesty (any non-APPLIED status returns the input
+   byte-for-byte). A new primitive's switch is not complete until it
+   appears here.
+   **Documented deviation found by the suite**: the import
+   primitive's original filter never checked
+   `status == "MISSING"` (only operation + exclusive) — preserved
+   byte-for-byte at the switch; the suite pins the other four and
+   records the asymmetry (unobservable live: obligations always
+   carry MISSING). Harmonizing is a deliberate post-harvest change,
+   not a silent refactor side effect.
+10. [x] **Lifecycle census** (remaining filter→edit→certificate
+    shapes outside the five):
+    - **block_insertion** (293 lines): same wire shape, DIFFERENT
+      mechanism class — a positionally-anchored transplant of ONE
+      contiguous block (cohesion determined against the other side;
+      single-shot edit). The unit is not a keyed item; forcing the
+      CollectionCodec protocol would distort it. Verdict: stays
+      standalone (shares the wire contract only).
+    - **deletion_union** (181 lines): item-shaped (per-line removals)
+      but semantically inverted — "already_present" would have to
+      mean "already absent". Fits a FUTURE direction-generalized
+      engine (additive/subtractive union as directions); not forced
+      now (the protocol's vocabulary presumes additive unions).
+    - **Cargo.lock takeover** (orchestrator-inline, S20.5): a
+      whole-file pick-side mechanism, not item-based. Belongs to the
+      takeover/mechanism family — candidate for the
+      mechanisms-registry port (pattern proven by
+      StorageClassRelocationMechanism), not for the keyed-collection
+      engine.
+    No further inline lifecycles found: the deterministic primitive
+    layer is now exactly the five engine-backed codecs plus the two
+    standalone mechanisms above, all on the shared wire contract.
+
 ## Additional correctness fixes (stage 2.5 continuation)
 
 4. [x] **Keyed-item scope-qualified collision** (claim-3 for the second

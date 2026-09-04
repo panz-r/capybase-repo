@@ -31,11 +31,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from capybase.import_union import (
-    ImportUnionResult,
-    STATUS_APPLIED, STATUS_NOT_APPLICABLE, STATUS_BLOCKED, STATUS_AMBIGUOUS,
-    RISK_TIER_A,
-)
+from capybase.import_union import ImportUnionResult, RISK_TIER_A
 
 
 
@@ -233,8 +229,7 @@ def propose_manifest_union(
 
     Returns an :class:`ImportUnionResult`. Never raises.
     """
-    from capybase.deterministic_model import PrimitiveStatus
-    from capybase.keyed_collection import merge_keyed_collection
+    from capybase.keyed_collection import merge_keyed_collection, to_wire_result
 
     result = merge_keyed_collection(
         _manifest_codec(), resolved_text, missing_obligations,
@@ -242,21 +237,15 @@ def propose_manifest_union(
         mechanism_id="toml.manifest_union/v1",
     )
 
-    # Map the engine's PrimitiveResult to the wire format.
-    _status_map = {
-        PrimitiveStatus.APPLIED: STATUS_APPLIED,
-        PrimitiveStatus.NOT_APPLICABLE: STATUS_NOT_APPLICABLE,
-        PrimitiveStatus.AMBIGUOUS: STATUS_AMBIGUOUS,
-        PrimitiveStatus.BLOCKED: STATUS_BLOCKED,
-    }
-    _text = result.candidate if result.candidate is not None else resolved_text
-    cert = dict(result.certificate)
-    # Backward-compat: the original certificate included these keys.
-    cert.setdefault("primitive", "toml.manifest_union/v1")
-    cert.setdefault("risk_tier", RISK_TIER_A)
-    cert.setdefault("preconditions", {"bracket_balanced": True})
-    return ImportUnionResult(
-        status=_status_map[result.status], text=_text, certificate=cert)
+    return to_wire_result(
+        result, resolved_text,
+        mechanism_id="toml.manifest_union/v1",
+        # Certificate keys of the original inline lifecycle (the original
+        # set risk_tier/preconditions only on the APPLIED certificate).
+        applied_cert=lambda r: {
+            "risk_tier": RISK_TIER_A,
+            "preconditions": {"bracket_balanced": True},
+        })
 
 
 

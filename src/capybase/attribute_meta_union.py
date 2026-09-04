@@ -26,11 +26,7 @@ from __future__ import annotations
 
 import re
 
-from capybase.import_union import (
-    ImportUnionResult,
-    STATUS_APPLIED, STATUS_NOT_APPLICABLE, STATUS_BLOCKED, STATUS_AMBIGUOUS,
-    RISK_TIER_A,
-)
+from capybase.import_union import ImportUnionResult, RISK_TIER_A
 from capybase.change_accounting import _derive_trait_set, _is_derive_attr
 
 
@@ -148,8 +144,7 @@ def propose_attribute_meta_union(
 
     Returns an :class:`ImportUnionResult`. Never raises.
     """
-    from capybase.deterministic_model import PrimitiveStatus
-    from capybase.keyed_collection import merge_keyed_collection
+    from capybase.keyed_collection import merge_keyed_collection, to_wire_result
 
     codec = _attribute_codec()
     result = merge_keyed_collection(
@@ -158,36 +153,31 @@ def propose_attribute_meta_union(
         mechanism_id="rust.attribute_meta_union/v1",
     )
 
-    _status_map = {
-        PrimitiveStatus.APPLIED: STATUS_APPLIED,
-        PrimitiveStatus.NOT_APPLICABLE: STATUS_NOT_APPLICABLE,
-        PrimitiveStatus.AMBIGUOUS: STATUS_AMBIGUOUS,
-        PrimitiveStatus.BLOCKED: STATUS_BLOCKED,
-    }
-    _reason_map = {
-        "no applicable items": "no additive directive obligations",
-        "no items could be safely inserted":
-            "no attributes could be safely unioned",
-        "all items already present (idempotent)":
-            "all directive lines already present",
-    }
-    text = result.candidate if result.candidate is not None else resolved_text
-    cert = dict(result.certificate)
-    cert["primitive"] = "rust.attribute_meta_union/v1"
-    if "reason" in cert:
-        cert["reason"] = _reason_map.get(cert["reason"], cert["reason"])
-    if result.status == PrimitiveStatus.APPLIED:
-        cert["closed_obligations"] = [
-            _normalize(c) for c in result.closed_obligations or []]
-        cert["edits"] = [
-            f"union: {c.strip()[:60]}"
-            for c in result.closed_obligations or []]
-        cert["preconditions"] = {"same_attribute": True}
-        cert["risk_tier"] = RISK_TIER_A
+    def _applied_cert(r):
+        cert = {
+            "closed_obligations": [
+                _normalize(c) for c in r.closed_obligations or []],
+            "edits": [
+                f"union: {c.strip()[:60]}"
+                for c in r.closed_obligations or []],
+            "preconditions": {"same_attribute": True},
+            "risk_tier": RISK_TIER_A,
+        }
         if codec.risk_flags:
             cert["risk_flags"] = codec.risk_flags
-    return ImportUnionResult(
-        status=_status_map[result.status], text=text, certificate=cert)
+        return cert
+
+    return to_wire_result(
+        result, resolved_text,
+        mechanism_id="rust.attribute_meta_union/v1",
+        reason_map={
+            "no applicable items": "no additive directive obligations",
+            "no items could be safely inserted":
+                "no attributes could be safely unioned",
+            "all items already present (idempotent)":
+                "all directive lines already present",
+        },
+        applied_cert=_applied_cert)
 
 
 def _try_union_one_attribute(

@@ -78,6 +78,47 @@ class ShadowDivergence:
     new_text_head: str = ""
 
 
+def to_wire_result(
+    result: PrimitiveResult,
+    resolved_text: str,
+    *,
+    mechanism_id: str,
+    reason_map: dict[str, str] | None = None,
+    applied_cert: Callable[[PrimitiveResult], dict] | None = None,
+):
+    """Map the engine's :class:`PrimitiveResult` to the legacy wire format.
+
+    Stage 4 (adapter consolidation): every switched primitive's public
+    function reduces to codec + engine + THIS mapping — status
+    translation, text fallback, the ``primitive`` key, reason
+    remapping, and the APPLIED-certificate extension via a
+    per-primitive callback (closed over its codec). The wire type
+    (:class:`~capybase.import_union.ImportUnionResult`) keeps its
+    historical home in import_union; moving it is the deferred package
+    restructure. Imported lazily so the engine module stays standalone.
+    """
+    from capybase.import_union import (
+        ImportUnionResult,
+        STATUS_APPLIED, STATUS_NOT_APPLICABLE,
+        STATUS_AMBIGUOUS, STATUS_BLOCKED,
+    )
+    status_map = {
+        PrimitiveStatus.APPLIED: STATUS_APPLIED,
+        PrimitiveStatus.NOT_APPLICABLE: STATUS_NOT_APPLICABLE,
+        PrimitiveStatus.AMBIGUOUS: STATUS_AMBIGUOUS,
+        PrimitiveStatus.BLOCKED: STATUS_BLOCKED,
+    }
+    text = result.candidate if result.candidate is not None else resolved_text
+    cert = dict(result.certificate)
+    cert["primitive"] = mechanism_id
+    if reason_map and "reason" in cert:
+        cert["reason"] = reason_map.get(cert["reason"], cert["reason"])
+    if result.status == PrimitiveStatus.APPLIED and applied_cert is not None:
+        cert.update(applied_cert(result))
+    return ImportUnionResult(
+        status=status_map[result.status], text=text, certificate=cert)
+
+
 def merge_keyed_collection(
     codec: CollectionCodec,
     resolved_text: str,

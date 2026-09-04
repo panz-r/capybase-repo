@@ -7878,3 +7878,43 @@ implementation.** The per-primitive inline lifecycles are gone
 new-language codecs (Python, JS/TS, Go) remain. The full harvest
 (user's call, EXTEND-17d template) provides the definitive
 zero-regression confirmation on the whole corpus.
+
+### S27-EXTEND-65 (2026-09-04) — stage 4: post-switch consolidation
+
+Three items completing the reuse arc pre-harvest (design doc stage 4):
+
+- **Shared wire adapter** (`to_wire_result` in keyed_collection.py):
+  the five propose_* functions repeated the same engine→wire mapping
+  (~30 lines each); one shared mapping now serves all five — an
+  adapter is codec + engine + reason_map + applied_cert callback.
+  Manifest's NOT_APPLICABLE certs regain the pre-switch shape
+  (risk_tier/preconditions are APPLIED-only again, as the original
+  had them). A sixth primitive is now a codec + a 10-line adapter.
+- **Codec conformance suite** (tests/test_codec_conformance.py, 44
+  tests): the proposal's conformance checklist as ONE parametrized
+  suite over all five public functions — never-raises on hostile
+  input (incl. attribute-access-raising obligation objects → BLOCKED
+  with original text), determinism, idempotent re-entry, the
+  added/non-exclusive filter contract, APPLIED cert keys,
+  transactional honesty (non-APPLIED ⇒ input byte-for-byte). Found
+  and documented one deviation: the import primitive's original
+  filter never checked status == "MISSING" (preserved at the switch;
+  unobservable live — obligations always carry MISSING);
+  harmonizing is a deliberate POST-harvest change.
+- **Lifecycle census** (no further inline lifecycles):
+  block_insertion = positional anchored transplant (unit is one
+  contiguous block, not a keyed item — stays standalone);
+  deletion_union = item-shaped but semantically inverted
+  ("already_present" would mean "already absent" — fits a future
+  direction-generalized engine, not forced); Cargo.lock takeover =
+  whole-file pick-side mechanism (mechanisms-registry port candidate,
+  pattern already proven). The deterministic primitive layer is now
+  exactly: five engine-backed codecs + two standalone mechanisms, all
+  on the shared wire contract.
+
+Gate 4,204/0 (44 new conformance tests). Live confirmation of the
+adapter refactor, one case per primitive family: sea-orm-history-0020
+PASS 1.00, tokio-history-0115 PASS 1.00, axum-history-0019 PASS 0.99 —
+all exact PASS bands. The design doc's stage 1 → 4 arc is complete;
+the harvest (user's call, EXTEND-17d) is the definitive zero-regression
+confirmation of the whole arc.

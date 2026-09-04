@@ -840,8 +840,7 @@ def propose_import_union(
     the caller's control flow is undisturbed. Internal errors are caught and
     mapped to BLOCKED (transactional rollback).
     """
-    from capybase.deterministic_model import PrimitiveStatus
-    from capybase.keyed_collection import merge_keyed_collection
+    from capybase.keyed_collection import merge_keyed_collection, to_wire_result
 
     codec = _import_codec()
     result = merge_keyed_collection(
@@ -850,36 +849,30 @@ def propose_import_union(
         mechanism_id="rust.use_leaf_union/v1",
     )
 
-    _status_map = {
-        PrimitiveStatus.APPLIED: STATUS_APPLIED,
-        PrimitiveStatus.NOT_APPLICABLE: STATUS_NOT_APPLICABLE,
-        PrimitiveStatus.AMBIGUOUS: STATUS_AMBIGUOUS,
-        PrimitiveStatus.BLOCKED: STATUS_BLOCKED,
-    }
-    _reason_map = {
-        "no applicable items": "no additive import obligations",
-        "all items already present (idempotent)":
-            "all leaves already present (idempotent)",
-        "no items could be safely inserted":
-            "no leaves could be safely unioned",
-        "local validity check failed":
-            "local validity check failed (brace imbalance or round-trip)",
-    }
-    text = result.candidate if result.candidate is not None else resolved_text
-    cert = dict(result.certificate)
-    cert["primitive"] = "rust.use_leaf_union/v1"
-    if "reason" in cert:
-        cert["reason"] = _reason_map.get(cert["reason"], cert["reason"])
-    if result.status == PrimitiveStatus.APPLIED:
-        cert["closed_obligations"] = list(codec.closed_paths)
-        cert["remaining_obligations"] = len(codec.unresolved_paths)
-        cert["edits"] = list(codec.edit_strings)
-        cert["preconditions"] = dict(codec.preconditions)
-        cert["risk_tier"] = RISK_TIER_A
-        cert["skipped_lines"] = []
-        cert["unresolved"] = list(codec.unresolved_paths)
-    return ImportUnionResult(
-        status=_status_map[result.status], text=text, certificate=cert)
+    def _applied_cert(r):
+        return {
+            "closed_obligations": list(codec.closed_paths),
+            "remaining_obligations": len(codec.unresolved_paths),
+            "edits": list(codec.edit_strings),
+            "preconditions": dict(codec.preconditions),
+            "risk_tier": RISK_TIER_A,
+            "skipped_lines": [],
+            "unresolved": list(codec.unresolved_paths),
+        }
+
+    return to_wire_result(
+        result, resolved_text,
+        mechanism_id="rust.use_leaf_union/v1",
+        reason_map={
+            "no applicable items": "no additive import obligations",
+            "all items already present (idempotent)":
+                "all leaves already present (idempotent)",
+            "no items could be safely inserted":
+                "no leaves could be safely unioned",
+            "local validity check failed":
+                "local validity check failed (brace imbalance or round-trip)",
+        },
+        applied_cert=_applied_cert)
 
 
 # ---------------------------------------------------------------------------

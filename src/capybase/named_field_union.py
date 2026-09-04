@@ -25,11 +25,7 @@ from __future__ import annotations
 
 import re
 
-from capybase.import_union import (
-    ImportUnionResult,
-    STATUS_APPLIED, STATUS_NOT_APPLICABLE, STATUS_BLOCKED, STATUS_AMBIGUOUS,
-    RISK_TIER_A,
-)
+from capybase.import_union import ImportUnionResult, RISK_TIER_A
 from capybase.brace_utils import find_container_close_line
 
 
@@ -219,8 +215,7 @@ def propose_named_field_union(
 
     Returns an :class:`ImportUnionResult`. Never raises.
     """
-    from capybase.deterministic_model import PrimitiveStatus
-    from capybase.keyed_collection import merge_keyed_collection
+    from capybase.keyed_collection import merge_keyed_collection, to_wire_result
 
     codec = _field_codec()
     result = merge_keyed_collection(
@@ -229,36 +224,31 @@ def propose_named_field_union(
         mechanism_id="rust.named_field_union/v1",
     )
 
-    _status_map = {
-        PrimitiveStatus.APPLIED: STATUS_APPLIED,
-        PrimitiveStatus.NOT_APPLICABLE: STATUS_NOT_APPLICABLE,
-        PrimitiveStatus.AMBIGUOUS: STATUS_AMBIGUOUS,
-        PrimitiveStatus.BLOCKED: STATUS_BLOCKED,
-    }
-    _reason_map = {
-        "no applicable items": "no additive field obligations",
-        "no items could be safely inserted": "no fields could be inserted",
-        "all items already present (idempotent)":
-            "all fields already present",
-    }
-    text = result.candidate if result.candidate is not None else resolved_text
-    cert = dict(result.certificate)
-    cert["primitive"] = "rust.named_field_union/v1"
-    if "reason" in cert:
-        cert["reason"] = _reason_map.get(cert["reason"], cert["reason"])
-    if result.status == PrimitiveStatus.APPLIED:
+    def _applied_cert(r):
         # Certificate keys of the original inline lifecycle.
-        cert["closed_obligations"] = [
-            _normalize(c) for c in result.closed_obligations or []]
-        cert["edits"] = [
-            f"insert field {_field_name(c)}"
-            for c in result.closed_obligations or []]
-        cert["preconditions"] = {"no_name_collision": True}
-        cert["risk_tier"] = RISK_TIER_A
+        cert = {
+            "closed_obligations": [
+                _normalize(c) for c in r.closed_obligations or []],
+            "edits": [
+                f"insert field {_field_name(c)}"
+                for c in r.closed_obligations or []],
+            "preconditions": {"no_name_collision": True},
+            "risk_tier": RISK_TIER_A,
+        }
         if codec.risk_flags:
             cert["risk_flags"] = codec.risk_flags
-    return ImportUnionResult(
-        status=_status_map[result.status], text=text, certificate=cert)
+        return cert
+
+    return to_wire_result(
+        result, resolved_text,
+        mechanism_id="rust.named_field_union/v1",
+        reason_map={
+            "no applicable items": "no additive field obligations",
+            "no items could be safely inserted": "no fields could be inserted",
+            "all items already present (idempotent)":
+                "all fields already present",
+        },
+        applied_cert=_applied_cert)
 
 
 __all__ = ["propose_named_field_union"]
