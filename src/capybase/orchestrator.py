@@ -17579,6 +17579,26 @@ class Orchestrator:
                 },
                 step_index=result.step_index,
             )
+            # The full evidence envelope (s27-extend-42): per-oracle
+            # outcome + scope + tool fingerprint + duration for each
+            # accepted unit — attributable, reproducible acceptance.
+            from capybase.acceptance import evidence_envelope
+            for o in result.outcomes:
+                if getattr(o, "accepted", None) is None:
+                    continue
+                env = evidence_envelope(o)
+                if env:
+                    self.journal.emit(
+                        "acceptance_evidence",
+                        {
+                            "step_index": result.step_index,
+                            "unit_id": (
+                                o.unit.unit_id if hasattr(o, "unit")
+                                else str(getattr(o, "unit_id", "?"))),
+                            "oracles": [e.as_dict() for e in env],
+                        },
+                        step_index=result.step_index,
+                    )
             report = self.paths.final / "accept-report.md"
             header = f"## step {result.step_index}\n\n"
             # Append (one section per step); create on first write.

@@ -7311,3 +7311,31 @@ The new strictness immediately caught a test passing a file where the
 contract is a directory (the dispatch test) — working as intended.
 Tests pin all three behaviors (file → named refusal; directory →
 loads; absent → defaults). Gate 4,057/0.
+
+### S27-EXTEND-42 (2026-09-04) — the deferred-without-cause items pulled in
+
+User directive: nothing defers to sprint-28 that doesn't need harvest
+results. Audit of the deferral list:
+
+- **Legacy-mode "removal decision" — was an EMPTY deferral**: the
+  design keeps legacy as the deliberate fallback (`--in-place`), the
+  dispatch and semantics are tested, and harvest data measures
+  resolution quality (which drives `orch.rebase` directly) — it cannot
+  inform a CLI-surface decision. Closed as "kept by design"; no work
+  existed.
+- **Evidence-envelope deepening — DID NOT need harvest data; LANDED**:
+  the RAN syntax/compile oracles now fingerprint themselves —
+  `syntax_tool` (the tool's --version line, per-process cached),
+  `syntax_duration_ms`, `syntax_scope` (unit|file) — at the per-unit
+  Ccs validator and both whole-file paths (rust + C; the unknown paths
+  carry their outcome). `acceptance.OracleEvidence` +
+  `evidence_envelope()` read them, and every accepted unit journals
+  `acceptance_evidence` (per-oracle outcome/scope/tool/duration) —
+  acceptance is now attributable and reproducible, not just graded.
+  2 envelope tests + the pinned ccs tests extended implicitly. Gate
+  4,059/0.
+
+Sprint-28's list is now exactly: whatever the HARVEST surfaces (the
+only legitimate deferral class), plus per-validator envelope coverage
+beyond the compile oracle (marker/brace/jury oracles reporting through
+the same envelope) if measurement says it pays.

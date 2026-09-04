@@ -52,3 +52,57 @@ def test_accept_report_unknown_line_present():
     lines = _validation_lines(_V())
     assert any("NOT CHECKED" in ln for ln in lines), lines
     assert not any(ln == "- syntax passed" for ln in lines)
+
+
+# ---------------------------------------------------------------------------
+# s27-extend-42: the evidence envelope
+# ---------------------------------------------------------------------------
+
+def test_evidence_envelope_reads_ran_check_fingerprint():
+    from capybase.acceptance import evidence_envelope
+
+    class _U:
+        unit_id = "u1"
+
+    class _Val:
+        features = {
+            "syntax_passed": True, "syntax_scope": "unit",
+            "syntax_tool": "cc (Ubuntu 15.2.0) 15.2.0",
+            "syntax_duration_ms": 42, "ccs_syntax_checked": True,
+        }
+
+    class _O:
+        unit = _U()
+        validation = _Val()
+        accepted = object()
+
+    env = evidence_envelope(_O())
+    assert len(env) == 1
+    e = env[0]
+    assert (e.oracle, e.outcome, e.scope) == ("syntax", "pass", "unit")
+    assert "15.2.0" in e.tool and e.duration_ms == 42
+
+
+def test_evidence_envelope_unknown_and_absent():
+    from capybase.acceptance import evidence_envelope
+
+    class _U:
+        unit_id = "u1"
+
+    class _ValUnknown:
+        features = {"syntax_outcome": "unknown",
+                    "syntax_scope": "file"}
+
+    class _O:
+        unit = _U(); validation = _ValUnknown(); accepted = object()
+
+    (e,) = evidence_envelope(_O())
+    assert (e.outcome, e.tool, e.duration_ms) == ("unknown", "", 0)
+
+    class _ValBare:
+        features = {"markers_remaining": False}
+
+    class _O2:
+        unit = _U(); validation = _ValBare(); accepted = object()
+
+    assert evidence_envelope(_O2()) == []

@@ -3595,6 +3595,8 @@ class _StandaloneSyntaxValidator:
                 # neither pass nor unknown (no credit, no double-count).
                 features={fk: False},
             )
+        import time as _ev_time
+        _ev_t0 = _ev_time.perf_counter()
         tool = self._resolve_compiler(ctx.config)
         if tool is None:
             return VerificationCheckResult(
@@ -3634,7 +3636,16 @@ class _StandaloneSyntaxValidator:
             severity="error",
             message=msg,
             detail={"diagnostic": msg},
-            features={fk: True, "syntax_passed": ok},
+            # Evidence envelope (s27-extend-42): the RAN check records its
+            # fingerprint — tool version, duration, scope — so acceptance
+            # evidence is attributable and reproducible.
+            features={
+                fk: True, "syntax_passed": ok,
+                "syntax_scope": "unit",
+                "syntax_tool": _tool_version(tool),
+                "syntax_duration_ms": int(
+                    (_ev_time.perf_counter() - _ev_t0) * 1000),
+            },
         )
 
     def _lang_label(self) -> str:
@@ -4940,6 +4951,28 @@ _CC_ERROR_FILE_RE = re.compile(r"([^\s:][^\s:]*?)\.([chp]+)(?:\+\+)?:\d+:\d+:\s*
 # and plain -W tags in the KNOWN warning categories (semantic warnings).
 # Structural categories stay errors: they fire on broken code regardless
 # of strictness flags.
+#: Evidence-envelope deepening (s27-extend-42): tool versions are cached
+#: per-process (resolved-path keyed) so per-check capture is free after the
+#: first call.
+_TOOL_VERSION_CACHE: dict[str, str] = {}
+
+
+def _tool_version(tool_path: str) -> str:
+    """The tool's first --version line, cached (evidence fingerprints)."""
+    if tool_path in _TOOL_VERSION_CACHE:
+        return _TOOL_VERSION_CACHE[tool_path]
+    try:
+        out = subprocess.run(
+            [tool_path, "--version"], capture_output=True, text=True,
+            timeout=10)
+        v = (out.stdout or out.stderr or "").strip().splitlines()
+        v = v[0][:80] if v else "unknown"
+    except Exception:  # noqa: BLE001 — version is best-effort evidence
+        v = "unknown"
+    _TOOL_VERSION_CACHE[tool_path] = v
+    return v
+
+
 _CC_WERROR_TAG_RE = re.compile(r"\[-W(error[=+])?([^\]]+)\]")
 
 #: Warning-option categories observed as promotions in this corpus —
@@ -5612,23 +5645,29 @@ class VerificationEngine:
                 # the only option and is correct here (no crate paths to resolve).
                 rustc = _resolve(self.config.rustc_path)
                 syntax_unknown = False
+                rust_compile_ms = None
                 if rustc is not None:
                     syntax_checked = True
                     edition = self.config.rust_edition or _infer_rust_edition(
                         repo_root, path
                     )
+                    import time as _ev_time
+                    _ev_t0 = _ev_time.perf_counter()
                     try:
                         ok, msg = _compile_rust(
                             whole, rustc_path=rustc, edition=edition
                         )
-                        if "not checked" in (msg or ""):
-                            # _compile_rust's own undecidable-location
-                            # paths — UNKNOWN is not pass.
-                            syntax_unknown = True
                     except FileNotFoundError:
                         ok = True  # tool vanished between resolve & run → skip
                         msg = "rustc not available; syntax not checked"
                         syntax_unknown = True  # UNKNOWN is not pass (P3-slice)
+                    finally:
+                        rust_compile_ms = int(
+                            (_ev_time.perf_counter() - _ev_t0) * 1000)
+                    if "not checked" in (msg or ""):
+                            # _compile_rust's own undecidable-location
+                            # paths — UNKNOWN is not pass.
+                            syntax_unknown = True
                     # E2 (sprint-23): include_str!/include_bytes! resolve
                     # relative to the ORIGINAL file's directory; a temp-copy
                     # compile cannot see them (axum-0005/0033: include_str'd
@@ -5673,6 +5712,11 @@ class VerificationEngine:
                         )
                 features["syntax_checked"] = syntax_checked
                 features["syntax_passed"] = syntax_ok
+                features["syntax_scope"] = "file"
+                if rustc is not None:
+                    features["syntax_tool"] = _tool_version(rustc)
+                if rust_compile_ms is not None:
+                    features["syntax_duration_ms"] = rust_compile_ms
                 if syntax_unknown:
                     # UNKNOWN is not pass: the oracle never produced a
                     # verdict. syntax_passed is ABSENT (not True) — consumers
@@ -5682,6 +5726,8 @@ class VerificationEngine:
         elif is_c_family(language):
             # UNKNOWN is not pass (P3-slice): the vanished-tool path marks it.
             _cc_syntax_unknown = False
+            _cc_syntax_tool = None
+            _cc_syntax_ms = None
             # C/C++ whole-file verification. Two paths:
             #
             # 1. When a user-supplied build command (``cc_build_command``) is
@@ -6151,6 +6197,8 @@ class VerificationEngine:
                         file_dir = (Path(repo_root) / path).parent
                         if str(file_dir) != str(repo_root):
                             _include_paths.append(str(file_dir))
+                    import time as _ev_time
+                    _ev_t0 = _ev_time.perf_counter()
                     try:
                         ok, msg = _compile_ccs(
                             whole, cc_path=cc, std=std, suffix=suffix,
@@ -6160,6 +6208,12 @@ class VerificationEngine:
                         ok = True  # tool vanished between resolve & run → skip
                         msg = "C/C++ compiler not available; syntax not checked"
                         _cc_syntax_unknown = True  # UNKNOWN is not pass
+                    finally:
+                        # Evidence envelope (s27-extend-42): fingerprint the
+                        # oracle that ran (or attempted) — tool + duration.
+                        _cc_syntax_tool = cc
+                        _cc_syntax_ms = int(
+                            (_ev_time.perf_counter() - _ev_t0) * 1000)
                     # Standalone gcc runs in /tmp with no -I flags, so it cannot
                     # resolve project-internal headers (#include "json.h",
                     # "server.h"). A missing-header fatal error is an artifact
@@ -6197,6 +6251,11 @@ class VerificationEngine:
                         )
             features["syntax_checked"] = syntax_checked
             features["syntax_passed"] = syntax_ok
+            features["syntax_scope"] = "file"
+            if _cc_syntax_tool:
+                features["syntax_tool"] = _tool_version(_cc_syntax_tool)
+            if _cc_syntax_ms is not None:
+                features["syntax_duration_ms"] = _cc_syntax_ms
             if _cc_syntax_unknown:
                 # UNKNOWN is not pass: absent syntax_passed + explicit outcome.
                 features.pop("syntax_passed", None)

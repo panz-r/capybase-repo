@@ -140,3 +140,58 @@ def decide(outcomes, tests_passed: bool | None) -> PolicyDecision:
     return PolicyDecision("B", PROPOSE_FOR_REVIEW, [
         f"model-assisted unit(s): {', '.join(model_assisted[:4])}; "
         f"no test-gate evidence (tests_passed={tests_passed!r})"])
+
+
+@dataclass
+class OracleEvidence:
+    """One oracle's full evidence record (the design's Evidence envelope).
+
+    The deepening beyond the tier inputs (s27-extend-42): scope, the
+    tool that produced the verdict, and how long it took — so an
+    acceptance is attributable and reproducible, not just graded.
+    """
+
+    oracle: str            # e.g. "ccs_syntax" / "syntax"
+    outcome: str           # pass | fail | unknown
+    scope: str             # unit | file (from syntax_scope)
+    tool: str              # the tool's --version line (fingerprint)
+    duration_ms: int       # how long the oracle ran
+
+    def as_dict(self) -> dict:
+        return {
+            "oracle": self.oracle, "outcome": self.outcome,
+            "scope": self.scope, "tool": self.tool,
+            "duration_ms": self.duration_ms,
+        }
+
+
+def evidence_envelope(outcome) -> list[OracleEvidence]:
+    """The full oracle-evidence list for one resolution outcome.
+
+    Reads what the validators recorded (the RAN checks carry
+    syntax_tool / syntax_duration_ms / syntax_scope; the unknown paths
+    carry syntax_outcome) — a read-layer, not a validator rewrite.
+    Oracles without tool fingerprints (marker/brace checks) report with
+    their outcome and empty tool/duration.
+    """
+    val = getattr(outcome, "validation", None)
+    if val is None:
+        return []
+    feats = getattr(val, "features", None) or {}
+    ev: list[OracleEvidence] = []
+    # The syntax/compile oracle (the strongest deterministic evidence).
+    if feats.get("syntax_outcome") == "unknown":
+        ev.append(OracleEvidence(
+            oracle="syntax", outcome="unknown",
+            scope=str(feats.get("syntax_scope") or "unit"),
+            tool="", duration_ms=0))
+    elif "syntax_passed" in feats or feats.get("syntax_checked"):
+        ev.append(OracleEvidence(
+            oracle="syntax",
+            outcome="pass" if feats.get("syntax_passed") is True
+            else ("fail" if feats.get("syntax_passed") is False
+                  else "unknown"),
+            scope=str(feats.get("syntax_scope") or "unit"),
+            tool=str(feats.get("syntax_tool") or ""),
+            duration_ms=int(feats.get("syntax_duration_ms") or 0)))
+    return ev
