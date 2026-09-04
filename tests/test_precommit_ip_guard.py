@@ -1,10 +1,12 @@
 """hooks/pre-commit — the no-endpoints-in-repo guard.
 
 The hook blocks STAGED ADDITIONS carrying environment-specific endpoint
-identifiers: non-loopback IPv4 literals, *.local mDNS hostnames, and
-DESKTOP-* machine names. Loopback/any addresses are allowed (they identify
-no infrastructure). These tests drive the real hook script against a temp
-git repo with staged content.
+identifiers: non-loopback IPv4 literals, *.local mDNS hostnames, DESKTOP-*
+machine names, and the local host's name (nova, incl. provider-name forms  # endpoint-guard: allow
+like nova-gemma4 — a provider name encoding the machine it points at is a  # endpoint-guard: allow
+host identifier). Loopback/any addresses are allowed (they identify no
+infrastructure). These tests drive the real hook script against a temp git
+repo with staged content.
 """
 
 from __future__ import annotations
@@ -83,6 +85,36 @@ def test_machine_name_blocked(tmp_path: Path) -> None:
     _stage(repo, "# served on DESKTOP-NOVA\n")  # endpoint-guard: allow
     p = _run_hook(repo)
     assert p.returncode == 1
+
+
+def test_host_name_provider_prefix_blocked(tmp_path: Path) -> None:
+    # A provider-config NAME that encodes the host it points at is a host
+    # identifier — the leak class that reached the README once.
+    repo = _init_repo(tmp_path)
+    _stage(repo, "--provider nova-gemma4 --case x\n")  # endpoint-guard: allow
+    p = _run_hook(repo)
+    assert p.returncode == 1
+    assert "nova" in p.stderr  # endpoint-guard: allow
+
+
+def test_host_name_underscore_form_blocked(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _stage(repo, "provider file: nova_vibethinker.json\n")  # endpoint-guard: allow
+    assert _run_hook(repo).returncode == 1
+
+
+def test_host_name_standalone_and_uppercase_blocked(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _stage(repo, "running on NOVA tonight\n")  # endpoint-guard: allow
+    assert _run_hook(repo).returncode == 1
+
+
+def test_words_containing_host_letters_pass(tmp_path: Path) -> None:
+    # Word-boundary anchoring: ordinary words are not the host name.
+    repo = _init_repo(tmp_path)
+    _stage(repo, "a supernova of fixes; canonical = true; renovate = off\n")
+    p = _run_hook(repo)
+    assert p.returncode == 0, p.stderr
 
 
 def test_unstaged_ip_does_not_block(tmp_path: Path) -> None:

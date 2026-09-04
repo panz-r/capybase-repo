@@ -7,8 +7,12 @@
 #     (127.0.0.1, 0.0.0.0, 255.255.255.255)
 #   - mDNS machine hostnames (*.local) and Windows-style hyphenated
 #     desktop-PC machine names
+#   - the local host's name (NOVA), including provider names built on it  # endpoint-guard: allow
+#     (nova-gemma4, nova_vibethinker) — a provider-config name is a host  # endpoint-guard: allow
+#     identifier when it encodes the machine it points at
 #
-# Intentional exceptions (e.g. the guard's own test fixtures) mark the line:
+# Intentional exceptions (e.g. the guard's own test fixtures, harvest
+# provenance quoting the command that actually ran) mark the line:
 #     something-with-an-ip  # endpoint-guard: allow
 #
 # Hosts, IPs, and machine names belong in provider configs under
@@ -58,6 +62,14 @@ while IFS= read -r line; do
     if printf '%s\n' "$content" | grep -qE '[[:space:](/]DESKTOP-[A-Z0-9-]+' \
         || printf '%s\n' "$content" | grep -qE '^DESKTOP-[A-Z0-9-]+'; then
         echo "pre-commit: machine name (DESKTOP-*) staged in $file" >&2
+        violations=1
+    fi
+
+    # Local host's name — standalone or as a provider-name prefix
+    # (nova-gemma4, nova_vibethinker). Word-boundary anchored so ordinary  # endpoint-guard: allow
+    # words containing the letters (supernova) pass.
+    if printf '%s\n' "$content" | grep -qiE '(\bnova\b|\bnova[-_])'; then
+        echo "pre-commit: host name (nova*) staged in $file" >&2  # endpoint-guard: allow
         violations=1
     fi
 done < <(git diff --cached --no-color -U0)
