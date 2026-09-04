@@ -167,6 +167,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--repo", default=".",
         help="repository to promote in (default: current directory)",
     )
+    pub_p = sub.add_parser(
+        "publish",
+        help="lease-protected remote publication (service mode): push the "
+             "retained candidate with --force-with-lease=<ref>:<expected-"
+             "oid> — the EXPLICIT expected-OID form; a remote that moved "
+             "since the snapshot refuses, never forces",
+    )
+    pub_p.add_argument(
+        "state", nargs="?", default=None,
+        help="path to the candidate's session_state.json (default: newest "
+             "retained successful candidate)",
+    )
+    pub_p.add_argument("--remote", default=None,
+                       help="remote to publish to (default: the snapshot's)")
+    pub_p.add_argument(
+        "--approve", action="store_true",
+        help="approve a tier-B/C candidate for publication (the review act)",
+    )
+    pub_p.add_argument("--dry-run", action="store_true", dest="dry_run",
+                       help="rehearse the lease push without transferring")
+    pub_p.add_argument("--repo", default=".", help="repository (default: .)")
     rb_p = sub.add_parser(
         "rebase",
         help="own the entire rebase: start it, resolve conflicts, finish",
@@ -1082,6 +1103,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "run":
         result = orch.run()
         return 1 if result.escalated else 0
+    if args.command == "publish":
+        from capybase.candidate_ref import publish_candidate
+        result = publish_candidate(
+            args.repo, state_path=args.state, remote=args.remote,
+            approve=args.approve, dry_run=args.dry_run)
+        print(result.summary())
+        return 0 if result.published else 1
     if args.command == "promote":
         from capybase.candidate_ref import promote_candidate
         result = promote_candidate(

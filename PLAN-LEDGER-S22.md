@@ -7182,3 +7182,31 @@ default-off) remain.
 
 Outstanding: **P5 only** — lease-protected remote publication (service
 mode, default-off, explicit `--force-with-lease=<ref>:<oid>`).
+
+### S27-EXTEND-37 (2026-09-04) — candidate-ref P5 LANDED: lease publication; the design is COMPLETE
+
+- **`capybase publish`** (candidate_ref.publish_candidate): the
+  explicit-expected-OID lease push — `git push
+  --force-with-lease=<ref>:<expected_oid> <remote> <candidate>:<ref>`,
+  never the implicit lease (the design: background fetches weaken it).
+  The expectation is the REMOTE OID recorded at SNAPSHOT (the source
+  branch's default remote-tracking ref: pushRemote > branch remote >
+  pushDefault > origin). A remote that moved since the snapshot breaks
+  the lease and refuses with guidance — never forces. The tier-B/C
+  consent gate applies (--approve); --dry-run rehearses without
+  transferring. Purely additive: nothing in rebase/promote publishes —
+  capybase stays local-first; publishing is the service operator's
+  explicit act.
+- 4 hermetic tests against a bare-repo remote (lease pushes with local
+  source untouched; remote-moved refuses + NOT overwritten; tier-B
+  refuses without approve with the remote untouched; dry-run transfers
+  nothing). One fixture lesson: the bare remote must live OUTSIDE the
+  repo worktree (a sibling remote.git/ reads as untracked and trips
+  the preflight dirty check). Gate 4,056/0.
+
+**THE CANDIDATE-REF ARCHITECTURE DESIGN IS FULLY IMPLEMENTED
+(P0–P5, sprint-27)**: never mutate the source branch (candidate mode
+default); UNKNOWN is not pass (evidence + tiers + promotion consent);
+the acceptance policy is the sole decider; promotion is an expected-
+OID CAS; a tested candidate is a reusable artifact; remote
+publication is lease-protected and explicitly initiated.

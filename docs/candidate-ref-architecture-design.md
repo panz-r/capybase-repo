@@ -192,8 +192,19 @@ ConflictUnit → CandidateResolution[] → Evidence[] → PolicyDecision
   (outcome=None) is NEVER reused — and git's own design (the branch
   advances only at completion) means there is nothing mid-series to
   resume from, which is a safety property, not a gap.
-- **P5 — OUTSTANDING**: remote lease publication (service mode,
-  default-off, explicit `--force-with-lease=<ref>:<oid>`).
+- **P5 — LANDED** (extend-37): `capybase publish` — the explicit-
+  expected-OID lease push
+  (`git push --force-with-lease=<ref>:<expected_oid> <remote>
+  <candidate_oid>:<ref>`), where the expectation is the REMOTE OID
+  recorded at the candidate's snapshot (from the source branch's
+  default remote-tracking ref). A remote that moved since the snapshot
+  breaks the lease and refuses — never forces. The policy consent gate
+  applies (tier A, or --approve); `--dry-run` rehearses the lease
+  without transferring. Purely additive: nothing in rebase/promote
+  ever publishes (capybase stays local-first; publishing is the
+  service operator's explicit act).
+
+**All stages P0–P5 are LANDED (sprint-27).**
 
 ### What does not change
 

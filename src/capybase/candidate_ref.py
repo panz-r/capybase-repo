@@ -149,6 +149,23 @@ def _write_state(path: Path, state: dict) -> None:
     path.write_text(json.dumps(state, indent=2), encoding="utf-8")
 
 
+def _default_remote(git: GitBackend, source_ref: str) -> str | None:
+    """The source branch's default remote (pushRemote > push > origin)."""
+    branch = source_ref.removeprefix("refs/heads/")
+    for probe in (
+        ["config", "--get", f"branch.{branch}.pushRemote"],
+        ["config", "--get", f"branch.{branch}.remote"],
+        ["config", "--get", "remote.pushDefault"],
+        ["config", "--get", "remote.origin.url"],
+    ):
+        r = git._run(probe, what="remote probe")
+        if r.ok and r.stdout.strip():
+            if probe[-1].startswith("remote."):
+                return probe[-1].split(".")[1]
+            return r.stdout.strip()
+    return None
+
+
 def _matching_retained_candidate(
     repo: Path, state: dict,
 ) -> tuple[dict, Path] | None:
@@ -221,6 +238,21 @@ def run_candidate_rebase(
     report.source_ref = git.current_branch() or "HEAD"
     report.source_oid = git.head_oid()
     report.target_oid = _resolve_oid(git, target)
+    # P5: the expected REMOTE OID — the lease's expectation. Recorded at
+    # snapshot from the source branch's default remote-tracking ref
+    # (branch.<src>.pushRemote > remote.<default>.push > origin). A
+    # remote that moves after this breaks the lease at publish (the
+    # honest refusal). Absent when no remote is configured (local-only).
+    _remote_name = _default_remote(git, report.source_ref)
+    _expected_remote_oid = None
+    if _remote_name:
+        _r = git._run(
+            ["rev-parse", "--verify", "--quiet",
+             f"refs/remotes/{_remote_name}/"
+             f"{report.source_ref.removeprefix('refs/heads/')}"],
+            what="snapshot remote-tracking oid")
+        if _r.ok:
+            _expected_remote_oid = _r.stdout.strip()
     ts = time.strftime("%Y%m%d-%H%M%S")
     source_slug = report.source_ref.replace("/", "-")
     # Unique-ify: two runs in the same second (or a retained candidate
@@ -252,6 +284,8 @@ def run_candidate_rebase(
         },
         "outcome": None,
         "candidate_oid": None,
+        "remote": _remote_name,
+        "expected_remote_oid": _expected_remote_oid,
         "transitions": [
             {"name": "snapshot", "source_oid": report.source_oid,
              "target_oid": report.target_oid, "at": ts},
@@ -628,4 +662,121 @@ def promote_candidate(
                     what="delete consumed candidate branch")
             except Exception:  # noqa: BLE001
                 _log.debug("candidate branch already gone", exc_info=True)
+    return result
+
+
+@dataclass
+class PublishResult:
+    """The outcome of a lease-protected remote publication (P5)."""
+
+    published: bool = False
+    refused_reason: str = ""
+    remote: str = ""
+    remote_ref: str = ""
+    expected_remote_oid: str = ""
+    candidate_oid: str = ""
+
+    def summary(self) -> str:
+        if self.published:
+            return (
+                f"PUBLISHED: {self.remote_ref} -> {self.candidate_oid[:8]} "
+                f"on {self.remote} (lease held against "
+                f"{self.expected_remote_oid[:8]})"
+            )
+        return f"PUBLISH REFUSED: {self.refused_reason}"
+
+
+def publish_candidate(
+    repo: str | Path,
+    *,
+    state_path: str | Path | None = None,
+    remote: str | None = None,
+    approve: bool = False,
+    dry_run: bool = False,
+) -> PublishResult:
+    """Publish a retained candidate to the remote with an EXPLICIT lease.
+
+    ``git push --force-with-lease=<ref>:<expected_oid> <remote>
+    <candidate_oid>:<ref>`` — the explicit expected-OID form only (the
+    design: implicit leases are weakened by background fetches updating
+    remote-tracking refs). The expectation is the REMOTE OID recorded at
+    the candidate's snapshot; a remote that moved since breaks the lease
+    and refuses — never forces. The policy consent gate applies (tier
+    A, or --approve). Purely additive: nothing in rebase/promote ever
+    calls this automatically (capybase stays local-first; publishing is
+    the service operator's explicit act).
+    """
+    git = GitBackend(repo)
+    result = PublishResult()
+
+    if state_path is None:
+        found = _latest_candidate_state(Path(repo))
+        if found is None:
+            result.refused_reason = (
+                "no retained successful candidate — run "
+                "`capybase rebase` (candidate mode) first")
+            return result
+        state_path = found
+    try:
+        state = json.loads(Path(state_path).read_text())
+    except Exception as exc:  # noqa: BLE001
+        result.refused_reason = f"state file unreadable: {exc}"
+        return result
+    if state.get("outcome") != "success":
+        result.refused_reason = (
+            f"candidate outcome is {state.get('outcome')!r} — nothing to publish")
+        return result
+    result.candidate_oid = state["candidate_oid"]
+    result.remote_ref = state["source_ref"]
+    result.expected_remote_oid = state.get("expected_remote_oid")
+
+    _policy = state.get("policy") or {}
+    if _policy.get("tier", "B") in ("B", "C") and not approve:
+        result.refused_reason = (
+            f"acceptance policy is "
+            f"{_policy.get('decision', 'PROPOSE_FOR_REVIEW')} (tier "
+            f"{_policy.get('tier', 'B')}) — publish with --approve after "
+            f"review (unknown is not pass)")
+        return result
+
+    if not result.expected_remote_oid:
+        result.refused_reason = (
+            "the candidate's snapshot recorded no expected remote OID "
+            "(no remote-tracking ref at run time) — configure the remote "
+            "and re-run the candidate, or the remote cannot be leased "
+            "safely")
+        return result
+    result.remote = remote or state.get("remote") or "origin"
+
+    # THE explicit-lease push. --force-with-lease=<ref>:<oid> refuses when
+    # the remote ref is not exactly at the expected OID (it moved since
+    # the snapshot) — the CAS analogue for remotes.
+    args = [
+        "push", f"--force-with-lease={result.remote_ref}:"
+        f"{result.expected_remote_oid}",
+    ]
+    if dry_run:
+        args.append("--dry-run")
+    args += [
+        result.remote,
+        f"{result.candidate_oid}:{result.remote_ref}",
+    ]
+    res = git._run(args, what="publish lease push")
+    if not res.ok:
+        result.refused_reason = (
+            f"lease push refused: {res.stderr.strip()[:200]} — the remote "
+            f"moved since the snapshot (the lease held; never forced). "
+            f"Fetch, re-run the candidate against the new remote tip."
+        )
+        return result
+    result.published = True
+    try:
+        state["published"] = {
+            "at": time.strftime("%Y%m%d-%H%M%S"),
+            "remote": result.remote,
+            "dry_run": dry_run,
+        }
+        _write_state(Path(state_path), state)
+    except Exception:  # noqa: BLE001 — state update is advisory
+        _log.debug("publish: state update failed", exc_info=True)
     return result

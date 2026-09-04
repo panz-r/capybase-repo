@@ -491,3 +491,122 @@ def test_promote_refuses_tier_b_without_approve(py_repo_before_rebase):
     approved = promote_candidate(repo, approve=True)
     assert approved.promoted, approved.summary()
     assert _branch_oid(repo, "feat") == report.candidate_oid
+
+
+# ---------------------------------------------------------------------------
+# P5: lease-protected remote publication (hermetic bare-repo remote)
+# ---------------------------------------------------------------------------
+
+
+def _repo_with_remote(py_repo_before_rebase, tmp_path):
+    """The fixture repo + a bare 'origin' holding the source branch.
+
+    The bare lives OUTSIDE the repo worktree (tmp_path is the repo root
+    for these fixtures — a sibling remote.git/ reads as untracked and
+    trips the preflight's dirty-tree check).
+    """
+    import subprocess as sp
+    import tempfile
+
+    repo = py_repo_before_rebase["repo"]
+    bare = Path(tempfile.mkdtemp(prefix="p5-remote-")) / "remote.git"
+    sp.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    # Push the current branches to the bare remote as the starting state.
+    git(repo, "remote", "add", "origin", str(bare))
+    git(repo, "push", "-q", "origin", "main")
+    git(repo, "push", "-q", "origin", "feat")
+    git(repo, "fetch", "-q", "origin")
+    return repo, bare
+
+
+def _remote_ref_oid(bare, ref="refs/heads/feat"):
+    import subprocess as sp
+
+    out = sp.run(
+        ["git", "--git-dir", str(bare), "rev-parse", ref],
+        capture_output=True, text=True, check=True)
+    return out.stdout.strip()
+
+
+def test_publish_lease_pushes_and_local_source_untouched(
+    py_repo_before_rebase, tmp_path,
+):
+    repo, bare = _repo_with_remote(py_repo_before_rebase, tmp_path)
+    merged = py_repo_before_rebase["merged_block"]
+    engine = ResolutionEngine(
+        _config(repo).model, client=CyclingClient([_payload(merged)]))
+    report = run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine)
+    assert report.would_succeed
+    feat_before = _branch_oid(repo, "feat")
+
+    from capybase.candidate_ref import publish_candidate
+    result = publish_candidate(repo, approve=True)
+    assert result.published, result.summary()
+    assert _remote_ref_oid(bare) == report.candidate_oid
+    # Publishing the remote does NOT move the local source (promote does).
+    assert _branch_oid(repo, "feat") == feat_before
+    state = json.loads(Path(report.state_path).read_text())
+    assert state["published"]["remote"] == "origin"
+
+
+def test_publish_lease_refuses_when_remote_moved(
+    py_repo_before_rebase, tmp_path,
+):
+    repo, bare = _repo_with_remote(py_repo_before_rebase, tmp_path)
+    merged = py_repo_before_rebase["merged_block"]
+    engine = ResolutionEngine(
+        _config(repo).model, client=CyclingClient([_payload(merged)]))
+    report = run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine)
+    assert report.would_succeed
+
+    # The remote MOVED after the snapshot (someone else pushed).
+    git(repo, "fetch", "-q", "origin")
+    git(repo, "branch", "-q", "-f", "tmp-remote-head",
+        _remote_ref_oid(bare))
+    import subprocess as sp
+    env = dict(**__import__("os").environ)
+    git(repo, "commit", "--allow-empty", "-q", "-m", "remote-side change",
+        "--author=a <a@a>")
+    # Push the local feat (now with an extra commit) to move the remote.
+    git(repo, "push", "-q", "-f", "origin", "feat")
+    moved = _remote_ref_oid(bare)
+
+    from capybase.candidate_ref import publish_candidate
+    result = publish_candidate(repo, approve=True)
+    assert not result.published
+    assert "lease" in result.summary().lower()
+    assert _remote_ref_oid(bare) == moved  # NOT overwritten — never forced
+
+
+def test_publish_tier_b_refuses_without_approve(py_repo_before_rebase, tmp_path):
+    repo, bare = _repo_with_remote(py_repo_before_rebase, tmp_path)
+    merged = py_repo_before_rebase["merged_block"]
+    engine = ResolutionEngine(
+        _config(repo).model, client=CyclingClient([_payload(merged)]))
+    report = run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine)
+    assert report.would_succeed and report.policy_tier == "B"
+
+    from capybase.candidate_ref import publish_candidate
+    result = publish_candidate(repo)
+    assert not result.published
+    assert "--approve" in result.summary()
+    # The remote is untouched.
+    assert _remote_ref_oid(bare) == report.source_oid
+
+
+def test_publish_dry_run_transfers_nothing(py_repo_before_rebase, tmp_path):
+    repo, bare = _repo_with_remote(py_repo_before_rebase, tmp_path)
+    merged = py_repo_before_rebase["merged_block"]
+    engine = ResolutionEngine(
+        _config(repo).model, client=CyclingClient([_payload(merged)]))
+    run_candidate_rebase(
+        _config(repo), repo, "main", resolution_engine=engine)
+    remote_before = _remote_ref_oid(bare)
+
+    from capybase.candidate_ref import publish_candidate
+    result = publish_candidate(repo, approve=True, dry_run=True)
+    assert result.published  # the lease held in rehearsal
+    assert _remote_ref_oid(bare) == remote_before  # nothing transferred
