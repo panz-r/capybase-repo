@@ -1,4 +1,5 @@
-"""Architecture-guard tests (deterministic-reuse-design).
+"""Architecture-guard tests (deterministic-layer structure; see
+docs/deterministic-resolution.md — the post-candidate repair section).
 
 These are the CI checks the design specifies — they prevent the
 structural regressions the reuse work eliminated from creeping back:

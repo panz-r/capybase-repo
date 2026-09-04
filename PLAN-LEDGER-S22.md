@@ -7918,3 +7918,17 @@ PASS 1.00, tokio-history-0115 PASS 1.00, axum-history-0019 PASS 0.99 —
 all exact PASS bands. The design doc's stage 1 → 4 arc is complete;
 the harvest (user's call, EXTEND-17d) is the definitive zero-regression
 confirmation of the whole arc.
+
+### S27-EXTEND-66 (2026-09-04) — deterministic-reuse-design.md RETIRED
+
+Verified complete (0 unchecked items across stages 1–4; conformance +
+architecture guards green; tree clean) and removed the design doc: its
+content is now the current architecture, not a proposal. The
+current-state description lives in the standing
+docs/deterministic-resolution.md (new section: "Post-candidate
+deterministic repair (obligation-driven union primitives)" — the
+engine/codec architecture, the seven-primitive precedence table, the
+two standalone-by-design mechanisms, and the how-to-add-a-primitive
+recipe). The design doc's history (proposal verdict, staging
+decisions, the dd7598d record correction, the census) remains in git
+history and the EXTEND-47…65 ledger entries.

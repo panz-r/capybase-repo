@@ -333,6 +333,62 @@ validated; an invalid splice falls through to the LLM.
 
 ---
 
+## Post-candidate deterministic repair (obligation-driven union primitives)
+
+After an LLM candidate exists, change-accounting derives the *missing
+obligations* — the additive lines each conflict side carried that the candidate
+dropped (typically because the model copied one side verbatim). A cascade of
+deterministic primitives then restores them mechanically, no second model call:
+
+| # | Primitive | Module | Scope |
+|---|-----------|--------|-------|
+| 1 | Import-leaf union | `import_union.py` | any language (Rust use-trees) |
+| 2 | Deletion application | `deletion_union.py` | DROPPED_DELETION obligations |
+| 3 | Attribute/meta union | `attribute_meta_union.py` | Rust (`derive`/`allow`/`warn` lists) |
+| 4 | Named-field union | `named_field_union.py` | Rust struct fields |
+| 5 | Keyed-item union | `keyed_item_union.py` | Rust impl/mod/trait items |
+| 6 | Block insertion | `block_insertion.py` | residual additive blocks (anchor-based) |
+| 7 | Manifest union | `manifest_union.py` | TOML arrays and feature lists |
+
+Each primitive *claims* (closes) the obligations it resolves; later primitives
+see only the remainder — specialized first, generic `block_insertion` last.
+
+**The keyed-collection engine** (`keyed_collection.py`). Primitives 1, 3–5
+and 7 run one shared lifecycle — filter obligations → idempotency →
+sequential transactional edits → local validity → certificate — implemented
+once in `merge_keyed_collection`. Each primitive supplies only a *codec*: what
+counts as an applicable obligation, what "already present" means, how to apply
+one edit (a `(start, end, replacement)` span), and what local validity means.
+Edits accumulate into an `EditTransaction` (`deterministic_model.py`: source-
+hash CAS, bounds, no-overlap) as the audit record; sequential codec calls are
+authoritative. The engine never raises — internal errors surface as `BLOCKED`
+with the original text (transactional rollback). `to_wire_result` maps the
+engine result to the shared `ImportUnionResult` wire contract (statuses
+`APPLIED`/`NOT_APPLICABLE`/`BLOCKED`/`AMBIGUOUS`, certificate with mechanism
+id, risk tier, hashes, closed/unresolved obligations).
+
+The unit is not always a line: the import codec unions *leaves* of use-trees
+(the original's unit of obligation); the attribute codec returns
+line-replacement spans; collision checks are scope-qualified (a name collides
+only within its destination container, not file-wide).
+
+**Standalone by design.** `block_insertion` transplants one contiguous,
+positionally-anchored block — its unit is not a keyed item, so it keeps its
+own lifecycle (same wire contract). `deletion_union` is item-shaped but
+semantically inverted (its "already present" would mean "already absent"); it
+would fit a future direction-generalized engine, and is not forced onto the
+additive-union protocol.
+
+**Adding a primitive**: write the codec, a ~10-line adapter calling
+`merge_keyed_collection` + `to_wire_result` (see `named_field_union.py` for
+the smallest example), add it to the conformance suite
+(`tests/test_codec_conformance.py` — never-raises, determinism, idempotent
+re-entry, filter contract, certificate keys, transactional honesty), a
+shadow suite against the previous implementation if one exists, and a
+dispatch line in `orchestrator.py`'s precedence block.
+
+---
+
 ## Validation pipeline (applied to every accepted candidate)
 
 Every candidate — whether from a deterministic layer or the LLM — passes
