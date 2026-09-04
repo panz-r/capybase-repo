@@ -18,13 +18,17 @@ Design contract (same as all Tier-A primitives):
   - Uses :func:`brace_utils.find_container_close_line` to locate insertion point.
   - Tier-A for distinct items; same-key collisions are NOT unioned.
   - Pure of I/O; cargo/rustc remains authoritative after the edit.
+
+Stage 3 (the SWITCH, primitive #3 of 5): the KeyedCollectionMerge
+engine is the authoritative implementation. This module supplies only
+the Rust-item codec; the lifecycle lives in
+:mod:`capybase.keyed_collection`. The codec was shadow-verified at
+6/6 agreement with the original inline lifecycle before the switch.
 """
 
 from __future__ import annotations
 
-import hashlib
 import re
-from dataclasses import dataclass
 
 from capybase.import_union import (
     ImportUnionResult,
@@ -75,6 +79,108 @@ def _is_macro(line: str) -> bool:
     return bool(_MACRO_NAME_RE.match(line.strip()))
 
 
+def _item_codec():
+    """The Rust-item codec for the KeyedCollectionMerge engine.
+
+    Carries the EXACT semantics of the original inline lifecycle
+    (shadow-verified at 6/6 agreement before the switch):
+
+    - no channel filter — ``_is_rust_item`` already rejects comments
+      and blank lines (the original had no classify_channel call).
+    - ``already_present`` always False — the original decided
+      idempotency inside the insert attempt via the scope-qualified
+      per-container collision (claim-3 fix), surfacing as
+      ``unresolved`` rather than an early idempotent exit.
+    - ``local_validity`` always True — the original had NO local
+      validity gate; the zero-regression bar forbids new BLOCKED
+      paths on mid-repair (possibly unbalanced) candidates.
+    - ``edit_notes`` accumulates the original certificate's edit
+      strings (``insert <name> before line <N>``) — the engine's
+      own edit reasons don't carry the destination line number.
+    """
+
+    class _RustItemCodec:
+        def __init__(self) -> None:
+            self.edit_notes: list[str] = []
+
+        def applicable_obligations(self, obligations):
+            from capybase.block_insertion import _is_import_line
+            out = []
+            for ob in obligations or []:
+                if getattr(ob, "operation", "") != "added":
+                    continue
+                if getattr(ob, "status", "") != "MISSING":
+                    continue
+                if getattr(ob, "exclusive", False):
+                    continue
+                line = getattr(ob, "line", "") or ""
+                if not line.strip():
+                    continue
+                # Must be a Rust item declaration (fn/const/type/etc.)
+                if not _is_rust_item(line):
+                    continue
+                # Refuse macro_rules! (opaque expansion).
+                if _is_macro(line):
+                    continue
+                # Skip imports (handled by import_union).
+                if _is_import_line(line):
+                    continue
+                out.append(line)
+            return out
+
+        def already_present(self, text, item):
+            return False
+
+        def try_edit(self, text, item, context):
+            item_name_str = _item_name(item)
+            if item_name_str is None:
+                return None
+            dest_info = _find_destination_container(text, item, context)
+            if dest_info is None:
+                return None
+            container_close_line, indent = dest_info
+
+            # SCOPE-QUALIFIED collision (claim-3 fix): the name must
+            # not exist in THIS container — find the container header
+            # by scanning backward for the first impl/mod/trait line.
+            cand = text.splitlines()
+            container_start = 0
+            for k in range(container_close_line - 1, -1, -1):
+                if _is_rust_item(cand[k]) and any(
+                        kw in cand[k] for kw in ("impl ", "mod ", "trait ")):
+                    container_start = k
+                    break
+            for k in range(container_start, container_close_line):
+                if _item_name(cand[k]) == item_name_str:
+                    return None  # genuine collision in the destination
+
+            # Extract the full item subtree from the other side.
+            item_subtree = _extract_item_subtree(context, item)
+            if item_subtree is None:
+                # Fall back to just the obligation line(s) — but only
+                # if it's a complete item (has a body or ends with ;).
+                item_subtree = item.strip()
+
+            # Insert before the container's closing brace.
+            insertion = item_subtree.rstrip() + "\n"
+            if indent:
+                insertion = "\n".join(
+                    (indent + ln if ln.strip() else ln)
+                    for ln in insertion.splitlines()
+                ) + "\n"
+            lines = text.splitlines(keepends=True)
+            pos = sum(len(l) for l in lines[:container_close_line])
+            pos = min(pos, len(text))
+            self.edit_notes.append(
+                f"insert {item_name_str} before line {container_close_line}")
+            return (pos, pos, insertion)
+
+        def local_validity(self, text):
+            return True
+
+    return _RustItemCodec()
+
+
 def propose_keyed_item_union(
     resolved_text: str, missing_obligations: list,
     *, other_side_text: str = "",
@@ -89,161 +195,52 @@ def propose_keyed_item_union(
     The item subtree is reconstructed from the other side's text: the full
     text from the item's declaration through its matching closing brace.
 
+    Stage 3 (the SWITCH): the KeyedCollectionMerge engine runs the
+    lifecycle; this function is a thin adapter mapping the engine's
+    :class:`PrimitiveResult` to the wire format
+    (:class:`ImportUnionResult`, original certificate keys,
+    ``rust.keyed_item_union/v1``).
+
     Returns an :class:`ImportUnionResult`. Never raises.
     """
-    try:
-        before_hash = hashlib.sha256(
-            (resolved_text or "").encode("utf-8")
-        ).hexdigest()[:16]
+    from capybase.deterministic_model import PrimitiveStatus
+    from capybase.keyed_collection import merge_keyed_collection
 
-        # --- Filter to additive obligations that declare Rust items. ---
-        candidate_items: list[str] = []
-        for ob in missing_obligations or []:
-            if getattr(ob, "operation", "") != "added":
-                continue
-            if getattr(ob, "status", "") != "MISSING":
-                continue
-            if getattr(ob, "exclusive", False):
-                continue
-            line = getattr(ob, "line", "") or ""
-            if not line.strip():
-                continue
-            # Must be a Rust item declaration (fn/const/type/etc.)
-            if not _is_rust_item(line):
-                continue
-            # Refuse macro_rules! (opaque expansion).
-            if _is_macro(line):
-                continue
-            # Skip imports (handled by import_union).
-            from capybase.block_insertion import _is_import_line
-            if _is_import_line(line):
-                continue
-            candidate_items.append(line)
+    codec = _item_codec()
+    result = merge_keyed_collection(
+        codec, resolved_text, missing_obligations,
+        other_side_text=other_side_text,
+        mechanism_id="rust.keyed_item_union/v1",
+    )
 
-        if not candidate_items:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "no additive item obligations",
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        # --- Idempotency (scope-qualified, matching the named-field fix).
-        # The per-container collision check happens after
-        # _find_destination_container locates the destination (below).
-        # A same-named item in an UNRELATED container is a different entity.
-        fresh = list(candidate_items)
-        if not fresh:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "all items already present (collision or idempotent)",
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        # --- For each fresh item, find its destination and insert. ---
-        edited_text = resolved_text
-        closed: list[str] = []
-        edits: list[str] = []
-        unresolved: list[str] = []
-
-        for item_line in fresh:
-            item_name_str = _item_name(item_line)
-            if item_name_str is None:
-                unresolved.append(item_line.strip()[:60])
-                continue
-
-            # Find the destination container in the candidate.
-            # Strategy: find the impl/mod/trait block that contains the
-            # item's siblings (by locating the container header).
-            dest_info = _find_destination_container(edited_text, item_line, other_side_text)
-            if dest_info is None:
-                unresolved.append(item_line.strip()[:60])
-                continue
-
-            container_close_line, indent = dest_info
-
-            # SCOPE-QUALIFIED collision (claim-3 fix, matching named-field):
-            # the item name must not already exist in THIS container —
-            # not anywhere in the file. Find the container header by
-            # scanning backward for the first impl/mod/trait line.
-            _cand = edited_text.splitlines()
-            _container_start = 0
-            for _k in range(container_close_line - 1, -1, -1):
-                if _is_rust_item(_cand[_k]) and any(
-                        kw in _cand[_k] for kw in ("impl ", "mod ", "trait ")):
-                    _container_start = _k
-                    break
-            for _k in range(_container_start, container_close_line):
-                if _item_name(_cand[_k]) == item_name_str:
-                    # Genuine collision in the destination container.
-                    unresolved.append(item_line.strip()[:60])
-                    break  # skip this item (don't continue outer loop)
-            else:
-                # No collision — proceed with insertion (falls through to
-                # the extraction + insertion below). This else clause on
-                # the for loop runs when no collision was found.
-                pass
-            # Check if we hit a collision (the for-else pattern: if we
-            # broke out, skip this item by continuing the outer loop).
-            if any(_item_name(_cand[_k]) == item_name_str
-                   for _k in range(_container_start, container_close_line)):
-                continue  # skip this item
-
-            # Extract the full item subtree from the other side.
-            item_subtree = _extract_item_subtree(other_side_text, item_line)
-            if item_subtree is None:
-                # Fall back to just the obligation line(s) — but only if it's
-                # a complete item (has a body or ends with ;).
-                item_subtree = item_line.strip()
-
-            # Insert before the container's closing brace.
-            lines = edited_text.splitlines(keepends=True)
-            insertion = item_subtree.rstrip() + "\n"
-            # Apply indentation if the container's items are indented.
-            if indent:
-                insertion = "\n".join(
-                    (indent + ln if ln.strip() else ln)
-                    for ln in insertion.splitlines()
-                ) + "\n"
-            lines.insert(container_close_line, insertion)
-            edited_text = "".join(lines)
-            closed.append(_normalize(item_line))
-            edits.append(f"insert {item_name_str} before line {container_close_line}")
-
-        if not closed:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "no items could be inserted",
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        after_hash = hashlib.sha256(
-            edited_text.encode("utf-8")
-        ).hexdigest()[:16]
-        return ImportUnionResult(
-            status=STATUS_APPLIED, text=edited_text,
-            certificate={
-                "primitive": "rust.keyed_item_union/v1",
-                "closed_obligations": closed,
-                "remaining_obligations": len(unresolved),
-                "edits": edits,
-                "preconditions": {
-                    "no_name_collision": True,
-                    "destination_found": True,
-                },
-                "risk_tier": RISK_TIER_A,
-                "before_hash": before_hash,
-                "after_hash": after_hash,
-                "unresolved": unresolved,
-            },
-        )
-    except Exception:  # noqa: BLE001
-        return ImportUnionResult(
-            status=STATUS_BLOCKED, text=resolved_text,
-            certificate={"reason": "internal error", "before_hash": ""},
-        )
+    _status_map = {
+        PrimitiveStatus.APPLIED: STATUS_APPLIED,
+        PrimitiveStatus.NOT_APPLICABLE: STATUS_NOT_APPLICABLE,
+        PrimitiveStatus.AMBIGUOUS: STATUS_AMBIGUOUS,
+        PrimitiveStatus.BLOCKED: STATUS_BLOCKED,
+    }
+    _reason_map = {
+        "no applicable items": "no additive item obligations",
+        "no items could be safely inserted": "no items could be inserted",
+        "all items already present (idempotent)":
+            "all items already present (collision or idempotent)",
+    }
+    text = result.candidate if result.candidate is not None else resolved_text
+    cert = dict(result.certificate)
+    cert["primitive"] = "rust.keyed_item_union/v1"
+    if "reason" in cert:
+        cert["reason"] = _reason_map.get(cert["reason"], cert["reason"])
+    if result.status == PrimitiveStatus.APPLIED:
+        cert["closed_obligations"] = [
+            _normalize(c) for c in result.closed_obligations or []]
+        cert["edits"] = list(codec.edit_notes)
+        cert["preconditions"] = {
+            "no_name_collision": True,
+            "destination_found": True,
+        }
+        cert["risk_tier"] = RISK_TIER_A
+    return ImportUnionResult(
+        status=_status_map[result.status], text=text, certificate=cert)
 
 
 def _find_destination_container(
@@ -287,8 +284,6 @@ def _find_destination_container(
                 or stripped.startswith("trait ")):
             container_header = stripped
             break
-    if container_header is None:
-        return None
     if container_header is None:
         return None
 

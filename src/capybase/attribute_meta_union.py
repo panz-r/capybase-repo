@@ -14,13 +14,17 @@ Design contract (same as all Tier-A primitives):
   - **deterministic, idempotent, transactional, conservative.**
   - Tier-A for built-in derives; Tier-B risk_flags for external derives.
   - Pure of I/O; cargo/rustc remains authoritative after the edit.
+
+Stage 3 (the SWITCH, primitive #4 of 5): the KeyedCollectionMerge
+engine is the authoritative implementation. This module supplies only
+the attribute/meta codec; the lifecycle lives in
+:mod:`capybase.keyed_collection`. The codec was shadow-verified at
+11/11 agreement with the original inline lifecycle before the switch.
 """
 
 from __future__ import annotations
 
-import hashlib
 import re
-from dataclasses import dataclass
 
 from capybase.import_union import (
     ImportUnionResult,
@@ -57,6 +61,76 @@ def _split_meta_items(content: str) -> list[str]:
     return [i.strip() for i in content.split(",") if i.strip()]
 
 
+def _attribute_codec():
+    """The attribute/meta codec for the KeyedCollectionMerge engine.
+
+    Carries the EXACT semantics of the original inline lifecycle
+    (shadow-verified at 11/11 agreement before the switch):
+
+    - ``already_present`` is a REAL pre-check (unlike the field/item
+      codecs): normalized-line membership in the resolved text — the
+      original dropped exact-duplicate directive lines before the
+      per-attribute union attempts.
+    - ``try_edit`` returns a LINE-REPLACEMENT span (the union rewrites
+      one existing attribute line in place), not a pure insertion.
+      context (other side) is unused — the union partner is found in
+      the candidate itself.
+    - ``local_validity`` always True — the original had NO local
+      validity gate.
+    - ``risk_flags`` accumulates external-derive flags on the codec
+      instance for the adapter to merge into the certificate.
+    """
+
+    class _AttributeCodec:
+        def __init__(self) -> None:
+            self.risk_flags: list[str] = []
+
+        def applicable_obligations(self, obligations):
+            from capybase.change_accounting import classify_channel
+            out = []
+            for ob in obligations or []:
+                if getattr(ob, "operation", "") != "added":
+                    continue
+                if getattr(ob, "status", "") != "MISSING":
+                    continue
+                if getattr(ob, "exclusive", False):
+                    continue
+                line = getattr(ob, "line", "") or ""
+                if not line.strip():
+                    continue
+                if classify_channel(line) != "directive":
+                    continue
+                out.append(line)
+            return out
+
+        def already_present(self, text, item):
+            norms = {self._normalize(l)
+                     for l in text.splitlines() if l.strip()}
+            return self._normalize(item) in norms
+
+        def try_edit(self, text, item, context):
+            lines = text.splitlines(keepends=True)
+            before = list(lines)  # _try_union_one_attribute mutates in place
+            edited = _try_union_one_attribute(lines, item, self.risk_flags)
+            if edited is None:
+                return None
+            # Locate the changed line (exactly one is rewritten in place).
+            for i, (b, a) in enumerate(zip(before, edited)):
+                if b != a:
+                    start = sum(len(l) for l in before[:i])
+                    return (start, start + len(b), a)
+            return None
+
+        def local_validity(self, text):
+            return True
+
+        @staticmethod
+        def _normalize(line):
+            return " ".join(line.split())
+
+    return _AttributeCodec()
+
+
 def propose_attribute_meta_union(
     resolved_text: str, missing_obligations: list,
 ) -> ImportUnionResult:
@@ -66,99 +140,54 @@ def propose_attribute_meta_union(
     ``#[allow(...)]`` / ``#[warn(...)]`` lines). Version bumps, cfg, repr,
     serde, deny, forbid are never unioned.
 
+    Stage 3 (the SWITCH): the KeyedCollectionMerge engine runs the
+    lifecycle; this function is a thin adapter mapping the engine's
+    :class:`PrimitiveResult` to the wire format
+    (:class:`ImportUnionResult`, original certificate keys,
+    ``rust.attribute_meta_union/v1``).
+
     Returns an :class:`ImportUnionResult`. Never raises.
     """
-    try:
-        before_hash = hashlib.sha256(
-            (resolved_text or "").encode("utf-8")
-        ).hexdigest()[:16]
+    from capybase.deterministic_model import PrimitiveStatus
+    from capybase.keyed_collection import merge_keyed_collection
 
-        # --- Filter to additive directive obligations. ---
-        candidate_lines: list[str] = []
-        for ob in missing_obligations or []:
-            if getattr(ob, "operation", "") != "added":
-                continue
-            if getattr(ob, "status", "") != "MISSING":
-                continue
-            if getattr(ob, "exclusive", False):
-                continue
-            line = getattr(ob, "line", "") or ""
-            if not line.strip():
-                continue
-            from capybase.change_accounting import classify_channel
-            if classify_channel(line) != "directive":
-                continue
-            candidate_lines.append(line)
+    codec = _attribute_codec()
+    result = merge_keyed_collection(
+        codec, resolved_text, missing_obligations,
+        other_side_text="",
+        mechanism_id="rust.attribute_meta_union/v1",
+    )
 
-        if not candidate_lines:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "no additive directive obligations",
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        # --- Idempotency: drop lines already present. ---
-        resolved_norms = {_normalize(l) for l in resolved_text.splitlines() if l.strip()}
-        fresh = [l for l in candidate_lines if _normalize(l) not in resolved_norms]
-        if not fresh:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "all directive lines already present",
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        edited_lines = resolved_text.splitlines(keepends=True)
-        closed: list[str] = []
-        edits: list[str] = []
-        risk_flags: list[str] = []
-        unresolved: list[str] = []
-
-        for fresh_line in fresh:
-            result = _try_union_one_attribute(
-                edited_lines, fresh_line, risk_flags)
-            if result is not None:
-                edited_lines = result
-                closed.append(_normalize(fresh_line))
-                edits.append(f"union: {fresh_line.strip()[:60]}")
-            else:
-                unresolved.append(fresh_line.strip()[:60])
-
-        if not closed:
-            return ImportUnionResult(
-                status=STATUS_NOT_APPLICABLE, text=resolved_text,
-                certificate={"reason": "no attributes could be safely unioned",
-                             "before_hash": before_hash,
-                             "after_hash": before_hash},
-            )
-
-        edited_text = "".join(edited_lines)
-        after_hash = hashlib.sha256(
-            edited_text.encode("utf-8")
-        ).hexdigest()[:16]
-        cert = {
-            "primitive": "rust.attribute_meta_union/v1",
-            "closed_obligations": closed,
-            "remaining_obligations": len(unresolved),
-            "edits": edits,
-            "preconditions": {"same_attribute": True},
-            "risk_tier": RISK_TIER_A,
-            "before_hash": before_hash,
-            "after_hash": after_hash,
-            "unresolved": unresolved,
-        }
-        if risk_flags:
-            cert["risk_flags"] = risk_flags
-        return ImportUnionResult(
-            status=STATUS_APPLIED, text=edited_text,
-            certificate=cert,
-        )
-    except Exception:  # noqa: BLE001
-        return ImportUnionResult(
-            status=STATUS_BLOCKED, text=resolved_text,
-            certificate={"reason": "internal error", "before_hash": ""},
-        )
+    _status_map = {
+        PrimitiveStatus.APPLIED: STATUS_APPLIED,
+        PrimitiveStatus.NOT_APPLICABLE: STATUS_NOT_APPLICABLE,
+        PrimitiveStatus.AMBIGUOUS: STATUS_AMBIGUOUS,
+        PrimitiveStatus.BLOCKED: STATUS_BLOCKED,
+    }
+    _reason_map = {
+        "no applicable items": "no additive directive obligations",
+        "no items could be safely inserted":
+            "no attributes could be safely unioned",
+        "all items already present (idempotent)":
+            "all directive lines already present",
+    }
+    text = result.candidate if result.candidate is not None else resolved_text
+    cert = dict(result.certificate)
+    cert["primitive"] = "rust.attribute_meta_union/v1"
+    if "reason" in cert:
+        cert["reason"] = _reason_map.get(cert["reason"], cert["reason"])
+    if result.status == PrimitiveStatus.APPLIED:
+        cert["closed_obligations"] = [
+            _normalize(c) for c in result.closed_obligations or []]
+        cert["edits"] = [
+            f"union: {c.strip()[:60]}"
+            for c in result.closed_obligations or []]
+        cert["preconditions"] = {"same_attribute": True}
+        cert["risk_tier"] = RISK_TIER_A
+        if codec.risk_flags:
+            cert["risk_flags"] = codec.risk_flags
+    return ImportUnionResult(
+        status=_status_map[result.status], text=text, certificate=cert)
 
 
 def _try_union_one_attribute(
