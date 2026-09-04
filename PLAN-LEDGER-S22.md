@@ -6051,6 +6051,40 @@ not the gate-failure/alternation shapes the rungs target. These two
 now carry the strongest possible disposition: measured with the full
 machinery alive.
 
+### S27-EXTEND-23 (2026-09-04) — measurement program complete: every case under live machinery
+
+The last two never-measured-under-live-rungs cases (×3):
+- **clickhouse-0013 ESC 3/3 @ 0.843, MODEL_NEEDS_HUMAN** — exact prior
+  disposition (content-level side-collapse). Genuine.
+- **sqlite-0039 GATE_UNAVAILABLE 3/3 @ 0.995, oracle_builds=False**
+  — its exact prior class, now with the era-aware oracle-build
+  determination explicitly recording the shared gate rejection.
+  Zero rung engagement in either (0039's ccs_syntax failures are not
+  delimiter/brace-shaped, so p6b's beam rung correctly declines).
+
+**Src-wide dead-code sweep (the dead-rung class):** verification,
+resolution_engine, mechanisms, context_builder — CLEAN (the one
+orchestrator instance was the only one; the flagged closure captures
+in verification are defined by the enclosing verify_file).
+
+**Final mechanism-engagement census (64 sessions, 11 run dirs):**
+f1_tier1_takeover 10, whole_file_repair 15,
+empty_terminal_recovery_grant 6, side_pick_applied 3 (all sqlite-0099
+— the revived rung's first engagements), f1_side_verify_failed 1
+(genuine: redis-0014's replayed side fails compile on era drift —
+correctly journaled in Phase B while the case PASSed via the normal
+path). Zero: alternation_collapse (its class was absorbed by the
+literal-repair fixes — consistent with extend-12), p6b_beam +
+candidate-level p6b (no current case hits the delimiter shape —
+insurance), repair_rung_error (no silent errors since the scope fix),
+whole_file_repair_oscillation (none since the count-budget fix),
+symbol_inject + repair_side_fallback (their cases all converted).
+
+**S27 measurement program COMPLETE**: every corpus case carries a
+disposition measured under the fully-live machinery. Final: 35
+conversions + 1 NEAR + 1 first-PASS-repeat + 3 GATE_UNAVAILABLE
+reclassifications + 30 fixes + 9 architecture repairs. Gate 4,027/0.
+
 ### S27-EXTEND-20 (2026-09-04) — full deterministic corpus run + sprint-28 design seed
 
 **Corpus `all` end-to-end** (the combined session+scenario+realworld
