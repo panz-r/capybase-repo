@@ -7761,3 +7761,25 @@ no harvest):
 - flask-0006 **ORACLE_DIVERGENT 0.576** (its coin-flip band)
 All exact prior sims — zero regressions from the scope fixes or the
 NullAdapter change.
+
+### S27-EXTEND-61 (2026-09-04) — JS/TS and Go import codecs: three new languages proven
+
+- **JSImportCodec** (9 tests): default imports, named imports with
+  same-module MERGE (two `import { X } from 'react'` lines merge into
+  one), namespace imports (`* as NS`), TS type-only imports
+  (`import type { T }`), different-module separation, idempotency,
+  non-import declined, never-raises. Semantic identity:
+  (module, kind, imported-name).
+- **GoImportCodec** (6 tests): import-block insertion (before the
+  closing paren), idempotency by path, aliased imports
+  (`myalias "path"`), blank imports (`_ "embed"`), non-import
+  declined, never-raises. Go's block syntax through the same
+  protocol.
+
+**THREE new language codecs** (Python 8, JS/TS 9, Go 6 = 23 tests):
+the KeyedCollectionMerge engine's cross-language claim demonstrated
+across three language families with ZERO engine modifications. The
+CollectionCodec protocol is sufficient for dynamic imports (Python),
+module-specifier imports (JS/TS), and block-structured imports (Go).
+
+Gate 4,160/0.

@@ -213,3 +213,18 @@ codec. Both are safe pre-harvest (tests only, no behavior change).
    PASS 0.98, sqlite-0004 PASS 1.00, tokio-0046 NEAR 0.88,
    flask-0006 DIVERGENT 0.58) — zero regressions from the scope fixes
    or NullAdapter.
+
+8. [x] **JavaScript/TypeScript import codec** (second new language):
+   9 tests — default imports, named imports (with same-module merge
+   into one line), namespace imports, TS type-only imports, separate
+   vs merged module handling, idempotency. Richer shapes than Python,
+   same engine.
+9. [x] **Go import codec** (third new language): 6 tests — import
+   block insertion, idempotency, aliased imports, blank imports
+   (`_ "embed"`). Go's block-structured imports through the same
+   protocol.
+
+**Three new language codecs proven** (Python, JS/TS, Go) — the
+engine's cross-language claim demonstrated across three language
+families with zero engine modifications. The CollectionCodec protocol
+is sufficient for all of them.
