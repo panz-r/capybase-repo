@@ -6964,3 +6964,32 @@ real-conflict, P+W 633/660 = 95.9%.** Every one of the 676 corpus
 cases now carries a current-stack measurement — the audit is complete
 to the last case; the ledger's expectation and the harvest's print
 should agree.
+
+### S27-EXTEND-30 (2026-09-04) — repository fixes: license contradiction, installable docs, dead extra
+
+Three packaging inconsistencies (user-directed):
+
+1. **License contradiction resolved**: pyproject declared MIT while
+   LICENSE/README say Apache-2.0. Now `license = "Apache-2.0"` (SPDX,
+   PEP 639) + `license-files = ["LICENSE", "NOTICE"]`. Verified by
+   building the wheel: `License-Expression: Apache-2.0`, both files
+   bundled. Drift guards: tests/test_packaging_metadata.py (4 tests
+   in the normal gate — SPDX==LICENSE, files declared+present, dev
+   extra supports the documented `-n 6`, no empty extras) AND a CI
+   workflow (.github/workflows/ci.yml — builds the wheel, asserts the
+   license metadata, runs the unit gate; the repo had no CI before).
+2. **The documented test command is installable**: README documents
+   `pytest tests/ -n 6` but pytest-xdist wasn't in the dev extra.
+   dev now carries pytest/pytest-xdist/pytest-timeout/pytest-cov/
+   hypothesis/ruff/pywright — ruff+pyright per the directive;
+   json-repair de-duplicated (runtime dep). numpy/sqlite-vec KEPT in
+   dev deliberately: the suite exercises the real vector backends
+   (the embeddings extra's content, documented in place).
+3. **Empty structural extra removed**: `pip install capybase[structural]`
+   installed nothing. The grammar-free abstract parser is the sole
+   structural backend (built in); the two stale tree-sitter comments
+   (run-live-test.sh, capybase.toml) now state the reality. The
+   `[structural]` CONFIG table stays (live settings, unrelated to the
+   pip extra).
+
+Gate 4,033/0 @ -n 6 (4 new metadata tests).

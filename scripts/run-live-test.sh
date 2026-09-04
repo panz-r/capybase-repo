@@ -45,10 +45,9 @@ CB_REQUEST_TIMEOUT="${CB_REQUEST_TIMEOUT:-600}"
 CB_GENERATION_TIMEOUT="${CB_GENERATION_TIMEOUT:-180}"
 CB_MAX_RETRIES="${CB_MAX_RETRIES:-3}"
 CB_CONTEXT_LINES="${CB_CONTEXT_LINES:-20}"
-# Enable tree-sitter structural context + AST preservation (requires the
-# `structural` extra: pip install -e ".[structural]"). Disabled by default so
-# the script works on a minimal install; set CB_STRUCTURAL_ENABLED=true to test
-# the AST layer live.
+# Structural context + AST preservation. The grammar-free abstract parser is
+# built in (no tree-sitter, no extra install). Set CB_STRUCTURAL_ENABLED=true
+# to test the AST layer live.
 CB_STRUCTURAL_ENABLED="${CB_STRUCTURAL_ENABLED:-false}"
 # Multi-request pipeline (Steps 2-5). These default to off so the script works
 # with the simple single-sample path; set them to test the full pipeline.

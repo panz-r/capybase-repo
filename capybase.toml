@@ -244,11 +244,11 @@ store_raw_responses = true
 store_snapshots = true
 store_candidates = true
 
-# Tree-sitter AST context (requires the `structural` extra: pip install -e ".[structural]").
-# When enabled and the grammars are installed, the resolver sees the enclosing
+# Structural AST context (built in: the grammar-free abstract parser — no
+# tree-sitter, no extra install). When enabled the resolver sees the enclosing
 # logical block (def/impl/struct) instead of a blind line window, and an
 # AST-preservation validator guards against silent deletion of unchanged code.
-# Silently degrades to the line-window behavior if tree-sitter is absent.
+# Silently degrades to the line-window behavior when the parse fails.
 [structural]
 enabled = false
 languages = ["python", "rust"]

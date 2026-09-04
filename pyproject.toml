@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "A rebase-conflict resolution agent with research-grade seams."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "panz-r" }]
 dependencies = [
     "pydantic>=2.5",
@@ -16,11 +17,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Structural analysis (Pillar 1): the grammar-free abstract parser is now the
-# sole structural backend (no tree-sitter dependency). This extra is kept as an
-# empty placeholder so existing install commands (`pip install -e .[structural]`)
-# don't break; it pulls in no additional packages.
-structural = []
 # Embedding features (Pillar 2): persisted vector cache + vectorized cosine.
 # Lazy-imported at runtime; capybase works without these — the embedding
 # retriever falls back to in-memory re-embedding each run (the prior behavior)
@@ -33,9 +29,16 @@ embeddings = [
 ]
 dev = [
     "pytest>=7",
+    "pytest-xdist>=3",
+    "pytest-timeout",
+    "pytest-cov",
+    "hypothesis",
+    "ruff",
+    "pyright",
+    # The embedding backends ride in dev so the suite exercises the real
+    # vector paths (the same content as the embeddings extra).
     "numpy>=1.26",
     "sqlite-vec>=0.1",
-    "json-repair>=0.30",
 ]
 
 [project.scripts]

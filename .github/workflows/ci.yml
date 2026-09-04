@@ -1,0 +1,55 @@
+# CI: unit gate + packaging-metadata verification.
+#
+# The license check exists because pyproject.toml once declared MIT while
+# LICENSE/README said Apache-2.0 (incorrect wheel metadata, downstream
+# ambiguity). Building the wheel and asserting the metadata here — alongside
+# the fast tomllib drift-guard test in tests/test_packaging_metadata.py —
+# keeps the two from diverging again.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests-and-packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (dev extra — the documented test toolchain)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install build
+      - name: License metadata cannot drift from the LICENSE file
+        run: |
+          python -m build --wheel --outdir dist/
+          python - <<'PY'
+          import zipfile, tomllib, pathlib, sys
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as z:
+              meta_name = next(n for n in z.namelist()
+                               if n.endswith("METADATA"))
+              meta = z.read(meta_name).decode()
+          # The wheel's METADATA carries the SPDX expression (PEP 639:
+          # License-Expression; older backends emit License:)
+          license_line = next(
+              (ln for ln in meta.splitlines()
+               if ln.startswith(("License-Expression:", "License:"))), "")
+          assert "Apache-2.0" in license_line, (
+              f"wheel metadata license is {license_line!r} — expected Apache-2.0 "
+              "(LICENSE/README are Apache-2.0)")
+          proj = tomllib.load(open("pyproject.toml", "rb"))["project"]
+          assert proj["license"] == "Apache-2.0"
+          assert proj["license-files"] == ["LICENSE", "NOTICE"]
+          with zipfile.ZipFile(wheel) as z:
+              for name in proj["license-files"]:
+                  assert any(n.endswith(name) for n in z.namelist()), (
+                      f"{name} not bundled in the wheel")
+          print("license metadata verified:", license_line)
+          PY
+      - name: Unit gate (the documented command)
+        run: python -m pytest tests/ -q -n 6
