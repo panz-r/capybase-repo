@@ -7509,3 +7509,20 @@ divergence recording. Gate 4,081/0.
 Next bounded item: the manifest_union port to the engine under shadow
 mode (old primitive authoritative, divergences recorded before any
 switch).
+
+### S27-EXTEND-50 (2026-09-04) — the manifest-array port under shadow mode: 6/6 agreement
+
+The first real port to the KeyedCollectionMerge engine: a
+ManifestArrayCodec (plain TOML arrays + inline-table feature lists,
+both through the span+replacement CollectionCodec protocol) running
+the generic engine alongside the existing `propose_manifest_union` on
+every shape from its test suite. **6/6 shadow cases agree on status
+AND applied text** — zero divergences (feature-list union,
+workspace-members, idempotent reapply, version-bump exclusion,
+multi-feature, simple array). The engine's EditTransaction enforced
+bounds during development (caught an off-by-one in the codec's span
+arithmetic — the universal rules working as designed). Gate 4,087/0.
+
+The port is ready to switch when the remaining codecs exist (fields →
+items → attributes → imports — the proposal's order). The pattern is
+proven: codec → engine → shadow → switch.

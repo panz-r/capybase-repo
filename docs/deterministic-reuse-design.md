@@ -126,9 +126,13 @@ acceptance policy: tier A should require D0/D1 provenance.
    try-edit, local validity) and `shadow_compare` for the
    old-vs-new divergence recording. 6 tests over a minimal line-append
    codec (the manifest-array shape — SET semantics).
-4. [ ] Manifest-array port to the engine under shadow mode (the real
-   manifest_union drives old; the engine+codec drives new;
-   divergences recorded).
+4. [x] Manifest-array port under SHADOW MODE: a ManifestArrayCodec
+   (plain arrays + inline-table feature lists, both through the
+   CollectionCodec span+replacement protocol) runs the engine
+   alongside the existing primitive on every shape from its test
+   suite — **6/6 shadow cases agree** on status AND applied text.
+   Zero divergences; the port is ready to switch when the remaining
+   codecs exist.
 5. [ ] Remaining ports (fields → items → attributes → imports).
 6. [ ] One orchestrator repair behind the registry.
 7. [ ] Confidence-float removal (0.85/0.9 on deterministic repairs).
