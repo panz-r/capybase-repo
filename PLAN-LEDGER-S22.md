@@ -6192,6 +6192,29 @@ P+W 631/660 = 95.6%**; genuine ESCALATE among real conflicts down to
   regressions**. The harvest's --repeat-nonpass 3 methodology remains
   the net for any residual variance.
 
+### S27-EXTEND-28 (2026-09-04) — the census-driven audit exhausts the corpus
+
+Ran the official `--census` over the merged latest-wins dataset
+(676 cases, 887 overlays). It exposed three tainted GATE_UNAVAILABLE
+verdicts the verdict-class audit missed (reading reasons, not labels):
+
+- **sea-orm-0021 PASS 0.983 first try — the 38th conversion.** Its
+  standing GATE_UNAVAILABLE was an Errno 122 disk-quota artifact
+  (pre-worktree-fix era).
+- **redis-0026 ESCALATE majority 2/3 @ 0.637** — genuine; the
+  brace-seam imbalance is not single-edit repairable and the revived
+  p6b beam rung correctly declines it.
+- **sqlite-0092 GATE_UNAVAILABLE 3/3 @ 0.999** — honest shared-gate
+  class, now current-stack-measured.
+- Plus sea-orm-0011 (the last pre-current-stack genuine-ESC verdict):
+  ESC 3/3 @ 0.793 — its exact prior disposition, now current.
+
+**Final: 38 conversions. Updated projection: PASS 626/660 = 94.8%
+real-conflict, P+W 632/660 = 95.8%.** Every escalated/non-PASS case
+in the corpus has now had its reason read under the census and either
+converted or confirmed under the current stack — the audit is
+exhausted; nothing further carries a hypothesis.
+
 ### S27-EXTEND-20 (2026-09-04) — full deterministic corpus run + sprint-28 design seed
 
 **Corpus `all` end-to-end** (the combined session+scenario+realworld
