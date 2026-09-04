@@ -334,11 +334,22 @@ wired but off by default.
 
 ### Results
 
+#### Model and harness
+
+All numbers were produced with **Google Gemma 4 E4B**, served by llama-server
+on local hardware. Non-PASS cases rerun up to 3 times; the verdict is the
+majority.
+
+#### Corpus
+
 The **661-case corpus of non-git-resolvable conflicts** (cases where
 git's own three-way merge leaves markers — anything git resolves
 cleanly is not a resolution problem) runs as a sharded harvest, one
-language at a time, fixes landing between rounds. Current state —
-all cases on the uniform commit `d8cc231` (sprint-26 era recovery:
+language at a time, fixes landing between rounds.
+
+#### Current round (s26)
+
+All cases on the uniform commit `d8cc231` (sprint-26 era recovery:
 per-dataset era configs — sqlite gnu99 + tcl includes, nlohmann cmake
 flags, redis link-order; rust dep vendoring with era tag pins; the A0
 output-cap removal; C12 empty-oscillation retarget; C17 missing-make-
@@ -366,17 +377,17 @@ neutral on their specimen sets and stay off by default.
 | cpp | 154 | 144 | 3 | 2 | 93.5% | 94.7% | 96.7% | +3.1pp |
 | **total** | **660** | **594** | **8** | **9** | **90.0%** | **91.2%** | **92.5%** | **+1.0pp** |
 
+#### Verdicts and metrics
+
 **PASS** = marker-free, passes the compile/structural gate, and matches
-the human resolution at token similarity ≥ 0.90, replayed live against
-one local endpoint (provider configs only — hosts are never tracked).
+the human resolution at token similarity ≥ 0.90.
 **adj %** = PASS / (cases − era-dead):
 era-dead cases are un-passable by construction (both sides and the
 human oracle fail the current toolchain identically — environmental,
 not resolver failures).
-Non-PASS cases rerun up to 3 times, majority verdict. **P+W adj %**
-adds WORKING verdicts — compiles, marker-free, both sides preserved,
-diverged from the human resolution below the PASS bar — the honest
-graded-success rate. Every number
+**P+W adj %** adds WORKING verdicts — compiles, marker-free, both sides
+preserved, diverged from the human resolution below the PASS bar — the
+honest graded-success rate. Every number
 recomputes from the per-case extracts committed under `docs/results/`
 (current round: `s26/`, incl. its `meta.json` with the pinned
 commit, commands, and flip-audit recipe; the prior `s22r2/`
