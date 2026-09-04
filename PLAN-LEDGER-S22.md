@@ -7932,3 +7932,83 @@ two standalone-by-design mechanisms, and the how-to-add-a-primitive
 recipe). The design doc's history (proposal verdict, staging
 decisions, the dd7598d record correction, the census) remains in git
 history and the EXTEND-47…65 ledger entries.
+
+### S27-EXTEND-67 (2026-09-05) — s26 era-dead investigation: the final 9, one by one
+
+The s26 harvest closed with era floor 167 → 9. All 9 were also
+ESCALATE_TOOLCHAIN in s22r2 — they are the residue the era recovery
+did not reach. Evidence: the toolchain_probe records retained in the
+raw harvest (/var/tmp/capybase-live/s26/full-harvest.json), the era
+manifests at each merge_sha (external-datasets checkouts), the
+sea-query git history, and two analytic reproductions.
+
+**Rust — sea-orm (7):**
+
+- **0015–0019 (5 cases; SHAs of 2021-10-12/13, feature-branch
+  merges)** — `E0432 unresolved import sea_query::FromValueTuple`,
+  identical on sides+oracle. Root cause pinned: the trait landed on
+  sea-query master 2021-10-12 (13f6721) and first shipped in 0.18.0
+  (cea5909); NO 0.17.x contains it (registry 0.17.3: zero
+  occurrences; the 0.18.0/0.18.2 checkouts carry it at
+  src/value.rs:114). The trees' manifests ask
+  `sea-query = "^0.17.1"` from crates.io with no patch section and
+  no committed lockfile — the era code imports an API its manifest
+  can never resolve; these merges happened the very day the trait
+  landed and rode an unshipped sea-query. DISPOSITION:
+  configuration-recoverable in principle — the A5 mechanism with an
+  added `[patch.crates-io] sea-query = { git, tag = "0.18.2" }` for
+  trees lacking the git dep (today's sea-orm patch pins only
+  sea-query-derive). Unverified whether further 0.17→0.18 API
+  mismatches surface after the import resolves.
+- **0003 (2022-10-17, sea-query-v0.27 integration)** —
+  `error: duplicate key` on all three. REPRODUCED analytically: the
+  tree carries its own `[patch.crates-io]` (sqlite-bind-decimals git
+  branch) and `_vendor_rust_deps` APPENDS a second one → duplicate
+  table (tomllib: "Cannot declare ('patch','crates-io') twice"). The
+  vendoring revert restores only on rc!=0 — the exception/timeout
+  path returns False WITHOUT restoring, leaving the poisoned
+  manifest for the probes. Compounding: the era's
+  `sqlite-bind-decimals` branch is GONE from SeaQL/sea-query
+  (ls-remote empty), so a fixed append-merge still needs the branch
+  dep rewritten to a rev/tag. DISPOSITION: two-part fix (merge into
+  an existing patch table + retag the dead branch) — harness-defect
+  class first, era second.
+- **0029 (2021-05-27)** — `failed to load manifest for workspace
+  member` on all three: the era manifest uses
+  `sea-query = { path = "../sea-query", version = "^0.11" }` — a
+  sibling checkout the isolated case worktree never materializes.
+  DISPOSITION: rewrite-recoverable (drop the `path = "../sea-query"`
+  fragment via RUST_DEP_REWRITES → crates.io/git resolution) or
+  materialize the sibling at the era SHA. New harness machinery,
+  not flags.
+
+**C++ (2):**
+
+- **fmt-0003 (test/chrono-test.cc)** — `could not convert
+  std::basic_format_arg<fmt::v5...>` — fmt v5's format-arg
+  construction vs modern libstdc++ constructor strictness;
+  identical on sides+oracle (the same chrono conversions appear in
+  every variant). Host has only gcc-14/15 — no era compiler.
+  DISPOSITION: era; recovery needs an older toolchain (untested
+  -std experiment at best).
+- **protobuf-0055** — undeclared STRICT/VERIFY/NONE. Root cause
+  pinned: the merge tree is INTERNALLY INCONSISTENT —
+  cpp_helpers.h declares `enum class Utf8CheckMode {kStrict,
+  kVerify, kNone}` (line 777) while
+  cpp_parse_function_generator.cc (OUTSIDE the conflict) still uses
+  unqualified `case NONE:/VERIFY:/STRICT:` — the enum rename hadn't
+  reached that file at the merge commit. The case's own oracle is
+  clean (qualified k-names, byte-identical to the merge_sha file);
+  the failure is tree-intrinsic under any resolution of the
+  conflicted file. DISPOSITION: genuinely dead — and a validation
+  of the classifier (content-intrinsic equivalence, not denominator
+  trimming).
+
+**Net reading**: of the 9, two are true era (protobuf-0055 provably
+un-passable by any resolver; fmt-0003 toolchain-drift with no era
+compiler on host), five are one known config step away (the sea-query
+0.18.2 patch for the FromValueTuple class), and two need small
+harness work (0003 append-merge + retag; 0029 path-dep rewrite).
+The plausible era floor is 9 → 2. No code changed in this entry —
+investigation only; the recovery items are candidates for the next
+round's era config, to be validated by targeted reruns first.
