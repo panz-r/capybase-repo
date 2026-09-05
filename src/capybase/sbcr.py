@@ -62,6 +62,49 @@ from capybase.conflict_model import ConflictUnit
 EXHAUSTIVE_THRESHOLD = 1024
 
 
+def _search_blocks(
+    ours: list[str], theirs: list[str], *, floor: float,
+    max_iterations: int, stagnation_limit: int, max_time: float,
+    rng: random.Random,
+) -> tuple[list[str] | None, float]:
+    """Best interleaving of two side line lists (shared by raw + refined)."""
+    ob = _group_into_blocks(ours)
+    tb = _group_into_blocks(theirs)
+    ol = [line for block in ob for line in block]
+    tl = [line for block in tb for line in block]
+    space = _interleaving_count(len(ol), len(tl))
+    if space == 0:
+        return None, 0.0
+    if space <= EXHAUSTIVE_THRESHOLD and len(ol) + len(tl) <= 500:
+        return _exhaustive_best(ol, tl, floor=floor)
+    return _hill_climb_best(
+        ol, tl, floor=floor, max_iterations=max_iterations,
+        stagnation_limit=stagnation_limit, max_time=max_time, rng=rng)
+
+
+def _fill_skeleton(skeleton: str, fills: list[str]) -> str:
+    """Replace the skeleton's conflict blocks with resolutions, in order.
+
+    Everything outside the ``<<<<<<< … >>>>>>>`` regions — the clean merge
+    git already produced — passes through untouched.
+    """
+    lines = skeleton.split("\n")
+    out: list[str] = []
+    i = 0
+    k = 0
+    while i < len(lines):
+        if lines[i].startswith("<<<<<<<") and k < len(fills):
+            while i < len(lines) and not lines[i].startswith(">>>>>>>"):
+                i += 1
+            i += 1  # past >>>>>>>
+            out.extend(fills[k].split("\n"))
+            k += 1
+        else:
+            out.append(lines[i])
+            i += 1
+    return "\n".join(out)
+
+
 @dataclass(frozen=True)
 class CombinationResolution:
     """Result of a combination-search attempt.
@@ -79,6 +122,10 @@ class CombinationResolution:
     text: str | None
     fitness: float
     skip_reason: str | None = None
+    #: "raw" (interleave of the marker sides — the prior behavior) or
+    #: "refined-blocks" (per-block search filled into the clean-merge
+    #: skeleton — the 0017 path).
+    mode: str = "raw"
 
     @property
     def resolved(self) -> bool:
@@ -383,6 +430,54 @@ def _hill_climb_best(
 # ---------------------------------------------------------------------------
 
 
+def _refined_block_search(
+    unit: ConflictUnit, *, floor: float, max_iterations: int,
+    stagnation_limit: int, max_time: float, seed: int | None,
+) -> tuple[str, float] | None:
+    """Search the diff3 conflict blocks; reconstruct via the merge skeleton.
+
+    Returns ``(full_region_text, worst_block_fitness)`` or None to fall
+    back to the raw-interleave path. Every block must be a clean add/add
+    shape (both sides non-empty — the refined analog of the empty-base
+    scope guard) and clear the fitness floor; one bad block declines the
+    whole refined attempt, keeping the two modes from mixing.
+    """
+    from capybase.adapters.git_diff3 import merge_file_diff3_with_skeleton
+    result = merge_file_diff3_with_skeleton(
+        unit.base.text or "", unit.current.text or "",
+        unit.replayed.text or "")
+    if result is None:
+        return None
+    blocks, skeleton = result
+    rng = random.Random(seed)
+    if not blocks:
+        # The sides merge cleanly at git's own alignment — the union IS
+        # the clean merge (the markers over-included a pseudo-conflict).
+        return skeleton, 1.0
+    fills: list[str] = []
+    worst = 1.0
+    for b in blocks:
+        if b.base.strip():
+            # Modification conflict (shared base lines the sides changed) —
+            # the same scope guard as the raw path, applied per block: the
+            # interleave space is unsafe here (a contradictory last-wins
+            # concatenation can outrank either side), so decline and let the
+            # raw path's gate / the LLM handle it.
+            return None
+        o = b.ours.splitlines()
+        t = b.theirs.splitlines()
+        if not o or not t:
+            return None  # deletion/mixed shape — not add/add
+        best, best_fit = _search_blocks(
+            o, t, floor=floor, max_iterations=max_iterations,
+            stagnation_limit=stagnation_limit, max_time=max_time, rng=rng)
+        if best is None:
+            return None  # below floor — leave the unit to the raw path
+        worst = min(worst, best_fit)
+        fills.append("\n".join(best))
+    return _fill_skeleton(skeleton, fills), worst
+
+
 def resolve_by_combination_search(
     unit: ConflictUnit,
     *,
@@ -391,6 +486,7 @@ def resolve_by_combination_search(
     stagnation_limit: int = 10,
     max_time: float = 15.0,
     seed: int | None = None,
+    use_refined: bool = True,
 ) -> CombinationResolution:
     """Attempt a search-based combination resolution of ``unit``.
 
@@ -438,15 +534,6 @@ def resolve_by_combination_search(
     trip the non-empty guard on a genuine addition conflict.
     """
     base = _effective_base(unit)
-    if base.strip():
-        # Non-empty base ⇒ a modification conflict, not an addition. The
-        # combination search space is unsafe here (see module docstring), so we
-        # refuse to propose. The structural resolver already declined (it runs
-        # first); the LLM will handle this.
-        return CombinationResolution(
-            text=None, fitness=0.0,
-            skip_reason="modification conflict (non-empty base)",
-        )
     ours_raw = (unit.current.text or "").splitlines()
     theirs_raw = (unit.replayed.text or "").splitlines()
     if not ours_raw and not theirs_raw:
@@ -456,51 +543,57 @@ def resolve_by_combination_search(
     # The trivial degenerate cases: if one side is empty, the only interleaving
     # is the other side verbatim — that's a one-sided resolution the structural
     # resolver already handles (and the LLM would too). SBCR adds no value, so
-    # decline rather than echo a side back.
+    # decline rather than echo a side back. (Checked BEFORE the refined path:
+    # a one-empty side merges cleanly through diff3, which would otherwise
+    # bypass this guard.)
     if not ours_raw or not theirs_raw:
         return CombinationResolution(
             text=None, fitness=0.0, skip_reason="one side empty",
         )
 
-    # Block-aware grouping: split each side into logical blocks (delimited by
-    # blank lines, indentation drops, or preprocessor directives). The
-    # interleaving then operates on BLOCKS, not individual lines — all lines
-    # within a block stay together and in order. This reduces the search space
-    # and prevents syntactically nonsensical splices (e.g., splitting an if
-    # block across an insertion boundary).
-    ours_blocks = _group_into_blocks(ours_raw)
-    theirs_blocks = _group_into_blocks(theirs_raw)
-    ours = [line for block in ours_blocks for line in block]
-    theirs = [line for block in theirs_blocks for line in block]
-
-    space = _interleaving_count(len(ours), len(theirs))
-    if space == 0:
-        return CombinationResolution(
-            text=None, fitness=0.0, skip_reason="empty search space",
-        )
-
-    if space <= EXHAUSTIVE_THRESHOLD:
-        # Depth guard: _interleavings recurses to depth m+n. Python's default
-        # recursion limit is 1000, so a skewed conflict (e.g. 1023+1 lines)
-        # with C(1024,1)=1024 ≤ EXHAUSTIVE_THRESHOLD would crash with
-        # RecursionError. Fall back to hill-climb when the total depth would
-        # exceed a safe limit.
-        if len(ours) + len(theirs) > 500:
-            best, best_fit = _hill_climb_best(
-                ours, theirs, floor=floor, max_iterations=max_iterations,
-                stagnation_limit=stagnation_limit, max_time=max_time,
-                rng=random.Random(seed),
-            )
-        else:
-            best, best_fit = _exhaustive_best(ours, theirs, floor=floor)
-    else:
-        best, best_fit = _hill_climb_best(
-            ours, theirs, floor=floor, max_iterations=max_iterations,
+    # Refined-block search (S27, the 0017 specimen): when the marker sides
+    # over-include shared context, interleaving the RAW sides duplicates it
+    # in EVERY candidate — an interleave must include all lines of both
+    # sides — so the space cannot represent the oracle's weave (common
+    # context once + both sides' true additions). The duplicated-context
+    # candidates fail the file gate (duplicate definitions) and the
+    # true-side portfolio rescues with a one-sided swap. Instead: search
+    # the diff3 conflict blocks (the TRUE conflict regions) and fill the
+    # winning interleavings into the clean-merge skeleton. Falls back to
+    # the raw path on any block that isn't a clean add/add shape, a
+    # below-floor block, or a git failure — the raw behavior is unchanged
+    # for everything the refined path can't handle.
+    if use_refined:
+        refined = _refined_block_search(
+            unit, floor=floor, max_iterations=max_iterations,
             stagnation_limit=stagnation_limit, max_time=max_time,
-            rng=random.Random(seed),
+            seed=seed)
+        if refined is not None:
+            return CombinationResolution(
+                text=refined[0], fitness=refined[1],
+                skip_reason=None,
+                mode="refined-blocks")
+
+    if base.strip():
+        # Non-empty base ⇒ a modification conflict, not an addition. The
+        # combination search space is unsafe here (see module docstring), so we
+        # refuse to propose. The structural resolver already declined (it runs
+        # first); the LLM will handle this.
+        return CombinationResolution(
+            text=None, fitness=0.0,
+            skip_reason="modification conflict (non-empty base)",
         )
+    best, best_fit = _search_blocks(
+        ours_raw, theirs_raw, floor=floor,
+        max_iterations=max_iterations,
+        stagnation_limit=stagnation_limit, max_time=max_time,
+        rng=random.Random(seed))
 
     if best is None:
+        if best_fit <= 0.0:
+            return CombinationResolution(
+                text=None, fitness=0.0, skip_reason="empty search space",
+            )
         return CombinationResolution(
             text=None, fitness=best_fit,
             skip_reason=f"fitness {best_fit:.3f} < floor {floor:.2f}",

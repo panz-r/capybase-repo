@@ -126,6 +126,48 @@ def merge_file_diff3(
         return None
 
 
+def merge_file_diff3_with_skeleton(
+    base_text: str,
+    ours_text: str,
+    theirs_text: str,
+    *,
+    diff_algorithm: str | None = None,
+) -> tuple[list[Diff3Block], str] | None:
+    """Like :func:`merge_file_diff3` but also returns the merged skeleton.
+
+    The skeleton is ``git merge-file --diff3 -p``'s full output — the clean
+    merge with conflict blocks still in marker form. Filling a block's
+    marker region with a resolution and keeping everything else yields a
+    splice-compatible full-region text (the SBCR refined search's
+    reconstruction path). Same return contract otherwise: ``None`` on git
+    failure; ``([], merged)`` when the sides merge cleanly.
+    """
+    algorithm = _validated_algorithm(diff_algorithm)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            base_p = tdp / "base"
+            ours_p = tdp / "ours"
+            theirs_p = tdp / "theirs"
+            base_p.write_text(base_text, encoding="utf-8")
+            ours_p.write_text(ours_text, encoding="utf-8")
+            theirs_p.write_text(theirs_text, encoding="utf-8")
+            proc = subprocess.run(
+                [
+                    "git",
+                    "-c", f"diff.algorithm={algorithm}",
+                    "merge-file", "--diff3", "-p", "-q",
+                    str(ours_p), str(base_p), str(theirs_p),
+                ],
+                capture_output=True, text=True, timeout=30,
+            )
+            if proc.returncode < 0 or proc.returncode > 127:
+                return None
+            return _parse_diff3(proc.stdout), proc.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+
+
 def _parse_diff3(merged: str) -> list[Diff3Block]:
     """Parse ``git merge-file --diff3`` output into conflict blocks.
 

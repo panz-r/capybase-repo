@@ -8188,3 +8188,46 @@ order-preserving interleave space (overlapping insertion regions),
 (b) rejected by validation during the search (a broken union — but
 the oracle compiles, so SOME weave passes), or (c) ranked below
 0.6577 by the fitness formula. Recorded as the SBCR-union task.
+
+### S27-EXTEND-72 (2026-09-05) — 0017 root cause CORRECTED and fixed: dup-detector false positive on macro arms; 0017 PASSES deterministically
+
+The EXTEND-71 attribution ("SBCR accepted the one-sided interleaving")
+was wrong in an instructive way. Mode+length instrumentation added to
+combination_resolved revealed the live unit was always the TIGHT
+2-line marker pair (the harness's git materialization conflicts only
+on the two `use` lines; the 341/288-line mined texts were my analysis
+inputs, not the live unit's). SBCR produced the correct 2-line union,
+the file gate PASSED — and then the TRUE-SIDE PORTFOLIO swapped the
+healthy both-sides file for the pristine replayed side.
+
+**Why the portfolio engaged**: `_shared_context_duplicate_definitions`
+fired — CONCLUSIVELY a false positive: the detector fires on the
+pristine CURRENT side AND on the HUMAN ORACLE of 0017. The "duplicate"
+is one macro_rules!'s legal arm overloading: `impl_into_active_value`
+defines the identical signature line for its $ty, Option<$ty>, and
+Option<Option<$ty>> arms. The rust pattern counted macro-body lines as
+top-level definitions.
+
+**Fix**: the detector depth-tracks `macro_rules!` bodies and skips
+them (a real top-level duplicate still fires — tested both ways, plus
+0017's oracle as a fixture). **Result: 0017 ESCALATE → PASS 0.99,
+bucket deterministic, provenance combination_search** — the both-sides
+union survives end-to-end. Regression set: 0018 PASS 1.00, 0019 PASS
+0.92, sqlite-0121 PASS 1.00, tokio-0115 PASS 0.99 (an earlier
+quota-crash verdict was infrastructure, rerun clean). Gate 4,238/0.
+
+**Kept from the first hypothesis (validated, differently motivated)**:
+the SBCR refined-block search — when a unit's marker sides genuinely
+over-include shared context, the raw interleave space duplicates it in
+every candidate (an interleave includes ALL lines of both sides) and
+cannot represent the oracle's weave. Offline on 0017's mined texts the
+refined path reconstructs the oracle at 0.996. Ships behind
+`future.sbcr_use_refined` (default on) with per-block scope guards (a
+block with non-empty base or an empty side declines the whole refined
+attempt — the existing tests caught both bypasses), the skeleton
+adapter `merge_file_diff3_with_skeleton`, and 6 new tests. The
+combination_resolved journal payload now carries mode + candidate_lines.
+
+Also: AGENTS.md gains the /tmp scratch-hygiene section (≥10G headroom
+before live runs; clean your own scratch; the clickhouse failure mode
+reads like a verdict but is infrastructure).

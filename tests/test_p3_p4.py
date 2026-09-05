@@ -163,3 +163,54 @@ def test_extreme_asymmetry_wiring():
     ctx = full_file_context(base, cur, rep)
     assert ctx["churn_ratio"] >= 0.95
     assert ctx["asymmetry_side"] is not None
+
+
+class TestMacroArmOverloadNotDuplicate:
+    """The rust dup detector must not fire on macro_rules! arm overloads.
+
+    sea-orm-0017: the detector counted the identical signature lines of
+    ONE macro's arms ($ty / Option<$ty> / Option<Option<$ty>>) as
+    duplicate top-level definitions — firing on the pristine CURRENT
+    side AND the human oracle, which summoned the dup-pathology takeover
+    on a healthy merge and forced a one-sided swap.
+    """
+
+    def test_macro_arms_are_not_duplicates(self):
+        from capybase.orchestrator import _shared_context_duplicate_definitions
+        macro = """macro_rules! impl_conv {
+    ($ty: ty, $fn: ident) => {
+        impl Conv<$ty> for $ty {
+            fn convert(self) -> Value<$ty> {
+                $fn(self)
+            }
+        }
+
+        impl Conv<Option<$ty>> for Option<$ty> {
+            fn convert(self) -> Value<$ty> {
+                match self {
+                    Some(v) => $fn(v),
+                    None => unreachable!(),
+                }
+            }
+        }
+    };
+}
+impl_conv!(u32, set);
+"""
+        assert _shared_context_duplicate_definitions(macro, "rust") == []
+
+    def test_real_top_level_duplicate_still_fires(self):
+        from capybase.orchestrator import _shared_context_duplicate_definitions
+        real = "fn dup_fn() -> u32 {\n    1\n}\n\nfn other() {\n}\n\nfn dup_fn() -> u32 {\n    9\n}\n"
+        assert _shared_context_duplicate_definitions(real, "rust") == [
+            "fn dup_fn() -> u32 {"]
+
+    def test_0017_oracle_shape_clean(self):
+        import json
+        from pathlib import Path
+        from capybase.orchestrator import _shared_context_duplicate_definitions
+        case = json.loads((Path(__file__).parent.parent / "extracted-testdata"
+                           / "realworld" / "sea-orm-history-0017.json").read_text())
+        for name in ("current", "expected_resolved"):
+            assert _shared_context_duplicate_definitions(
+                case[name], "rust") == []

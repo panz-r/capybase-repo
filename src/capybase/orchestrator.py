@@ -1647,12 +1647,28 @@ def _shared_context_duplicate_definitions(
 
     counts: dict[str, int] = {}
     in_conflict = False
+    # macro_rules! bodies (rust only): the arms of ONE macro legitimately
+    # repeat an identical signature line for different generic targets
+    # (sea-orm's impl_into_active_value defines `fn into_active_value` in
+    # its $ty, Option<$ty>, and Option<Option<$ty>> arms). Lines inside a
+    # macro body are not top-level definitions — skip them (0017: the
+    # detector fired on the pristine CURRENT side AND on the human oracle,
+    # summoning the dup-pathology takeover on a healthy merge).
+    _macro_depth = 0
+    _macro_rules_re = _re.compile(
+        r"^\s*(?:pub\s*\([^)]*\)\s*)?macro_rules!\s*\w+\s*\{")
     for line in original.split("\n"):
         if line.startswith("<<<<<<<"):
             in_conflict = True
             continue
         if line.startswith(">>>>>>>"):
             in_conflict = False
+            continue
+        if _macro_depth > 0:
+            _macro_depth += line.count("{") - line.count("}")
+            continue
+        if _macro_rules_re.match(line):
+            _macro_depth = line.count("{") - line.count("}") or 1
             continue
         if in_conflict or line.startswith("======="):
             continue
@@ -6319,6 +6335,7 @@ class Orchestrator:
             max_iterations=fut.sbcr_max_iterations,
             stagnation_limit=fut.sbcr_stagnation_limit,
             max_time=fut.sbcr_max_time_seconds,
+            use_refined=fut.sbcr_use_refined,
         )
         if not result.resolved or result.text is None:
             # The search declined (modification conflict, below floor, shrinkage
@@ -6358,6 +6375,7 @@ class Orchestrator:
                     "passed": False,
                     "deferred_to_llm": True,
                     "reason": f"balance {bal:.2f} < threshold {threshold:.2f}",
+                    "mode": result.mode,
                 },
                 step_index=self.step,
                 path=unit.path,
@@ -6472,6 +6490,8 @@ class Orchestrator:
                 "fitness": round(result.fitness, 4),
                 "balance": round(bal, 4),
                 "passed": validation.passed,
+                "mode": result.mode,
+                "candidate_lines": len((result.text or "").splitlines()),
             },
             step_index=self.step,
             path=unit.path,

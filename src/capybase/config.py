@@ -664,6 +664,13 @@ class FutureConfig(BaseModel):
     sbcr_max_time_seconds: float = 15.0
     # Hard budget on total fitness evaluations for hill climbing (§2.2).
     sbcr_max_iterations: int = 2000
+    # Refined-block search (S27): when the marker sides over-include shared
+    # context, interleave the diff3 conflict blocks and fill the winners into
+    # the clean-merge skeleton instead of interleaving the raw sides (whose
+    # space duplicates the context in every candidate — see sbcr.py's
+    # refined-block note). Falls back to the raw path per-unit whenever the
+    # blocks aren't clean add/add or fall below the floor.
+    sbcr_use_refined: bool = True
     # Block-capture resolution (large modify/delete): when one side deleted a
     # large block and the keeper side kept/modified it, the model can't reliably
     # reproduce the block as an escaped JSON string (placeholder collapse +

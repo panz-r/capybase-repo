@@ -55,3 +55,17 @@ to push.
 - Commit logical units with clear messages.
 - Never rewrite history that has been pushed (but since the agent never pushes,
   this is naturally enforced).
+
+## Scratch hygiene (/tmp)
+
+The live harness materializes per-case repos under `/tmp` and large corpora
+need real headroom (clickhouse worktrees alone ~6.5G; the failure mode is a
+`Disk quota exceeded` SETUP_FAILED, which reads like a case verdict but is
+infrastructure). Before live runs:
+
+- Check `df -h /tmp` and keep ≥10G free; free stale scratch (dated session
+  dirs, vendor trees) rather than shrinking the run.
+- Clean your own scratch (`/tmp/a6val`-style validation dirs, `/var/tmp`
+  target caches) when a task finishes — don't leave them for the next run.
+- `du -sh /tmp/* | sort -rh | head` finds the consumers fast; week-old
+  session scratch in /tmp is fair game to remove (its work is committed).

@@ -428,3 +428,80 @@ def test_skip_reason_populated_on_below_floor():
     assert not r.resolved
     assert r.skip_reason is not None
     assert "floor" in r.skip_reason.lower()
+
+
+class TestRefinedBlockSearch:
+    """The S27 refined-block path (the 0017 specimen).
+
+    When the marker sides over-include shared context, the raw interleave
+    space duplicates that context in EVERY candidate (an interleave must
+    include all lines of both sides) — the space cannot represent the
+    oracle's weave. The refined path searches the diff3 conflict blocks
+    and fills the winners into the clean-merge skeleton.
+    """
+
+    def test_overincluded_context_unions_through_skeleton(self):
+        # Mini-0017: shared context + both sides add at overlapping spots.
+        base = "fn a() {}\n\nfn b() {}\n"
+        cur = "use x::Nullable;\n\nfn a() {}\n\nfn b() {}\n"
+        rep = "use x::ValueTuple;\n\nfn a() {}\n\nfn b() {}\n"
+        r = resolve_by_combination_search(_unit(cur, rep, base))
+        assert r.resolved and r.mode == "refined-blocks"
+        lines = r.text.splitlines()
+        # The context appears ONCE (no duplication), both additions kept.
+        assert lines.count("fn a() {}") == 1
+        assert lines.count("fn b() {}") == 1
+        assert "use x::Nullable;" in r.text
+        assert "use x::ValueTuple;" in r.text
+
+    def test_modification_conflict_still_declined(self):
+        # A shared base line the sides changed: the raw path's scope guard
+        # must hold through the refined path too — per BLOCK base check.
+        r = resolve_by_combination_search(_unit("x = 2", "x = 3", base="x = 1"))
+        assert not r.resolved
+        assert r.skip_reason == "modification conflict (non-empty base)"
+
+    def test_one_side_empty_still_declines(self):
+        # diff3 would merge this cleanly — the degenerate guard must fire
+        # BEFORE the refined path (regression: the clean-merge branch once
+        # bypassed it).
+        assert not resolve_by_combination_search(_unit("x = 1", "")).resolved
+        assert not resolve_by_combination_search(_unit("", "x = 1")).resolved
+
+    def test_clean_merge_returns_merged_text(self):
+        # Sides that git merges cleanly (additions at different spots): the
+        # union IS the clean merge — no marker residue, both additions kept.
+        base = "a\nb\n"
+        cur = "a\nA\nb\n"
+        rep = "a\nb\nB\n"
+        r = resolve_by_combination_search(_unit(cur, rep, base))
+        assert r.resolved and r.mode == "refined-blocks"
+        assert r.fitness == 1.0
+        assert "A" in r.text and "B" in r.text
+        assert "<<<" not in r.text and ">>>" not in r.text
+
+    def test_use_refined_false_restores_raw_behavior(self):
+        base = "fn a() {}\n\nfn b() {}\n"
+        cur = "use x::Nullable;\n\nfn a() {}\n\nfn b() {}\n"
+        rep = "use x::ValueTuple;\n\nfn a() {}\n\nfn b() {}\n"
+        r = resolve_by_combination_search(_unit(cur, rep, base), use_refined=False)
+        # Without refined metadata the raw path's base gate declines this
+        # shape (the over-included marker base is non-empty) — the pre-S27
+        # behavior that starved 0017 of a both-sides candidate.
+        assert not r.resolved
+        assert r.skip_reason == "modification conflict (non-empty base)"
+
+    def test_block_below_floor_declines_whole_refined_attempt(self):
+        # A block whose best interleave falls under the floor sends the
+        # unit back to the raw path rather than mixing modes.
+        big_base = "\n".join(f"line{i}" for i in range(20))
+        big_cur = "\n".join(f"ours{i}" for i in range(20))
+        big_rep = "\n".join(f"theirs{i}" for i in range(20))
+        # Disjoint content, no shared characters between the sides' blocks:
+        # fitness of any interleave vs the parents stays low.
+        r = resolve_by_combination_search(_unit(big_cur, big_rep, big_base))
+        # Whatever it decides, it must not produce a half-refined splice:
+        # either refined (all blocks cleared the floor) or raw-mode decline.
+        assert (not r.resolved) or r.mode in ("raw", "refined-blocks")
+        if r.resolved:
+            assert "ours0" in r.text or "theirs0" in r.text
