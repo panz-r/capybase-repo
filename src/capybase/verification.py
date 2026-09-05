@@ -48,6 +48,31 @@ class VerificationContext:
     config: "ValidationConfig"
 
 
+def _first_error_line(message: str) -> str:
+    """The FIRST gcc diagnostic line, normalized (path-stripped)."""
+    import re as _re
+    for ln in (message or "").splitlines():
+        s = ln.strip()
+        if "error" in s or "warning" in s:
+            return _re.sub(r"/tmp/\S+\.(c|cc|cpp|h|hpp):", "<file>:", s)
+    return ""
+
+
+def _last_error_line(message: str) -> str:
+    """The last gcc/diagnostic line of a validator message, normalized.
+
+    Validator messages end with the compile's last error line (the
+    ``_compile`` contract). Strip temp-file paths so the pristine-side
+    comparison is path-independent.
+    """
+    import re as _re
+    for ln in reversed((message or "").splitlines()):
+        s = ln.strip()
+        if "error" in s or "warning" in s:
+            return _re.sub(r"/tmp/\S+\.(c|cc|cpp|h|hpp):", "<file>:", s)
+    return ""
+
+
 @dataclass
 class VerificationCheckResult:
     name: str
@@ -3757,7 +3782,50 @@ class CcsSyntaxValidator(_StandaloneSyntaxValidator):
         self._strict_semantic = (
             getattr(ctx.candidate, "model_name", "") == "source_portfolio"
         )
-        return super().verify(ctx)
+        result = super().verify(ctx)
+        # Pre-existing parse error (sqlite-0039, the lemon-template class):
+        # a file that is not valid C by CONSTRUCTION (tool/lempar.c's %
+        # directives) fails -fsyntax-only on the PRISTINE sides and the
+        # human oracle alike. The per-unit gate has no blanked-baseline
+        # delta (Python's #7 and the whole-tree builds both excuse
+        # pre-existing errors); without one, an oracle-perfect merge
+        # hard-fails on an error nobody introduced. Excuse a parse error
+        # whose normalized first diagnostic a pristine side also produces.
+        if (not result.passed) and not result.unknown:
+            self._maybe_excuse_preexisting(ctx, result)
+        return result
+
+    def _maybe_excuse_preexisting(
+        self, ctx: VerificationContext, result: VerificationCheckResult,
+    ) -> None:
+        unit = ctx.unit
+        tool = self._resolve_compiler(ctx.config)
+        if tool is None:
+            return
+        cand_msg = _last_error_line(result.message)
+        if not cand_msg:
+            return
+        # Baseline = the ORIGINAL conflicted file with markers blanked to one
+        # side — the same spliced context the candidate was compiled in, so a
+        # pre-existing directive/template error appears at the SAME line. (The
+        # refined side text alone is region-only and compiles standalone; it
+        # can't witness errors in the surrounding file.)
+        baseline = _blank_markers(
+            unit.original_worktree_text or "", unit.language)
+        if not baseline.strip():
+            return
+        try:
+            ok, bmsg = self._compile(baseline, tool, ctx.config)
+        except Exception:  # noqa: BLE001 - baseline is best-effort
+            return
+        if not ok and _last_error_line(bmsg) == cand_msg:
+            result.passed = True
+            result.unknown = False
+            result.message = (
+                f"pre-existing parse error excused (the pre-conflict "
+                f"file fails identically: {cand_msg[:80]}); "
+                "deferring to whole-file check"
+            )
 
     def _compile(self, spliced: str, tool: str, cfg: object) -> tuple[bool, str]:
         _cpp_lang = self._is_cpp
@@ -5812,6 +5880,10 @@ class VerificationEngine:
                     skip: strictly less authoritative than a full build
                     (no sibling #include resolution) but completes in
                     seconds and never rejects on infrastructure.
+                    Pre-existing parse errors (the sqlite-0039 lemon-
+                    template class) are excused when the ORIGINAL
+                    conflicted text fails identically — the merge
+                    introduced nothing.
                     """
                     from capybase.adapters.lsp import _resolve as _resolve_cc_fb
                     _cc_fb = _resolve_cc_fb(
@@ -5841,6 +5913,23 @@ class VerificationEngine:
                                       f"({msg_fb[:50]})")
                     if not ok_fb and _is_cc_werror_warning(msg_fb):
                         return True, f"cc fallback: -Werror skipped ({msg_fb[:50]})"
+                    if not ok_fb and original:
+                        # sqlite-0039 (lemon-template class): the file is
+                        # not valid C by construction; the ORIGINAL
+                        # conflicted text fails with the same FIRST
+                        # error. The merge introduced nothing.
+                        try:
+                            _bok, _bmsg = _compile_ccs(
+                                original, cc_path=_cc_fb, std=_std_fb,
+                                suffix=_suffix_fb, include_paths=_inc_fb)
+                        except Exception:  # noqa: BLE001
+                            _bok, _bmsg = True, ""
+                        _fl = _first_error_line(msg_fb)
+                        if (not _bok and _fl
+                                and _first_error_line(_bmsg) == _fl):
+                            return True, (
+                                f"cc fallback: pre-existing parse error "
+                                f"excused ({_fl[:50]})")
                     return ok_fb, msg_fb
 
                 if _bs is not None and _is_full_build and not _bs.full_build_available:
@@ -6249,6 +6338,28 @@ class VerificationEngine:
                     if not ok and _is_cc_werror_warning(msg):
                         ok = True
                         msg = f"cc: -Werror warning promotion skipped in standalone mode ({msg[:60]})"
+                    if not ok and original:
+                        # Pre-existing parse error (sqlite-0039, the lemon-
+                        # template class): a file that is not valid C by
+                        # CONSTRUCTION fails standalone gcc on the ORIGINAL
+                        # conflicted text too — first-error comparison, since
+                        # the original's later errors include the markers.
+                        # The merge introduced nothing; excuse it (the same
+                        # principle as Python's no-worse-than-before delta).
+                        try:
+                            _bok, _bmsg = _compile_ccs(
+                                original, cc_path=cc, std=std, suffix=suffix,
+                                include_paths=_include_paths or None)
+                        except Exception:  # noqa: BLE001
+                            _bok, _bmsg = True, ""
+                        if (not _bok
+                                and _first_error_line(_bmsg) == _first_error_line(msg)
+                                and _first_error_line(msg)):
+                            ok = True
+                            msg = (
+                                "cc: pre-existing parse error excused "
+                                "(original fails identically: "
+                                f"{_first_error_line(msg)[:60]})")
                     syntax_ok = ok
                     if not ok and self.config.require_syntax_if_supported:
                         hard.append(

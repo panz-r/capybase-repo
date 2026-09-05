@@ -266,3 +266,59 @@ class TestDuplicateDetectorScopedRepeats:
                 if _shared_context_duplicate_definitions(d[k], lang):
                     fired += 1
         assert fired == 0, f"{fired} corpus oracle/side fires remain"
+
+
+class TestPreexistingParseErrorExcuse:
+    """sqlite-0039 (EXTEND-80): tool/lempar.c is a LEMON TEMPLATE — not
+    valid C by construction; the pristine sides and the human oracle all
+    fail gcc -fsyntax-only at the same '%' token. The per-unit gate
+    hard-failed parse errors with no baseline delta, killing
+    oracle-perfect merges. The C validator now excuses a parse error a
+    pristine side reproduces identically."""
+
+    def _unit_with_sides(self, current: str, replayed: str):
+        from capybase.conflict_model import ConflictSide, ConflictUnit
+        return ConflictUnit(
+            session_id="s", step_index=0, path="t.c", unit_id="u",
+            language="c",
+            base=ConflictSide(label="BASE", text=""),
+            current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=current),
+            replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=replayed),
+            original_worktree_text=current,
+        )
+
+    def _verify(self, unit, cand):
+        from capybase.verification import (
+            CcsSyntaxValidator, VerificationContext, ValidationConfig)
+        return CcsSyntaxValidator().verify(VerificationContext(
+            unit=unit, candidate=cand, config=ValidationConfig()))
+
+    def test_lemon_template_class_excused(self):
+        from capybase.verification import CcsSyntaxValidator
+        from capybase.conflict_model import CandidateResolution
+        template = "%directive syntax\nint ok(void) {\n  return 1;\n}\n%end\n"
+        unit = self._unit_with_sides(template, template)
+        cand = CandidateResolution(
+            candidate_id="c", unit_id="u", model_name="m",
+            prompt_version="v", resolved_text=template)
+        res = self._verify(unit, cand)
+        assert res.passed
+        assert "pre-existing parse error excused" in res.message
+
+    def test_new_parse_error_still_fails(self):
+        from capybase.verification import CcsSyntaxValidator
+        from capybase.conflict_model import CandidateResolution
+        good = "int ok(void) {\n  return 1;\n}\n"
+        broken = "int ok(void) {\n  return 1;\n}\nint bad = %%%;\n"
+        unit = self._unit_with_sides(good, good)
+        cand = CandidateResolution(
+            candidate_id="c", unit_id="u", model_name="m",
+            prompt_version="v", resolved_text=broken)
+        res = self._verify(unit, cand)
+        assert not res.passed
+
+    def test_last_error_line_normalizes_paths(self):
+        from capybase.verification import _last_error_line
+        msg = "syntax check failed:\n/tmp/tmpabc123.c:27:1: error: expected identifier"
+        out = _last_error_line(msg)
+        assert out == "<file>:27:1: error: expected identifier"

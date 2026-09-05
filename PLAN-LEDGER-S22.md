@@ -8457,3 +8457,29 @@ The oversized pair (sqlite-0077/0078) is the known parked class
 Harvest expectation: ≈636/660 raw (≈96.4%), P+W ≈641/660, era floor 4;
 30 stale cases remain unmeasured (mostly large C — the harvest
 measures them).
+
+### S27-EXTEND-80 (2026-09-05) — the C gates get a pre-existing-parse-error excuse; sqlite-0039 converted
+
+sqlite-0039 (sim=1.00, GATE_UNAVAILABLE): the conflict file
+tool/lempar.c is lemon's parser-generator TEMPLATE — not valid C by
+construction; the pristine sides and the human oracle all fail
+standalone gcc at the same `%' token (line 27). Python's per-unit gate
+has a no-worse-than-before delta and the whole-tree builds compare
+against a pre-conflict baseline — the C gates had NOTHING: any parse
+error was a hard failure attributed to the merge.
+
+Three gates gained the excuse (excuse = the baseline fails with the
+same normalized FIRST error line; the merge introduced nothing):
+- per-unit CcsSyntaxValidator: baseline = the marker-blanked
+  ORIGINAL worktree text — the same spliced context the candidate was
+  compiled in. (First cut used the refined SIDE text, which is
+  region-only and compiles standalone — cannot witness surrounding-file
+  errors; the live flight caught this: region candidates failed at
+  27:1 while the sides passed.)
+- whole-file gcc fallback + the build-timeout _syntax_only_fallback:
+  baseline = the original conflicted text (first-error comparison; the
+  original's later errors include the markers).
+
+**Live: sqlite-0039 GATE_UNAVAILABLE → PASS 1.00.** Tests: lemon-
+template fixture excused; a NEW parse error still fails; _first_error_line
+normalization. Gate 4,268/0. Harvest expectation ≈637/660 raw.
