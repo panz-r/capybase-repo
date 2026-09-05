@@ -33,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
+from capybase.brace_utils import brackets_balanced
 
 
 # ---------------------------------------------------------------------------
@@ -420,25 +421,6 @@ def parse_use_leaves(line: str) -> list[ImportLeaf] | None:
 # ---------------------------------------------------------------------------
 
 
-def _brackets_balanced(s: str) -> bool:
-    """True when (), [], {} are balanced across the whole string."""
-    pairs = {")": "(", "]": "[", "}": "{"}
-    opens = set("([{")
-    depth = {c: 0 for c in "([{"}
-    stack: list[str] = []
-    # Naive scan — does not skip comments/strings, but for a single ``use``
-    # line there are no block comments and strings are pathological. The
-    # authoritative parse is rustc; this is the cheap pre-filter.
-    for ch in s:
-        if ch in opens:
-            depth[ch] += 1
-            stack.append(ch)
-        elif ch in pairs:
-            if not stack or stack[-1] != pairs[ch]:
-                return False
-            stack.pop()
-    return not stack
-
 
 # ---------------------------------------------------------------------------
 # The union proposer
@@ -807,7 +789,7 @@ def _import_codec():
             return None
 
         def local_validity(self, text):
-            ok = _brackets_balanced(text) and \
+            ok = brackets_balanced(text) and \
                 _roundtrip_confirms(text, self.closed_paths)
             if not ok:
                 self._blocked = True

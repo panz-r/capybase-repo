@@ -25,6 +25,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 
+from capybase.brace_utils import brackets_balanced
 from capybase.import_union import (
     ImportUnionResult,
     STATUS_APPLIED, STATUS_NOT_APPLICABLE, STATUS_BLOCKED, STATUS_AMBIGUOUS,
@@ -36,20 +37,6 @@ from capybase.import_union import (
 # Local validity (reuse import_union's brace-balance check)
 # ---------------------------------------------------------------------------
 
-
-def _brackets_balanced(s: str) -> bool:
-    """True when (), [], {} are balanced across the whole string."""
-    pairs = {")": "(", "]": "[", "}": "{"}
-    opens = set("([{")
-    stack: list[str] = []
-    for ch in s:
-        if ch in opens:
-            stack.append(ch)
-        elif ch in pairs:
-            if not stack or stack[-1] != pairs[ch]:
-                return False
-            stack.pop()
-    return not stack
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +112,7 @@ def propose_deletion_application(
         ]
         edited_text = "".join(surviving)
 
-        if not _brackets_balanced(edited_text):
+        if not brackets_balanced(edited_text):
             return ImportUnionResult(
                 status=STATUS_BLOCKED, text=resolved_text,
                 certificate={"reason": "brace imbalance after deletion",

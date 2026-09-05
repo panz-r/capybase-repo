@@ -1492,16 +1492,16 @@ def test_identifier_ending_in_r_before_string_not_raw():
     """an identifier ending in ``r``/``b`` immediately before a string
     literal must NOT be misread as a raw-string prefix. ``myr#\"...\"#`` — the
     ``r`` is part of ``myr``, not a prefix. The fix is a word-boundary check in
-    ``_match_string_prefix``: the rune run must be preceded by a non-identifier
+    ``match_string_prefix`` (string_lexer canonical): the rune run must be preceded by a non-identifier
     char (or start of input). Tested at the unit level (the precise fix site)
     plus a parse-level check that a following function is detected."""
     # Unit level — the precise behavior the fix corrects.
-    assert ap._match_string_prefix('ambr#"', 5) == 0   # 'm' before 'rb' → not a prefix
-    assert ap._match_string_prefix('myr"', 3) == 0     # 'y' before 'r' → not a prefix
-    assert ap._match_string_prefix('r#"', 2) == 1      # start of input → real raw
-    assert ap._match_string_prefix(' r#"', 3) == 1     # space boundary → real raw
-    assert ap._match_string_prefix('=r#"', 3) == 1     # '=' boundary → real raw
-    assert ap._match_string_prefix('br"', 2) == 0      # real byte-raw (closes on ")
+    assert ap.match_string_prefix('ambr#"', 5) == 0   # 'm' before 'rb' → not a prefix
+    assert ap.match_string_prefix('myr"', 3) == 0     # 'y' before 'r' → not a prefix
+    assert ap.match_string_prefix('r#"', 2) == 1      # start of input → real raw
+    assert ap.match_string_prefix(' r#"', 3) == 1     # space boundary → real raw
+    assert ap.match_string_prefix('=r#"', 3) == 1     # '=' boundary → real raw
+    assert ap.match_string_prefix('br"', 2) == 0      # real byte-raw (closes on ")
     # Parse level: an identifier ending in 'r' before a plain string must not
     # send the scanner into a bogus raw-string state. Both functions detected.
     src = (

@@ -31,6 +31,30 @@ def _mask_strings_and_comments(text: str, language: str | None = None) -> str:
     return blank_strings_and_comments(text, language, string_char=" ")
 
 
+def brackets_balanced(s: str) -> bool:
+    """True when ``()``, ``[]``, ``{}`` are properly nested and balanced.
+
+    A NAIVE scan — it does not skip comments or string literals (a ``}``
+    inside a string counts). The union/insertion primitives use it as a cheap
+    pre-filter on small fragments; the authoritative syntax gates (compilers,
+    verification's string-aware ``_braces_balanced``) are masked first. This
+    is the single implementation of that pre-filter (EXTEND-94 lifted five
+    verbatim copies: manifest_union, import_union, block_insertion,
+    deletion_union, file_linker).
+    """
+    pairs = {")": "(", "]": "[", "}": "{"}
+    opens = set("([{")
+    stack: list[str] = []
+    for ch in s:
+        if ch in opens:
+            stack.append(ch)
+        elif ch in pairs:
+            if not stack or stack[-1] != pairs[ch]:
+                return False
+            stack.pop()
+    return not stack
+
+
 def find_closing_brace(
     text: str, open_idx: int, *, language: str | None = None,
 ) -> int | None:

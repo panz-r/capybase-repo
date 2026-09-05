@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
+from capybase.brace_utils import brackets_balanced
 from capybase.import_union import (
     ImportUnionResult,
     STATUS_APPLIED, STATUS_NOT_APPLICABLE, STATUS_BLOCKED, STATUS_AMBIGUOUS,
@@ -39,20 +40,6 @@ def _normalize(line: str) -> str:
     """Whitespace-normalized form for matching."""
     return " ".join(line.split())
 
-
-def _brackets_balanced(s: str) -> bool:
-    """True when (), [], {} are balanced across the whole string."""
-    pairs = {")": "(", "]": "[", "}": "{"}
-    opens = set("([{")
-    stack: list[str] = []
-    for ch in s:
-        if ch in opens:
-            stack.append(ch)
-        elif ch in pairs:
-            if not stack or stack[-1] != pairs[ch]:
-                return False
-            stack.pop()
-    return not stack
 
 
 def _is_import_line(line: str) -> bool:
@@ -213,7 +200,7 @@ def propose_block_insertion(
         edited_text = "".join(edited_lines)
 
         # --- Local validity: brace balance. ---
-        if not _brackets_balanced(edited_text):
+        if not brackets_balanced(edited_text):
             return ImportUnionResult(
                 status=STATUS_BLOCKED, text=resolved_text,
                 certificate={"reason": "brace imbalance after insertion",

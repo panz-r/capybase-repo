@@ -36,21 +36,8 @@ from capybase.import_union import (
     _parse_visibility_and_attrs,
 )
 from capybase.langs import is_c_family
+from capybase.brace_utils import brackets_balanced
 
-
-def _brackets_balanced(s: str) -> bool:
-    """True when (), [], {} are balanced across the whole string."""
-    pairs = {")": "(", "]": "[", "}": "{"}
-    opens = set("([{")
-    stack: list[str] = []
-    for ch in s:
-        if ch in opens:
-            stack.append(ch)
-        elif ch in pairs:
-            if not stack or stack[-1] != pairs[ch]:
-                return False
-            stack.pop()
-    return not stack
 
 
 def deduplicate_imports(
@@ -92,7 +79,7 @@ def deduplicate_imports(
             if (s.startswith("use ") or s.startswith("pub use ")
                     or s.startswith("pub(crate) use ")):
                 # Must be a single-line use (balanced braces).
-                if _brackets_balanced(ln.rstrip("\n")):
+                if brackets_balanced(ln.rstrip("\n")):
                     import_indices.append(i)
 
         if not import_indices:
@@ -163,7 +150,7 @@ def deduplicate_imports(
         result = "".join(result_lines)
 
         # Safety: brace balance must hold.
-        if not _brackets_balanced(result):
+        if not brackets_balanced(result):
             return text, 0  # transactional rollback
 
         return result, removed_count

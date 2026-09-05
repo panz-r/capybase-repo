@@ -1455,3 +1455,18 @@ def test_append_diagnostic_failure_calls_reduce_cascade_once(monkeypatch):
         validator="syntax", message_prefix="cargo check", tool="cargo",
     )
     assert calls["n"] == 1, f"expected 1 reduce_cascade_errors call, got {calls['n']}"
+
+
+def test_py_compile_errors_keeps_only_diagnostic_lines():
+    """The merged _py_compile_errors (EXTEND-94): empty on success, and on
+    failure keeps ONLY the Error/Warning-bearing lines (the delta key) —
+    `File "<tmp>", line N` and caret lines are excluded (their temp paths
+    shift between runs and would poison the baseline-vs-after comparison)."""
+    from capybase.verification import _py_compile_errors
+    assert _py_compile_errors("x = 1\n") == []
+    errs = _py_compile_errors("def f(:\n    pass\n")
+    assert errs and all("Error" in e for e in errs), errs
+    assert not any(e.startswith("File") for e in errs), errs
+    # The last-resort branch: a failure with no Error/Warning line still
+    # returns something non-empty (never masks a compile failure).
+    assert _py_compile_errors("") == []  # empty source compiles fine

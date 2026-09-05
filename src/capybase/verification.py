@@ -4048,23 +4048,32 @@ def _has_whole_file_span(
     return any(span is None for span, _ in resolutions)
 
 
-def _compile_python(source: str) -> tuple[bool, str]:
+def _py_compile_run(source: str) -> subprocess.CompletedProcess:
+    """Write ``source`` to a temp file and run ``python3 -m py_compile`` on it.
+
+    The ONE subprocess shape behind both Python compile views (EXTEND-94
+    merged the duplicated temp-file twins): the temp file is always removed.
+    """
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", delete=False, encoding="utf-8"
     ) as tf:
         tf.write(source)
         tmp_path = tf.name
     try:
-        proc = subprocess.run(
+        return subprocess.run(
             ["python3", "-m", "py_compile", tmp_path],
             capture_output=True,
             text=True,
         )
-        if proc.returncode == 0:
-            return True, "py_compile ok"
-        return False, (proc.stderr.strip() or "py_compile failed").splitlines()[-1]
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+
+def _compile_python(source: str) -> tuple[bool, str]:
+    proc = _py_compile_run(source)
+    if proc.returncode == 0:
+        return True, "py_compile ok"
+    return False, (proc.stderr.strip() or "py_compile failed").splitlines()[-1]
 
 
 def _py_compile_errors(source: str) -> list[str]:
@@ -4077,30 +4086,20 @@ def _py_compile_errors(source: str) -> list[str]:
     Python: the merge is rejected only when it introduces a syntax error the
     blanked baseline didn't have, not for a pre-existing one in the conflict.
     """
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", delete=False, encoding="utf-8"
-    ) as tf:
-        tf.write(source)
-        tmp_path = tf.name
-    try:
-        proc = subprocess.run(
-            ["python3", "-m", "py_compile", tmp_path],
-            capture_output=True, text=True,
-        )
-        if proc.returncode == 0:
-            return []
-        # py_compile emits lines like '  File "...", line N' + 'SyntaxError: ...'.
-        # Keep the diagnostic-bearing lines (the SyntaxError/IndentationError/etc.
-        # messages), stripping the temp-file path prefix for a stable delta key.
-        errs: list[str] = []
-        for ln in (proc.stderr or "").splitlines():
-            s = ln.strip()
-            if s and (s.startswith(tmp_path) or "Error" in s or "Warning" in s):
-                # Normalize the temp path out so the message is path-independent.
-                errs.append(s.replace(tmp_path, "<file>"))
-        return errs or [(proc.stderr or "py_compile failed").strip()]
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+    proc = _py_compile_run(source)
+    if proc.returncode == 0:
+        return []
+    # py_compile emits '  File "<path>", line N' + 'SyntaxError: ...'. Keep the
+    # diagnostic-bearing lines (Error/Warning) for the delta key — the File/
+    # caret lines carry temp paths and shift between runs. (The old inline
+    # copy's ``startswith(tmp_path)`` never matched the stripped 'File "..."'
+    # lines, so only Error/Warning lines were ever kept — preserved verbatim.)
+    errs: list[str] = []
+    for ln in (proc.stderr or "").splitlines():
+        s = ln.strip()
+        if s and ("Error" in s or "Warning" in s):
+            errs.append(s)
+    return errs or [(proc.stderr or "py_compile failed").strip()]
 
 
 #: Rust error codes whose message text DRIFTS between a marker-blanked baseline

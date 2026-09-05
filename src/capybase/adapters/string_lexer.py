@@ -184,6 +184,28 @@ def _match_cpp_raw_prefix(src: str, quote_idx: int, n: int) -> str | None:
     return src[delim_start:a]
 
 
+def match_string_prefix(src: str, quote_idx: int) -> int:
+    """Public canonical form of :func:`_match_string_prefix`.
+
+    Single implementation of the Rust string-prefix detection (raw/byte
+    strings, hash counts) — abstract_parser's drifted copy was removed in
+    favor of this one (EXTEND-94). Returns the raw-string hash count, 0 for
+    a prefix that closes on a plain quote, 0 for no prefix.
+    """
+    return _match_string_prefix(src, quote_idx)
+
+
+def match_cpp_raw_prefix(src: str, quote_idx: int, n: int) -> str | None:
+    """Public canonical form of :func:`_match_cpp_raw_prefix`.
+
+    Single implementation of the C++ raw-string opener detection
+    (``[u8|L|u|U]R"DELIM(...)DELIM"``) — abstract_parser's drifted copy was
+    removed in favor of this one (EXTEND-94). Returns the delimiter (possibly
+    empty) or None.
+    """
+    return _match_cpp_raw_prefix(src, quote_idx, n)
+
+
 # ---------------------------------------------------------------------------
 # Char-scan state machine
 # ---------------------------------------------------------------------------

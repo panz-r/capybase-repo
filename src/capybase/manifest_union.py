@@ -32,22 +32,10 @@ import re
 from dataclasses import dataclass
 
 from capybase.import_union import ImportUnionResult, RISK_TIER_A
+from capybase.brace_utils import brackets_balanced
 
 
 
-
-def _brackets_balanced(s: str) -> bool:
-    pairs = {")": "(", "]": "[", "}": "{"}
-    opens = set("([{")
-    stack: list[str] = []
-    for ch in s:
-        if ch in opens:
-            stack.append(ch)
-        elif ch in pairs:
-            if not stack or stack[-1] != pairs[ch]:
-                return False
-            stack.pop()
-    return not stack
 
 
 #: Matches a TOML key = [...] array assignment, capturing the key and the
