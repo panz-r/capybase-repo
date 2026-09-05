@@ -1,3 +1,6 @@
+# session resume
+RESUME*.md
+PLAN-LEDGER*.md
 # build / dist
 build/
 dist/
