@@ -726,28 +726,72 @@ def enumerate_comment_spans(
     Returns:
         A list of ``(start, end, comment_text)`` tuples in source order.
     """
+    spans: list[tuple[int, int, str]] = []
+    _walk_string_comment_states(
+        text, lang,
+        on_comment_span=lambda start, end: spans.append(
+            (start, end, text[start:end])),
+    )
+    return spans
+
+
+def _walk_string_comment_states(
+    text: str,
+    lang: str | None = None,
+    *,
+    on_comment_span=None,
+    on_newline=None,
+) -> None:
+    """THE canonical string/comment char-scan (ONE implementation).
+
+    EXTEND-94c collapsed the two drifted copies of this walk
+    (enumerate_comment_spans' full version and multiline_string_line_mask's
+    "simplified" one — which lacked Rust nested-block-comment depth and
+    f-string interpolation tracking, so it could mis-scan after a nested
+    ``*/`` or inside ``f"{...}"`` braces). Both views are now collectors over
+    this walk:
+
+    - ``on_comment_span(start, end_exclusive)`` fires for every completed
+      comment (including an unterminated tail at EOF).
+    - ``on_newline(newline_char_idx, spanning)`` fires at each ``\n``;
+      ``spanning`` is True when the scan is mid-SPANNING-string at the line
+      boundary (triple-quote, raw ``r#"..."#``, C++ raw, template literal —
+      single-line strings never span).
+
+    The walk carries the FULL canonical state machine: nested Rust block
+    comments, f-string interpolation braces, raw-string hash counts, C++
+    raw delimiters, lifetimes vs char literals.
+    """
     n = len(text)
     slash = _lang_uses_slash_comments(lang)
     hash_c = not slash
     st = _LexState()
-    spans: list[tuple[int, int, str]] = []
     comment_start: int | None = None  # byte offset where the current comment began
     # Rust nested block-comment depth (/* /* */ */ is ONE comment). Family A
     # block comments nest in Rust but NOT in C/C++/JS. Track depth for Rust only.
     block_depth = 0
+
+    def _in_spanning() -> bool:
+        return (
+            st.in_str in ("triple_d", "triple_s", "`")
+            or (st.in_str == '"' and (st.hash_count > 0 or st.in_cpp_raw))
+        )
 
     i = 0
     while i < n:
         ch = text[i]
         nxt = text[i + 1] if i + 1 < n else ""
 
-        # --- newline: close a line comment ---
+        # --- newline: close a line comment; notify the line-mask view ---
         if ch == "\n":
             if st.in_line_comment:
                 st.in_line_comment = False
                 if comment_start is not None:
-                    spans.append((comment_start, i, text[comment_start:i]))
+                    if on_comment_span is not None:
+                        on_comment_span(comment_start, i)
                     comment_start = None
+            if on_newline is not None:
+                on_newline(i, _in_spanning())
             i += 1
             continue
 
@@ -771,7 +815,8 @@ def enumerate_comment_spans(
                 st.in_block_comment = False
                 end = i + 2
                 if comment_start is not None:
-                    spans.append((comment_start, end, text[comment_start:end]))
+                    if on_comment_span is not None:
+                        on_comment_span(comment_start, end)
                     comment_start = None
                 i += 2
                 continue
@@ -918,8 +963,8 @@ def enumerate_comment_spans(
 
     # If the file ends mid-line-comment (no trailing newline), emit the span.
     if comment_start is not None and (st.in_line_comment or st.in_block_comment):
-        spans.append((comment_start, n, text[comment_start:n]))
-    return spans
+        if on_comment_span is not None:
+            on_comment_span(comment_start, n)
 
 
 def enumerate_docstring_spans(
@@ -1038,163 +1083,24 @@ def multiline_string_line_mask(text: str, lang: str | None = None) -> list[bool]
     which (a) didn't handle C++ raw strings and (b) matched closers by a
     hash-count-blind ``"#+`` regex (closing a 2-hash string on a 3-hash line).
 
-    The mask is computed by running the char-scan and tracking, per newline,
-    whether the scan was mid-string at that point.
+    Computed as a collector over the ONE canonical walk
+    (:func:`_walk_string_comment_states`) — previously this was a second,
+    "simplified" copy of the state machine that had drifted from the comment-
+    span walk (no Rust nested-block-comment depth, no f-string interpolation),
+    so a line after a nested ``*/`` or inside ``f"{...}"`` braces could be
+    mis-masked.
     """
-    n = len(text)
-    st = _LexState()
-    # A line is "interior" if the scan is inside a SPANNING string (triple-quote,
-    # raw, template) at the START of the line. Single-line strings (regular
-    # "..." / '...' / char) never span, so they don't contribute.
-    slash = _lang_uses_slash_comments(lang)
-    hash_c = not slash
-    # Process char by char, but only track state transitions (don't build
-    # blanked output — we only need the mask).
     lines = text.split("\n")
     mask = [False] * len(lines)
-    line_idx = 0
-    i = 0
-    # Mark line_idx as interior if we're in a spanning string at its start.
-    # "Spanning" = triple-quote, raw (hash_count > 0), cpp_raw, or template.
-    def _in_spanning() -> bool:
-        return (
-            st.in_str in ("triple_d", "triple_s", "`")
-            or (st.in_str == '"' and (st.hash_count > 0 or st.in_cpp_raw))
-        )
-    while i < n:
-        ch = text[i]
-        nxt = text[i + 1] if i + 1 < n else ""
-        if ch == "\n":
-            line_idx += 1
-            if line_idx < len(lines) and _in_spanning():
-                mask[line_idx] = True
-            i += 1
-            continue
-        # Replicate the state transitions (simplified — no blanking needed).
-        if st.in_line_comment:
-            i += 1
-            continue
-        if st.in_block_comment:
-            if ch == "*" and nxt == "/":
-                st.in_block_comment = False
-                i += 2
-                continue
-            i += 1
-            continue
-        if st.in_str is not None:
-            if ch == "\\":
-                if st.in_str == '"' and st.hash_count > 0:
-                    i += 1
-                    continue
-                i += 2
-                continue
-            if st.in_str == "char" and ch == "'":
-                st.in_str = None
-                i += 1
-                continue
-            if st.in_str == "'" and ch == "'":
-                st.in_str = None
-                i += 1
-                continue
-            if st.in_str == "`" and ch == "`":
-                st.in_str = None
-                i += 1
-                continue
-            if st.in_str == '"':
-                if st.in_cpp_raw:
-                    delim = st.cpp_raw_delim
-                    need = ")" + delim
-                    start = i - len(need)
-                    if start >= 0 and text[start:i] == need:
-                        st.in_str = None
-                        st.in_cpp_raw = False
-                        st.cpp_raw_delim = ""
-                        i += 1
-                        continue
-                    i += 1
-                    continue
-                if st.hash_count > 0:
-                    hc = st.hash_count
-                    tail = text[i + 1 : i + 1 + hc]
-                    after = text[i + 1 + hc] if i + 1 + hc < n else ""
-                    if (
-                        len(tail) == hc and tail == "#" * hc and after != "#"
-                    ):
-                        st.in_str = None
-                        st.hash_count = 0
-                        i += 1 + hc
-                        continue
-                    i += 1
-                    continue
-                st.in_str = None
-                i += 1
-                continue
-            if st.in_str in ("triple_d", "triple_s"):
-                marker = '"""' if st.in_str == "triple_d" else "'''"
-                if text[i : i + 3] == marker:
-                    st.in_str = None
-                    i += 3
-                    continue
-                i += 1
-                continue
-            i += 1
-            continue
-        # Transitions INTO string/comment.
-        if slash and ch == "/" and nxt == "/":
-            st.in_line_comment = True
-            i += 2
-            continue
-        if slash and ch == "/" and nxt == "*":
-            st.in_block_comment = True
-            i += 2
-            continue
-        if hash_c and ch == "#":
-            st.in_line_comment = True
-            i += 1
-            continue
-        if ch == '"':
-            if text[i : i + 3] == '"""':
-                st.in_str = "triple_d"
-                i += 3
-                continue
-            cpp_delim = _match_cpp_raw_prefix(text, i, n)
-            if cpp_delim is not None:
-                st.in_str = '"'
-                st.in_cpp_raw = True
-                st.cpp_raw_delim = cpp_delim
-                i += 1
-                continue
-            st.in_str = '"'
-            st.hash_count = _match_string_prefix(text, i)
-            i += 1
-            continue
-        if ch == "'":
-            if text[i : i + 3] == "'''":
-                st.in_str = "triple_s"
-                i += 3
-                continue
-            nxt1 = text[i + 1] if i + 1 < n else ""
-            nxt2 = text[i + 2] if i + 2 < n else ""
-            prev = text[i - 1] if i > 0 else ""
-            if (
-                slash
-                and (nxt1.isalpha() or nxt1 == "_")
-                and nxt2 != "'"
-                and not (prev.isalnum() or prev == "_")
-            ):
-                i += 1
-                continue
-            if prev in _HEXDIGITS and nxt1 in _HEXDIGITS and nxt2 != "'":
-                i += 1
-                continue
-            st.in_str = "char"
-            i += 1
-            continue
-        if ch == "`":
-            st.in_str = "`"
-            i += 1
-            continue
-        i += 1
+    seen_newlines = 0
+
+    def _on_newline(_idx: int, spanning: bool) -> None:
+        nonlocal seen_newlines
+        seen_newlines += 1
+        if spanning and seen_newlines < len(lines):
+            mask[seen_newlines] = True
+
+    _walk_string_comment_states(text, lang, on_newline=_on_newline)
     return mask
 
 

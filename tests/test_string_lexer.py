@@ -511,3 +511,40 @@ def test_line_continuation_backslash_inside_string_unaffected():
     assert "real comment" not in out
     assert "int x = 1;" in out
     assert len(out) == len(src)
+
+
+def test_mask_rust_nested_comment_tail_no_phantom_string():
+    """EXTEND-94c: the line mask is a collector over the ONE canonical walk.
+
+    The old mask walk was a drifted "simplified" copy without Rust
+    nested-block-comment depth: after the FIRST inner ``*/`` it resumed
+    CODE scanning, so a raw-string opener (``r#"``) inside the still-open
+    outer comment opened a PHANTOM spanning string and masked following
+    comment lines as string-interior (skipping consensus normalization on
+    them). The canonical walk's nesting keeps the whole region a comment.
+    """
+    from capybase.adapters.string_lexer import (
+        multiline_string_line_mask, enumerate_comment_spans,
+    )
+    src = (
+        '/* /* inner */ r#"phantom raw opener — still comment\n'
+        "still comment text\n"
+        '*/\n'
+        "fn real() {\n"
+        '    let s = r#"real raw\n'
+        'spans lines"#;\n'
+        "}\n"
+    )
+    mask = multiline_string_line_mask(src, "rust")
+    lines = src.split("\n")
+    # The nested comment's interior lines are NOT string-interior...
+    assert mask[1] is False and mask[2] is False, mask
+    # ...and the comment is ONE span covering the whole nested region.
+    spans = enumerate_comment_spans(src, "rust")
+    assert len(spans) == 1
+    start, end, _content = spans[0]
+    assert src[start:end].startswith("/* /* inner */")
+    assert "phantom" in src[start:end]
+    # The REAL raw string later in the file still spans: the line AFTER the
+    # opener is interior; the opener's own line and the closer's are not.
+    assert mask[4] is False and mask[5] is True and mask[6] is False, mask
