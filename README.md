@@ -130,10 +130,14 @@ git config core.hooksPath hooks
 capybase check                       # git + LLM + tools ready? (no mutation)
 capybase rebase --dry-run <target>   # rehearse in a throwaway worktree
 capybase rebase <target>             # the WHOLE rebase on a candidate branch
-capybase promote [--approve]         # expected-OID CAS onto the source branch
-capybase publish [--approve]         # lease-protected remote publication
+capybase promote [--approve]         # land a RETAINED candidate (CAS onto the source)
+capybase publish [--approve]         # publish a RETAINED candidate (lease-protected)
 capybase status                      # read-only: latest session + backups
 ```
+
+`promote` and `publish` act on a retained candidate from a prior
+`capybase rebase` — run before one exists, they refuse with "no retained
+successful candidate found".
 
 **The default is candidate mode**: `capybase rebase <target>` never mutates
 your branch. The entire replay runs in a linked worktree on a visible
