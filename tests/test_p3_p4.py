@@ -359,3 +359,49 @@ class TestRenameExclusiveScoping:
         obs = derive_missing_obligations(base, cur, rep, rep)
         adds = [o for o in obs if o.operation == "added" and "stream" in o.line]
         assert adds and all(o.exclusive for o in adds)
+
+
+class TestSplitFileClosureDerivation:
+    """EXTEND-86: split files' cross-boundary additions are invisible to
+    per-unit derivation — the closure falls back to the file-level
+    three-way (marker-side extraction + whole-side derivation)."""
+
+    def test_marker_side_extraction(self):
+        from capybase.orchestrator import (
+            _marker_side_text, _marker_base_text)
+        mo = ("shared()\n"
+              "<<<<<<< A\n"
+              "current_line()\n"
+              "||||||| base\n"
+              "base_line()\n"
+              "=======\n"
+              "replayed_line()\n"
+              ">>>>>>> B\n"
+              "tail()\n")
+        cur = _marker_side_text(mo, "current")
+        rep = _marker_side_text(mo, "replayed")
+        base = _marker_base_text(mo)
+        assert "current_line()" in cur and "replayed_line()" not in cur
+        assert "replayed_line()" in rep and "current_line()" not in rep
+        assert "base_line()" in base and "current_line()" not in base
+        assert "shared()" in cur and "tail()" in cur
+
+    def test_file_level_derivation_sees_cross_boundary_additions(self):
+        # The 0007 shape: the fn definition and its call live in different
+        # sub-units; whole-side derivation finds both as non-exclusive.
+        from capybase.orchestrator import (
+            _marker_side_text, _marker_base_text)
+        from capybase.change_accounting import derive_missing_obligations
+        import json as _json
+        from pathlib import Path as _P
+        d = _json.loads((_P(__file__).parent.parent / "extracted-testdata"
+                         / "realworld" / "sea-orm-history-0007.json").read_text())
+        mo = d["marker_original"]
+        obs = derive_missing_obligations(
+            _marker_base_text(mo),
+            _marker_side_text(mo, "current"),
+            _marker_side_text(mo, "replayed"),
+            d["replayed"])
+        fn_obs = [o for o in obs if "create_active_enum_table" in (o.line or "")]
+        assert len(fn_obs) == 2  # the definition + the call
+        assert all(not o.exclusive for o in fn_obs)

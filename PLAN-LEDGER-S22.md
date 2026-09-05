@@ -8645,3 +8645,36 @@ derive the closure's obligations from the file-level three-way when a
 file has multiple units, then attribute claims per-unit. This also
 explains why unit 1:2 (self-contained tail) resolved via
 source_portfolio while 1:0/1:1 (cross-boundary additions) could not.
+
+### S27-EXTEND-86 (2026-09-05) — split-file closure: file-level derivation + context, wired end-to-end
+
+The EXTEND-85 close-out's recorded fix, implemented in three steps
+(each validated live before the next):
+1. **File-level derivation fallback**: when the per-unit derivation
+   yields nothing and the file has ≥2 units, derive from the FILE-
+   three-way (`_marker_side_text`/`_marker_base_text` extract whole
+   sides and base from the conflicted text; journaled as
+   closure_file_level_derivation).
+2. **Live catch**: the first instrumented rerun showed 42 obligations
+   derived but EVERY primitive declining — the primitives' context
+   (`_other`) was still the per-unit side, so the 37-line fn's
+   subtree was invisible to keyed_item and no contiguous run existed
+   for block_insertion. The file-level path now also feeds the
+   FILE-level sides as context.
+3. **Result**: `keyed_item_union_applied` fires IN-SESSION, closing
+   exactly the `create_active_enum_table` fn obligation.
+
+Tests: marker-side/base extraction round-trips; the 0007 file-level
+derivation sees both cross-boundary obligations non-exclusively.
+Gate 4,277/0.
+
+**Remaining (recorded)**: the closure augments the CEGIS winner —
+which for unit 1:0 is the model's own broken candidate
+(`expected parameter name, found '/'`); the closure's insertion is
+correct but rides a broken base. The offline 0.982 proof started
+from the PRISTINE replayed side; the in-session equivalent is
+applying the closure to the portfolio's side-only candidates (the
+portfolio path precedes the closure in the cascade but does not run
+it). That last wiring — closure-on-portfolio-candidates — is the
+next sprint's opening item; the mechanism stack below it is now
+fully proven live.

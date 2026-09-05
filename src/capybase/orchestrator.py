@@ -1604,6 +1604,61 @@ def _side_preservation(base_text: str, side_text: str, output_text: str) -> floa
     return n_ok / n_tot if n_tot else None
 
 
+def _marker_side_text(marker_text: str, side: str) -> str | None:
+    """Extract one whole side from a conflicted file: each conflict block
+    contributes its CURRENT or REPLAYED body; shared context passes
+    through. Returns None on malformed markers."""
+    lines = marker_text.split("\n")
+    out: list[str] = []
+    state = "shared"  # shared | current | replayed | base
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("<<<<<<<"):
+            state = "current"
+            continue
+        if s.startswith("|||||||"):
+            state = "base"
+            continue
+        if s.startswith("=======") and state == "base":
+            state = "replayed"
+            continue
+        if s.startswith(">>>>>>>"):
+            state = "shared"
+            continue
+        if state == "shared" or state == side:
+            out.append(ln)
+        elif state == "base":
+            continue
+        elif state == ("replayed" if side == "current" else "current"):
+            continue
+    return "\n".join(out)
+
+
+def _marker_base_text(marker_text: str) -> str:
+    """Extract the BASE side from a conflicted file (diff3 markers);
+    shared context passes through (best-effort approximation)."""
+    lines = marker_text.split("\n")
+    out: list[str] = []
+    state = "shared"
+    for ln in lines:
+        s = ln.strip()
+        if s.startswith("<<<<<<<"):
+            state = "current"
+            continue
+        if s.startswith("|||||||"):
+            state = "base"
+            continue
+        if s.startswith("=======") and state == "base":
+            state = "replayed"
+            continue
+        if s.startswith(">>>>>>>"):
+            state = "shared"
+            continue
+        if state == "shared" or state == "base":
+            out.append(ln)
+    return "\n".join(out)
+
+
 def _shared_context_duplicate_definitions(
     original: str, language: str | None,
 ) -> list[str]:
@@ -9092,6 +9147,11 @@ class Orchestrator:
             self._step_pattern_cache: dict[str, list] = {}
             # Unit-count-aware retry budget: scale down retries when a file has
             # many units, so the total model-call count stays within the wall-
+            # Split-file closure (EXTEND-86): the per-unit deterministic
+            # closure reads this to know whether the file is split (and
+            # cross-boundary additions need file-level derivation).
+            self._units_by_path = {**(getattr(self, "_units_by_path", {})),
+                                   path: units}
             # time budget. With the default 2 retries (3 attempts), a 78-unit
             # file needs up to 234 calls — far over budget. Scaling to 0
             # retries (1 attempt) bounds it to 78 calls.
@@ -13255,6 +13315,40 @@ class Orchestrator:
         )
         return [(wf_unit, wf_cand)]
 
+    def _file_level_obligations(
+        self, unit: ConflictUnit, cand: CandidateResolution,
+    ) -> list | None:
+        """File-level obligation derivation for split files (EXTEND-86).
+
+        Returns obligations derived from the whole conflicted file's
+        marker-blanked sides, or None when the file has a single unit
+        (the per-unit derivation is authoritative there) or the texts
+        are unavailable.
+        """
+        try:
+            original = unit.original_worktree_text or ""
+            if not original or "<<<<<<<" not in original:
+                return None
+            # Single-unit files: per-unit derivation already covers them.
+            units_of_file = getattr(self, "_units_by_path", {}).get(unit.path)
+            if units_of_file is None or len(units_of_file) < 2:
+                return None
+            from capybase.verification import _blank_markers_one_side
+            # The original's two sides: blank markers keeping the CURRENT
+            # body gives one whole side; keeping REPLAYED gives the other.
+            # _blank_markers (the underlying impl) comments out the second
+            # side — call it on marker-pairs flipped to get each side.
+            cur_side = _marker_side_text(original, "current")
+            rep_side = _marker_side_text(original, "replayed")
+            base_side = _marker_base_text(original)
+            if not cur_side or not rep_side:
+                return None
+            from capybase.change_accounting import derive_missing_obligations
+            return derive_missing_obligations(
+                base_side, cur_side, rep_side, cand.resolved_text or "")
+        except Exception:  # noqa: BLE001 — fallback is best-effort
+            return None
+
     def _apply_deterministic_closure(
         self, unit: ConflictUnit, cand: CandidateResolution,
     ) -> CandidateResolution:
@@ -13326,8 +13420,26 @@ class Orchestrator:
                 base_text, unit.current.text or "",
                 unit.replayed.text or "", cand.resolved_text,
             )
+            _file_level = False
             if not obligations:
-                return cand
+                # Split-file fallback (0007, EXTEND-86): a file split into
+                # multiple units derives obligations from each unit's
+                # diff3-refined sides — but additions that CROSS unit
+                # boundaries (the fn in one unit, its call in another) are
+                # invisible at every unit's scope. Derive from the FILE-level
+                # three-way instead: the marker-blanked original gives both
+                # whole sides; the candidate is this unit's text (the
+                # cross-boundary obligations land wherever they're missing).
+                obligations = self._file_level_obligations(unit, cand)
+                _file_level = obligations is not None
+                if not _file_level or not obligations:
+                    return cand
+                self.journal.emit(
+                    "closure_file_level_derivation",
+                    {"n_obligations": len(obligations)},
+                    step_index=self.step, path=unit.path,
+                    unit_id=unit.unit_id,
+                )
 
             provenance_suffix = ""
             edited_text = cand.resolved_text
@@ -13338,8 +13450,22 @@ class Orchestrator:
             # re-process them. This implements the precedence: specialized
             # primitives go first, generic block_insertion gets the residual.
             _remaining = list(obligations)
-            _cur_text = unit.current.text or ""
-            _rep_text = unit.replayed.text or ""
+            if _file_level:
+                # The obligations came from the FILE-level three-way —
+                # the primitives' context (other-side text for subtree
+                # extraction and anchor location) must be the FILE-level
+                # sides too: the per-unit side contains only the sub-
+                # region, so the 37-line fn's subtree is invisible to
+                # keyed_item and no contiguous run exists for
+                # block_insertion (the 0007 flight: 42 obligations
+                # derived, every primitive declined).
+                _cur_text = _marker_side_text(
+                    unit.original_worktree_text or "", "current")
+                _rep_text = _marker_side_text(
+                    unit.original_worktree_text or "", "replayed")
+            else:
+                _cur_text = unit.current.text or ""
+                _rep_text = unit.replayed.text or ""
             _other = _rep_text if edited_text.strip() == _cur_text.strip() else _cur_text
 
             def _run_primitive(propose_fn, name, *, needs_other=False, **kwargs):
