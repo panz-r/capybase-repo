@@ -399,3 +399,178 @@ def test_transport_failure_does_not_become_a_side_pick(tmp_path: Path):
     assert all(f.get("failure_kind") == "request_failed" for f in frags)
     # The honest outcome during an outage: escalation, not a silent merge.
     assert result.escalated
+
+
+# ---------------------------------------------------------------------------
+# EXTEND-95: the deletion-respect PRUNE arm (the mirror shape).
+# clickhouse-0013: current is a pure DELETION side, replayed is the REWRITE;
+# the buffer carries replayed's rewrite but resurrects current's deleted
+# blocks. The swap arm declines (buffer not >=0.90 in current — correctly,
+# its side-swap would install the pre-rewrite upstream file); the prune arm
+# removes the resurrected blocks: replayed minus current's deletions — the
+# formula that reproduces the human oracle at 0.998 token-Jaccard.
+# ---------------------------------------------------------------------------
+
+# The mirror fixture: current DELETES the dead block; replayed REWRITES
+# (keeps the block region's old content and adds new lines).
+M_LIVE = "\n".join(f"live_{i} = {i}" for i in range(90))
+M_BASE = f"{M_LIVE}\n\n{DEAD_BLOCK}\n\ntail = 2\n"
+M_CUR = f"{M_LIVE}\n\ntail = 2\n"                      # pure deletion side
+M_REP = (f"{M_LIVE}\n\n{DEAD_BLOCK}\n\nnew_rewrite_1 = 1\n"
+         f"new_rewrite_2 = 2\n\ntail = 3\n")           # rewrite + kept block
+
+
+def _mirror_repo(repo: Path) -> None:
+    git(repo, "init", "-q", "-b", "main")
+    build_multistep_rebase(
+        repo,
+        base_files={"app.py": M_BASE},
+        feat_commits=[CommitEdit("feat: rewrite + keep", {"app.py": M_REP})],
+        main_commits=[CommitEdit("main: delete dead block",
+                                 {"app.py": M_CUR})],
+        stop_early=True,
+    )
+
+
+def _mirror_unit(repo: Path) -> ConflictUnit:
+    worktree = (repo / "app.py").read_text()
+    return ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="app.py:1:0",
+        unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=M_BASE),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=M_CUR),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=M_REP),
+        original_worktree_text=worktree, marker_span=(2, 4),
+    )
+
+
+def test_prune_repairs_replayed_side_resurrection(tmp_path: Path):
+    """Buffer = replayed verbatim (resurrects current's deletions) → the
+    prune arm returns replayed-minus-deletions: dead block gone, replayed's
+    NEW rewrite lines kept."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _mirror_repo(repo)
+    orch = _orch(repo)
+    unit = _mirror_unit(repo)
+    out = orch._try_deletion_respect_swap(
+        "app.py", "python", [unit], M_REP)  # buffer IS the replayed side
+    assert out is not None
+    text = out[0][1].resolved_text
+    assert "dead_0" not in text and "dead_3" not in text   # deletions honored
+    assert "new_rewrite_1" in text and "new_rewrite_2" in text  # rewrite kept
+    assert out[0][1].model_name == "deletion_respect_prune"
+
+
+def test_no_prune_for_woven_buffer(tmp_path: Path):
+    """A buffer not >=0.90 contained in replayed (a real woven merge) is
+    neither arm's shape → None."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _mirror_repo(repo)
+    orch = _orch(repo)
+    unit = _mirror_unit(repo)
+    woven = f"{M_LIVE}\n\nwoven_new = 42\n\ntail = 3\n"
+    assert orch._try_deletion_respect_swap("app.py", "python", [unit], woven) is None
+
+
+def test_no_prune_when_resurrection_partial(tmp_path: Path):
+    """The dead block only PARTIALLY resurrected → no exact run → decline
+    (the collapse guard's adjudication remains the honest outcome)."""
+    from capybase.merge_intent import find_block_run, detect_resurrection
+    # sanity: partial block (half the lines) is detected as a finding but
+    # not locatable as an exact run
+    partial = "\n".join(DEAD_BLOCK.splitlines()[:2])
+    assert find_block_run(f"x()\n{partial}\ny()\n", DEAD_BLOCK) is None
+    assert find_block_run(f"x()\n{DEAD_BLOCK}\ny()\n", DEAD_BLOCK) == (1, 1 + len(DEAD_BLOCK.splitlines()))
+    # end-to-end: a buffer whose resurrection is partial declines.
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _mirror_repo(repo)
+    orch = _orch(repo)
+    unit = _mirror_unit(repo)
+    half_block = "\n".join(DEAD_BLOCK.splitlines()[:2])
+    buf = f"{M_LIVE}\n\n{half_block}\n\nnew_rewrite_1 = 1\n\ntail = 3\n"
+    assert detect_resurrection(M_BASE, M_CUR, buf) == []
+    assert orch._try_deletion_respect_swap("app.py", "python", [unit], buf) is None
+
+
+def test_collapse_guard_skips_prune_provenance(tmp_path: Path):
+    """A buffer accepted via deletion_respect_prune is one-sided BY
+    CONSTRUCTION with the deletion side honored — the guard must not
+    re-adjudicate it (clickhouse-0013: the 2-1 split would veto the oracle
+    at 0.998)."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _mirror_repo(repo)
+    orch = _orch(repo)
+    unit = _mirror_unit(repo)
+    pruned = M_REP.replace(DEAD_BLOCK + "\n\n", "")
+    accepted = [(unit, type("C", (), {
+        "model_name": "deletion_respect_prune",
+        "flagged_by_preservation_heuristic": False,
+        "resolved_text": pruned})())]
+    # _StepResult shim (same as the guard tests above)
+    class _R:
+        escalated = False
+        reason = ""
+        step_index = 1
+    from capybase.verification import VerificationEngine
+    orch.verification = VerificationEngine.__new__(VerificationEngine)
+    assert orch._check_side_collapse(
+        "app.py", "python", [unit], pruned, _R(), accepted=accepted) is False
+
+
+def test_prune_handles_interleaved_resurrection(tmp_path):
+    """A rewrite that WOVE the deleted block's lines among new content (the
+    real clickhouse-0013 shape: 2 of 6 blocks non-contiguous) — span removal
+    declines per-block, multiset line removal honors the deletion (one
+    occurrence per deleted line), and the compile gate still protects."""
+    from capybase.merge_intent import find_block_run
+    dead_lines = DEAD_BLOCK.splitlines()
+    # The REWRITE itself wove the old block's lines among new additions —
+    # the replayed side IS the interleaving (real 0013 shape: 2 of 6 blocks).
+    woven_rep = (
+        f"{M_LIVE}\n\n"
+        f"{dead_lines[0]}\nnew_a = 1\n"
+        f"{dead_lines[1]}\nnew_b = 2\n"
+        f"{dead_lines[2]}\nnew_c = 3\n"
+        f"{dead_lines[3]}\nnew_d = 4\n"
+        f"{dead_lines[4]}\nnew_e = 5\n"
+        f"{dead_lines[5]}\nnew_f = 6\n"
+        f"{dead_lines[6]}\nnew_g = 7\n"
+        f"{dead_lines[7]}\nnew_h = 8\n"
+        "\ntail = 3\n"
+    )
+    assert find_block_run(woven_rep, DEAD_BLOCK) is None  # not contiguous
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    build_multistep_rebase(
+        repo,
+        base_files={"app.py": M_BASE},
+        feat_commits=[CommitEdit("feat: woven rewrite", {"app.py": woven_rep})],
+        main_commits=[CommitEdit("main: delete dead block",
+                                 {"app.py": M_CUR})],
+        stop_early=True,
+    )
+    worktree = (repo / "app.py").read_text()
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="app.py:1:0",
+        unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=M_BASE),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=M_CUR),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=woven_rep),
+        original_worktree_text=worktree, marker_span=(2, 4),
+    )
+    orch = _orch(repo)
+    # Buffer = the woven replayed side verbatim.
+    out = orch._try_deletion_respect_swap("app.py", "python", [unit], woven_rep)
+    assert out is not None
+    text = out[0][1].resolved_text
+    for dl in dead_lines:
+        assert dl not in text, dl          # every deleted line honored
+    for keep in ("new_a = 1", "new_h = 8", "live_0 = 0", "tail = 3"):
+        assert keep in text                # the rewrite's additions survive

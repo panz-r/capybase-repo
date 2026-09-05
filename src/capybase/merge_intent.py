@@ -314,6 +314,46 @@ def detect_resurrection(
     return findings
 
 
+def find_block_run(result: str, block: str) -> tuple[int, int] | None:
+    """Locate ``block`` as a contiguous run of lines inside ``result``.
+
+    STRICT: every non-blank block line must appear, in order and contiguously,
+    matching by whitespace-normalized equality (blank block lines are
+    skipped over — the run may span blank lines in ``result``). Returns the
+    0-based ``(start, end)`` line range in ``result`` (end exclusive,
+    covering the block INCLUDING any blank lines inside the run), or None
+    when the block is absent or only partially present — partial
+    resurrections must not be pruned by exact-position machinery.
+
+    Used by the deletion-respect PRUNE arm (EXTEND-95): a coverage-1.0
+    resurrected block is pruned precisely, by position; anything less is
+    left to the honest escalations.
+    """
+    def _norm(ln: str) -> str:
+        return "".join(ln.split())
+
+    block_norm = [_norm(l) for l in block.splitlines() if _norm(l)]
+    if not block_norm:
+        return None
+    result_norm = [_norm(l) for l in result.splitlines()]
+    n, m = len(result_norm), len(block_norm)
+    for start in range(n - m + 1):
+        # candidate anchor: block's first line must match here
+        if result_norm[start] != block_norm[0]:
+            continue
+        bi, ri, end = 1, start + 1, start + 1
+        while bi < m and ri < n:
+            if result_norm[ri] == block_norm[bi]:
+                bi += 1
+            elif result_norm[ri]:  # a non-matching non-blank line breaks the run
+                break
+            ri += 1
+            end = ri
+        if bi == m:
+            return (start, end)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Deletion stability (bounded history-walk verification)
 # ---------------------------------------------------------------------------

@@ -16433,7 +16433,11 @@ class Orchestrator:
             step_index=self.step, path=path,
         )
         if containment < 0.90:
-            return None  # a woven merge, not a context resurrection
+            # Not the swap's shape. The MIRROR shape (EXTEND-95): the buffer
+            # is the REPLAYED rewrite that resurrected current's deletions —
+            # prune instead of swap.
+            return self._try_deletion_respect_prune(
+                path, language, units, buffer, findings, sides, base_text)
         try:
             if (language and structural_gate_applies(path)
                     and not _braces_balanced(cur, language)):
@@ -16490,6 +16494,164 @@ class Orchestrator:
         )
         return [(unit, cand)]
 
+    def _deletion_respect_candidate(
+        self, path: str, units: list, base_text: str, cur: str, rep: str,
+        text: str, *, mechanism: str, provenance: str, explanation: str,
+    ):
+        """The whole-file acceptance entry shared by the deletion-respect
+        arms (swap + prune) — same unit shape, same side texts, only the
+        mechanism/provenance/explanation differ."""
+        from capybase.conflict_model import (
+            CandidateResolution as _DRS_CR,
+            ConflictSide as _DRS_CS,
+        )
+        unit = ConflictUnit(
+            session_id=units[0].session_id,
+            step_index=units[0].step_index,
+            path=path,
+            language=units[0].language,
+            unit_id=f"{path}:{mechanism}",
+            unit_kind="whole_file",
+            base=_DRS_CS(label="BASE", text=base_text),
+            current=_DRS_CS(label="CURRENT_UPSTREAM_SIDE", text=cur),
+            replayed=_DRS_CS(label="REPLAYED_COMMIT_SIDE", text=rep),
+            original_worktree_text=units[0].original_worktree_text,
+            marker_span=None,
+        )
+        cand = _DRS_CR(
+            candidate_id=f"{unit.unit_id}:whole",
+            unit_id=unit.unit_id,
+            model_name=mechanism,
+            resolved_text=text,
+            provenance=provenance,
+            prompt_version=f"{mechanism}.v1",
+            explanation=explanation,
+        )
+        return unit, cand
+
+    def _try_deletion_respect_prune(
+        self,
+        path: str,
+        language: str | None,
+        units: list,
+        buffer: str,
+        findings: list,
+        sides: dict[str, str],
+        base_text: str,
+    ) -> list[tuple[ConflictUnit, CandidateResolution]] | None:
+        """EXTEND-95 mirror arm: prune current's deletions from a replayed-
+        side buffer that resurrected them.
+
+        The swap arm handles buffer-toward-CURRENT resurrections (swap to the
+        verified upstream side). This arm handles the mirror: the buffer is
+        the REPLAYED side's rewrite (>= 0.90 of its lines contained in
+        replayed) that brought back blocks CURRENT deleted. Swapping sides
+        would install the pre-rewrite upstream file — wrong; the
+        deletion-respecting action is to PRUNE the resurrected blocks:
+        replayed's rewrite minus current's deletions. clickhouse-0013 (the
+        delete-vs-rewrite shape): that formula reproduces the human oracle
+        at 0.998 token-Jaccard where replayed verbatim scores 0.733 and the
+        un-pruned buffer preserved only 37% of current's lines.
+
+        STRICT by construction: every finding must locate as an exact
+        contiguous run (:func:`merge_intent.find_block_run`) and the runs
+        must not overlap; partial resurrections decline (None) and the
+        side-collapse guard's adjudication remains the honest outcome. The
+        pruned buffer must pass the same whole-file verification as the
+        swap arm's side.
+        """
+        if not units or not buffer:
+            return None
+        rep = sides.get("replayed", "") or ""
+        if not rep.strip():
+            return None
+
+        def _line_set(text: str) -> set[str]:
+            return {"".join(ln.split()) for ln in text.splitlines() if ln.strip()}
+
+        buf_set, rep_set = _line_set(buffer), _line_set(rep)
+        if not buf_set or not rep_set:
+            return None
+        in_rep = len(buf_set & rep_set) / len(buf_set)
+
+        def _decline(why: str, **extra) -> None:
+            self.journal.emit(
+                "deletion_respect_prune",
+                {"declined": why, "buffer_in_replayed": round(in_rep, 4), **extra},
+                step_index=self.step, path=path,
+            )
+
+        if in_rep < 0.90:
+            _decline("woven_merge")
+            return None  # a woven merge, not the replayed side's shape
+        from capybase.merge_intent import find_block_run
+
+        # Prune each resurrected block: prefer removing the block's contiguous
+        # run (find_block_run — blanks inside the run go too); when the rewrite
+        # interleaved the block's lines with new content, fall back to MULTISET
+        # line removal — delete each non-blank block line once, wherever it
+        # occurs. That is exactly the deletion-respecting formula the oracle
+        # follows (replayed minus current's deletions); the compile gate below
+        # rejects any pruned buffer that stops parsing.
+        lines = buffer.splitlines()
+        pruned_by_span = pruned_by_line = 0
+        for f in findings:
+            span = find_block_run(buffer, f.text)
+            if span is not None:
+                del lines[span[0]:span[1]]
+                pruned_by_span += 1
+                continue
+            remaining = ["".join(l.split()) for l in f.text.splitlines()
+                         if l.strip()]
+            out_lines: list[str] = []
+            for ln in lines:
+                if remaining and "".join(ln.split()) == remaining[0]:
+                    remaining.pop(0)  # one occurrence per deleted line
+                    pruned_by_line += 1
+                else:
+                    out_lines.append(ln)
+            lines = out_lines
+        pruned = "\n".join(lines)
+        if not pruned.strip():
+            return None
+        self.journal.emit(
+            "deletion_respect_prune",
+            {"blocks": len(findings),
+             "pruned_lines": sum(f.block_line_count for f in findings),
+             "pruned_by_span": pruned_by_span,
+             "pruned_by_line": pruned_by_line,
+             "buffer_in_replayed": round(in_rep, 4)},
+            step_index=self.step, path=path,
+        )
+        try:
+            if (language and structural_gate_applies(path)
+                    and not _braces_balanced(pruned, language)):
+                return None
+        except Exception:  # noqa: BLE001
+            return None
+        self._write_worktree_only(path, pruned, accepted=None)
+        val = self.verification.verify_file(
+            path, language, units[0].original_worktree_text or base_text, [],
+            repo_root=str(self.git.repo), whole_text=pruned)
+        if not val.passed:
+            return None
+        _rt = getattr(val, "resolved_text", None)
+        if _rt is not None:
+            pruned = _rt
+            self._write_worktree_only(path, pruned, accepted=None)
+        unit, cand = self._deletion_respect_candidate(
+            path, units, base_text, sides.get("current", "") or "", rep,
+            pruned,
+            mechanism="deletion_respect_prune",
+            provenance="deterministic_deletion_respect_prune",
+            explanation=(f"buffer carried the replayed rewrite but "
+                         f"resurrected {len(findings)} upstream-deleted "
+                         f"block(s) ({sum(f.block_line_count for f in findings)} "
+                         f"lines); pruned them (replayed minus current's "
+                         f"deletions) and verified whole-file"),
+        )
+        return [(unit, cand)]
+
     def _check_side_collapse(
         self,
         path: str,
@@ -16521,6 +16683,16 @@ class Orchestrator:
         written); False to continue staging.
         """
         if not getattr(self.config.future, "enable_side_collapse_guard", True):
+            return False
+        # EXTEND-95: a deletion-respect PRUNE buffer is one-sided BY
+        # CONSTRUCTION and honors the dropped side exactly (its deletions
+        # were pruned, verified whole-file) — the guard's premise (a SILENT
+        # drop) doesn't apply. Verified on clickhouse-0013: the pruned
+        # buffer reproduces the human oracle at 0.998 token-Jaccard while
+        # the adjudicator's 2-1 split (confidence 0.64 < 0.70) would veto
+        # exactly the oracle.
+        if any(getattr(c, "model_name", "") == "deletion_respect_prune"
+               for _u, c in (accepted or [])):
             return False
         if not units or not buffer:
             return False
