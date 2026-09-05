@@ -8614,3 +8614,18 @@ two-sided schema rewrites), so the LLM candidate + closure path is
 what must fire. Recorded as the remaining step: verify the closure
 applies to the LLM's one-side candidate in-session (a journal check
 on the next flight), not just offline.
+
+**Flight check (in-session closure wiring)**: the live run splits
+schema.rs into THREE units (1:0 imports/head, 1:1 mid, 1:2 tail).
+Unit 1:2 resolved via source_portfolio (shared_plus_distinct) — zero
+model calls. Units 1:0/1:1 went to the LLM and failed with rust_syntax
+churn (the oscillation guard's stop). No `*_applied` closure events
+appear — closure DECLINES are silent in the journal (only APPLIED is
+emitted), so either the per-unit obligation derivation yielded
+nothing applicable for 1:0/1:1, or the closure declined. The offline
+0.982 proof used the WHOLE-FILE three-way; the in-session per-UNIT
+sides (diff3-refined sub-regions) derive different obligations. Two
+recorded follow-ups: (a) journal closure declines with reasons (same
+skip-is-never-invisible doctrine as the cascade layers); (b) compare
+per-unit vs whole-file obligation derivation for split files — the
+closure may need the file-level view even when units are split.
