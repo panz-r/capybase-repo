@@ -8557,3 +8557,32 @@ the other side's item is top-level, the destination is end-of-file
 (or match a sibling fn's position for anchor quality). That plus the
 existing import union covers 0007's shape entirely. Recorded; not
 implemented this turn.
+
+### S27-EXTEND-84 (2026-09-05) — keyed-item file-level fallback implemented; the 0007 shape closes at 0.98 offline
+
+The EXTEND-83 fix shape, implemented in the keyed-item codec:
+- `_find_destination_container` falls back to END-OF-FILE when the
+  other side's item is top-level (`_is_file_level`: backward brace
+  walk — depth never positive) and no impl/mod/trait header anchors
+  it. Position semantics: EOF is len(cand_lines) — insert AFTER the
+  final line (container destinations insert BEFORE their closing
+  brace; EOF has none — the first cut's len-1 made the collision
+  scan range empty on 1-line candidates, caught by the collision
+  test).
+- Collision scope for file-level destinations: the WHOLE file above
+  the insert point (a same-named top-level item anywhere collides).
+- 3 new tests (EOF insertion, file-level collision declines,
+  impl-anchored items still use the container). Gate 4,272/0.
+
+Offline closure on 0007 (import_union → keyed_item → block_insertion
+over the replayed side): **0.982 vs oracle, 163/163 lines** (from
+0.854). Note: the offline replay must relax `exclusive` on the whole-
+file fn obligation — the LIVE orchestrator derives per-unit
+obligations itself and may classify differently.
+
+Live rerun: still ESCALATE 0.91 (rust_syntax oscillation) — the live
+unit's obligation classification does not route the fn through the
+codec (the exclusive flag or the whole-file unit shape gates it
+before closure). The codec fix is correct for its class (offline
+proof + tests); routing the whole-file unit's obligations into the
+closure is the remaining work item, recorded.

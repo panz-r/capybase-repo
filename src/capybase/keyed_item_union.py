@@ -149,6 +149,16 @@ def _item_codec():
             for k in range(container_start, container_close_line):
                 if _item_name(cand[k]) == item_name_str:
                     return None  # genuine collision in the destination
+            # File-level destination (no container header found): the
+            # collision scope is the WHOLE remaining file above the insert
+            # point — a same-named top-level item anywhere is a collision.
+            if container_start == 0 and not any(
+                    kw in cand[k] for k in range(0, container_close_line)
+                    for kw in ("impl ", "mod ", "trait ")
+                    if _is_rust_item(cand[k])):
+                for k in range(0, container_close_line):
+                    if _item_name(cand[k]) == item_name_str:
+                        return None
 
             # Extract the full item subtree from the other side.
             item_subtree = _extract_item_subtree(context, item)
@@ -232,6 +242,19 @@ def propose_keyed_item_union(
         applied_cert=_applied_cert)
 
 
+def _is_file_level(other_lines: list[str], item_line_idx: int) -> bool:
+    """True when the item is TOP-LEVEL in the other side (the file is the
+    module). Walks backward counting braces: any depth-0 closing of an
+    impl/mod/trait block above the item means the item is inside it.
+    """
+    depth = 0
+    for j in range(item_line_idx - 1, -1, -1):
+        depth -= other_lines[j].count("}") - other_lines[j].count("{")
+        if depth > 0:
+            return False  # inside an open block
+    return True
+
+
 def _find_destination_container(
     text: str, item_line: str, other_side_text: str,
 ) -> tuple[int, str] | None:
@@ -274,7 +297,25 @@ def _find_destination_container(
             container_header = stripped
             break
     if container_header is None:
-        return None
+        # FILE-LEVEL item (EXTEND-83): the item sits at top level — the
+        # file itself is the module (schema.rs's free fns, consts). The
+        # destination is the candidate's end-of-file, with the item's own
+        # indentation from the other side preserved. Guarded by the
+        # name-collision check in the codec like any container.
+        if not _is_file_level(other_lines, item_line_idx):
+            return None
+        cand_lines = text.splitlines()
+        if not cand_lines:
+            return None
+        indent = ""
+        m = __import__("re").match(r"^[ \t]*", other_lines[item_line_idx])
+        if m:
+            indent = m.group(0)
+        # EOF destination: AFTER the last line (len, not len-1 — the
+        # insert-before-close semantics of container destinations put
+        # the item before line N; EOF has no closing brace, so the
+        # position is past the final line).
+        return (len(cand_lines), indent)
 
     # Find the same container header in the candidate text.
     cand_lines = text.splitlines()

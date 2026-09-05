@@ -202,3 +202,58 @@ def test_shadow_item_agrees(name, resolved, other, missing):
         assert old.text == new.candidate, (
             f"{name}: texts differ:\n  old: {old.text[:120]}\n"
             f"  new: {(new.candidate or '')[:120]}")
+
+
+class TestFileLevelFallback:
+    """EXTEND-83: file-level items (the file IS the module — schema.rs's
+    free fns) have no impl/mod/trait container to anchor on; the codec
+    now falls back to end-of-file insertion with the item's own
+    indentation, guarded by the same collision check."""
+
+    def test_file_level_fn_inserted_at_eof(self):
+        from capybase.keyed_item_union import propose_keyed_item_union
+        from capybase.change_accounting import BranchObligation, classify_channel
+        ob = BranchObligation(
+            line="pub async fn extra(db: &DbConn) -> Result<ExecResult, DbErr> {",
+            channel=classify_channel(
+                "pub async fn extra(db: &DbConn) -> Result<ExecResult, DbErr> {"),
+            status="MISSING", side="replayed", operation="added",
+            exclusive=False)
+        resolved = "use sea_orm::DbConn;\n\npub async fn existing() {}\n"
+        other = (
+            "use sea_orm::DbConn;\n\npub async fn existing() {}\n\n"
+            "pub async fn extra(db: &DbConn) -> Result<ExecResult, DbErr> {\n"
+            "    Ok(ExecResult {\n"
+            "        rows_affected: 0,\n"
+            "        last_insert_id: None,\n"
+            "    })\n"
+            "}\n")
+        r = propose_keyed_item_union(resolved, [ob], other_side_text=other)
+        assert str(r.status) == "APPLIED"
+        assert "pub async fn extra" in r.text
+        assert r.text.rstrip().endswith("}")
+
+    def test_file_level_collision_still_declines(self):
+        from capybase.keyed_item_union import propose_keyed_item_union
+        from capybase.change_accounting import BranchObligation, classify_channel
+        ob = BranchObligation(
+            line="pub async fn existing() {}",
+            channel=classify_channel("pub async fn existing() {}"),
+            status="MISSING", side="replayed", operation="added",
+            exclusive=False)
+        resolved = "pub async fn existing() {}\n"
+        other = "pub async fn existing() {}\npub async fn existing() {}\n"
+        r = propose_keyed_item_union(resolved, [ob], other_side_text=other)
+        assert str(r.status) != "APPLIED"
+
+    def test_item_inside_impl_uses_container_not_eof(self):
+        # The fallback must NOT hijack container-anchored items.
+        from capybase.keyed_item_union import _find_destination_container
+        other = (
+            "struct S;\n\nimpl S {\n"
+            "    fn a(&self) {}\n"
+            "    fn b(&self) {}\n"
+            "}\n")
+        r = _find_destination_container("impl S {\n    fn a(&self) {}\n}",
+                                        "    fn b(&self) {}", other)
+        assert r is not None and r[1] == "    "
