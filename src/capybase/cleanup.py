@@ -22,7 +22,14 @@ everything else is scaffolding this module removes:
   "clean" real.
 
 Safety:
-- Refuses to run while a rebase/merge/cherry-pick/revert is in progress.
+- An in-progress operation in the MAIN repo: if it is a rebase that
+  capybase's own records attribute to a crashed run (an unfinished
+  session journal + that session's recovery refs + journal activity
+  contemporaneous with the rebase state), clean ABORTS it itself —
+  the operator cannot be expected to resume or even identify a rebase
+  they never started. Otherwise (a rebase with no capybase attribution,
+  or any merge/cherry-pick/revert/bisect) clean refuses: that state
+  may be the user's own resumable work.
 - Only capybase's own namespaces are touched (``delete_ref``'s rail).
 - The MAIN worktree is never removed; a user branch checked out there
   is left alone even if it somehow carries a capybase name.
@@ -31,12 +38,14 @@ Safety:
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from capybase.git_backend import GitBackend
+from capybase.runlock import live_lock
 
 #: The on-disk state root (gitignored: audit bundles, sessions, journals).
 STATE_DIR = ".rebase-agent"
@@ -75,6 +84,9 @@ class CleanReport:
     worktrees: list[str] = field(default_factory=list)
     state_dir_bytes: int = 0
     state_dir_removed: bool = False
+    #: non-empty when clean aborted a crashed capybase in-place rebase
+    #: (the session id whose records attributed it).
+    aborted_session: str = ""
     gc_ran: bool = False
     git_size_before: int = 0
     git_size_after: int = 0
@@ -85,6 +97,12 @@ class CleanReport:
         mode = "DRY-RUN — nothing removed" if self.dry_run else "removed"
         lines = [
             f"capybase clean ({mode})",
+        ]
+        if self.aborted_session:
+            lines.insert(1, f"  aborted crashed rebase (session "
+                            f"{self.aborted_session[:8]}) — restored the "
+                            "pre-rebase HEAD")
+        lines += [
             f"  candidate branches : {len(self.candidate_branches)}",
             f"  dryrun branches    : {len(self.dryrun_branches)}",
             f"  backup branches    : {len(self.backup_branches)}",
@@ -177,25 +195,151 @@ def _owned_worktrees(git: GitBackend, repo: Path) -> list[str]:
     return sorted(owned)
 
 
+#: Session-journal events that close a session. A journal whose LAST
+#: event is neither is a crashed run (the diag flights end mid-stream
+#: exactly like this — e.g. on ``side_collapse_adjudication``).
+_TERMINAL_SESSION_EVENTS = ("session_completed", "escalated")
+
+
+def _unfinished_capybase_session(repo: Path) -> tuple[str, float] | None:
+    """The newest session whose journal has no terminal event (a crash).
+
+    Returns ``(session_id, journal_mtime)`` or None. A clean/escalated
+    session is not a crash candidate — its leftover state is ordinary
+    cleanable scaffolding, not an attribution for an in-progress rebase.
+    """
+    sessions = repo / ".rebase-agent" / "sessions"
+    if not sessions.is_dir():
+        return None
+    best: tuple[str, float] | None = None
+    for d in sessions.iterdir():
+        j = d / "journal.jsonl"
+        if not j.is_file():
+            continue
+        try:
+            lines = j.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        if not lines:
+            continue
+        try:
+            last = json.loads(lines[-1]).get("event_type", "")
+        except json.JSONDecodeError:
+            last = ""
+        if last in _TERMINAL_SESSION_EVENTS:
+            continue
+        mtime = j.stat().st_mtime
+        if best is None or mtime > best[1]:
+            best = (d.name, mtime)
+    return best
+
+
+def _try_abort_capybase_rebase(git: GitBackend, repo: Path) -> str:
+    """Abort a main-repo rebase IF capybase's records attribute it.
+
+    Attribution requires ALL of: an unfinished session journal (a
+    crash), that session's recovery refs, and journal activity
+    contemporaneous with the rebase state (the user's own rebase started
+    after a stale crashed session lingers fails this). Returns the
+    session id, or "" when not attributable — the caller refuses.
+    """
+    unfinished = _unfinished_capybase_session(repo)
+    if unfinished is None:
+        return ""
+    session_id, journal_mtime = unfinished
+    if not git.resolve_ref(f"refs/rebase-agent/{session_id}/start"):
+        return ""
+    # Contemporaneity: the rebase state dir must not predate the journal
+    # by more than the slack window (both are written during the same
+    # run; a user rebase started later leaves the journal far older).
+    rm = repo / ".git" / "rebase-merge"
+    ra = repo / ".git" / "rebase-apply"
+    state_dir = rm if rm.exists() else ra
+    if not state_dir.exists():
+        return ""
+    if journal_mtime < state_dir.stat().st_mtime - 300:
+        return ""
+    r = subprocess.run(
+        ["git", "-C", str(repo), "rebase", "--abort"],
+        capture_output=True, text=True, timeout=120)
+    if r.returncode != 0 or git.operation_in_progress():
+        return ""
+    return session_id
+
+
+#: The git abort command per in-progress operation label. Used ONLY by
+#: the explicit --abort-in-progress escape hatch (the operator asserts
+#: the state is disposable); attribution-based aborts are rebase-only.
+_ABORT_COMMANDS = {
+    "rebase": ["rebase", "--abort"],
+    "merge": ["merge", "--abort"],
+    "cherry-pick": ["cherry-pick", "--abort"],
+    "revert": ["revert", "--abort"],
+    "bisect": ["bisect", "reset"],
+}
+
+
 def clean_capybase_state(
     repo: str | Path, *, dry_run: bool = False,
+    abort_in_progress: bool = False,
 ) -> CleanReport:
     """Remove all unpromoted capybase state; return what happened.
 
     See the module docstring for the inventory and the safety contract.
-    Never raises on missing state (an already-clean repo is a no-op
-    report); git failures propagate as :class:`GitError`.
+    ``abort_in_progress`` is the operator's assertion that an in-progress
+    git operation is disposable residue (un-attributable crash state, or
+    a copied directory whose sentinels came along for the ride) — clean
+    then aborts whatever git reports before cleaning. Never raises on
+    missing state (an already-clean repo is a no-op report); git
+    failures propagate as :class:`GitError`.
     """
     repo = Path(repo).resolve()
     git = GitBackend(repo, check_git=True)
     report = CleanReport(dry_run=dry_run)
 
+    # Liveness first: git's sentinels say an op is unfinished but nothing
+    # about WHO or whether anything is alive to finish it — and neither
+    # do crashed journals. The run lock is the one signal that can't lie
+    # about a LIVE run on THIS directory (a copied dir inherits the
+    # original's lock, but the lock's recorded repo path is not this one).
+    live = live_lock(repo)
+    if live:
+        report.refused = (
+            f"an active capybase run (pid {live['pid']}) holds this repo — "
+            "stop it before cleaning")
+        return report
+
     op = git.operation_in_progress()
     if op:
-        report.refused = (
-            f"a git {op} is in progress — finish or abort it before cleaning "
-            "(clean removes recovery state a resumable op may need)")
-        return report
+        # A crashed IN-PLACE capybase run leaves the main repo mid-rebase
+        # with sentinels the operator cannot reason about — they never
+        # started it and don't know the session. When capybase's own
+        # records attribute the rebase, abort it HERE and keep cleaning.
+        if op == "rebase" and not dry_run:
+            session = _try_abort_capybase_rebase(git, repo)
+            if session:
+                report.aborted_session = session
+                op = None
+        if op and abort_in_progress and not dry_run:
+            cmd = _ABORT_COMMANDS.get(op)
+            if cmd:
+                r = subprocess.run(["git", "-C", str(repo), *cmd],
+                                   capture_output=True, text=True, timeout=120)
+                if r.returncode == 0 and not git.operation_in_progress():
+                    report.aborted_session = (
+                        report.aborted_session or f"--abort-in-progress ({op})")
+                    op = None
+        if op:
+            hint = ("; a rebase capybase's records attribute is aborted "
+                    "automatically; otherwise pass --abort-in-progress to "
+                    "assert the state is disposable"
+                    if op == "rebase" else
+                    "; pass --abort-in-progress to assert the state is "
+                    "disposable")
+            report.refused = (
+                f"a git {op} is in progress — finish or abort it before "
+                f"cleaning{hint}")
+            return report
 
     report.git_size_before = _dir_size(repo / ".git")
 

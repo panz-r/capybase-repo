@@ -269,3 +269,161 @@ def test_crashed_worktree_mid_rebase_is_discarded(tmp_path):
     assert not wt.exists()
     assert not admin.exists()
     assert not _ref_exists(repo, "capybase/candidate/main@t1")
+
+
+class TestCrashedInPlaceRebase:
+    """A crashed --in-place run leaves the MAIN repo mid-rebase with
+    sentinels the operator cannot reason about (they never started it,
+    and don't know the session). When capybase's records attribute the
+    rebase, clean aborts it itself and keeps cleaning."""
+
+    def _crash_in_place(self, repo: Path, session: str = "sess-crash1"):
+        # conflicting branches, then stop the main repo mid-rebase
+        subprocess.run(["git", "checkout", "-q", "-b", "other"], cwd=repo, check=True)
+        (repo / "f.txt").write_text("two\n")
+        subprocess.run(["git", "commit", "-aqm", "c2"], cwd=repo, check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+        (repo / "f.txt").write_text("three\n")
+        subprocess.run(["git", "commit", "-aqm", "c3"], cwd=repo, check=True)
+        r = subprocess.run(["git", "rebase", "other"], cwd=repo,
+                           capture_output=True, text=True)
+        assert r.returncode != 0
+        assert (repo / ".git" / "rebase-merge").exists()
+        # the crashed session: an unfinished journal + recovery refs
+        d = repo / ".rebase-agent" / "sessions" / session
+        d.mkdir(parents=True)
+        (d / "journal.jsonl").write_text(
+            '{"event_type": "session_started"}\n'
+            '{"event_type": "step_started"}\n'
+            '{"event_type": "conflict_detected"}\n')
+        subprocess.run(
+            ["git", "update-ref", f"refs/rebase-agent/{session}/start",
+             subprocess.run(["git", "rev-parse", "main~1"], cwd=repo,
+                            capture_output=True, text=True).stdout.strip()],
+            cwd=repo, check=True)
+
+    def test_attributed_rebase_is_aborted_and_cleaned(self, tmp_path):
+        repo = _repo(tmp_path)
+        self._crash_in_place(repo)
+        pre = subprocess.run(["git", "rev-parse", "main"], cwd=repo,
+                             capture_output=True, text=True).stdout.strip()
+        report = clean_capybase_state(repo)
+        assert not report.refused
+        assert report.aborted_session == "sess-crash1"
+        # the rebase was aborted back to the pre-rebase HEAD
+        now = subprocess.run(["git", "rev-parse", "main"], cwd=repo,
+                             capture_output=True, text=True).stdout.strip()
+        assert now == pre
+        assert GitBackend(repo).operation_in_progress() is None
+        assert not _ref_exists(repo, "refs/rebase-agent/sess-crash1/start")
+        assert not (repo / ".rebase-agent").exists()
+
+    def test_user_owned_rebase_still_refuses(self, tmp_path):
+        repo = _repo(tmp_path)
+        subprocess.run(["git", "checkout", "-q", "-b", "other"], cwd=repo, check=True)
+        (repo / "f.txt").write_text("two\n")
+        subprocess.run(["git", "commit", "-aqm", "c2"], cwd=repo, check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+        (repo / "f.txt").write_text("three\n")
+        subprocess.run(["git", "commit", "-aqm", "c3"], cwd=repo, check=True)
+        subprocess.run(["git", "rebase", "other"], cwd=repo,
+                       capture_output=True, text=True)
+        report = clean_capybase_state(repo)
+        assert report.refused and "in progress" in report.refused
+        assert (repo / ".git" / "rebase-merge").exists()  # untouched
+
+    def test_stale_crashed_session_does_not_capture_a_new_user_rebase(
+            self, tmp_path):
+        # A crashed capybase session lingers (old journal); the user then
+        # starts their OWN rebase. The contemporaneity window must keep
+        # clean from aborting the user's rebase.
+        import os, time
+        repo = _repo(tmp_path)
+        self._crash_in_place(repo)
+        subprocess.run(["git", "rebase", "--abort"], cwd=repo, check=True)
+        # backdate the crashed journal far enough to fail the window
+        j = repo / ".rebase-agent" / "sessions" / "sess-crash1" / "journal.jsonl"
+        old = time.time() - 3600
+        os.utime(j, (old, old))
+        # the user's own rebase now
+        r = subprocess.run(["git", "rebase", "other"], cwd=repo,
+                           capture_output=True, text=True)
+        assert r.returncode != 0
+        report = clean_capybase_state(repo)
+        assert report.refused
+        assert (repo / ".git" / "rebase-merge").exists()  # untouched
+
+
+class TestRunLiveness:
+    """Git's sentinels say an op is unfinished — nothing about WHO or
+    whether anything is alive. The run lock answers liveness; a copied
+    directory inherits the ORIGINAL's lock, which must read as not-ours
+    (the live process belongs to the original path, not the copy)."""
+
+    def _live_child_lock(self, repo: Path, lock_repo: Path):
+        import subprocess as sp, time
+        child = sp.Popen(["sleep", "120"])
+        from capybase.runlock import _start_time, lock_path
+        p = lock_path(repo)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(__import__("json").dumps({
+            "pid": child.pid,
+            "start_time": _start_time(child.pid),
+            "repo": str(lock_repo.resolve()),
+        }))
+        time.sleep(0.05)
+        return child
+
+    def test_live_run_on_this_repo_refuses(self, tmp_path):
+        repo = _repo(tmp_path)
+        child = self._live_child_lock(repo, repo)
+        try:
+            report = clean_capybase_state(repo)
+            assert report.refused and "pid" in report.refused
+        finally:
+            child.kill(); child.wait()
+
+    def test_copied_dir_with_originals_live_lock_is_cleanable(self, tmp_path):
+        # The original run is ALIVE — but on the original path. The copy's
+        # inherited lock records a different repo; clean must proceed.
+        (tmp_path / "original").mkdir()
+        original = _repo(tmp_path / "original")
+        copy = tmp_path / "the-copy"
+        shutil.copytree(original, copy)
+        child = self._live_child_lock(copy, original)  # lock names ORIGINAL
+        try:
+            report = clean_capybase_state(copy)
+            assert not report.refused
+        finally:
+            child.kill(); child.wait()
+
+    def test_stale_lock_dead_pid_is_cleanable(self, tmp_path):
+        repo = _repo(tmp_path)
+        from capybase.runlock import lock_path
+        p = lock_path(repo)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text('{"pid": 999999, "start_time": "1", "repo": "'
+                     + str(repo.resolve()) + '"}')
+        report = clean_capybase_state(repo)
+        assert not report.refused
+
+    def test_unattributable_op_aborts_with_flag_only(self, tmp_path):
+        # An in-progress rebase with NO capybase records: attribution
+        # impossible (the "we probably can't determine" case). Refused
+        # by default; --abort-in-progress is the operator's assertion.
+        repo = _repo(tmp_path)
+        subprocess.run(["git", "checkout", "-q", "-b", "other"], cwd=repo, check=True)
+        (repo / "f.txt").write_text("two\n")
+        subprocess.run(["git", "commit", "-aqm", "c2"], cwd=repo, check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+        (repo / "f.txt").write_text("three\n")
+        subprocess.run(["git", "commit", "-aqm", "c3"], cwd=repo, check=True)
+        subprocess.run(["git", "rebase", "other"], cwd=repo,
+                       capture_output=True, text=True)
+        refused = clean_capybase_state(repo)
+        assert refused.refused and "--abort-in-progress" in refused.refused
+        assert (repo / ".git" / "rebase-merge").exists()
+        done = clean_capybase_state(repo, abort_in_progress=True)
+        assert not done.refused
+        assert "--abort-in-progress" in done.aborted_session
+        assert GitBackend(repo).operation_in_progress() is None

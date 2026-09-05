@@ -197,6 +197,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cl_p.add_argument("--dry-run", action="store_true", dest="dry_run",
                       help="list what would be removed; mutate nothing")
+    cl_p.add_argument(
+        "--abort-in-progress", action="store_true",
+        dest="abort_in_progress",
+        help="assert an in-progress git operation is disposable residue "
+             "(un-attributable crash state, or sentinels inherited by a "
+             "copied directory) and abort it before cleaning")
     cl_p.add_argument("--repo", default=".", help="repository (default: .)")
     rb_p = sub.add_parser(
         "rebase",
@@ -972,6 +978,45 @@ def _run_metrics(config: Config, repo: str, *, out=sys.stdout) -> int:
     return 0
 
 
+def _dispatch_rebase(args, config, orch):
+    """The rebase command's mode dispatch (candidate default,
+    --dry-run rehearsal, --in-place legacy)."""
+    # P2 default flip: the candidate mode is the default (the design's
+    # "never mutate the source branch"); --in-place opts back into the
+    # legacy mutate-and-abort path; --dry-run stays the throwaway
+    # rehearsal; an explicit --candidate is still accepted (no-op
+    # equivalent of the new default).
+    if not getattr(args, "in_place", False) and not (
+            getattr(args, "dry_run", False)):
+        from capybase.candidate_ref import run_candidate_rebase
+        report = run_candidate_rebase(
+            config, repo=args.repo, target=args.target,
+            autostash=args.autostash,
+            reuse=not getattr(args, "fresh", False),
+        )
+        print(report.summary())
+        return 0 if report.would_succeed else 1
+    if getattr(args, "dry_run", False):
+        # Rehearse in a throwaway worktree: never moves the branch pointer.
+        # Uses real LLM calls (the point of a rehearsal); no orchestrator
+        # against the real repo is constructed.
+        from capybase.dryrun import rehearse_rebase
+        report = rehearse_rebase(
+            config, repo=args.repo, target=args.target, autostash=args.autostash,
+        )
+        # History-aware report (#9 step 10) when a plan was active; else the
+        # terse summary (summary_history falls back to summary itself).
+        print(report.summary_history())
+        return 0 if report.would_succeed else 1
+    result = orch.rebase(
+        args.target,
+        autostash=args.autostash,
+        abort_on_escalation=args.abort_on_escalation,
+        interactive=args.interactive,
+    )
+    return 1 if result.escalated else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1089,7 +1134,9 @@ def main(argv: list[str] | None = None) -> int:
         from capybase.cleanup import clean_capybase_state
         from capybase.git_backend import GitError
         try:
-            report = clean_capybase_state(args.repo, dry_run=args.dry_run)
+            report = clean_capybase_state(
+                args.repo, dry_run=args.dry_run,
+                abort_in_progress=args.abort_in_progress)
         except GitError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
@@ -1141,47 +1188,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "inspect":
         result = orch.inspect()
         return 1 if result.escalated else 0
-    if args.command == "manual":
-        result = orch.manual()
-        return 1 if result.escalated else 0
-    if args.command == "run":
-        result = orch.run()
-        return 1 if result.escalated else 0
-    if args.command == "rebase":
-        # P2 default flip: the candidate mode is the default (the design's
-        # "never mutate the source branch"); --in-place opts back into the
-        # legacy mutate-and-abort path; --dry-run stays the throwaway
-        # rehearsal; an explicit --candidate is still accepted (no-op
-        # equivalent of the new default).
-        if not getattr(args, "in_place", False) and not (
-                getattr(args, "dry_run", False)):
-            from capybase.candidate_ref import run_candidate_rebase
-            report = run_candidate_rebase(
-                config, repo=args.repo, target=args.target,
-                autostash=args.autostash,
-                reuse=not getattr(args, "fresh", False),
-            )
-            print(report.summary())
-            return 0 if report.would_succeed else 1
-        if getattr(args, "dry_run", False):
-            # Rehearse in a throwaway worktree: never moves the branch pointer.
-            # Uses real LLM calls (the point of a rehearsal); no orchestrator
-            # against the real repo is constructed.
-            from capybase.dryrun import rehearse_rebase
-            report = rehearse_rebase(
-                config, repo=args.repo, target=args.target, autostash=args.autostash,
-            )
-            # History-aware report (#9 step 10) when a plan was active; else the
-            # terse summary (summary_history falls back to summary itself).
-            print(report.summary_history())
-            return 0 if report.would_succeed else 1
-        result = orch.rebase(
-            args.target,
-            autostash=args.autostash,
-            abort_on_escalation=args.abort_on_escalation,
-            interactive=args.interactive,
-        )
-        return 1 if result.escalated else 0
+    from capybase.runlock import run_lock_guard
+    if args.command in ("manual", "run", "rebase"):
+        # The run lock: one live capybase run per repo (clean reads it to
+        # refuse cleaning under an active run; a crash leaves it stale,
+        # which reads as dead).
+        with run_lock_guard(getattr(args, "repo", ".")):
+            if args.command == "manual":
+                result = orch.manual()
+                return 1 if result.escalated else 0
+            if args.command == "run":
+                result = orch.run()
+                return 1 if result.escalated else 0
+            return _dispatch_rebase(args, config, orch)
     parser.error(f"unknown command: {args.command}")
     return 2
 

@@ -8317,3 +8317,33 @@ crashed run whose temporary branch is mid-rebase?
 - Pinned as test_crashed_worktree_mid_rebase_is_discarded (a real
   conflicting inner rebase, live rebase-merge state, main repo idle).
   Gate 4,251/0.
+
+### S27-EXTEND-76 (2026-09-05) — git is not the truth: run-liveness lock + the --abort-in-progress assertion
+
+User direction: don't blindly trust git's in-progress sentinels — they
+say an op is unfinished but nothing about WHO left it or whether
+anything is alive (OOM kill, crash, reboot — or the directory was
+COPIED while the original run continues, sentinels and all).
+
+- **Run liveness lock** (runlock.py): every mutating run records
+  `.rebase-agent/run.lock` = {pid, /proc start time, repo path}.
+  LIVE-for-this-repo requires all three to match — a dead pid, a
+  start-time mismatch (post-reboot pid reuse), or a lock naming a
+  DIFFERENT path (the copy inherits the original's lock; the live
+  process belongs to the original) all read as not-live. Acquired by
+  the CLI around manual/run/rebase (all modes); crash-safe by design
+  (a surviving lock reads dead). clean refuses while a run is live —
+  which also closes a hole the lock surfaced: nothing previously
+  stopped clean from deleting a live run's candidate branch mid-run.
+- **--abort-in-progress**: the un-attributable case (attribution
+  impossible — journal never flushed, .rebase-agent absent) is refused
+  by default with the flag named in the message; the flag is the
+  operator's assertion that the git state is disposable, and clean then
+  aborts it (per-op: rebase/merge/cherry-pick/revert --abort, bisect
+  reset) before cleaning.
+- Tests (4 new, 17 total for clean): live run on this repo refuses; the
+  COPY is cleanable while the original's process is alive (lock names
+  the original path); stale lock (dead pid) cleanable; un-attributable
+  rebase refused by default + aborted with the flag. Gate 4,258/0.
+- CLI refactor: the rebase mode dispatch extracted to
+  _dispatch_rebase(args, config, orch) under the lock guard.
