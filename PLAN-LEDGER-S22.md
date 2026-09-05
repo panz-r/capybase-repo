@@ -8387,3 +8387,20 @@ crashed axum-0002's ORACLE-PERFECT merge on `float("")` — the model
 returned `"confidence": ""`. Hardened via _as_float (junk → 0.0) +
 test. The conversion batch (the 8 non-PASS oracle-fire candidates)
 is in flight; axum-0002 needs a post-batch rerun under the fix.
+
+**Conversion results (the detector-fix batch, 8 oracle-fire
+candidates)**: two clear conversions — **protobuf-0043 PASS 1.00**
+(was ESCALATE; bucket llm_cegis) and **redis-0049 PASS 0.97** (was
+ESCALATE; bucket deterministic). Two near-misses at sim=1.00 whose
+RESOLUTION matched the oracle but a late phase escalated:
+redis-0052 (ESCALATE, deterministic bucket, sub-unit "model produced
+empty resolution") and sqlite-0092 (GATE_UNAVAILABLE, same empty-
+resolution signature) — recorded as follow-up specimens; the merge
+itself is right, something after it fails. Two honest remaining
+escalates: axum-0002 0.86 (oscillation backstop; now crash-free after
+the float("") fix — its pre-fix run died at sim=1.00) and sea-orm-0011
+0.79 (compile-error-driven CEGIS; genuinely hard). Harvest expectation
+moves ≈628 → ≈630/660 raw, with the two sim-1.00 near-misses as
+upside. Note: the four size-guarded cases need
+CAPYBASE_SKIP_SIZE_GUARD=1 (as s26 did) — the first batch silently
+loaded only 2 of 6.
