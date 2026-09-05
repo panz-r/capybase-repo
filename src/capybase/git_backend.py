@@ -328,19 +328,26 @@ class GitBackend:
         return [r for r in out.splitlines() if r.strip()]
 
     def delete_ref(self, ref: str) -> None:
-        """Delete a ref, restricted to the backup namespace as a safety rail.
+        """Delete a ref, restricted to capybase's own namespaces (safety rail).
 
-        Refuses anything outside ``refs/heads/capybase/backup/`` (short or full
-        form) so a stray call can never delete the user's real branches or
-        capybase's recovery refs. Raises :class:`GitError` on a namespace
-        violation.
+        Allows ``refs/heads/capybase/backup/``, ``refs/heads/capybase/candidate/``
+        (candidate-ref mode's retained branches) and ``refs/rebase-agent/``
+        (internal recovery refs — ``capybase clean`` removes those too).
+        Refuses anything else so a stray call can never delete the user's
+        real branches. Raises :class:`GitError` on a namespace violation.
         """
         short = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
         full = ref if ref.startswith("refs/") else f"refs/heads/{short}"
-        if not full.startswith(self.BACKUP_NAMESPACE + "/"):
+        allowed = (
+            self.BACKUP_NAMESPACE + "/",
+            "refs/heads/capybase/candidate/",
+            "refs/rebase-agent/",
+        )
+        if not full.startswith(allowed):
             raise GitError(
-                f"delete_ref refuses to delete {ref!r}: only refs under "
-                f"{self.BACKUP_NAMESPACE}/ may be deleted via this method"
+                f"delete_ref refuses to delete {ref!r}: only capybase's own "
+                "namespaces (capybase/backup, capybase/candidate, "
+                "refs/rebase-agent) may be deleted via this method"
             )
         self._run_ok(["update-ref", "-d", full], what=f"delete ref {full}")
 

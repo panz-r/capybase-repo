@@ -80,7 +80,8 @@ def test_delete_ref_accepts_short_name(repo: Path):
 @pytest.mark.parametrize("bad_ref", [
     "refs/heads/main",          # a real user branch
     "main",                     # short form of a real branch
-    "refs/rebase-agent/x/start",  # capybase's internal audit ref
+    "refs/notes/x",             # an unrelated git namespace
+    "refs/heads/capybase/",     # the namespace PREFIX alone is not a ref
 ])
 def test_delete_ref_refuses_non_backup_namespace(repo: Path, bad_ref: str):
     _repo_with_commit(repo)
@@ -89,3 +90,19 @@ def test_delete_ref_refuses_non_backup_namespace(repo: Path, bad_ref: str):
     git(repo, "branch", "topic")
     with pytest.raises(GitError, match="refuses to delete"):
         g.delete_ref(bad_ref)
+
+
+@pytest.mark.parametrize("good_ref", [
+    "refs/heads/capybase/candidate/main@1",  # retained candidate branch
+    "refs/rebase-agent/x/start",             # internal recovery ref
+])
+def test_delete_ref_allows_capybase_namespaces(repo: Path, good_ref: str):
+    # `capybase clean` widens the rail to capybase's OWN namespaces:
+    # candidate branches and recovery refs are deletable; the user's
+    # branches and every other namespace stay refused (above).
+    _repo_with_commit(repo)
+    g = GitBackend(repo)
+    head = g.head_oid()
+    g.create_ref(good_ref, head)
+    g.delete_ref(good_ref)
+    assert g.resolve_ref(good_ref) is None

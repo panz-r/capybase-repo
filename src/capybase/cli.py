@@ -188,6 +188,16 @@ def build_parser() -> argparse.ArgumentParser:
     pub_p.add_argument("--dry-run", action="store_true", dest="dry_run",
                        help="rehearse the lease push without transferring")
     pub_p.add_argument("--repo", default=".", help="repository (default: .)")
+    cl_p = sub.add_parser(
+        "clean",
+        help="remove ALL unpromoted capybase state, leaving no trace: "
+             "candidate/backup branches, recovery refs, linked worktrees, "
+             ".rebase-agent/ — then reflog-expire + gc --prune=now so the "
+             "object store does not keep the deleted branches' commits",
+    )
+    cl_p.add_argument("--dry-run", action="store_true", dest="dry_run",
+                      help="list what would be removed; mutate nothing")
+    cl_p.add_argument("--repo", default=".", help="repository (default: .)")
     rb_p = sub.add_parser(
         "rebase",
         help="own the entire rebase: start it, resolve conflicts, finish",
@@ -1072,6 +1082,19 @@ def main(argv: list[str] | None = None) -> int:
             approve=args.approve, dry_run=args.dry_run)
         print(result.summary())
         return 0 if result.published else 1
+    if args.command == "clean":
+        # Pure git/filesystem operations over capybase's own namespaces —
+        # no resolution, no LLM (same doctrine as promote/publish: the
+        # calibration gate does not apply).
+        from capybase.cleanup import clean_capybase_state
+        from capybase.git_backend import GitError
+        try:
+            report = clean_capybase_state(args.repo, dry_run=args.dry_run)
+        except GitError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(report.summary())
+        return 1 if report.refused else 0
 
     # A calibration profile is REQUIRED for resolution runs — there is no
     # default and no ambient fallback. The provider mechanism is the

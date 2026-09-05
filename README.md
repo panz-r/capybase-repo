@@ -166,20 +166,27 @@ and your branch was never touched — no abort-and-restore dance to get wrong.
   nothing ever publishes on its own.
 
 **Discarding a rebase (not promoting).** Your branch was never touched, so
-there is nothing to roll back — only the retained artifacts to delete:
+there is nothing to roll back — run:
 
 ```bash
-git branch --list 'capybase/candidate/*'   # what's retained
-git branch -D capybase/candidate/<branch>@<ts>
-rm -rf .rebase-agent/candidates/<id>       # audit bundle + session_state.json
-git worktree prune                         # belt-and-braces; worktrees auto-remove
+capybase clean          # --dry-run lists what would go, mutates nothing
 ```
+
+This removes ALL unpromoted capybase state, leaving no trace: candidate and
+backup branches, internal recovery refs, linked worktrees, and the
+`.rebase-agent/` directory (audit bundles, sessions, prompts, snapshots) —
+then expires unreachable reflog entries and runs `git gc --prune=now`, so
+the object store does not keep the deleted branches' commits and the
+repository does not grow. It refuses to run mid-rebase/merge (that state
+may be needed to resume) and touches only capybase's own namespaces —
+your branches, reflogs, and history are never modified. Promoted work is
+ordinary commits on your branch; an already-clean repo is a no-op.
 
 An escalated run has already cleaned up after itself (candidate branch and
 worktree deleted — nothing to promote, nothing retained). After `promote`,
 the candidate branch is deleted too unless `--keep-ref`; the audit bundle
-remains as the record of what landed. `.rebase-agent/` holds prompts and
-file snapshots — remove it entirely when you want it gone.
+remains as the record of what landed — `capybase clean` removes it when
+you no longer want the record.
 
 **Acceptance is a policy, not a feeling.** A check that could not run is
 recorded as UNKNOWN, never as a pass (missing toolchains lower trust —

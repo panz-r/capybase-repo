@@ -8231,3 +8231,35 @@ combination_resolved journal payload now carries mode + candidate_lines.
 Also: AGENTS.md gains the /tmp scratch-hygiene section (≥10G headroom
 before live runs; clean your own scratch; the clickhouse failure mode
 reads like a verdict but is infrastructure).
+
+### S27-EXTEND-73 (2026-09-05) — `capybase clean`: the no-trace discard
+
+User-directed: a command that fully and safely removes all unpromoted
+rebase state, leaving no trace, with the repository size NOT growing.
+
+- **cleanup.py**: the full inventory — candidate branches
+  (refs/heads/capybase/candidate/*), backup branches (capybase/backup/*),
+  internal recovery refs (refs/rebase-agent/<session>/*), linked
+  worktrees on capybase branches (+ stale registrations via worktree
+  prune), and .rebase-agent/ (audit bundles, sessions, journals,
+  prompts, snapshots). The size guarantee needs more than ref deletion:
+  deleted branches' commits stay alive via HEAD's reflog —
+  `reflog expire --expire-unreachable=now --all` (reachable entries
+  survive; user reflog history untouched) then `gc --prune=now`. The
+  report measures the object store before/after and flags a grow.
+- **Safety**: refuses mid-rebase/merge (resume state), main worktree
+  never removed, delete_ref's rail widened ONLY to capybase's own three
+  namespaces (test_backup pins both sides — user refs still refused,
+  candidate/recovery refs now allowed for clean).
+- **CLI**: `capybase clean [--dry-run] [--repo]`, dispatched with
+  promote/publish's doctrine (pure git ops — no calibration gate);
+  non-repo prints a clean error (rc=2).
+- **Tests** (6 hermetic): the no-trace guarantee pinned as "the
+  candidate's COMMITS are pruned, not merely unreachable" (cat-file -e
+  fails after clean; the seed commit is 200K incompressible so the
+  size assertion reflects real reclamation — a micro-repo's gc packing
+  overhead would dominate, caught live), dry-run inert, user branches +
+  reachable reflogs byte-identical, live candidate worktree removed
+  then branch pruned, mid-op refusal, already-clean no-op.
+- README's discard block now leads with the command; the manual git
+  recipe is gone. Gate 4,247/0.
