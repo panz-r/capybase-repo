@@ -8531,3 +8531,29 @@ python_syntax signature on complete responses), majority-of-2 kept
 ESCALATE at sim 0.96. The fix removes the class it targets (pinned by
 test); the case itself remains a genuine hard specimen with PASS
 runs interleaving. Recorded; no further chase.
+
+### S27-EXTEND-83 (2026-09-05) — sea-orm-0007's deterministic path verified offline: the file-level-fn gap
+
+Non-build check of EXTEND-81's parked hypothesis (import-codec
+whole-file mode) against the case data. The oracle is exactly
+replayed + 4 additions: 2 import-line unions, 1 call insertion, 1
+37-line `pub async fn create_active_enum_table` — all four inside the
+deterministic closure's vocabulary. Offline run of the closure on the
+replayed side with real obligations:
+
+- import_union: APPLIED (adds the Alias import line);
+- keyed_item: NOT_APPLICABLE — ROOT CAUSE CONFIRMED:
+  `_find_destination_container` requires an impl/mod/trait header
+  above the item in the other side; schema.rs's fns are FILE-LEVEL
+  (the file IS the module) → no container → decline (verified with a
+  minimal repro);
+- block_insertion: AMBIGUOUS (anchor lines not unique enough);
+- closure result vs oracle: 0.854 (imports only) — the fn block is
+  the whole remaining gap.
+
+Fix shape (small, next sprint item): the keyed-item codec needs a
+FILE-LEVEL fallback — when no impl/mod/trait container is found but
+the other side's item is top-level, the destination is end-of-file
+(or match a sibling fn's position for anchor quality). That plus the
+existing import union covers 0007's shape entirely. Recorded; not
+implemented this turn.
