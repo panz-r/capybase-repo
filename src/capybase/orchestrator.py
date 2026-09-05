@@ -13350,6 +13350,20 @@ class Orchestrator:
                 if needs_other:
                     call_kwargs["other_side_text"] = _other
                 r = propose_fn(edited_text, _remaining, **call_kwargs)
+                if r.status != _APPLIED:
+                    # Skip-is-never-invisible (the cascade layers' doctrine):
+                    # record WHY each primitive declined so split-file units
+                    # debug without guessing (0007's flight showed silent
+                    # declines hiding whether per-unit derivation even
+                    # produced applicable obligations).
+                    self.journal.emit(
+                        "closure_declined",
+                        {"primitive": name,
+                         "reason": (r.certificate or {}).get("reason", ""),
+                         "n_remaining": len(_remaining)},
+                        step_index=self.step, path=unit.path,
+                        unit_id=unit.unit_id,
+                    )
                 if r.status == _APPLIED and r.text != edited_text:
                     certificates.append((name, r.certificate))
                     edited_text = r.text

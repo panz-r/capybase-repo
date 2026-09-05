@@ -8629,3 +8629,19 @@ recorded follow-ups: (a) journal closure declines with reasons (same
 skip-is-never-invisible doctrine as the cascade layers); (b) compare
 per-unit vs whole-file obligation derivation for split files — the
 closure may need the file-level view even when units are split.
+
+**Decline journaling shipped + the decisive finding**: closure_declined
+events (primitive, reason, remaining) now emitted for every non-APPLIED
+primitive — the skip-is-never-invisible doctrine extended to the
+closure. Gate 4,275/0. The instrumented rerun of 0007 shows **zero
+closure events of either kind** — the early `if not obligations`
+return fires before any primitive runs: the PER-UNIT obligation
+derivation (diff3-refined unit sides) yields NOTHING for the split
+sub-units, while the offline 0.982 proof used the WHOLE-FILE three-way.
+That is the precise remaining gap, now measured: split files derive
+closure obligations per-unit; the file-level additions live across
+unit boundaries. Fix direction recorded (not built this sprint):
+derive the closure's obligations from the file-level three-way when a
+file has multiple units, then attribute claims per-unit. This also
+explains why unit 1:2 (self-contained tail) resolved via
+source_portfolio while 1:0/1:1 (cross-boundary additions) could not.
