@@ -185,10 +185,19 @@ pre-capybase size.
 It is crash- and reboot-safe: worktrees are recognized as capybase's from
 any surviving signal (branch name, worktree path, or git's admin entry) —
 a crashed run whose teardown never executed, or a reboot that wiped the
-temp worktree, is cleaned completely. It refuses to run mid-rebase/merge
-(that state may be needed to resume) and touches only capybase's own
-namespaces — your branches, reflogs, and history are never modified. An
-already-clean repo is a no-op; preview with `--dry-run`.
+temp worktree, is cleaned completely. Git's in-progress markers are
+handled without trusting them as truth: a crashed in-place run's rebase
+that capybase's records attribute is aborted automatically (you never
+started it); an un-attributable in-progress operation is refused by
+default, and `--abort-in-progress` is your assertion that the state is
+disposable residue (crash before records flushed, or markers inherited
+by a copied directory). An ACTIVE run is never touched: a liveness lock
+(pid + process start time + the repo path it runs in) detects it — a
+copied directory inherits the original's lock, but the lock names the
+original path, so the copy cleans while the original runs. Clean touches
+only capybase's own namespaces — your branches, reflogs, and history are
+never modified. An already-clean repo is a no-op; preview with
+`--dry-run`.
 
 An escalated run has already cleaned up after itself (candidate branch and
 worktree deleted — nothing to promote, nothing retained). After `promote`,
