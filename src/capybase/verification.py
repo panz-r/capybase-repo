@@ -7111,13 +7111,13 @@ def _blank_markers(text: str, language: str | None = None) -> str:
     - Keeping the **first** side's body lines as-is (live code).
     - **Commenting out** the second side's body lines (so they don't produce
       duplicate definitions / consecutive-expression errors).
-    - Replacing marker lines (``<<<<<<<``, ``=======``, ``>>>>>>>``) with
-      comments.
+    - Replacing marker lines (``<<<<<<<``, ``|||||||``, ``=======``,
+      ``>>>>>>>``) with comments.
 
     Line numbers are preserved (each line maps 1:1). The comment syntax is
-    language-appropriate: ``//`` for Rust (a bare ``#`` is an attribute, not a
-    comment, and breaks the Rust parse), ``#`` otherwise. When ``language`` is
-    None, defaults to ``#``.
+    language-appropriate: ``//`` for Rust (a bare ``#`` is an attribute, not
+    a comment, and breaks the Rust parse), ``#`` otherwise. When ``language``
+    is None, defaults to ``#``.
 
     **Why the second side is commented out, not just the markers**: in a
     multi-hunk file, a sibling conflict block's BOTH sides left as live code
@@ -7128,6 +7128,16 @@ def _blank_markers(text: str, language: str | None = None) -> str:
     the file parses. (Previously this function only blanked the marker LINES,
     leaving both bodies as live code — a bug that caused false-positive syntax
     rejections on correct candidates in multi-hunk files.)
+
+    **diff3/zdiff3**: a ``|||||||`` base section is ancestor text — a third
+    copy of the region between the kept first side and the commented second
+    side. The base marker line is commented like the others and the base body
+    joins the second side in being commented out. Before this, a diff3
+    worktree (the live harness materializes asymmetric cases with
+    ``git merge-file --diff3``) leaked the raw ``|||||||`` line into every
+    spliced validation buffer — on zenodo-hdiff-0012, EVERY model candidate
+    on five of six units failed python_syntax with bare ``invalid syntax``
+    and burned the retry budget to a no-progress escalation.
     """
     from capybase.adapters.language import adapter_for
     comment = adapter_for(language).comment_prefix
@@ -7136,6 +7146,12 @@ def _blank_markers(text: str, language: str | None = None) -> str:
     for line in text.split("\n"):
         if line.startswith("<<<<<<<"):
             state = "in_first_side"
+            out.append(f"{comment} conflict-marker")
+            continue
+        if line.startswith("|||||||"):
+            # diff3 base section: comment the marker and everything after it
+            # (base body, then the second side) until the block's `>>>>>>>`.
+            state = "in_second_side"
             out.append(f"{comment} conflict-marker")
             continue
         if line.startswith("======="):

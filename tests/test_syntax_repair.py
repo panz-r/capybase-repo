@@ -291,6 +291,60 @@ def test_python_syntax_multi_unit_safe():
     assert res.passed
 
 
+def test_python_syntax_diff3_sibling_block_safe():
+    """diff3 sibling blocks must not false-fail a valid candidate (EXTEND-90).
+
+    The live harness materializes asymmetric cases (one side >30% larger than
+    base) with ``git merge-file --diff3`` — the worktree conflict blocks carry
+    a ``|||||||`` base section. ``_blank_markers`` only knew the three
+    default-style markers, so the raw ``|||||||`` line leaked into every
+    spliced validation buffer: on zenodo-hdiff-0012 every model candidate on
+    units 1:1–1:5 failed python_syntax with bare ``invalid syntax`` and the
+    case escalated on burned retries. The base marker line must blank like
+    the others and the base body must be commented out.
+    """
+    v = PythonSyntaxValidator()
+    worktree = (
+        "def f():\n<<<<<<<\n    return 1\n=======\n    return 2\n>>>>>>>\n\n"
+        "def g():\n<<<<<<<\n    return 3\n||||||| base\n    return 0\n"
+        "=======\n    return 4\n>>>>>>>\n"
+    )
+    # Unit 1 (span 1-5) resolved; the diff3 sibling block 2 remains raw.
+    unit = _unit(
+        base="def f():\n    return 1\n\ndef g():\n    return 0\n",
+        worktree=worktree, marker_span=(1, 5),
+    )
+    cand = _candidate(resolved="    return 2")
+    res = _verify(v, unit, cand)
+    assert res.passed
+    assert res.features["syntax_passed"] is True
+
+
+def test_blank_markers_diff3_base_section_commented():
+    """_blank_markers on a diff3 block: marker lines become comments, the base
+    body and second side are commented out, the first side stays live, and the
+    line count is preserved 1:1 (line-number mapping is load-bearing for the
+    AST-fingerprint and diagnostic-delta paths)."""
+    from capybase.verification import _blank_markers
+    marked = (
+        "x = 1\n"
+        "<<<<<<< HEAD\ncur()\n||||||| base\nbase()\n=======\nrep()\n"
+        ">>>>>>> feat\ny = 2\n"
+    )
+    out = _blank_markers(marked, "python")
+    lines = out.split("\n")
+    assert len(lines) == len(marked.split("\n"))  # 1:1 line mapping
+    assert lines[1] == "# conflict-marker"          # <<<<<<<
+    assert lines[2] == "cur()"                      # first side live
+    assert lines[3] == "# conflict-marker"          # ||||||| (was: leaked raw)
+    assert lines[4] == "# base()"                   # base body commented
+    assert lines[5] == "# conflict-marker"          # =======
+    assert lines[6] == "# rep()"                    # second side commented
+    assert lines[7] == "# conflict-marker"          # >>>>>>>
+    assert lines[8] == "y = 2"
+    compile(out, "<blanked>", "exec")  # the blanked baseline must parse
+
+
 # ---------------------------------------------------------------------------
 # RustSyntaxValidator
 # ---------------------------------------------------------------------------
