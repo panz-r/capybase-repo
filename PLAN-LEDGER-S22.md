@@ -8294,3 +8294,26 @@ Dry-run covers the preview need, so no interactive confirmation.
 - README: the clean paragraph states the transience contract (unlimited
   runs; only promoted commits persist; a clean between runs keeps the
   repo at pre-capybase size) and the crash/reboot safety.
+
+### S27-EXTEND-75 (2026-09-05) — clean vs mid-rebase: the semantics verified and pinned
+
+User question: how does clean know "mid-rebase", and what about a
+crashed run whose temporary branch is mid-rebase?
+
+- **The check**: operation_in_progress() resolves git's sentinel files
+  (rebase-merge/rebase-apply/MERGE_HEAD/CHERRY_PICK_HEAD/REVERT_HEAD/
+  BISECT_LOG) via `rev-parse --git-path` against the MAIN repo. It
+  guards the MAIN worktree only — a user's own half-finished op, or an
+  in-place capybase run (refuse: that state may be resumable; abort
+  first, then clean removes the backups).
+- **A crashed worktree's rebase state lives in
+  .git/worktrees/<name>/rebase-merge — invisible to that check, BY
+  DESIGN**: an owned worktree (proven by any of the three ownership
+  signals) exists only for a capybase run, so its rebase state is
+  capybase's by construction and DISCARDING it is the point. Clean
+  proceeds, and double-force `worktree remove` clears the live rebase
+  state (verified empirically: worktree gone, admin gone, branch gone,
+  objects pruned; main repo never refused).
+- Pinned as test_crashed_worktree_mid_rebase_is_discarded (a real
+  conflicting inner rebase, live rebase-merge state, main repo idle).
+  Gate 4,251/0.

@@ -229,3 +229,43 @@ class TestCrashRecovery:
         assert not report.refused
         assert not _ref_exists(repo, "capybase/dryrun/sess-42")
         assert not wt.exists()
+
+
+def test_crashed_worktree_mid_rebase_is_discarded(tmp_path):
+    """THE crash scenario: capybase died mid-rebase inside its worktree.
+
+    The rebase state lives in the WORKTREE's git dir
+    (.git/worktrees/<name>/rebase-merge) — invisible to the main repo's
+    operation_in_progress check, so clean does not refuse (correct: an
+    owned worktree's rebase state is capybase's by construction, and
+    discarding it is the point). Double-force removal clears the live
+    rebase state; the branch, admin entries, and objects follow.
+    """
+    repo = _repo(tmp_path)
+    # A conflicting side branch to stop the inner rebase at a conflict.
+    subprocess.run(["git", "checkout", "-q", "-b", "other"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("two\n")
+    subprocess.run(["git", "commit", "-aqm", "c2"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("three\n")
+    subprocess.run(["git", "commit", "-aqm", "c3"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "branch", "capybase/candidate/main@t1", "other"],
+        cwd=repo, check=True)
+    import tempfile
+    wt = Path(tempfile.mkdtemp(prefix="capybase-candidate-"))
+    subprocess.run(
+        ["git", "worktree", "add", str(wt), "capybase/candidate/main@t1"],
+        cwd=repo, check=True)
+    r = subprocess.run(["git", "-C", str(wt), "rebase", "main"],
+                       cwd=repo, capture_output=True, text=True)
+    assert r.returncode != 0  # stopped at the conflict
+    admin = repo / ".git" / "worktrees" / wt.name
+    assert (admin / "rebase-merge").exists()  # mid-rebase, live
+    # The main repo is idle — the crashed state is invisible to it.
+    assert GitBackend(repo).operation_in_progress() is None
+    report = clean_capybase_state(repo)
+    assert not report.refused
+    assert not wt.exists()
+    assert not admin.exists()
+    assert not _ref_exists(repo, "capybase/candidate/main@t1")
