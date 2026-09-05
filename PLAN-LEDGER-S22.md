@@ -8750,3 +8750,28 @@ passes but whose full-tree sandbox gate rejects the oracle count as
 PASS? The doctrine says no (the full gate is the certification
 standard) — recorded as-is for the harvest to measure. No code
 change; no further chase.
+
+### S27-EXTEND-90 (2026-09-05, IN PROGRESS — resumed next session) — zenodo-0012: the newline-seam finding, fix REVERTED for safety
+
+Diagnosis complete: the failing sub-unit candidates' SyntaxError
+traces to a FUSED SEAM — the candidate's last line
+"[images], Images2Neibs)" directly concatenated with the following
+context "    def test_..." on ONE line (reproduced offline: string
+concatenation of the non-newline-terminated candidate against the
+post-span context). A first fix (append a seam-empty-line in
+splice_resolution when resolved text lacks a trailing newline)
+broke 9 existing tests — the line-list splice contract
+("merged" → "h\nmerged\nf\n") is load-bearing — so it was REVERTED;
+the tree is clean at gate 4,277/0.
+
+NEXT SESSION (resume here):
+1. Find WHICH code path actually concatenates strings (the per-unit
+   splice uses line lists; the fusion appeared in the real run —
+   check _resolved_buffer / splice_all_resolutions / the whole-file
+   buffer composer in orchestrator.py for string-concat seams; the
+   0012 flight candidates end without trailing newlines).
+2. Fix THAT path's seam (guard: ensure a "\n" boundary when joining
+   accepted resolutions), keeping splice_resolution's contract.
+3. Rerun zenodo-0012 live (expect the SyntaxError churn to clear;
+   sim already 0.97).
+4. Ledger EXTEND-90 completion + commit.
