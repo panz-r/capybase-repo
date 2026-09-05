@@ -182,11 +182,12 @@ def _parse_diff3(merged: str) -> list[Diff3Block]:
         >>>>>>> file
     """
     blocks: list[Diff3Block] = []
+    from capybase.adapters.parsers import is_marker_line
     lines = merged.split("\n")
     i = 0
     while i < len(lines):
         line = lines[i]
-        if line.startswith("<<<<<<<"):
+        if is_marker_line(line) == "<<<<<<<":
             # Collect until >>>>>>>
             ours_buf: list[str] = []
             base_buf: list[str] = []
@@ -195,11 +196,12 @@ def _parse_diff3(merged: str) -> list[Diff3Block]:
             section = "ours"
             while i < len(lines):
                 l = lines[i]
-                if l.startswith("|||||||"):
+                _mk = is_marker_line(l)
+                if _mk == "|||||||":
                     section = "base"
-                elif l.startswith("======="):
+                elif _mk == "=======":
                     section = "theirs"
-                elif l.startswith(">>>>>>>"):
+                elif _mk == ">>>>>>>":
                     i += 1
                     break
                 else:

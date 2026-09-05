@@ -2071,13 +2071,11 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
         # firing at depth > 0 would close the enclosing unit mid-body, truncating
         # its span/body to a fragment.
         if brace_depth == 0 and (i == line_start or (i > line_start and src[line_start:i].strip() == "")):
-            line_head = src[line_start : line_start + 7]
-            if (
-                line_head.startswith("<<<<<<<")
-                or line_head.startswith("|||||||")  # diff3 base (EXTEND-90 family)
-                or line_head.startswith("=======")
-                or line_head.startswith(">>>>>>>")
-            ):
+            # Canonical marker classification (parsers.is_marker_line via
+            # _is_conflict_marker_line): every marker is exactly 7 chars, so
+            # the 7-char line head either IS one of the four markers or the
+            # line isn't a marker.
+            if _is_conflict_marker_line(src[line_start : line_start + 7]):
                 # Close all open units.
                 while stack:
                     _close_a_unit(stack.pop(), brace_depth + 1, src, units, stack, language, _line_index)

@@ -1620,59 +1620,55 @@ def _side_preservation(base_text: str, side_text: str, output_text: str) -> floa
     return n_ok / n_tot if n_tot else None
 
 
+def _marker_section_states(marker_text: str):
+    """Yield ``(line, state)`` for every line of a conflicted file.
+
+    ``state`` is ``shared`` | ``current`` | ``base`` | ``replayed``. Handles
+    BOTH marker styles: default (``<<<<<<<``/``=======``/``>>>>>>>``) and
+    diff3/zdiff3 (with a ``|||||||`` base section) — ``=======`` transitions
+    to the replayed section from either ``current`` (default style) or
+    ``base`` (diff3). Marker classification is the canonical
+    :func:`capybase.adapters.parsers.is_marker_line` — the single source of
+    marker awareness (the EXTEND-90/93 family existed because scanners
+    hand-rolled it).
+
+    A ``=======``/``|||||||`` line OUTSIDE any block (e.g. a Markdown setext
+    heading underline in shared context) does NOT switch sections — it stays
+    content.
+    """
+    from capybase.adapters.parsers import is_marker_line
+    state = "shared"  # shared | current | base | replayed
+    for ln in marker_text.split("\n"):
+        marker = is_marker_line(ln.strip())
+        if marker == "<<<<<<<":
+            state = "current"
+        elif marker == ">>>>>>>":
+            state = "shared"
+        elif marker == "|||||||" and state == "current":
+            state = "base"
+        elif marker == "=======" and state in ("current", "base"):
+            state = "replayed"
+        else:
+            yield ln, state
+
+
 def _marker_side_text(marker_text: str, side: str) -> str | None:
     """Extract one whole side from a conflicted file: each conflict block
     contributes its CURRENT or REPLAYED body; shared context passes
     through. Returns None on malformed markers."""
-    lines = marker_text.split("\n")
-    out: list[str] = []
-    state = "shared"  # shared | current | replayed | base
-    for ln in lines:
-        s = ln.strip()
-        if s.startswith("<<<<<<<"):
-            state = "current"
-            continue
-        if s.startswith("|||||||"):
-            state = "base"
-            continue
-        if s.startswith("=======") and state == "base":
-            state = "replayed"
-            continue
-        if s.startswith(">>>>>>>"):
-            state = "shared"
-            continue
-        if state == "shared" or state == side:
-            out.append(ln)
-        elif state == "base":
-            continue
-        elif state == ("replayed" if side == "current" else "current"):
-            continue
-    return "\n".join(out)
+    return "\n".join(
+        ln for ln, state in _marker_section_states(marker_text)
+        if state == "shared" or state == side
+    )
 
 
 def _marker_base_text(marker_text: str) -> str:
     """Extract the BASE side from a conflicted file (diff3 markers);
     shared context passes through (best-effort approximation)."""
-    lines = marker_text.split("\n")
-    out: list[str] = []
-    state = "shared"
-    for ln in lines:
-        s = ln.strip()
-        if s.startswith("<<<<<<<"):
-            state = "current"
-            continue
-        if s.startswith("|||||||"):
-            state = "base"
-            continue
-        if s.startswith("=======") and state == "base":
-            state = "replayed"
-            continue
-        if s.startswith(">>>>>>>"):
-            state = "shared"
-            continue
-        if state == "shared" or state == "base":
-            out.append(ln)
-    return "\n".join(out)
+    return "\n".join(
+        ln for ln, state in _marker_section_states(marker_text)
+        if state == "shared" or state == "base"
+    )
 
 
 def _shared_context_duplicate_definitions(
@@ -1734,15 +1730,17 @@ def _shared_context_duplicate_definitions(
     _chr_re = _re.compile(r"'(?:\\.|[^\\'])'")
     _lt_re = _re.compile(r"'(?=\w)")
 
+    from capybase.adapters.parsers import is_marker_line as _marker_kind
     counts: dict[str, int] = {}
     in_conflict = False
     depth = 0
     pp_stack: list[bool] = []  # per enclosing conditional: else-arm seen?
     for line in original.split("\n"):
-        if line.startswith("<<<<<<<"):
+        _mk = _marker_kind(line)
+        if _mk == "<<<<<<<":
             in_conflict = True
             continue
-        if line.startswith(">>>>>>>"):
+        if _mk == ">>>>>>>":
             in_conflict = False
             continue
         stripped = line.strip()
@@ -1770,7 +1768,7 @@ def _shared_context_duplicate_definitions(
         at_top = depth == 0
         in_alt_arm = any(pp_stack)
         depth += bare.count("{") - bare.count("}")
-        if in_conflict or stripped.startswith("=======") or not at_top \
+        if in_conflict or _mk == "=======" or not at_top \
                 or in_alt_arm:
             continue
         for pat in patterns:

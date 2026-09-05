@@ -405,3 +405,47 @@ class TestSplitFileClosureDerivation:
         fn_obs = [o for o in obs if "create_active_enum_table" in (o.line or "")]
         assert len(fn_obs) == 2  # the definition + the call
         assert all(not o.exclusive for o in fn_obs)
+
+
+class TestMarkerSideExtractionStyles:
+    """EXTEND-93: _marker_side_text handled ONLY diff3 blocks — on
+    default-style (no |||||||) blocks the `=======` guard (`state == "base"`)
+    never fired, so the "current" side swallowed the replayed body and the
+    "replayed" side starved to shared-context-only. Symmetric cases' live
+    worktrees are default-style (diff3 reconstruction is asymmetric-only),
+    so every symmetric case hitting the closure/portfolio fallbacks got
+    garbage sides."""
+
+    def test_default_style_sides(self):
+        from capybase.orchestrator import _marker_side_text
+        mo = ("shared()\n"
+              "<<<<<<< A\n"
+              "current_line()\n"
+              "=======\n"
+              "replayed_line()\n"
+              ">>>>>>> B\n"
+              "tail()\n")
+        cur = _marker_side_text(mo, "current")
+        rep = _marker_side_text(mo, "replayed")
+        assert "current_line()" in cur and "replayed_line()" not in cur
+        assert "replayed_line()" in rep and "current_line()" not in rep
+        assert "shared()" in cur and "tail()" in rep
+
+    def test_stray_divider_in_shared_context_stays_content(self):
+        """A `=======` line OUTSIDE any block (e.g. a Markdown setext heading
+        underline in a conflicted CHANGELOG) must NOT switch sections — the
+        old `state == "base"` guard's one virtue, kept by the new machine."""
+        from capybase.orchestrator import _marker_side_text
+        mo = ("Heading\n"
+              "=======\n"
+              "body()\n"
+              "<<<<<<< A\n"
+              "cur()\n"
+              "=======\n"
+              "rep()\n"
+              ">>>>>>> B\n")
+        cur = _marker_side_text(mo, "current")
+        rep = _marker_side_text(mo, "replayed")
+        assert "Heading" in cur and "body()" in cur
+        assert "Heading" in rep and "body()" in rep
+        assert "cur()" in cur and "rep()" not in cur
