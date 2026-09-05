@@ -310,6 +310,65 @@ def _classify_preprocessor(
                 macros.append(name)
 
 
+def _extract_params(all_tokens: list, paren_idx: int) -> str:
+    """Extract parameter text from the raw token stream starting at ``paren_idx``
+    (the position of the opening ``(``).
+
+    The ONE C/C++ parameter extractor (EXTEND-94 clone lift: cpp_skeleton
+    carried a verbatim named copy and this module an inline copy of the same
+    token loop + normalization chain; cpp now imports this).
+    """
+    param_parts: list[str] = []
+    pd = 1
+    pk = paren_idx + 1
+    while pk < len(all_tokens) and pd > 0:
+        pt = all_tokens[pk]
+        if pt.kind == "pp_line":
+            pk += 1
+            continue
+        if pt.text == "(":
+            pd += 1
+            param_parts.append("(")
+        elif pt.text == ")":
+            pd -= 1
+            if pd > 0:
+                param_parts.append(")")
+        else:
+            if param_parts and param_parts[-1] not in ("(", ","):
+                param_parts.append(" ")
+            param_parts.append(pt.text)
+        pk += 1
+    params = "".join(param_parts)
+    params = re.sub(r"\s*([,()])\s*", lambda m: m.group(1), params).strip()
+    params = re.sub(r"\*\s+\*", "**", params)
+    params = re.sub(r"\s*,\s*", ", ", params)
+    params = re.sub(r"\s+", " ", params)
+    return params
+
+
+def _fnptr_typedef_name(all_tokens: list, buf: list) -> str | None:
+    """The ``(*name)`` function-pointer name inside this declaration's token
+    range, or None when the declaration has no function-pointer group.
+
+    Shared by the C and C++ classify buffers (EXTEND-94 clone lift). The
+    isinstance guard tolerates buffer entries that are bare tokens (the C++
+    member scanner's shape) as well as ``(token, raw_index)`` tuples.
+    """
+    if not buf:
+        return None
+    buf_start_idx = buf[0][1] if isinstance(buf[0], tuple) else 0
+    buf_end_idx = buf[-1][1] if isinstance(buf[-1], tuple) else 0
+    for k in range(buf_start_idx, min(buf_end_idx + 1, len(all_tokens) - 3)):
+        if (all_tokens[k].kind == "punct" and all_tokens[k].text == "("
+                and all_tokens[k + 1].kind == "punct"
+                and all_tokens[k + 1].text == "*"
+                and all_tokens[k + 2].kind == "ident"
+                and all_tokens[k + 3].kind == "punct"
+                and all_tokens[k + 3].text == ")"):
+            return all_tokens[k + 2].text
+    return None
+
+
 def _classify_buffer(
     buf: list[tuple[_Token, int]],
     all_tokens: list[_Token],
@@ -336,19 +395,14 @@ def _classify_buffer(
         # The name is inside the (*name) group — it's NOT in the buffer's
         # idents list (the scanner strips tokens inside parens). Scan the raw
         # token stream for the (*ident) pattern within this declaration's range.
-        buf_start_idx = buf[0][1] if buf else 0
-        buf_end_idx = buf[-1][1] if buf else 0
-        for k in range(buf_start_idx, min(buf_end_idx + 1, len(all_tokens) - 3)):
-            if (all_tokens[k].kind == "punct" and all_tokens[k].text == "("
-                    and all_tokens[k + 1].kind == "punct"
-                    and all_tokens[k + 1].text == "*"
-                    and all_tokens[k + 2].kind == "ident"
-                    and all_tokens[k + 3].kind == "punct"
-                    and all_tokens[k + 3].text == ")"):
-                fp_name = all_tokens[k + 2].text
-                if fp_name not in typedefs:
-                    typedefs.append(fp_name)
-                return
+        fp_name = _fnptr_typedef_name(all_tokens, buf)
+        if fp_name is not None:
+            # A function-pointer typedef's alias IS the (*name) — consume the
+            # buffer here (even when already recorded; no simple-typedef fall-
+            # through for a repeat name).
+            if fp_name not in typedefs:
+                typedefs.append(fp_name)
+            return
         # Simple typedef: last identifier before the terminator is the alias.
         name = idents[-1].text if idents[-1].text not in _C_TYPE_KEYWORDS else None
         if name:
@@ -398,34 +452,7 @@ def _classify_buffer(
                 # buf[j] = ( ( token, _ ) ; the stored index is the position
                 # in all_tokens where this ( appears.
                 _, paren_raw_idx = buf[j]
-                param_parts: list[str] = []
-                pd = 1
-                pk = paren_raw_idx + 1
-                while pk < len(all_tokens) and pd > 0:
-                    pt = all_tokens[pk]
-                    if pt.kind == "pp_line":
-                        pk += 1
-                        continue
-                    if pt.text == "(":
-                        pd += 1
-                        param_parts.append("(")
-                    elif pt.text == ")":
-                        pd -= 1
-                        if pd > 0:
-                            param_parts.append(")")
-                    else:
-                        if param_parts and param_parts[-1] not in ("(", ","):
-                            param_parts.append(" ")
-                        param_parts.append(pt.text)
-                    pk += 1
-                params = "".join(param_parts)
-                # Collapse: no space before commas, single space after, and
-                # fold adjacent pointer stars (`* *` -> `**`) since the
-                # inter-token spacer can split a declarator's stars.
-                params = re.sub(r"\s*([,()])\s*", lambda m: m.group(1), params).strip()
-                params = re.sub(r"\*\s+\*", "**", params)
-                params = re.sub(r"\s*,\s*", ", ", params)
-                params = re.sub(r"\s+", " ", params)
+                params = _extract_params(all_tokens, paren_raw_idx)
                 if params:
                     functions.append(f"{name_tok.text}({params})")
                 else:

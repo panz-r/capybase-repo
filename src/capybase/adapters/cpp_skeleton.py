@@ -36,6 +36,8 @@ from capybase.adapters.c_skeleton import (
     _C_CONTROL_KEYWORDS,
     _C_TYPE_KEYWORDS,
     _classify_preprocessor,
+    _extract_params,
+    _fnptr_typedef_name,
     _tokenize,
 )
 
@@ -218,37 +220,6 @@ def _classify_member(
             p_depth += 1
         elif tok.kind == "punct" and tok.text == ")":
             p_depth = max(0, p_depth - 1)
-
-
-def _extract_params(all_tokens: list, paren_idx: int) -> str:
-    """Extract parameter text from the raw token stream starting at ``paren_idx``
-    (the position of the opening ``(``)."""
-    param_parts: list[str] = []
-    pd = 1
-    pk = paren_idx + 1
-    while pk < len(all_tokens) and pd > 0:
-        pt = all_tokens[pk]
-        if pt.kind == "pp_line":
-            pk += 1
-            continue
-        if pt.text == "(":
-            pd += 1
-            param_parts.append("(")
-        elif pt.text == ")":
-            pd -= 1
-            if pd > 0:
-                param_parts.append(")")
-        else:
-            if param_parts and param_parts[-1] not in ("(", ","):
-                param_parts.append(" ")
-            param_parts.append(pt.text)
-        pk += 1
-    params = "".join(param_parts)
-    params = re.sub(r"\s*([,()])\s*", lambda m: m.group(1), params).strip()
-    params = re.sub(r"\*\s+\*", "**", params)
-    params = re.sub(r"\s*,\s*", ", ", params)
-    params = re.sub(r"\s+", " ", params)
-    return params
 
 
 # ---------------------------------------------------------------------------
@@ -550,20 +521,12 @@ def _classify_cpp_buffer(
 
     # typedef (reuse C logic — function-pointer typedefs work the same).
     if idents[0].text == "typedef":
-        # Function-pointer typedef: scan for (*name) pattern.
-        buf_start_idx = buf[0][1] if isinstance(buf[0], tuple) else 0
-        buf_end_idx = buf[-1][1] if isinstance(buf[-1], tuple) else 0
-        for k in range(buf_start_idx, min(buf_end_idx + 1, len(all_tokens) - 3)):
-            if (all_tokens[k].kind == "punct" and all_tokens[k].text == "("
-                    and all_tokens[k + 1].kind == "punct"
-                    and all_tokens[k + 1].text == "*"
-                    and all_tokens[k + 2].kind == "ident"
-                    and all_tokens[k + 3].kind == "punct"
-                    and all_tokens[k + 3].text == ")"):
-                fp_name = all_tokens[k + 2].text
-                if fp_name not in typedefs:
-                    typedefs.append(fp_name)
-                return
+        # Function-pointer typedef: the shared (*name) scan.
+        fp_name = _fnptr_typedef_name(all_tokens, buf)
+        if fp_name is not None:
+            if fp_name not in typedefs:
+                typedefs.append(fp_name)
+            return
         # Simple typedef: last non-keyword identifier.
         name = idents[-1].text if idents[-1].text not in _CPP_TYPE_KEYWORDS else None
         if name:

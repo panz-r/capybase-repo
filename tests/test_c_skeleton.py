@@ -352,3 +352,28 @@ def test_skeleton_absent_for_non_c_languages():
         unit=_FakeUnit(),  # type: ignore[arg-type]
     )
     assert out[-1] == ""
+
+
+def test_fnptr_typedef_name_shared_helper_semantics():
+    """The shared (*name) function-pointer scan (EXTEND-94 clone lift).
+    Pins the subtle consume-on-match semantics: a found name consumes the
+    declaration EVEN when already recorded (no simple-typedef fall-through),
+    and a declaration without a fnptr group returns None (caller falls
+    through to the alias path). Both C and C++ classify buffers route here."""
+    from capybase.adapters.c_skeleton import _fnptr_typedef_name, _tokenize
+
+    toks = _tokenize("typedef int (*cb_t)(int, char **);")
+    # buf shape the classify buffers pass: (token, raw_index) tuples
+    buf = [(t, i) for i, t in enumerate(toks)]
+    assert _fnptr_typedef_name(toks, buf) == "cb_t"
+
+    toks2 = _tokenize("typedef unsigned long size_t;")
+    buf2 = [(t, i) for i, t in enumerate(toks2)]
+    assert _fnptr_typedef_name(toks2, buf2) is None
+
+    # Bare-token buffer entries (no raw indices) can't bound the scan range:
+    # the original inline code's `else 0` collapses the window to a degenerate
+    # range — preserved verbatim by the lift (no crash, no match). Real callers
+    # always pass (token, raw_index) tuples.
+    assert _fnptr_typedef_name(toks, list(toks)) is None
+    assert _fnptr_typedef_name(toks, []) is None
