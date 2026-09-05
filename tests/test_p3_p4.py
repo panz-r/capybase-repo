@@ -322,3 +322,40 @@ class TestPreexistingParseErrorExcuse:
         msg = "syntax check failed:\n/tmp/tmpabc123.c:27:1: error: expected identifier"
         out = _last_error_line(msg)
         assert out == "<file>:27:1: error: expected identifier"
+
+
+class TestRenameExclusiveScoping:
+    """EXTEND-85: the rename-type exclusive rule fired on sibling
+    DEFINITIONS sharing a signature (schema.rs's table fns) and on CALL
+    lines (their ``(db).await?;`` suffix matches every sibling call) —
+    marking genuine additions exclusive and gating them out of the
+    deterministic closure. The rule now skips item definitions and
+    invocation lines."""
+
+    def test_sibling_fns_not_exclusive(self):
+        from capybase.change_accounting import derive_missing_obligations
+        base = "pub async fn create_log_table(db: &DbConn) -> R {\n}\n"
+        cur = (base + "\npub async fn create_active_enum_table"
+               "(db: &DbConn) -> R {\n}\n")
+        rep = base
+        obs = derive_missing_obligations(base, cur, rep, rep)
+        adds = [o for o in obs if "create_active_enum_table" in (o.line or "")]
+        assert adds and all(not o.exclusive for o in adds)
+
+    def test_sibling_calls_not_exclusive(self):
+        from capybase.change_accounting import derive_missing_obligations
+        base = "async fn run(db: &DbConn) {\n    create_log_table(db).await?;\n}\n"
+        cur = (base.replace("}\n", "    create_active_enum_table(db).await?;\n}\n"))
+        rep = base
+        obs = derive_missing_obligations(base, cur, rep, rep)
+        calls = [o for o in obs if "create_active_enum_table(db)" in (o.line or "")]
+        assert calls and all(not o.exclusive for o in calls)
+
+    def test_genuine_rename_still_exclusive(self):
+        from capybase.change_accounting import derive_missing_obligations
+        base = "fn build(self) -> Self { stream }\n"
+        cur = "fn build(self) -> Self { Sse { stream } }\n"
+        rep = "fn build(self) -> Self { Self { stream } }\n"
+        obs = derive_missing_obligations(base, cur, rep, rep)
+        adds = [o for o in obs if o.operation == "added" and "stream" in o.line]
+        assert adds and all(o.exclusive for o in adds)

@@ -8586,3 +8586,31 @@ codec (the exclusive flag or the whole-file unit shape gates it
 before closure). The codec fix is correct for its class (offline
 proof + tests); routing the whole-file unit's obligations into the
 closure is the remaining work item, recorded.
+
+### S27-EXTEND-85 (2026-09-05) — the rename-exclusive rule scoped; 0007's obligations now reach the closure
+
+The EXTEND-84 routing gap root-caused: the rename-type exclusive rule
+(different leading identifiers, same structural suffix ⇒ rename)
+fired on sibling DEFINITIONS sharing a signature (schema.rs's table
+fns all end `(db: &DbConn) -> Result<ExecResult, DbErr> {`) and on
+CALL lines (`(db).await?;` matches every sibling call) — marking
+genuine additions exclusive and gating them out of every closure
+primitive. The rule now skips item-definition heads and invocation
+lines (`_is_item_definition` / `_is_invocation_line`); genuine renames
+(`Self { stream }` vs `Sse { stream }`) still fire.
+
+Offline: the closure on 0007 now reaches **0.982 vs oracle (163/163
+lines) with the UNMODIFIED derivation** — no exclusive relaxation
+needed. 3 new tests pin both directions. Gate 4,275/0.
+
+Live: still ESCALATE 0.91 — but the failure signature CHANGED (now
+`expected item, found '||'` on unit 1:1, an LLM-CEGIS compile churn;
+previously the rust_syntax oscillation on 1:0). The deterministic
+obligations are no longer the blocker; the case's remaining failure
+is the model's candidate quality on the second unit. The closure
+itself is exercised in-session only when a one-side candidate reaches
+validation — the structural resolver declines this file (no rule for
+two-sided schema rewrites), so the LLM candidate + closure path is
+what must fire. Recorded as the remaining step: verify the closure
+applies to the LLM's one-side candidate in-session (a journal check
+on the next flight), not just offline.

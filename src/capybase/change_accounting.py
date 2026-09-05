@@ -181,6 +181,36 @@ def _anchor_of(line: str) -> str:
     return m.group(1) if m else ""
 
 
+_ITEM_DEF_RE = None  # compiled lazily to avoid import cost at module load
+
+
+def _is_item_definition(line: str) -> bool:
+    """True for a Rust/C/Python item DEFINITION head (fn/struct/enum/
+    trait/impl/const/type/class/def). Sibling definitions legitimately
+    share signatures (overload families, generated table fns)."""
+    import re as _re
+    s = (line or "").strip()
+    if not s:
+        return False
+    return bool(_re.match(
+        r"^(?:pub(?:\s*\([^)]*\))?\s+)?(?:pub\s+)?"
+        r"(?:async\s+|unsafe\s+|extern\s+\S+\s+)*"
+        r"(?:fn|struct|enum|trait|impl|mod|const|static|type|macro_rules!)\b",
+        s)
+        or _re.match(r"^\s*(?:async\s+)?def\s+\w+|^\s*class\s+\w+", s))
+
+
+def _is_invocation_line(line: str) -> bool:
+    """True for a CALL/expression line (``foo(db).await?;``) — its
+    trailing suffix matches every sibling call, which says nothing
+    about exclusivity."""
+    s = (line or "").strip()
+    return bool(s) and (
+        s.endswith(";") and "(" in s
+        and not s.startswith(("use ", "pub ", "fn ", "let ", "return ", "#"))
+        and "=" not in s.split("(")[0])
+
+
 def _structural_suffix(line: str) -> str:
     """Everything AFTER the leading identifier in a line — the structural
     'shape' that remains when the name is stripped. Used to detect rename-type
@@ -380,7 +410,15 @@ def derive_missing_obligations(
                 # SAME trailing structure (e.g. ``Self { stream }`` vs
                 # ``Sse { stream }`` — a type rename). When the anchors differ
                 # but the structural suffix matches, it's still exclusive.
-                if not exclusive:
+                # SCOPED per line kind (EXTEND-85): sibling DEFINITIONS sharing
+                # a signature (schema.rs's table fns all end
+                # ``(db: &DbConn) -> Result<ExecResult, DbErr> {``) are a
+                # FAMILY, not renames of one another — and a CALL line's
+                # ``(db).await?;`` suffix matches every sibling call. Only
+                # apply the rename rule when the changed line is NOT an item
+                # definition and NOT a call/await invocation.
+                if not exclusive and not _is_item_definition(changed) \
+                        and not _is_invocation_line(changed):
                     suffix = _structural_suffix(changed)
                     if suffix and len(suffix) >= 4:
                         for res_line in res.splitlines():
