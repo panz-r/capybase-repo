@@ -1607,18 +1607,30 @@ def _side_preservation(base_text: str, side_text: str, output_text: str) -> floa
 def _shared_context_duplicate_definitions(
     original: str, language: str | None,
 ) -> list[str]:
-    """Identical-signature definitions repeated OUTSIDE conflict markers.
+    """Repeated TOP-LEVEL definitions in the marker file's shared context.
 
-    A compilable translation unit cannot define the same signature twice, so
-    duplicates in the marker file's SHARED context prove git's line-aligned
-    merge interleaved the two sides' content outside every marker span —
-    the cross-ordered-blocks pathology (both sides added the same block in
-    a different order). Per-region resolution is structurally insufficient
-    there: the duplicates aren't inside any span it may rewrite.
+    The dup-pathology takeover's trigger: content outside every marker
+    span that no per-region resolution can remove. The premise — "a
+    compilable unit cannot define the same signature twice" — holds ONLY
+    for top-level definitions, so counting is scoped accordingly (three
+    classes of LEGAL textual repeats taught the hard way, each by a
+    corpus oracle the detector wrongly fired on):
+
+    - SCOPED repeats: an identical signature line in different impls /
+      traits / classes (rust ``fn fmt`` in every Debug impl; C++
+      ``parse()`` in every formatter) — skipped by brace-depth tracking
+      (only depth-0 items count), with string/char literals stripped so
+      format braces don't skew the count.
+    - PREPROCESSOR alternatives: ``#else``/``#elif`` arms are
+      mutually-exclusive definitions (redis's two
+      ``setupSigSegvAction`` bodies) — later arms of any enclosing
+      conditional are not counted.
+    - PYTHON: exempt entirely — redefinition is legal Python
+      (shadowing never fails compilation), so the premise itself fails.
 
     Definition lines are matched per language family and keyed by their
-    whitespace-normalized text, so legitimate overloads (different params)
-    don't fire. Returns the duplicated keys (empty list = healthy).
+    whitespace-normalized text, so legitimate overloads (different
+    params) don't fire. Returns the duplicated keys (empty = healthy).
     """
     import re as _re
 
@@ -1630,33 +1642,31 @@ def _shared_context_duplicate_definitions(
             r"(?:const\s*)?(?:noexcept\s*)?\{\s*$")]
         skip_names = {"if", "for", "while", "switch", "catch", "do", "else",
                       "return", "sizeof", "typeof"}
-    elif lang in _lang_any_of("python"):
-        patterns = [
-            _re.compile(r"^\s*def\s+\w+\s*\(.*\)\s*(->\s*[^:]+)?:"),
-            _re.compile(r"^\s*class\s+\w+"),
-        ]
-        skip_names = set()
     elif lang in _lang_any_of("rust"):
         patterns = [
             _re.compile(r"^\s*(?:pub\s+)?(?:\w+\s+)*fn\s+\w+[^{]*\{\s*$"),
             _re.compile(r"^\s*(?:pub\s+)?(?:struct|enum|trait)\s+\w+"),
         ]
         skip_names = set()
+    elif lang in _lang_any_of("python"):
+        # Redefinition is legal Python (shadowing) — the trigger's
+        # premise fails; never fire for python.
+        return []
     else:
         return []
 
+    # Strings, then EXACT char literals ('x' is one char or an escape;
+    # a greedy any-length match lets a lifetime's apostrophe eat text
+    # to the next quote and corrupt the depth count), then remaining
+    # lifetime apostrophes dropped so they can never pair.
+    _str_re = _re.compile(r'r#*"(?:[^"\\]|\\.)*"')
+    _chr_re = _re.compile(r"'(?:\\.|[^\\'])'")
+    _lt_re = _re.compile(r"'(?=\w)")
+
     counts: dict[str, int] = {}
     in_conflict = False
-    # macro_rules! bodies (rust only): the arms of ONE macro legitimately
-    # repeat an identical signature line for different generic targets
-    # (sea-orm's impl_into_active_value defines `fn into_active_value` in
-    # its $ty, Option<$ty>, and Option<Option<$ty>> arms). Lines inside a
-    # macro body are not top-level definitions — skip them (0017: the
-    # detector fired on the pristine CURRENT side AND on the human oracle,
-    # summoning the dup-pathology takeover on a healthy merge).
-    _macro_depth = 0
-    _macro_rules_re = _re.compile(
-        r"^\s*(?:pub\s*\([^)]*\)\s*)?macro_rules!\s*\w+\s*\{")
+    depth = 0
+    pp_stack: list[bool] = []  # per enclosing conditional: else-arm seen?
     for line in original.split("\n"):
         if line.startswith("<<<<<<<"):
             in_conflict = True
@@ -1664,13 +1674,33 @@ def _shared_context_duplicate_definitions(
         if line.startswith(">>>>>>>"):
             in_conflict = False
             continue
-        if _macro_depth > 0:
-            _macro_depth += line.count("{") - line.count("}")
+        stripped = line.strip()
+        # Preprocessor conditionals: track alternative arms; directives
+        # never count as definitions and never carry braces.
+        if stripped.startswith("#"):
+            d = stripped.lstrip("#").strip().split()
+            if not d:
+                continue
+            head = d[0]
+            if head in ("ifdef", "ifndef", "if"):
+                pp_stack.append(False)
+            elif head in ("else", "elif"):
+                if pp_stack:
+                    pp_stack[-1] = True
+            elif head == "endif":
+                if pp_stack:
+                    pp_stack.pop()
             continue
-        if _macro_rules_re.match(line):
-            _macro_depth = line.count("{") - line.count("}") or 1
-            continue
-        if in_conflict or line.startswith("======="):
+        # Depth from the literal-stripped line (the definition line's own
+        # opening brace must not exclude it — count patterns at the depth
+        # BEFORE the line's delta).
+        bare = _lt_re.sub(
+            "", _chr_re.sub("''", _str_re.sub('""', line)))
+        at_top = depth == 0
+        in_alt_arm = any(pp_stack)
+        depth += bare.count("{") - bare.count("}")
+        if in_conflict or stripped.startswith("=======") or not at_top \
+                or in_alt_arm:
             continue
         for pat in patterns:
             if pat.match(line):
@@ -1679,9 +1709,14 @@ def _shared_context_duplicate_definitions(
                     break
                 key = _re.sub(r"\s+", " ", line).strip()
                 counts[key] = counts.get(key, 0) + 1
-                break
+    if depth != 0:
+        # Unbalanced brace count ⇒ the depth tracking itself was fooled
+        # (raw strings, quote-heavy derive code) — the counts are
+        # unreliable, so decline the trigger. Balanced files keep full
+        # detection; the failure direction is under-firing, which only
+        # skips an aggressive whole-file takeover.
+        return []
     return [k for k, n in counts.items() if n > 1]
-
 
 def _whole_side_churn(base_text: str, side_text: str) -> int:
     """Absolute changed-line count of a side vs the base (both directions)."""

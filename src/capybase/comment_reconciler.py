@@ -766,6 +766,14 @@ def render_reconciliation_report(
     return "\n".join(lines)
 
 
+def _as_float(value) -> float:
+    """Tolerant float: model JSON sometimes carries "" or junk."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def parse_comment_plan(raw_response: str) -> CommentPlan | None:
     """Parse the model's response into a CommentPlan, or None on failure.
 
@@ -789,7 +797,7 @@ def parse_comment_plan(raw_response: str) -> CommentPlan | None:
             lineage_id=str(a.get("lineage_id", "")),
             operation=str(a.get("operation", "keep")),
             text=str(a.get("text", "")),
-            confidence=float(a.get("confidence", 0.0)),
+            confidence=_as_float(a.get("confidence", 0.0)),
             derived_from=[str(x) for x in derived_raw],
             reason_code=str(a.get("reason_code", "")),
         ))

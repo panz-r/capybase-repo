@@ -214,3 +214,55 @@ impl_conv!(u32, set);
         for name in ("current", "expected_resolved"):
             assert _shared_context_duplicate_definitions(
                 case[name], "rust") == []
+
+
+class TestDuplicateDetectorScopedRepeats:
+    """The detector's three legal-repeat classes (each found via a corpus
+    oracle it wrongly fired on): scoped signatures, preprocessor
+    alternatives, and python entirely (redefinition is legal shadowing).
+    Plus the balance guard for depth-fooling text."""
+
+    def test_rust_impl_scoped_repeats(self):
+        from capybase.orchestrator import _shared_context_duplicate_definitions
+        impls = ("impl Debug for A {\n    fn fmt(&self) {}\n}\n\n"
+                 "impl Debug for B {\n    fn fmt(&self) {}\n}\n")
+        assert _shared_context_duplicate_definitions(impls, "rust") == []
+
+    def test_c_preprocessor_alternatives(self):
+        from capybase.orchestrator import _shared_context_duplicate_definitions
+        alt = ("#ifdef HAVE_BACKTRACE\nvoid setup(void) {\n}\n"
+               "#else\nvoid setup(void) {\n}\n#endif\n")
+        assert _shared_context_duplicate_definitions(alt, "c") == []
+
+    def test_python_never_fires(self):
+        from capybase.orchestrator import _shared_context_duplicate_definitions
+        shadow = ("def index():\n    pass\n\n\ndef index():\n    pass\n")
+        assert _shared_context_duplicate_definitions(shadow, "python") == []
+
+    def test_unbalanced_text_declines(self):
+        # serde-0001's class: raw strings fool the depth count; an
+        # unbalanced file means the counts are unreliable — decline.
+        from capybase.orchestrator import _shared_context_duplicate_definitions
+        # A MULTI-LINE raw string: the single-line literal stripping
+        # cannot see across the newline, its interior brace shifts the
+        # count, and the EOF balance is non-zero — decline.
+        unbalanced = ('static Q: &str = r#"\n'
+                      "}\n"
+                      '"#;\n'
+                      "fn dup() -> u32 {\n}\n\nfn dup() -> u32 {\n}\n")
+        assert _shared_context_duplicate_definitions(unbalanced, "rust") == []
+
+    def test_corpus_oracles_all_clean(self):
+        import json as _json
+        from pathlib import Path as _P
+        from capybase.orchestrator import _shared_context_duplicate_definitions
+        from capybase.conflict_extractor import detect_language
+        root = _P(__file__).parent.parent / "extracted-testdata" / "realworld"
+        fired = 0
+        for f in sorted(root.glob("*.json")):
+            d = _json.loads(f.read_text())
+            lang = detect_language(d.get("conflict_path") or "")
+            for k in ("current", "replayed", "expected_resolved"):
+                if _shared_context_duplicate_definitions(d[k], lang):
+                    fired += 1
+        assert fired == 0, f"{fired} corpus oracle/side fires remain"

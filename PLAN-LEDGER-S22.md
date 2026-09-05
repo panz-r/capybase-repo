@@ -8347,3 +8347,43 @@ COPIED while the original run continues, sentinels and all).
   rebase refused by default + aborted with the flag. Gate 4,258/0.
 - CLI refactor: the rebase mode dispatch extracted to
   _dispatch_rebase(args, config, orch) under the lock guard.
+
+### S27-EXTEND-77 (2026-09-05) — the dup detector's false-positive classes, fixed corpus-wide
+
+Follow-up to EXTEND-75's macro-arm fix: a full-corpus census (the
+detector run on every case's sides AND oracles, with the production
+path-derived language) found THREE more legal-repeat classes it fired
+on — each proven by an oracle (a compiling, human-written file):
+
+- **Scoped repeats** (rust `fn fmt` in every Debug impl; C++ `parse()`
+  in every formatter; ~29 oracle fires): identical signature text in
+  different impl/trait/class scopes. Fix: brace-depth tracking — only
+  depth-0 items count — with literal stripping (strings, exact char
+  literals, raw strings; lifetime apostrophes dropped — a naive
+  greedy quote match lets `&'a {` eat text to the next quote and
+  corrupt the count).
+- **Preprocessor alternatives** (redis's two `setupSigSegvAction`
+  bodies under `#else`): `#if/#elif/#else` later arms are
+  mutually-exclusive definitions — not counted.
+- **Python, exempt entirely**: redefinition is legal Python (shadowing
+  never fails compilation) — the trigger's premise ("a compilable unit
+  cannot define the same signature twice") is false for the language.
+- **Balance guard**: serde-0001/0003 still fired via multi-line-raw-
+  string depth drift — an unbalanced brace count means the count
+  itself is unreliable, so the trigger declines (failure direction:
+  under-fire, which only skips an aggressive whole-file takeover).
+- Census artifact corrected: the first sweep fired on axum CHANGELOG
+  cases — the corpus tags them language=rust, but production derives
+  language from the path (.md → no detector at all).
+
+After the fix: **zero oracle/side fires corpus-wide**; real duplicates
+still detected (the 0063 cross-ordered shape, top-level dups). Two
+portfolio fixtures updated: the 0063 shape's elided bodies now close
+(balanced, as real text is), and python's expectation flips to no-fire
+(the policy change). Gate 4,264/0 (+ corpus-oracle regression test).
+
+**Also (found by the rerun)**: comment_reconciler.parse_comment_plan
+crashed axum-0002's ORACLE-PERFECT merge on `float("")` — the model
+returned `"confidence": ""`. Hardened via _as_float (junk → 0.0) +
+test. The conversion batch (the 8 non-PASS oracle-fire candidates)
+is in flight; axum-0002 needs a post-batch rerun under the fix.

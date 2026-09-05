@@ -697,3 +697,14 @@ def test_flight_key_changes_with_content_inputs():
     k1 = flight_key("abc", "def", "ghi")
     k2 = flight_key("abc", "def", "XYZ")  # ledger changed
     assert k1 != k2
+
+
+def test_parse_comment_plan_tolerates_empty_confidence():
+    """axum-0002 (EXTEND-77): the model returned "confidence": "" and
+    float("") crashed an oracle-perfect resolution. Junk confidence is
+    0.0, never a crash."""
+    from capybase.comment_reconciler import parse_comment_plan
+    raw = ('{"actions": [{"lineage_id": "L1", "operation": "keep", '
+           '"text": "x", "confidence": "", "reason_code": ""}]}')
+    plan = parse_comment_plan(raw)
+    assert plan is not None and plan.actions[0].confidence == 0.0

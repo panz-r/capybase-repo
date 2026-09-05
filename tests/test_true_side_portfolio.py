@@ -79,8 +79,10 @@ def test_interleaved_shared_context_duplicates_fire():
         "}\n"
         "<<<<<<< A\n"
         "void a() {\n"
+        "}\n"
         "=======\n"
         "void b() {\n"
+        "}\n"
         ">>>>>>> B\n"
         "void helper(int x) {\n"
         "}\n"
@@ -117,8 +119,10 @@ def test_control_flow_not_treated_as_definitions():
 
 
 def test_python_and_rust_families():
+    # Python EXEMPT (EXTEND-77): redefinition is legal Python (shadowing
+    # never fails compilation) — the trigger's premise fails there.
     py = "def f(x):\n    pass\ndef f(x):\n    pass\n"
-    assert len(_shared_context_duplicate_definitions(py, "python")) == 1
+    assert _shared_context_duplicate_definitions(py, "python") == []
     rs = "pub fn a() {\n}\npub fn b() {\n}\npub fn a() {\n}\n"
     assert len(_shared_context_duplicate_definitions(rs, "rust")) == 1
     assert _shared_context_duplicate_definitions("whatever", "brainfuck") == []
