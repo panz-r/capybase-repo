@@ -8728,3 +8728,25 @@ honestly).
 + the two oversized parked ones) — the harvest measures them.
 **Harvest expectation: ≈642/660 raw (97.3%)**, era floor 4, with
 redis-0032 and zenodo-0012 as near-certain upside.
+
+### S27-EXTEND-89 (2026-09-05) — redis-0032 diagnosed: the GATE_UNAVAILABLE is honest, a different family from 0092/0039
+
+Flight diagnosis (the EXTEND-88 near-miss): **the resolver SUCCEEDED**
+— the journal ends `session_completed` with both units validated, the
+file written/staged, the IN-SESSION targeted gate (`make config.o`)
+passing on the resolved tree. The GATE_UNAVAILABLE comes from the
+HARNESS's post-hoc classification: `_c_builds` runs the FULL
+per-dataset build (`make -j4 CC=... redis`), which fails on the
+resolved tree AND (oracle_builds=False) on the oracle text — the
+targeted gate the resolver faced passes everything; the full-tree
+gate rejects the oracle identically. Under the verdict doctrine that
+is exactly the honest GATE_UNAVAILABLE: a sim-0.98 merge the full
+gate cannot certify because the human resolution fails it too.
+
+Distinct from 0092/0039 (resolver escalations fixed by gate changes).
+No mechanism defect. The remaining question is classification
+philosophy, not machinery: should a case whose IN-SESSION gate
+passes but whose full-tree sandbox gate rejects the oracle count as
+PASS? The doctrine says no (the full gate is the certification
+standard) — recorded as-is for the harvest to measure. No code
+change; no further chase.
