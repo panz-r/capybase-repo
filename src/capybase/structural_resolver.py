@@ -425,14 +425,16 @@ def resolve_structurally(unit: ConflictUnit) -> StructuralResolution:
         else (unit.base.text or "")
     )
     if not lint_base.strip():
+        from capybase.adapters.parsers import is_marker_line
         _raw = getattr(unit, "original_worktree_text", "") or ""
         _lines = []
         _in_marker = False
         for _ml in _raw.split("\n"):
-            if _ml.startswith("<<<<<<<"):
+            _marker = is_marker_line(_ml)
+            if _marker == "<<<<<<<":
                 _in_marker = True
                 continue
-            if _ml.startswith(">>>>>>>"):
+            if _marker == ">>>>>>>":
                 _in_marker = False
                 continue
             if _in_marker:

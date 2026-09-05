@@ -1187,6 +1187,41 @@ def _whole_file_side_candidates(
     return out
 
 
+def _reconstruct_sides_from_markers(marker_text: str) -> tuple[str, str]:
+    """Full-file ``(current, replayed)`` sides from a conflicted file.
+
+    Each conflict block contributes its CURRENT or REPLAYED body; shared
+    context outside markers appears in both. diff3 ``|||||||`` base sections
+    belong to NEITHER side — skipping them needs an explicit base state, else
+    the base body pollutes the reconstructed current side (the EXTEND-90 leak
+    family; parsers' docstring records the same corruption for block parsing).
+    """
+    from capybase.adapters.parsers import is_marker_line as _is_mk
+    _cur_lines: list[str] = []
+    _rep_lines: list[str] = []
+    _in_cur = _in_rep = _in_base = False
+    for _ml in marker_text.split("\n"):
+        _mk = _is_mk(_ml)
+        if _mk == "<<<<<<<":
+            _in_cur, _in_rep, _in_base = True, False, False
+        elif _mk == "|||||||":
+            _in_cur, _in_rep, _in_base = False, False, True
+        elif _mk == "=======":
+            _in_cur, _in_rep, _in_base = False, True, False
+        elif _mk == ">>>>>>>":
+            _in_cur = _in_rep = _in_base = False
+        elif _in_base:
+            continue
+        elif _in_cur:
+            _cur_lines.append(_ml)
+        elif _in_rep:
+            _rep_lines.append(_ml)
+        else:
+            _cur_lines.append(_ml)
+            _rep_lines.append(_ml)
+    return "\n".join(_cur_lines), "\n".join(_rep_lines)
+
+
 def _try_whole_file_portfolio(
     units: list,
     accepted: list,
@@ -1240,26 +1275,7 @@ def _try_whole_file_portfolio(
         # Full-file current/replayed: reconstruct from the marker text by
         # replacing each side's marker content with that side (shared context
         # outside markers appears in both).
-        _orig_lines = original.split("\n")
-        _cur_lines: list[str] = []
-        _rep_lines: list[str] = []
-        _in_cur = _in_rep = False
-        for _ml in _orig_lines:
-            if _ml.startswith("<<<<<<<"):
-                _in_cur, _in_rep = True, False
-            elif _ml.startswith("=======") and ">>>>" not in _ml:
-                _in_cur, _in_rep = False, True
-            elif _ml.startswith(">>>>>>>"):
-                _in_cur = _in_rep = False
-            elif _in_cur:
-                _cur_lines.append(_ml)
-            elif _in_rep:
-                _rep_lines.append(_ml)
-            else:
-                _cur_lines.append(_ml)
-                _rep_lines.append(_ml)
-        _cur_full = "\n".join(_cur_lines)
-        _rep_full = "\n".join(_rep_lines)
+        _cur_full, _rep_full = _reconstruct_sides_from_markers(original)
 
     _per_unit_buf = _resolved_buffer(original, accepted)
     # Asymmetric files (one side rewrote wholesale, churn_ratio >= 0.90)

@@ -122,6 +122,24 @@ def test_parse_diff3_span_covers_full_block():
     assert b.span == (1, 7)
 
 
+def test_is_marker_line_public_helper_diff3_aware():
+    """The public marker test knows all four markers (incl. diff3's |||||||)
+    and tolerates labels + CRLF. This is the ONE canonical test non-parser
+    call sites must use — a hand-rolled startswith tuple forgetting |||||||
+    was exactly the EXTEND-90 defect (false syntax failures on every
+    diff3-materialized case)."""
+    from capybase.adapters.parsers import is_marker_line
+    assert is_marker_line("<<<<<<< HEAD") == "<<<<<<<"
+    assert is_marker_line("||||||| merged-base") == "|||||||"
+    assert is_marker_line("||||||| deadbeef dead commit") == "|||||||"
+    assert is_marker_line("=======") == "======="
+    assert is_marker_line(">>>>>>> feat") == ">>>>>>>"
+    assert is_marker_line(">>>>>>> feat\r") == ">>>>>>>"  # CRLF
+    assert is_marker_line("x = 1") is None
+    assert is_marker_line("  <<<<<<< indented") is None  # column-0 only
+    assert is_marker_line("// ====== comment banner") is None
+
+
 def test_parse_multiple_blocks_diff3_and_default_mixed():
     """A file can mix diff3 and default-style blocks; each parses correctly."""
     text = (

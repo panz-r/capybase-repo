@@ -88,13 +88,14 @@ def _fill_skeleton(skeleton: str, fills: list[str]) -> str:
     Everything outside the ``<<<<<<< … >>>>>>>`` regions — the clean merge
     git already produced — passes through untouched.
     """
+    from capybase.adapters.parsers import is_marker_line
     lines = skeleton.split("\n")
     out: list[str] = []
     i = 0
     k = 0
     while i < len(lines):
-        if lines[i].startswith("<<<<<<<") and k < len(fills):
-            while i < len(lines) and not lines[i].startswith(">>>>>>>"):
+        if is_marker_line(lines[i]) == "<<<<<<<" and k < len(fills):
+            while i < len(lines) and is_marker_line(lines[i]) != ">>>>>>>":
                 i += 1
             i += 1  # past >>>>>>>
             out.extend(fills[k].split("\n"))

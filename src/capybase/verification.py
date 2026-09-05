@@ -7140,25 +7140,27 @@ def _blank_markers(text: str, language: str | None = None) -> str:
     and burned the retry budget to a no-progress escalation.
     """
     from capybase.adapters.language import adapter_for
+    from capybase.adapters.parsers import is_marker_line
     comment = adapter_for(language).comment_prefix
     out: list[str] = []
     state = "code"  # code | in_first_side | in_second_side
     for line in text.split("\n"):
-        if line.startswith("<<<<<<<"):
+        marker = is_marker_line(line)
+        if marker == "<<<<<<<":
             state = "in_first_side"
             out.append(f"{comment} conflict-marker")
             continue
-        if line.startswith("|||||||"):
+        if marker == "|||||||":
             # diff3 base section: comment the marker and everything after it
             # (base body, then the second side) until the block's `>>>>>>>`.
             state = "in_second_side"
             out.append(f"{comment} conflict-marker")
             continue
-        if line.startswith("======="):
+        if marker == "=======":
             state = "in_second_side"
             out.append(f"{comment} conflict-marker")
             continue
-        if line.startswith(">>>>>>>"):
+        if marker == ">>>>>>>":
             state = "code"
             out.append(f"{comment} conflict-marker")
             continue

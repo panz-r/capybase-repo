@@ -470,17 +470,17 @@ _B_CONFLICT_MARKERS = ("<", "=", ">")
 
 
 def _is_conflict_marker_line(line: str) -> bool:
-    """True for ``<<<<<<<``/``=======``/``>>>>>>>`` conflict marker lines.
+    """True for conflict marker lines, diff3 ``|||||||`` included.
 
-    These are scope-boundary signals:
-    close any open unit and treat the region as UNKNOWN_BLOCK. Never crash.
+    Leading whitespace is tolerated (markers are scope-boundary signals:
+    close any open unit and treat the region as UNKNOWN_BLOCK; never crash).
+    The diff3 base marker MUST count — in a diff3-materialized worktree the
+    ``|||||||`` section is a third copy of the region and must not parse as
+    code (the EXTEND-90 leak family). The canonical marker set lives in
+    :func:`capybase.adapters.parsers.is_marker_line`.
     """
-    s = line.lstrip()
-    return (
-        s.startswith("<<<<<<<")
-        or s.startswith("=======")
-        or s.startswith(">>>>>>>")
-    )
+    from capybase.adapters.parsers import is_marker_line
+    return is_marker_line(line.lstrip()) is not None
 
 
 #: Brackets whose unclosed state makes a line a continuation of the previous
@@ -2074,6 +2074,7 @@ def parse_family_a(source: str, language: str | None = "rust") -> FileIR:
             line_head = src[line_start : line_start + 7]
             if (
                 line_head.startswith("<<<<<<<")
+                or line_head.startswith("|||||||")  # diff3 base (EXTEND-90 family)
                 or line_head.startswith("=======")
                 or line_head.startswith(">>>>>>>")
             ):

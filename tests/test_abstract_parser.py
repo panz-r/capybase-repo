@@ -5069,3 +5069,47 @@ def test_r46_dup_bodied_2way_rename_both_found():
     assert ("function", "plip") in rename_map, f"bar->plip not paired; got {rename_map}"
     assert rename_map[("function", "qux")] == ("function", "foo")
     assert rename_map[("function", "plip")] == ("function", "bar")
+
+
+def test_conflict_marker_boundary_diff3_base_marker():
+    """diff3's ||||||| base marker is a scope boundary like the other three
+    (EXTEND-90 family). Pre-fix, a diff3 worktree's base section parsed as
+    CODE in both the line-oriented family parser and the char scanner —
+    corrupting unit spans/enclosing-symbol detection on diff3-materialized
+    (asymmetric) cases."""
+    from capybase.adapters.abstract_parser import (
+        _is_conflict_marker_line, parse_family_b,
+    )
+    assert _is_conflict_marker_line("||||||| merged-base") is True
+    assert _is_conflict_marker_line("  ||||||| indented") is True  # lstrip semantics
+    assert _is_conflict_marker_line("<<<<<<< HEAD") is True
+    assert _is_conflict_marker_line(">>>>>>> feat") is True
+    assert _is_conflict_marker_line("int x = 1;") is False
+    assert _is_conflict_marker_line("// ======= banner") is False
+
+    # Behavioral: in a diff3 conflict region the base body must NOT parse as
+    # a live unit (it is the ancestor's copy, superseded by both sides).
+    src = (
+        "def live_before():\n"
+        "    return 1\n"
+        "<<<<<<< HEAD\n"
+        "def merged():\n"
+        "    return 2\n"
+        "||||||| merged-base\n"
+        "def merged():\n"
+        "    return 0\n"
+        "=======\n"
+        "def merged():\n"
+        "    return 3\n"
+        ">>>>>>> feat\n"
+        "def live_after():\n"
+        "    return 4\n"
+    )
+    ir = parse_family_b(src, "python")
+    bodies = " ".join(u.body or "" for u in ir.units)
+    # The marker LINE itself is a hard boundary — it must never appear as
+    # unit content (pre-fix, `||||||| merged-base` parsed as a code line).
+    assert "|||||||" not in bodies
+    # Live code outside the conflict still parses.
+    names = [u.name for u in ir.units]
+    assert "live_before" in names and "live_after" in names

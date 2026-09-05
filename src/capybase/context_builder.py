@@ -536,8 +536,8 @@ def canonicalize_context(text: str, language: str | None = None) -> str:
     trailing whitespace — keeping the model focused on functional code rather
     than docstrings, license headers, or decorative comments. Indentation is
     PRESERVED (it is structurally significant). The conflict-marker lines
-    (``<<<<<<<``, ``=======``, ``>>>>>>>``) are always kept — the model needs
-    to see the exact block boundaries.
+    (``<<<<<<<``, ``|||||||``, ``=======``, ``>>>>>>>``) are always kept — the
+    model needs to see the exact block boundaries.
     """
     if not text:
         return text
@@ -546,13 +546,14 @@ def canonicalize_context(text: str, language: str | None = None) -> str:
     # comment. The blanked version is used ONLY to decide keep/drop; the
     # ORIGINAL line content is preserved in the output.
     from capybase.adapters.structural import _blank_text_strings
+    from capybase.adapters.parsers import is_marker_line
     blanked = _blank_text_strings(text)
     blanked_lines = blanked.split("\n")
     lines: list[str] = []
     for idx, line in enumerate(text.split("\n")):
         stripped = line.lstrip()
         # Never strip conflict-marker lines — the model needs exact boundaries.
-        if stripped.startswith(("<<<<<<<", "=======", ">>>>>>>", "|||||||")):
+        if is_marker_line(stripped) is not None:
             lines.append(line.rstrip())
             continue
         # Drop full comment lines — but check the BLANKED version so a ``#``-led

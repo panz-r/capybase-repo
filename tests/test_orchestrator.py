@@ -2790,3 +2790,35 @@ def test_empty_terminal_recovery_grant_fires_before_escalate(conflicted_repo):
     assert not result.escalated, "the recovery attempt resolves the unit"
     final = (repo / "app.py").read_text()
     assert "howdy" in final
+
+
+def test_reconstruct_sides_diff3_base_not_in_either_side():
+    """_reconstruct_sides_from_markers: a diff3 ||||||| base section belongs
+    to NEITHER reconstructed side. Pre-fix, the base body silently polluted
+    the current side (the EXTEND-90 leak family) — skewing the whole-file
+    portfolio's coverage scoring on diff3-materialized (asymmetric) cases."""
+    from capybase.orchestrator import _reconstruct_sides_from_markers
+    marker_text = (
+        "shared_top()\n"
+        "<<<<<<< HEAD\n"
+        "cur_fn()\n"
+        "||||||| merged-base\n"
+        "base_fn()\n"
+        "=======\n"
+        "rep_fn()\n"
+        ">>>>>>> feat\n"
+        "shared_bottom()\n"
+    )
+    cur, rep = _reconstruct_sides_from_markers(marker_text)
+    assert "cur_fn()" in cur and "rep_fn()" not in cur
+    assert "rep_fn()" in rep and "cur_fn()" not in rep
+    # The base body must appear in NEITHER side (pre-fix: it landed in cur).
+    assert "base_fn()" not in cur
+    assert "base_fn()" not in rep
+    # Shared context passes through into both.
+    assert "shared_top()" in cur and "shared_top()" in rep
+    assert "shared_bottom()" in cur and "shared_bottom()" in rep
+    # Default-style (no diff3) blocks are unchanged.
+    cur2, rep2 = _reconstruct_sides_from_markers(
+        "<<<<<<< HEAD\ncur_fn()\n=======\nrep_fn()\n>>>>>>> feat\n")
+    assert cur2 == "cur_fn()\n" and rep2 == "rep_fn()\n"

@@ -111,6 +111,7 @@ def _localize_base_anchored(
     """
     if not base_text or marker_span is None:
         return None
+    from capybase.adapters.parsers import is_marker_line
     wt_lines = worktree_text.split("\n")
     base_lines = base_text.split("\n")
     start, end = marker_span
@@ -121,7 +122,7 @@ def _localize_base_anchored(
     for i in range(start - 1, max(start - 1 - _ANCHOR_LINES * 2, -1), -1):
         if 0 <= i < len(wt_lines):
             line = wt_lines[i].rstrip()
-            if line and not line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
+            if line and is_marker_line(line) is None:
                 before_anchor.insert(0, line)
             if len(before_anchor) >= _ANCHOR_LINES:
                 break
@@ -130,7 +131,7 @@ def _localize_base_anchored(
     for i in range(end + 1, min(end + 1 + _ANCHOR_LINES * 2, len(wt_lines))):
         if 0 <= i < len(wt_lines):
             line = wt_lines[i].rstrip()
-            if line and not line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
+            if line and is_marker_line(line) is None:
                 after_anchor.append(line)
             if len(after_anchor) >= _ANCHOR_LINES:
                 break

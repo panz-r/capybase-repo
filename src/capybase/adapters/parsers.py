@@ -65,6 +65,21 @@ def _is_marker(line: str) -> str | None:
     return None
 
 
+def is_marker_line(line: str) -> str | None:
+    """The canonical conflict-marker test for non-parser call sites.
+
+    Returns the marker prefix (``"<<<<<<<"``, ``"|||||||"``, ``"======="``,
+    ``">>>>>>>"``) or ``None``. This is the ONE place marker awareness lives;
+    every hand-rolled ``startswith(("<<<<<<<", ...))`` tuple elsewhere was a
+    chance to forget diff3's ``|||||||`` base marker — exactly the EXTEND-90
+    defect (verification's marker blanking missed it, and every candidate on
+    diff3-materialized cases false-failed syntax validation). New marker
+    handling must go through this helper so diff3/zdiff3 awareness stays
+    centralized.
+    """
+    return _is_marker(line)
+
+
 def parse_marker_blocks(text: str) -> list[MarkerBlock]:
     """Parse all conflict-marker blocks in ``text``.
 
