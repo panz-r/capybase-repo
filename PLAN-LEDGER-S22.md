@@ -8483,3 +8483,27 @@ same normalized FIRST error line; the merge introduced nothing):
 **Live: sqlite-0039 GATE_UNAVAILABLE → PASS 1.00.** Tests: lemon-
 template fixture excused; a NEW parse error still fails; _first_error_line
 normalization. Gate 4,268/0. Harvest expectation ≈637/660 raw.
+
+### S27-EXTEND-81 (2026-09-05) — the two remaining near-misses diagnosed (no code change)
+
+- **sea-orm-0007 (0.91, ESCALATE)**: whole-file unit
+  (tests/common/features/schema.rs); the model consistently answers
+  with the 5-line import block instead of the file (the wrong-shape
+  class the whole-file validator exists to catch — it does, and
+  CEGIS burns out). Genuinely hard for the model; the structural
+  cascade's import codec could own this shape (all obligations are
+  use-lines) — candidate for the import codec's whole-file mode,
+  parked as follow-up.
+- **zenodo-hdiff-0079 (0.96, ESCALATE)**: flight diagnosis — the
+  model's attempt1 is a TRANSPARENT reasoning preamble plus a fenced
+  ```python block CUT MID-LINE (481 chars, ends "keep-"); the fence
+  extraction accepts the incomplete block, the splice against the
+  following `)),` context yields "unmatched ')'", python_syntax
+  repeats, oscillation guard escalates. attempts 0 and 2 are complete.
+  Mechanism gap recorded: a fenced block truncated mid-line should
+  classify as truncated/parse_failed (retryable) rather than validate
+  as a syntax-broken merge — same family as the empty-order bug
+  (EXTEND-78): response-shape classification before validation.
+  Small fix, next turn.
+
+Harvest expectation unchanged (≈637/660 raw; both cases upside).
