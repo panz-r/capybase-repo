@@ -165,6 +165,22 @@ and your branch was never touched — no abort-and-restore dance to get wrong.
   moved since the run refuses; never the implicit lease. Purely opt-in:
   nothing ever publishes on its own.
 
+**Discarding a rebase (not promoting).** Your branch was never touched, so
+there is nothing to roll back — only the retained artifacts to delete:
+
+```bash
+git branch --list 'capybase/candidate/*'   # what's retained
+git branch -D capybase/candidate/<branch>@<ts>
+rm -rf .rebase-agent/candidates/<id>       # audit bundle + session_state.json
+git worktree prune                         # belt-and-braces; worktrees auto-remove
+```
+
+An escalated run has already cleaned up after itself (candidate branch and
+worktree deleted — nothing to promote, nothing retained). After `promote`,
+the candidate branch is deleted too unless `--keep-ref`; the audit bundle
+remains as the record of what landed. `.rebase-agent/` holds prompts and
+file snapshots — remove it entirely when you want it gone.
+
 **Acceptance is a policy, not a feeling.** A check that could not run is
 recorded as UNKNOWN, never as a pass (missing toolchains lower trust —
 reports say "NOT CHECKED", risk rises, and the acceptance tier degrades).
