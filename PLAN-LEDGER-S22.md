@@ -8507,3 +8507,27 @@ normalization. Gate 4,268/0. Harvest expectation ≈637/660 raw.
   Small fix, next turn.
 
 Harvest expectation unchanged (≈637/660 raw; both cases upside).
+
+### S27-EXTEND-82 (2026-09-05) — truncated fenced blocks refused at parse (the EXTEND-81 gap)
+
+The zenodo-0079 mechanism gap, fixed: `_iter_fenced_blocks` now yields
+a third element `closed`; an UNTERMINATED fence (response cut before
+the closer) yields its fragment with closed=False, and
+`_extract_markdown_code_block` REFUSES it (None → the JSON-parse
+fallback classifies the response parse_failed/truncated — retryable).
+Previously the half-block flowed through as resolved_text, spliced
+against the following context, and died as "unmatched ')'" — burning
+the retry budget as a syntax failure. Same response-shape-classification
+family as EXTEND-78's empty-order bug.
+
+Tests: the zenodo-0079 truncated shape refused (block + full
+parse_resolution_json), complete/tilde/inner-fence shapes unchanged,
+the iterator's unterminated-tilde expectation updated to the graded
+tuple. Gate 4,269/0.
+
+Live rerun of zenodo-0079: repeat verdicts [ESCALATE, PASS] — the
+truncation class is variance-frequency (this run's failures carried a
+python_syntax signature on complete responses), majority-of-2 kept
+ESCALATE at sim 0.96. The fix removes the class it targets (pinned by
+test); the case itself remains a genuine hard specimen with PASS
+runs interleaving. Recorded; no further chase.

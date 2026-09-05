@@ -63,11 +63,13 @@ def test_iter_fenced_blocks_tilde_and_backtick_do_not_cross_close():
     blocks = list(_iter_fenced_blocks(raw))
     assert len(blocks) == 1, f"tilde inside backtick fence misparsed: {blocks}"
     assert blocks[0][1] == "some ~~~ inside"
-    # Tilde opener, backtick closer must NOT close it (no close → unclosed block).
+    # Tilde opener, backtick closer must NOT close it → the block is
+    # UNTERMINATED: yielded with closed=False (graded-truncation signal,
+    # EXTEND-82), not silently dropped.
     raw2 = "~~~python\ncode\n```"
     blocks2 = list(_iter_fenced_blocks(raw2))
-    # Unclosed (the ``` doesn't close a ~~~ fence) → no complete block yielded.
-    assert blocks2 == [], f"backtick wrongly closed tilde fence: {blocks2}"
+    assert blocks2 == [("python", "code\n```", False)], (
+        f"backtick wrongly closed tilde fence: {blocks2}")
 
 
 def test_markdown_layout_preserves_embedded_quotes_and_newlines():
@@ -235,3 +237,21 @@ def test_r43_first_code_block_preferred_over_last_fragment():
     assert "# Title" in data["resolved_text"], (
         f"returned the trailing fragment instead of the code head: {data['resolved_text']!r}"
     )
+
+
+def test_truncated_code_block_is_refused():
+    """zenodo-0079 (EXTEND-82): a response CUT before the closing fence
+    must NOT yield the half-block as merged code — the fragment spliced
+    against the following context died as "unmatched ')'" and burned the
+    retry budget as a syntax failure. Refused → the JSON-parse fallback
+    classifies the response parse_failed (retryable)."""
+    truncated = (
+        "reasoning preamble\n\n```python\n"
+        "        ('--keep-alive', dict(\n"
+        "            help=\"How often to send a keep-"
+    )
+    assert _extract_markdown_code_block(truncated) is None
+    from capybase.adapters.parsers import parse_resolution_json
+    data, warnings = parse_resolution_json(truncated, layout="markdown_code")
+    assert not data.get("resolved_text")
+    assert any("no fenced code block" in w for w in warnings)

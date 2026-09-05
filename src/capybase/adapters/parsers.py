@@ -557,9 +557,16 @@ def _iter_fenced_blocks(raw: str):
                 buf.append(lines[j])
                 j += 1
             if closed:
-                yield info, "\n".join(buf)
+                yield info, "\n".join(buf), True
                 i = j + 1
                 continue
+            # Unterminated fence: the response was CUT before the closer.
+            # Zenodo-0079 (EXTEND-82): the half-block flowed through as
+            # resolved_text, spliced against the following context, and
+            # died as "unmatched ')'" — burning the retry budget as a
+            # syntax failure instead of retrying a truncated response.
+            # Yield the fragment UNGRADED so extractors can refuse it.
+            yield info, "\n".join(buf), False
             i = j + 1
         else:
             i += 1
@@ -585,11 +592,17 @@ def _extract_markdown_code_block(raw: str) -> str | None:
     the trailing fragment after an inner fence (which silently truncated the
     resolved text).
     """
-    for info, body in _iter_fenced_blocks(raw):
+    for info, body, closed in _iter_fenced_blocks(raw):
         # A ```json fence (or one whose info string starts with json) is the
         # metadata block; everything else is the merged code.
         if info.lower().startswith("json"):
             continue
+        # An UNTERMINATED code fence is a truncated response — refuse it
+        # (None falls back to the JSON parse, which will classify the
+        # response parse_failed/truncated: retryable, never a half-block
+        # merge).
+        if not closed:
+            return None
         return body
     return None
 
@@ -604,7 +617,7 @@ def _parse_markdown_metadata(raw: str) -> dict | None:
     fence) is also accepted so a terse model still parses.
     """
     json_blocks: list[str] = []
-    for info, body in _iter_fenced_blocks(raw):
+    for info, body, _closed in _iter_fenced_blocks(raw):
         if info.lower().startswith("json"):
             json_blocks.append(body)
     candidates: list[str] = []
