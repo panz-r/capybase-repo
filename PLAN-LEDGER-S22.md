@@ -8427,3 +8427,33 @@ The two EXTEND-77 near-misses resolved:
 
 Harvest expectation: ≈631/660 raw (protobuf-0043 + redis-0049 +
 sqlite-0092 conversions this sprint; redis-0052 variance-band upside).
+
+### S27-EXTEND-79 (2026-09-05) — stale-band refresh: 6/12 convert, deterministic bucket dominates
+
+Census: 42 s26 non-PASS cases remained unmeasured under current
+machinery (excl. era-dead, skips, and this sprint's already-refreshed
+cases). Targeted batch of 12 (the fix-class targets: empty, oscillation,
+splice-coherence, python-divergent; sizes 2-34K; repeat 2):
+
+**Converted (6)**: axum-0013 PASS 1.00; **axum-0019 PASS 1.00
+(deterministic)**; **jsonc-0016 PASS 1.00 (deterministic)**;
+**redis-0040 PASS 1.00 (deterministic)**; **sea-orm-0008 PASS 0.95
+(deterministic)**; sqlite-0099 ESCALATE → WORKING 0.77 (deterministic).
+Five of six resolved with ZERO model calls — the accumulated sprint
+mechanism work (dead-rung scope fix, dup-detector classes, era
+configs) converted band members the s26 machinery could not touch.
+
+**Near-misses (3)**: sqlite-0039 GATE_UNAVAILABLE at sim=1.00 — the
+same "merge right, late phase fails" shape as 0092 pre-fix (next
+specimen); sea-orm-0007 ESCALATE 0.91 (schema.rs unit); zenodo-0079
+ESCALATE 0.96 (its empty-class signature persists).
+
+**Band-stable (3)**: flask-0006 DIVERGENT 0.58; sqlite-0109 NEAR 0.87;
+tokio-0046 NEAR 0.88 (this one is the long-standing NEAR band — the
+manifest-switch validation case; band-consistent).
+
+The oversized pair (sqlite-0077/0078) is the known parked class
+(statement-level splitter, sprint-19 D8 — enabling stays off).
+Harvest expectation: ≈636/660 raw (≈96.4%), P+W ≈641/660, era floor 4;
+30 stale cases remain unmeasured (mostly large C — the harvest
+measures them).
