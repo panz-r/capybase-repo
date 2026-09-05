@@ -212,3 +212,43 @@ def test_detect_resurrection_replace_not_treated_as_deletion():
     result = base
     findings = detect_resurrection(base, ours, result, min_block_lines=3)
     assert findings == []
+
+
+def test_side_preservation_semantics():
+    """The ONE preservation judge (EXTEND-94d lift) — the orchestrator's
+    wholesale-winner floor and the eval's WORKING classification both
+    delegate here; its semantics are pinned so the mirror cannot drift."""
+    from capybase.merge_intent import side_preservation
+    base = "a = 1\nb = 2\nc = 3\n"
+    side = "a = 1\nb = 22\nd = 4\n"          # changed b, added d, removed c
+    # output preserves the changed line and the addition, honors the removal
+    assert side_preservation(base, side, "a = 1\nb = 22\nd = 4\n") == 1.0
+    # output reverts b (old b present) but keeps d and the removal. A
+    # CHANGED line counts in BOTH buckets (difflib `replace` routes the new
+    # line to added and the old line to deleted): added={b22,d} (1/2 ok),
+    # deleted={b,c} (1/2 ok) -> 2/4.
+    assert side_preservation(base, side, "a = 1\nb = 2\nd = 4\n") == 0.5
+    # indentation drift doesn't dent membership (whitespace-normalized)
+    assert side_preservation(base, side, "a = 1\n    b = 22\nd = 4\n") == 1.0
+    # an unchanged side has nothing to preserve -> None (WORKING vacuous)
+    assert side_preservation(base, base, "x\n") is None
+    # the deletion side of a delete-vs-rewrite: side deleted c; output kept
+    # everything incl. c -> 0.0 (nothing preserved)
+    assert side_preservation(base, "a = 1\nb = 2\n", "a = 1\nb = 2\nc = 3\n") == 0.0
+
+
+def test_side_preservation_orchestrator_and_eval_delegates_agree():
+    """The consistency contract: the orchestrator floor's helper and the
+    harness judge are the SAME function now — pin that both entry points
+    route to merge_intent.side_preservation (guards a future re-split)."""
+    from capybase.merge_intent import side_preservation
+    from capybase.orchestrator import _side_preservation as orch_pres
+    base, side, out = "x = 1\n", "x = 2\ny = 3\n", "x = 2\ny = 3\n"
+    assert orch_pres(base, side, out) == side_preservation(base, side, out) == 1.0
+    import importlib.util, sys as _sys
+    spec = importlib.util.spec_from_file_location(
+        "lerw_delegate_check", "/w/capybase/scripts/live_eval_realworld.py")
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules[spec.name] = mod  # dataclass resolution needs registration
+    spec.loader.exec_module(mod)
+    assert mod._side_preservation(base, side, out) == side_preservation(base, side, out)

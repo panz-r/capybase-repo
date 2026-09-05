@@ -1736,41 +1736,14 @@ def _norm_lines(text: str) -> set[str]:
 
 
 def _side_preservation(base_text: str, side_text: str, output_text: str) -> float | None:
-    """Share of one side's changes the output preserves (0.0–1.0).
+    """Delegate to the canonical capybase.merge_intent.side_preservation.
 
-    Added/changed lines (the side's side of the base diff) count as
-    preserved when present in the output; deleted base lines count as
-    preserved when absent from it. Whitespace-normalized line-set
-    membership, so indentation drift doesn't dent the fraction. Returns
-    None when the side made no changes vs base (nothing to preserve — the
-    WORKING property is vacuous, not satisfied).
+    The WORKING classification's numbers MUST match the orchestrator's
+    wholesale-winner floor — one implementation (consistency contract
+    documented there).
     """
-    import difflib as _dl
-
-    b, s = base_text.splitlines(), side_text.splitlines()
-    added: list[str] = []
-    deleted: list[str] = []
-    for tag, i1, i2, j1, j2 in _dl.SequenceMatcher(None, b, s, autojunk=False).get_opcodes():
-        if tag == "equal":
-            continue
-        if tag != "delete":
-            added.extend(s[j1:j2])
-        if tag != "insert":
-            deleted.extend(b[i1:i2])
-    if not added and not deleted:
-        return None
-    out = _norm_lines(output_text)
-    n_ok = 0
-    n_tot = 0
-    for ln in added:
-        if ln.strip():
-            n_tot += 1
-            n_ok += ln.strip() in out
-    for ln in deleted:
-        if ln.strip():
-            n_tot += 1
-            n_ok += ln.strip() not in out
-    return n_ok / n_tot if n_tot else None
+    from capybase.merge_intent import side_preservation
+    return side_preservation(base_text, side_text, output_text)
 
 
 def _preservation_fields(case, content: str) -> tuple[float | None, float | None]:

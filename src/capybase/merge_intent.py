@@ -495,6 +495,57 @@ def side_churn(base_text: str, side_text: str) -> int:
     return n
 
 
+def side_preservation(
+    base_text: str, side_text: str, output_text: str
+) -> float | None:
+    """Share of one side's changes the output preserves (0.0-1.0).
+
+    Added/changed lines (the side's side of the base diff) count as
+    preserved when present in the output; deleted base lines count as
+    preserved when absent from it. Whitespace-normalized line-set
+    membership, so indentation drift doesn't dent the fraction. Returns
+    None when the side made no changes vs base (nothing to preserve — the
+    WORKING property is vacuous, not satisfied).
+
+    CONSISTENCY CONTRACT: this is the ONE implementation of the
+    preservation judge — the orchestrator's wholesale-winner floor and the
+    live eval's WORKING classification MUST speak the same numbers (the
+    floor's docstring promised "mirrors the live eval's post-hoc judge";
+    the two hand-maintained copies are now delegates of this function, so
+    the mirror cannot drift). The matcher is difflib.SequenceMatcher with
+    autojunk=False — preserved verbatim from the copies; switching it to
+    the histogram line_matcher seam would move threshold numbers and is a
+    calibration decision, not a refactor.
+    """
+    import difflib as _dl
+
+    b, s = base_text.splitlines(), side_text.splitlines()
+    added: list[str] = []
+    deleted: list[str] = []
+    for tag, i1, i2, j1, j2 in _dl.SequenceMatcher(
+            None, b, s, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        if tag != "delete":
+            added.extend(s[j1:j2])
+        if tag != "insert":
+            deleted.extend(b[i1:i2])
+    if not added and not deleted:
+        return None
+    out = {ln.strip() for ln in output_text.splitlines() if ln.strip()}
+    n_ok = 0
+    n_tot = 0
+    for ln in added:
+        if ln.strip():
+            n_tot += 1
+            n_ok += ln.strip() in out
+    for ln in deleted:
+        if ln.strip():
+            n_tot += 1
+            n_ok += ln.strip() not in out
+    return n_ok / n_tot if n_tot else None
+
+
 def full_file_context(base_text: str, current_text: str, replayed_text: str) -> dict:
     """Whole-file three-way shape summary, for stamping on every unit.
 
