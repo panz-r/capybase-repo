@@ -377,3 +377,18 @@ def test_candidate_entropy_none_when_response_had_none():
     engine = ResolutionEngine(_cfg(), client=MetaClient([resp]))
     cand = engine.propose(_unit(), ContextBuilder().build(_unit()))[0]
     assert cand.mean_token_entropy is None
+
+
+def test_empty_body_with_finish_length_is_empty_not_truncated():
+    """sqlite-0092 (EXTEND-78): a ZERO-BODY response with
+    finish_reason=length classified as 'truncated' — sending it down the
+    max_tokens retry path and, at tok_est >= 1500, blocking the C7'
+    empty fast-fail. Four empty attempts later the case escalated with
+    a sim=1.00 merge. Empty is empty regardless of finish reason: the
+    single-side fallback engages."""
+    from capybase.adapters.llm_openai import LLMResponse
+
+    resp = LLMResponse(text="", raw={"_accumulated": {"finish_reason": "length"}})
+    engine = ResolutionEngine(_cfg(), client=MetaClient([resp]))
+    cand = engine.propose(_unit(), ContextBuilder().build(_unit()))[0]
+    assert cand.failure_kind == "empty"

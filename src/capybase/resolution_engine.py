@@ -4095,12 +4095,6 @@ class ResolutionEngine:
                 choices = meta.get("choices") or []
                 if choices:
                     finish = choices[0].get("finish_reason") or ""
-        if finish == "length":
-            return _failed_candidate(
-                unit, self.config.model, prompt_version,
-                "model output truncated (finish_reason=length); increase max_tokens",
-                resp.text, failure_kind="truncated",
-            )
         # P1 (sprint-23 batch E): parser-level empty/refusal distinction.
         # Zero bytes returned is a TRANSPORT failure, not a considered
         # refusal. The old path let empty text fall through to JSON
@@ -4108,6 +4102,12 @@ class ResolutionEngine:
         # when the model emitted a JSON shell with empty resolved_text.
         # "empty" is a distinct failure kind; C7' fires on it with zero
         # carve-out logic. Whitespace-only (<10 chars) is also empty.
+        # CHECKED BEFORE truncation: an empty body with
+        # finish_reason=length produced NOTHING — "truncated" would send
+        # it down the max_tokens retry path (which returns nothing
+        # again) and, at tok_est >= 1500, block the empty fast-fail
+        # entirely (sqlite-0092: four empty attempts, all classified
+        # truncated, sim=1.00 merge lost to the escalate).
         _raw_stripped = (resp.text or "").strip()
         if len(_raw_stripped) < 10:
             return _failed_candidate(
@@ -4115,6 +4115,12 @@ class ResolutionEngine:
                 "model returned empty response (transport/endpoint "
                 "failure, not a considered refusal)",
                 resp.text, failure_kind="empty",
+            )
+        if finish == "length":
+            return _failed_candidate(
+                unit, self.config.model, prompt_version,
+                "model output truncated (finish_reason=length); increase max_tokens",
+                resp.text, failure_kind="truncated",
             )
         _profile = active_profile()
         data, warnings = coerce_candidate_dict(

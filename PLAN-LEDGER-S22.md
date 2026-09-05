@@ -8404,3 +8404,26 @@ moves ≈628 → ≈630/660 raw, with the two sim-1.00 near-misses as
 upside. Note: the four size-guarded cases need
 CAPYBASE_SKIP_SIZE_GUARD=1 (as s26 did) — the first batch silently
 loaded only 2 of 6.
+
+### S27-EXTEND-78 (2026-09-05) — the empty fast-fail was order-blocked; sqlite-0092 converted
+
+The two EXTEND-77 near-misses resolved:
+- **redis-0052**: PASSES 1.00 on rerun — run-to-run variance (the
+  empty-resolution sub-unit failure is probabilistic), not a defect.
+- **sqlite-0092**: reproducible, and the root cause is a classification
+  ORDER bug: `_candidate_from_response` checked
+  `finish_reason == "length"` BEFORE the empty-body check, so a
+  ZERO-BODY truncated response classified as `truncated` — sending it
+  down the max_tokens retry path (which produces nothing again) and,
+  at tok_est >= 1500, blocking the C7' empty fast-fail entirely (the
+  gate requires kind=="empty", <1500 tokens, or oversized-parse).
+  Result: four empty attempts, escalate, with a sim=1.00 merge already
+  in hand. Fix: the empty-body check (<10 chars) runs FIRST — empty is
+  empty regardless of finish reason; the single-side fallback engages.
+  **Live: sqlite-0092 GATE_UNAVAILABLE → PASS 1.00.**
+  Pinned as test_empty_body_with_finish_length_is_empty_not_truncated;
+  the pre-existing truncation test (non-empty body) still passes.
+  Gate 4,265/0.
+
+Harvest expectation: ≈631/660 raw (protobuf-0043 + redis-0049 +
+sqlite-0092 conversions this sprint; redis-0052 variance-band upside).
