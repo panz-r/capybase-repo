@@ -8701,3 +8701,30 @@ layer now works live, offline closure = 0.982 vs oracle — and the
 case's final barrier is the model's per-sub-unit syntax quality at
 0.91 sim. No further chase; the harvest's majority-of-3 will measure
 where it lands. Gate 4,277/0.
+
+### S27-EXTEND-88 (2026-09-05) — stale-band batch 2: 5/10 convert; harvest expectation ≈642/660
+
+The 10 smallest of the 29 remaining stale cases (6-39K, the classes
+not covered by batch 1), repeat-2, CAPYBASE_SKIP_SIZE_GUARD=1:
+
+**Converted (5)**: redis-0048 GATE_UNAVAILABLE → **PASS 0.99**;
+sqlite-0019 ESCALATE → **PASS 1.00** (llm_cegis); sqlite-0113
+ESCALATE → **PASS 1.00** (llm_cegis); sqlite-0118 ESCALATE →
+**PASS 1.00 (deterministic)**; zenodo-0011 ESCALATE (retry-cap
+class) → **PASS 0.99** (llm_cegis).
+
+**Near-misses (2)**: redis-0032 GATE_UNAVAILABLE at sim=0.98
+(llm_one_shot — the merge is right, a late gate rejects; the same
+family as 0092/0039 pre-fix — worth one flight next sprint);
+zenodo-0012 ESCALATE at 0.97 (the retry-cap class again, sibling of
+converted 0011).
+
+**Band-stable (3)**: clickhouse-0021 NEAR 0.86; zenodo-0003 NEAR
+0.83; zenodo-0014 NEAR 0.84 (deterministic bucket — a NEAR with
+zero model calls; the deterministic answer differs from the oracle
+honestly).
+
+19 stale cases remain (84-309K, the large-C whole-file-repair class
++ the two oversized parked ones) — the harvest measures them.
+**Harvest expectation: ≈642/660 raw (97.3%)**, era floor 4, with
+redis-0032 and zenodo-0012 as near-certain upside.
