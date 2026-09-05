@@ -4,12 +4,14 @@ The rebase machinery's no-trace contract: promoted work lives on the
 source branch as ordinary commits (via the expected-OID CAS), and
 everything else is scaffolding this module removes:
 
-- ``refs/heads/capybase/candidate/*`` — retained candidate branches
-- ``refs/heads/capybase/backup/*`` — backup branches (legacy mode, and
-  the candidate runs' inner backups)
+- ``refs/heads/capybase/*`` — candidate, dryrun, and backup branches
+  (the whole capybase branch namespace)
 - ``refs/rebase-agent/<session>/*`` — internal recovery/step refs
-- linked worktrees checked out on a ``capybase/*`` branch (plus stale
-  worktree registrations via ``git worktree prune``)
+- linked worktrees OWNED by capybase — identified crash-proof by ANY of
+  three signals (branch under ``refs/heads/capybase/*``, admin entry
+  name, worktree path prefix), so a crash that deleted the branch or a
+  reboot that wiped the temp dir still leaves a recognizable owner;
+  stale registrations are pruned
 - ``.rebase-agent/`` — audit bundles, sessions, journals, prompts,
   file snapshots (gitignored, but a trace nonetheless)
 - the now-unreachable OBJECTS the deleted refs pointed at — reclaimed
@@ -51,12 +53,23 @@ def _dir_size(path: Path) -> int:
     return total
 
 
+#: Worktree ownership signals. Every worktree capybase creates carries
+#: the prefix in three places: the admin entry name
+#: (``.git/worktrees/<name>``), the on-disk path (an mkdtemp prefix),
+#: and the checked-out branch. A crash can delete any ONE (partial
+#: escalation cleanup removes the branch; a reboot wipes the temp dir;
+#: the admin entry always survives) — matching on ANY signal is what
+#: makes crashed-run cleanup safe and complete.
+OWNED_ADMIN_PREFIXES = ("capybase-candidate-", "capybase-dryrun-")
+
+
 @dataclass
 class CleanReport:
     """What ``capybase clean`` found / removed."""
     dry_run: bool = False
     refused: str = ""            # non-empty ⇒ refused (e.g. op in progress)
     candidate_branches: list[str] = field(default_factory=list)
+    dryrun_branches: list[str] = field(default_factory=list)
     backup_branches: list[str] = field(default_factory=list)
     recovery_refs: list[str] = field(default_factory=list)
     worktrees: list[str] = field(default_factory=list)
@@ -73,6 +86,7 @@ class CleanReport:
         lines = [
             f"capybase clean ({mode})",
             f"  candidate branches : {len(self.candidate_branches)}",
+            f"  dryrun branches    : {len(self.dryrun_branches)}",
             f"  backup branches    : {len(self.backup_branches)}",
             f"  recovery refs      : {len(self.recovery_refs)}",
             f"  linked worktrees   : {len(self.worktrees)}",
@@ -90,40 +104,77 @@ class CleanReport:
                         "investigate reflogs)"))
         for b in self.candidate_branches:
             lines.append(f"    - {b}")
+        for b in self.dryrun_branches:
+            lines.append(f"    - {b}")
         for b in self.backup_branches:
             lines.append(f"    - {b}")
         return "\n".join(lines)
 
 
-def _capybase_worktrees(git: GitBackend, repo: Path) -> list[str]:
-    """Linked worktrees (paths) checked out on a ``capybase/*`` branch.
+def _owned_worktrees(git: GitBackend, repo: Path) -> list[str]:
+    """Linked worktrees (paths) owned by capybase — crash-proof.
 
-    The MAIN worktree (the repo root itself) is never included.
+    Ownership = ANY of: the checked-out branch is under
+    ``refs/heads/capybase/*``, the admin entry name
+    (``.git/worktrees/<name>``) carries a capybase prefix, or the
+    worktree path carries one. The admin entries are enumerated
+    directly (each contains a ``gitdir`` file naming the worktree path)
+    because ``worktree list`` hides branchless leftovers a crash can
+    leave behind. The MAIN worktree (the repo root itself) is never
+    included.
     """
+    main = Path(repo).resolve()
+    owned: set[str] = set()
+
+    def _is_owned(wt_path: str, branch: str, admin_name: str) -> bool:
+        if branch.startswith("refs/heads/capybase/"):
+            return True
+        if admin_name.startswith(OWNED_ADMIN_PREFIXES):
+            return True
+        return any(p in wt_path for p in OWNED_ADMIN_PREFIXES)
+
+    # Signal 1: live branches via worktree list.
     out = git._run_ok(["worktree", "list", "--porcelain"],
                       what="list worktrees")
-    main = str(repo.resolve())
-    paths: list[str] = []
     current: dict[str, str] = {}
+
+    def _flush(cur: dict[str, str]) -> None:
+        wt = cur.get("worktree", "")
+        if not wt or Path(wt).resolve() == main:
+            return
+        if _is_owned(wt, cur.get("branch", ""), Path(wt).name):
+            owned.add(str(Path(wt).resolve()))
+
     for line in out.splitlines():
         if not line.strip():
-            if current:
-                wt = current.get("worktree", "")
-                branch = current.get("branch", "")
-                if (wt and branch.startswith("refs/heads/capybase/")
-                        and Path(wt).resolve() != Path(main)):
-                    paths.append(wt)
-                current = {}
+            _flush(current)
+            current = {}
             continue
         key, _, value = line.partition(" ")
         current[key] = value
-    if current:  # last block without trailing blank
-        wt = current.get("worktree", "")
-        branch = current.get("branch", "")
-        if (wt and branch.startswith("refs/heads/capybase/")
-                and Path(wt).resolve() != Path(main)):
-            paths.append(wt)
-    return paths
+    _flush(current)
+
+    # Signal 2: admin entries (survive branch deletion and reboots; the
+    # gitdir file names the worktree path even when list shows nothing).
+    admins_dir = repo / ".git" / "worktrees"
+    if admins_dir.is_dir():
+        for admin in admins_dir.iterdir():
+            if not admin.is_dir():
+                continue
+            gitdir_file = admin / "gitdir"
+            try:
+                wt_path = gitdir_file.read_text(encoding="utf-8").strip()
+            except OSError:
+                continue
+            if not wt_path:
+                continue
+            # gitdir holds the worktree's .git FILE path — strip it.
+            wt = str(Path(wt_path).parent.resolve())
+            if wt == str(main) or Path(wt) == main:
+                continue
+            if _is_owned(wt, "", admin.name):
+                owned.add(wt)
+    return sorted(owned)
 
 
 def clean_capybase_state(
@@ -148,20 +199,23 @@ def clean_capybase_state(
 
     report.git_size_before = _dir_size(repo / ".git")
 
-    # Inventory.
-    cand = git._run_ok(
-        ["for-each-ref", "--format=%(refname:short)", "refs/heads/capybase/candidate"],
-        what="list candidate branches")
-    report.candidate_branches = [b for b in cand.splitlines() if b.strip()]
-    backup = git._run_ok(
-        ["for-each-ref", "--format=%(refname:short)", "refs/heads/capybase/backup"],
-        what="list backup branches")
-    report.backup_branches = [b for b in backup.splitlines() if b.strip()]
+    # Inventory: the WHOLE capybase branch namespace (candidate, dryrun,
+    # backup — a crashed run can leave any of them).
+    all_cb = git._run_ok(
+        ["for-each-ref", "--format=%(refname:short)", "refs/heads/capybase"],
+        what="list capybase branches")
+    for b in (x for x in all_cb.splitlines() if x.strip()):
+        if b.startswith("capybase/dryrun/"):
+            report.dryrun_branches.append(b)
+        elif b.startswith("capybase/backup/"):
+            report.backup_branches.append(b)
+        else:  # candidate (and anything future under capybase/)
+            report.candidate_branches.append(b)
     rec = git._run_ok(
         ["for-each-ref", "--format=%(refname)", "refs/rebase-agent"],
         what="list recovery refs")
     report.recovery_refs = [r for r in rec.splitlines() if r.strip()]
-    report.worktrees = _capybase_worktrees(git, repo)
+    report.worktrees = _owned_worktrees(git, repo)
     state_dir = repo / STATE_DIR
     report.state_dir_bytes = _dir_size(state_dir) if state_dir.exists() else 0
 
@@ -169,12 +223,16 @@ def clean_capybase_state(
         return report
 
     # Worktrees first (git refuses -D on a branch checked out live).
+    # Double-force survives a lock a crashed run may have left.
     for wt in report.worktrees:
-        git.remove_worktree(wt, force=True)
+        if Path(wt).exists():
+            git._run_ok(["worktree", "remove", "--force", "--force", wt],
+                        what=f"remove worktree {wt}")
     git.prune_worktrees()
 
     # Branches + recovery refs (delete_ref's namespace rail is the guard).
-    for short in report.candidate_branches + report.backup_branches:
+    for short in (report.candidate_branches + report.dryrun_branches
+                  + report.backup_branches):
         git.delete_ref(short)
     for ref in report.recovery_refs:
         git.delete_ref(ref)

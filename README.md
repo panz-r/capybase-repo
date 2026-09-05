@@ -172,15 +172,23 @@ there is nothing to roll back — run:
 capybase clean          # --dry-run lists what would go, mutates nothing
 ```
 
-This removes ALL unpromoted capybase state, leaving no trace: candidate and
-backup branches, internal recovery refs, linked worktrees, and the
-`.rebase-agent/` directory (audit bundles, sessions, prompts, snapshots) —
-then expires unreachable reflog entries and runs `git gc --prune=now`, so
-the object store does not keep the deleted branches' commits and the
-repository does not grow. It refuses to run mid-rebase/merge (that state
-may be needed to resume) and touches only capybase's own namespaces —
-your branches, reflogs, and history are never modified. Promoted work is
-ordinary commits on your branch; an already-clean repo is a no-op.
+This removes ALL unpromoted capybase state, leaving no trace: candidate,
+dryrun, and backup branches, internal recovery refs, linked worktrees,
+and the `.rebase-agent/` directory (audit bundles, sessions, prompts,
+snapshots) — then expires unreachable reflog entries and runs
+`git gc --prune=now`, so the object store does not keep the deleted
+branches' commits and the repository does not grow. Only promoted work
+persists, as ordinary commits on your branch — so capybase can be run an
+unlimited number of times and a clean in between keeps the repo at its
+pre-capybase size.
+
+It is crash- and reboot-safe: worktrees are recognized as capybase's from
+any surviving signal (branch name, worktree path, or git's admin entry) —
+a crashed run whose teardown never executed, or a reboot that wiped the
+temp worktree, is cleaned completely. It refuses to run mid-rebase/merge
+(that state may be needed to resume) and touches only capybase's own
+namespaces — your branches, reflogs, and history are never modified. An
+already-clean repo is a no-op; preview with `--dry-run`.
 
 An escalated run has already cleaned up after itself (candidate branch and
 worktree deleted — nothing to promote, nothing retained). After `promote`,

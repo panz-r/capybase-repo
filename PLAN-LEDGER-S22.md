@@ -8263,3 +8263,34 @@ rebase state, leaving no trace, with the repository size NOT growing.
   then branch pruned, mid-op refusal, already-clean no-op.
 - README's discard block now leads with the command; the manual git
   recipe is gone. Gate 4,247/0.
+
+### S27-EXTEND-74 (2026-09-05) — `capybase clean` crash/reboot-proofed; the transient-operation story
+
+User direction: the built-in teardown is not enough — capybase may crash,
+the system may reboot; clean must safely and completely remove ALL
+intermediate state. Git-object growth is acceptable to the user as a
+fallback (they know git; re-clone solves it), but fully transient
+operation is preferable — unlimited runs, only promoted results persist.
+Dry-run covers the preview need, so no interactive confirmation.
+
+- **Ownership is now crash-proof**: every worktree capybase creates
+  carries its identity in THREE places — the branch
+  (refs/heads/capybase/*), the mkdtemp path prefix
+  (/tmp/capybase-candidate-*, capybase-dryrun-*), and git's admin entry
+  name (.git/worktrees/<name>). A crash deletes any one signal (partial
+  escalation cleanup kills the branch; a reboot wipes the dir; the admin
+  always survives) — clean claims a worktree on ANY signal, enumerating
+  .git/worktrees/* directly (each gitdir file names the worktree path),
+  because worktree list hides branchless leftovers.
+- **Gap found and fixed**: capybase/dryrun/* branches (crashed
+  rehearsals) were not in the inventory at all — the ref sweep now
+  covers the WHOLE refs/heads/capybase namespace (candidate + dryrun +
+  backup, categorized in the report); delete_ref's rail admits dryrun.
+- Removal uses double-force (survives a crashed run's lock); admins with
+  missing dirs clear via prune.
+- 3 new crash tests: branchless worktree reclaimed via admin name
+  (partial-cleanup simulation), reboot-wiped dir + surviving admin
+  pruned, crashed dry-run branch+worktree cleaned. Gate 4,250/0.
+- README: the clean paragraph states the transience contract (unlimited
+  runs; only promoted commits persist; a clean between runs keeps the
+  repo at pre-capybase size) and the crash/reboot safety.

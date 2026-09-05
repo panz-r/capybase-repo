@@ -11,6 +11,7 @@ and the object store not larger afterwards.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -161,3 +162,70 @@ def test_already_clean_repo_is_a_noop(tmp_path):
     assert report.candidate_branches == []
     assert report.state_dir_bytes == 0
     assert "0" in report.summary()
+
+
+class TestCrashRecovery:
+    """Crashed runs / reboots bypass the finally-teardown — clean must
+    still find and remove everything from the surviving signals alone."""
+
+    def test_branchless_worktree_removed_via_admin_name(self, tmp_path):
+        # Crash + partial escalation cleanup deleted the branch; the
+        # worktree dir and its admin entry survive. Ownership is still
+        # provable from the admin name / path prefix.
+        import tempfile
+        repo = _repo(tmp_path)
+        tip = _seed_state(repo)
+        wt = Path(tempfile.mkdtemp(prefix="capybase-candidate-"))
+        subprocess.run(
+            ["git", "worktree", "add", str(wt),
+             "capybase/candidate/main@20260905-1"],
+            cwd=repo, check=True)
+        # Simulate the partial cleanup: force-delete the checked-out
+        # branch ref directly (a crash path git normally guards).
+        subprocess.run(
+            ["git", "-C", str(wt), "checkout", "-q", "--detach"], check=True)
+        subprocess.run(
+            ["git", "update-ref", "-d",
+             "refs/heads/capybase/candidate/main@20260905-1"],
+            cwd=repo, check=True)
+        assert wt.exists()
+        report = clean_capybase_state(repo)
+        assert not report.refused
+        assert not wt.exists()
+        assert not (repo / ".git" / "worktrees").exists() or \
+            not any((repo / ".git" / "worktrees").iterdir())
+        assert not _object_exists(repo, tip)
+
+    def test_reboot_wiped_worktree_dir_admin_pruned(self, tmp_path):
+        # The temp dir vanished (reboot); the admin entry survives.
+        import tempfile
+        repo = _repo(tmp_path)
+        _seed_state(repo)
+        wt = Path(tempfile.mkdtemp(prefix="capybase-candidate-"))
+        subprocess.run(
+            ["git", "worktree", "add", str(wt),
+             "capybase/candidate/main@20260905-1"],
+            cwd=repo, check=True)
+        shutil.rmtree(wt)  # the "reboot"
+        report = clean_capybase_state(repo, dry_run=True)
+        assert not report.refused
+        report = clean_capybase_state(repo)
+        assert not report.refused
+        assert not (repo / ".git" / "worktrees").exists() or \
+            not any((repo / ".git" / "worktrees").iterdir())
+
+    def test_dryrun_branches_and_worktrees_cleaned(self, tmp_path):
+        # A crashed --dry-run rehearsal leaves capybase/dryrun/<session>
+        # branches and a capybase-dryrun-* worktree.
+        import tempfile
+        repo = _repo(tmp_path)
+        subprocess.run(
+            ["git", "branch", "capybase/dryrun/sess-42"], cwd=repo, check=True)
+        wt = Path(tempfile.mkdtemp(prefix="capybase-dryrun-"))
+        subprocess.run(
+            ["git", "worktree", "add", str(wt), "capybase/dryrun/sess-42"],
+            cwd=repo, check=True)
+        report = clean_capybase_state(repo)
+        assert not report.refused
+        assert not _ref_exists(repo, "capybase/dryrun/sess-42")
+        assert not wt.exists()

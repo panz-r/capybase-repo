@@ -341,13 +341,15 @@ class GitBackend:
         allowed = (
             self.BACKUP_NAMESPACE + "/",
             "refs/heads/capybase/candidate/",
+            "refs/heads/capybase/dryrun/",
             "refs/rebase-agent/",
         )
         if not full.startswith(allowed):
             raise GitError(
                 f"delete_ref refuses to delete {ref!r}: only capybase's own "
                 "namespaces (capybase/backup, capybase/candidate, "
-                "refs/rebase-agent) may be deleted via this method"
+                "capybase/dryrun, refs/rebase-agent) may be deleted via "
+                "this method"
             )
         self._run_ok(["update-ref", "-d", full], what=f"delete ref {full}")
 
