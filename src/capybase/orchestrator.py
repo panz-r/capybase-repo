@@ -6375,6 +6375,15 @@ class Orchestrator:
                 explanation=f"source-derived candidate ({cand_id})",
                 provenance=_PROV_MAP.get(cand_id, "plain_llm"),
             )
+            # Closure-on-portfolio (EXTEND-87): the pristine side
+            # candidates are exactly the base the deterministic closure
+            # proved itself on offline (0007: replayed + closure = 0.982
+            # vs oracle). Without this, a side-only candidate that fails
+            # validation (it drops the other side's cross-boundary
+            # additions) is discarded — and the closure only ever runs
+            # on the CEGIS winner, i.e. on the model's broken text.
+            cand = self._apply_deterministic_closure(unit, cand)
+            text = cand.resolved_text
             validation = self.verification.verify(unit, cand)
             if validation.passed:
                 if self._strictness_blocks_pre_llm(unit, cand, validation, "source_portfolio"):

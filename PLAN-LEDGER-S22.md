@@ -8678,3 +8678,26 @@ portfolio path precedes the closure in the cascade but does not run
 it). That last wiring — closure-on-portfolio-candidates — is the
 next sprint's opening item; the mechanism stack below it is now
 fully proven live.
+
+### S27-EXTEND-87 (2026-09-05) — closure-on-portfolio: the last wiring lands; 0007's remaining failure is model quality
+
+The EXTEND-86 recorded item, wired: the source portfolio's candidates
+now pass through `_apply_deterministic_closure` BEFORE validation —
+the pristine side candidates are the exact base the closure proved
+itself on offline. Live rerun: **unit 1:0 now resolves** (the
+provenance mix shows a closure-augmented/portfolio acceptance where
+both prior runs failed); the case's remaining blocker moved to unit
+1:1, whose LLM candidates carry a genuine syntax error
+(`expected item, found '||'`) — the model itself produces broken
+Rust on that sub-unit, which no deterministic closure can repair
+(it augments candidates; it cannot rewrite them).
+
+Honest close of the 0007 arc (7 ledger entries): era-fixed case →
+wrong-shape model answers → five mechanism defects found and fixed
+(rename-exclusive scoping, keyed-item file-level fallback + EOF
+semantics + collision scope, split-file file-level derivation +
+context, closure decline journaling, closure-on-portfolio) — every
+layer now works live, offline closure = 0.982 vs oracle — and the
+case's final barrier is the model's per-sub-unit syntax quality at
+0.91 sim. No further chase; the harvest's majority-of-3 will measure
+where it lands. Gate 4,277/0.
