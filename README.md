@@ -409,8 +409,6 @@ Counting rules:
 
 - A case counts under each mechanism in its accepted candidates'
   lineage.
-- Failed attempts are not counted — only what is in the accepted
-  candidates appears.
 - Escalated cases have no accepted candidates and are excluded. There
   are no PASS/WORKING columns: accepted is the criterion.
 - The phase-1 fast path and the true-side portfolio bypass the
