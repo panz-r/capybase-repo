@@ -748,6 +748,82 @@ _LANG_EXT = {"rust": "rs", "python": "py", "javascript": "js", "java": "java",
              "clojure": "clj", "lua": "lua", "shell": "sh", "go": "go",
              "ruby": "rb", "haskell": "hs", "c": "c", "cpp": "cpp"}
 
+#: Source-file extensions admitted into the corpus. The conflict's REAL path
+#: (``conflict_path``, from the mined repo) must match — the synthetic
+#: ``conflict_NNNN.lang`` path always would. Catches binary artifacts that
+#: content heuristics misclassify (prusaslicer's gettext ``.mo`` catalogs
+#: classified as "python"; the s27-prelim discovery).
+_SOURCE_EXTS = {
+    ".py", ".pyx", ".pxd",           # python / cython
+    ".rs",                            # rust
+    ".c", ".h",                       # c
+    ".cc", ".cpp", ".cxx", ".hpp", ".hh", ".hxx", ".inl",  # c++
+}
+
+
+def _parses_as_py3(source: str) -> bool:
+    """True when ``source`` parses under the CURRENT python. False for
+    python-2-era code (``print x``) — the language-era corpus filter: the
+    live gate is py_compile on python3, so a py2 oracle can never pass and
+    pollutes the denominator (scikit-0090's oracle fails py_compile; 38/468
+    new-corpus python cases carry py2-style prints — the s27-prelim census).
+    """
+    try:
+        import ast as _ast
+        _ast.parse(source)
+        return True
+    except (SyntaxError, ValueError):
+        return False
+
+
+def admit_case(
+    conflict_path: str,
+    base: str,
+    current: str,
+    replayed: str,
+    merged: str,
+    marker_original: str | None,
+    language: str,
+    seen_hashes: set[str],
+) -> tuple[bool, str | None]:
+    """Corpus admission check for one mined conflict tuple (s27 integration).
+
+    Returns ``(admit, reject_reason)``. Rejects, in order:
+    - ``non_source``: the real conflict path's extension is outside
+      :data:`_SOURCE_EXTS` (binary/localization/generated artifacts).
+    - ``binary``: a NUL byte in any of the four texts.
+    - ``clean_merge``: ``marker_original`` is None (regenerated markers
+      merge cleanly — no conflict to resolve; previously silent).
+    - ``empty_markers``: ``marker_original`` is empty (binary merges yield
+      "" — slipped the None guard; prusaslicer-0016).
+    - ``duplicate``: identical (base, current, replayed, merged) content
+      already admitted — adjacent merges of one PR re-mine the same tuple.
+    - ``py2_oracle``: a ``.py`` oracle that cannot parse under python3
+      (language-era; kept for ``.pyx``/``.pxd`` which cython syntax makes
+      unparseable as python).
+    """
+    import hashlib as _hl
+    fp = Path(conflict_path or "")
+    if fp.suffix.lower() not in _SOURCE_EXTS:
+        return False, "non_source"
+    if any("\x00" in t for t in (base, current, replayed, merged)):
+        return False, "binary"
+    if marker_original is None:
+        return False, "clean_merge"
+    if not marker_original.strip():
+        return False, "empty_markers"
+    h = _hl.sha1(
+        ("\x00".join((base, current, replayed, merged))).encode(
+            "utf-8", "replace")
+    ).hexdigest()
+    if h in seen_hashes:
+        return False, "duplicate"
+    if language == "python" and fp.suffix.lower() == ".py" \
+            and not _parses_as_py3(merged):
+        return False, "py2_oracle"
+    seen_hashes.add(h)
+    return True, None
+
 
 def process(dataset: Dataset, *, language: str | None = "rust", limit: int | None = None) -> int:
     """Walk the extracted dataset, emit JSON cases for ``language``.
@@ -768,6 +844,8 @@ def process(dataset: Dataset, *, language: str | None = "rust", limit: int | Non
         kwargs["merge_limit"] = dataset.merge_limit
 
     lang_hist: Counter[str] = Counter()
+    filtered: Counter[str] = Counter()
+    seen_hashes: set[str] = set()
     cases: list[dict] = []
     n = 0
     for ct in extractor(root, **kwargs):
@@ -778,12 +856,18 @@ def process(dataset: Dataset, *, language: str | None = "rust", limit: int | Non
         lang_hist[lang] += 1
         if language is not None and lang != language:
             continue
+        # Regenerate authentic markers from A/O/B first (admission needs them).
+        marker_original = build_markers(ct.base, ct.current, ct.replayed)
+        # Corpus admission (s27): non-source paths, binaries, empty/duplicate
+        # tuples, and language-era python oracles never enter the corpus.
+        ok, why = admit_case(
+            ct.conflict_path, ct.base, ct.current, ct.replayed, ct.merged,
+            marker_original, lang, seen_hashes)
+        if not ok:
+            filtered[why] += 1
+            continue
         if limit is not None and len(cases) >= limit:
             continue  # keep scanning for the histogram, but stop emitting
-        # Regenerate authentic markers from A/O/B. Skip clean merges.
-        marker_original = build_markers(ct.base, ct.current, ct.replayed)
-        if marker_original is None:
-            continue
         # Skip cases where the human merge M still contains conflict markers.
         # This happens when M is a docs file (RST ``=======`` underlines look
         # like markers) or a genuinely unresolved merge — either way it's not a
@@ -819,6 +903,10 @@ def process(dataset: Dataset, *, language: str | None = "rust", limit: int | Non
         if language is not None and lang == language:
             marker = f"  <-- selected ({language})"
         print(f"    {lang:12s} {count:6d}{marker}")
+    if filtered:
+        print("  [filtered] corpus admission rejects:")
+        for why, count in filtered.most_common():
+            print(f"    {why:16s} {count:6d}")
 
     if not cases:
         label = language or "any language"
