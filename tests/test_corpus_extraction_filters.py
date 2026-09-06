@@ -79,3 +79,18 @@ def test_keeps_pyx_oracles_unparsed():
 def test_py3_oracle_admitted():
     ok, why = _run(_mk(merged="print('hello')\n"), set())
     assert ok and why is None
+
+
+def test_rejects_duplicate_definitions_in_texts():
+    # tikv-0024: the human oracle kept both sides' identical decode_data
+    # (a true positive — rustc E0201; a broken oracle).
+    dup_src = ("pub fn decode_data(r: &mut T) -> Result<u64> {\n"
+               "    1\n}\n\npub fn decode_data(r: &mut T) -> Result<u64> {\n"
+               "    1\n}\n")
+    ok, why = _run(_mk(conflict_path="src/util/codec/rpc.rs", language="rust",
+                       merged=dup_src), set())
+    assert not ok and why == "dup_definitions"
+    # and pristine sides fire too
+    ok, why = _run(_mk(conflict_path="src/util/codec/rpc.rs", language="rust",
+                       replayed=dup_src), set())
+    assert not ok and why == "dup_definitions"

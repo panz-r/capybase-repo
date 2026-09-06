@@ -801,6 +801,10 @@ def admit_case(
     - ``py2_oracle``: a ``.py`` oracle that cannot parse under python3
       (language-era; kept for ``.pyx``/``.pxd`` which cython syntax makes
       unparseable as python).
+    - ``dup_definitions``: any of the three texts carries duplicate
+      top-level same-signature definitions (the human oracle itself kept
+      both sides' identical function — tikv-0024's ``decode_data`` ×2;
+      a broken oracle and a spuriously-firing dup-eradication trigger).
     """
     import hashlib as _hl
     fp = Path(conflict_path or "")
@@ -821,6 +825,14 @@ def admit_case(
     if language == "python" and fp.suffix.lower() == ".py" \
             and not _parses_as_py3(merged):
         return False, "py2_oracle"
+    if language in ("rust", "c", "cpp"):
+        from capybase.orchestrator import \
+            _shared_context_duplicate_definitions as _dupdef
+        from capybase.conflict_extractor import detect_language as _dl
+        lang = _dl(conflict_path)
+        for text in (base, current, replayed, merged):
+            if _dupdef(text, lang):
+                return False, "dup_definitions"
     seen_hashes.add(h)
     return True, None
 
