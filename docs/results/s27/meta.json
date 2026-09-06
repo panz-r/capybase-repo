@@ -1,0 +1,13 @@
+{
+  "round": "s27",
+  "source": "/var/tmp/capybase-live/s27/full-harvest.json",
+  "recount": {
+    "total": 660,
+    "pass": 637,
+    "working": 9,
+    "era_dead": 1,
+    "pass_pct": 96.5,
+    "adj_pct": 96.7,
+    "pw_adj_pct": 98.0
+  }
+}
