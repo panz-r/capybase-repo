@@ -154,17 +154,6 @@ DATASETS: dict[str, Dataset] = {
         # tokio's history is very large; cap lower to keep the clone/scan tractable.
         merge_limit=150,
     ),
-    "pydantic-history": Dataset(
-        id="pydantic-history",
-        kind="git-history",
-        url="https://github.com/pydantic/pydantic.git",
-        extract_subdir="pydantic",
-        extractor="git_history",
-        license="MIT",
-        source_url="https://github.com/pydantic/pydantic",
-        # Adds Python-language real-world cases to complement the Rust-only corpus.
-        merge_limit=200,
-    ),
     "requests-history": Dataset(
         id="requests-history",
         kind="git-history",
@@ -185,16 +174,6 @@ DATASETS: dict[str, Dataset] = {
         source_url="https://github.com/pallets/flask",
         merge_limit=200,
     ),
-    "rayon-history": Dataset(
-        id="rayon-history",
-        kind="git-history",
-        url="https://github.com/rayon-rs/rayon.git",
-        extract_subdir="rayon",
-        extractor="git_history",
-        license="MIT OR Apache-2.0",
-        source_url="https://github.com/rayon-rs/rayon",
-        merge_limit=200,
-    ),
     "axum-history": Dataset(
         id="axum-history",
         kind="git-history",
@@ -203,20 +182,6 @@ DATASETS: dict[str, Dataset] = {
         extractor="git_history",
         license="MIT",
         source_url="https://github.com/tokio-rs/axum",
-        merge_limit=200,
-    ),
-    "ratatui-history": Dataset(
-        id="ratatui-history",
-        kind="git-history",
-        url="https://github.com/ratatui/ratatui.git",
-        extract_subdir="ratatui",
-        extractor="git_history",
-        license="MIT",
-        source_url="https://github.com/ratatui/ratatui",
-        # ratatui has the highest doc-comment density of any corpus repo (~33%:
-        # ~18.5k /// lines / ~55k code lines) — the best candidate for
-        # comment-overlapping conflicts the jury evaluates. The default scan
-        # window; bump if the comment-overlap rate is too low.
         merge_limit=200,
     ),
     # --- C corpus (mined from real C projects). The mining machinery is
@@ -295,6 +260,69 @@ DATASETS: dict[str, Dataset] = {
         extractor="git_history",
         license="BSD-3-Clause",
         source_url="https://github.com/protocolbuffers/protobuf",
+        merge_limit=2000,
+    ),
+    # ------------------------------------------------------------------
+    # Sprint-27 corpus expansion — the 8 WINNERS (2 per language), selected
+    # by extraction yield from a 32-repo probe/extraction evaluation
+    # (fame slate yielded ~0: yield tracks merge culture, not activity;
+    # tables in PLAN-LEDGER work log 2026-09-06). Non-winners removed;
+    # re-add from the probe tables when a language needs depth.
+    # ------------------------------------------------------------------
+    "tikv-history": Dataset(
+        id="tikv-history", kind="git-history",
+        url="https://github.com/tikv/tikv.git",
+        extract_subdir="tikv", extractor="git_history",
+        license="Apache-2.0", source_url="https://github.com/tikv/tikv",
+        merge_limit=2000,
+    ),
+    "polars-history": Dataset(
+        id="polars-history", kind="git-history",
+        url="https://github.com/pola-rs/polars.git",
+        extract_subdir="polars", extractor="git_history",
+        license="MIT", source_url="https://github.com/pola-rs/polars",
+        merge_limit=2000,
+    ),
+    "cython-history": Dataset(
+        id="cython-history", kind="git-history",
+        url="https://github.com/cython/cython.git",
+        extract_subdir="cython", extractor="git_history",
+        license="Apache-2.0", source_url="https://github.com/cython/cython",
+        merge_limit=2000,
+    ),
+    "scikit-learn-history": Dataset(
+        id="scikit-learn-history", kind="git-history",
+        url="https://github.com/scikit-learn/scikit-learn.git",
+        extract_subdir="scikit-learn", extractor="git_history",
+        license="BSD-3-Clause", source_url="https://github.com/scikit-learn/scikit-learn",
+        merge_limit=2000,
+    ),
+    "php-history": Dataset(
+        id="php-history", kind="git-history",
+        url="https://github.com/php/php-src.git",
+        extract_subdir="php-src", extractor="git_history",
+        license="PHP-3.01", source_url="https://github.com/php/php-src",
+        merge_limit=2000,
+    ),
+    "libuv-history": Dataset(
+        id="libuv-history", kind="git-history",
+        url="https://github.com/libuv/libuv.git",
+        extract_subdir="libuv", extractor="git_history",
+        license="MIT", source_url="https://github.com/libuv/libuv",
+        merge_limit=2000,
+    ),
+    "duckdb-history": Dataset(
+        id="duckdb-history", kind="git-history",
+        url="https://github.com/duckdb/duckdb.git",
+        extract_subdir="duckdb", extractor="git_history",
+        license="MIT", source_url="https://github.com/duckdb/duckdb",
+        merge_limit=2000,
+    ),
+    "prusaslicer-history": Dataset(
+        id="prusaslicer-history", kind="git-history",
+        url="https://github.com/prusa3d/PrusaSlicer.git",
+        extract_subdir="prusaslicer", extractor="git_history",
+        license="AGPL-3.0", source_url="https://github.com/prusa3d/PrusaSlicer",
         merge_limit=2000,
     ),
 }
