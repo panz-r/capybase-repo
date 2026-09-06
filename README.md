@@ -431,10 +431,9 @@ preserved flight journals at recount time. Rows sum to more than the
 | deletion_union | 3 | 0.5% |
 | deterministic_source_cur_rep | 1 | 0.2% |
 
-The complementary single-label view (each case attributed to its
-dominant mechanism — the plurality provenance among accepted units) is
-in `meta.json` as `mechanism_histogram`; it answers "who owns the
-resolution" where this table answers "who contributed".
+`meta.json` also contains `mechanism_histogram`: each case counted
+once, under the mechanism with the most accepted units. The table
+above instead counts a case under every mechanism that participated.
 
 #### Prior round (s26)
 
