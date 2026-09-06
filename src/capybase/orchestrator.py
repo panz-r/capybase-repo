@@ -6395,6 +6395,182 @@ class Orchestrator:
                 return outcome
         return None  # no source candidate passed; fall through to LLM
 
+    def _empty_side_stage_sides(self, path: str):
+        """Memoized (per step) merge-index stage sides + diff3 regions.
+
+        Returns ``(sides_dict, base_text, diff3_blocks)`` or None. The rule
+        needs the FILE-level three texts (classify_side) and each conflict
+        region's ANCESTOR text (the light-edit discriminator): ``git
+        merge-file --diff3`` on the three stage texts re-derives base
+        sections the worktree's default-style markers don't carry. Computed
+        once per (step, path) — the rule runs per unit.
+        """
+        memo = getattr(self, "_stage_sides_memo", None)
+        if memo is None:
+            memo = self._stage_sides_memo = {}
+        key = (self.step, path)
+        if key not in memo:
+            memo[key] = None
+            try:
+                staged = _true_stage_sides(self.git, path)
+            except Exception:  # noqa: BLE001 - stages unreadable
+                staged = None
+            if staged is not None:
+                sides, base_text = staged
+                blocks = []
+                try:
+                    import subprocess as _sp, tempfile as _tf
+                    from capybase.adapters.parsers import parse_marker_blocks
+                    with _tf.TemporaryDirectory() as _td:
+                        td = Path(_td)
+                        for _n, _t in (("c", sides.get("current", "")),
+                                       ("b", base_text),
+                                       ("r", sides.get("replayed", ""))):
+                            (td / _n).write_text(_t or "", encoding="utf-8")
+                        _proc = _sp.run(
+                            ["git", "merge-file", "-p", "--diff3",
+                             str(td / "c"), str(td / "b"), str(td / "r")],
+                            capture_output=True, text=True, timeout=30)
+                    if _proc.returncode > 0 and _proc.stdout:
+                        blocks = parse_marker_blocks(_proc.stdout)
+                except Exception:  # noqa: BLE001 - regions are advisory
+                    blocks = []
+                memo[key] = (sides, base_text, blocks)
+        return memo[key]
+
+    def _try_empty_side_fragment(self, unit: ConflictUnit) -> UnitOutcome | None:
+        """Deterministic resolution when exactly one marker-block side is EMPTY.
+
+        EXTEND-96 (zenodo-0027): a mid-expression fragment conflict where one
+        block side is empty (that side deleted the region) and the other is
+        non-empty. The deterministic option space is exactly {"", other-side
+        text}; the discriminator is the EMPTY side's FILE-level kind
+        (:func:`merge_intent.classify_side` on the merge-index stages):
+
+        - "deleted" (a pure-deletion side) → the deletion is the side's
+          COHERENT intent → winner "" (0027's oracle keeps the deletion —
+          the model reasoned identically but emitted whole-statement text
+          whose shape broke the fragment splice).
+        - "unchanged"/"added" → the empty block side is INCIDENTAL (that
+          side never had this content — an insertion conflict) → winner =
+          the other side's block text.
+        - "modified" → ambiguous (the deletion may be incidental to a
+          broader edit) → decline; the LLM decides, as before.
+
+        The winner runs the full validation pipeline (empty resolved_text
+        skips only the syntax check by design; both-sides-represented is
+        warning-severity, so honoring a coherent deletion is not blocked
+        for the dropped lines). Failure falls through to the next engine.
+        """
+        if unit.marker_span is None:
+            return None
+        cur_block = (unit.current.text or "").strip()
+        rep_block = (unit.replayed.text or "").strip()
+        if bool(cur_block) == bool(rep_block):
+            return None  # both empty (nothing to resolve) or both non-empty
+        deleting_is_current = not cur_block
+        other_block = unit.replayed.text if deleting_is_current else unit.current.text
+        staged = self._empty_side_stage_sides(unit.path)
+        if staged is None:
+            return None
+        sides, base_text, diff3_blocks = staged
+        if not (base_text or "").strip():
+            return None
+
+        def _toks(t: str) -> set:
+            return set((t or "").split())
+
+        # The light-edit discriminator: find this unit's conflict region in
+        # the diff3 re-derivation (a split sub-unit's other-side text is a
+        # subset of its parent diff3 block's side; match by token
+        # containment) and measure whether the surviving side is a LIGHT
+        # EDIT of the deleted ancestor content or a REWRITE. A light edit of
+        # deliberately-deleted content is contingent (the deletion wins —
+        # 0027: old_style->new_style, jaccard 0.78); a rewrite carries new
+        # intent and belongs to the keep-block/prune machinery (0013's
+        # 216-line JSON rewrite: 0.26 — emptying it regressed PASS->NEAR).
+        _unit_other = _toks(other_block)
+        best_j = None
+        for blk in diff3_blocks:
+            blk_other = blk.replayed_text if deleting_is_current else blk.current_text
+            bt = _toks(blk_other)
+            if not bt or not _unit_other:
+                continue
+            if not _unit_other <= bt:
+                continue  # not this unit's region
+            r = _toks(blk.base_text)
+            j = (len(bt & r) / len(bt | r)) if (bt | r) else 1.0
+            best_j = j if best_j is None else max(best_j, j)
+        if best_j is None or best_j < 0.6:
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="empty_side",
+                decision="skip",
+                reason=("region not re-derivable" if best_j is None
+                        else f"surviving side rewrote the region (jaccard {best_j:.2f})"),
+            )
+            return None
+        deleting_file = (sides.get("current", "") if deleting_is_current
+                         else sides.get("replayed", "") or "")
+        from capybase.merge_intent import classify_side
+        kind = classify_side(base_text, deleting_file)
+        if kind == "deleted":
+            winner, why = "", "coherent deletion honored (empty side)"
+        elif kind in ("unchanged", "added"):
+            winner = other_block or ""
+            why = "insertion conflict (empty side incidental); other side wins"
+        else:
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="empty_side",
+                decision="skip",
+                reason=f"empty side's file-level kind={kind} (ambiguous)",
+            )
+            return None
+        cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:empty_side",
+            unit_id=unit.unit_id,
+            model_name="empty_side",
+            prompt_version="empty_side.v1",
+            resolved_text=winner,
+            explanation=(f"one block side empty; file-level classify_side="
+                         f"{kind!r}; {why}"),
+            provenance="deterministic_empty_side",
+        )
+        validation = self.verification.verify(unit, cand)
+        self.journal.emit(
+            "empty_side_resolved",
+            {"candidate_id": cand.candidate_id, "kind": kind,
+             "winner": "empty" if not winner.strip() else "other_side",
+             "passed": validation.passed},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        if not validation.passed:
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="empty_side",
+                candidate=cand, validation=validation,
+                decision="skip", reason="failed validation",
+            )
+            return None
+        if self._strictness_blocks_pre_llm(unit, cand, validation, "empty_side"):
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="empty_side",
+                candidate=cand, validation=validation,
+                decision="skip", reason="strictness declined",
+            )
+            return None
+        outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+        outcome.accepted = cand
+        self._record_resolution_attempt(
+            UnitOutcome(unit=unit), mechanism="empty_side",
+            candidate=cand, validation=validation,
+            decision="accept", reason=why,
+        )
+        self.journal.emit(
+            "candidate_accepted",
+            {"candidate_id": cand.candidate_id, "via": "empty_side"},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        return outcome
+
     def _try_combination_search(self, unit: ConflictUnit) -> UnitOutcome | None:
         """Attempt a search-based combination resolution; accept only if it
         passes the full validation pipeline. Survey §4.1 (SBCR).
@@ -13938,6 +14114,16 @@ class Orchestrator:
             early = self._try_structural_resolve(unit)
             if early is not None:
                 return early  # accepted deterministically; LLM loop skipped entirely
+
+        # Empty-side fragment rule (EXTEND-96): when exactly one marker-block
+        # side is EMPTY, the deterministic option space is {"", other side} —
+        # discriminated by the empty side's FILE-level kind. Resolves the
+        # zenodo-0027 class (mid-expression deletion fragments) without an
+        # LLM call; failure falls through, as everywhere in this cascade.
+        if failures is None and self.config.future.enable_empty_side_rule:
+            early = self._try_empty_side_fragment(unit)
+            if early is not None:
+                return early  # accepted via the empty-side rule
 
         # Search-based combination resolution (SBCR): AFTER the
         # structural resolver declines and BEFORE the LLM. Searches order-

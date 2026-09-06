@@ -266,6 +266,7 @@ class NonEmptyResolutionValidator:
             or prov == "block_capture"
             or prov == "deterministic_structural"
             or pv.startswith("structural.")
+            or prov == "deterministic_empty_side"
         )
         if is_empty and is_deliberate_deletion:
             return VerificationCheckResult(

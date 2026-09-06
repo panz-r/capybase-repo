@@ -40,6 +40,8 @@ def test_provenance_values_match_spec():
     """The spec values are present, in a stable order."""
     assert PROVENANCE_VALUES == (
         "deterministic_structural",
+        "deterministic_empty_side",
+        "deterministic_deletion_respect_prune",
         "deterministic_brace_repair",
         "deterministic_gcc_fixit",
         "deterministic_cc_repair",

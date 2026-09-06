@@ -19,6 +19,7 @@ from capybase.orchestrator import Orchestrator
 
 from tests.conftest import git
 from tests.multistep_builder import CommitEdit, build_multistep_rebase
+from capybase.adapters.parsers import parse_marker_blocks
 
 
 DEAD_BLOCK = "\n".join(f"def dead_{i}():\n    return {i}" for i in range(4))
@@ -574,3 +575,184 @@ def test_prune_handles_interleaved_resurrection(tmp_path):
         assert dl not in text, dl          # every deleted line honored
     for keep in ("new_a = 1", "new_h = 8", "live_0 = 0", "tail = 3"):
         assert keep in text                # the rewrite's additions survive
+
+
+# ---------------------------------------------------------------------------
+# EXTEND-96: the empty-side fragment rule. zenodo-0027: a mid-expression
+# fragment with an EMPTY current block side; the oracle keeps the deletion
+# (correct answer ""); the model reasoned correctly but its whole-statement
+# shape broke the splice. classify_side discriminates deterministically.
+# ---------------------------------------------------------------------------
+
+E_BASE = (
+    "def run():\n"
+    "    x = call(\n"
+    "        a=1,\n"
+    "        grad=old_style(\n"
+    "            [1, 2, 3],\n"
+    "            dtype=floatX,\n"
+    "        ),\n"
+    "        b=2,\n"
+    "    )\n"
+    "    return x\n"
+)
+E_CUR_DELETED = (            # pure-deletion side: dropped the grad kwarg
+    "def run():\n"
+    "    x = call(\n"
+    "        a=1,\n"
+    "        b=2,\n"
+    "    )\n"
+    "    return x\n"
+)
+E_REP = (                    # replayed modified the kwarg (a LIGHT edit)
+    "def run():\n"
+    "    x = call(\n"
+    "        a=1,\n"
+    "        grad=new_style(\n"
+    "            [1, 2, 3],\n"
+    "            dtype=floatX,\n"
+    "        ),\n"
+    "        b=2,\n"
+    "    )\n"
+    "    return x\n"
+)
+
+
+def _empty_side_repo(repo: Path, *, cur_text: str, rep_text: str,
+                     cur_other_file: str | None = None) -> None:
+    """Repo whose conflict file has ONE block with an EMPTY current side.
+
+    ``cur_other_file``: when given, the main commit touches ONLY that
+    unrelated file's content (so app.py's current stage stays byte-equal to
+    base — the "unchanged deleter" premise — while the commit itself is
+    non-empty).
+    """
+    git(repo, "init", "-q", "-b", "main")
+    if cur_other_file is not None:
+        main_edit = {"other.py": cur_other_file}
+    else:
+        main_edit = {"app.py": cur_text}
+    build_multistep_rebase(
+        repo,
+        base_files={"app.py": E_BASE, "other.py": "o = 0\n"},
+        feat_commits=[CommitEdit("feat: modify kwarg", {"app.py": rep_text})],
+        main_commits=[CommitEdit("main: drop kwarg", main_edit)],
+        stop_early=True,
+    )
+
+
+def _empty_side_unit(repo: Path, *, cur_block: str, rep_block: str) -> ConflictUnit:
+    worktree = (repo / "app.py").read_text()
+    return ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="app.py:1:0",
+        unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=E_BASE),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=cur_block),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=rep_block),
+        original_worktree_text=worktree,
+        marker_span=parse_marker_blocks(worktree)[0].span,
+    )
+
+
+def test_empty_side_rule_honors_coherent_deletion(tmp_path: Path):
+    """File-level current is a PURE DELETION -> the empty block side is the
+    side's coherent intent -> winner '' (the 0027 oracle answer)."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _empty_side_repo(repo, cur_text=E_CUR_DELETED, rep_text=E_REP)
+    orch = _orch(repo)
+    unit = _empty_side_unit(repo, cur_block="", rep_block="grad=new_style(\n            [1, 2, 3],\n            dtype=floatX,\n        ),")
+    out = orch._try_empty_side_fragment(unit)
+    assert out is not None
+    assert out.accepted.resolved_text == ""
+    assert out.accepted.provenance == "deterministic_empty_side"
+
+
+def test_empty_side_rule_insertion_wins_when_deleter_unchanged(tmp_path: Path):
+    """File-level current UNCHANGED (its empty block side is incidental —
+    replayed inserted content) -> winner = replayed's block text.
+
+    A real git conflict with an UNCHANGED current side cannot exist (git
+    auto-merges; app.py would never be unmerged) — the arm is defensive
+    coverage for odd stage shapes, so the stage sides are injected directly
+    rather than built as a repo."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _empty_side_repo(repo, cur_text=E_CUR_DELETED, rep_text=E_REP)
+    orch = _orch(repo)
+    from capybase.adapters.parsers import parse_marker_blocks
+    _d3 = ("def run():\n"
+           "<<<<<<< A\n"
+           "=======\n"
+           "        grad=new_style(\n            [1, 2, 3],\n            dtype=floatX,\n        ),\n"
+           ">>>>>>> B\n")
+    _blocks = parse_marker_blocks(_d3)
+    # synthesize the base section the default-style marker lacks
+    _blocks[0].__dict__['base_text'] = _blocks[0].replayed_text.replace(
+        "new_style", "old_style")
+    orch.config.validation.enable_verifier_model = False  # no endpoint in tests
+    orch._empty_side_stage_sides = lambda path: (
+        {"current": E_BASE, "replayed": E_REP}, E_BASE, _blocks)
+    unit = _empty_side_unit(repo, cur_block="", rep_block="grad=new_style(\n            [1, 2, 3],\n            dtype=floatX,\n        ),")
+    out = orch._try_empty_side_fragment(unit)
+    assert out is not None
+    assert "new_style" in out.accepted.resolved_text
+
+
+def test_empty_side_rule_declines_when_deleter_modified(tmp_path: Path):
+    """File-level current MODIFIED elsewhere too — the empty block side's
+    meaning is ambiguous -> decline (LLM decides, as before). Stages are
+    injected (a real repo for this shape merges cleanly, so no conflict
+    exists to build); the worktree text is synthetic marker-laden."""
+    cur_modified = E_BASE.replace("return x", "return x + 1")
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _empty_side_repo(repo, cur_text=E_CUR_DELETED, rep_text=E_REP)
+    orch = _orch(repo)
+    _d3 = ("def run():\n<<<<<<< A\n=======\n"
+           "        grad=new_style(\n            [1, 2, 3],\n            dtype=floatX,\n        ),\n"
+           ">>>>>>> B\n")
+    _blocks = parse_marker_blocks(_d3)
+    _blocks[0].__dict__['base_text'] = _blocks[0].replayed_text.replace(
+        "new_style", "old_style")
+    orch._empty_side_stage_sides = lambda path: (
+        {"current": cur_modified, "replayed": E_REP}, E_BASE, _blocks)
+    worktree = _d3  # synthetic marker-laden worktree
+    unit = ConflictUnit(
+        session_id="s", step_index=1, path="app.py", language="python",
+        conflict_type="UU", unit_id="app.py:1:0",
+        unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text=E_BASE),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=""),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE",
+                              text="grad=new_style(\n            [1, 2, 3],\n            dtype=floatX,\n        ),"),
+        original_worktree_text=worktree,
+        marker_span=parse_marker_blocks(worktree)[0].span,
+    )
+    assert orch._try_empty_side_fragment(unit) is None
+
+def test_empty_side_rule_needs_one_empty_side(tmp_path: Path):
+    """Both sides non-empty -> not this rule's shape -> None."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _empty_side_repo(repo, cur_text=E_CUR_DELETED, rep_text=E_REP)
+    orch = _orch(repo)
+    unit = _empty_side_unit(repo, cur_block="grad=old_style(\n            [1, 2, 3],\n            dtype=floatX,\n        ),",
+                            rep_block="grad=new_style(\n            [1, 2, 3],\n            dtype=floatX,\n        ),")
+    assert orch._try_empty_side_fragment(unit) is None
+
+
+def test_empty_side_rule_declines_large_regions(tmp_path: Path):
+    """The clickhouse-0013 regression pin: a LARGE non-empty block side
+    (216-line rewrite units) must NOT be emptied — those regions belong to
+    the keep-block / deletion-respect-prune path (the oracle keeps the
+    rewrite minus pruned deletions; emptying them regressed 0013 from PASS
+    1.00 to NEAR 0.85). Only fragments fire the rule."""
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _empty_side_repo(repo, cur_text=E_CUR_DELETED, rep_text=E_REP)
+    orch = _orch(repo)
+    big_block = "\n".join(f"rewrite_line_{i}(new, json, serialize)" for i in range(30))
+    unit = _empty_side_unit(repo, cur_block="", rep_block=big_block)
+    assert orch._try_empty_side_fragment(unit) is None

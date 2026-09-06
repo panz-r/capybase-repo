@@ -649,6 +649,11 @@ class FutureConfig(BaseModel):
     # and falls through to the LLM. Default ON; only fires when the structural
     # resolver declined, so the cheap provably-safe rules always run first.
     enable_combination_search: bool = True
+    # EXTEND-96: deterministic resolution when exactly one marker-block
+    # side is EMPTY (a deletion vs a modification/insertion) — the
+    # empty-side fragment rule (see orchestrator
+    # _try_empty_side_fragment).
+    enable_empty_side_rule: bool = True
     # SBCR (combination-search) tuning. The fitness is character-level Gestalt
     # similarity, mean-aggregated over both parents (arXiv:2605.16646 §4.1).
     # These knobs make the research-tuned parameters configurable without code

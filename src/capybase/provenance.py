@@ -45,6 +45,8 @@ from typing import Literal
 # data, infer the legacy way") — see :data:`LEGACY_PROVENANCE`.
 ResolutionProvenance = Literal[
     "deterministic_structural",
+    "deterministic_empty_side",
+    "deterministic_deletion_respect_prune",
     "combination_search",
     "block_capture",
     "exact_history_reuse",
@@ -57,6 +59,8 @@ ResolutionProvenance = Literal[
 #: stable table and by the dry-run report (#10).
 PROVENANCE_VALUES: tuple[str, ...] = (
     "deterministic_structural",
+    "deterministic_empty_side",
+    "deterministic_deletion_respect_prune",
     "deterministic_brace_repair",
     "deterministic_gcc_fixit",
     "deterministic_cc_repair",
@@ -90,6 +94,8 @@ LEGACY_PROVENANCE = ""
 #: string maps to ``(legacy)`` so old candidates render something sane.
 PROVENANCE_LABELS: dict[str, str] = {
     "deterministic_structural": "deterministic structural",
+    "deterministic_empty_side": "empty-side fragment rule",
+    "deterministic_deletion_respect_prune": "deletion-respect prune",
     "deterministic_brace_repair": "deterministic brace repair",
     "deterministic_gcc_fixit": "deterministic gcc fix-it",
     "deterministic_cc_repair": "deterministic cc repair (gcc-diagnostic)",
