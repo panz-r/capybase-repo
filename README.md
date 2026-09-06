@@ -410,9 +410,6 @@ Counting rules:
 - A case counts under each mechanism in its accepted candidates'
   lineage.
 - Escalated cases have no accepted candidates and are excluded.
-- The phase-1 fast path and the true-side portfolio bypass the
-  per-unit loop and record no candidate provenance; those cases are
-  attributed from the preserved flight journals at recount time.
 - Rows sum to more than the 654 accepted cases: a case with several
   participating mechanisms counts once per mechanism.
 
