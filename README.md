@@ -401,19 +401,23 @@ participated, not that it solved the case alone).
 
 ##### Mechanism breakdown
 
-Which mechanisms participate in accepted resolutions — computed by
-walking **backwards from the accepted candidates**: each candidate's
-provenance is a `+`-joined lineage of the mechanisms that composed it
-(e.g. `plain_llm+keyed_item_union` = the model's candidate, then the
-union layer completed it), and a case counts for **every mechanism in
-that lineage**. Mechanisms that ran but were not part of the winning
-path are deliberately absent (the losing attempts are the retry
-budget's story, not this table's), and escalated cases — which have no
-winning path — are excluded, so the table treats accepted as passed:
-no PASS/WORKING columns. Whole-file paths that bypass the per-unit
-loop (phase-1 fast path, true-side portfolio) are attributed from the
-preserved flight journals at recount time. Rows sum to more than the
-654 accepted cases by design.
+Every accepted candidate records a `+`-joined list of the mechanisms
+that composed it. For example, `plain_llm+keyed_item_union` is a model
+candidate completed by the union layer.
+
+Counting rules:
+
+- A case counts under each mechanism in its accepted candidates'
+  lineage.
+- Failed attempts are not counted — only what is in the accepted
+  candidates appears.
+- Escalated cases have no accepted candidates and are excluded. There
+  are no PASS/WORKING columns: accepted is the criterion.
+- The phase-1 fast path and the true-side portfolio bypass the
+  per-unit loop and record no candidate provenance; those cases are
+  attributed from the preserved flight journals at recount time.
+- Rows sum to more than the 654 accepted cases: a case with several
+  participating mechanisms counts once per mechanism.
 
 | mechanism (participated in accepted) | cases | % of corpus |
 |---|---|---|
