@@ -23,8 +23,58 @@ from pathlib import Path
 _FIELDS = (
     "id", "language", "dataset", "verdict", "terminal_reason",
     "matches_oracle", "escalated", "elapsed", "repeat_verdicts", "reason",
-    "toolchain_dead",
+    "toolchain_dead", "resolution_bucket", "provenance_mix",
 )
+
+#: Buckets that mean "the LLM was involved" (EXTEND-70's llm column: broad
+#: breakdown — the LLM participated, not that it solved the case alone).
+_LLM_BUCKETS = ("llm_one_shot", "llm_cegis")
+
+
+def _journal_mechanism(flights_root: Path | None, case_id: str) -> str | None:
+    """Derive a case's mechanism from its preserved flight journal.
+
+    The fallback for rows whose provenance_mix is empty: the phase-1 fast
+    path and other whole-file paths bypass the per-unit candidate loop, so
+    classify_resolution_bucket saw nothing — but the journal records what
+    actually ran (phase1_fast_path_adjudication, true_side_portfolio,
+    candidate_accepted with provenance/via).
+    """
+    if flights_root is None:
+        return None
+    import glob
+    journals = sorted(glob.glob(str(flights_root / "**" / case_id / "**" / "journal.jsonl"), recursive=True))
+    if not journals:
+        # some layouts nest one level deeper/shallower — try by suffix match
+        journals = sorted(glob.glob(str(flights_root / "**" / "journal.jsonl"), recursive=True))
+        journals = [j for j in journals if f"/{case_id}/" in j]
+    for jpath in journals:  # newest last; later sessions overwrite the story
+        mix: dict[str, int] = {}
+        fast_path = portfolio = False
+        try:
+            for line in open(jpath, encoding="utf-8"):
+                try:
+                    ev = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                t = ev.get("event_type", "")
+                if t == "phase1_fast_path_adjudication":
+                    fast_path = True
+                elif t == "true_side_portfolio":
+                    portfolio = True
+                elif t == "candidate_accepted":
+                    prov = (ev.get("payload") or {}).get("provenance") \
+                        or (ev.get("payload") or {}).get("via") or "unknown"
+                    mix[prov] = mix.get(prov, 0) + 1
+        except OSError:
+            continue
+        if fast_path:
+            return "phase1_fast_path"
+        if portfolio:
+            return "true_side_portfolio"
+        if mix:
+            return max(mix.items(), key=lambda kv: kv[1])[0]
+    return None
 
 
 def main() -> None:
@@ -32,6 +82,13 @@ def main() -> None:
     ap.add_argument("--results", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--round", required=True, help="round name, e.g. s26")
+    ap.add_argument(
+        "--flights", default=None, metavar="DIR",
+        help="The harvest's --preserve-flights root. Enables the mechanism "
+             "histogram's journal fallback: rows whose provenance_mix is "
+             "empty (the phase-1 fast path and other whole-file paths "
+             "bypass the per-unit candidate loop) get their mechanism "
+             "derived from the preserved journal's event trace.")
     ap.add_argument(
         "--override", action="append", default=None, metavar="JSON",
         help="A later rerun's results JSON whose verdicts REPLACE the "
@@ -90,6 +147,59 @@ def main() -> None:
             if row.get("toolchain_dead"):
                 era += 1
     denom_adj = total - era
+
+    # Per-language table (README rows) incl. the llm column (EXTEND-70:
+    # cases whose resolution_bucket is llm_one_shot/llm_cegis — the LLM
+    # was involved).
+    by_language = {}
+    for lang, rows in sorted(by_lang.items()):
+        lt = lp = lw = le = lllm = 0
+        for row in rows:
+            if row.get("terminal_reason") == "SAFE_SKIP":
+                continue
+            lt += 1
+            v = row["verdict"]
+            if v == "PASS":
+                lp += 1
+            elif v == "WORKING":
+                lw += 1
+            if row.get("toolchain_dead"):
+                le += 1
+            if row.get("resolution_bucket") in _LLM_BUCKETS:
+                lllm += 1
+        by_language[lang] = {
+            "cases": lt, "pass": lp, "working": lw, "era_dead": le,
+            "llm": lllm,
+        }
+
+    # Mechanism histogram (EXTEND-70: mechanism | cases | PASS | WORKING |
+    # P+W %), from each case's dominant provenance; journal fallback for
+    # empty-mix rows when --flights is given.
+    flights_root = Path(args.flights) if args.flights else None
+    mech: dict[str, dict[str, int]] = {}
+    for rec in records:
+        if rec.get("terminal_reason") == "SAFE_SKIP":
+            continue
+        mix = rec.get("provenance_mix") or {}
+        if mix:
+            mechanism = max(mix.items(), key=lambda kv: kv[1])[0]
+        else:
+            mechanism = _journal_mechanism(flights_root, rec["id"])
+            if mechanism is None:
+                mechanism = ("(unresolved)" if rec.get("escalated")
+                             else "(unclassified)")
+        d = mech.setdefault(mechanism, {"cases": 0, "pass": 0, "working": 0})
+        d["cases"] += 1
+        v = rec.get("verdict")
+        if v == "PASS":
+            d["pass"] += 1
+        elif v == "WORKING":
+            d["working"] += 1
+    histogram = []
+    for m, d in sorted(mech.items(), key=lambda kv: -kv[1]["cases"]):
+        pw = round(100 * (d["pass"] + d["working"]) / d["cases"], 1) if d["cases"] else 0
+        histogram.append({"mechanism": m, **d, "pw_pct": pw})
+
     meta = {
         "round": args.round,
         "source": args.results,
@@ -102,6 +212,8 @@ def main() -> None:
             "adj_pct": round(100 * passes / denom_adj, 1) if denom_adj else 0,
             "pw_adj_pct": round(
                 100 * (passes + working) / denom_adj, 1) if denom_adj else 0,
+            "by_language": by_language,
+            "mechanism_histogram": histogram,
         },
         # caller completes: mechanism_commit, state, command_template,
         # ran, verification, outcome_summary

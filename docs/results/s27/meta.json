@@ -8,6 +8,150 @@
     "era_dead": 1,
     "pass_pct": 96.5,
     "adj_pct": 96.7,
-    "pw_adj_pct": 98.0
-  }
+    "pw_adj_pct": 98.0,
+    "by_language": {
+      "c": {
+        "cases": 204,
+        "pass": 197,
+        "working": 2,
+        "era_dead": 0,
+        "llm": 47
+      },
+      "cpp": {
+        "cases": 154,
+        "pass": 150,
+        "working": 1,
+        "era_dead": 0,
+        "llm": 32
+      },
+      "python": {
+        "cases": 108,
+        "pass": 101,
+        "working": 4,
+        "era_dead": 0,
+        "llm": 14
+      },
+      "rust": {
+        "cases": 194,
+        "pass": 189,
+        "working": 2,
+        "era_dead": 1,
+        "llm": 13
+      }
+    },
+    "mechanism_histogram": [
+      {
+        "mechanism": "deterministic_structural",
+        "cases": 300,
+        "pass": 296,
+        "working": 1,
+        "pw_pct": 99.0
+      },
+      {
+        "mechanism": "deterministic_source_current_only",
+        "cases": 141,
+        "pass": 133,
+        "working": 5,
+        "pw_pct": 97.9
+      },
+      {
+        "mechanism": "plain_llm",
+        "cases": 60,
+        "pass": 59,
+        "working": 1,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "true_side_portfolio",
+        "cases": 57,
+        "pass": 55,
+        "working": 1,
+        "pw_pct": 98.2
+      },
+      {
+        "mechanism": "combination_search",
+        "cases": 57,
+        "pass": 55,
+        "working": 1,
+        "pw_pct": 98.2
+      },
+      {
+        "mechanism": "phase1_fast_path",
+        "cases": 20,
+        "pass": 20,
+        "working": 0,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "plain_llm+intent_coverage",
+        "cases": 7,
+        "pass": 6,
+        "working": 0,
+        "pw_pct": 85.7
+      },
+      {
+        "mechanism": "deterministic_empty_side",
+        "cases": 6,
+        "pass": 5,
+        "working": 0,
+        "pw_pct": 83.3
+      },
+      {
+        "mechanism": "deterministic_source_replayed_only",
+        "cases": 2,
+        "pass": 2,
+        "working": 0,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "block_capture",
+        "cases": 2,
+        "pass": 1,
+        "working": 0,
+        "pw_pct": 50.0
+      },
+      {
+        "mechanism": "deterministic_source_current_only+deletion_union",
+        "cases": 2,
+        "pass": 2,
+        "working": 0,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "(unresolved)",
+        "cases": 2,
+        "pass": 0,
+        "working": 0,
+        "pw_pct": 0.0
+      },
+      {
+        "mechanism": "plain_llm+keyed_item_union",
+        "cases": 2,
+        "pass": 1,
+        "working": 0,
+        "pw_pct": 50.0
+      },
+      {
+        "mechanism": "deterministic_source_current_only+keyed_item_union",
+        "cases": 1,
+        "pass": 1,
+        "working": 0,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "deterministic_source_cur_rep",
+        "cases": 1,
+        "pass": 1,
+        "working": 0,
+        "pw_pct": 100.0
+      }
+    ]
+  },
+  "mechanism_commit": "71ac03a",
+  "description": "sprint-27 final stack: diff3 marker-leak fix family, marker-scanner consolidation (parsers.is_marker_line), default-style side extraction, deletion-respect prune arm + empty-side fragment rule, duplication-lift refactors. First corpus-wide resolution_bucket data.",
+  "command_template": "CAPYBASE_WORKTREE_DIR=/var/tmp/capy-wt TMPDIR=/var/tmp CAPYBASE_SKIP_SIZE_GUARD=1 .venv/bin/python scripts/live_eval_realworld.py --provider nova-gemma4 --repeat-nonpass 3 --out <out>.json --preserve-flights <flights-dir>  # endpoint-guard: allow",
+  "ran": "2026-09-06 (wall 777.7m, zero SETUP_FAILED)",
+  "state": "complete",
+  "verification": "recount recomputes from docs/results/s27/*.jsonl; mechanism histogram uses provenance_mix with journal fallback (--flights /var/tmp/capybase-live/s27/flights-harvest)",
+  "outcome_summary": "637/660 raw PASS (96.5%), P+W 646/660 (98.0%); +43 net vs s26 (53 up / 6 down); era floor 9 -> 1; llm any-participation 106/660 (16%); regressions: 2 variance, 2 known-and-better, 1 band shift, 1 open thread (sqlite-0016 sbcr whole-file interleave)"
 }

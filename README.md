@@ -364,34 +364,77 @@ majority.
 
 #### Corpus
 
-The **661-case corpus of non-git-resolvable conflicts** (cases where
+The **660-case corpus of non-git-resolvable conflicts** (cases where
 git's own three-way merge leaves markers — anything git resolves
 cleanly is not a resolution problem) runs as a sharded harvest, one
 language at a time, fixes landing between rounds.
 
-#### Current round (s26)
+#### Current round (s27)
 
-All cases on the uniform commit `d8cc231` — the sprint-26 era-recovery
-round (per-dataset toolchain-era configs for the C corpora, Rust
-dependency vendoring with era tag pins, and a set of splice/repair
-fixes; the full list is in `docs/results/s26/meta.json`). Δ is versus
-the prior full round (`e9513c5`). 676 cases ran; 16 git-resolvable
-skips leave the 660-row denominator below. The era floor collapsed
-from 167 to 9. Two mid-run regressions were diagnosed and fixed the
-same day; their 14 invalidated rows are overridden by fix-validation
-rerun verdicts in the extracts. Flip audit vs the prior round: 156 up,
-5 down (all sim ≥ 0.99 gate stalls, oracle-subjective variance, or
-known big-file classes) — zero mechanism regressions. The calibration
-A/Bs (B9 resolve directive, B10 self-consistency n=3) were
-evidence-neutral and stay off by default.
+All cases on the uniform commit `71ac03a` — the sprint-27 round: the
+diff3 marker-leak fix family (validation no longer false-fails on
+`--diff3`-materialized worktrees), marker-scanner consolidation, the
+deletion-respect prune arm and the empty-side fragment rule (two new
+deterministic mechanisms), and the duplication-lift refactors; the full
+list is in `docs/results/s27/meta.json`. Δ is versus the prior full
+round (`d8cc231`, s26). 676 cases ran; 16 git-resolvable skips leave
+the 660-row denominator. Zero SETUP_FAILED; wall ~13h. Flip audit vs
+s26: 53 up, 6 down — of the down, two are repeat-3 variance
+(nlohmann-0038, zenodo-0030), two are known-and-better
+(flask-0006's safe refusal, redis-0026's sandbox variance), one a band
+shift to WORKING (protobuf-0063); the one mechanism regression
+(sqlite-0016, an sbcr whole-file interleave) has its diagnosis thread
+open in the sprint ledger. The era floor collapsed again: 9 → 1
+(protobuf-0055, a supposed intrinsic, now passes).
 
-| lang | cases | PASS | WORKING | era-dead | PASS % | adj % | P+W adj % | Δ P+W |
-|------|-------|------|---------|----------|--------|-----------|-----------|-------|
-| python | 108 | 97 | 4 | 0 | 89.8% | 89.8% | 93.5% | +2.8pp |
-| c | 204 | 176 | 1 | 0 | 86.3% | 86.3% | 86.8% | +2.8pp |
-| rust | 194 | 177 | 0 | 7 | 91.2% | 94.7% | 94.7% | −0.6pp |
-| cpp | 154 | 144 | 3 | 2 | 93.5% | 94.7% | 96.7% | +3.1pp |
-| **total** | **660** | **594** | **8** | **9** | **90.0%** | **91.2%** | **92.5%** | **+1.0pp** |
+**llm** = cases whose resolution involved the model (the
+`resolution_bucket` is llm_one_shot or llm_cegis — the LLM
+participated, not that it solved the case alone).
+
+| lang | cases | PASS | WORKING | era-dead | llm | PASS % | adj % | P+W adj % | Δ P+W |
+|------|-------|------|---------|----------|-----|--------|-----------|-----------|-------|
+| python | 108 | 101 | 4 | 0 | 14 | 93.5% | 93.5% | 97.2% | +3.7pp |
+| c | 204 | 197 | 2 | 0 | 47 | 96.6% | 96.6% | 97.5% | +10.7pp |
+| rust | 194 | 189 | 2 | 1 | 13 | 97.4% | 97.9% | 99.0% | +4.3pp |
+| cpp | 154 | 150 | 1 | 0 | 32 | 97.4% | 97.4% | 98.1% | +1.4pp |
+| **total** | **660** | **637** | **9** | **1** | **106** | **96.5%** | **96.7%** | **98.0%** | **+5.5pp** |
+
+##### Mechanism breakdown
+
+Who actually resolves the corpus — each case attributed to its dominant
+mechanism (the plurality provenance among accepted units; whole-file
+paths that bypass the per-unit loop are derived from the preserved
+flight journals at recount time). 591 of 660 cases (90%) carry no
+LLM-dominant mechanism; the `llm` column above is the stricter
+any-participation count (106, 16%).
+
+| mechanism | cases | PASS | WORKING | P+W % |
+|---|---|---|---|---|
+| deterministic_structural | 300 | 296 | 1 | 99.0 |
+| deterministic_source_current_only | 141 | 133 | 5 | 97.9 |
+| plain_llm | 60 | 59 | 1 | 100.0 |
+| true_side_portfolio | 57 | 55 | 1 | 98.2 |
+| combination_search | 57 | 55 | 1 | 98.2 |
+| phase1_fast_path | 20 | 20 | 0 | 100.0 |
+| plain_llm+intent_coverage | 7 | 6 | 0 | 85.7 |
+| deterministic_empty_side | 6 | 5 | 0 | 83.3 |
+| deterministic_source_replayed_only | 2 | 2 | 0 | 100.0 |
+| block_capture | 2 | 1 | 0 | 50.0 |
+| deterministic_source_current_only+deletion_union | 2 | 2 | 0 | 100.0 |
+| plain_llm+keyed_item_union | 2 | 1 | 0 | 50.0 |
+| deterministic_source_current_only+keyed_item_union | 1 | 1 | 0 | 100.0 |
+| deterministic_source_cur_rep | 1 | 1 | 0 | 100.0 |
+| (unresolved) | 2 | 0 | 0 | 0.0 |
+
+#### Prior round (s26)
+
+The sprint-26 era-recovery round (per-dataset toolchain-era configs
+for the C corpora, Rust dependency vendoring with era tag pins, and a
+set of splice/repair fixes; `docs/results/s26/meta.json`): 594/660
+PASS (90.0%), P+W adj 92.5%, era floor 167 → 9. Flip audit vs s22r2:
+156 up, 5 down — zero mechanism regressions. The calibration A/Bs
+(B9 resolve directive, B10 self-consistency n=3) were evidence-neutral
+and stay off by default.
 
 #### Verdicts and metrics
 
@@ -405,9 +448,9 @@ not resolver failures).
 preserved, diverged from the human resolution below the PASS bar — the
 honest graded-success rate. Every number
 recomputes from the per-case extracts committed under `docs/results/`
-(current round: `s26/`, incl. its `meta.json` with the pinned
-commit, commands, and flip-audit recipe; the prior `s22r2/`
-remains for comparison).
+(current round: `s27/`, incl. its `meta.json` with the pinned
+commit, the per-language recount, and the mechanism histogram; the
+prior rounds `s26/` and `s22r2/` remain for comparison).
 
 ## Test suites
 
