@@ -401,8 +401,8 @@ participated, not that it solved the case alone).
 
 ##### Mechanism breakdown
 
-The table counts, per mechanism, how many accepted resolutions it took
-part in producing.
+Which mechanisms participate in accepted conflict resolutions, and how
+often each one does.
 
 Counting rules:
 
