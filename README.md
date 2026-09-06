@@ -401,31 +401,35 @@ participated, not that it solved the case alone).
 
 ##### Mechanism breakdown
 
-Who actually resolves the corpus, walking **backwards from the final
-accepted candidates**: each accepted candidate's provenance is a
-`+`-joined lineage of the mechanisms that composed it (e.g.
-`plain_llm+keyed_item_union` = the model's candidate, then the union
-layer completed it), so a case counts for **every mechanism that
-participated** — not just one. Whole-file paths that bypass the
-per-unit loop (phase-1 fast path, true-side portfolio) are attributed
-from the preserved flight journals at recount time. Rows sum to more
-than 660 by design; 2 escalated cases have no participating mechanism.
+Which mechanisms participate in accepted resolutions — computed by
+walking **backwards from the accepted candidates**: each candidate's
+provenance is a `+`-joined lineage of the mechanisms that composed it
+(e.g. `plain_llm+keyed_item_union` = the model's candidate, then the
+union layer completed it), and a case counts for **every mechanism in
+that lineage**. Mechanisms that ran but were not part of the winning
+path are deliberately absent (the losing attempts are the retry
+budget's story, not this table's), and escalated cases — which have no
+winning path — are excluded, so the table treats accepted as passed:
+no PASS/WORKING columns. Whole-file paths that bypass the per-unit
+loop (phase-1 fast path, true-side portfolio) are attributed from the
+preserved flight journals at recount time. Rows sum to more than the
+654 accepted cases by design.
 
-| mechanism (participated) | cases | % of corpus | PASS | P+W % |
-|---|---|---|---|---|
-| deterministic_structural | 353 | 53.5% | 347 | 98.9 |
-| deterministic_source_current_only | 179 | 27.1% | 170 | 98.3 |
-| plain_llm | 102 | 15.5% | 97 | 97.1 |
-| combination_search | 71 | 10.8% | 67 | 97.2 |
-| true_side_portfolio | 57 | 8.6% | 55 | 98.2 |
-| phase1_fast_path | 20 | 3.0% | 20 | 100.0 |
-| intent_coverage | 14 | 2.1% | 12 | 85.7 |
-| deterministic_empty_side | 10 | 1.5% | 8 | 80.0 |
-| keyed_item_union | 6 | 0.9% | 4 | 83.3 |
-| deterministic_source_replayed_only | 4 | 0.6% | 4 | 100.0 |
-| block_capture | 4 | 0.6% | 3 | 75.0 |
-| deletion_union | 3 | 0.5% | 3 | 100.0 |
-| deterministic_source_cur_rep | 1 | 0.2% | 1 | 100.0 |
+| mechanism (participated in accepted) | cases | % of corpus |
+|---|---|---|
+| deterministic_structural | 350 | 53.0% |
+| deterministic_source_current_only | 179 | 27.1% |
+| plain_llm | 102 | 15.5% |
+| combination_search | 71 | 10.8% |
+| true_side_portfolio | 56 | 8.5% |
+| phase1_fast_path | 20 | 3.0% |
+| intent_coverage | 14 | 2.1% |
+| deterministic_empty_side | 9 | 1.4% |
+| keyed_item_union | 6 | 0.9% |
+| deterministic_source_replayed_only | 4 | 0.6% |
+| block_capture | 4 | 0.6% |
+| deletion_union | 3 | 0.5% |
+| deterministic_source_cur_rep | 1 | 0.2% |
 
 The complementary single-label view (each case attributed to its
 dominant mechanism — the plurality provenance among accepted units) is

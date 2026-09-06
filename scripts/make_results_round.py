@@ -201,17 +201,22 @@ def main() -> None:
         histogram.append({"mechanism": m, **d, "pw_pct": pw})
 
     # Participation view: a case counts for EVERY mechanism that
-    # contributed to building its final accepted candidates — each
-    # accepted provenance string is a "+"-joined lineage (e.g.
+    # participated in building its final ACCEPTED candidates — walking
+    # backwards from the acceptance: each accepted provenance string is
+    # a "+"-joined lineage of its composers (e.g.
     # plain_llm+keyed_item_union = the model's candidate, then the union
     # layer completed it), so split on "+" and union across units.
-    # Empty-mix rows (whole-file paths) participate via their
-    # journal-derived mechanism. Complements the dominant view (which
-    # answers "who owns the resolution" with ONE label per case);
-    # participation answers "who contributed".
-    part: dict[str, dict[str, int]] = {}
+    # Mechanisms that ran but were not part of the winning path are
+    # deliberately absent. Escalated cases have no winning path and are
+    # excluded; having participated in an accepted candidate IS this
+    # table's success criterion, so no PASS/WORKING columns — the
+    # breakdown treats accepted as passed. Empty-mix rows (whole-file
+    # paths) participate via their journal-derived mechanism.
+    part: dict[str, int] = {}
     for rec in records:
         if rec.get("terminal_reason") == "SAFE_SKIP":
+            continue
+        if rec.get("verdict") in ("ESCALATE", "ESCALATE_TOOLCHAIN"):
             continue
         mechs = set()
         for prov in (rec.get("provenance_mix") or {}):
@@ -220,23 +225,13 @@ def main() -> None:
             j = _journal_mechanism(flights_root, rec["id"])
             if j:
                 mechs.add(j)
-        v = rec.get("verdict")
-        pw = v in ("PASS", "WORKING")
         for m in mechs:
-            d = part.setdefault(m, {"cases": 0, "pass": 0, "pw": 0})
-            d["cases"] += 1
-            if v == "PASS":
-                d["pass"] += 1
-            if pw:
-                d["pw"] += 1
-    participation = []
-    for m, d in sorted(part.items(), key=lambda kv: -kv[1]["cases"]):
-        participation.append({
-            "mechanism": m, "cases": d["cases"],
-            "pct_of_corpus": round(100 * d["cases"] / total, 1) if total else 0,
-            "pass": d["pass"],
-            "pw_pct": round(100 * d["pw"] / d["cases"], 1) if d["cases"] else 0,
-        })
+            part[m] = part.get(m, 0) + 1
+    participation = [
+        {"mechanism": m, "cases": n,
+         "pct_of_corpus": round(100 * n / total, 1) if total else 0}
+        for m, n in sorted(part.items(), key=lambda kv: -kv[1])
+    ]
 
     meta = {
         "round": args.round,

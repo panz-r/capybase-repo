@@ -149,94 +149,68 @@
     "mechanism_participation": [
       {
         "mechanism": "deterministic_structural",
-        "cases": 353,
-        "pct_of_corpus": 53.5,
-        "pass": 347,
-        "pw_pct": 98.9
+        "cases": 350,
+        "pct_of_corpus": 53.0
       },
       {
         "mechanism": "deterministic_source_current_only",
         "cases": 179,
-        "pct_of_corpus": 27.1,
-        "pass": 170,
-        "pw_pct": 98.3
+        "pct_of_corpus": 27.1
       },
       {
         "mechanism": "plain_llm",
         "cases": 102,
-        "pct_of_corpus": 15.5,
-        "pass": 97,
-        "pw_pct": 97.1
+        "pct_of_corpus": 15.5
       },
       {
         "mechanism": "combination_search",
         "cases": 71,
-        "pct_of_corpus": 10.8,
-        "pass": 67,
-        "pw_pct": 97.2
+        "pct_of_corpus": 10.8
       },
       {
         "mechanism": "true_side_portfolio",
-        "cases": 57,
-        "pct_of_corpus": 8.6,
-        "pass": 55,
-        "pw_pct": 98.2
+        "cases": 56,
+        "pct_of_corpus": 8.5
       },
       {
         "mechanism": "phase1_fast_path",
         "cases": 20,
-        "pct_of_corpus": 3.0,
-        "pass": 20,
-        "pw_pct": 100.0
+        "pct_of_corpus": 3.0
       },
       {
         "mechanism": "intent_coverage",
         "cases": 14,
-        "pct_of_corpus": 2.1,
-        "pass": 12,
-        "pw_pct": 85.7
+        "pct_of_corpus": 2.1
       },
       {
         "mechanism": "deterministic_empty_side",
-        "cases": 10,
-        "pct_of_corpus": 1.5,
-        "pass": 8,
-        "pw_pct": 80.0
+        "cases": 9,
+        "pct_of_corpus": 1.4
       },
       {
         "mechanism": "keyed_item_union",
         "cases": 6,
-        "pct_of_corpus": 0.9,
-        "pass": 4,
-        "pw_pct": 83.3
+        "pct_of_corpus": 0.9
       },
       {
         "mechanism": "deterministic_source_replayed_only",
         "cases": 4,
-        "pct_of_corpus": 0.6,
-        "pass": 4,
-        "pw_pct": 100.0
+        "pct_of_corpus": 0.6
       },
       {
         "mechanism": "block_capture",
         "cases": 4,
-        "pct_of_corpus": 0.6,
-        "pass": 3,
-        "pw_pct": 75.0
+        "pct_of_corpus": 0.6
       },
       {
         "mechanism": "deletion_union",
         "cases": 3,
-        "pct_of_corpus": 0.5,
-        "pass": 3,
-        "pw_pct": 100.0
+        "pct_of_corpus": 0.5
       },
       {
         "mechanism": "deterministic_source_cur_rep",
         "cases": 1,
-        "pct_of_corpus": 0.2,
-        "pass": 1,
-        "pw_pct": 100.0
+        "pct_of_corpus": 0.2
       }
     ]
   }
