@@ -145,13 +145,99 @@
         "working": 0,
         "pw_pct": 100.0
       }
+    ],
+    "mechanism_participation": [
+      {
+        "mechanism": "deterministic_structural",
+        "cases": 353,
+        "pct_of_corpus": 53.5,
+        "pass": 347,
+        "pw_pct": 98.9
+      },
+      {
+        "mechanism": "deterministic_source_current_only",
+        "cases": 179,
+        "pct_of_corpus": 27.1,
+        "pass": 170,
+        "pw_pct": 98.3
+      },
+      {
+        "mechanism": "plain_llm",
+        "cases": 102,
+        "pct_of_corpus": 15.5,
+        "pass": 97,
+        "pw_pct": 97.1
+      },
+      {
+        "mechanism": "combination_search",
+        "cases": 71,
+        "pct_of_corpus": 10.8,
+        "pass": 67,
+        "pw_pct": 97.2
+      },
+      {
+        "mechanism": "true_side_portfolio",
+        "cases": 57,
+        "pct_of_corpus": 8.6,
+        "pass": 55,
+        "pw_pct": 98.2
+      },
+      {
+        "mechanism": "phase1_fast_path",
+        "cases": 20,
+        "pct_of_corpus": 3.0,
+        "pass": 20,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "intent_coverage",
+        "cases": 14,
+        "pct_of_corpus": 2.1,
+        "pass": 12,
+        "pw_pct": 85.7
+      },
+      {
+        "mechanism": "deterministic_empty_side",
+        "cases": 10,
+        "pct_of_corpus": 1.5,
+        "pass": 8,
+        "pw_pct": 80.0
+      },
+      {
+        "mechanism": "keyed_item_union",
+        "cases": 6,
+        "pct_of_corpus": 0.9,
+        "pass": 4,
+        "pw_pct": 83.3
+      },
+      {
+        "mechanism": "deterministic_source_replayed_only",
+        "cases": 4,
+        "pct_of_corpus": 0.6,
+        "pass": 4,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "block_capture",
+        "cases": 4,
+        "pct_of_corpus": 0.6,
+        "pass": 3,
+        "pw_pct": 75.0
+      },
+      {
+        "mechanism": "deletion_union",
+        "cases": 3,
+        "pct_of_corpus": 0.5,
+        "pass": 3,
+        "pw_pct": 100.0
+      },
+      {
+        "mechanism": "deterministic_source_cur_rep",
+        "cases": 1,
+        "pct_of_corpus": 0.2,
+        "pass": 1,
+        "pw_pct": 100.0
+      }
     ]
-  },
-  "mechanism_commit": "71ac03a",
-  "description": "sprint-27 final stack: diff3 marker-leak fix family, marker-scanner consolidation (parsers.is_marker_line), default-style side extraction, deletion-respect prune arm + empty-side fragment rule, duplication-lift refactors. First corpus-wide resolution_bucket data.",
-  "command_template": "CAPYBASE_WORKTREE_DIR=/var/tmp/capy-wt TMPDIR=/var/tmp CAPYBASE_SKIP_SIZE_GUARD=1 .venv/bin/python scripts/live_eval_realworld.py --provider nova-gemma4 --repeat-nonpass 3 --out <out>.json --preserve-flights <flights-dir>  # endpoint-guard: allow",
-  "ran": "2026-09-06 (wall 777.7m, zero SETUP_FAILED)",
-  "state": "complete",
-  "verification": "recount recomputes from docs/results/s27/*.jsonl; mechanism histogram uses provenance_mix with journal fallback (--flights /var/tmp/capybase-live/s27/flights-harvest)",
-  "outcome_summary": "637/660 raw PASS (96.5%), P+W 646/660 (98.0%); +43 net vs s26 (53 up / 6 down); era floor 9 -> 1; llm any-participation 106/660 (16%); regressions: 2 variance, 2 known-and-better, 1 band shift, 1 open thread (sqlite-0016 sbcr whole-file interleave)"
+  }
 }

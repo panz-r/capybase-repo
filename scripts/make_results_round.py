@@ -200,6 +200,44 @@ def main() -> None:
         pw = round(100 * (d["pass"] + d["working"]) / d["cases"], 1) if d["cases"] else 0
         histogram.append({"mechanism": m, **d, "pw_pct": pw})
 
+    # Participation view: a case counts for EVERY mechanism that
+    # contributed to building its final accepted candidates — each
+    # accepted provenance string is a "+"-joined lineage (e.g.
+    # plain_llm+keyed_item_union = the model's candidate, then the union
+    # layer completed it), so split on "+" and union across units.
+    # Empty-mix rows (whole-file paths) participate via their
+    # journal-derived mechanism. Complements the dominant view (which
+    # answers "who owns the resolution" with ONE label per case);
+    # participation answers "who contributed".
+    part: dict[str, dict[str, int]] = {}
+    for rec in records:
+        if rec.get("terminal_reason") == "SAFE_SKIP":
+            continue
+        mechs = set()
+        for prov in (rec.get("provenance_mix") or {}):
+            mechs.update(m for m in prov.split("+") if m)
+        if not mechs:
+            j = _journal_mechanism(flights_root, rec["id"])
+            if j:
+                mechs.add(j)
+        v = rec.get("verdict")
+        pw = v in ("PASS", "WORKING")
+        for m in mechs:
+            d = part.setdefault(m, {"cases": 0, "pass": 0, "pw": 0})
+            d["cases"] += 1
+            if v == "PASS":
+                d["pass"] += 1
+            if pw:
+                d["pw"] += 1
+    participation = []
+    for m, d in sorted(part.items(), key=lambda kv: -kv[1]["cases"]):
+        participation.append({
+            "mechanism": m, "cases": d["cases"],
+            "pct_of_corpus": round(100 * d["cases"] / total, 1) if total else 0,
+            "pass": d["pass"],
+            "pw_pct": round(100 * d["pw"] / d["cases"], 1) if d["cases"] else 0,
+        })
+
     meta = {
         "round": args.round,
         "source": args.results,
@@ -214,6 +252,7 @@ def main() -> None:
                 100 * (passes + working) / denom_adj, 1) if denom_adj else 0,
             "by_language": by_language,
             "mechanism_histogram": histogram,
+            "mechanism_participation": participation,
         },
         # caller completes: mechanism_commit, state, command_template,
         # ran, verification, outcome_summary

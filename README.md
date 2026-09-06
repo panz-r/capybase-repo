@@ -401,30 +401,36 @@ participated, not that it solved the case alone).
 
 ##### Mechanism breakdown
 
-Who actually resolves the corpus — each case attributed to its dominant
-mechanism (the plurality provenance among accepted units; whole-file
-paths that bypass the per-unit loop are derived from the preserved
-flight journals at recount time). 591 of 660 cases (90%) carry no
-LLM-dominant mechanism; the `llm` column above is the stricter
-any-participation count (106, 16%).
+Who actually resolves the corpus, walking **backwards from the final
+accepted candidates**: each accepted candidate's provenance is a
+`+`-joined lineage of the mechanisms that composed it (e.g.
+`plain_llm+keyed_item_union` = the model's candidate, then the union
+layer completed it), so a case counts for **every mechanism that
+participated** — not just one. Whole-file paths that bypass the
+per-unit loop (phase-1 fast path, true-side portfolio) are attributed
+from the preserved flight journals at recount time. Rows sum to more
+than 660 by design; 2 escalated cases have no participating mechanism.
 
-| mechanism | cases | PASS | WORKING | P+W % |
+| mechanism (participated) | cases | % of corpus | PASS | P+W % |
 |---|---|---|---|---|
-| deterministic_structural | 300 | 296 | 1 | 99.0 |
-| deterministic_source_current_only | 141 | 133 | 5 | 97.9 |
-| plain_llm | 60 | 59 | 1 | 100.0 |
-| true_side_portfolio | 57 | 55 | 1 | 98.2 |
-| combination_search | 57 | 55 | 1 | 98.2 |
-| phase1_fast_path | 20 | 20 | 0 | 100.0 |
-| plain_llm+intent_coverage | 7 | 6 | 0 | 85.7 |
-| deterministic_empty_side | 6 | 5 | 0 | 83.3 |
-| deterministic_source_replayed_only | 2 | 2 | 0 | 100.0 |
-| block_capture | 2 | 1 | 0 | 50.0 |
-| deterministic_source_current_only+deletion_union | 2 | 2 | 0 | 100.0 |
-| plain_llm+keyed_item_union | 2 | 1 | 0 | 50.0 |
-| deterministic_source_current_only+keyed_item_union | 1 | 1 | 0 | 100.0 |
-| deterministic_source_cur_rep | 1 | 1 | 0 | 100.0 |
-| (unresolved) | 2 | 0 | 0 | 0.0 |
+| deterministic_structural | 353 | 53.5% | 347 | 98.9 |
+| deterministic_source_current_only | 179 | 27.1% | 170 | 98.3 |
+| plain_llm | 102 | 15.5% | 97 | 97.1 |
+| combination_search | 71 | 10.8% | 67 | 97.2 |
+| true_side_portfolio | 57 | 8.6% | 55 | 98.2 |
+| phase1_fast_path | 20 | 3.0% | 20 | 100.0 |
+| intent_coverage | 14 | 2.1% | 12 | 85.7 |
+| deterministic_empty_side | 10 | 1.5% | 8 | 80.0 |
+| keyed_item_union | 6 | 0.9% | 4 | 83.3 |
+| deterministic_source_replayed_only | 4 | 0.6% | 4 | 100.0 |
+| block_capture | 4 | 0.6% | 3 | 75.0 |
+| deletion_union | 3 | 0.5% | 3 | 100.0 |
+| deterministic_source_cur_rep | 1 | 0.2% | 1 | 100.0 |
+
+The complementary single-label view (each case attributed to its
+dominant mechanism — the plurality provenance among accepted units) is
+in `meta.json` as `mechanism_histogram`; it answers "who owns the
+resolution" where this table answers "who contributed".
 
 #### Prior round (s26)
 
