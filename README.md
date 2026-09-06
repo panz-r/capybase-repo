@@ -401,9 +401,8 @@ participated, not that it solved the case alone).
 
 ##### Mechanism breakdown
 
-Every accepted candidate records a `+`-joined list of the mechanisms
-that composed it. For example, `plain_llm+keyed_item_union` is a model
-candidate completed by the union layer.
+The table counts, per mechanism, how many accepted resolutions it took
+part in producing.
 
 Counting rules:
 
