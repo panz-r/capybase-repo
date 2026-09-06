@@ -429,8 +429,7 @@ Counting rules:
 | deterministic_source_cur_rep | 1 | 0.2% |
 
 `meta.json` also contains `mechanism_histogram`: each case counted
-once, under the mechanism with the most accepted units. The table
-above instead counts a case under every mechanism that participated.
+once, under the mechanism with the most accepted units.
 
 #### Prior round (s26)
 
