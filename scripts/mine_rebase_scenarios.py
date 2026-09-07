@@ -113,6 +113,10 @@ class RebaseScenario:
     source_tip_oid: str
     target_tip_oid: str
     merge_base_oid: str
+    #: The human merge commit this scenario was mined from — the ORACLE:
+    #: its tree is the ground truth for per-file verdicts (the merged
+    #: content of each conflicted file).
+    merge_oid: str = ""
     #: The replayed source-commit sequence (ReplayCommit-shaped dicts, oldest-
     #: first). Matches the persisted ``rebase_plan.json`` schema exactly.
     source_commits: list[dict]
@@ -325,6 +329,7 @@ def _mine_one_merge(
             source_tip_oid=source_tip,
             target_tip_oid=target_tip,
             merge_base_oid=base,
+            merge_oid=merge_oid,
             source_commits=source_commits,
             conflict_steps=conflict_steps,
             license="",  # filled by the writer
