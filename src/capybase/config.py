@@ -654,6 +654,10 @@ class FutureConfig(BaseModel):
     # empty-side fragment rule (see orchestrator
     # _try_empty_side_fragment).
     enable_empty_side_rule: bool = True
+    # EXTEND-08: deterministic docs-union for changelog-shaped
+    # conflicts (both sides' entries additive; oracle = union in
+    # 48/51 corpus cases). See capybase.docs_union.
+    enable_docs_union: bool = True
     # SBCR (combination-search) tuning. The fitness is character-level Gestalt
     # similarity, mean-aggregated over both parents (arXiv:2605.16646 §4.1).
     # These knobs make the research-tuned parameters configurable without code

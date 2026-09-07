@@ -6571,6 +6571,74 @@ class Orchestrator:
         )
         return outcome
 
+    def _try_docs_union(self, unit: ConflictUnit) -> UnitOutcome | None:
+        """Deterministic docs-union for changelog-shaped conflicts (S27-08).
+
+        Changelogs are append-only logs: both sides' entries are additive
+        and the human merge is the union in 94% of corpus cases (48/51;
+        the 15 declines offline were all removal-carrying release cuts).
+        Proposes the ordered union of the block's two sides; the
+        candidate runs the full validation pipeline — nothing bypasses
+        it. Fires only on changelog-shaped paths with both sides adding.
+        """
+        from capybase.docs_union import propose_docs_union
+        base_region = unit.structural_metadata.get("diff3_refined")
+        base_text = (base_region or {}).get("base") if isinstance(base_region, dict) else None
+        if base_text is None:
+            base_text = unit.base.text or ""
+        result = propose_docs_union(
+            unit.path, base_text,
+            unit.current.text or "", unit.replayed.text or "")
+        if result.text is None:
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="docs_union",
+                decision="skip", reason=result.reason)
+            return None
+        cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:docs_union",
+            unit_id=unit.unit_id,
+            model_name="docs_union",
+            prompt_version="docs_union.v1",
+            resolved_text=result.text,
+            explanation=(f"changelog append-only union "
+                         f"(cur +{result.current_entries}, rep +{result.replayed_entries})"),
+            provenance="deterministic_docs_union",
+        )
+        validation = self.verification.verify(unit, cand)
+        self.journal.emit(
+            "docs_union_resolved",
+            {"candidate_id": cand.candidate_id,
+             "cur_entries": result.current_entries,
+             "rep_entries": result.replayed_entries,
+             "passed": validation.passed},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        if not validation.passed:
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="docs_union",
+                candidate=cand, validation=validation,
+                decision="skip", reason="failed validation")
+            return None
+        if self._strictness_blocks_pre_llm(unit, cand, validation, "docs_union"):
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="docs_union",
+                candidate=cand, validation=validation,
+                decision="skip", reason="strictness declined")
+            return None
+        outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+        outcome.accepted = cand
+        self._record_resolution_attempt(
+            UnitOutcome(unit=unit), mechanism="docs_union",
+            candidate=cand, validation=validation,
+            decision="accept", reason="changelog union",
+        )
+        self.journal.emit(
+            "candidate_accepted",
+            {"candidate_id": cand.candidate_id, "via": "docs_union"},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        return outcome
+
     def _try_combination_search(self, unit: ConflictUnit) -> UnitOutcome | None:
         """Attempt a search-based combination resolution; accept only if it
         passes the full validation pipeline. Survey §4.1 (SBCR).
@@ -14124,6 +14192,15 @@ class Orchestrator:
             early = self._try_empty_side_fragment(unit)
             if early is not None:
                 return early  # accepted via the empty-side rule
+
+        # Docs-union (S27-08): changelog-shaped conflicts resolve to the
+        # ordered union of both sides' entries (append-only logs). Runs
+        # after empty-side; failure falls through, as everywhere here.
+        if failures is None and getattr(
+                self.config.future, "enable_docs_union", True):
+            early = self._try_docs_union(unit)
+            if early is not None:
+                return early  # accepted via the docs-union rule
 
         # Search-based combination resolution (SBCR): AFTER the
         # structural resolver declines and BEFORE the LLM. Searches order-

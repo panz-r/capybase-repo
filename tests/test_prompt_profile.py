@@ -27,6 +27,20 @@ from capybase.resolution_engine import (
 )
 
 
+
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _reset_active_profile():
+    """The active prompt profile is a PROCESS GLOBAL. Tests that set it
+    must not leak it into same-worker neighbours — the s27 flake: the
+    suite grew past the schedule where leaking never coincided with
+    profile-sensitive assertions (test_two_pass/test_repair)."""
+    from capybase import prompt_profile as _pp
+    yield
+    _pp.set_active_profile(None)
+
 def _unit():
     worktree = "def f():\n<<<<<<< H\n    return 0\n=======\n    return 9\n>>>>>>> b\n"
     return ConflictUnit(

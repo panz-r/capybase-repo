@@ -46,6 +46,7 @@ from typing import Literal
 ResolutionProvenance = Literal[
     "deterministic_structural",
     "deterministic_empty_side",
+    "deterministic_docs_union",
     "deterministic_deletion_respect_prune",
     "combination_search",
     "block_capture",
@@ -60,6 +61,7 @@ ResolutionProvenance = Literal[
 PROVENANCE_VALUES: tuple[str, ...] = (
     "deterministic_structural",
     "deterministic_empty_side",
+    "deterministic_docs_union",
     "deterministic_deletion_respect_prune",
     "deterministic_brace_repair",
     "deterministic_gcc_fixit",
@@ -95,6 +97,7 @@ LEGACY_PROVENANCE = ""
 PROVENANCE_LABELS: dict[str, str] = {
     "deterministic_structural": "deterministic structural",
     "deterministic_empty_side": "empty-side fragment rule",
+    "deterministic_docs_union": "docs-union (changelog append-only)",
     "deterministic_deletion_respect_prune": "deletion-respect prune",
     "deterministic_brace_repair": "deterministic brace repair",
     "deterministic_gcc_fixit": "deterministic gcc fix-it",
