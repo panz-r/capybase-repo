@@ -113,13 +113,6 @@ class RebaseScenario:
     source_tip_oid: str
     target_tip_oid: str
     merge_base_oid: str
-    #: The human merge commit this scenario was mined from — the ORACLE:
-    #: its tree is the ground truth for per-file verdicts (the merged
-    #: content of each conflicted file).
-    merge_oid: str = ""
-    #: 0 = the source range has no inner merges (linear replay
-    #: reproduces every resolution); >0 flags information loss.
-    inner_merges_in_source: int = 0
     #: The replayed source-commit sequence (ReplayCommit-shaped dicts, oldest-
     #: first). Matches the persisted ``rebase_plan.json`` schema exactly.
     source_commits: list[dict]
@@ -127,6 +120,13 @@ class RebaseScenario:
     license: str
     source_url: str
     clone_subdir: str
+    #: The human merge commit this scenario was mined from — the ORACLE:
+    #: its tree is the ground truth for per-file verdicts (the merged
+    #: content of each conflicted file).
+    merge_oid: str = ""
+    #: 0 = the source range has no inner merges (linear replay
+    #: reproduces every resolution); >0 flags information loss.
+    inner_merges_in_source: int = 0
 
     def to_dict(self) -> dict:
         d = asdict(self)
