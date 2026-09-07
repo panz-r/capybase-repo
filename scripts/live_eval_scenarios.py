@@ -178,7 +178,19 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             oracle_r.stdout = oracle_r.stdout.decode("utf-8", "replace")
             oracle_r.stderr = oracle_r.stderr.decode("utf-8", "replace")
             oracle = oracle_r.stdout if oracle_r.returncode == 0 else ""
-            if oracle_r.returncode != 0 and not oracle:
+            if (oracle_r.returncode != 0 and not oracle) or (
+                    oracle_r.returncode == 0 and not oracle.strip()):
+                # ABSENT or EMPTY-BLOB at the oracle: the human merge
+                # removed (or emptied — prusaslicer-0013's build.yml is
+                # git's canonical empty blob) this file. Judging content
+                # against an empty oracle is meaningless; treat as the
+                # structural absent case. (The empty blob is a real merge
+                # artifact class: resolve-by-emptying.)
+                results.append({"path": path, "sim": None,
+                                "absent_at_oracle": True,
+                                "present_in_replay": bool(final.strip()),
+                                "ok": None})
+                continue
                 # ABSENT at the oracle. Two sub-cases:
                 # - final ALSO absent: the replay agreed with M (both
                 #   dropped it) — consistent, informational only.
