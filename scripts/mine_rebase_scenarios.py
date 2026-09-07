@@ -284,7 +284,13 @@ def mine_rebase_scenarios(
                 yield scenario
                 found += 1
         except Exception as exc:  # noqa: BLE001 - one bad merge must not stop the run
-            _log.debug("merge %s skipped: %s", m[:8], exc)
+            # TWICE-LEARNED (shutil import; .stdout-on-str): a bug in
+            # _mine_one_merge surfaces as a silent per-merge "skipped" and
+            # reads as "this repo has no scenarios". WARN with the exception
+            # type so the log distinguishes bugs (AttributeError etc.) from
+            # legitimate unsuitability (returned None above).
+            _log.warning("merge %s FAILED (not skipped — likely a bug): %s: %s",
+                         m[:8], type(exc).__name__, exc)
 
 
 def _mine_one_merge(
