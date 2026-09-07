@@ -466,6 +466,8 @@ def process(
             conflict_steps=scenario.conflict_steps,
             license=dataset.license, source_url=dataset.source_url,
             clone_subdir=dataset.extract_subdir,
+            merge_oid=scenario.merge_oid,
+            inner_merges_in_source=scenario.inner_merges_in_source,
         )
         out = SCENARIO_DIR / f"{scenario_id}.json"
         out.write_text(json.dumps(full.to_dict(), ensure_ascii=False, indent=2))
