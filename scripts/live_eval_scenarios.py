@@ -128,6 +128,7 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
         cfg = L._config_for(type("C", (), {
             "path": "scenario.rs", "language": case_lang,
             "marker_original": "", "id": sc["id"],
+            "dataset": sc["dataset"],
         })(), has_crate=True)
         engine = ResolutionEngine(cfg.model, client=client)
         orch = Orchestrator(cfg, repo=str(wt), resolution_engine=engine,
