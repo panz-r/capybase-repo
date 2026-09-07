@@ -166,13 +166,18 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
                 capture_output=True, text=True)
             oracle = oracle_r.stdout if oracle_r.returncode == 0 else ""
             if oracle_r.returncode != 0 and not oracle:
-                # ABSENT at the oracle: the human merge removed (or never
-                # had) this file the replay produces. That is a
-                # merge-vs-replay STRUCTURAL difference — unattributable
-                # to the resolver (no conflict ever named this path).
-                # Reported, excluded from the resolver-quality count.
+                # ABSENT at the oracle. Two sub-cases:
+                # - final ALSO absent: the replay agreed with M (both
+                #   dropped it) — consistent, informational only.
+                # - final PRESENT: the replay kept a file M removed —
+                #   the tikv-0001 signature (structural, unattributable
+                #   to the resolver — no conflict named this path — but
+                #   the resurrection scan's catch territory).
+                # Both are excluded from the resolver-quality count.
                 results.append({"path": path, "sim": None,
-                                "absent_at_oracle": True, "ok": None})
+                                "absent_at_oracle": True,
+                                "present_in_replay": bool(final.strip()),
+                                "ok": None})
                 continue
             sim = _token_jaccard(final, oracle) if (final or oracle) else 0.0
             markers = contains_markers(final) if final else True
@@ -185,8 +190,10 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
         row["files_detail"] = results
         scored = [r_ for r_ in results if r_["ok"] is not None]
         n_ok = sum(1 for r_ in scored if r_["ok"])
-        row["absent_at_oracle"] = sum(
-            1 for r_ in results if r_.get("absent_at_oracle"))
+        absent = [r_ for r_ in results if r_.get("absent_at_oracle")]
+        row["absent_at_oracle"] = len(absent)
+        row["absent_kept_in_replay"] = sum(
+            1 for r_ in absent if r_.get("present_in_replay"))
         if row["escalated"]:
             row["verdict"] = "ESCALATE"
         elif scored and n_ok == len(scored):
