@@ -117,6 +117,9 @@ class RebaseScenario:
     #: its tree is the ground truth for per-file verdicts (the merged
     #: content of each conflicted file).
     merge_oid: str = ""
+    #: 0 = the source range has no inner merges (linear replay
+    #: reproduces every resolution); >0 flags information loss.
+    inner_merges_in_source: int = 0
     #: The replayed source-commit sequence (ReplayCommit-shaped dicts, oldest-
     #: first). Matches the persisted ``rebase_plan.json`` schema exactly.
     source_commits: list[dict]
@@ -254,6 +257,7 @@ def mine_rebase_scenarios(
     merge_limit: int = 200,
     max_scenarios: int = DEFAULT_MAX_SCENARIOS,
     require_min_commits: int = DEFAULT_MIN_COMMITS,
+    require_linear: bool = False,
 ) -> Iterator[RebaseScenario]:
     """Yield multi-commit rebase scenarios mined from ``clone``.
 
@@ -274,7 +278,8 @@ def mine_rebase_scenarios(
         if found >= max_scenarios:
             break
         try:
-            scenario = _mine_one_merge(gb, clone, m, require_min_commits)
+            scenario = _mine_one_merge(gb, clone, m, require_min_commits,
+                                       require_linear=require_linear)
             if scenario is not None:
                 yield scenario
                 found += 1
@@ -283,7 +288,8 @@ def mine_rebase_scenarios(
 
 
 def _mine_one_merge(
-    gb: GitBackend, clone: Path, merge_oid: str, require_min_commits: int
+    gb: GitBackend, clone: Path, merge_oid: str, require_min_commits: int,
+    *, require_linear: bool = False,
 ) -> RebaseScenario | None:
     """Mine one merge commit into a scenario, or None if it's unsuitable."""
     parents = _parents(clone, merge_oid)
@@ -302,6 +308,13 @@ def _mine_one_merge(
     else:
         source_tip, target_tip, source_n = p2, p1, n2
     if source_n < require_min_commits:
+        return None
+    inner_merges = int(_git(clone, "rev-list", "--merges", "--count",
+                            f"{base}..{source_tip}").stdout.strip() or 0)
+    if require_linear and inner_merges > 0:
+        _log.debug("merge %s skipped: source range has %d inner merge(s) "
+                   "(linear replay drops their resolutions)",
+                   merge_oid[:8], inner_merges)
         return None
 
     # Drive the rebase in a throwaway worktree.
@@ -330,6 +343,7 @@ def _mine_one_merge(
             target_tip_oid=target_tip,
             merge_base_oid=base,
             merge_oid=merge_oid,
+            inner_merges_in_source=inner_merges,
             source_commits=source_commits,
             conflict_steps=conflict_steps,
             license="",  # filled by the writer
@@ -413,6 +427,7 @@ def process(
     max_scenarios: int = DEFAULT_MAX_SCENARIOS,
     require_min_commits: int = DEFAULT_MIN_COMMITS,
     language: str = "rust",
+    require_linear: bool = False,
 ) -> int:
     """Mine scenarios for ``dataset`` and write them to SCENARIO_DIR.
 
@@ -436,6 +451,7 @@ def process(
         clone,
         max_scenarios=max_scenarios,
         require_min_commits=require_min_commits,
+        require_linear=require_linear,
     ):
         # Language filter on the conflict paths.
         if ext is not None and not any(s.path.endswith(ext) for s in scenario.conflict_steps):
@@ -471,6 +487,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="dataset id to mine (default: all git-history datasets)")
     p.add_argument("--max-scenarios", type=int, default=DEFAULT_MAX_SCENARIOS,
                    help=f"cap scenarios per repo (default {DEFAULT_MAX_SCENARIOS})")
+    p.add_argument("--require-linear", action="store_true",
+                    help="only mine scenarios whose source range has NO inner "
+                         "merge commits — linear replay drops inner-merge "
+                         "resolutions, making such oracles unreproducible "
+                         "(the tikv-0001 class)")
     p.add_argument("--min-commits", type=int, default=DEFAULT_MIN_COMMITS,
                    help=f"min source-side commits to keep a scenario (default {DEFAULT_MIN_COMMITS})")
     p.add_argument("--language", default="rust",
@@ -499,7 +520,8 @@ def main(argv: list[str] | None = None) -> int:
         # Ensure the clone exists (blob-filtered, idempotent).
         clone_repo(ds)
         n = process(ds, max_scenarios=args.max_scenarios,
-                    require_min_commits=args.min_commits, language=args.language)
+                    require_min_commits=args.min_commits, language=args.language,
+                    require_linear=args.require_linear)
         total += n
     print(f"mined {total} scenario(s) into {SCENARIO_DIR}")
     return 0
