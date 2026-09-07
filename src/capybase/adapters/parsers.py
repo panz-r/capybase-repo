@@ -52,6 +52,13 @@ def _is_marker(line: str) -> str | None:
     Strips a trailing ``\\r`` first so CRLF files match cleanly (a marker line
     ``<<<<<<< HEAD\\r`` would otherwise miss ``startswith`` and leak ``\\r`` into
     parsed text). The returned marker is the canonical prefix, not the raw line.
+
+    The ``=======`` divider is AMBIGUOUS with RST/Markdown section underlines
+    (``============`` under a title). Git conflict markers are EXACTLY 7
+    characters, so a pure-``=`` line longer than 7 is an underline, not a
+    divider — the scikit-rebase-0008 class: the human oracle's own title
+    underline (32 ``=``) false-positived every whole-file markers check and
+    made the file un-passable regardless of the splice.
     """
     stripped = line[:-1] if line.endswith("\r") else line
     if stripped.startswith(_MARK_CURRENT):
@@ -59,7 +66,10 @@ def _is_marker(line: str) -> str | None:
     if stripped.startswith(_MARK_BASE):
         return _MARK_BASE
     if stripped.startswith(_MARK_DIVIDER):
-        return _MARK_DIVIDER
+        if stripped == _MARK_DIVIDER or not set(stripped) == {"="}:
+            return _MARK_DIVIDER  # has a label tail, or not a pure run
+        # A pure '=' run LONGER than 7: an RST/Markdown underline.
+        return None
     if stripped.startswith(_MARK_REPLAYED):
         return _MARK_REPLAYED
     return None

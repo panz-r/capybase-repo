@@ -532,3 +532,20 @@ def test_r41_well_formed_multi_block_still_parses():
     assert blocks[0].replayed_text == "A rep"
     assert blocks[1].current_text == "B cur"
     assert blocks[1].replayed_text == "B rep"
+
+
+def test_divider_vs_rst_underline_disambiguation():
+    """A pure-'=' run LONGER than 7 is an RST/Markdown section underline,
+    not a conflict divider (git markers are exactly 7 chars). The
+    scikit-rebase-0008 class: the human oracle's own 32-'=' title
+    underline false-positived contains_markers and made every whole-file
+    markers check fail regardless of the splice."""
+    from capybase.adapters.parsers import _is_marker, contains_markers, parse_marker_blocks
+    assert _is_marker("=======") == "======="
+    assert _is_marker("========") is None      # 8 pure = -> underline
+    assert _is_marker("================================") is None
+    assert contains_markers("Title\n==========\n\n- entry one\n") is False
+    assert contains_markers("<<<<<<< A\nx\n=======\ny\n>>>>>>> B\n") is True
+    # And block PARSING still splits on real 7-char dividers:
+    b = parse_marker_blocks("<<<<<<< A\ncur\n=======\nrep\n>>>>>>> B\n")[0]
+    assert b.current_text == "cur" and b.replayed_text == "rep"
