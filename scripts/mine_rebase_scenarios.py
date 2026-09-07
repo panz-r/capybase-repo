@@ -310,7 +310,7 @@ def _mine_one_merge(
     if source_n < require_min_commits:
         return None
     inner_merges = int(_git(clone, "rev-list", "--merges", "--count",
-                            f"{base}..{source_tip}").stdout.strip() or 0)
+                            f"{base}..{source_tip}").strip() or 0)
     if require_linear and inner_merges > 0:
         _log.debug("merge %s skipped: source range has %d inner merge(s) "
                    "(linear replay drops their resolutions)",
