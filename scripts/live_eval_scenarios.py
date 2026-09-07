@@ -137,9 +137,21 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
         row["escalated"] = bool(getattr(step, "escalated", False))
         row["reason"] = (step.reason or "")[:200]
         row["session_id"] = getattr(orch, "session_id", "")
-        # 3) per-file verdicts vs the human merge M
+        # 3) per-file verdicts vs the human merge M — CONFLICTED files
+        # plus the replayed commits' OTHER touched files (the tikv-0001
+        # lesson: wrongness outside the conflict span is invisible to a
+        # conflicted-only verdict; the resurrection scan protects the
+        # resolver, this widens the MEASUREMENT to match).
+        conflicted = {s["path"] for s in sc["conflict_steps"]}
+        touched_r = subprocess.run(
+            ["git", "-C", str(clone), "diff", "--name-only",
+             sc["merge_base_oid"], sc["source_tip_oid"]],
+            capture_output=True, text=True, timeout=120)
+        scored = sorted(conflicted | (
+            set(touched_r.stdout.splitlines()) if touched_r.returncode == 0
+            else set()))
         results = []
-        for path in sorted({s["path"] for s in sc["conflict_steps"]}):
+        for path in scored:
             final_p = _git(wt, "show", f":{path}", check=False)
             if final_p.returncode != 0:
                 final = ""
@@ -153,6 +165,15 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
                 ["git", "-C", str(clone), "show", f'{sc["merge_oid"]}:{path}'],
                 capture_output=True, text=True)
             oracle = oracle_r.stdout if oracle_r.returncode == 0 else ""
+            if oracle_r.returncode != 0 and not oracle:
+                # ABSENT at the oracle: the human merge removed (or never
+                # had) this file the replay produces. That is a
+                # merge-vs-replay STRUCTURAL difference — unattributable
+                # to the resolver (no conflict ever named this path).
+                # Reported, excluded from the resolver-quality count.
+                results.append({"path": path, "sim": None,
+                                "absent_at_oracle": True, "ok": None})
+                continue
             sim = _token_jaccard(final, oracle) if (final or oracle) else 0.0
             markers = contains_markers(final) if final else True
             lang = _lang_of_path(path)
@@ -162,15 +183,19 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             results.append({"path": path, "sim": round(sim, 3),
                             "markers": markers, "ok": ok})
         row["files_detail"] = results
-        n_ok = sum(1 for r_ in results if r_["ok"])
+        scored = [r_ for r_ in results if r_["ok"] is not None]
+        n_ok = sum(1 for r_ in scored if r_["ok"])
+        row["absent_at_oracle"] = sum(
+            1 for r_ in results if r_.get("absent_at_oracle"))
         if row["escalated"]:
             row["verdict"] = "ESCALATE"
-        elif n_ok == len(results) and results:
+        elif scored and n_ok == len(scored):
             row["verdict"] = "PASS"
         elif n_ok > 0:
             row["verdict"] = "PARTIAL"
         else:
             row["verdict"] = "ORACLE_DIVERGENT"
+        row["files_ok"] = f"{n_ok}/{len(scored)}"
         row["files_ok"] = f"{n_ok}/{len(results)}"
         # Preserve the session artifacts (journal, prompts, responses)
         # BEFORE the finally-block removes the worktree.
