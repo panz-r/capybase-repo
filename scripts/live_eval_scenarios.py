@@ -66,7 +66,11 @@ def _clone_for(dataset: str) -> Path | None:
 
 
 def _git(wt: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    r = subprocess.run(["git", "-C", str(wt), *args], capture_output=True, text=True)
+    # Binary-safe: touched-file diffs can carry non-UTF-8 bytes; decode
+    # with replacement so the verdict path never dies on them.
+    r = subprocess.run(["git", "-C", str(wt), *args], capture_output=True)
+    r.stdout = r.stdout.decode("utf-8", "replace")
+    r.stderr = r.stderr.decode("utf-8", "replace")
     if check and r.returncode != 0:
         raise RuntimeError(f"git {args[:3]} failed: {r.stderr.strip()[:200]}")
     return r
@@ -131,6 +135,12 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             "dataset": sc["dataset"],
         })(), has_crate=True)
         engine = ResolutionEngine(cfg.model, client=client)
+        # Per-scenario wall budget scales with step count: each replayed
+        # stop carries its own resolution rounds (~60-120s LLM worst case);
+        # a flat 900s cap starved 13-step scenarios (duckdb-0003's timeout
+        # was budget, not resolver). Base 600s + 240s/step, capped at 2h.
+        n_steps = max(1, len(sc.get("conflict_steps", [])))
+        cfg.policy.max_wall_time_per_file_seconds = min(600 + 240 * n_steps, 7200)
         orch = Orchestrator(cfg, repo=str(wt), resolution_engine=engine,
                             out=lambda *a, **k: None)
         step = orch.run()
@@ -146,7 +156,8 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
         touched_r = subprocess.run(
             ["git", "-C", str(clone), "diff", "--name-only",
              sc["merge_base_oid"], sc["source_tip_oid"]],
-            capture_output=True, text=True, timeout=120)
+            capture_output=True, timeout=120)
+        touched_r.stdout = touched_r.stdout.decode("utf-8", "replace")
         scored = sorted(conflicted | (
             set(touched_r.stdout.splitlines()) if touched_r.returncode == 0
             else set()))
@@ -163,7 +174,9 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
                 final = final_p.stdout
             oracle_r = subprocess.run(
                 ["git", "-C", str(clone), "show", f'{sc["merge_oid"]}:{path}'],
-                capture_output=True, text=True)
+                capture_output=True)
+            oracle_r.stdout = oracle_r.stdout.decode("utf-8", "replace")
+            oracle_r.stderr = oracle_r.stderr.decode("utf-8", "replace")
             oracle = oracle_r.stdout if oracle_r.returncode == 0 else ""
             if oracle_r.returncode != 0 and not oracle:
                 # ABSENT at the oracle. Two sub-cases:
