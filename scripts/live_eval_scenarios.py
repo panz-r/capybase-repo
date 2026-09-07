@@ -172,6 +172,13 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
         else:
             row["verdict"] = "ORACLE_DIVERGENT"
         row["files_ok"] = f"{n_ok}/{len(results)}"
+        # Preserve the session artifacts (journal, prompts, responses)
+        # BEFORE the finally-block removes the worktree.
+        if flights_dir is not None and row.get("session_id"):
+            src = getattr(orch.paths, "root", None)
+            if src is not None and Path(src).exists():
+                dest = Path(flights_dir) / "flights" / sc["id"] / row["session_id"]
+                shutil.copytree(src, dest, dirs_exist_ok=True)
         return row
     finally:
         _git(clone, "worktree", "remove", "--force", str(wt), check=False)
@@ -206,6 +213,10 @@ def main() -> int:
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--out", default="/tmp/scenario-results.json")
     ap.add_argument("--preserve-flights")
+    ap.add_argument("--include-inner-merges", action="store_true",
+                    help="include scenarios whose source range contains merge "
+                         "commits — linear replay DROPS their resolutions, so "
+                         "the oracle may be unreproducible (tikv-0001 class)")
     ap.add_argument("--prepare", action="store_true",
                     help="one-time full-fetch of the selected datasets' clones")
     args = ap.parse_args()
@@ -228,6 +239,8 @@ def main() -> int:
             continue
         if not d.get("merge_oid"):
             continue  # no oracle — can't verdict
+        if d.get("inner_merges_in_source", 0) > 0 and not args.include_inner_merges:
+            continue  # linear replay drops inner-merge resolutions (tikv-0001)
         sel.append(d)
     if args.prepare:
         for ds in sorted({d["dataset"] for d in sel}):
@@ -251,7 +264,7 @@ def main() -> int:
     results = []
     for sc in sel:
         print(f"[scenario] {sc['id']} ...", flush=True)
-        row = run_scenario(sc, client)
+        row = run_scenario(sc, client, flights_dir=Path(args.preserve_flights) if args.preserve_flights else None)
         results.append(row)
         print(f"  {row.get('verdict')} {row.get('elapsed', '?')}s "
               f"files_ok={row.get('files_ok', '-')} {row.get('reason', '')[:60]}",
