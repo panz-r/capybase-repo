@@ -199,15 +199,18 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             else set()))
         results = []
         for path in scored:
-            final_p = _git(wt, "show", f":{path}", check=False)
-            if final_p.returncode != 0:
+            # Read the WORKTREE file, not `git show :path` (the INDEX).
+            # After the orchestrator's rebase completes, index == HEAD, so
+            # this is equivalent there — but when a late replay stop left
+            # the index with conflict stages, `:path` returns the MERGED-
+            # WITH-MARKERS stage-0 blob and marks clean files as
+            # marker-laden (scikit-0016: 9 sim-1.0 'failures' whose
+            # content matched M exactly). The worktree file is the truth
+            # the user would see.
+            try:
+                final = (wt / path).read_text(errors="replace")
+            except OSError:
                 final = ""
-                try:
-                    final = (wt / path).read_text(errors="replace")
-                except OSError:
-                    pass
-            else:
-                final = final_p.stdout
             oracle_r = subprocess.run(
                 ["git", "-C", str(clone), "show", f'{sc["merge_oid"]}:{path}'],
                 capture_output=True)
