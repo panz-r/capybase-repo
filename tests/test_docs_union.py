@@ -82,3 +82,16 @@ def test_duplicate_entries_skipped():
     r = propose_docs_union("CHANGELOG.md", BASE, both, both)
     assert r.resolved
     assert r.text.count("issue 9") == 1
+
+
+def test_path_gate_extensionless_changelog():
+    # libuv style: bare "ChangeLog" / "NEWS" with no extension (S27-30:
+    # the gate required .rst/.md/.txt and declined libuv's ChangeLog; the
+    # LLM then emptied on it).
+    from capybase.docs_union import is_changelog_path
+    assert is_changelog_path("ChangeLog")
+    assert is_changelog_path("CHANGELOG")
+    assert is_changelog_path("NEWS")
+    assert is_changelog_path("doc/whats_new/v0.20.rst")
+    assert not is_changelog_path("src/main.rs")
+    assert not is_changelog_path("changelog_parser.py")  # word + extension

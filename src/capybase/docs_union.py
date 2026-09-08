@@ -41,9 +41,23 @@ _ENTRY_LINE = re.compile(r"^\s*(?:[-*+]\s+\S|\d+\.\s+\S|\.\. \S)")
 
 
 def is_changelog_path(path: str) -> bool:
-    """True when the path names a changelog-ish docs file."""
+    """True when the path names a changelog-ish docs file.
+
+    Extensionless basenames (libuv's ``ChangeLog``, ``CHANGELOG``,
+    ``NEWS``) count: the path gate's extension requirement was added
+    for prusaslicer's .mo binaries, but those carry extensions — an
+    extensionless CHANGELOG-named file is always the log (S27-30).
+    """
     p = (path or "").lower()
-    return bool(_CHANGELOG_PATH.search(p)) and p.endswith(_DOCS_EXT)
+    if not _CHANGELOG_PATH.search(p):
+        return False
+    if p.endswith(_DOCS_EXT):
+        return True
+    # extensionless: the basename itself must BE the changelog word
+    # (not a directory segment) — e.g. "ChangeLog", "CHANGELOG.mkdocs"
+    # still has an extension; pure "ChangeLog" and "NEWS" qualify.
+    base = p.rsplit("/", 1)[-1]
+    return "." not in base and bool(_CHANGELOG_PATH.fullmatch(base))
 
 
 def _looks_like_changelog(text: str) -> bool:
