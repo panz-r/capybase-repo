@@ -594,3 +594,13 @@ def test_overline_style_exact7():
     from capybase.adapters.parsers import contains_markers
     assert contains_markers("=======\nSupport\n=======\n\nbody\n") is False
     assert contains_markers("x = 1\n=======\ny") is True
+
+
+def test_overline_blank_above_wide_under():
+    """Overline variant: blank line above the top rule, title below, and a
+    WIDE (19-char) underline under the title (doc/developers/contributing.rst
+    — the top exact-7 rule flags but the under-rule isn't exact-7, so the
+    first overline check missed it). The under-rule is any pure-'=' run >=7."""
+    from capybase.adapters.parsers import contains_markers
+    assert contains_markers("\n\n=======\nWays to contribute\n==================\n\nx\n") is False
+    assert contains_markers("x = 1\n=======\ny") is True

@@ -256,10 +256,12 @@ def contains_markers(text: str) -> bool:
             if not prev_s and idx + 2 < len(lines):
                 title = lines[idx + 1].strip()
                 under = lines[idx + 2].rstrip("\r")
-                if (title and _is_marker(lines[idx + 1]) is None
-                        and len(title) <= 80
-                        and not any(ch in title for ch in "=(){};:,#")
-                        and _is_marker(under) == "======="):
+                under_s = under.strip()
+                title_ok = (title and _is_marker(lines[idx + 1]) is None
+                            and len(title) <= 80
+                            and not any(ch in title for ch in "=(){};:,#"))
+                under_is_rule = (set(under_s) == {"="} and len(under_s) >= 7)
+                if title_ok and under_is_rule:
                     continue
         return True
     return False
