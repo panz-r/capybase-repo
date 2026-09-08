@@ -47,7 +47,9 @@ def test_unterminated_raises():
 
 def test_contains_markers():
     assert contains_markers("<<<<<<< x\na\n")
-    assert contains_markers("a\n=======\nb\n")
+    # bare ======= under a code-like line is a divider (the context check
+    # in S27-33 treats title-like lines above as RST underlines)
+    assert contains_markers("x = 1\n=======\nb\n")
     assert not contains_markers("plain text\n")
 
 
@@ -564,3 +566,22 @@ def test_divider_exact_seven_only():
     assert contains_markers(
         "==============         STDERR          =============\nbody\n") is False
     assert contains_markers("<<<<<<< A\nx\n=======\ny\n>>>>>>> B\n") is True
+
+
+def test_isolated_exact7_divider_context_check():
+    """The 4th marker-FP class (S27-33): an exact-7 '=======' line that is
+    an RST underline under a TITLE (scikit's README.rst: 'Install' /
+    '=======' at sim 1.0). contains_markers context-checks: a bare exact-7
+    divider with a title-like line above (short, no code operators, no
+    sentence punctuation) and NO <<<<<<< anywhere is an underline. Code
+    above (x = 1, def f():) or a real marker set still flags."""
+    from capybase.adapters.parsers import contains_markers
+    assert contains_markers("Install\n=======\n\nbody text\n") is False
+    assert contains_markers("Section Title\n=======\n") is False
+    assert contains_markers("x = 1\n=======\ny") is True
+    assert contains_markers("def f():\n=======\n") is True
+    assert contains_markers("<<<<<<< A\nx\n=======\ny\n>>>>>>> B\n") is True
+    # _is_marker itself stays pure (no context) — the check lives in
+    # contains_markers where the file context exists.
+    from capybase.adapters.parsers import _is_marker
+    assert _is_marker("=======") == "======="

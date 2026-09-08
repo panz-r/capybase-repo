@@ -218,10 +218,39 @@ def contains_markers(text: str) -> bool:
 
     Uses line-start matching so ``// =====`` comment banners, indented rules,
     and marker-shaped strings inside content are NOT flagged. Handles CRLF.
+
+    The exact-7 ``=======`` divider is context-checked (S27-33): a bare
+    ``=======`` line with a non-blank text line directly above and no
+    ``<<<<<<<`` elsewhere is an RST/section underline of exactly 7 chars
+    (scikit's README.rst: ``Install`` / ``=======``) — the ONE length the
+    S27-10 split cannot disambiguate. A real leftover divider implies the
+    file has (or had) the other markers; an isolated one under a title is
+    an underline.
     """
-    for line in text.split("\n"):
-        if _is_marker(line) is not None:
-            return True
+    lines = text.split("\n")
+    has_cur = any(_is_marker(l) == "<<<<<<<" for l in lines)
+    for idx, line in enumerate(lines):
+        m = _is_marker(line)
+        if m is None:
+            continue
+        if m == "=======" and not has_cur:
+            # isolated exact-7 divider with a text title above -> underline
+            prev = lines[idx - 1].rstrip("\r") if idx > 0 else ""
+            nxt = lines[idx + 1].rstrip("\r") if idx + 1 < len(lines) else ""
+            # An RST/section underline: a short text title above (not code,
+            # not blank) and blank or text content below. A code line above
+            # (``x = 1``) means a real divider.
+            # An RST/section underline: the line above is a TITLE —
+            # short text, no sentence punctuation, no code operators
+            # (=(){};). ``Install`` qualifies; ``x = 1`` and ``foo()``
+            # do not (real divider contexts).
+            prev_s = prev.strip()
+            if (prev_s and _is_marker(prev) is None
+                    and len(prev_s) <= 80
+                    and not any(ch in prev_s for ch in "=(){};:,#")
+                    and not prev_s.endswith((".", ",", "!"))):
+                continue
+        return True
     return False
 
 
