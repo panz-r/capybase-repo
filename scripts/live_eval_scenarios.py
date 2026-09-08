@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -207,8 +208,20 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             # marker-laden (scikit-0016: 9 sim-1.0 'failures' whose
             # content matched M exactly). The worktree file is the truth
             # the user would see.
+            # SYMLINKS compare like-for-like: `git show` on a symlink blob
+            # (mode 120000) returns the link TARGET STRING, while read_text
+            # FOLLOWS the link to the destination content — disjoint token
+            # sets, sim 0.0 on perfectly correct merges (serde's LICENSE/
+            # src symlinks into precomp/). When the worktree entry is a
+            # symlink, compare link targets (the oracle side is already the
+            # target string via git show).
+            import os as _os
+            _wp = wt / path
             try:
-                final = (wt / path).read_text(errors="replace")
+                if _os.path.islink(_wp):
+                    final = _os.readlink(_wp)
+                else:
+                    final = _wp.read_text(errors="replace")
             except OSError:
                 final = ""
             oracle_r = subprocess.run(
@@ -283,7 +296,22 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
                 shutil.copytree(src, dest, dirs_exist_ok=True)
         return row
     finally:
-        _git(clone, "worktree", "remove", "--force", str(wt), check=False)
+        if os.environ.get("CAPYBASE_KEEP_SCENARIO_WORKTREE"):
+            # Debug: leave the worktree and log HEAD-vs-worktree for every
+            # failed scored file — separates "git dropped it from HEAD"
+            # (replay wrong) from "worktree never materialized it"
+            # (checkout/index inconsistency).
+            print(f"[keep-worktree] {wt}", flush=True)
+            for f in row.get("files_detail", []) or []:
+                if f.get("ok") is False:
+                    path = f["path"]
+                    head_e = _git(wt, "cat-file", "-e", f"HEAD:{path}",
+                                  check=False).returncode == 0
+                    print(f"[keep-worktree] {path} HEAD={head_e} "
+                          f"worktree={(wt / path).exists()}", flush=True)
+        else:
+            _git(clone, "worktree", "remove", "--force", str(wt), check=False)
+        _git(clone, "worktree", "prune", check=False)
         _git(clone, "branch", "-D", branch, check=False)
         row["elapsed"] = round(time.time() - t0, 1)
 
