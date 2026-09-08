@@ -6661,41 +6661,18 @@ class Orchestrator:
             return None  # malformed/nested markers — not our shape
         if not r.resolved:
             return None
-        # SHAPE GATE (S27-24's lesson: without it the mechanism fires on
-        # 3,179 generic both-sides steps; with it, the 116 true races):
-        # (1) the resolved (replayed) content must LIVE in the replayed
-        #     side's own file state — the moved def's new home — checked
-        #     against the merge-index stage-3 blob of this path;
-        # (2) the target must have genuinely touched this file — stage 2
-        #     differs from stage 1. Both are cheap line-set checks.
-        def _lset(t):
-            return {ln.strip() for ln in (t or "").splitlines() if ln.strip()}
-        try:
-            theirs = self.git.read_stage_blob(unit.path, 3)
-            ours = self.git.read_stage_blob(unit.path, 2)
-            base_blob = self.git.read_stage_blob(unit.path, 1)
-        except Exception:  # noqa: BLE001 - stages unreadable (mid-continue)
-            return None
-        if theirs is None or ours is None or base_blob is None:
-            return None
-        try:
-            theirs_t = theirs.decode("utf-8", "replace")
-            ours_t = ours.decode("utf-8", "replace")
-            base_t = base_blob.decode("utf-8", "replace")
-        except AttributeError:
-            return None
-        if not _lset(r.text) <= _lset(theirs_t):
-            self._record_resolution_attempt(
-                UnitOutcome(unit=unit), mechanism="def_site_race",
-                decision="skip",
-                reason="shape gate: resolved content not in replayed file")
-            return None
-        if _lset(ours_t) == _lset(base_t):
-            self._record_resolution_attempt(
-                UnitOutcome(unit=unit), mechanism="def_site_race",
-                decision="skip",
-                reason="shape gate: target did not touch this file")
-            return None
+        # SHAPE GATE (S27-25's lesson: the stage-based gate is VACUOUS —
+        # every modify/modify conflict passes it because the replayed block
+        # is trivially in stage-3's file and ours always differs from base).
+        # The TRUE move-race evidence is cross-file: the def duplicated at
+        # another path in the SOURCE TIP tree. Only the scenario-level
+        # caller has that context; it registers the race evidence on the
+        # orchestrator (``_race_step_paths``) before run(). No evidence ->
+        # the mechanism declines (dormant in single-file mode, by design).
+        race_paths = getattr(self, "_race_step_paths", None) or {}
+        evidence = race_paths.get(unit.path)
+        if evidence is None:
+            return None  # no scenario-provided race evidence for this path
         cand = CandidateResolution(
             candidate_id=f"{unit.unit_id}:def_site_race",
             unit_id=unit.unit_id,

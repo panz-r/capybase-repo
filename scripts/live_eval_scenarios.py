@@ -141,8 +141,44 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
         # was budget, not resolver). Base 600s + 240s/step, capped at 2h.
         n_steps = max(1, len(sc.get("conflict_steps", [])))
         cfg.policy.max_wall_time_per_file_seconds = min(600 + 240 * n_steps, 7200)
+        # Race seeds (S27-26): pre-compute the cross-file move evidence
+        # the per-unit cascade cannot see — for each conflict path, is the
+        # replayed block's content present in the SOURCE TIP's tree (the
+        # moved def's new home)? Registered on the orchestrator; the
+        # dormant def_site_race mechanism activates only on these paths.
+        from capybase.def_site_race import resolve_def_site_race as _dsr
+        race_paths: dict[str, dict] = {}
+        for stepinfo in sc.get("conflict_steps", []):
+            sp = stepinfo["path"]
+            if sp in race_paths:
+                continue
+            try:
+                rr = _dsr(stepinfo["marker_text"])
+            except ValueError:
+                continue
+            if not rr.resolved:
+                continue
+            ps = subprocess.run(
+                ["git", "-C", str(clone), "show",
+                 f'{sc["source_tip_oid"]}:{sp}'],
+                capture_output=True, timeout=30)
+            if ps.returncode != 0:
+                continue
+            src_lines = {l.strip() for l in
+                         ps.stdout.decode("utf-8", "replace").splitlines()
+                         if l.strip()}
+            cand_lines = {l.strip() for l in rr.text.splitlines()
+                          if l.strip()}
+            if cand_lines and cand_lines <= src_lines:
+                race_paths[sp] = {"content": rr.content,
+                                  "source_tip": sc["source_tip_oid"]}
         orch = Orchestrator(cfg, repo=str(wt), resolution_engine=engine,
                             out=lambda *a, **k: None)
+        if race_paths:
+            orch._race_step_paths = race_paths
+            # activate the dormant mechanism — the evidence gate now does
+            # the real filtering (per-unit mode stays protected).
+            cfg.future.enable_def_site_race = True
         step = orch.run()
         row["escalated"] = bool(getattr(step, "escalated", False))
         row["reason"] = (step.reason or "")[:200]
