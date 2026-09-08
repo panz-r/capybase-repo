@@ -42,6 +42,7 @@ def test_provenance_values_match_spec():
         "deterministic_structural",
         "deterministic_empty_side",
         "deterministic_docs_union",
+        "deterministic_def_site_race",
         "deterministic_deletion_respect_prune",
         "deterministic_brace_repair",
         "deterministic_gcc_fixit",

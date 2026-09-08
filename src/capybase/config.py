@@ -658,6 +658,12 @@ class FutureConfig(BaseModel):
     # conflicts (both sides' entries additive; oracle = union in
     # 48/51 corpus cases). See capybase.docs_union.
     enable_docs_union: bool = True
+    # NOTE: wired but DORMANT — the unit-level shape gate is
+    # vacuous (any modify/modify conflict passes it); the true
+    # move-race evidence needs cross-file context (the def
+    # duplicated at a different path in the replayed tree),
+    # which belongs to the scenario-level consumer.
+    enable_def_site_race: bool = False
     # SBCR (combination-search) tuning. The fitness is character-level Gestalt
     # similarity, mean-aggregated over both parents (arXiv:2605.16646 §4.1).
     # These knobs make the research-tuned parameters configurable without code

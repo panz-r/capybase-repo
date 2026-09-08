@@ -6639,6 +6639,104 @@ class Orchestrator:
         )
         return outcome
 
+    def _try_def_site_race(self, unit: ConflictUnit) -> UnitOutcome | None:
+        """Shape-gated def-site-race CANDIDATE GENERATOR (S27-24).
+
+        Fires only when the conflict carries the move-race shape: the
+        replayed block's content is the def the replay branch MOVED
+        verbatim (content lives in the source side's file state), and the
+        target genuinely modified the base-location copy. Per the S27-22
+        census (833 records) the moved location wins 59% outright and the
+        40% union band requires KEEPING the replayed copy — so the
+        replayed-verbatim content is a strong seed, but at 60% >=0.90
+        file-level it is NOT auto-resolve: the candidate runs the full
+        validation pipeline like every pre-LLM mechanism, and failure
+        falls through to the LLM.
+        """
+        from capybase.def_site_race import resolve_def_site_race
+        marker_text = unit.original_worktree_text
+        try:
+            r = resolve_def_site_race(marker_text)
+        except ValueError:
+            return None  # malformed/nested markers — not our shape
+        if not r.resolved:
+            return None
+        # SHAPE GATE (S27-24's lesson: without it the mechanism fires on
+        # 3,179 generic both-sides steps; with it, the 116 true races):
+        # (1) the resolved (replayed) content must LIVE in the replayed
+        #     side's own file state — the moved def's new home — checked
+        #     against the merge-index stage-3 blob of this path;
+        # (2) the target must have genuinely touched this file — stage 2
+        #     differs from stage 1. Both are cheap line-set checks.
+        def _lset(t):
+            return {ln.strip() for ln in (t or "").splitlines() if ln.strip()}
+        try:
+            theirs = self.git.read_stage_blob(unit.path, 3)
+            ours = self.git.read_stage_blob(unit.path, 2)
+            base_blob = self.git.read_stage_blob(unit.path, 1)
+        except Exception:  # noqa: BLE001 - stages unreadable (mid-continue)
+            return None
+        if theirs is None or ours is None or base_blob is None:
+            return None
+        try:
+            theirs_t = theirs.decode("utf-8", "replace")
+            ours_t = ours.decode("utf-8", "replace")
+            base_t = base_blob.decode("utf-8", "replace")
+        except AttributeError:
+            return None
+        if not _lset(r.text) <= _lset(theirs_t):
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="def_site_race",
+                decision="skip",
+                reason="shape gate: resolved content not in replayed file")
+            return None
+        if _lset(ours_t) == _lset(base_t):
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="def_site_race",
+                decision="skip",
+                reason="shape gate: target did not touch this file")
+            return None
+        cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:def_site_race",
+            unit_id=unit.unit_id,
+            model_name="def_site_race",
+            prompt_version="def_site_race.v1",
+            resolved_text=r.text,
+            explanation=("def-site race: replayed side moved the def "
+                         "verbatim (S27-22 census policy: moved location "
+                         "wins; replayed copy kept)"),
+            provenance="deterministic_def_site_race",
+        )
+        validation = self.verification.verify(unit, cand)
+        self.journal.emit(
+            "def_site_race_proposed",
+            {"candidate_id": cand.candidate_id,
+             "content": r.content, "passed": validation.passed},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        if not validation.passed:
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="def_site_race",
+                candidate=cand, validation=validation,
+                decision="skip", reason="failed validation")
+            return None
+        if self._strictness_blocks_pre_llm(unit, cand, validation,
+                                           "def_site_race"):
+            return None
+        outcome = UnitOutcome(unit=unit, validation=validation,
+                              attempts=[cand])
+        outcome.accepted = cand
+        self._record_resolution_attempt(
+            UnitOutcome(unit=unit), mechanism="def_site_race",
+            candidate=cand, validation=validation,
+            decision="accept", reason="move-race census policy")
+        self.journal.emit(
+            "candidate_accepted",
+            {"candidate_id": cand.candidate_id, "via": "def_site_race"},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        return outcome
+
     def _try_combination_search(self, unit: ConflictUnit) -> UnitOutcome | None:
         """Attempt a search-based combination resolution; accept only if it
         passes the full validation pipeline. Survey §4.1 (SBCR).
@@ -14201,6 +14299,14 @@ class Orchestrator:
             early = self._try_docs_union(unit)
             if early is not None:
                 return early  # accepted via the docs-union rule
+
+        # Def-site race (S27-24): the move-race shape's strong seed.
+        # Shape-gated candidate generator; validated, never bypasses.
+        if failures is None and getattr(
+                self.config.future, "enable_def_site_race", True):
+            early = self._try_def_site_race(unit)
+            if early is not None:
+                return early  # accepted via the def-site-race policy
 
         # Search-based combination resolution (SBCR): AFTER the
         # structural resolver declines and BEFORE the LLM. Searches order-
