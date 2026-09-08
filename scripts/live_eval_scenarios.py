@@ -246,8 +246,14 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             sim = _token_jaccard(final, oracle) if (final or oracle) else 0.0
             markers = contains_markers(final) if final else True
             lang = _lang_of_path(path)
-            compiles = (_py_compiles(final) if lang == "python"
-                        else True)  # other languages: brace gate deferred
+            # Parse gate (python only): vacuous when the ORACLE itself
+            # fails py3 (language-era file — scikit-0016's parse_path.py
+            # is a py2 tutorial script the human merge kept verbatim).
+            # Same no-worse-than-before doctrine as the unit gates.
+            compiles = True
+            if lang == "python":
+                compiles = (_py_compiles(final)
+                            or not _py_compiles(oracle))
             ok = bool(final.strip()) and not markers and sim >= 0.90 and compiles
             results.append({"path": path, "sim": round(sim, 3),
                             "markers": markers, "ok": ok})
@@ -293,7 +299,9 @@ def _lang_of_dataset(ds: str) -> str:
 
 def _lang_of_path(path: str) -> str:
     sfx = Path(path).suffix
-    return {".rs": "rust", ".py": "python", ".pyx": "python",
+    # .pyx is Cython, not Python — py_compile fails on its syntax (the
+    # scikit-0016 .pyx files at sim 1.0). Its own tier: no parse gate.
+    return {".rs": "rust", ".py": "python", ".pyx": "cython",
             ".c": "c", ".h": "c", ".cpp": "cpp", ".hpp": "cpp"}.get(sfx, "unknown")
 
 
