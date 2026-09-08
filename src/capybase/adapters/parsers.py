@@ -250,6 +250,17 @@ def contains_markers(text: str) -> bool:
                     and not any(ch in prev_s for ch in "=(){};:,#")
                     and not prev_s.endswith((".", ",", "!"))):
                 continue
+            # RST OVERLINE style: '=======' / Title / '=======' — the
+            # rule above has no title, but a title-like line sits directly
+            # BELOW with another rule under it (doc/support.rst).
+            if not prev_s and idx + 2 < len(lines):
+                title = lines[idx + 1].strip()
+                under = lines[idx + 2].rstrip("\r")
+                if (title and _is_marker(lines[idx + 1]) is None
+                        and len(title) <= 80
+                        and not any(ch in title for ch in "=(){};:,#")
+                        and _is_marker(under) == "======="):
+                    continue
         return True
     return False
 

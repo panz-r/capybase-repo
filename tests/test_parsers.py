@@ -585,3 +585,12 @@ def test_isolated_exact7_divider_context_check():
     # contains_markers where the file context exists.
     from capybase.adapters.parsers import _is_marker
     assert _is_marker("=======") == "======="
+
+
+def test_overline_style_exact7():
+    """RST overline: '=======' / Title / '=======' (doc/support.rst,
+    scikit-0016's sweep find) — the top rule has no title ABOVE, but a
+    title-like line BELOW with another exact-7 rule under it."""
+    from capybase.adapters.parsers import contains_markers
+    assert contains_markers("=======\nSupport\n=======\n\nbody\n") is False
+    assert contains_markers("x = 1\n=======\ny") is True
