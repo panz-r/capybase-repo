@@ -549,3 +549,18 @@ def test_divider_vs_rst_underline_disambiguation():
     # And block PARSING still splits on real 7-char dividers:
     b = parse_marker_blocks("<<<<<<< A\ncur\n=======\nrep\n>>>>>>> B\n")[0]
     assert b.current_text == "cur" and b.replayed_text == "rep"
+
+
+def test_divider_exact_seven_only():
+    """The conflict divider is EXACTLY seven '=' — longer pure runs are
+    RST underlines (S27-10) and runs with embedded content are BANNERS
+    (duckdb's '==============         STDERR          =============' test
+    output separators — S27-28: two sim-1.0 files failed markers=True
+    on their own banner lines)."""
+    from capybase.adapters.parsers import _is_marker, contains_markers
+    assert _is_marker("=======") == "======="
+    assert _is_marker("==============         STDERR          =============") is None
+    assert _is_marker("================  FAILURES SUMMARY  ================") is None
+    assert contains_markers(
+        "==============         STDERR          =============\nbody\n") is False
+    assert contains_markers("<<<<<<< A\nx\n=======\ny\n>>>>>>> B\n") is True

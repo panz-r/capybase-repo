@@ -66,9 +66,13 @@ def _is_marker(line: str) -> str | None:
     if stripped.startswith(_MARK_BASE):
         return _MARK_BASE
     if stripped.startswith(_MARK_DIVIDER):
-        if stripped == _MARK_DIVIDER or not set(stripped) == {"="}:
-            return _MARK_DIVIDER  # has a label tail, or not a pure run
-        # A pure '=' run LONGER than 7: an RST/Markdown underline.
+        # Git's conflict divider is EXACTLY seven '=' and nothing else.
+        # Longer pure-'=' runs are RST/Markdown underlines (S27-10); runs
+        # with other content (letters/spaces) are banners — duckdb's
+        # '==============         STDERR          =============' test-output
+        # separators (S27-28). Only the exact 7-char form divides.
+        if stripped == _MARK_DIVIDER:
+            return _MARK_DIVIDER
         return None
     if stripped.startswith(_MARK_REPLAYED):
         return _MARK_REPLAYED
