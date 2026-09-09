@@ -326,6 +326,72 @@ class TestPreexistingParseErrorExcuse:
         out = _last_error_line(msg)
         assert out == "<file>:27:1: error: expected identifier"
 
+    def _unit_with_span(self, worktree: str, span):
+        """A marker-block unit (the excuse tests above use whole-file units;
+        the set-form tests need the splice)."""
+        from capybase.conflict_model import ConflictSide, ConflictUnit
+        return ConflictUnit(
+            session_id="s", step_index=0, path="t.c", unit_id="u",
+            language="c",
+            base=ConflictSide(label="BASE", text=""),
+            current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=""),
+            replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=""),
+            original_worktree_text=worktree, marker_span=span,
+        )
+
+    def test_set_form_new_error_below_preexisting_not_excused(self):
+        """A pre-existing template error ABOVE the block must not excuse a
+        NEW parse error the candidate introduces below it. (The directive is
+        semicolon-terminated so gcc's error recovery completes before the
+        block — with a bare ``%directive`` the recovery swallows the whole
+        function and the new error is unobservable behind the old one.)"""
+        from capybase.verification import CcsSyntaxValidator
+        from capybase.conflict_model import CandidateResolution
+        worktree = (
+            "%directive;\n"
+            "int ok(void) {\n"
+            "<<<<<<<\n"
+            "  return 1;\n"
+            "=======\n"
+            "  return 2;\n"
+            ">>>>>>>\n"
+            "}\n"
+            "%end;\n"
+        )
+        unit = self._unit_with_span(worktree, (2, 6))
+        # New parse error inside the resolved block.
+        cand = CandidateResolution(
+            candidate_id="c", unit_id="u", model_name="m",
+            prompt_version="v", resolved_text="  int x = ;")
+        res = self._verify(unit, cand)
+        assert not res.passed
+
+    def test_set_form_shifted_preexisting_error_excused(self):
+        """A pre-existing error BELOW the block still excuses a clean
+        candidate even when the splice SHIFTS its line — the multiset keys
+        on the message, not the position."""
+        from capybase.verification import CcsSyntaxValidator
+        from capybase.conflict_model import CandidateResolution
+        worktree = (
+            "int ok(void) {\n"
+            "<<<<<<<\n"
+            "  return 1;\n"
+            "=======\n"
+            "  return 2;\n"
+            ">>>>>>>\n"
+            "}\n"
+            "%directive;\n"
+        )
+        unit = self._unit_with_span(worktree, (1, 5))
+        # Two resolved lines vs the 1-line block bodies — the % error shifts
+        # lines, but the message multiset is identical to the baseline's.
+        cand = CandidateResolution(
+            candidate_id="c", unit_id="u", model_name="m",
+            prompt_version="v", resolved_text="  return 3;\n  int y = 0;")
+        res = self._verify(unit, cand)
+        assert res.passed
+        assert "pre-existing error excused" in res.message
+
 
 class TestRenameExclusiveScoping:
     """EXTEND-85: the rename-type exclusive rule fired on sibling

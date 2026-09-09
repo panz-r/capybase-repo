@@ -504,6 +504,17 @@ def test_rust_syntax_preexisting_error_does_not_mask_new_defect():
     assert not res.passed
 
 
+@skip_no_rustc
+def test_rust_syntax_second_identical_message_counts_as_new():
+    """Multiset semantics: the pristine region has ONE box error; a
+    candidate adding ANOTHER box line introduces a second occurrence of
+    the identical message — that is a new error, and no excuse applies."""
+    v = RustSyntaxValidator()
+    cand = _candidate(resolved="    box 2")
+    res = _verify(v, _box_unit(), cand)
+    assert not res.passed
+
+
 # --- s27-44: edition inference through ctx.repo_root ---
 
 

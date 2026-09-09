@@ -52,13 +52,23 @@ class VerificationContext:
     repo_root: str = ""
 
 
+#: A temp-file path prefix on a gcc/clang diagnostic line. Every standalone
+#: compile writes its own temp file, so baseline-vs-candidate comparisons
+#: must strip the path to compare the diagnostic itself.
+_CC_TMPFILE_RE = re.compile(r"/tmp/\S+\.(c|cc|cpp|h|hpp):")
+
+#: The full position prefix of a gcc/clang diagnostic (``file:line:col:``) —
+#: used by the multiset excuse, where the MESSAGE (not the position) is the
+#: identity of an error and multiplicity carries the count.
+_CC_DIAG_POSITION_RE = re.compile(r"^\S+:\d+:\d+: ")
+
+
 def _first_error_line(message: str) -> str:
     """The FIRST gcc diagnostic line, normalized (path-stripped)."""
-    import re as _re
     for ln in (message or "").splitlines():
         s = ln.strip()
         if "error" in s or "warning" in s:
-            return _re.sub(r"/tmp/\S+\.(c|cc|cpp|h|hpp):", "<file>:", s)
+            return _CC_TMPFILE_RE.sub("<file>:", s)
     return ""
 
 
@@ -69,11 +79,10 @@ def _last_error_line(message: str) -> str:
     ``_compile`` contract). Strip temp-file paths so the pristine-side
     comparison is path-independent.
     """
-    import re as _re
     for ln in reversed((message or "").splitlines()):
         s = ln.strip()
         if "error" in s or "warning" in s:
-            return _re.sub(r"/tmp/\S+\.(c|cc|cpp|h|hpp):", "<file>:", s)
+            return _CC_TMPFILE_RE.sub("<file>:", s)
     return ""
 
 
@@ -3748,8 +3757,13 @@ class _StandaloneSyntaxValidator:
             self._error_lines_for_excuse(ctx, baseline, tool)
             if cand_set is not None else None)
         if cand_set is not None and base_set is not None:
-            # Set form: excuse iff the candidate introduced no new error line.
-            if cand_set and set(cand_set) <= set(base_set):
+            # Multiset form: excuse iff the candidate introduced no error
+            # line the baseline lacks, COUNTING multiplicity — a candidate
+            # that adds a second occurrence of an identical pre-existing
+            # message (another ``box`` expression) introduced an error and
+            # must not be excused by the first occurrence's presence.
+            from collections import Counter
+            if cand_set and not (Counter(cand_set) - Counter(base_set)):
                 self._excuse_preexisting(result, cand_set[0])
             return
         # Legacy single-line form (Ccs/sqlite-0039 semantics).
@@ -3924,7 +3938,10 @@ class CcsSyntaxValidator(_StandaloneSyntaxValidator):
         )
         return super().verify(ctx)
 
-    def _compile(self, spliced: str, tool: str, cfg: object) -> tuple[bool, str]:
+    def _ccs_compile_flags(self, cfg: object) -> tuple[str, str, float]:
+        """(std, suffix, timeout) the unit compiles under — shared by the
+        gate (``_compile``) and the excuse's baseline compile so both run
+        the exact same tool invocation."""
         _cpp_lang = self._is_cpp
         std = getattr(cfg, "cpp_std" if _cpp_lang else "c_std", "c++17" if _cpp_lang else "c11")
         # Use the header suffix when the unit is a header file — gcc infers
@@ -3938,6 +3955,10 @@ class CcsSyntaxValidator(_StandaloneSyntaxValidator):
         else:
             suffix = ".cpp" if _cpp_lang else ".c"
             timeout = 30.0
+        return std, suffix, timeout
+
+    def _compile(self, spliced: str, tool: str, cfg: object) -> tuple[bool, str]:
+        std, suffix, timeout = self._ccs_compile_flags(cfg)
         # Include paths: the per-unit Phase A gate doesn't have access to the
         # repo root (only Phase B verify_file does). Headers compile without
         # include paths — the semantic-error filter defers "unknown type name"
@@ -3949,6 +3970,32 @@ class CcsSyntaxValidator(_StandaloneSyntaxValidator):
             spliced, cc_path=tool, std=std, suffix=suffix,
             timeout=timeout,
         )
+
+    def _error_lines_for_excuse(
+        self, ctx: VerificationContext, source: str, tool: str,
+    ) -> "list[str] | None":
+        # The Rust set-form doctrine (s27-44): excuse only when the candidate
+        # introduces no error line the blanked baseline lacks. gcc lines are
+        # reduced to the MESSAGE (the ``file:line:col:`` prefix stripped —
+        # every compile runs in its own temp file, and a splice that shifts
+        # the pristine region must not void the excuse); multiplicity is the
+        # multiset's business in the base class, so a same-message error the
+        # candidate ADDS still counts as new. Resolution-class lines defer
+        # to the whole-file gate and are excluded, same as the gate's filter.
+        std, suffix, timeout = self._ccs_compile_flags(ctx.config)
+        proc = _ccs_syntax_compile(
+            source, cc_path=tool, std=std, suffix=suffix, timeout=timeout)
+        if proc is None:
+            return None
+        ok, err_lines = proc
+        if ok:
+            return []
+        out = []
+        for ln in err_lines:
+            if (" error:" in ln or ln.startswith("error")) and not (
+                    _is_ccs_resolution_error(ln)):
+                out.append(_CC_DIAG_POSITION_RE.sub("", ln).strip())
+        return out or None
 
     def _is_resolution_error(self, msg: str) -> bool:
         if getattr(self, "_strict_semantic", False):
@@ -4624,6 +4671,52 @@ def _compile_rust(
     return False, err_lines[-1]
 
 
+def _ccs_syntax_compile(
+    source: str, *, cc_path: str = "gcc", std: str = "c11", suffix: str = ".c",
+    timeout: float = 30.0,
+    include_paths: list[str] | None = None,
+) -> "tuple[bool, list[str]] | None":
+    """Run the standalone ``gcc``/``clang -fsyntax-only`` compile; full stderr.
+
+    The core behind :func:`_compile_ccs` (see there for the compile's
+    semantics and the include-path rationale). Returns ``(ok, stderr_lines)``
+    — the COMPLETE diagnostic text, so callers that need a diagnostic SET
+    (the pre-existing-error delta) aren't limited to the first line.
+    ``None`` on timeout (undecidable); ``FileNotFoundError`` propagates
+    (callers gate on ``_resolve`` first).
+    """
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=suffix, delete=False, encoding="utf-8"
+    ) as tf:
+        tf.write(source)
+        tmp_path = tf.name
+    try:
+        cmd = [cc_path, "-fsyntax-only", f"-std={std}"]
+        # Add include search paths so header files can resolve sibling includes
+        # (e.g. #include "sqliteInt.h" defining u8, BtCursor). Each path becomes
+        # a -I flag. Paths that don't exist are silently skipped by gcc, so no
+        # validation needed here.
+        if include_paths:
+            for ip in include_paths:
+                cmd.append(f"-I{ip}")
+        cmd.append(tmp_path)
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        err_lines = (proc.stderr or "").strip().splitlines()
+        return (proc.returncode == 0, err_lines)
+    except FileNotFoundError:
+        # compiler absent — caller treats this as "not checked", not a failure.
+        raise
+    except subprocess.TimeoutExpired:
+        return None
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
 def _compile_ccs(
     source: str, *, cc_path: str = "gcc", std: str = "c11", suffix: str = ".c",
     timeout: float = 30.0,
@@ -4660,47 +4753,24 @@ def _compile_ccs(
     (declarations-only are valid translation units), so no ``.c`` driver wrapper
     is needed.
     """
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=suffix, delete=False, encoding="utf-8"
-    ) as tf:
-        tf.write(source)
-        tmp_path = tf.name
-    try:
-        cmd = [cc_path, "-fsyntax-only", f"-std={std}"]
-        # Add include search paths so header files can resolve sibling includes
-        # (e.g. #include "sqliteInt.h" defining u8, BtCursor). Each path becomes
-        # a -I flag. Paths that don't exist are silently skipped by gcc, so no
-        # validation needed here.
-        if include_paths:
-            for ip in include_paths:
-                cmd.append(f"-I{ip}")
-        cmd.append(tmp_path)
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        if proc.returncode == 0:
-            return True, "cc ok"
-        err = (proc.stderr or "").strip()
-        if not err:
-            return False, "cc failed"
-        # gcc/clang format: ``file:line:col: error: msg``. Find the first line
-        # carrying a real ``error:`` (a ``warning:`` or caret line isn't it).
-        # Fall back to the first non-empty line (e.g. ``gcc: error: ...`` for a
-        # bad flag, which has no file prefix).
-        for line in err.splitlines():
-            if " error:" in line or line.startswith("error"):
-                return False, line
-        return False, err.splitlines()[0]
-    except FileNotFoundError:
-        # compiler absent — caller treats this as "not checked", not a failure.
-        raise
-    except subprocess.TimeoutExpired:
+    proc = _ccs_syntax_compile(
+        source, cc_path=cc_path, std=std, suffix=suffix, timeout=timeout,
+        include_paths=include_paths)
+    if proc is None:
         return False, f"cc timed out after {timeout:g}s"
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
+    ok, err_lines = proc
+    if ok:
+        return True, "cc ok"
+    if not err_lines:
+        return False, "cc failed"
+    # gcc/clang format: ``file:line:col: error: msg``. Find the first line
+    # carrying a real ``error:`` (a ``warning:`` or caret line isn't it).
+    # Fall back to the first non-empty line (e.g. ``gcc: error: ...`` for a
+    # bad flag, which has no file prefix).
+    for line in err_lines:
+        if " error:" in line or line.startswith("error"):
+            return False, line
+    return False, err_lines[0]
 
 
 # ---------------------------------------------------------------------------
