@@ -102,7 +102,15 @@ class ConflictExtractor:
                 path, step_index, session_id, mode, unmerged
             )
 
-        base_bytes = self.git.read_stage_blob(path, STAGE_BASE)
+        # Add/add (AA): no stage-1 base exists. Git's own content merge for
+        # add/add used an empty base; do the same so the marker blocks
+        # extract (libuv-0019's test-emfile.c: both sides re-added the file,
+        # the stage-1 read raised, and the step escalated as "all conflicted
+        # paths are unsupported" — a crash misread as a policy boundary).
+        try:
+            base_bytes = self.git.read_stage_blob(path, STAGE_BASE)
+        except Exception:  # noqa: BLE001 — missing stage = empty base
+            base_bytes = b""
         current_bytes = self.git.read_stage_blob(path, STAGE_CURRENT)
         replayed_bytes = self.git.read_stage_blob(path, STAGE_REPLAYED)
         worktree_bytes = self.git.read_worktree_file(path)

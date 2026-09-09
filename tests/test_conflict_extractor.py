@@ -79,3 +79,43 @@ def test_detect_language_strips_linecol_suffix():
     # No extension → None
     assert detect_language("Makefile") is None
     assert detect_language("Makefile:1:0") is None
+
+
+def test_add_add_conflict_extracts_with_empty_base(repo):
+    """AA (add/add): no stage-1 base exists. The stage-1 read used to RAISE,
+    the gather loop skipped the path as an extraction error, and a step whose
+    conflicts were all add/add escalated as 'all conflicted paths are
+    unsupported' (libuv-0019's test-emfile.c — a crash misread as a policy
+    boundary). The extractor now degrades to an empty base — the same 3-way
+    git's own add/add content merge uses."""
+    from corpus._gitshim import git
+
+    # empty root, then each side independently ADDS the file (true add/add)
+    git(repo, "commit", "-q", "--allow-empty", "-m", "root")
+    git(repo, "checkout", "-q", "-b", "side")
+    (repo / "emfile.c").write_text(
+        "int main(void) {\n  int ok = 2;\n  return ok ? 0 : 1;\n}\n")
+    git(repo, "add", "emfile.c")
+    git(repo, "commit", "-q", "-m", "theirs adds")
+    git(repo, "checkout", "-q", "main")
+    (repo / "emfile.c").write_text(
+        "int main(void) {\n  int ok = 1;\n  return ok ? 0 : 1;\n}\n")
+    git(repo, "add", "emfile.c")
+    git(repo, "commit", "-q", "-m", "ours adds")
+    git(repo, "merge", "side", check=False)
+
+    git_backend = GitBackend(repo)
+    ex = ConflictExtractor(git_backend)
+    # The gather's unmerged entry: mode AA, stages 2+3 only.
+    class _E:
+        path = "emfile.c"
+        mode = "AA"
+        stages = {2: "x2", 3: "x3"}
+
+    units = ex.extract_file_units(
+        "emfile.c", step_index=1, session_id="s1", unmerged=_E())
+    assert units, "AA conflict must extract, not raise/skip"
+    for u in units:
+        assert u.conflict_type == "AA"
+        assert u.base.text == ""  # no stage 1 — empty base, like git's merge
+        assert u.current.text.strip() and u.replayed.text.strip()
