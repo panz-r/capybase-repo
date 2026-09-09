@@ -149,6 +149,32 @@ class GitBackend:
     def head_oid(self) -> str:
         return self._run_ok(["rev-parse", "HEAD"], what="rev-parse HEAD").strip()
 
+    def rebase_progress(self) -> "tuple[int, int] | None":
+        """(msgnum, end) of an in-progress rebase, or None when not rebasing.
+
+        A dropped-empty pick CONSUMES its slot without moving HEAD — the
+        rebase-merge state files advance where the commit graph does not.
+        The orchestrator's stuck-guard needs exactly this signal to tell a
+        legitimately-dropped pick (progress) from a wedged continue (none).
+        """
+        try:
+            base = Path(self.repo) / ".git"
+            if (base / "rebase-merge").is_dir():
+                git_dir = base
+            else:
+                # a linked worktree: .git is a file pointing at the parent's
+                # worktrees/<name> dir, where rebase-merge actually lives.
+                ptr = (Path(self.repo) / ".git").read_text().strip()
+                git_dir = Path(ptr.split("gitdir:", 1)[1].strip())
+            msgnum = (git_dir / "rebase-merge" / "msgnum")
+            end = (git_dir / "rebase-merge" / "end")
+            if msgnum.is_file() and end.is_file():
+                return (int(msgnum.read_text().strip()),
+                        int(end.read_text().strip()))
+        except Exception:  # noqa: BLE001 — diagnostic signal, never fatal
+            pass
+        return None
+
     def current_branch(self) -> str | None:
         """The checked-out branch name, or ``None`` if HEAD is detached.
 
@@ -458,6 +484,17 @@ class GitBackend:
         """Unstaged modifications to tracked files (``git diff --name-only``)."""
         r = self._run(["diff", "--name-only"], what="diff --name-only")
         return [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+
+    def unmerged_paths(self) -> list[str]:
+        """Distinct paths with conflict stages in the index (``git ls-files -u``).
+
+        The staging→continue interval's health check: a staged resolution
+        clears these; their reappearance means a merge re-ran and overwrote
+        the staging (the cython-0020 continue-loop forensics — s27-51).
+        """
+        r = self._run(["ls-files", "-u"], what="ls-files -u")
+        return sorted({ln.split("\t", 1)[-1].strip()
+                       for ln in (r.stdout or "").splitlines() if ln.strip()})
 
     def stash_files(self, files: list[str]) -> GitResult:
         """``git stash push -- <files>`` — set aside worktree modifications.

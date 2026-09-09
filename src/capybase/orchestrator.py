@@ -9205,6 +9205,7 @@ class Orchestrator:
         last: StepResult | None = None
         _stuck_continues = 0
         _prev_head: str | None = None
+        _prev_pos: "tuple[int, int] | None" = None
         while True:
             self.step += 1
             head_before = self.git.head_oid()
@@ -9299,6 +9300,21 @@ class Orchestrator:
                      "returncode": _stash.returncode},
                     step_index=self.step,
                 )
+            # s27-51 forensics: bracket the staging→continue interval with
+            # the index's unmerged state — if staging was effective this is
+            # empty; its reappearance AFTER the continue identifies a merge
+            # re-run overwriting the staged resolution (the cython-0020
+            # continue-loop class).
+            try:
+                _pre_cont_unmerged = self.git.unmerged_paths()
+            except Exception:  # noqa: BLE001 — diagnostic only
+                _pre_cont_unmerged = []
+            if _pre_cont_unmerged:
+                self.journal.emit(
+                    "continue_pre_unmerged",
+                    {"paths": _pre_cont_unmerged[:10]},
+                    step_index=self.step,
+                )
             cont = self.git.continue_rebase()
             self.journal.emit(
                 "step_continued",
@@ -9307,6 +9323,16 @@ class Orchestrator:
                  "stdout": (getattr(cont, "stdout", "") or "")[:500]},
                 step_index=self.step,
             )
+            try:
+                _post_cont_unmerged = self.git.unmerged_paths()
+            except Exception:  # noqa: BLE001 — diagnostic only
+                _post_cont_unmerged = []
+            if _post_cont_unmerged:
+                self.journal.emit(
+                    "continue_post_unmerged",
+                    {"paths": _post_cont_unmerged[:10]},
+                    step_index=self.step,
+                )
             # Empty-commit completion: a resolution that fully superseded
             # the replayed commit (e.g. the whole-file fast path taking the
             # rewriting side verbatim) leaves the pick empty — git refuses
@@ -9331,8 +9357,28 @@ class Orchestrator:
             # without the head moving, the rebase is wedged — escalate
             # instead of spinning to the case timeout.
             _head_now = self.git.head_oid()
-            if cont.returncode != 0 and _head_now == _prev_head:
+            # A dropped-empty pick consumes its slot WITHOUT moving HEAD
+            # (the whole-file takeover resolving a superseded pick to the
+            # current side leaves nothing to commit; git drops it — correct,
+            # the content is already present). The rebase's position counter
+            # advancing IS progress: only an unmoved head AND an unmoved
+            # position is a wedged continue (cython-0020: four CI picks
+            # resolved to no-change, dropped one per iteration, and the old
+            # head-only guard killed the healthy rebase at the third).
+            _pos_now = self.git.rebase_progress()
+            _progressed = (_head_now != _prev_head) or (
+                _pos_now is not None and _pos_now != _prev_pos)
+            if cont.returncode != 0 and not _progressed:
                 _stuck_continues += 1
+                # s27-51 forensics: every wedged iteration must be visible —
+                # the cython-0020 escalate fired at 3 without its companion
+                # iterations appearing in the journal.
+                self.journal.emit(
+                    "stuck_continue",
+                    {"count": _stuck_continues, "head": _head_now[:10],
+                     "pos": list(_pos_now) if _pos_now else None},
+                    step_index=self.step,
+                )
                 if _stuck_continues >= 3:
                     last.escalated = True
                     last.reason = (
@@ -9343,6 +9389,7 @@ class Orchestrator:
             else:
                 _stuck_continues = 0
             _prev_head = _head_now
+            _prev_pos = _pos_now
             result.continued = True
             if not self.git.rebase_in_progress():
                 # Rebase finished cleanly. Run the resurrection scan: the rebase

@@ -32,3 +32,26 @@ def test_worktree_file_has_markers(conflicted_repo):
     git = GitBackend(conflicted_repo["repo"])
     text = git.read_worktree_file("app.py").decode()
     assert "<<<<<<<" in text and "=======" in text and ">>>>>>>" in text
+
+
+def test_rebase_progress_mid_rebase(conflicted_repo):
+    """(msgnum, end) while a rebase is stopped — the dropped-empty-pick
+    signal. A pick resolved to no-change gets DROPPED: HEAD does not move,
+    but the rebase's position does (cython-0020: four CI picks dropped one
+    per iteration; the head-only stuck-guard killed the healthy rebase)."""
+    git = GitBackend(conflicted_repo["repo"])
+    prog = git.rebase_progress()
+    assert prog is not None
+    msgnum, end = prog
+    assert msgnum >= 1
+    assert end >= msgnum
+
+
+def test_rebase_progress_none_when_clean(repo):
+    git = GitBackend(repo)
+    assert git.rebase_progress() is None
+
+
+def test_unmerged_paths_dedupes_stages(conflicted_repo):
+    git = GitBackend(conflicted_repo["repo"])
+    assert git.unmerged_paths() == ["app.py"]
