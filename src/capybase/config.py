@@ -664,6 +664,11 @@ class FutureConfig(BaseModel):
     # conflicts (both sides' entries additive; oracle = union in
     # 48/51 corpus cases). See capybase.docs_union.
     enable_docs_union: bool = True
+    # S27-48: deterministic list-union for one-entry-per-line name
+    # lists (AUTHORS/.mailmap/CONTRIBUTORS): current side's lines +
+    # replayed additions, target dedups respected. See
+    # capybase.list_union.
+    enable_list_union: bool = True
     # NOTE: wired but DORMANT — the unit-level shape gate is
     # vacuous (any modify/modify conflict passes it); the true
     # move-race evidence needs cross-file context (the def

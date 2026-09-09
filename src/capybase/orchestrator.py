@@ -6644,6 +6644,73 @@ class Orchestrator:
         )
         return outcome
 
+    def _try_list_union(self, unit: ConflictUnit) -> UnitOutcome | None:
+        """Deterministic list-union for name-list conflicts (S27-48).
+
+        One-entry-per-line lists (AUTHORS, .mailmap, CONTRIBUTORS): the
+        human merge keeps the current side's lines (its dedups included)
+        and adds the replayed side's additions — corpus-measured across
+        all libuv list blocks (104/141 exact, the rest within ~1 line).
+        The candidate runs the full validation pipeline.
+        """
+        from capybase.list_union import propose_list_union
+        base_region = unit.structural_metadata.get("diff3_refined")
+        base_text = (base_region or {}).get("base") if isinstance(base_region, dict) else None
+        if base_text is None:
+            base_text = unit.base.text or ""
+        result = propose_list_union(
+            unit.path, base_text,
+            unit.current.text or "", unit.replayed.text or "")
+        if result.text is None:
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="list_union",
+                decision="skip", reason=result.reason)
+            return None
+        cand = CandidateResolution(
+            candidate_id=f"{unit.unit_id}:list_union",
+            unit_id=unit.unit_id,
+            model_name="list_union",
+            prompt_version="list_union.v1",
+            resolved_text=result.text,
+            explanation=(f"name-list union "
+                         f"(cur {result.current_entries}, rep +{result.replayed_entries})"),
+            provenance="deterministic_list_union",
+        )
+        validation = self.verification.verify(unit, cand)
+        self.journal.emit(
+            "list_union_resolved",
+            {"candidate_id": cand.candidate_id,
+             "cur_entries": result.current_entries,
+             "rep_entries": result.replayed_entries,
+             "passed": validation.passed},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        if not validation.passed:
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="list_union",
+                candidate=cand, validation=validation,
+                decision="skip", reason="failed validation")
+            return None
+        if self._strictness_blocks_pre_llm(unit, cand, validation, "list_union"):
+            self._record_resolution_attempt(
+                UnitOutcome(unit=unit), mechanism="list_union",
+                candidate=cand, validation=validation,
+                decision="skip", reason="strictness declined")
+            return None
+        outcome = UnitOutcome(unit=unit, validation=validation, attempts=[cand])
+        outcome.accepted = cand
+        self._record_resolution_attempt(
+            UnitOutcome(unit=unit), mechanism="list_union",
+            candidate=cand, validation=validation,
+            decision="accept", reason="name-list union",
+        )
+        self.journal.emit(
+            "candidate_accepted",
+            {"candidate_id": cand.candidate_id, "via": "list_union"},
+            step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+        )
+        return outcome
+
     def _try_def_site_race(self, unit: ConflictUnit) -> UnitOutcome | None:
         """Shape-gated def-site-race CANDIDATE GENERATOR (S27-24).
 
@@ -14281,6 +14348,17 @@ class Orchestrator:
             early = self._try_docs_union(unit)
             if early is not None:
                 return early  # accepted via the docs-union rule
+
+        # List-union (S27-48): one-entry-per-line name lists (AUTHORS,
+        # .mailmap, CONTRIBUTORS) resolve to the current side's lines plus
+        # the replayed side's additions — the target's dedups are respected,
+        # not unioned back (the corpus-measured human policy). Failure
+        # falls through, as everywhere here.
+        if failures is None and getattr(
+                self.config.future, "enable_list_union", True):
+            early = self._try_list_union(unit)
+            if early is not None:
+                return early  # accepted via the list-union rule
 
         # Def-site race (S27-24): the move-race shape's strong seed.
         # Shape-gated candidate generator; validated, never bypasses.
