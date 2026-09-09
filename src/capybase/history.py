@@ -705,8 +705,9 @@ def future_apply_probe(
                     git.prune_worktrees()
                 except Exception:  # noqa: BLE001
                     pass
-            else:
-                # add_worktree failed — the path is a plain temp dir, not a
-                # registered worktree. Remove it directly to avoid leaking.
-                import shutil
-                shutil.rmtree(worktree_path, ignore_errors=True)
+            # Belt-and-braces: a partially-failed `git worktree remove` must
+            # not leak the mount point (libuv-0020's ENOSPC run left 288
+            # capybase-futureprobe-* dirs behind — the registration went,
+            # the directory stayed). Always rmtree the path last.
+            import shutil
+            shutil.rmtree(worktree_path, ignore_errors=True)
