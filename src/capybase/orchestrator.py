@@ -4869,6 +4869,11 @@ class Orchestrator:
         except Exception:  # noqa: BLE001 — advisory; never break orchestrator init
             pass
         _val_cfg = ValidationConfig.from_dict(config.validation.model_dump())
+        # Repo root for path-aware validators: the per-unit Rust syntax gate
+        # infers the crate's declared edition from the nearest Cargo.toml
+        # (edition changes what parses; a wrong-edition gate reports errors
+        # the merge didn't cause).
+        _val_cfg.repo_root = str(self.git.repo)
         # Propagate the user-supplied build command (tests.pre_continue) for
         # C/C++ whole-file verification. When set, verify_file's C branch runs
         # the real build (make/cmake) in the repo dir instead of standalone gcc

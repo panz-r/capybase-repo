@@ -303,7 +303,10 @@ class TestPreexistingParseErrorExcuse:
             prompt_version="v", resolved_text=template)
         res = self._verify(unit, cand)
         assert res.passed
-        assert "pre-existing parse error excused" in res.message
+        # s27-44: the wording generalized from "parse error" to "error" when
+        # the excuse moved to the shared base — the era-syntax class (tikv's
+        # box) isn't a parse error, just pre-existing.
+        assert "pre-existing error excused" in res.message
 
     def test_new_parse_error_still_fails(self):
         from capybase.verification import CcsSyntaxValidator

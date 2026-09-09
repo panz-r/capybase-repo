@@ -403,6 +403,12 @@ class ValidationConfig(BaseModel):
     # field, falling back to "2021".
     rustc_path: str = "rustc"
     rust_edition: str = ""
+    # Repo root for path-aware validators (the per-unit Rust gate's edition
+    # inference walks from the unit's repo-relative path to the nearest
+    # Cargo.toml). Empty (default) — the orchestrator injects the live repo
+    # on the verification-side config; this mirror exists so a standalone
+    # ValidationConfig can carry it too.
+    repo_root: str = ""
     # Rust error codes to SUPPRESS in the diagnostic delta (treat as not-new
     # even when genuinely introduced). The live realworld eval (Issue 3) showed
     # near-correct Rust merges rejected for E0432/E0433 (crate-path resolution

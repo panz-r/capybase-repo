@@ -162,6 +162,17 @@ def test_infer_edition_does_not_escape_repo_root(tmp_path):
     assert _infer_rust_edition(str(nested), str(tmp_path / "src" / "x.rs")) == "2021"
 
 
+def test_infer_edition_relative_path_anchored_at_root(tmp_path, monkeypatch):
+    # s27-44: the live harness runs with cwd = the workspace, not the
+    # worktree. A repo-relative unit path resolved against the CWD silently
+    # missed the crate's manifest (always defaulted 2021); it must anchor at
+    # repo_root.
+    (tmp_path / "Cargo.toml").write_text('edition = "2015"\n')
+    (tmp_path / "src").mkdir()
+    monkeypatch.chdir(tmp_path.parent)
+    assert _infer_rust_edition(str(tmp_path), "src/lib.rs") == "2015"
+
+
 # ---------------------------------------------------------------------------
 # verify_file Rust syntax branch
 # ---------------------------------------------------------------------------

@@ -26,10 +26,11 @@ from capybase.config import ValidationConfig
 
 
 def _unit(*, base="", current="", replayed="", worktree=None, language="python",
-          marker_span=(0, 0)):
+          marker_span=(0, 0), path=None):
     wt = worktree if worktree is not None else base
     return ConflictUnit(
-        session_id="s", step_index=0, path="a.py" if language == "python" else "a.rs",
+        session_id="s", step_index=0,
+        path=path or ("a.py" if language == "python" else "a.rs"),
         language=language, conflict_type="UU", unit_id="u", unit_kind="text_marker_block",
         base=ConflictSide(label="BASE", text=base),
         current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=current),
@@ -45,8 +46,10 @@ def _candidate(resolved=""):
     )
 
 
-def _verify(validator, unit, candidate):
-    ctx = VerificationContext(unit=unit, candidate=candidate, config=ValidationConfig())
+def _verify(validator, unit, candidate, config=None, repo_root=""):
+    ctx = VerificationContext(
+        unit=unit, candidate=candidate,
+        config=config or ValidationConfig(), repo_root=repo_root)
     return validator.verify(ctx)
 
 
@@ -356,20 +359,27 @@ skip_no_rustc = pytest.mark.skipif(rustc is None, reason="rustc not installed")
 
 @skip_no_rustc
 def test_rust_syntax_catches_malformed_format():
-    """The exact live-eval failure: a newline inside a format! string literal."""
+    """A genuinely malformed candidate fails the gate.
+
+    The original live-eval failure (a newline inside a ``format!`` string) no
+    longer reproduces: rustc 1.92 lexes multi-line string literals without a
+    parse error. The candidate here is malformed on every toolchain — an
+    unclosed ``format!`` call. The worktree is a free fn (no ``&self``) so
+    the file itself is pristine and no excuse can apply.
+    """
     v = RustSyntaxValidator()
     worktree = (
-        'pub fn label(&self) -> String {\n'
+        'pub fn label() -> String {\n'
         '<<<<<<<\n    format!("x")\n=======\n    format!("y")\n>>>>>>>\n'
         '}\n'
     )
     unit = _unit(
         language="rust",
-        base='pub fn label(&self) -> String {\n    format!("x")\n}\n',
+        base='pub fn label() -> String {\n    format!("x")\n}\n',
         worktree=worktree, marker_span=(1, 5),
     )
-    # Malformed: newline inside the string literal
-    cand = _candidate(resolved='    format!("{}\n    (retries={})", a, b)')
+    # Malformed: unclosed macro call.
+    cand = _candidate(resolved='    format!("hi {}", name')
     res = _verify(v, unit, cand)
     assert not res.passed
     assert res.features["rust_syntax_checked"] is True
@@ -444,6 +454,134 @@ def test_rust_syntax_skips_non_rust():
     res = _verify(v, unit, cand)
     assert res.passed
     assert res.features["rust_syntax_checked"] is False
+
+
+# --- s27-44: pre-existing-error excuse (the tikv trio shape) ---
+
+# rust-2015 ``box`` syntax, removed by rustc 1.92 under EVERY edition: a
+# pristine-region error no candidate can fix. The conflict block is a clean
+# two-literal pick in a separate fn.
+_BOX_WORKTREE = (
+    "pub fn boxed() -> Box<u32> {\n"
+    "    box 1\n"
+    "}\n"
+    "\n"
+    "pub fn pick() -> u32 {\n"
+    "<<<<<<<\n    1\n=======\n    2\n>>>>>>>\n"
+    "}\n"
+)
+
+
+def _box_unit():
+    return _unit(
+        language="rust",
+        base="pub fn boxed() -> Box<u32> {\n    box 1\n}\n\npub fn pick() -> u32 {\n    1\n}\n",
+        worktree=_BOX_WORKTREE, marker_span=(5, 9),
+    )
+
+
+@skip_no_rustc
+def test_rust_syntax_excuses_preexisting_era_error():
+    """tikv-0004/5/6: era syntax in the pristine region fails every candidate
+    identically — the gate excuses and defers to the whole-file check."""
+    v = RustSyntaxValidator()
+    cand = _candidate(resolved="    3")
+    res = _verify(v, _box_unit(), cand)
+    assert res.passed
+    assert "pre-existing error excused" in res.message
+    assert res.features["rust_syntax_checked"] is True
+
+
+@skip_no_rustc
+def test_rust_syntax_preexisting_error_does_not_mask_new_defect():
+    """The set-form delta: a pre-existing first error must NOT excuse a NEW
+    parse defect the candidate introduces (the single-line compare's hole)."""
+    v = RustSyntaxValidator()
+    # A brace-balanced candidate with a parse error the pristine file
+    # doesn't have (an unclosed string would trip the brace guard instead).
+    cand = _candidate(resolved="    let x = ;")
+    res = _verify(v, _box_unit(), cand)
+    assert not res.passed
+
+
+# --- s27-44: edition inference through ctx.repo_root ---
+
+
+@skip_no_rustc
+def test_rust_syntax_infers_edition_from_cargo_toml(tmp_path, monkeypatch):
+    """``let async = 1`` is legal rust-2015 and a parse error under 2021; the
+    gate must check under the crate's declared edition, anchoring the
+    repo-relative unit path at ctx.repo_root (not the process CWD). The
+    pristine first side is edition-clean so the compile outcome — not the
+    pre-existing excuse — discriminates."""
+    (tmp_path / "Cargo.toml").write_text('edition = "2015"\n')
+    monkeypatch.chdir(tmp_path.parent)  # cwd ≠ the repo root
+    v = RustSyntaxValidator()
+    worktree = (
+        "pub fn f() -> u32 {\n"
+        "<<<<<<<\n    0\n=======\n    1\n>>>>>>>\n"
+        "}\n"
+    )
+    unit = _unit(
+        language="rust", path="src/lib.rs",
+        base="pub fn f() -> u32 {\n    0\n}\n",
+        worktree=worktree, marker_span=(1, 5),
+    )
+    cand = _candidate(resolved="    let async = 1;\n    async")
+    res = _verify(v, unit, cand, repo_root=str(tmp_path))
+    assert res.passed, res.message
+    assert res.features["rust_syntax_checked"] is True
+    assert res.features["rust_edition"] == "2015"
+
+
+@skip_no_rustc
+def test_rust_syntax_explicit_edition_override_beats_inference(tmp_path):
+    """rust_edition override wins over Cargo.toml inference — the same era
+    candidate that passes under the declared 2015 hard-fails under a forced
+    2021 (with a clean baseline, nothing excuses it)."""
+    (tmp_path / "Cargo.toml").write_text('edition = "2015"\n')
+    v = RustSyntaxValidator()
+    worktree = (
+        "pub fn f() -> u32 {\n"
+        "<<<<<<<\n    0\n=======\n    1\n>>>>>>>\n"
+        "}\n"
+    )
+    unit = _unit(
+        language="rust", path="src/lib.rs",
+        base="pub fn f() -> u32 {\n    0\n}\n",
+        worktree=worktree, marker_span=(1, 5),
+    )
+    cand = _candidate(resolved="    let async = 1;\n    async")
+    res = _verify(v, unit, cand, config=ValidationConfig(rust_edition="2021"),
+                  repo_root=str(tmp_path))
+    assert not res.passed
+
+
+@skip_no_rustc
+def test_engine_verify_threads_repo_root_to_rust_gate(tmp_path, monkeypatch):
+    """The engine populates ctx.repo_root from ValidationConfig.repo_root
+    (set by the orchestrator from the repo) — the wiring the inference rides."""
+    from capybase.verification import ValidationConfig as _ValCfg
+    from capybase.verification import VerificationEngine
+
+    (tmp_path / "Cargo.toml").write_text('edition = "2015"\n')
+    monkeypatch.chdir(tmp_path.parent)
+    cfg = _ValCfg()
+    cfg.repo_root = str(tmp_path)
+    eng = VerificationEngine.default(cfg)
+    worktree = (
+        "pub fn f() -> u32 {\n"
+        "<<<<<<<\n    let async = 1;\n    async\n=======\n    0\n>>>>>>>\n"
+        "}\n"
+    )
+    unit = _unit(
+        language="rust", path="src/lib.rs",
+        base="pub fn f() -> u32 {\n    0\n}\n",
+        worktree=worktree, marker_span=(1, 5),
+    )
+    cand = _candidate(resolved="    let async = 1;\n    async")
+    res = eng.verify(unit, cand)
+    assert res.features.get("rust_edition") == "2015"
 
 
 # --- sprint-20 S20.7: sibling-boundary insertion (the fmt-0003 shape) ---

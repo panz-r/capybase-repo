@@ -46,6 +46,10 @@ class VerificationContext:
     unit: ConflictUnit
     candidate: CandidateResolution
     config: "ValidationConfig"
+    # Repo root for path-aware validators (edition inference from Cargo.toml,
+    # include-path resolution). Empty when unknown — validators must degrade
+    # gracefully (default edition, no includes), never fail, on an empty root.
+    repo_root: str = ""
 
 
 def _first_error_line(message: str) -> str:
@@ -142,6 +146,11 @@ class ValidationConfig:
     # Rust compile floor (mirrors config.ValidationConfig; the live flags).
     rustc_path: str = "rustc"
     rust_edition: str = ""
+    # Repo root the validators run against (set by the orchestrator after
+    # from_dict; empty = unavailable). Feeds the per-unit Rust gate's edition
+    # inference — the unit path alone is repo-relative and cannot be walked to
+    # a Cargo.toml without knowing the root.
+    repo_root: str = ""
     # Rust error codes to suppress in the delta (mirrors config.ValidationConfig).
     rust_suppress_codes: list[str] = field(default_factory=list)
     # C/C++ compile floor (mirrors config.ValidationConfig; gcc/clang -fsyntax-only).
@@ -3666,7 +3675,7 @@ class _StandaloneSyntaxValidator:
                         (_ev_time.perf_counter() - _ev_t0) * 1000),
                 },
             )
-        return VerificationCheckResult(
+        result = VerificationCheckResult(
             name=self.name,
             passed=ok,
             severity="error",
@@ -3682,6 +3691,85 @@ class _StandaloneSyntaxValidator:
                 "syntax_duration_ms": int(
                     (_ev_time.perf_counter() - _ev_t0) * 1000),
             },
+        )
+        if not result.passed:
+            self._maybe_excuse_preexisting(ctx, result, spliced)
+        return result
+
+    def _error_lines_for_excuse(
+        self, ctx: VerificationContext, source: str, tool: str,
+    ) -> "list[str] | None":
+        """The diagnostic SET of a compile, for the pre-existing-error delta.
+
+        ``None`` (default): this validator has no set form — the excuse falls
+        back to comparing the single normalized line from ``_compile`` (the
+        sqlite-0039 legacy semantics). A list: every error line of the
+        compile, so the excuse can require the candidate to introduce NO
+        error the baseline didn't already have (a single-line compare lets a
+        pre-existing FIRST error mask any candidate defect behind it).
+        """
+        return None
+
+    def _maybe_excuse_preexisting(
+        self, ctx: VerificationContext, result: VerificationCheckResult,
+        spliced: str,
+    ) -> None:
+        """Excuse a failure the pre-conflict file already had (in place).
+
+        The per-unit gate compiles the whole spliced file, so an error in the
+        PRISTINE region outside the marker block — a template language that
+        never parses standalone (sqlite-0039's lemon ``%`` directives), era
+        syntax the toolchain rejects everywhere (tikv's rust-2015 ``box``,
+        removed by rustc 1.92 under every edition) — fails EVERY candidate.
+        Baseline = the original conflicted file with markers blanked, the
+        same body the candidate was compiled in. When the baseline shows
+        every error the candidate produced, nobody introduced anything:
+        excuse and defer to the whole-file gate (which runs its own
+        original-vs-resolved delta). Lifted from CcsSyntaxValidator
+        (sqlite-0039) to the shared base in s27-44 so Rust gets the same
+        doctrine.
+        """
+        unit = ctx.unit
+        tool = self._resolve_compiler(ctx.config)
+        if tool is None:
+            return
+        cand_msg = _last_error_line(result.message)
+        if not cand_msg:
+            return
+        # The refined side text alone is region-only and compiles standalone;
+        # it can't witness errors in the surrounding file — the blanked
+        # original is the only honest baseline.
+        baseline = _blank_markers(
+            unit.original_worktree_text or "", unit.language)
+        if not baseline.strip():
+            return
+        cand_set = self._error_lines_for_excuse(ctx, spliced, tool)
+        base_set = (
+            self._error_lines_for_excuse(ctx, baseline, tool)
+            if cand_set is not None else None)
+        if cand_set is not None and base_set is not None:
+            # Set form: excuse iff the candidate introduced no new error line.
+            if cand_set and set(cand_set) <= set(base_set):
+                self._excuse_preexisting(result, cand_set[0])
+            return
+        # Legacy single-line form (Ccs/sqlite-0039 semantics).
+        try:
+            ok, bmsg = self._compile(baseline, tool, ctx.config)
+        except Exception:  # noqa: BLE001 - baseline is best-effort
+            return
+        if not ok and _last_error_line(bmsg) == cand_msg:
+            self._excuse_preexisting(result, cand_msg)
+
+    @staticmethod
+    def _excuse_preexisting(
+        result: VerificationCheckResult, msg: str,
+    ) -> None:
+        result.passed = True
+        result.unknown = False
+        result.message = (
+            f"pre-existing error excused (the pre-conflict "
+            f"file fails identically: {msg[:80]}); "
+            "deferring to whole-file check"
         )
 
     def _lang_label(self) -> str:
@@ -3716,12 +3804,63 @@ class RustSyntaxValidator(_StandaloneSyntaxValidator):
     _feature_key = "rust_syntax_checked"
     _check_braces = True
 
+    def verify(self, ctx: VerificationContext) -> VerificationCheckResult:
+        # Stash the unit's repo-relative path and the repo root so _compile
+        # can infer the crate's edition from the nearest Cargo.toml (the
+        # same stash idiom as CcsSyntaxValidator's _unit_path).
+        self._unit_path = ctx.unit.path or ""
+        self._repo_root = ctx.repo_root or getattr(ctx.config, "repo_root", "") or ""
+        result = super().verify(ctx)
+        # Evidence envelope: record WHICH edition the gate ran under. An
+        # era-sensitive crate (tikv's rust-2015 ``box`` syntax) passing under
+        # "2015" vs failing under "2021" is the whole story of a verdict —
+        # make it attributable, like tool version and duration already are.
+        if result.features.get(self._feature_key):
+            result.features["rust_edition"] = getattr(
+                self, "_edition_used", "")
+        return result
+
     def _resolve_compiler(self, cfg: object) -> str | None:
         return _resolve_tool(getattr(cfg, "rustc_path", "rustc"))
 
     def _compile(self, spliced: str, tool: str, cfg: object) -> tuple[bool, str]:
-        edition = getattr(cfg, "rust_edition", "") or "2021"
+        # Edition precedence: explicit rust_edition override, else the crate's
+        # own declaration (nearest Cargo.toml), else the inference's 2021
+        # default. The edition changes what parses (2015 module paths, 2018
+        # ``dyn``, 2024 ``gen`` blocks) — checking a crate under an edition it
+        # doesn't declare reports errors that aren't the merge's fault. (The
+        # tikv trio's ``box`` syntax is NOT this class: rustc 1.92 removed it
+        # under every edition; that's the pre-existing-error excuse above.)
+        edition = getattr(cfg, "rust_edition", "") or _infer_rust_edition(
+            getattr(self, "_repo_root", "") or getattr(cfg, "repo_root", "") or ".",
+            getattr(self, "_unit_path", "") or "",
+        )
+        self._edition_used = edition
         return _compile_rust(spliced, rustc_path=tool, edition=edition)
+
+    def _error_lines_for_excuse(
+        self, ctx: VerificationContext, source: str, tool: str,
+    ) -> "list[str] | None":
+        # Parse-class lines only: E-coded semantic errors and resolution-
+        # shaped diagnostics defer to the whole-file gate anyway, and leaving
+        # them in would hold the subset test hostage to whichever crate
+        # symbols the (blanked) baseline happens to reference. rustc's
+        # ``error:`` summary lines carry no position, so identical text stays
+        # identical even when the splice shifts line numbers.
+        proc = _rustc_metadata_compile(
+            source, rustc_path=tool,
+            edition=getattr(self, "_edition_used", "") or "2021")
+        if proc is None:
+            return None
+        ok, err_lines = proc
+        if ok:
+            return []
+        return [
+            ln for ln in err_lines
+            if ln.startswith("error")
+            and "aborting due to" not in ln
+            and not _is_rust_resolution_error(ln)
+        ] or None
 
     def _is_resolution_error(self, msg: str) -> bool:
         return _is_rust_resolution_error(msg)
@@ -3783,50 +3922,7 @@ class CcsSyntaxValidator(_StandaloneSyntaxValidator):
         self._strict_semantic = (
             getattr(ctx.candidate, "model_name", "") == "source_portfolio"
         )
-        result = super().verify(ctx)
-        # Pre-existing parse error (sqlite-0039, the lemon-template class):
-        # a file that is not valid C by CONSTRUCTION (tool/lempar.c's %
-        # directives) fails -fsyntax-only on the PRISTINE sides and the
-        # human oracle alike. The per-unit gate has no blanked-baseline
-        # delta (Python's #7 and the whole-tree builds both excuse
-        # pre-existing errors); without one, an oracle-perfect merge
-        # hard-fails on an error nobody introduced. Excuse a parse error
-        # whose normalized first diagnostic a pristine side also produces.
-        if (not result.passed) and not result.unknown:
-            self._maybe_excuse_preexisting(ctx, result)
-        return result
-
-    def _maybe_excuse_preexisting(
-        self, ctx: VerificationContext, result: VerificationCheckResult,
-    ) -> None:
-        unit = ctx.unit
-        tool = self._resolve_compiler(ctx.config)
-        if tool is None:
-            return
-        cand_msg = _last_error_line(result.message)
-        if not cand_msg:
-            return
-        # Baseline = the ORIGINAL conflicted file with markers blanked to one
-        # side — the same spliced context the candidate was compiled in, so a
-        # pre-existing directive/template error appears at the SAME line. (The
-        # refined side text alone is region-only and compiles standalone; it
-        # can't witness errors in the surrounding file.)
-        baseline = _blank_markers(
-            unit.original_worktree_text or "", unit.language)
-        if not baseline.strip():
-            return
-        try:
-            ok, bmsg = self._compile(baseline, tool, ctx.config)
-        except Exception:  # noqa: BLE001 - baseline is best-effort
-            return
-        if not ok and _last_error_line(bmsg) == cand_msg:
-            result.passed = True
-            result.unknown = False
-            result.message = (
-                f"pre-existing parse error excused (the pre-conflict "
-                f"file fails identically: {cand_msg[:80]}); "
-                "deferring to whole-file check"
-            )
+        return super().verify(ctx)
 
     def _compile(self, spliced: str, tool: str, cfg: object) -> tuple[bool, str]:
         _cpp_lang = self._is_cpp
@@ -4438,34 +4534,28 @@ def _py_unreachable_code(source: str) -> list[tuple[str, str, int]] | None:
     return findings
 
 
-def _compile_rust(
+def _rustc_metadata_compile(
     source: str, *, rustc_path: str = "rustc", edition: str = "2021"
-) -> tuple[bool, str]:
-    """Syntax/parse-check Rust source via ``rustc --emit=metadata``.
+) -> "tuple[bool, list[str]] | None":
+    """Run the standalone ``rustc --emit=metadata`` compile; full diagnostics.
 
-    The ``py_compile`` analog for Rust: writes the source to a temp ``.rs`` file
-    and asks ``rustc`` to emit *only* metadata (``--emit=metadata``), which runs
-    parsing + macro expansion + name resolution far enough to catch syntax and
-    obvious semantic errors WITHOUT producing an object file or needing a
-    ``Cargo.toml``. Compiled as ``--crate-type lib`` so a fragment with top-level
-    items type-checks. Returns ``(True, "rustc ok")`` on success or
-    ``(False, first_error_line)`` on failure — the first ``error``-prefixed line
-    of stderr is the actionable diagnostic the CEGIS repair loop wants, more
-    useful than rustc's trailing "aborting due to N previous errors".
-
-    Any invocation failure (missing binary, crash) maps to
-    ``(False, message)``; the caller gates hard-rejection on the tool actually
-    being available (``_resolve``), so a missing ``rustc`` is reported as
-    "not checked" rather than a false syntax failure.
+    The core behind :func:`_compile_rust`: writes the source to a temp ``.rs``
+    file and asks ``rustc`` for metadata only (parse + expansion + resolution,
+    no object file, no Cargo.toml), compiled ``--crate-type lib``. Returns
+    ``(ok, stderr_lines)`` — the COMPLETE error text, so callers that need a
+    diagnostic SET (the pre-existing-error delta) aren't limited to the first
+    line. ``None`` when the compile is undecidable from a temp copy
+    (include_str!/include_bytes! resolve relative to the original file's
+    directory) — callers map that to "not checked", never a failure.
+    ``FileNotFoundError`` propagates (callers gate on ``_resolve`` first).
     """
     # E2 (sprint-23): include_str!/include_bytes! resolve relative to the
     # ORIGINAL file's directory; this temp-copy compile cannot see them
     # (axum-0005/0033: include_str'd docs read as /tmp/../docs/... — a false
     # syntax failure from EVERY caller: unit validator, whole-file gate,
-    # repair loops). Undecidable at this location: report not-checked.
+    # repair loops). Undecidable at this location.
     if re.search(r"include_(?:str|bytes)!\s*\(", source):
-        return True, ("rustc temp-copy: include_str/include_bytes "
-                      "undecidable from this location; not checked")
+        return None
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".rs", delete=False, encoding="utf-8"
     ) as tf:
@@ -4490,23 +4580,48 @@ def _compile_rust(
             capture_output=True,
             text=True,
         )
-        if proc.returncode == 0:
-            return True, "rustc ok"
-        err = (proc.stderr or "").strip()
-        if not err:
-            return False, "rustc failed"
-        # Prefer the first real diagnostic line (starts with "error"); it names
-        # the actual problem. Fall back to the last non-empty line.
-        for line in err.splitlines():
-            if line.startswith("error"):
-                return False, line
-        return False, err.splitlines()[-1]
+        err_lines = (proc.stderr or "").strip().splitlines()
+        return (proc.returncode == 0, err_lines)
     except FileNotFoundError:
         # rustc absent — caller treats this as "not checked", not a failure.
         raise
     finally:
         Path(tmp_path).unlink(missing_ok=True)
         Path(out_path).unlink(missing_ok=True)
+
+
+def _compile_rust(
+    source: str, *, rustc_path: str = "rustc", edition: str = "2021"
+) -> tuple[bool, str]:
+    """Syntax/parse-check Rust source via ``rustc --emit=metadata``.
+
+    The ``py_compile`` analog for Rust (see :func:`_rustc_metadata_compile`
+    for the compile's semantics). Returns ``(True, "rustc ok")`` on success or
+    ``(False, first_error_line)`` on failure — the first ``error``-prefixed
+    line of stderr is the actionable diagnostic the CEGIS repair loop wants,
+    more useful than rustc's trailing "aborting due to N previous errors".
+
+    Any invocation failure (missing binary, crash) maps to
+    ``(False, message)``; the caller gates hard-rejection on the tool actually
+    being available (``_resolve``), so a missing ``rustc`` is reported as
+    "not checked" rather than a false syntax failure.
+    """
+    proc = _rustc_metadata_compile(
+        source, rustc_path=rustc_path, edition=edition)
+    if proc is None:
+        return True, ("rustc temp-copy: include_str/include_bytes "
+                      "undecidable from this location; not checked")
+    ok, err_lines = proc
+    if ok:
+        return True, "rustc ok"
+    if not err_lines:
+        return False, "rustc failed"
+    # Prefer the first real diagnostic line (starts with "error"); it names
+    # the actual problem. Fall back to the last non-empty line.
+    for line in err_lines:
+        if line.startswith("error"):
+            return False, line
+    return False, err_lines[-1]
 
 
 def _compile_ccs(
@@ -5190,15 +5305,25 @@ def _infer_rust_edition(repo_root: str, path: str) -> str:
     errors. Pure TOML-field grep — no dependency on a TOML parser, tolerant of
     comments/whitespace. Note the cargo path (the default in a cargo project)
     doesn't use this — cargo passes the correct ``--edition`` itself; this
-    inference feeds only the loose-file standalone-rustc fallback.
+    inference feeds only the loose-file standalone-rustc fallback. A
+    relative ``path`` is anchored at ``repo_root`` (never the process CWD —
+    callers pass repo-relative unit paths).
 
     The walk is strictly bounded by ``repo_root``: it never consults a
     manifest above the project root, so an outer workspace's edition can't
     leak in. If ``path`` is not itself under ``repo_root`` (a misconfigured
     root), no walk happens and the default edition is returned.
     """
-    start = Path(path).resolve()
     root = Path(repo_root).resolve()
+    # A repo-relative path (the orchestrator's unit paths are repo-relative)
+    # must be anchored at the root: resolving it against the process CWD
+    # silently walks the wrong tree — the live harness runs from the
+    # workspace, not the worktree, so every inference would miss the Cargo.toml
+    # and fall to the 2021 default without ever looking wrong.
+    p = Path(path)
+    if not p.is_absolute():
+        p = root / p
+    start = p.resolve()
     # Only walk when path is under (or equal to) repo_root. A path outside the
     # root means the root is misconfigured; defaulting is the safe choice.
     try:
@@ -5320,7 +5445,10 @@ class VerificationEngine:
         self, unit: ConflictUnit, candidate: CandidateResolution, *,
         fast_verify: bool = False,
     ) -> VerificationResult:
-        ctx = VerificationContext(unit=unit, candidate=candidate, config=self.config)
+        ctx = VerificationContext(
+            unit=unit, candidate=candidate, config=self.config,
+            repo_root=getattr(self.config, "repo_root", "") or "",
+        )
         hard: list[VerificationFailure] = []
         warnings: list[VerificationWarning] = []
         features: dict[str, float | int | str | bool] = {}
