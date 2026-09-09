@@ -135,6 +135,21 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             "marker_original": "", "id": sc["id"],
             "dataset": sc["dataset"],
         })(), has_crate=True)
+        # _config_for's python branch materializes a per-CASE test gate
+        # ("python3 -m py_compile {case.path}") — meaningful for the
+        # single-file corpus where one case is one file, but in a replay
+        # scenario the stub path ("scenario.rs") doesn't exist and the real
+        # conflict paths vary per step. The broken command sat latent in
+        # python-dataset scenarios until a unit reached the f1 takeover's
+        # verify_file, where the FileNotFoundError read as a HARD build
+        # failure and vetoed every takeover (cython-0020's 262s escalate:
+        # "whole-file validation failed ... No such file or directory:
+        # 'scenario.rs'"). The scenario harness judges outcomes itself
+        # (token-jaccard vs the merge oracle); neutralize the gate. The C
+        # datasets already fall through to "true" here (their command tables
+        # are keyed by single-file case ids).
+        cfg.tests.pre_continue = "true"
+        cfg.tests.final = "true"
         engine = ResolutionEngine(cfg.model, client=client)
         # Per-scenario wall budget scales with step count: each replayed
         # stop carries its own resolution rounds (~60-120s LLM worst case);
