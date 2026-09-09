@@ -199,6 +199,9 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             set(touched_r.stdout.splitlines()) if touched_r.returncode == 0
             else set()))
         results = []
+        # One lazy per-scenario refetch when an oracle read hits an
+        # object-store hole (side-branch merge oids no refspec covers).
+        rescued_this_scenario = False
         for path in scored:
             # Read the WORKTREE file, not `git show :path` (the INDEX).
             # After the orchestrator's rebase completes, index == HEAD, so
@@ -230,6 +233,42 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             oracle_r.stdout = oracle_r.stdout.decode("utf-8", "replace")
             oracle_r.stderr = oracle_r.stderr.decode("utf-8", "replace")
             oracle = oracle_r.stdout if oracle_r.returncode == 0 else ""
+            if oracle_r.returncode != 0 and "bad object" in (
+                    oracle_r.stderr or "") and not rescued_this_scenario:
+                # Self-heal once per scenario: the merge oid may live on a
+                # side branch no refspec covers, so even a "full" clone can
+                # miss its snapshot blobs (tikv-0004). One targeted refetch
+                # of the merge oid fills every hole in its tree.
+                rescued_this_scenario = True
+                try:
+                    subprocess.run(
+                        ["git", "-C", str(clone), "fetch", "--refetch",
+                         "origin", sc["merge_oid"]],
+                        capture_output=True, timeout=300)
+                    oracle_r = subprocess.run(
+                        ["git", "-C", str(clone), "show",
+                         f'{sc["merge_oid"]}:{path}'], capture_output=True)
+                    oracle_r.stdout = oracle_r.stdout.decode("utf-8", "replace")
+                    oracle_r.stderr = oracle_r.stderr.decode("utf-8", "replace")
+                    oracle = oracle_r.stdout if oracle_r.returncode == 0 else ""
+                except Exception:  # noqa: BLE001 — rescue is best-effort
+                    pass
+            if oracle_r.returncode != 0 and "bad object" in (
+                    oracle_r.stderr or ""):
+                # OBJECT-STORE HOLE, not absence (s27-44: tikv-0004's three
+                # "absent" files were blob-filter holes — the oracle existed
+                # and scored 1.000/0.954/0.874 once refetched). "bad object"
+                # means the clone lacks the blob; genuine absence reads
+                # "path ... does not exist in <sha>". A hole is a
+                # MEASUREMENT error: mark it, never score it as absent
+                # (absent flatters the verdict by skipping the file).
+                print(f"  [warn] oracle blob hole: {path} at "
+                      f"{sc['merge_oid'][:10]} — run --prepare / refetch "
+                      f"the merge oid", flush=True)
+                results.append({"path": path, "sim": None,
+                                "oracle_read_error": True,
+                                "ok": None})
+                continue
             if (oracle_r.returncode != 0 and not oracle) or (
                     oracle_r.returncode == 0 and not oracle.strip()):
                 # ABSENT or EMPTY-BLOB at the oracle: the human merge
@@ -238,12 +277,7 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
                 # against an empty oracle is meaningless; treat as the
                 # structural absent case. (The empty blob is a real merge
                 # artifact class: resolve-by-emptying.)
-                results.append({"path": path, "sim": None,
-                                "absent_at_oracle": True,
-                                "present_in_replay": bool(final.strip()),
-                                "ok": None})
-                continue
-                # ABSENT at the oracle. Two sub-cases:
+                # ABSENT sub-cases:
                 # - final ALSO absent: the replay agreed with M (both
                 #   dropped it) — consistent, informational only.
                 # - final PRESENT: the replay kept a file M removed —
@@ -277,8 +311,15 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
         row["absent_at_oracle"] = len(absent)
         row["absent_kept_in_replay"] = sum(
             1 for r_ in absent if r_.get("present_in_replay"))
+        holes = [r_ for r_ in results if r_.get("oracle_read_error")]
+        if holes:
+            # Measurement holes must be visible in the row itself, not just
+            # the log — a PASS with unscored files is not an honest PASS.
+            row["oracle_read_errors"] = len(holes)
         if row["escalated"]:
             row["verdict"] = "ESCALATE"
+        elif holes:
+            row["verdict"] = "ORACLE_HOLE"
         elif scored and n_ok == len(scored):
             row["verdict"] = "PASS"
         elif n_ok > 0:
