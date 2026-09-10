@@ -195,6 +195,41 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             # activate the dormant mechanism — the evidence gate now does
             # the real filtering (per-unit mode stays protected).
             cfg.future.enable_def_site_race = True
+        # Convergence seeds (S27-54): paths where the TARGET TIP and SOURCE
+        # TIP carry the same blob — the replay's conflict on them is
+        # transient churn over a decided final state. Census: 1080/1080
+        # such conflicts have the oracle == the tips' content (the duckdb
+        # family carries ~60 per scenario). Registered like the race seeds;
+        # the mechanism writes the converged content as the whole file,
+        # validated through the standard gates.
+        conv_seeds: dict[str, str] = {}
+        try:
+            for stepinfo in sc.get("conflict_steps", []):
+                sp = stepinfo["path"]
+                if sp in conv_seeds:
+                    continue
+                r_t = subprocess.run(
+                    ["git", "-C", str(clone), "rev-parse",
+                     f'{sc["target_tip_oid"]}:{sp}'],
+                    capture_output=True, timeout=30)
+                r_s = subprocess.run(
+                    ["git", "-C", str(clone), "rev-parse",
+                     f'{sc["source_tip_oid"]}:{sp}'],
+                    capture_output=True, timeout=30)
+                if (r_t.returncode != 0 or r_s.returncode != 0
+                        or r_t.stdout.strip() != r_s.stdout.strip()):
+                    continue
+                r_c = subprocess.run(
+                    ["git", "-C", str(clone), "show",
+                     f'{sc["target_tip_oid"]}:{sp}'],
+                    capture_output=True, timeout=30)
+                if r_c.returncode == 0:
+                    conv_seeds[sp] = r_c.stdout.decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001 — seeds are best-effort
+            conv_seeds = {}
+        if conv_seeds:
+            orch._convergence_seeds = conv_seeds
+            cfg.future.enable_convergence_seed = True
         step = orch.run()
         row["escalated"] = bool(getattr(step, "escalated", False))
         row["reason"] = (step.reason or "")[:200]

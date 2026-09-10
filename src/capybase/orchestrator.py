@@ -6638,6 +6638,67 @@ class Orchestrator:
         )
         return outcome
 
+    def _try_convergence_seed(
+        self, path: str, units: list, result: "StepResult",
+    ) -> "tuple[list, str] | None":
+        """Deterministic convergence seed (S27-54): the scenario registered
+        this path as CONVERGED — the target tip and source tip carry the
+        SAME content for it, so the replay's conflict is transient churn
+        over a file whose final state is already decided. The tips' content
+        IS the resolution (corpus census: 1080/1080 conflicts on converged
+        paths have the oracle == the converged content — the strongest
+        policy signal of the sprint; the duckdb family alone carries ~60
+        per scenario, and duckdb-0018 ESCALATED on exactly such a file the
+        model refused). Writes the seed as the whole file, validates via
+        verify_file (markers + syntax gates as always), and returns the
+        accepted pairs + buffer; None declines and the per-unit cascade
+        runs unchanged.
+        """
+        seed = (getattr(self, "_convergence_seeds", None) or {}).get(path)
+        if seed is None or not seed.strip():
+            return None
+        language = units[0].language if units else None
+        original = units[0].original_worktree_text if units else seed
+        val = self.verification.verify_file(
+            path, language, original, [], repo_root=str(self.git.repo),
+            whole_text=seed)
+        self.journal.emit(
+            "convergence_seed",
+            {"path": path, "passed": val.passed,
+             "hard_failures": [str(f.message)[:80]
+                               for f in val.hard_failures[:2]]},
+            step_index=self.step, path=path,
+        )
+        if not val.passed:
+            return None  # the seed itself fails a gate — fall through
+        cand = CandidateResolution(
+            candidate_id=f"{path}:convergence_seed",
+            unit_id=units[0].unit_id,
+            model_name="convergence_seed",
+            prompt_version="convergence_seed.v1",
+            resolved_text=seed,
+            explanation=("target and source tips carry identical content "
+                         "for this path — the converged final state"),
+            provenance="deterministic_convergence_seed",
+        )
+        accepted = [(u, cand) for u in units]
+        for u, c in accepted:
+            outcome = UnitOutcome(unit=u, validation=val, attempts=[c])
+            outcome.accepted = c
+            result.outcomes.append(outcome)
+            self._record_resolution_attempt(
+                outcome, mechanism="convergence_seed",
+                candidate=c, validation=val,
+                decision="accept", reason="converged tips content",
+            )
+        self.journal.emit(
+            "candidate_accepted",
+            {"candidate_id": cand.candidate_id, "via": "convergence_seed",
+             "n_units": len(units)},
+            step_index=self.step, path=path,
+        )
+        return accepted, seed
+
     def _try_docs_union(self, unit: ConflictUnit) -> UnitOutcome | None:
         """Deterministic docs-union for changelog-shaped conflicts (S27-08).
 
@@ -9667,6 +9728,18 @@ class Orchestrator:
             # max_retries kwarg, so without this it would get the full config
             # budget, undermining the throughput fix).
             self._file_max_retries = _file_max_retries
+            # Convergence seed (S27-54): on paths the scenario registered as
+            # CONVERGED (target tip == source tip — transient replay churn
+            # over a decided final state), the tips' content IS the answer;
+            # skip per-unit resolution entirely for the file.
+            if units and getattr(
+                    self.config.future, "enable_convergence_seed", False):
+                _conv = self._try_convergence_seed(path, units, result)
+                if _conv is not None:
+                    _acc_conv, _buf_conv = _conv
+                    self._write_and_stage(
+                        path, _buf_conv, result, accepted=_acc_conv)
+                    continue
             # File-level lint transform detection: scan ALL units for repeated
             # known-safe lint substitutions (NULL→nullptr, and→&&, etc.). When
             # the aggregate count is high (≥5), promote the transforms to a

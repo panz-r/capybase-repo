@@ -669,6 +669,12 @@ class FutureConfig(BaseModel):
     # replayed additions, target dedups respected. See
     # capybase.list_union.
     enable_list_union: bool = True
+    # S27-54: deterministic convergence seed — on paths the scenario
+    # registered as CONVERGED (target tip == source tip content), the
+    # tips' content IS the final file (census: 1080/1080 oracle
+    # agreement). Registered by the scenario harness like the race
+    # seeds; dormant without evidence.
+    enable_convergence_seed: bool = False
     # NOTE: wired but DORMANT — the unit-level shape gate is
     # vacuous (any modify/modify conflict passes it); the true
     # move-race evidence needs cross-file context (the def

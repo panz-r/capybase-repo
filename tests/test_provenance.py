@@ -43,6 +43,7 @@ def test_provenance_values_match_spec():
         "deterministic_empty_side",
         "deterministic_docs_union",
         "deterministic_list_union",
+        "deterministic_convergence_seed",
         "deterministic_def_site_race",
         "deterministic_deletion_respect_prune",
         "deterministic_brace_repair",
