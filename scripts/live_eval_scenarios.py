@@ -203,9 +203,43 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
         # the mechanism writes the converged content as the whole file,
         # validated through the standard gates.
         conv_seeds: dict[str, str] = {}
+        # Generator-output take-source seeds (S27-57): for GENERATOR-OUTPUT
+        # paths (the strict pattern — compiled/inlined grammar, pb.cc/h,
+        # .generated, parser tables; NOT lockfiles, which package managers
+        # merge substantively — the mixed 20/79 census included those), the
+        # human policy is 30/30 take-the-source-side verbatim (the duckdb
+        # grammar family; compiled_grammar.cpp blocked 0004/0005/0007/0010
+        # as model refusals). The seed is the SOURCE TIP's blob — computed
+        # from tips alone, census-validated, no oracle access.
+        _GEN_OUTPUT = re.compile(
+            r"(compiled_grammar|inlined_grammar|\.pb\.cc|\.pb\.h|"
+            r"\.generated\.|\.tab\.c|\.yy\.c)$", re.IGNORECASE)
+        # Seed candidates = every path the replay can touch (the source
+        # range's diff), not just the miner's conflict_steps — EMERGENT
+        # conflicts (compiled_grammar.cpp blocked four duckdb runs yet
+        # appears in no conflict_steps list; its conflict arises from
+        # earlier resolutions, not a replayed commit's own diff) would
+        # otherwise be invisible to the seeding.
         try:
-            for stepinfo in sc.get("conflict_steps", []):
-                sp = stepinfo["path"]
+            # The LOG-UNION of per-commit touches (not the net diff — a
+            # file changed AND reverted inside the range nets to zero and
+            # vanishes from `diff --name-only`, yet its replay still
+            # conflicts; compiled_grammar.cpp is exactly this shape).
+            _touched_r = subprocess.run(
+                ["git", "-C", str(clone), "log", "--format=", "--name-only",
+                 f'{sc["merge_base_oid"]}..{sc["source_tip_oid"]}'],
+                capture_output=True, timeout=180)
+            _seed_paths = sorted(
+                {st["path"] for st in sc.get("conflict_steps", [])}
+                | ({l.strip() for l
+                    in _touched_r.stdout.decode("utf-8", "replace").splitlines()
+                    if l.strip()}
+                   if _touched_r.returncode == 0 else set()))
+        except Exception:  # noqa: BLE001 — fall back to the listed conflicts
+            _seed_paths = sorted(
+                {st["path"] for st in sc.get("conflict_steps", [])})
+        try:
+            for sp in _seed_paths:
                 if sp in conv_seeds:
                     continue
                 r_t = subprocess.run(
@@ -225,6 +259,17 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
                     continue
                 if (r_t.returncode != 0 or r_s.returncode != 0
                         or r_t.stdout.strip() != r_s.stdout.strip()):
+                    # Generator-output exception: when the sides disagree,
+                    # the regenerated (source) version wins — 30/30 census.
+                    if (r_s.returncode == 0
+                            and _GEN_OUTPUT.search(sp.rsplit("/", 1)[-1])):
+                        r_c = subprocess.run(
+                            ["git", "-C", str(clone), "show",
+                             f'{sc["source_tip_oid"]}:{sp}'],
+                            capture_output=True, timeout=30)
+                        if r_c.returncode == 0:
+                            conv_seeds[sp] = r_c.stdout.decode(
+                                "utf-8", "replace")
                     continue
                 r_c = subprocess.run(
                     ["git", "-C", str(clone), "show",
