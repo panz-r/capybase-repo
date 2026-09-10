@@ -6655,33 +6655,50 @@ class Orchestrator:
         runs unchanged.
         """
         seed = (getattr(self, "_convergence_seeds", None) or {}).get(path)
-        if seed is None or not seed.strip():
+        if seed is None:
             return None
         language = units[0].language if units else None
         original = units[0].original_worktree_text if units else seed
-        val = self.verification.verify_file(
-            path, language, original, [], repo_root=str(self.git.repo),
-            whole_text=seed)
-        self.journal.emit(
-            "convergence_seed",
-            {"path": path, "passed": val.passed,
-             "hard_failures": [str(f.message)[:80]
-                               for f in val.hard_failures[:2]]},
-            step_index=self.step, path=path,
-        )
-        if not val.passed:
-            return None  # the seed itself fails a gate — fall through
+        # "" = DELETE-SEED: the file is absent at both tips (transient —
+        # born and deleted inside the replay window; census 499/499 oracle
+        # agreement). Nothing to validate content-wise — the file goes away,
+        # no markers can leak — so no verify_file; _write_and_stage's
+        # whole-file-delete path does the git rm.
+        val = None
+        if seed.strip():
+            val = self.verification.verify_file(
+                path, language, original, [], repo_root=str(self.git.repo),
+                whole_text=seed)
+            self.journal.emit(
+                "convergence_seed",
+                {"path": path, "passed": val.passed,
+                 "hard_failures": [str(f.message)[:80]
+                                   for f in val.hard_failures[:2]]},
+                step_index=self.step, path=path,
+            )
+            if not val.passed:
+                return None  # the seed itself fails a gate — fall through
         cand = CandidateResolution(
             candidate_id=f"{path}:convergence_seed",
             unit_id=units[0].unit_id,
             model_name="convergence_seed",
             prompt_version="convergence_seed.v1",
             resolved_text=seed,
-            explanation=("target and source tips carry identical content "
+            explanation=("file absent at both tips (transient) — "
+                         "converged deletion"
+                         if not seed.strip() else
+                         "target and source tips carry identical content "
                          "for this path — the converged final state"),
             provenance="deterministic_convergence_seed",
         )
         accepted = [(u, cand) for u in units]
+        if val is None:
+            # Deletion seed: a synthetic passing result (nothing to
+            # validate — the file is removed wholesale).
+            from capybase.conflict_model import VerificationResult
+            val = VerificationResult(
+                candidate_id=cand.candidate_id, unit_id=cand.unit_id,
+                passed=True, features={"convergence_seed": "deletion"})
         for u, c in accepted:
             outcome = UnitOutcome(unit=u, validation=val, attempts=[c])
             outcome.accepted = c
@@ -6689,7 +6706,9 @@ class Orchestrator:
             self._record_resolution_attempt(
                 outcome, mechanism="convergence_seed",
                 candidate=c, validation=val,
-                decision="accept", reason="converged tips content",
+                decision="accept",
+                reason=("converged deletion (transient file)"
+                        if not seed.strip() else "converged tips content"),
             )
         self.journal.emit(
             "candidate_accepted",

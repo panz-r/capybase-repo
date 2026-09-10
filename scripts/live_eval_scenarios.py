@@ -216,6 +216,13 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
                     ["git", "-C", str(clone), "rev-parse",
                      f'{sc["source_tip_oid"]}:{sp}'],
                     capture_output=True, timeout=30)
+                if r_t.returncode != 0 and r_s.returncode != 0:
+                    # TRANSIENT FILE: absent at both tips — born and deleted
+                    # inside the replay window. The final state is deletion
+                    # (census: 499/499 oracle agreement). Empty string is the
+                    # delete-seed.
+                    conv_seeds[sp] = ""
+                    continue
                 if (r_t.returncode != 0 or r_s.returncode != 0
                         or r_t.stdout.strip() != r_s.stdout.strip()):
                     continue

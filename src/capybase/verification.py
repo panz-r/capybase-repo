@@ -285,6 +285,9 @@ class NonEmptyResolutionValidator:
             or prov == "deterministic_structural"
             or pv.startswith("structural.")
             or prov == "deterministic_empty_side"
+            # s27-55: the convergence seed's delete arm (transient file,
+            # absent at both tips — census 499/499 oracle agreement).
+            or prov == "deterministic_convergence_seed"
         )
         if is_empty and is_deliberate_deletion:
             return VerificationCheckResult(
