@@ -9618,6 +9618,9 @@ class Orchestrator:
         # step, but across steps the history advances (a future commit becomes
         # the current one), so we reset between steps.
         self._clear_history_caches()
+        # Per-step seeded-file set (convergence seeds): only paths seeded in
+        # THIS step skip Phase 2.
+        self._step_seeded_files = set()
         if not result.units_by_path:
             # No conflicts at this stop: nothing to resolve (rare).
             self.out("no conflict units at this stop; continuing.")
@@ -9739,6 +9742,16 @@ class Orchestrator:
                     _acc_conv, _buf_conv = _conv
                     self._write_and_stage(
                         path, _buf_conv, result, accepted=_acc_conv)
+                    # The seeded file is WRITTEN AND STAGED whole — skip the
+                    # Phase-1 splice tail and Phase-2 validation (the seed
+                    # already ran verify_file). Record the maps so other
+                    # phases' bookkeeping stays complete.
+                    resolved_files[path] = _buf_conv
+                    accepted_by_path[path] = _acc_conv
+                    originals[path] = units[0].original_worktree_text
+                    self._step_seeded_files = {
+                        *(getattr(self, "_step_seeded_files", set())),
+                        path}
                     continue
             # File-level lint transform detection: scan ALL units for repeated
             # known-safe lint substitutions (NULL→nullptr, and→&&, etc.). When
@@ -10031,6 +10044,8 @@ class Orchestrator:
 
         # ---- Phase 2: per-file Phase-B validation + CEGIS repair + stage ----
         for path, units in result.units_by_path.items():
+            if path in getattr(self, "_step_seeded_files", set()):
+                continue  # convergence seed: already validated, written, staged
             accepted = accepted_by_path[path]
             original = originals[path]
             language = units[0].language
