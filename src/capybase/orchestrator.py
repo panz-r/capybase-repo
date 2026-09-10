@@ -758,6 +758,68 @@ def _remove_duplicate_function_blocks(
     return "\n".join(lines)
 
 
+#: A type definition's opening line: ``enum class X``, ``enum X``,
+#: ``struct X``, ``class X`` (brace-bodied) or ``using X =`` (single-line).
+_TYPE_DEF_START = re.compile(
+    r"^\s*(?:enum(?:\s+class)?|struct|class)\s+(\w+)\b|^\s*using\s+(\w+)\s*=")
+
+
+def _extract_type_definition_names(lines: list[str]) -> set[str]:
+    """Names of type definitions among ``lines`` (enums, structs, classes,
+    using-aliases). The type-level analog of ``_extract_definition_names``
+    (which is function-oriented) — a header candidate that re-declares an
+    enum the rest of the file already defines fails the standalone compile
+    with "multiple definition of 'enum class X'" (prusaslicer-0008's
+    header-CEGIS-cap escalate: the function-only removal saw nothing)."""
+    names: set[str] = set()
+    for ln in lines:
+        m = _TYPE_DEF_START.match(ln)
+        if m:
+            names.add(m.group(1) or m.group(2))
+    return names
+
+
+def _remove_duplicate_type_blocks(text: str, names: set[str]) -> str | None:
+    """Remove duplicate TYPE definition blocks from ``text``.
+
+    For each name in ``names``, finds the definition's opening line and
+    removes through the matching close (``};`` for brace bodies, the line
+    itself for ``using`` aliases), plus one trailing blank line. Same
+    safety doctrine as :func:`_remove_duplicate_function_blocks`: removes
+    from the CANDIDATE only — the existing definition elsewhere in the
+    file stays. Returns the repaired text, or None when nothing matched.
+    """
+    if not text or not names:
+        return None
+    lines = text.split("\n")
+    out: list[str] = []
+    i = 0
+    removed = 0
+    while i < len(lines):
+        m = _TYPE_DEF_START.match(lines[i])
+        name = (m.group(1) or m.group(2)) if m else None
+        if name in names:
+            if m.group(2):  # `using X = ...;` — single line
+                i += 1
+                removed += 1
+                continue
+            depth = 0
+            seen_open = False
+            while i < len(lines):
+                depth += lines[i].count("{") - lines[i].count("}")
+                seen_open = seen_open or "{" in lines[i]
+                i += 1
+                if seen_open and depth <= 0:
+                    break
+            if i < len(lines) and not lines[i].strip():
+                i += 1  # swallow the orphaned blank line
+            removed += 1
+            continue
+        out.append(lines[i])
+        i += 1
+    return "\n".join(out) if removed else None
+
+
 def _find_def_context(
     lines: list[str], fn_name: str, *, width: int = 8,
 ) -> tuple[int, str] | None:
@@ -15318,6 +15380,51 @@ class Orchestrator:
                                 unit_id=unit.unit_id,
                             )
                             if not _dup_fns:
+                                # Type-level analog (prusaslicer-0008): a
+                                # header candidate re-declaring an enum/
+                                # struct the rest of the file already has
+                                # fails with "multiple definition of
+                                # 'enum class X'" — the function-oriented
+                                # scan sees nothing in a types-only
+                                # candidate. Same compiler-guided doctrine.
+                                _rest_types = _extract_type_definition_names(
+                                    _rest_rem)
+                                _cand_types = _extract_type_definition_names(
+                                    _pc.resolved_text.split("\n"))
+                                _dup_types = _cand_types & _rest_types
+                                if _dup_types:
+                                    _rt = _remove_duplicate_type_blocks(
+                                        _pc.resolved_text, _dup_types)
+                                    if _rt and _rt.strip() and _rt != _pc.resolved_text:
+                                        _rc = _pc.model_copy(
+                                            update={"resolved_text": _rt})
+                                        _rv = self.verification.verify(unit, _rc)
+                                        if _rv.passed:
+                                            outcome.accepted = _rc
+                                            outcome.validation = _rv
+                                            outcome.retry_count = retry_count
+                                            outcome.reason = (
+                                                "compiler-guided duplicate "
+                                                "removal: removed duplicate "
+                                                f"type(s) {sorted(_dup_types)}; "
+                                                "existing definitions kept"
+                                            )
+                                            self._record_resolution_attempt(
+                                                outcome,
+                                                mechanism="dup_def_block_removal",
+                                                candidate=_rc, validation=_rv,
+                                                decision="accept",
+                                                reason=outcome.reason,
+                                            )
+                                            self.journal.emit(
+                                                "candidate_accepted",
+                                                {"candidate_id": _rc.candidate_id,
+                                                 "via": "dup_type_block_removal"},
+                                                step_index=self.step,
+                                                path=unit.path,
+                                                unit_id=unit.unit_id,
+                                            )
+                                            return outcome
                                 continue
                             _rt = _remove_duplicate_function_blocks(
                                 _pc.resolved_text, _dup_fns)

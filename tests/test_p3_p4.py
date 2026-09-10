@@ -518,3 +518,48 @@ class TestMarkerSideExtractionStyles:
         assert "Heading" in cur and "body()" in cur
         assert "Heading" in rep and "body()" in rep
         assert "cur()" in cur and "rep()" not in cur
+
+
+class TestDuplicateTypeBlockRemoval:
+    """S27-54 (prusaslicer-0008): a header candidate re-declaring enums the
+    rest of the file already defines failed the Ccs gate with 'multiple
+    definition of enum class X'; the function-only removal saw nothing in
+    a types-only candidate and the header CEGIS cap (1 retry) escalated
+    the scenario. The type-level analog removes the duplicate blocks."""
+
+    def test_extracts_type_names(self):
+        from capybase.orchestrator import _extract_type_definition_names
+        lines = [
+            "enum class BufferAccess { ReadOnly };",
+            "enum TextureFmt { RGB };",
+            "struct Point { float x; };",
+            "class Widget;",
+            "using Handler = void (*)(int);",
+            "int not_a_type(int x);",
+        ]
+        names = _extract_type_definition_names(lines)
+        assert {"BufferAccess", "TextureFmt", "Point", "Handler"} <= names
+        assert "not_a_type" not in names
+
+    def test_removes_duplicate_enum_blocks(self):
+        from capybase.orchestrator import _remove_duplicate_type_blocks
+        cand = (
+            "enum class BufferAccess\n{\n    ReadOnly\n};\n"
+            "\n"
+            "enum class TextureMinFilter\n{\n    Nearest,\n    Linear\n};\n"
+            "\n"
+            "enum class TextureMagFilter\n{\n    Nearest\n};\n"
+        )
+        out = _remove_duplicate_type_blocks(
+            cand, {"TextureMinFilter", "TextureMagFilter"})
+        assert out is not None
+        assert "BufferAccess" in out
+        assert "TextureMinFilter" not in out and "TextureMagFilter" not in out
+
+    def test_removes_using_alias_and_none_case(self):
+        from capybase.orchestrator import _remove_duplicate_type_blocks
+        out = _remove_duplicate_type_blocks(
+            "using Flags = int;\nint keep_me;\n", {"Flags"})
+        assert out is not None and "keep_me" in out and "Flags" not in out
+        # no match -> None (caller falls through)
+        assert _remove_duplicate_type_blocks("int x;\n", {"Missing"}) is None
