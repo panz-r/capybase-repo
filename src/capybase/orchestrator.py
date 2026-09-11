@@ -6568,6 +6568,31 @@ class Orchestrator:
             r = _toks(blk.base_text)
             j = (len(bt & r) / len(bt | r)) if (bt | r) else 1.0
             best_j = j if best_j is None else max(best_j, j)
+        # Absorbed-side check (s27-59, duckdb-0013's
+        # generate_extensions_function.py): the non-empty side's text may
+        # ALREADY exist verbatim in the pristine region outside the marker
+        # block — the surviving file absorbed that content elsewhere
+        # (HEAD moved the dict entry above the block; the replayed side
+        # re-adds it inside). Resolving to the other side then DUPLICATES
+        # the content and the file breaks; the correct answer is the empty
+        # side (pure duplicate suppression). Runs before the jaccard gate:
+        # the rewrite heuristic measures against the diff3 BASE, which is
+        # irrelevant when the pristine FILE already contains the content.
+        from capybase.verification import _blank_markers as _blank_markers_fn
+        _pristine = _blank_markers_fn(unit.original_worktree_text or "",
+                                      unit.language)
+        if _unit_other and _pristine and (other_block or "").strip() \
+                and (other_block or "").strip() in _pristine:
+            winner, why = "", (
+                "absorbed side: the non-empty side's content already exists "
+                "verbatim in the pristine region (duplicate suppression)")
+            self.journal.emit(
+                "empty_side_absorbed",
+                {"unit_id": unit.unit_id},
+                step_index=self.step, path=unit.path, unit_id=unit.unit_id,
+            )
+            return self._accept_empty_side_winner(
+                unit, winner, why, deleting_is_current)
         if best_j is None or best_j < 0.6:
             self._record_resolution_attempt(
                 UnitOutcome(unit=unit), mechanism="empty_side",
@@ -6592,20 +6617,27 @@ class Orchestrator:
                 reason=f"empty side's file-level kind={kind} (ambiguous)",
             )
             return None
+        return self._accept_empty_side_winner(unit, winner, why, deleting_is_current)
+
+    def _accept_empty_side_winner(
+        self, unit: ConflictUnit, winner: str, why: str,
+        deleting_is_current: bool,
+    ) -> "UnitOutcome | None":
+        """Build, validate, and accept the empty-side rule's winner (shared
+        by the classify arms and the absorbed-side arm)."""
         cand = CandidateResolution(
             candidate_id=f"{unit.unit_id}:empty_side",
             unit_id=unit.unit_id,
             model_name="empty_side",
             prompt_version="empty_side.v1",
             resolved_text=winner,
-            explanation=(f"one block side empty; file-level classify_side="
-                         f"{kind!r}; {why}"),
+            explanation=why,
             provenance="deterministic_empty_side",
         )
         validation = self.verification.verify(unit, cand)
         self.journal.emit(
             "empty_side_resolved",
-            {"candidate_id": cand.candidate_id, "kind": kind,
+            {"candidate_id": cand.candidate_id,
              "winner": "empty" if not winner.strip() else "other_side",
              "passed": validation.passed},
             step_index=self.step, path=unit.path, unit_id=unit.unit_id,
