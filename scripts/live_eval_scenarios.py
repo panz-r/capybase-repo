@@ -213,7 +213,8 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
         # from tips alone, census-validated, no oracle access.
         _GEN_OUTPUT = re.compile(
             r"(compiled_grammar|inlined_grammar|\.pb\.cc|\.pb\.h|"
-            r"\.generated\.|\.tab\.c|\.yy\.c)$", re.IGNORECASE)
+            r"\.generated\.|\.tab\.c|\.yy\.c|"
+            r"transform_generated_|_generated\.|/generated_)", re.IGNORECASE)
         # Seed candidates = every path the replay can touch (the source
         # range's diff), not just the miner's conflict_steps — EMERGENT
         # conflicts (compiled_grammar.cpp blocked four duckdb runs yet
