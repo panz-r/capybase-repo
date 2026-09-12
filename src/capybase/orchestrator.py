@@ -371,6 +371,11 @@ def _is_whole_file_delete(
     if len(accepted) != 1:
         return False
     unit, cand = accepted[0]
+    # s27-66 review: the convergence seed's delete arm carries the ORIGINAL
+    # text_marker_block units (marker_span set) with an empty resolved text —
+    # a transient file must be git rm'd, not written as an empty file.
+    if cand.provenance == "deterministic_convergence_seed":
+        return not cand.resolved_text.strip()
     return unit.marker_span is None and not cand.resolved_text.strip()
 
 
@@ -6632,11 +6637,20 @@ class Orchestrator:
         # side (pure duplicate suppression). Runs before the jaccard gate:
         # the rewrite heuristic measures against the diff3 BASE, which is
         # irrelevant when the pristine FILE already contains the content.
-        from capybase.verification import _blank_markers as _blank_markers_fn
-        _pristine = _blank_markers_fn(unit.original_worktree_text or "",
-                                      unit.language)
-        if _unit_other and _pristine and (other_block or "").strip() \
-                and (other_block or "").strip() in _pristine:
+        # s27-66 review fix: check against the region OUTSIDE the marker
+        # block, in the RAW original. The blanked baseline keeps the
+        # non-empty side's own lines as comment ghosts (`# line`), and a
+        # single-line other_block substring-matches its own ghost — every
+        # one-line replayed addition would be wrongly suppressed.
+        _span = unit.marker_span
+        _orig_lines = (unit.original_worktree_text or "").split("\n")
+        if _span is not None:
+            _outside = "\n".join(
+                _orig_lines[:_span[0]] + _orig_lines[_span[1] + 1:])
+        else:
+            _outside = unit.original_worktree_text or ""
+        if _unit_other and _outside and (other_block or "").strip() \
+                and (other_block or "").strip() in _outside:
             winner, why = "", (
                 "absorbed side: the non-empty side's content already exists "
                 "verbatim in the pristine region (duplicate suppression)")
@@ -10804,6 +10818,11 @@ class Orchestrator:
                         # below (jsonc-0001: repair escalated, fallback
                         # rescued, then TypeError 'NoneType' not iterable).
                         accepted = accepted_opt
+                        # s27-66 review: whole-file repair rungs may return
+                        # whole_file units (side-pick, rung swaps) — keep
+                        # accepted_by_path final so the end-of-step outcome
+                        # reconciliation sees them.
+                        accepted_by_path[path] = accepted
                     # Tiered budget: only count a MODEL re-resolve against the
                     # single-model-call budget. A deterministic repair (brace/
                     # preprocessor/side-consistency/etc.) returns a candidate
@@ -10859,6 +10878,7 @@ class Orchestrator:
                         )
                         if det is not None:
                             accepted = det
+                            accepted_by_path[path] = accepted
                             _spans = [
                                 (u.marker_span, c.resolved_text)
                                 for u, c in accepted

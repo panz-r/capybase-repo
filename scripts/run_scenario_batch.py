@@ -63,18 +63,39 @@ def acquire_lock(out_dir: Path) -> bool:
     holder exists; takes over a stale one."""
     lock = out_dir / "batch.lock"
     if lock.exists():
+        prev = None
         try:
-            prev = int(lock.read_text().strip().split()[0])
-            os.kill(prev, 0)  # raises if dead
-            print(f"batch: lock held by live pid {prev} — refusing. "
-                  f"(Two batches on one out-dir race the endpoint; the "
-                  f"s27-60 lesson.)", flush=True)
-            return False
-        except (ProcessLookupError, ValueError, PermissionError):
-            print(f"batch: stale lock {lock} — taking over", flush=True)
+            parts = lock.read_text().strip().split()
+            prev = int(parts[0])
+        except (OSError, ValueError, IndexError):
+            prev = None  # unreadable/partial → treat as stale
+        if prev is not None:
+            try:
+                os.kill(prev, 0)  # raises if dead
+                # EPERM would mean a LIVE foreign process — refuse too.
+                print(f"batch: lock held by live pid {prev} — refusing. "
+                      f"(Two batches on one out-dir race the endpoint; the "
+                      f"s27-60 lesson.)", flush=True)
+                return False
+            except ProcessLookupError:
+                print(f"batch: stale lock {lock} — taking over", flush=True)
+            except PermissionError:
+                print(f"batch: lock held by live (foreign-user) pid {prev} "
+                      f"— refusing.", flush=True)
+                return False
+        # fall through: stale — remove it, then create fresh below
+        try:
+            lock.unlink()
         except OSError:
-            pass  # unreadable — take over
-    lock.write_text(f"{os.getpid()} {int(time.time())}\n")
+            pass
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        # lost a concurrent create — re-check the holder once more
+        print("batch: lock appeared during acquire — retrying", flush=True)
+        return acquire_lock(out_dir)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(f"{os.getpid()} {int(time.time())}\n")
     return True
 
 
@@ -147,6 +168,40 @@ def _proc_io_cpu(pid: int) -> "tuple[int, int] | None":
         return None
 
 
+def _mtime_or_0(p: Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _proc_io_cpu_group(pgid: int) -> "tuple[int, int] | None":
+    """(read_bytes+write_bytes, cpu_ticks) summed over the process GROUP.
+
+    s27-66 review: the direct child mostly WAITS — its git children hold
+    the io, and a lone-child snapshot is flat during any long git call
+    (false-positive kill). Summing the group sees the movers.
+    """
+    members = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            if os.getpgid(int(pid)) == pgid:
+                members.append(int(pid))
+        except OSError:
+            continue
+    if not members:
+        return None
+    total_io = total_cpu = 0
+    for pid in members:
+        r = _proc_io_cpu(pid)
+        if r is not None:
+            total_io += r[0]
+            total_cpu += r[1]
+    return (total_io, total_cpu)
+
+
 def _journal_size(journal: Path | None) -> int:
     if journal is None:
         return -1
@@ -203,12 +258,25 @@ def cleanup_orphan_worktrees() -> int:
         except OSError:
             continue
     blob = "\n".join(live_cmdlines)
+    now = time.time()
     removed = 0
     for wt in Path("/tmp").glob("capy-scen-*"):
         if not wt.is_dir():
             continue
         if str(wt) in blob:
             continue  # referenced by a live process — keep
+        # s27-66 review: a worktree's path appears in /proc cmdlines only
+        # transiently (inside short-lived git subprocess argv) — a LIVE
+        # batch's worktree looks orphaned between calls. Recency guard:
+        # anything with file activity in the last hour is left alone.
+        try:
+            newest = max(
+                (f.stat().st_mtime for f in wt.rglob("*") if f.is_file()),
+                default=wt.stat().st_mtime)
+            if now - newest < 3600:
+                continue  # recent activity — keep
+        except OSError:
+            continue
         gitfile = wt / ".git"
         clone = None
         try:
@@ -337,13 +405,33 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 cwd=str(REPO), start_new_session=True)
-            # Tee child stdout to run.log + parse the worktree line.
+            # s27-66 review: readline BLOCKS — probing behind it meant the
+            # watchdog never ran while the child was silent (i.e. during
+            # exactly the hangs it exists to catch). Tee via a thread; the
+            # main thread owns the timer.
+            import queue as _queue
+            import threading as _threading
+            out_q: _queue.Queue = _queue.Queue()
             worktree: Path | None = None
-            detector = HangDetector(hang_after)
-            last_probe = 0.0
-            while True:
-                line = proc.stdout.readline()
-                if line:
+
+            def _pump(stream, q):
+                for ln in iter(stream.readline, b""):
+                    q.put(ln)
+                q.put(None)  # EOF sentinel
+
+            _tee = _threading.Thread(
+                target=_pump, args=(proc.stdout, out_q), daemon=True)
+            _tee.start()
+
+            def _drain_available() -> None:
+                nonlocal worktree
+                while True:
+                    try:
+                        line = out_q.get_nowait()
+                    except _queue.Empty:
+                        return
+                    if line is None:
+                        return
                     lf.write(line)
                     lf.flush()
                     text = line.decode("utf-8", "replace")
@@ -351,14 +439,27 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
                     m = _WORKTREE_RE.match(text)
                     if m and worktree is None:
                         worktree = Path(m.group(1))
-                    continue
+
+            detector = HangDetector(hang_after)
+            hang_declared = False
+            while True:
+                _drain_available()
                 if proc.poll() is not None:
+                    # Drain any tail the pump already enqueued.
+                    while True:
+                        try:
+                            line = out_q.get(timeout=0.5)
+                        except _queue.Empty:
+                            break
+                        if line is None:
+                            break
+                        lf.write(line)
+                        lf.flush()
+                        print(f"  [{scenario_id}] "
+                              f"{line.decode('utf-8', 'replace')}",
+                              end="", flush=True)
                     break
                 now = time.time()
-                if now - last_probe < poll_s:
-                    time.sleep(1.0)
-                    continue
-                last_probe = now
                 # deadline
                 if (max_seconds is not None
                         and now - t0 >= max_seconds):
@@ -374,20 +475,22 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
                 if worktree is not None:
                     j = worktree / ".rebase-agent" / "sessions"
                     if j.is_dir():
-                        js = sorted(j.glob("*/journal.jsonl"))
+                        js = sorted(
+                            j.glob("*/journal.jsonl"), key=_mtime_or_0)
                         if js:
                             journal = js[-1]
-                io_cpu = _proc_io_cpu(proc.pid)
+                io_cpu = _proc_io_cpu_group(proc.pid)
                 jsz = _journal_size(journal)
                 if io_cpu is None:
                     break  # process gone; outer loop will reap
-                hung = detector.update(now, jsz, io_cpu[0], io_cpu[1])
-                if hung:
+                if detector.update(now, jsz, io_cpu[0], io_cpu[1]):
                     print(f"  [{scenario_id}] HANG: journal+io+cpu flat "
                           f"for {hang_after:.0f}s — killing process group",
                           flush=True)
+                    hang_declared = True
                     _kill_tree(proc)
                     break
+                time.sleep(poll_s)
             proc.wait()
 
         if result_is_complete(out_file):
@@ -405,6 +508,7 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
             return entry
 
         # No result: hung (or crashed). Retry once, then INFRA_HANG.
+        del hang_declared  # recorded via the synthetic reason below
         if attempt <= 1:
             print(f"  [{scenario_id}] no result (hang/crash) — retrying "
                   f"once", flush=True)
@@ -421,14 +525,17 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
 def _kill_tree(proc: subprocess.Popen) -> None:
     """Kill the whole process GROUP (the bash loop and its python — the
     s27-60 lesson: killing only the python lets a parent loop advance to
-    the next scenario and race a new batch)."""
+    the next scenario and race a new batch).
+
+    start_new_session=True pins pgid == proc.pid at spawn, so killpg
+    works even after the leader exits (group members — an orphaned
+    python holding the endpoint — are exactly what needs killing).
+    Re-deriving getpgid at kill time raced the leader's exit and fell
+    back to killing only the dead leader (s27-66 review)."""
     try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
-        try:
-            proc.kill()
-        except OSError:
-            pass
+        pass
 
 
 def _synthetic_result(out_file: Path, scenario_id: str, verdict: str,

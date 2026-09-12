@@ -99,17 +99,37 @@ def propose_list_union(
         return ListUnionResult(None, "replayed side adds nothing")
 
     if _is_sorted(cur_lines) and _is_sorted(rep_lines):
-        out = sorted(cur_lines + rep_adds, key=lambda l: l.casefold())
+        # s27-66 review: sort contiguous non-blank runs in place — a global
+        # sort hoists blank separators to the top and destroys the file's
+        # section structure.
+        out = []
+        run: list[str] = []
+
+        def _flush_run():
+            out.extend(sorted(run, key=lambda l: l.casefold()))
+            run.clear()
+
+        for l in cur_lines + rep_adds:
+            if l.strip():
+                run.append(l)
+            else:
+                _flush_run()
+                out.append(l)
+        _flush_run()
     else:
         out = cur_lines + rep_adds
     # Dedupe by normalized text, keeping each line's first occurrence's
     # original formatting (a name both sides added, differing only in
-    # whitespace, is one entry).
+    # whitespace, is one entry). s27-66 review: blank lines are structural
+    # (section separators) — preserved verbatim, never deduped.
     seen: set[str] = set()
     union: list[str] = []
     for l in out:
         n = _norm(l)
-        if n and n not in seen:
+        if not n:
+            union.append(l)
+            continue
+        if n not in seen:
             union.append(l)
             seen.add(n)
 

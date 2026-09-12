@@ -1,47 +1,30 @@
-"""Def-site-race resolution for scenario-mode conflicts (sprint-27).
+"""Deterministic resolver for the move-race conflict family (s27-24).
 
-The consumer of :mod:`capybase.correspondence` for the S27-22 census's
-dominant family: a marker conflict whose replayed side MOVED a
-definition verbatim while the target MODIFIED it in place — the
-def-site race. The census (833 records) says the moved location wins
-in 59% of oracles outright and the union band (40%) still requires
-KEEPING the replayed copy — so this resolver splices the replayed
-def at its moved location, never dropping the replayed copy.
+The move-race shape: the replayed commit MOVED a definition and the
+target branch edited it in place — git surfaces an edit/edit conflict at
+the old location whose replayed side is the moved definition verbatim.
 
-The resolver is deliberately narrow:
-- the unit's conflict block must BE the definition's body (its content
-  fingerprint equals the replayed def's), and
-- the correspondence record for that def must be the move-race shape
-  (replayed MOVED verbatim; target's in-place copy on the conflicted
-  path),
-- the resolution = the replayed def body, placed per the moved
-  location's surroundings (the block's own splice does the placement).
+EVIDENCE GATE (the actual contract): this module's resolver alone is
+NOT evidence — any two-sided conflict would resolve. The evidence is
+registered by the scenario harness (``orch._race_step_paths``): a path
+is registered only when the conflict block's content is a SUBSET of the
+source tip's tree at another home (the moved def's new home), i.e.
+cross-file move evidence computed from the repo. The orchestrator
+fires this resolver only on registered paths
+(``future.enable_def_site_race`` + evidence present).
 
-Anything else (composition, third versions, deletions) declines —
-the LLM tier owns it, as everywhere in this cascade.
+Census (s27-22, 833 moved-race records): oracle = the moved
+(replayed-side) content verbatim in 59% of records; the remaining 41%
+still keep the replayed copy. The resolver therefore proposes the
+replayed side verbatim and relies on the standard validation pipeline
+(nothing bypasses it).
 """
 from __future__ import annotations
 
 import hashlib
-import re
 from dataclasses import dataclass
 
 from capybase.adapters.parsers import parse_marker_blocks
-
-
-def _body_fp(body: str) -> str:
-    """The rename-stable body digest: header line stripped, whitespace-
-    normalized per line — mirrors the fingerprint semantics used by the
-    correspondence census."""
-    body = body.split("\n")
-    core = "\n".join(body[1:]).strip()
-    return hashlib.sha1(" ".join(core.split()).encode()).hexdigest()[:16]
-
-
-def _fp_of_block(block_text: str) -> str:
-    """Block content fingerprint: whitespace-normalized lines joined.
-    The correspondence census pairs by the same normalization."""
-    return " ".join(l.strip() for l in block_text.splitlines() if l.strip())
 
 
 @dataclass(frozen=True)

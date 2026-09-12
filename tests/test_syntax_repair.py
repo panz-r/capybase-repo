@@ -639,3 +639,27 @@ def test_balance_braces_sibling_guard_skips_nested_blocks():
     idx_sibling = next(i for i, ln in enumerate(lines) if ln.startswith("TEST(C"))
     # the inserted closer sits immediately before the sibling
     assert lines[idx_sibling - 1].strip() == "}", out
+
+
+def test_blank_markers_rst_underline_is_content_outside_blocks():
+    """s27-66 review: an exact-7 '=' line outside any conflict block is an
+    RST underline — _blank_markers must not flip to second-side mode and
+    comment out the rest of the file (the ghost-flip class; contains_
+    markers' S27-33 context check covers detection, this covers blanking)."""
+    from capybase.verification import _blank_markers
+    marked = (
+        "Install\n"
+        "=======\n"          # RST underline, 7 '=', NOT a divider
+        "x = 1\n"
+        "<<<<<<< HEAD\ncur()\n=======\nrep()\n>>>>>>> feat\n"
+        "y = 2\n"
+    )
+    out = _blank_markers(marked, "python")
+    lines = out.split("\n")
+    assert lines[1] == "======="            # content — untouched
+    assert lines[2] == "x = 1"              # live code stays live
+    assert lines[3] == "# conflict-marker"  # the real block opener
+    assert lines[4] == "cur()"              # first side live
+    assert lines[5] == "# conflict-marker"  # real divider
+    assert lines[6] == "# rep()"            # second side commented
+    assert lines[8] == "y = 2"              # live code stays live

@@ -251,7 +251,8 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
         _GEN_OUTPUT = re.compile(
             r"(compiled_grammar|inlined_grammar|\.pb\.cc|\.pb\.h|"
             r"\.generated\.|\.tab\.c|\.yy\.c|"
-            r"transform_generated_|_generated\.|/generated_)", re.IGNORECASE)
+            r"transform_generated_|_generated\.|generated_)",
+            re.IGNORECASE)
         # Seed candidates = every path the replay can touch (the source
         # range's diff), not just the miner's conflict_steps — EMERGENT
         # conflicts (compiled_grammar.cpp blocked four duckdb runs yet
@@ -309,14 +310,17 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
                             conv_seeds[sp] = r_c.stdout.decode(
                                 "utf-8", "replace")
                     continue
-                r_c = subprocess.run(
-                    ["git", "-C", str(clone), "show",
-                     f'{sc["target_tip_oid"]}:{sp}'],
-                    capture_output=True, timeout=30)
+                try:
+                    r_c = subprocess.run(
+                        ["git", "-C", str(clone), "show",
+                         f'{sc["target_tip_oid"]}:{sp}'],
+                        capture_output=True, timeout=30)
+                except subprocess.TimeoutExpired:
+                    continue  # one slow read must not discard other seeds
                 if r_c.returncode == 0:
                     conv_seeds[sp] = r_c.stdout.decode("utf-8", "replace")
         except Exception:  # noqa: BLE001 — seeds are best-effort
-            conv_seeds = {}
+            pass
         if conv_seeds:
             orch._convergence_seeds = conv_seeds
             cfg.future.enable_convergence_seed = True
@@ -364,7 +368,8 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
                 if _os.path.islink(_wp):
                     final = _os.readlink(_wp)
                 else:
-                    final = _wp.read_text(errors="replace")
+                    final = _wp.read_text(encoding="utf-8",
+                                          errors="replace")
             except OSError:
                 final = ""
             oracle_r = subprocess.run(
@@ -477,7 +482,8 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             row["verdict"] = "PARTIAL"
         else:
             row["verdict"] = "ORACLE_DIVERGENT"
-        row["files_ok"] = f"{n_ok}/{len(scored)}"
+        # PASS's criterion is all-SCORED-ok; the denominator shown is all
+        # files (scored + absent + holes) so the row reads consistently.
         row["files_ok"] = f"{n_ok}/{len(results)}"
         # Cost + mechanism accounting (s27-61): the seeds' economics story
         # (27 LLM calls for 86 conflicts) and per-arm acceptance counts

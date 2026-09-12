@@ -54,7 +54,8 @@ class Correspondence:
 
 
 def _changed_files(clone: Path, a: str, b: str) -> list[str]:
-    r = subprocess.run(["git", "-C", str(clone), "diff", "--name-only", a, b],
+    r = subprocess.run(["git", "-C", str(clone), "diff", "--name-only",
+                         "--no-renames", a, b],
                        capture_output=True, timeout=120)
     if r.returncode != 0:
         return []

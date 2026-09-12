@@ -7354,10 +7354,23 @@ def _blank_markers(text: str, language: str | None = None) -> str:
         if marker == "|||||||":
             # diff3 base section: comment the marker and everything after it
             # (base body, then the second side) until the block's `>>>>>>>`.
+            # Same content guard as '=======' below: outside an open
+            # block it is content, not a marker.
+            if state == "code":
+                out.append(line)
+                continue
             state = "in_second_side"
             out.append(f"{comment} conflict-marker")
             continue
         if marker == "=======":
+            # s27-66 review: an exact-7 '=' line is also a valid RST
+            # underline/overline. Outside an open block ("code" state) it is
+            # CONTENT — flipping to in_second_side here would comment out
+            # the rest of the file (the ghost-flip class that contains_
+            # markers' S27-33 context check already handles for detection).
+            if state == "code":
+                out.append(line)
+                continue
             state = "in_second_side"
             out.append(f"{comment} conflict-marker")
             continue
