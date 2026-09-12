@@ -93,6 +93,34 @@ def _py_compiles(content: str) -> bool:
         return False
 
 
+def _journal_counters(journal_path) -> dict:
+    """Cost + mechanism accounting from a session's journal (s27-61).
+
+    One pass over the JSONL (the Journal appends per-event, flushed): the
+    number of LLM generations (``candidate_generated``) and the acceptance
+    count per mechanism (``candidate_accepted`` payload ``via``). Malformed
+    or trailing-partial lines are skipped — counters are advisory.
+    """
+    out = {"llm_calls": 0, "mechanism_accepts": {}}
+    try:
+        with open(journal_path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    e = json.loads(line)
+                except Exception:  # noqa: BLE001 — advisory
+                    continue
+                t = e.get("event_type")
+                if t == "candidate_generated":
+                    out["llm_calls"] += 1
+                elif t == "candidate_accepted":
+                    via = (e.get("payload") or {}).get("via") or "?"
+                    out["mechanism_accepts"][via] = (
+                        out["mechanism_accepts"].get(via, 0) + 1)
+    except OSError:
+        pass
+    return out
+
+
 def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
     """Drive one scenario; return the result row."""
     from capybase.config import Config
@@ -113,6 +141,13 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
            "files": len({s["path"] for s in sc.get("conflict_steps", [])})}
     wt = Path(tempfile.mkdtemp(prefix="capy-scen-"))
     branch = f"capy-scen-{uuid.uuid4().hex[:8]}"
+    # Observability line (s27-61): the live journal lives INSIDE this
+    # worktree (<wt>/.rebase-agent/sessions/<id>/journal.jsonl) and is only
+    # copied to the flights dir AFTER completion — watching the flights dir
+    # mid-run shows nothing (the s27-47 forensics trap). The batch runner's
+    # watchdog parses this line to bind to the scenario's journal; humans
+    # debugging a live run get the path in the log.
+    print(f"  worktree={wt}", flush=True)
     try:
         # 1) worktree at target_tip + branch; drive the --onto rebase
         _git(clone, "worktree", "add", "--detach", str(wt), sc["target_tip_oid"])
@@ -190,6 +225,8 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
                                   "source_tip": sc["source_tip_oid"]}
         orch = Orchestrator(cfg, repo=str(wt), resolution_engine=engine,
                             out=lambda *a, **k: None)
+        print(f"  session={orch.session_id} journal={orch.paths.journal}",
+              flush=True)
         if race_paths:
             orch._race_step_paths = race_paths
             # activate the dormant mechanism — the evidence gate now does
@@ -408,6 +445,17 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             results.append({"path": path, "sim": round(sim, 3),
                             "markers": markers, "ok": ok})
         row["files_detail"] = results
+        # Stop-cascade classification (s27-61): on an ESCALATE, files still
+        # carrying markers were never resolved — the replay stopped before
+        # their commits replayed; their 0.0 sims measure the STOP, not the
+        # resolver. Flag them so sweep summaries don't need manual
+        # separation of cascade misses from real divergences.
+        row["stop_cascade_misses"] = 0
+        if row["escalated"]:
+            for r_ in results:
+                if r_.get("ok") is False and r_.get("markers"):
+                    r_["stop_cascade"] = True
+                    row["stop_cascade_misses"] += 1
         scored = [r_ for r_ in results if r_["ok"] is not None]
         n_ok = sum(1 for r_ in scored if r_["ok"])
         absent = [r_ for r_ in results if r_.get("absent_at_oracle")]
@@ -431,6 +479,12 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             row["verdict"] = "ORACLE_DIVERGENT"
         row["files_ok"] = f"{n_ok}/{len(scored)}"
         row["files_ok"] = f"{n_ok}/{len(results)}"
+        # Cost + mechanism accounting (s27-61): the seeds' economics story
+        # (27 LLM calls for 86 conflicts) and per-arm acceptance counts
+        # used to take a journal grep per sweep — read once here instead.
+        counters = _journal_counters(orch.paths.journal)
+        row["llm_calls"] = counters["llm_calls"]
+        row["mechanism_accepts"] = counters["mechanism_accepts"]
         # Preserve the session artifacts (journal, prompts, responses)
         # BEFORE the finally-block removes the worktree.
         if flights_dir is not None and row.get("session_id"):
@@ -480,6 +534,94 @@ def _lang_of_path(path: str) -> str:
 _PROVIDER_NAME: str | None = None
 
 
+def select_scenarios(scenario_ids: list[str], dataset: str | None,
+                     *, include_inner_merges: bool = False) -> list[dict]:
+    """The shared selection: load the corpus, filter by ids/dataset, drop
+    oracle-less and (by default) inner-merge scenarios. Used by main() and
+    by run_scenario_batch.py (s27-61) so both select identically.
+    """
+    sel = []
+    idset = set(scenario_ids)
+    for f in sorted(SCENARIO_DIR.glob("*-rebase-*.json")):
+        d = json.loads(f.read_text())
+        if idset and d["id"] not in idset:
+            continue
+        if dataset and d["dataset"] != dataset:
+            continue
+        if not d.get("merge_oid"):
+            continue  # no oracle — can't verdict
+        if d.get("inner_merges_in_source", 0) > 0 and not include_inner_merges:
+            continue  # linear replay drops inner-merge resolutions (tikv-0001)
+        sel.append(d)
+    return sel
+
+
+def smoke() -> list[str]:
+    """Config self-test (s27-61 item 7): pure assertions, no git, no
+    network. Regression armor for the stub-path-leak class (s27-50:
+    _config_for's python branch materialized "python3 -m py_compile
+    scenario.rs" from the harness's stub case — latent until a unit hit
+    the f1 takeover's verify_file). Returns the list of failures; empty
+    means healthy.
+    """
+    failures = []
+    import live_eval_realworld as L
+    from types import SimpleNamespace
+    # Provider resolution is a LOCAL config read (no network) but requires
+    # a configured provider; without one the stub-path assertions are
+    # SKIPPED loudly (hermetic test environments have none) and the pattern
+    # assertions still run.
+    try:
+        L._PROVIDER = L.resolve_provider(provider=_PROVIDER_NAME)
+        provider_ok = True
+    except Exception:
+        provider_ok = False
+        print("smoke: no provider configured — stub-path assertions SKIPPED")
+    if provider_ok:
+        for lang in ("python", "rust", "c", "cpp"):
+            cfg = L._config_for(SimpleNamespace(
+                path="scenario.rs", language=lang, marker_original="",
+                id="smoke", dataset="smoke-dataset"), has_crate=True)
+            # The scenario harness neutralizes the per-case gate after
+            # _config_for; assert BOTH that the neutralization is applied in
+            # run_scenario's pattern and that nothing else materializes the
+            # stub path (this mirrors the two lines in run_scenario).
+            cfg.tests.pre_continue = "true"
+            cfg.tests.final = "true"
+            for label, cmd in (("pre_continue", cfg.tests.pre_continue),
+                               ("final", cfg.tests.final)):
+                if "scenario.rs" in (cmd or ""):
+                    failures.append(
+                        f"{lang}: stub path leaked into tests.{label}: {cmd!r}")
+    # Generator-output seed pattern (s27-57/s27-60): the intended set —
+    # grammar files and generated transformers match; lockfiles and
+    # hand-written helpers don't.
+    import re as _re
+    gen = _re.compile(
+        r"(compiled_grammar|inlined_grammar|\.pb\.cc|\.pb\.h|"
+        r"\.generated\.|\.tab\.c|\.yy\.c|"
+        r"transform_generated_|_generated\.|/generated_)", _re.IGNORECASE)
+    expect_match = [
+        "src/parser/peg/compiled_grammar.cpp",
+        "src/parser/peg/transformer/transform_generated_trampoline.cpp",
+        "proto/messages.pb.cc",
+        "src/parser/peg/inlined_grammar.hpp",
+    ]
+    expect_no_match = [
+        "Cargo.lock",
+        "package-lock.json",
+        "src/main.cpp",
+        "AUTHORS",
+    ]
+    for p in expect_match:
+        if not gen.search(p.rsplit("/", 1)[-1]):
+            failures.append(f"generator pattern should match but doesn't: {p}")
+    for p in expect_no_match:
+        if gen.search(p.rsplit("/", 1)[-1]):
+            failures.append(f"generator pattern should NOT match but does: {p}")
+    return failures
+
+
 def main() -> int:
     global _PROVIDER_NAME
     ap = argparse.ArgumentParser()
@@ -487,6 +629,9 @@ def main() -> int:
     ap.add_argument("--scenario", help="exact scenario id")
     ap.add_argument("--dataset", help="run all scenarios of a dataset")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--smoke", action="store_true",
+                    help="config self-test (no git, no network): asserts no "
+                         "stub-path leaks and the seed patterns' shape")
     ap.add_argument("--out", default="/tmp/scenario-results.json")
     ap.add_argument("--preserve-flights")
     ap.add_argument("--include-inner-merges", action="store_true",
@@ -506,18 +651,17 @@ def main() -> int:
                   f"files={len({s['path'] for s in d['conflict_steps']}):3d} "
                   f"merge_oid={'Y' if d.get('merge_oid') else 'MISSING'}")
         return 0
-    sel = []
-    for f in scenarios:
-        d = json.loads(f.read_text())
-        if args.scenario and d["id"] != args.scenario:
-            continue
-        if args.dataset and d["dataset"] != args.dataset:
-            continue
-        if not d.get("merge_oid"):
-            continue  # no oracle — can't verdict
-        if d.get("inner_merges_in_source", 0) > 0 and not args.include_inner_merges:
-            continue  # linear replay drops inner-merge resolutions (tikv-0001)
-        sel.append(d)
+    if args.smoke:
+        fails = smoke()
+        if fails:
+            for f_ in fails:
+                print(f"SMOKE-FAIL: {f_}")
+            return 1
+        print("smoke: all config assertions passed")
+        return 0
+    sel = select_scenarios(
+        [args.scenario] if args.scenario else [], args.dataset,
+        include_inner_merges=args.include_inner_merges)
     if args.prepare:
         for ds in sorted({d["dataset"] for d in sel}):
             prepare_clone(ds)
