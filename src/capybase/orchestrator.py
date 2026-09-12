@@ -10222,6 +10222,29 @@ class Orchestrator:
                     # _has_whole_file_span guard; the buffer is the resolved
                     # text directly for such units.
                     buffer = _resolved_buffer(original, accepted)
+                    # s27-66 tripwire: a whole_file unit's resolved_text IS the
+                    # file. A collapse to a small fraction of the original (with
+                    # no deletion mechanism in the acceptance chain) is the
+                    # rung-returns-fragment bug shape — journal it loudly so a
+                    # recurrence is visible in the flight, not in a 0.00 sim.
+                    _orig_lines = len(original.splitlines())
+                    _buf_lines = len(buffer.splitlines())
+                    if _orig_lines >= 40 and _buf_lines < _orig_lines * 0.25:
+                        _del_prov = ("deterministic_empty_side", "block_capture",
+                                     "deterministic_deletion_respect_prune")
+                        _has_del = any(
+                            (getattr(c, "provenance", "") or "") in _del_prov
+                            for _u, c in accepted)
+                        if not _has_del:
+                            self.journal.emit(
+                                "whole_file_buffer_collapse",
+                                {"original_lines": _orig_lines,
+                                 "buffer_lines": _buf_lines,
+                                 "provenances": [
+                                     (getattr(c, "provenance", "") or "?")[:40]
+                                     for _u, c in accepted][:4]},
+                                step_index=self.step, path=path,
+                            )
                     # Phase 9: whole-file import deduplication linker. Runs
                     # AFTER splicing but BEFORE validation. Removes duplicate
                     # `use` statements introduced when the model's per-unit
@@ -13219,6 +13242,12 @@ class Orchestrator:
                         self._journal_validation(
                             _sp_cands[0][0], _sp_cands[0][1], _sp_val)
                         if _sp_val.passed:
+                            # s27-66: a whole_file unit's resolved_text IS the
+                            # file — carry the FULL verified splice, not the
+                            # side's block fragment (sqlite-0016 wrote a
+                            # 118-byte fragment over 57KB of oracle-equal
+                            # content through this exact hole).
+                            _sp_full = _resolved_buffer(original, _sp_cands)
                             _sp_unit = _sp_cands[0][0].model_copy(
                                 update={"marker_span": None,
                                         "unit_kind": "whole_file"})
@@ -13227,6 +13256,7 @@ class Orchestrator:
                                     "candidate_id": (
                                         _sp_cands[0][1].candidate_id
                                         + f":sidepick-{_sp_side}"),
+                                    "resolved_text": _sp_full,
                                     "prompt_version": "deterministic_side_pick",
                                     "provenance": "deterministic_structural",
                                     "self_reported_confidence": 0.7,
@@ -13503,6 +13533,10 @@ class Orchestrator:
                         self._journal_validation(
                             _sp_cands[0][0], _sp_cands[0][1], _sp_val)
                         if _sp_val.passed:
+                            # s27-66: carry the FULL verified splice (see the
+                            # sibling site) — the block fragment must not ride
+                            # a whole_file unit.
+                            _sp_full = _resolved_buffer(original, _sp_cands)
                             _sp_unit = _sp_cands[0][0].model_copy(
                                 update={"marker_span": None,
                                         "unit_kind": "whole_file"})
@@ -13511,6 +13545,7 @@ class Orchestrator:
                                     "candidate_id": (
                                         _sp_cands[0][1].candidate_id
                                         + f":sidepick-{_sp_side}"),
+                                    "resolved_text": _sp_full,
                                     "prompt_version":
                                         "deterministic_side_pick",
                                     "provenance":

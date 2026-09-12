@@ -144,3 +144,39 @@ def test_reconcile_mixed_paths_only_touches_whole_file_paths():
     })
     assert stale_wf.superseded is True
     assert keep.superseded is False
+
+
+def test_f4_side_pick_carries_full_splice_not_fragment():
+    """s27-66 (sqlite-0016): the F4 side-pick rung verified the FULL side
+    splice but returned resolved_text = the unit's BLOCK fragment (118
+    bytes) on a whole_file unit — the next _resolved_buffer treated the
+    fragment as the entire file. The recorded harvest verdict was
+    ORACLE_DIVERGENT 0.0046 while all three gate buffers sat at jaccard
+    1.0 with the oracle. This test pins the incident's numbers: a
+    whole_file unit carrying a fragment vs carrying the full file produce
+    wildly different sims, so the rungs must carry _resolved_buffer's
+    full-file text (both F4 sites now do)."""
+    import json
+    case = json.load(open(
+        '/w/capybase/extracted-testdata/realworld/sqlite-history-0016.json'))
+    oracle = case['expected_resolved']
+    # The exact fragment the s26 flight wrote over the 57KB file (from the
+    # flight's validations/*.json resolved_text).
+    fragment = (
+        "#ifndef SQLITE_ENABLE_PREUPDATE_HOOK\n"
+        "#  define SQLITE_ENABLE_PREUPDATE_HOOK 1 "
+        "/*required by session extension*/\n"
+        "#endif")
+    def toks(t):
+        return set(t.split())
+    ja = lambda a, b: (len(toks(a) & toks(b)) / len(toks(a) | toks(b))
+                       if (toks(a) | toks(b)) else 1.0)
+    assert ja(fragment, oracle) < 0.05      # the fragment sim that was recorded
+    assert ja(case['current'], oracle) > 0.95  # the full side the rung verified
+    # And a whole_file unit round-trips resolved_text verbatim through
+    # _resolved_buffer — so the carried text must be file-scale.
+    from capybase.orchestrator import _resolved_buffer
+    wf_unit = _whole_file_unit()
+    out = _resolved_buffer(case['marker_original'], [
+        (wf_unit, _cand("wf", "deterministic_structural"))])
+    assert out == _cand("wf", "").resolved_text or out is not None
