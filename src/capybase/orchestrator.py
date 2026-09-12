@@ -142,6 +142,13 @@ class UnitOutcome:
     # ``attempts`` (the bare candidate list, kept for backward compat) — this is
     # the structured record reports/metrics/dry-run read.
     resolution_attempts: list = field(default_factory=list)
+    # s27-63: True when a whole-file mechanism (true_side_portfolio swap,
+    # phase1 fast path, deletion-respect swap, midband takeover) later
+    # replaced this path's resolution — the per-unit candidates here were
+    # DISCARDED, so bucket classification must skip them (otherwise the
+    # case is attributed to the stale per-unit mechanism instead of the
+    # whole-file swap that actually produced the file).
+    superseded: bool = False
 
 
 @dataclass
@@ -2236,6 +2243,53 @@ def _empty_repair_side_fallback(
         else:
             out.append((u, c))
     return out if swapped else None
+
+
+def reconcile_whole_file_outcomes(result, accepted_by_path: dict) -> int:
+    """Make ``result.outcomes`` tell the truth about whole-file swaps.
+
+    Whole-file mechanisms (true_side_portfolio, the phase1 fast path,
+    midband takeover, deletion-respect swap) accept a synthetic
+    ``whole_file`` unit and REPLACE the per-unit candidates that Phase 1
+    recorded — but the per-unit ``UnitOutcome``s stayed in
+    ``result.outcomes``, so `classify_resolution_bucket` attributed the
+    file to the stale mechanism (or, on the phase1 fast path, saw no
+    outcome at all — the bucket gap behind the s26 harvest's
+    `--flights` fallback for ~77 cases).
+
+    For every path whose final accepted pairs are all ``whole_file``
+    units: mark the stale per-unit outcomes ``superseded`` (the
+    classifier skips them) and append one fresh outcome per pair.
+    Idempotent (deduped by candidate_id). Returns the number of fresh
+    outcomes appended.
+    """
+    appended = 0
+    for path, pairs in (accepted_by_path or {}).items():
+        if not pairs:
+            continue
+        if not all(
+                getattr(u, "unit_kind", "") == "whole_file"
+                for u, _c in pairs):
+            continue  # per-unit resolutions — outcomes are already accurate
+        pair_ids = {c.candidate_id for _u, c in pairs}
+        for o in result.outcomes:
+            if o.unit.path == path and not getattr(o, "superseded", False):
+                if o.accepted is not None and (
+                        o.accepted.candidate_id in pair_ids):
+                    continue  # a previously appended whole-file outcome
+                o.superseded = True
+        fresh_ids = {
+            (o.accepted.candidate_id if o.accepted else None)
+            for o in result.outcomes if o.unit.path == path}
+        for u, c in pairs:
+            if c.candidate_id in fresh_ids:
+                continue
+            outcome = UnitOutcome(
+                unit=u, accepted=c, attempts=[c],
+                validation=None, superseded=False)
+            result.outcomes.append(outcome)
+            appended += 1
+    return appended
 
 
 def _rebase_continue_empty(cont) -> bool:
@@ -10313,6 +10367,9 @@ class Orchestrator:
                             wall_deadline=_file_wall_deadline)
                         if _ts_res is not None:
                             accepted, buffer, file_validation = _ts_res
+                            # s27-63: record the final truth for the
+                            # end-of-step whole-file outcome reconciliation.
+                            accepted_by_path[path] = accepted
                             # Re-enter the loop: the next iteration
                             # re-splices from the swapped whole-file unit and
                             # revalidates (including the build test).
@@ -10335,6 +10392,7 @@ class Orchestrator:
                                 _ts_acc, _ts_buf, _ts_val = _ts_res
                                 if _ts_val.passed and _ts_buf != buffer:
                                     accepted, buffer = _ts_acc, _ts_buf
+                                    accepted_by_path[path] = accepted
                                     file_validation = _ts_val
                         # Structural validation passed (markers, splice,
                         # standalone syntax). Also run the build test —
@@ -11385,6 +11443,7 @@ class Orchestrator:
             _drs = self._try_deletion_respect_swap(path, language, units, buffer)
             if _drs is not None:
                 accepted = _drs
+                accepted_by_path[path] = accepted
                 buffer = _drs[0][1].resolved_text
             # Sprint-18 WS4: a both-rewrite file resolved to one side
             # verbatim is a silent drop of the other side's rewrite
@@ -11412,6 +11471,37 @@ class Orchestrator:
         # Pure instrumentation — no behavioral change.
         if not result.escalated and self._any_unit_used_llm(result):
             self._dump_conflict_bundles(result)
+        # s27-63: whole-file swaps (true_side_portfolio, phase1 fast path,
+        # deletion-respect, midband) replace per-unit candidates without
+        # recording outcomes — reconcile so bucket classification and the
+        # accept report attribute the file to the mechanism that actually
+        # produced it.
+        for path, pairs in accepted_by_path.items():
+            if not all(
+                    getattr(u, "unit_kind", "") == "whole_file"
+                    for u, _c in pairs):
+                continue
+            for _u, c in pairs:
+                if any(
+                    o.accepted is not None
+                    and o.accepted.candidate_id == c.candidate_id
+                    and not o.superseded
+                    for o in result.outcomes
+                ):
+                    continue
+                self.journal.emit(
+                    "candidate_accepted",
+                    {"candidate_id": c.candidate_id,
+                     "via": c.model_name or "whole_file"},
+                    step_index=self.step, path=path,
+                )
+        _appended = reconcile_whole_file_outcomes(result, accepted_by_path)
+        if _appended:
+            self.journal.emit(
+                "whole_file_outcomes_reconciled",
+                {"outcomes_appended": _appended},
+                step_index=self.step,
+            )
         return result
 
     def _reconcile_comments(

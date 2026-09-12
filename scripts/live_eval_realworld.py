@@ -443,6 +443,8 @@ def classify_resolution_bucket(outcomes) -> tuple[str, dict]:
     llm_units = 0
     cegis_units = 0
     for o in outcomes or []:
+        if getattr(o, "superseded", False):
+            continue  # s27-63: a whole-file swap replaced this resolution
         acc = getattr(o, "accepted", None)
         if acc is None:
             continue
