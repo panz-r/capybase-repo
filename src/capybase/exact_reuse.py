@@ -184,6 +184,20 @@ def find_exact_reuse(
         if not resolved:
             near_misses.append(f"{exp.example.summary}: empty resolved text")
             continue
+        # s27-72 (sixth pass): span-size sanity — the stored resolution must
+        # be REGION-scaled relative to the sides it claims to resolve. A
+        # whole-file text recorded on a marker-region experience (the
+        # convergence-seed inversion, or any whole-file-on-region shape in
+        # pre-fix stores) would splice an entire stale file into the region.
+        # Generous bound: 3x the larger side + 10 lines of legitimate
+        # expansion (the sibling guard pattern from _try_step_pattern_reuse).
+        _side_max = max(
+            len(current.splitlines()), len(replayed.splitlines()), 1)
+        if len(resolved.splitlines()) > 3 * _side_max + 10:
+            near_misses.append(
+                f"{exp.example.summary}: resolved {len(resolved.splitlines())}L "
+                f">> region (~{_side_max}L) — whole-file-on-region record")
+            continue
         # Full match — record the conditions that matched (#idea 8 auditability).
         conditions = [
             f"shape={target_shape}",

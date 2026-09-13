@@ -245,7 +245,9 @@ def test_produced_provenances_explicitly_classified():
     as D1 and reached Tier A against the module's own doctrine."""
     import re
     from capybase.langs import _PROVENANCE_SAFETY, safety_class_for
-    src = open("src/capybase/orchestrator.py").read()
+    from pathlib import Path
+    _repo = Path(__file__).resolve().parent.parent
+    src = (_repo / "src" / "capybase" / "orchestrator.py").read_text()
     produced = set()
     for m in re.finditer(r'provenance="([a-z_0-9{}:+\-]+)"', src):
         produced.add(m.group(1))
@@ -269,3 +271,17 @@ def test_produced_provenances_explicitly_classified():
     from capybase.langs import SafetyClass
     assert safety_class_for("deterministic_gcc_fixit") == SafetyClass.HEURISTIC
     assert safety_class_for("deterministic_convergence_seed") == SafetyClass.POLICY
+
+
+def test_safety_class_handles_pipeline_stage_suffixes():
+    """s27-72 (sixth pass): repair rungs append '+'-stages
+    (deterministic_gcc_fixit+file_linker) — the matcher must resolve the
+    base, not fall to the STRUCTURAL default (the drift bug B4 fixed,
+    re-entered by concatenation)."""
+    from capybase.langs import SafetyClass, safety_class_for
+    assert safety_class_for(
+        "deterministic_gcc_fixit+file_linker") == SafetyClass.HEURISTIC
+    assert safety_class_for(
+        "plain_llm+intent_coverage") is None
+    assert safety_class_for(
+        "deterministic_convergence_seed+prefix_dedup") == SafetyClass.POLICY

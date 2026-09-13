@@ -6007,7 +6007,15 @@ class VerificationEngine:
                             )
                         )
                 features["syntax_checked"] = syntax_checked
-                features["syntax_passed"] = syntax_ok
+                # s27-72 (sixth pass): the tool-absent paths leave the local
+                # syntax_ok=True init — record the UNKNOWN contract, not a pass
+                # no oracle produced (the explicit unknown arms below still
+                # override for their shapes).
+                if syntax_checked:
+                    features["syntax_passed"] = syntax_ok
+                else:
+                    features.pop("syntax_passed", None)
+                    features.setdefault("syntax_outcome", "unknown")
                 features["syntax_scope"] = "file"
                 if rustc is not None:
                     features["syntax_tool"] = _tool_version(rustc)
@@ -6589,7 +6597,15 @@ class VerificationEngine:
                             )
                         )
             features["syntax_checked"] = syntax_checked
-            features["syntax_passed"] = syntax_ok
+            # s27-72 (sixth pass): the tool-absent paths leave the local
+            # syntax_ok=True init — record the UNKNOWN contract, not a pass
+            # no oracle produced (the explicit unknown arms below still
+            # override for their shapes).
+            if syntax_checked:
+                features["syntax_passed"] = syntax_ok
+            else:
+                features.pop("syntax_passed", None)
+                features.setdefault("syntax_outcome", "unknown")
             features["syntax_scope"] = "file"
             if _cc_syntax_tool:
                 features["syntax_tool"] = _tool_version(_cc_syntax_tool)
@@ -6855,8 +6871,11 @@ class VerificationEngine:
             after = runner._check_cargo(whole, path, repo_root)
         if not after.checked:
             # cargo absent / failed → not checked (never a false fail).
+            # s27-72: abstain records the UNKNOWN contract (s27-71 B5's
+            # sibling sites), not a stamped pass.
             features["syntax_checked"] = False
-            features["syntax_passed"] = True
+            features.pop("syntax_passed", None)
+            features["syntax_outcome"] = "unknown"
             return False, True
         # Baseline: marker-blanked original (one side kept so it's valid TOML),
         # cargo-checked, then restored. TOML comments use ``#``, which is the
@@ -6867,8 +6886,10 @@ class VerificationEngine:
         if not baseline.checked:
             # Undecidable delta (unchecked baseline = empty error list) →
             # abstain, never count every candidate error as "new".
+            # s27-72: unknown contract (see above).
             features["syntax_checked"] = False
-            features["syntax_passed"] = True
+            features.pop("syntax_passed", None)
+            features["syntax_outcome"] = "unknown"
             return False, True
         features["syntax_checked"] = True
         # Phase-scoped: cargo manifest check has full crate context — do NOT

@@ -1248,18 +1248,31 @@ def _whole_file_side_candidates(
     from capybase.conflict_model import CandidateResolution
     out: list[tuple[str, list]] = []
     for side in ("current", "replayed"):
-        cands: list[tuple] = []
-        for unit in units:
-            side_obj = getattr(unit, side, None)
-            side_text = getattr(side_obj, "text", "") or ""
-            cands.append((unit, CandidateResolution(
+        texts = [
+            (getattr(getattr(u, side, None), "text", "") or "")
+            for u in units
+        ]
+        if any(not t.strip() for t in texts):
+            # s27-72 (sixth pass): an empty side anywhere in the file is a
+            # modify/delete DECISION — block-capture, the empty-side rule,
+            # and deletion-respect adjudicate those (with provenance and
+            # churn gates). A side-pick/portfolio candidate with empty text
+            # would pass verify_file VACUOUSLY (empty files carry no
+            # markers and parse clean) and _is_whole_file_delete would
+            # git-rm it — silently converting an adjudicated KEEP into a
+            # confident delete.
+            continue
+        cands: list[tuple] = [
+            (unit, CandidateResolution(
                 candidate_id=f"{unit.unit_id}:{side}_only_wf",
                 unit_id=unit.unit_id,
                 model_name="whole_file_portfolio",
-                resolved_text=side_text,
+                resolved_text=text,
                 provenance=f"deterministic_source_{side}_only",
                 prompt_version=f"wf_portfolio.{side}",
-            )))
+            ))
+            for unit, text in zip(units, texts)
+        ]
         out.append((side, cands))
     return out
 
@@ -11205,6 +11218,11 @@ class Orchestrator:
                                         f"{_f1_side} side subsumes"),
                                 )
                                 accepted = [(_f1_unit, _f1_cand)]
+                                # s27-72 (sixth pass): the takeover IS the
+                                # file's resolution — update the map or the
+                                # reconciliation keeps the stale per-unit
+                                # pairs (memory positives, the D3 poison).
+                                accepted_by_path[path] = accepted
                                 buffer = _f1_text
                                 file_validation = None
                                 # The takeover IS the file's resolution — its
@@ -11386,6 +11404,8 @@ class Orchestrator:
                                                         step_index=self.step,
                                                         path=path)
                                                     accepted = [(_ou, _oc)]
+                                                    # s27-72: map update (see tier-1)
+                                                    accepted_by_path[path] = accepted
                                                     buffer = _ot
                                                     file_validation = None
                                                     if not hasattr(self, "_takeover_landed_paths"):
@@ -11417,6 +11437,8 @@ class Orchestrator:
                                             f"{_f2_side} subsumes"),
                                     )
                                     accepted = [(_f2_unit, _f2_cand)]
+                                    # s27-72: map update (see tier-1)
+                                    accepted_by_path[path] = accepted
                                     buffer = _f2_text
                                     file_validation = None
                                     if not hasattr(self, "_takeover_landed_paths"):
@@ -12616,14 +12638,18 @@ class Orchestrator:
         absent, or the sample is too small. Informs the review decision;
         never flips a tier.
         """
-        cached = getattr(self, "_class_prior_cache", None)
-        if cached is not None:
-            return cached[0]
+        # s27-72 (sixth pass): cache PER LANGUAGE — the old single-slot
+        # cache froze the first accepted step's language for the whole
+        # session, annotating every later Rust step with Python's prior.
+        lang = getattr(self, "_prior_language", None)
+        cache = getattr(self, "_class_prior_cache", None) or {}
+        if lang in cache:
+            return cache[lang]
         from capybase.calibration_priors import load_priors, prior_for
         path = getattr(self.config.future, "calibration_priors_path", "") or ""
-        prior = (prior_for(load_priors(path), getattr(
-            self, "_prior_language", None)) if path else None)
-        self._class_prior_cache = (prior,)
+        prior = (prior_for(load_priors(path), lang) if path else None)
+        cache[lang] = prior
+        self._class_prior_cache = cache
         return prior
 
     def _side_pick_churn_ok(self, path: str) -> bool | None:
@@ -16975,6 +17001,16 @@ class Orchestrator:
         reconcile_whole_file_outcomes(result, self._step_accepted_by_path
                                       if hasattr(self, "_step_accepted_by_path")
                                       else {})
+        # s27-72 (sixth pass): the journal's mechanism counters previously
+        # double-counted accepts that a whole-file swap later superseded —
+        # emit the superseded candidate ids so readers can subtract.
+        _sup_ids = [
+            o.accepted.candidate_id for o in result.outcomes
+            if getattr(o, "superseded", False) and o.accepted is not None]
+        if _sup_ids:
+            self.journal.emit(
+                "outcomes_superseded", {"candidate_ids": _sup_ids},
+                step_index=result.step_index)
         self._record_outcomes_to_memory(result)
 
     def _record_outcomes_to_memory(self, result: StepResult) -> None:
@@ -16998,6 +17034,14 @@ class Orchestrator:
                 continue
             unit = outcome.unit
             accepted = outcome.accepted
+            # s27-72 (sixth pass): convergence-seed candidates carry the
+            # WHOLE FILE as resolved_text on per-unit marker-region units —
+            # recording them teaches exact_reuse to splice a whole stale
+            # file into a marker region (region/file inversion; the seed
+            # re-derives from tips every run, so memory adds nothing).
+            if accepted is not None and (
+                    accepted.provenance == "deterministic_convergence_seed"):
+                continue
             # Collect a conflict-chain observation (#9 step 7) for every outcome,
             # so detect_conflict_chains() can find related conflicts across the
             # replay. Done unconditionally (not just on successful memory append)

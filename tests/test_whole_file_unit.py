@@ -277,3 +277,29 @@ def test_policy_supports_au_ua_modes():
     cfg = Config()
     assert "AU" in cfg.policy.supported_conflict_types
     assert "UA" in cfg.policy.supported_conflict_types
+
+
+def _sc_unit(cur: str, rep: str) -> "ConflictUnit":
+    return ConflictUnit(
+        session_id="s", step_index=1, path="a.py", language="python",
+        conflict_type="UU", unit_id="a.py:1:0", unit_kind="text_marker_block",
+        base=ConflictSide(label="BASE", text="x = 1"),
+        current=ConflictSide(label="CURRENT_UPSTREAM_SIDE", text=cur),
+        replayed=ConflictSide(label="REPLAYED_COMMIT_SIDE", text=rep),
+        original_worktree_text="", marker_span=(0, 2),
+    )
+
+
+def test_side_candidates_drop_empty_sides():
+    """s27-72: an empty side anywhere is a modify/delete DECISION — the
+    side-pick/portfolio rungs must not propose it (empty text passes
+    verify_file vacuously and converts an adjudicated KEEP into a delete)."""
+    from capybase.orchestrator import _whole_file_side_candidates
+    units = [_sc_unit("", "def kept(): pass")]
+    out = dict(_whole_file_side_candidates(units))
+    # the empty (current) side is dropped entirely
+    assert "current" not in out
+    assert "replayed" in out
+    # both-sides-present file still yields both
+    both = dict(_whole_file_side_candidates([_sc_unit("a", "b")]))
+    assert set(both) == {"current", "replayed"}

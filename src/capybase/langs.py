@@ -174,9 +174,15 @@ def safety_class_for(provenance: str | None) -> SafetyClass | None:
     p = (provenance or "").strip().lower()
     if not p:
         return None
-    for prefix, cls in _PROVENANCE_SAFETY.items():
-        if p == prefix or p.startswith(prefix + ":"):
-            return cls
+    # s27-72 (sixth pass): repair rungs append "+"-suffixed pipeline stages
+    # (deterministic_gcc_fixit+file_linker, ...+intent_coverage, ...) — try
+    # the full string, then each "+"-separated base, before defaulting.
+    for candidate_key in [p] + p.split("+"):
+        candidate_key = candidate_key.strip()
+        for prefix, cls in _PROVENANCE_SAFETY.items():
+            if (candidate_key == prefix
+                    or candidate_key.startswith(prefix + ":")):
+                return cls
     if p.startswith("deterministic"):
         return SafetyClass.STRUCTURAL  # conservative default for unlisted det.
     return None

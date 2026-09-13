@@ -130,20 +130,34 @@ def _journal_counters(journal_path) -> dict:
     out = {"llm_calls": 0, "mechanism_accepts": {}}
     try:
         with open(journal_path, encoding="utf-8") as fh:
+            events = []
             for line in fh:
                 try:
                     e = json.loads(line)
                 except Exception:  # noqa: BLE001 — advisory
                     continue
-                t = e.get("event_type")
-                if t == "candidate_generated":
-                    out["llm_calls"] += 1
-                elif t == "candidate_accepted":
-                    via = (e.get("payload") or {}).get("via") or "?"
-                    out["mechanism_accepts"][via] = (
-                        out["mechanism_accepts"].get(via, 0) + 1)
+                events.append(e)
     except OSError:
-        pass
+        return out
+    # s27-72 (sixth pass): a whole-file takeover supersedes earlier per-unit
+    # accepts — both journaled candidate_accepted events; subtract the
+    # superseded candidate ids or every takeover double-counts.
+    superseded: set[str] = set()
+    for e in events:
+        if e.get("event_type") == "outcomes_superseded":
+            superseded.update(
+                (e.get("payload") or {}).get("candidate_ids") or [])
+    for e in events:
+        t = e.get("event_type")
+        if t == "candidate_generated":
+            out["llm_calls"] += 1
+        elif t == "candidate_accepted":
+            payload = e.get("payload") or {}
+            if payload.get("candidate_id") in superseded:
+                continue
+            via = payload.get("via") or "?"
+            out["mechanism_accepts"][via] = (
+                out["mechanism_accepts"].get(via, 0) + 1)
     return out
 
 
@@ -187,6 +201,8 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
     row = {"id": sc["id"], "dataset": sc["dataset"],
            "steps": len(sc.get("conflict_steps", [])),
            "files": len({s["path"] for s in sc.get("conflict_steps", [])})}
+    _flights_copied = False
+    orch = None
     wt = Path(tempfile.mkdtemp(prefix="capy-scen-"))
     branch = f"capy-scen-{uuid.uuid4().hex[:8]}"
     # Observability line (s27-61): the live journal lives INSIDE this
@@ -378,14 +394,13 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
         # conflicted-only verdict; the resurrection scan protects the
         # resolver, this widens the MEASUREMENT to match).
         conflicted = {s["path"] for s in sc["conflict_steps"]}
-        touched_r = subprocess.run(
-            ["git", "-C", str(clone), "diff", "--name-only",
-             sc["merge_base_oid"], sc["source_tip_oid"]],
-            capture_output=True, timeout=120)
-        touched_r.stdout = touched_r.stdout.decode("utf-8", "replace")
-        scored = sorted(conflicted | (
-            set(touched_r.stdout.splitlines()) if touched_r.returncode == 0
-            else set()))
+        # s27-72 (sixth pass): score the SAME universe the seeds cover —
+        # the LOG-UNION of per-commit touches (computed above for the seed
+        # registration), not the net diff. A changed-and-reverted file nets
+        # to zero in the diff yet can emerge as a conflict and be SEEDED;
+        # scoring the net diff left it unscored — a wrong seed write was
+        # invisible (a false-PASS class).
+        scored = sorted(conflicted | set(_seed_paths or []))
         results = []
         # One lazy per-scenario refetch when an oracle read hits an
         # object-store hole (side-branch merge oids no refspec covers).
@@ -528,7 +543,15 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             src = getattr(orch.paths, "root", None)
             if src is not None and Path(src).exists():
                 dest = Path(flights_dir) / "flights" / sc["id"] / row["session_id"]
-                shutil.copytree(src, dest, dirs_exist_ok=True)
+                try:
+                    shutil.copytree(src, dest, dirs_exist_ok=True)
+                    _flights_copied = True
+                except OSError as exc:
+                    # s27-72 (sixth pass): the copy is forensic, the verdict
+                    # is the product — a disk-full copy error must not
+                    # discard a completed result row (hours of spend).
+                    print(f"[flights] copy FAILED ({exc}); verdict kept, "
+                          f"journal lost with the worktree", flush=True)
         return row
     finally:
         if os.environ.get("CAPYBASE_KEEP_SCENARIO_WORKTREE"):
@@ -545,6 +568,23 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
                     print(f"[keep-worktree] {path} HEAD={head_e} "
                           f"worktree={(wt / path).exists()}", flush=True)
         else:
+            # s27-72 (sixth pass): a crash path (orch.run() raising) skips
+            # the success-point copy — preserve the journal into flights
+            # BEFORE the worktree goes, or the crash leaves zero forensics
+            # (the runner's kill-preservation only covers watchdog kills).
+            if (orch is not None and flights_dir is not None
+                    and not _flights_copied
+                    and getattr(orch, "session_id", None)):
+                _src = getattr(getattr(orch, "paths", None), "root", None)
+                if _src is not None and Path(_src).exists():
+                    _dest = (Path(flights_dir) / "flights" / sc["id"] /
+                             f"{orch.session_id}-crashed")
+                    try:
+                        shutil.copytree(_src, _dest, dirs_exist_ok=True)
+                        print(f"[flights] crashed session preserved -> "
+                              f"{_dest}", flush=True)
+                    except OSError:
+                        pass
             _git(clone, "worktree", "remove", "--force", str(wt), check=False)
         _git(clone, "worktree", "prune", check=False)
         _git(clone, "branch", "-D", branch, check=False)
@@ -643,15 +683,10 @@ def smoke() -> list[str]:
                         failures.append(
                             f"{lang}: stub path leaked into "
                             f"{section}.{fname}: {val[:80]!r}")
-            # and the neutralization pattern itself clears the two allowed
-            # surfaces (mirrors run_scenario):
-            cfg.tests.pre_continue = "true"
-            cfg.tests.final = "true"
-            for label, cmd in (("pre_continue", cfg.tests.pre_continue),
-                               ("final", cfg.tests.final)):
-                if cmd != "true":
-                    failures.append(
-                        f"{lang}: neutralized tests.{label} != 'true': {cmd!r}")
+            # (The s27-71 rewrite's neutralization-mirror assert was
+            # removed s27-72: assign-then-assert is a tautology. The
+            # confinement loop above is the armor; run_scenario's own
+            # neutralization is pinned by the harness's live behavior.)
     # Generator-output seed pattern (s27-57/60): asserts the PRODUCTION
     # pattern (module-scope _GEN_OUTPUT, hoisted s27-71 — the old inline
     # copy had already diverged back to the dead `/generated_` form).

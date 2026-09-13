@@ -426,9 +426,11 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
     # t0 reset inside the loop gave a retried scenario up to 2x the budget.
     scenario_t0 = time.time()
     timed_out = False
+    killed_tag: str | None = None
     while True:
         attempt += 1
         t0 = time.time()
+        killed_tag = None
         with open(log, "ab") as lf:
             lf.write(f"\n===== {scenario_id} attempt {attempt} "
                      f"{time.strftime('%H:%M:%S')} =====\n".encode())
@@ -495,10 +497,9 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
                     print(f"  [{scenario_id}] TIMEOUT after "
                           f"{now - scenario_t0:.0f}s — killing process group",
                           flush=True)
-                    _preserve_killed_session(
-                        worktree, flights_dir, scenario_id, "timeout")
                     _kill_tree(proc)
                     timed_out = True
+                    killed_tag = "timeout"
                     break  # fall through: a completed result file wins
                 # hang
                 journal = None
@@ -522,12 +523,17 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
                     print(f"  [{scenario_id}] HANG: journal+io+cpu flat "
                           f"for {hang_after:.0f}s — killing process group",
                           flush=True)
-                    _preserve_killed_session(
-                        worktree, flights_dir, scenario_id, "hang")
                     _kill_tree(proc)
+                    killed_tag = "hang"
                     break
                 time.sleep(poll_s)
             proc.wait()
+            # s27-72 (sixth pass): preserve AFTER the kill+wait — copying
+            # before the kill delayed it past the deadline and could tear
+            # the journal mid-write.
+            if killed_tag:
+                _preserve_killed_session(
+                    worktree, flights_dir, scenario_id, killed_tag)
 
         if result_is_complete(out_file):
             verdict = result_verdict(out_file)

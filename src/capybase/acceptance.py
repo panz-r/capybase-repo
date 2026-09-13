@@ -172,18 +172,28 @@ def decide(
     # decides. Tests passing = strong independent evidence (tier B
     # candidate-branch per the design); tests absent = weaker still.
     model_assisted = [e.unit_id for e in evidence if not e.deterministic]
+    # s27-72 (sixth pass): an all-D2/D3 deterministic step is NOT
+    # "model-assisted" — the old reason rendered an empty unit list and
+    # lied about the mechanism class.
+    det_classes = sorted({e.safety for e in evidence if e.deterministic})
     # Calibrated confidence (design P3's final piece): the class prior
     # from observed historical outcomes ANNOTATES the review decision —
     # it never flips a tier (evidence decides; a prior alone promoting
     # would be the resolver-decides-safety mistake in statistical dress).
     from capybase.calibration_priors import prior_reason
     _prior = prior_reason(class_prior)
-    base = (
-        f"model-assisted unit(s): {', '.join(model_assisted[:4])}; "
-        f"test gate passed (strong independent behavioral evidence)"
-        if tests_passed is True else
-        f"model-assisted unit(s): {', '.join(model_assisted[:4])}; "
-        f"no test-gate evidence (tests_passed={tests_passed!r})")
+    if not model_assisted and det_classes:
+        base = (f"deterministic D2/D3 unit(s) ({', '.join(det_classes)}) "
+                f"need evidence tiers — "
+                + ("test gate passed" if tests_passed is True
+                   else f"no test-gate evidence (tests_passed={tests_passed!r})"))
+    else:
+        base = (
+            f"model-assisted unit(s): {', '.join(model_assisted[:4])}; "
+            f"test gate passed (strong independent behavioral evidence)"
+            if tests_passed is True else
+            f"model-assisted unit(s): {', '.join(model_assisted[:4])}; "
+            f"no test-gate evidence (tests_passed={tests_passed!r})")
     reasons = [base] + ([_prior] if _prior else [])
     return PolicyDecision("B", PROPOSE_FOR_REVIEW, reasons)
 

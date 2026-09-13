@@ -560,6 +560,12 @@ def _classify_terminal_reason(reason: str) -> str:
     # Classified distinctly so summaries stop counting infra as capability.
     if r.startswith("setup failed"):
         return "SETUP_FAILED"
+    # s27-72 (sixth pass): harness-level crashes ("orch raised: ...",
+    # "harness error: ...") are infrastructure, not resolver capability —
+    # they were falling to OTHER and polluting the real-conflict
+    # denominator (the clickhouse-0003 SETUP_FAILED doctrine).
+    if r.startswith("orch raised") or r.startswith("harness error"):
+        return "SETUP_FAILED"
     if "too large" in r or "oversized" in r:
         return "OVERSIZED"
     if "case timeout" in r:
@@ -2499,6 +2505,11 @@ def main():
             escalate_ct += 1
         elif verdict == "GATE_UNAVAILABLE":
             gate_ct += 1
+        elif verdict == "ESCALATE_TOOLCHAIN":
+            # s27-72 (sixth pass): the ladder had no arm — toolchain-era
+            # cases landed in wrong_ct, inflating ORACLE_DIVERGENT and
+            # disagreeing with the by-dataset tables in the same summary.
+            escalate_ct += 1
         else:
             wrong_ct += 1
         r.verdict = verdict
