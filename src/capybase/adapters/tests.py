@@ -12,6 +12,7 @@ compile error vs. a test failure) rather than the bare return code.
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass, field
@@ -40,39 +41,21 @@ class TestRunner:
 
     def run(self, command: str, *, cwd: str | None = None) -> TestRunResult:
         argv = shlex.split(command)
+        # s27-74 (ninth pass): reap the WHOLE process tree on timeout —
+        # subprocess.run(timeout=...) kills only the direct child, and a
+        # test suite that spawns servers/daemons (pytest fixtures, cargo
+        # test binaries) leaves orphans holding ports/locks; the next
+        # attempt then fails "address already in use" permanently. Same
+        # session+killpg pattern as verification.py's build-command runner.
+        import signal
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 argv,
                 cwd=cwd or str(self.git.repo),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.timeout,
-            )
-            passed = proc.returncode == 0
-            verdict = classify_test_output(
-                command, proc.stdout, proc.stderr, returncode=proc.returncode
-            )
-            return TestRunResult(
-                passed=passed,
-                returncode=proc.returncode,
-                stdout=proc.stdout,
-                stderr=proc.stderr,
-                command=command,
-                verdict=verdict,
-            )
-        except subprocess.TimeoutExpired as exc:
-            out = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
-            err = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
-            return TestRunResult(
-                passed=False,
-                returncode=-1,
-                stdout=out,
-                stderr=err,
-                command=command,
-                timed_out=True,
-                verdict=classify_test_output(
-                    command, out, err, returncode=-1, timed_out=True
-                ),
+                start_new_session=True,
             )
         except FileNotFoundError as exc:
             # The command itself wasn't found (e.g. pytest missing in a Rust
@@ -90,3 +73,35 @@ class TestRunner:
                     summary=f"test command not found: {err}",
                 ),
             )
+        try:
+            out, err = proc.communicate(timeout=self.timeout)
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            out, err = proc.communicate()
+            return TestRunResult(
+                passed=False,
+                returncode=-1,
+                stdout=out or "",
+                stderr=err or "",
+                command=command,
+                timed_out=True,
+                verdict=classify_test_output(
+                    command, out or "", err or "", returncode=-1, timed_out=True
+                ),
+            )
+        passed = returncode == 0
+        verdict = classify_test_output(
+            command, out, err, returncode=returncode
+        )
+        return TestRunResult(
+            passed=passed,
+            returncode=returncode,
+            stdout=out,
+            stderr=err,
+            command=command,
+            verdict=verdict,
+        )

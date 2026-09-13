@@ -29,6 +29,41 @@ def write_review_bundle(
     advisories: list[str] | None = None,
     reconciliation_report: str | None = None,
 ) -> Path:
+    """Advisory wrapper: never raises (s27-74, ninth pass). Every call site
+    treats the bundle as best-effort — a disk-full/serialization failure
+    must not turn a clean escalation into a traceback with a stale run
+    lock. The real work lives in _write_review_bundle_impl."""
+    try:
+        return _write_review_bundle_impl(
+            paths, reason=reason, step_index=step_index, unit=unit,
+            candidate=candidate, alternates=alternates,
+            validation=validation, test_output=test_output,
+            resume_hint=resume_hint, consensus=consensus,
+            resurrections=resurrections, advisories=advisories,
+            reconciliation_report=reconciliation_report)
+    except Exception:  # noqa: BLE001 — advisory by contract
+        import logging
+        logging.getLogger(__name__).debug(
+            "review bundle not written", exc_info=True)
+        return paths.final / "review-bundle.md"
+
+
+def _write_review_bundle_impl(
+    paths: SessionPaths,
+    *,
+    reason: str,
+    step_index: int | None = None,
+    unit: ConflictUnit | None = None,
+    candidate: CandidateResolution | None = None,
+    alternates: list[CandidateResolution] | None = None,
+    validation: VerificationResult | None = None,
+    test_output: str | None = None,
+    resume_hint: str | None = None,
+    consensus: dict | None = None,
+    resurrections: list | None = None,
+    advisories: list[str] | None = None,
+    reconciliation_report: str | None = None,
+) -> Path:
     """Write ``final/review-bundle.md`` and return its path.
 
     ``alternates`` are other cluster representatives from the consensus vote;

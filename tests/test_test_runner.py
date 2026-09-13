@@ -15,10 +15,22 @@ from capybase.orchestrator import Orchestrator
 
 
 class _Proc:
+    """A fake Popen: communicate() returns the canned output (s27-74 —
+    the runner drives Popen+communicate so a timeout can killpg the
+    whole process tree)."""
+
     def __init__(self, rc: int, out: str, err: str):
-        self.returncode = rc
-        self.stdout = out
-        self.stderr = err
+        self._rc = rc
+        self._out = out
+        self._err = err
+        self.pid = 0
+
+    def communicate(self, timeout=None):
+        self.returncode = self._rc
+        return self._out, self._err
+
+    def kill(self):
+        pass
 
 
 def _orch(repo) -> Orchestrator:
@@ -28,7 +40,7 @@ def _orch(repo) -> Orchestrator:
 def test_runner_parses_cargo_pass(repo):
     """A passing cargo run gets verdict kind=passed."""
     runner = TestRunner(_orch(repo).git)
-    with patch("capybase.adapters.tests.subprocess.run") as mock:
+    with patch("capybase.adapters.tests.subprocess.Popen") as mock:
         mock.return_value = _Proc(0, "test result: ok. 5 passed; 0 failed\n", "")
         r = runner.run("cargo test")
     assert r.passed
@@ -39,7 +51,7 @@ def test_runner_parses_cargo_pass(repo):
 def test_runner_parses_cargo_lock_contention(repo):
     """``Blocking waiting for file lock`` → verdict kind=lock_contention (transient)."""
     runner = TestRunner(_orch(repo).git)
-    with patch("capybase.adapters.tests.subprocess.run") as mock:
+    with patch("capybase.adapters.tests.subprocess.Popen") as mock:
         mock.return_value = _Proc(
             -1, "",
             "   Blocking waiting for file lock on build directory\n",
@@ -51,7 +63,7 @@ def test_runner_parses_cargo_lock_contention(repo):
 
 def test_runner_parses_compile_error(repo):
     runner = TestRunner(_orch(repo).git)
-    with patch("capybase.adapters.tests.subprocess.run") as mock:
+    with patch("capybase.adapters.tests.subprocess.Popen") as mock:
         mock.return_value = _Proc(
             101, "",
             "error[E0433]: could not find `tools`\ncould not compile `x`\n",
@@ -73,7 +85,7 @@ def test_orchestrator_retries_on_lock_contention_then_succeeds(repo):
         _Proc(-1, "", "   Blocking waiting for file lock on build directory\n"),  # retry
         _Proc(0, "test result: ok. 5 passed\n", ""),  # success
     ]
-    with patch("capybase.adapters.tests.subprocess.run", side_effect=seq), \
+    with patch("capybase.adapters.tests.subprocess.Popen", side_effect=seq), \
          patch("time.sleep"):  # don't actually backoff in the test
         run = orch._run_test_command("cargo test")
     assert run.passed
@@ -84,7 +96,7 @@ def test_orchestrator_gives_up_after_max_lock_retries(repo):
     """Persistent lock contention exhausts retries → returns the (failed) run."""
     orch = _orch(repo)
     locked = _Proc(-1, "", "   Blocking waiting for file lock on build directory\n")
-    with patch("capybase.adapters.tests.subprocess.run", return_value=locked), \
+    with patch("capybase.adapters.tests.subprocess.Popen", return_value=locked), \
          patch("time.sleep"):
         run = orch._run_test_command("cargo test")
     assert not run.passed
@@ -94,7 +106,7 @@ def test_orchestrator_gives_up_after_max_lock_retries(repo):
 def test_orchestrator_does_not_retry_non_transient_failure(repo):
     """A compile error is NOT retried (it's a real failure, not transient)."""
     orch = _orch(repo)
-    with patch("capybase.adapters.tests.subprocess.run") as mock:
+    with patch("capybase.adapters.tests.subprocess.Popen") as mock:
         mock.return_value = _Proc(
             101, "", "error[E0433]: could not find `tools`\ncould not compile\n"
         )

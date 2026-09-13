@@ -173,6 +173,7 @@ class RustAnalyzerRunner:
         # Write the resolved source into the actual file path so cargo sees it.
         target_path = Path(repo_root) / path
         original: bytes | None = None
+        created = not target_path.exists()
         if target_path.exists():
             original = target_path.read_bytes()
         try:
@@ -189,6 +190,15 @@ class RustAnalyzerRunner:
         finally:
             if original is not None:
                 target_path.write_bytes(original)
+            elif created:
+                # s27-74 (ninth pass): the candidate source was a NEW file —
+                # the old finally only restored pre-existing files, leaking
+                # it as an untracked worktree file (same contract as
+                # verification.py's temp_worktree_file).
+                try:
+                    target_path.unlink()
+                except OSError:
+                    pass
         diags = _parse_cargo_messages(proc.stdout, path)
         # Cargo emits most errors on the JSON stream, but a fatal failure it
         # can't structurally report — notably an unparseable Cargo.toml ("newlines

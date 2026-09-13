@@ -178,7 +178,16 @@ def build_multistep_rebase(
         except ValueError:
             return 1
 
+    max_iters = 4 * (len(replayed_oids) + 1) + 16  # s27-74: bound the loop
+    iters = 0
     while True:
+        iters += 1
+        if iters > max_iters:
+            raise RuntimeError(
+                "multistep_builder: rebase loop did not converge — a feat "
+                "commit was likely dropped as empty (rev-list step "
+                "derivation skips it), desyncing conflicts_at from "
+                "feat_commits")
         # Is there a conflict right now? Check for unmerged paths.
         status = git_fn(
             repo, "status", "--porcelain", check=False

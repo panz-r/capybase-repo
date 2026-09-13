@@ -314,6 +314,52 @@ def test_reconcile_emits_outcomes_superseded(tmp_path):
     assert "f:1:0:c1" in payload["candidate_ids"]
 
 
+def test_reconcile_emits_candidate_accepted_for_whole_file_take():
+    """s27-74 fix: the fresh whole-file outcome's candidate_accepted emit
+    must fire even though reconcile appends the outcome BEFORE the emit
+    loop — the s27-74 first attempt emitted after the append and its
+    already-appended id check skipped every emit (the whole-file
+    attribution stayed dead while the commit claimed to fix it)."""
+    from types import SimpleNamespace
+    from capybase.orchestrator import Orchestrator, UnitOutcome
+
+    events = []
+
+    class _Journal:
+        def emit(self, *args, **kwargs):
+            events.append(args)
+
+    class _C1:
+        candidate_id = "g:1:0:c1"
+
+    class _CWF:
+        candidate_id = "g:1:0:tsp"
+        model_name = "true_side_portfolio"
+
+    outcome = UnitOutcome(unit=SimpleNamespace(
+        unit_id="g:1:0", path="g", unit_kind="text_marker_block"))
+    outcome.accepted = _C1()
+    result = SimpleNamespace(outcomes=[outcome], step_index=6)
+
+    wf_unit = SimpleNamespace(unit_id="g:wf", path="g",
+                              unit_kind="whole_file")
+    pairs = [(wf_unit, _CWF())]
+    stub = SimpleNamespace(journal=_Journal(), step=6,
+                           memory_store=None,
+                           _step_accepted_by_path={"g": pairs},
+                           _record_outcomes_to_memory=lambda r: None)
+    Orchestrator._reconcile_and_record(stub, result)
+    # a SECOND call (the escalation-exit + tail pattern) must not
+    # double-emit — _pre_ids now contains the whole-file id
+    Orchestrator._reconcile_and_record(stub, result)
+
+    takes = [a for a in events if a[0] == "candidate_accepted"
+             and a[1].get("candidate_id") == "g:1:0:tsp"]
+    assert len(takes) == 1, (
+        f"expected exactly 1 whole-file accept event, got {len(takes)}")
+    assert takes[0][1]["via"] == "true_side_portfolio"
+
+
 def test_stub_path_leak_armor():
     """s27-73: C1's confinement armor, now a testable function. The two
     neutralized fields MAY carry the stub path (run_scenario overwrites

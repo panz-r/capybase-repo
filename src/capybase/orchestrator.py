@@ -17002,24 +17002,24 @@ class Orchestrator:
         resolution that actually produced the file (s27-67 review D3)."""
         _map = (self._step_accepted_by_path
                 if hasattr(self, "_step_accepted_by_path") else {})
+        # s27-74 fix: capture which candidates are already recorded BEFORE
+        # reconcile appends the fresh outcomes — the s27-74 first attempt
+        # emitted AFTER reconcile and its already-appended id check skipped
+        # every emit (the defect it claimed to fix, stillborn).
+        _pre_ids = {o.accepted.candidate_id for o in result.outcomes
+                    if o.accepted is not None}
         _appended = reconcile_whole_file_outcomes(result, _map)
-        # s27-73: the fresh-outcome candidate_accepted emits lived only at
-        # the _resolve_step tail — AFTER this call since reconciliation
-        # moved here — so whole-file takes stopped journaling candidate_
-        # accepted entirely (mechanism_accepts lost their attribution;
-        # found via the libuv-0017 validation: 0 whole-file vias vs
-        # sweep-22's 20x). Emit here, where the append happens.
+        # Whole-file takes MUST journal candidate_accepted — the s27-63
+        # emit loop at the _resolve_step tail was orphaned (it ran after
+        # this reconciliation, its id check skipped everything), so
+        # mechanism_accepts lost the whole-file attribution entirely
+        # (libuv-0017: 0 whole-file vias vs sweep-22's 20x).
         for path, pairs in _map.items():
             for u, c in pairs:
                 if getattr(u, "unit_kind", "") != "whole_file":
                     continue
-                if any(
-                    o.accepted is not None
-                    and o.accepted.candidate_id == c.candidate_id
-                    and not o.superseded
-                    for o in result.outcomes
-                ):
-                    continue
+                if c.candidate_id in _pre_ids:
+                    continue  # already recorded by an earlier reconcile
                 self.journal.emit(
                     "candidate_accepted",
                     {"candidate_id": c.candidate_id,
@@ -18841,7 +18841,17 @@ class Orchestrator:
         # no longer pass are regressions the merge introduced — high-signal
         # counterexamples. Sharpen the verdict so the human/model sees WHICH
         # baseline tests broke, not just "tests failed".
-        regressions = self._test_continuity_regressions(run.stdout, cmd)
+        # s27-74 (ninth pass): ONLY diff when the run actually reached the
+        # tests — a compile error or a timeout produces a partial/empty
+        # passing-set, and baseline-minus-empty flags nearly every
+        # baseline-passing test as a phantom regression (fed straight into
+        # _observe_drift's "0% FPR" channel).
+        _continuity_valid = run.passed or not (
+            getattr(run, "timed_out", False)
+            or (run.verdict.kind in ("compile_error", "lock_contention")
+                if run.verdict else False))
+        regressions = (self._test_continuity_regressions(run.stdout, cmd)
+                       if _continuity_valid else [])
         # Stash for the drift detector: _observe_drift (run after this gate)
         # reads the step's regressions as the behavioral-drift primary signal.
         # Set unconditionally — an empty list means "no regressions this step".

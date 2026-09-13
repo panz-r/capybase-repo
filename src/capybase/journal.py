@@ -9,6 +9,8 @@ payload.
 
 from __future__ import annotations
 
+from pydantic import ValidationError
+
 import json
 from pathlib import Path
 from typing import Any
@@ -185,7 +187,15 @@ class Journal:
             line = line.strip()
             if not line:
                 continue
-            events.append(JournalEvent.model_validate_json(line))
+            # s27-74 (ninth pass): skip torn lines like every external
+            # reader — _append writes through an 8KB-buffered handle, so a
+            # crash mid-event leaves a partial line, and an unguarded
+            # validate raised through `capybase status` and silently
+            # dropped ALL advisories in _recent_advisories.
+            try:
+                events.append(JournalEvent.model_validate_json(line))
+            except ValidationError:
+                continue
         return events
 
 

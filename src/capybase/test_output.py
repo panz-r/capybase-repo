@@ -238,6 +238,18 @@ def classify_test_output(
     if _CARGO_LOCK_RE.search(combined):
         return parse_cargo(stdout, stderr, returncode=returncode)
 
+    # s27-74 (ninth pass): the pytest lock/port-in-use regex was defined
+    # and never consulted — an orphaned test server (the timed-out-run
+    # class the TestRunner just stopped creating, but also any external
+    # holder) failed the NEXT attempt permanently instead of engaging the
+    # retry loop as transient lock contention.
+    if "pytest" in command and _PYTEST_LOCK_RE.search(combined):
+        return TestVerdict(
+            kind="lock_contention", tool="pytest",
+            diagnostics=["test collection hit a lock/port-in-use "
+                         "(transient; retry)"],
+        )
+
     if timed_out:
         # Distinguish a timeout mid-compile (slow, retry-friendly) from a
         # timeout mid-test-run (a hanging test). Without structured signals we
