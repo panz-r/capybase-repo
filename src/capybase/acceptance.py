@@ -110,7 +110,8 @@ def decide(
     test command is configured — no evidence either way).
     """
     evidence = [_unit_evidence(o) for o in outcomes
-                if getattr(o, "accepted", None) is not None]
+                if getattr(o, "accepted", None) is not None
+                and not getattr(o, "superseded", False)]
     reasons: list[str] = []
 
     # Tier C first: verifier disagreement on an ACCEPTED candidate is a

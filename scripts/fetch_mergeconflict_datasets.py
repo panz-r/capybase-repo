@@ -772,7 +772,7 @@ def _parses_as_py3(source: str) -> bool:
         import ast as _ast
         _ast.parse(source)
         return True
-    except (SyntaxError, ValueError):
+    except (SyntaxError, ValueError, RecursionError):
         return False
 
 

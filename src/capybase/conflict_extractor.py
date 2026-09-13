@@ -111,8 +111,16 @@ class ConflictExtractor:
             base_bytes = self.git.read_stage_blob(path, STAGE_BASE)
         except Exception:  # noqa: BLE001 — missing stage = empty base
             base_bytes = b""
-        current_bytes = self.git.read_stage_blob(path, STAGE_CURRENT)
-        replayed_bytes = self.git.read_stage_blob(path, STAGE_REPLAYED)
+        # s27-67 review: same tolerance for synthesized shapes missing a
+        # content stage ({2}-only has no stage 3; {3}-only has no stage 2).
+        try:
+            current_bytes = self.git.read_stage_blob(path, STAGE_CURRENT)
+        except Exception:  # noqa: BLE001 — missing stage = empty
+            current_bytes = b""
+        try:
+            replayed_bytes = self.git.read_stage_blob(path, STAGE_REPLAYED)
+        except Exception:  # noqa: BLE001 — missing stage = empty
+            replayed_bytes = b
         worktree_bytes = self.git.read_worktree_file(path)
 
         base_text = base_bytes.decode("utf-8", errors="replace")
@@ -394,12 +402,16 @@ class ConflictExtractor:
         current_oid = stages.get(STAGE_CURRENT)
         replayed_oid = stages.get(STAGE_REPLAYED)
 
-        # base (stage 1) is present for both AU/UA; the modified stage carries
-        # the keeper. read_stage_blob raises on a missing stage, so only read
-        # the ones we know exist.
-        base_text = self.git.read_stage_blob(path, STAGE_BASE).decode(
-            "utf-8", errors="replace"
-        )
+        # base (stage 1) is present for classic AU/UA but may be absent for
+        # synthesized stage shapes (a {2}-only entry is routed here as UA with
+        # no base) — s27-67 review: degrade to an empty base instead of
+        # raising, mirroring the add/add stage-1 tolerance.
+        try:
+            base_text = self.git.read_stage_blob(path, STAGE_BASE).decode(
+                "utf-8", errors="replace"
+            )
+        except Exception:  # noqa: BLE001 — no base stage → empty
+            base_text = ""
         if mode == "AU":
             # current (upstream) deleted → empty; replayed modified → keeper.
             current_text = ""

@@ -362,7 +362,10 @@ def _mine_one_merge(
                 gb.remove_worktree(wt_path, force=True)
             except Exception:  # noqa: BLE001
                 pass
-            gb.prune_worktrees()
+            try:
+                gb.prune_worktrees()
+            except Exception:  # noqa: BLE001
+                pass  # s27-67: a prune failure must not abort a mined result
             shutil.rmtree(wt_path, ignore_errors=True)
 
 

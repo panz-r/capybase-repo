@@ -42,7 +42,8 @@ def build_accept_report(
     didn't run / was skipped). Returns the markdown body (no leading ``#``); the
     caller prepends a header / persists it. Empty when no unit was accepted.
     """
-    accepted = [o for o in outcomes if o.accepted is not None]
+    accepted = [o for o in outcomes if o.accepted is not None
+                and not getattr(o, "superseded", False)]
     if not accepted:
         return ""
 

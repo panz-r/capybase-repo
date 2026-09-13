@@ -971,15 +971,23 @@ def _synthesize_mode(stages: dict[int, str]) -> str:
     This is informational only (e.g. ``UU``, ``AA``) for classification; it is
     not git's literal two-letter mode but a stable, sortable proxy derived from
     which stages exist.
+
+    s27-67 review: the mapping now matches the extractor's contract — the
+    consumer branches on ("AU", "UA") for whole-file modify/delete, where
+    AU = current absent (replayed keeper) and UA = replayed absent (current
+    keeper). {2}-only is replayed-absent -> UA (was mislabeled AA, which
+    routed to the marker path and crashed reading the missing stage 3);
+    {3}-only is current-absent -> AU (ditto, stage 2). {2,3} without
+    stage 1 is both-added -> AA; with stage 1 it is UU.
     """
     has = lambda s: s in stages  # noqa: E731
     if has(2) and has(3):
-        return "UU"
+        return "UU" if has(1) else "AA"
     if has(2) and not has(3):
-        return "UA" if has(1) else "AA"
+        return "UA"
     if not has(2) and has(3):
-        return "AU" if has(1) else "AA"
-    return "??"
+        return "AU"
+    return "DD"  # stage 1 only: both sides deleted the file
 
 
 def default_backend(repo: str | Path = ".") -> GitBackend:

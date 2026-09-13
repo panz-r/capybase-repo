@@ -368,14 +368,17 @@ def _is_whole_file_delete(
     Any non-whole-file unit, or a non-empty whole-file resolution (keep_block),
     returns False so the normal write+add path runs.
     """
+    # s27-66 review + s27-67: the convergence seed's delete arm carries the
+    # ORIGINAL text_marker_block units — one pair PER UNIT — with an empty
+    # resolved text. A multi-unit transient file must be git rm'd too, so
+    # the provenance check precedes the len gate (all pairs share one
+    # candidate).
+    if accepted and accepted[0][1].provenance == (
+            "deterministic_convergence_seed"):
+        return not accepted[0][1].resolved_text.strip()
     if len(accepted) != 1:
         return False
     unit, cand = accepted[0]
-    # s27-66 review: the convergence seed's delete arm carries the ORIGINAL
-    # text_marker_block units (marker_span set) with an empty resolved text —
-    # a transient file must be git rm'd, not written as an empty file.
-    if cand.provenance == "deterministic_convergence_seed":
-        return not cand.resolved_text.strip()
     return unit.marker_span is None and not cand.resolved_text.strip()
 
 
@@ -6649,8 +6652,15 @@ class Orchestrator:
                 _orig_lines[:_span[0]] + _orig_lines[_span[1] + 1:])
         else:
             _outside = unit.original_worktree_text or ""
-        if _unit_other and _outside and (other_block or "").strip() \
-                and (other_block or "").strip() in _outside:
+        _other_stripped = (other_block or "").strip()
+        # s27-67 review (D4): require a >=2-line block (a one-line addition
+        # trivially substring-matches unrelated code) and compare on
+        # whitespace-normalized text (line endings/indent drift must not
+        # void the match).
+        _norm_ws = lambda s: " ".join(s.split())
+        if _unit_other and _outside and len(
+                _other_stripped.splitlines()) >= 2 \
+                and _norm_ws(_other_stripped) in _norm_ws(_outside):
             winner, why = "", (
                 "absorbed side: the non-empty side's content already exists "
                 "verbatim in the pristine region (duplicate suppression)")
@@ -9608,8 +9618,13 @@ class Orchestrator:
             # resolved to no-change, dropped one per iteration, and the old
             # head-only guard killed the healthy rebase at the third).
             _pos_now = self.git.rebase_progress()
+            # s27-67 review (4a): rebase_progress can transiently return None
+            # (mid-write state files). None while a rebase is still in
+            # progress is progress-UNKNOWN — count it as progress so a read
+            # glitch cannot escalate a healthy rebase.
             _progressed = (_head_now != _prev_head) or (
-                _pos_now is not None and _pos_now != _prev_pos)
+                _pos_now is None and self.git.rebase_in_progress()
+            ) or (_pos_now is not None and _pos_now != _prev_pos)
             if cont.returncode != 0 and not _progressed:
                 _stuck_continues += 1
                 # s27-51 forensics: every wedged iteration must be visible —
@@ -9762,6 +9777,10 @@ class Orchestrator:
         # file's cargo check now sees a clean crate.
         resolved_files: dict[str, str] = {}  # path -> spliced buffer (all units)
         accepted_by_path: dict[str, list] = {}  # path -> [(unit, candidate), ...]
+        # s27-67: the tail's whole-file outcome reconciliation reads the map
+        # through this reference — mutations during Phase 2 (whole-file
+        # swaps) are visible without re-stashing.
+        self._step_accepted_by_path = accepted_by_path
         # Snapshot the original worktree text per path so Phase 2 can re-splice.
         originals: dict[str, str] = {}
         # Stash for §10 code-reopening (_resolve_comment_contract_conflicts
@@ -10244,8 +10263,11 @@ class Orchestrator:
                     _orig_lines = len(original.splitlines())
                     _buf_lines = len(buffer.splitlines())
                     if _orig_lines >= 40 and _buf_lines < _orig_lines * 0.25:
-                        _del_prov = ("deterministic_empty_side", "block_capture",
-                                     "deterministic_deletion_respect_prune")
+                        _del_prov = (
+                            "deterministic_empty_side", "block_capture",
+                            "deterministic_deletion_respect_prune",
+                            "deterministic_source_current_only",
+                            "deterministic_structural")
                         _has_del = any(
                             (getattr(c, "provenance", "") or "") in _del_prov
                             for _u, c in accepted)
@@ -10902,6 +10924,7 @@ class Orchestrator:
                             path, language, units, buffer=None)
                     if _floor is not None:
                         accepted = _floor
+                        accepted_by_path[path] = accepted
                         buffer = _floor[0][1].resolved_text
                     else:
                         # F1 tier-1 (sprint-23): deterministic near-one-sided
@@ -11401,6 +11424,7 @@ class Orchestrator:
                                             f"{_heuristic_side} carries the churn"),
                                     )
                                     accepted = [(_hf_unit, _hf_cand)]
+                                    accepted_by_path[path] = accepted
                                     buffer = _heuristic_text
                                     if not hasattr(self, "_takeover_landed_paths"):
                                         self._takeover_landed_paths = {}
@@ -11494,19 +11518,19 @@ class Orchestrator:
             # dropped side is adjudicated not-superseded.
             if self._check_side_collapse(path, language, units, buffer,
                                          result, accepted=accepted):
-                self._record_outcomes_to_memory(result)
+                self._reconcile_and_record(result)
                 return result
             self._write_and_stage(path, buffer, result, accepted=accepted)
         # After staging: assert no unmerged paths remain for our files.
         if self.git.has_unmerged_paths():
             result.escalated = True
             result.reason = "unmerged paths remain after staging"
-            self._record_outcomes_to_memory(result)
+            self._reconcile_and_record(result)
             write_review_bundle(
                 self.paths, reason=result.reason, step_index=result.step_index
             )
         else:
-            self._record_outcomes_to_memory(result)
+            self._reconcile_and_record(result)
         # Dump conflict bundles for NEAR_MATCH debugging: when any unit was
         # resolved via an LLM candidate (not a deterministic rule), the result
         # may be just below the sim threshold. Having the runtime inputs lets us
@@ -14756,7 +14780,7 @@ class Orchestrator:
         # Def-site race (S27-24): the move-race shape's strong seed.
         # Shape-gated candidate generator; validated, never bypasses.
         if failures is None and getattr(
-                self.config.future, "enable_def_site_race", True):
+                self.config.future, "enable_def_site_race", False):
             early = self._try_def_site_race(unit)
             if early is not None:
                 return early  # accepted via the def-site-race policy
@@ -16854,6 +16878,16 @@ class Orchestrator:
                     _json_dbg.dumps(meta, indent=2), encoding="utf-8")
         except Exception:  # noqa: BLE001 — instrumentation only
             pass
+
+    def _reconcile_and_record(self, result: StepResult) -> None:
+        """Reconcile whole-file swaps into result.outcomes FIRST, then
+        record to memory — otherwise memory stores the DISCARDED per-unit
+        candidates as positive examples and never sees the whole-file
+        resolution that actually produced the file (s27-67 review D3)."""
+        reconcile_whole_file_outcomes(result, self._step_accepted_by_path
+                                      if hasattr(self, "_step_accepted_by_path")
+                                      else {})
+        self._record_outcomes_to_memory(result)
 
     def _record_outcomes_to_memory(self, result: StepResult) -> None:
         """Append labeled outcomes to the experience store for RAG/calibration.
