@@ -162,31 +162,25 @@ def test_journal_counters_missing_file(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_stop_cascade_classification_contract():
-    # The harness sets stop_cascade on ok=False files that still carry
-    # markers when the row escalated: those misses measure the STOP, not
-    # the resolver. (Executed inline in run_scenario; this pins the rule
-    # as documented behavior.)
+    """s27-61: escalated + markers ⇒ the miss measures the replay STOP, not
+    the resolver. Now tests the REAL harness function (the old copy-paste
+    inline version had zero coupling)."""
+    _harness = _load("live_eval_scenarios_for_batch_tests",
+                     _SCRIPTS / "live_eval_scenarios.py")
     results = [
         {"path": "a.py", "sim": 0.0, "markers": True, "ok": False},
         {"path": "b.py", "sim": 0.85, "markers": False, "ok": False},
         {"path": "c.py", "sim": 1.0, "markers": False, "ok": True},
     ]
-    escalated = True
-    cascade = 0
-    if escalated:
-        for r in results:
-            if r.get("ok") is False and r.get("markers"):
-                r["stop_cascade"] = True
-                cascade += 1
-    assert cascade == 1
+    n = _harness.classify_stop_cascade(results, escalated=True)
+    assert n == 1
     assert results[0].get("stop_cascade") is True
     assert "stop_cascade" not in results[1]
-
-
-# ---------------------------------------------------------------------------
-# smoke
-# ---------------------------------------------------------------------------
-
+    # Not escalated → no flags at all (fresh dicts — the first call
+    # mutated results[0] in place)
+    results2 = [{"path": "a.py", "sim": 0.0, "markers": True, "ok": False}]
+    assert _harness.classify_stop_cascade(results2, escalated=False) == 0
+    assert "stop_cascade" not in results2[0]
 def test_smoke_pattern_assertions_pass():
     # In the hermetic test env no provider is configured: the stub-path
     # arm is loudly skipped and the generator-pattern assertions run.

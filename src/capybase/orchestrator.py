@@ -10088,6 +10088,11 @@ class Orchestrator:
                     path, units[0].language, units, buffer=None)
                 if _floor is not None:
                     accepted = _floor
+                    # s27-67d: the Phase-1 rescue site (distinct from the
+                    # Phase-2 floor site) — flow continues to Phase 2 and the
+                    # tail reconciliation must see the floor's whole-file
+                    # pairs or the bucket gap persists on this path.
+                    accepted_by_path[path] = accepted
                     escalated_units = []
             if escalated_units:
                 escalated_unit = escalated_units[0]

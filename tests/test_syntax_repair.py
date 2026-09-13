@@ -418,7 +418,7 @@ def test_rust_syntax_brace_guard_skips_partial_context():
     unit = _unit(
         language="rust",
         base="impl Config {\n    pub fn new() -> Self {\n        Config {\n            x: 1,\n        }\n    }\n}\n",
-        worktree=worktree, marker_span=(3, 5),
+        worktree=worktree, marker_span=(3, 7),
     )
     cand = _candidate(resolved="            x: 1,\n            y: 2,")
     res = _verify(v, unit, cand)
@@ -439,7 +439,7 @@ def test_rust_syntax_semantic_filter_defers_resolution_errors():
     unit = _unit(
         language="rust",
         base="struct S {\n    a: i32,\n    b: i32,\n}\n",
-        worktree=worktree, marker_span=(1, 5),
+        worktree=worktree, marker_span=(2, 6),
     )
     cand = _candidate(resolved="    b: i32,\n    b: i32,")  # duplicate field
     res = _verify(v, unit, cand)
@@ -663,3 +663,23 @@ def test_blank_markers_rst_underline_is_content_outside_blocks():
     assert lines[5] == "# conflict-marker"  # real divider
     assert lines[6] == "# rep()"            # second side commented
     assert lines[8] == "y = 2"              # live code stays live
+
+
+def test_blank_markers_diff3_base_marker_in_code_state_is_content():
+    """s27-67d (V5 companion): a stray diff3 base marker in code state is
+    content — same guard class as the divider; only mid-block markers act."""
+    from capybase.verification import _blank_markers
+    out = _blank_markers("x = 1\n||||||| base\ny = 2\n", "python")
+    lines = out.split("\n")
+    assert lines[1] == "||||||| base"   # content — untouched
+    assert lines[2] == "y = 2"          # stays live
+
+
+def test_blank_markers_stray_closer_in_code_state_is_content():
+    """s27-67d (V5): a stray >>>>>>> in code state is content (a changelog
+    headline `>>>>>>> v1.0`); replacing it broke the 1:1 line contract."""
+    from capybase.verification import _blank_markers
+    out = _blank_markers(">>>>>>> v1.0 (2024-01-01)\nx = 1\n", "python")
+    lines = out.split("\n")
+    assert lines[0] == ">>>>>>> v1.0 (2024-01-01)"  # content — untouched
+    assert lines[1] == "x = 1"

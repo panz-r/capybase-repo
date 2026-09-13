@@ -563,3 +563,25 @@ class TestDuplicateTypeBlockRemoval:
         assert out is not None and "keep_me" in out and "Flags" not in out
         # no match -> None (caller falls through)
         assert _remove_duplicate_type_blocks("int x;\n", {"Missing"}) is None
+
+
+def test_non_empty_resolution_exempts_convergence_delete_seed():
+    """s27-55: the convergence seed's delete arm (transient file, absent at
+    both tips) produces empty resolved_text with the convergence-seed
+    provenance — a deliberate deletion, exempt from the non-empty guard."""
+    from capybase.verification import (
+        NonEmptyResolutionValidator, VerificationContext, ValidationConfig,
+    )
+    from capybase.conflict_model import CandidateResolution
+
+    v = NonEmptyResolutionValidator()
+    unit = _mk_unit("x = 1\n", "x = 1\n", "x = 2\n")
+    cand = CandidateResolution(
+        candidate_id="c", unit_id=unit.unit_id, model_name="convergence_seed",
+        prompt_version="convergence_seed.v1", resolved_text="",
+        provenance="deterministic_convergence_seed",
+    )
+    ctx = VerificationContext(unit=unit, candidate=cand,
+                              config=ValidationConfig())
+    res = v.verify(ctx)
+    assert res.passed, res.message

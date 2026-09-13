@@ -93,6 +93,20 @@ def _py_compiles(content: str) -> bool:
         return False
 
 
+def classify_stop_cascade(results: list, *, escalated: bool) -> int:
+    """Flag files still carrying markers on an ESCALATE (s27-61): they were
+    never resolved — the replay stopped before their commits replayed, so
+    their 0.0 sims measure the STOP, not the resolver. Mutates the detail
+    dicts (sets ``stop_cascade``) and returns the count."""
+    n = 0
+    if escalated:
+        for r_ in results:
+            if r_.get("ok") is False and r_.get("markers"):
+                r_["stop_cascade"] = True
+                n += 1
+    return n
+
+
 def _journal_counters(journal_path) -> dict:
     """Cost + mechanism accounting from a session's journal (s27-61).
 
@@ -450,17 +464,8 @@ def run_scenario(sc: dict, client, *, flights_dir: Path | None = None) -> dict:
             results.append({"path": path, "sim": round(sim, 3),
                             "markers": markers, "ok": ok})
         row["files_detail"] = results
-        # Stop-cascade classification (s27-61): on an ESCALATE, files still
-        # carrying markers were never resolved — the replay stopped before
-        # their commits replayed; their 0.0 sims measure the STOP, not the
-        # resolver. Flag them so sweep summaries don't need manual
-        # separation of cascade misses from real divergences.
-        row["stop_cascade_misses"] = 0
-        if row["escalated"]:
-            for r_ in results:
-                if r_.get("ok") is False and r_.get("markers"):
-                    r_["stop_cascade"] = True
-                    row["stop_cascade_misses"] += 1
+        row["stop_cascade_misses"] = classify_stop_cascade(
+            results, escalated=bool(row.get("escalated")))
         scored = [r_ for r_ in results if r_["ok"] is not None]
         n_ok = sum(1 for r_ in scored if r_["ok"])
         absent = [r_ for r_ in results if r_.get("absent_at_oracle")]

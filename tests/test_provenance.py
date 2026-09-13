@@ -59,6 +59,8 @@ def test_provenance_values_match_spec():
         "deterministic_source_replayed_only",
         "deterministic_source_current_only_stage",
         "deterministic_source_replayed_only_stage",
+        "deterministic_wholesale_floor_current",
+        "deterministic_wholesale_floor_replayed",
         "deterministic_source_cur_rep",
         "deterministic_source_rep_cur",
         "deterministic_source_shared",

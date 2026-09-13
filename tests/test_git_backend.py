@@ -42,9 +42,9 @@ def test_rebase_progress_mid_rebase(conflicted_repo):
     git = GitBackend(conflicted_repo["repo"])
     prog = git.rebase_progress()
     assert prog is not None
-    msgnum, end = prog
-    assert msgnum >= 1
-    assert end >= msgnum
+    # Exact: the fixture replays exactly one commit — a swapped tuple
+    # must not pass (msgnum >= 1 and end >= msgnum are swap-blind).
+    assert prog == (1, 1)
 
 
 def test_rebase_progress_none_when_clean(repo):

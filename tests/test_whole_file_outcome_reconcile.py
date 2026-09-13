@@ -150,33 +150,79 @@ def test_f4_side_pick_carries_full_splice_not_fragment():
     """s27-66 (sqlite-0016): the F4 side-pick rung verified the FULL side
     splice but returned resolved_text = the unit's BLOCK fragment (118
     bytes) on a whole_file unit — the next _resolved_buffer treated the
-    fragment as the entire file. The recorded harvest verdict was
-    ORACLE_DIVERGENT 0.0046 while all three gate buffers sat at jaccard
-    1.0 with the oracle. This test pins the incident's numbers: a
-    whole_file unit carrying a fragment vs carrying the full file produce
-    wildly different sims, so the rungs must carry _resolved_buffer's
-    full-file text (both F4 sites now do)."""
-    import json
-    case = json.load(open(
-        '/w/capybase/extracted-testdata/realworld/sqlite-history-0016.json'))
-    oracle = case['expected_resolved']
-    # The exact fragment the s26 flight wrote over the 57KB file (from the
-    # flight's validations/*.json resolved_text).
-    fragment = (
-        "#ifndef SQLITE_ENABLE_PREUPDATE_HOOK\n"
-        "#  define SQLITE_ENABLE_PREUPDATE_HOOK 1 "
-        "/*required by session extension*/\n"
-        "#endif")
-    def toks(t):
-        return set(t.split())
-    ja = lambda a, b: (len(toks(a) & toks(b)) / len(toks(a) | toks(b))
-                       if (toks(a) | toks(b)) else 1.0)
-    assert ja(fragment, oracle) < 0.05      # the fragment sim that was recorded
-    assert ja(case['current'], oracle) > 0.95  # the full side the rung verified
-    # And a whole_file unit round-trips resolved_text verbatim through
-    # _resolved_buffer — so the carried text must be file-scale.
+    fragment as the entire file. Pins the actual contract: a whole_file
+    unit's resolved_text round-trips VERBATIM through _resolved_buffer,
+    so the rungs must carry file-scale text."""
     from capybase.orchestrator import _resolved_buffer
     wf_unit = _whole_file_unit()
-    out = _resolved_buffer(case['marker_original'], [
-        (wf_unit, _cand("wf", "deterministic_structural"))])
-    assert out == _cand("wf", "").resolved_text or out is not None
+    FILE_TEXT = "line-a\nline-b\n" + "x\n" * 100 + "line-z\n"
+    out = _resolved_buffer(FILE_TEXT, [
+        (wf_unit, _cand("wf", "deterministic_structural").model_copy(
+            update={"resolved_text": FILE_TEXT}))])
+    assert out == FILE_TEXT  # verbatim — a fragment here is the bug
+    # And the incident's shape (fragment on a whole_file unit) produces
+    # exactly the recorded 0.0046-class divergence:
+    frag = _cand("wf", "deterministic_structural").model_copy(
+        update={"resolved_text": "#ifndef X\n#  define X 1\n#endif"})
+    out_frag = _resolved_buffer(FILE_TEXT, [(wf_unit, frag)])
+    assert len(out_frag.splitlines()) == 3  # 118 bytes IS the file
+
+def test_is_whole_file_delete_multi_unit_delete_seed():
+    """s27-67b D1: the convergence seed's delete arm builds one pair PER
+    UNIT (all sharing the empty candidate) — the provenance check must
+    precede the len==1 gate or a multi-unit transient file writes an
+    empty file instead of git rm."""
+    from capybase.orchestrator import _is_whole_file_delete
+    seed_cand = _cand("seed", "deterministic_convergence_seed")
+    seed_cand = seed_cand.model_copy(update={"resolved_text": ""})
+    pairs = [(_unit(), seed_cand), (_unit(), seed_cand)]
+    assert _is_whole_file_delete(pairs) is True
+
+
+def test_is_whole_file_delete_nonseed_multi_unit_still_false():
+    from capybase.orchestrator import _is_whole_file_delete
+    cand = _cand("x", "plain_llm").model_copy(update={"resolved_text": ""})
+    assert _is_whole_file_delete([(_unit(), cand), (_unit(), cand)]) is False
+
+
+def test_synthesize_mode_matches_extractor_contract():
+    """s27-67b: {2}-only is replayed-absent (UA), {3}-only is current-absent
+    (AU) — the old table labeled both AA, routing them to the marker path
+    where the missing sibling stage crashed extraction."""
+    from capybase.git_backend import _synthesize_mode
+    assert _synthesize_mode({1: "a", 2: "b", 3: "c"}) == "UU"
+    assert _synthesize_mode({2: "b", 3: "c"}) == "AA"      # both added, no base
+    assert _synthesize_mode({1: "a", 2: "b"}) == "UA"      # replayed deleted
+    assert _synthesize_mode({1: "a", 3: "c"}) == "AU"      # current deleted
+    assert _synthesize_mode({2: "b"}) == "UA"              # synthesized shape
+    assert _synthesize_mode({3: "c"}) == "AU"              # synthesized shape
+    assert _synthesize_mode({1: "a"}) == "DD"              # both deleted
+
+
+def test_acceptance_decide_skips_superseded():
+    """s27-67b D5: a stale verifier-disagreement on a DISCARDED candidate
+    must not force a Tier-C STOP when a whole-file swap produced the
+    file."""
+    import importlib.util as _ilu
+    import sys as _sys
+    _p = _SCRIPTS.parent / "src" / "capybase" / "acceptance.py"
+    _spec = _ilu.spec_from_file_location("acceptance_mod", _p)
+    acc = _ilu.module_from_spec(_spec)
+    _sys.modules["acceptance_mod"] = acc
+    _spec.loader.exec_module(acc)
+
+    from types import SimpleNamespace as _NS
+    # verifier_disagreement keys on the candidate's suspected_validator_error
+    # flag; deterministic safety class comes from the provenance prefix.
+    def _mk(superseded: bool):
+        return _NS(
+            unit=_unit(),
+            accepted=_cand("stale", "plain_llm").model_copy(
+                update={"suspected_validator_error": True}),
+            validation=None, attempts=[],
+            superseded=superseded,
+        )
+    live = acc.decide([_mk(False)], tests_passed=True)
+    assert live.decision == "STOP" and live.tier == "C"  # disagreement stops
+    skipped = acc.decide([_mk(True)], tests_passed=True)
+    assert not (skipped.decision == "STOP" and skipped.tier == "C")

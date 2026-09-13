@@ -441,7 +441,6 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
                         worktree = Path(m.group(1))
 
             detector = HangDetector(hang_after)
-            hang_declared = False
             while True:
                 _drain_available()
                 if proc.poll() is not None:
@@ -487,7 +486,6 @@ def run_one(scenario_id: str, provider: str, out_dir: Path,
                     print(f"  [{scenario_id}] HANG: journal+io+cpu flat "
                           f"for {hang_after:.0f}s — killing process group",
                           flush=True)
-                    hang_declared = True
                     _kill_tree(proc)
                     break
                 time.sleep(poll_s)

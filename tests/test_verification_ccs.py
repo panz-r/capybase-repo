@@ -245,7 +245,7 @@ _C_WORKTREE = (
     ">>>>>>> b\n"
     "}\n"
 )
-_C_SPAN = (1, 3)  # the three marker lines
+_C_SPAN = (1, 5)  # the whole block: opener..closer inclusive
 
 
 @skip_no_gcc

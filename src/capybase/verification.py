@@ -3783,6 +3783,18 @@ class _StandaloneSyntaxValidator:
     ) -> None:
         result.passed = True
         result.unknown = False
+        # s27-67d (V1): the evidence features must agree with the verdict —
+        # acceptance reads syntax_passed and Tier-C STOPs on accepted-but-
+        # failing evidence, so leaving False meant every excused unit (the
+        # tikv box trio, sqlite-0039's lemon templates) was accepted by the
+        # validator then stopped by the policy. Both language feature keys
+        # are set; the resolution-defer path does the same.
+        result.features["syntax_passed"] = True
+        result.features["syntax_excused_preexisting"] = True
+        if "rust_syntax_checked" in result.features:
+            result.features["rust_syntax_passed"] = True
+        if "ccs_syntax_checked" in result.features:
+            result.features["ccs_syntax_passed"] = True
         result.message = (
             f"pre-existing error excused (the pre-conflict "
             f"file fails identically: {msg[:80]}); "
@@ -3848,10 +3860,15 @@ class RustSyntaxValidator(_StandaloneSyntaxValidator):
         # doesn't declare reports errors that aren't the merge's fault. (The
         # tikv trio's ``box`` syntax is NOT this class: rustc 1.92 removed it
         # under every edition; that's the pre-existing-error excuse above.)
-        edition = getattr(cfg, "rust_edition", "") or _infer_rust_edition(
-            getattr(self, "_repo_root", "") or getattr(cfg, "repo_root", "") or ".",
-            getattr(self, "_unit_path", "") or "",
-        )
+        # s27-67d (V2): an EMPTY root means unknown — skip the walk (the
+        # documented contract), never resolve against the process CWD where
+        # an unrelated Cargo.toml would silently re-edition the gate.
+        _root = (getattr(self, "_repo_root", "")
+                 or getattr(cfg, "repo_root", ""))
+        edition = getattr(cfg, "rust_edition", "") or (
+            _infer_rust_edition(
+                _root, getattr(self, "_unit_path", "") or "")
+            if _root else "2021")
         self._edition_used = edition
         return _compile_rust(spliced, rustc_path=tool, edition=edition)
 
@@ -3996,7 +4013,7 @@ class CcsSyntaxValidator(_StandaloneSyntaxValidator):
         out = []
         for ln in err_lines:
             if (" error:" in ln or ln.startswith("error")) and not (
-                    _is_ccs_resolution_error(ln)):
+                    self._is_resolution_error(ln)):
                 out.append(_CC_DIAG_POSITION_RE.sub("", ln).strip())
         return out or None
 
@@ -7348,6 +7365,10 @@ def _blank_markers(text: str, language: str | None = None) -> str:
     for line in text.split("\n"):
         marker = is_marker_line(line)
         if marker == "<<<<<<<":
+            # NOTE (s27-67d): no code-state guard here — a real block's
+            # OPENER legitimately sits in code state (it is how blocks
+            # begin); only mid-block and closing markers are
+            # distinguishable as strays in code state.
             state = "in_first_side"
             out.append(f"{comment} conflict-marker")
             continue
@@ -7375,6 +7396,11 @@ def _blank_markers(text: str, language: str | None = None) -> str:
             out.append(f"{comment} conflict-marker")
             continue
         if marker == ">>>>>>>":
+            # s27-67d (V5): same content guard — a closer in code state is
+            # content; replacing it breaks the 1:1 line contract.
+            if state == "code":
+                out.append(line)
+                continue
             state = "code"
             out.append(f"{comment} conflict-marker")
             continue
