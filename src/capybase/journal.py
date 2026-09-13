@@ -183,7 +183,9 @@ class Journal:
         if not self.paths.journal.exists():
             return []
         events: list[JournalEvent] = []
-        for line in self.paths.journal.read_text(encoding="utf-8").splitlines():
+        raw = self.paths.journal.read_bytes()
+        text = raw.decode("utf-8", errors="replace")  # torn multi-byte tail
+        for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue

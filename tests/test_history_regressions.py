@@ -729,3 +729,28 @@ def test_multistep_builder_counts_clean_leading_commits(tmp_path):
     )
     assert built.conflicts_at == [2], built.conflicts_at
     assert built.rebase_in_progress is True
+
+
+def test_continuity_diff_skips_unparsable_and_non_run_output():
+    """s27-74/76: the continuity diff may run ONLY when the post-merge run
+    reached AND completed the tests, and never against an EMPTY parsed
+    passing-set (the default bare-`pytest` gate parses to {} while the
+    -v baseline is populated — baseline-minus-empty flags the whole
+    baseline as regressed, polluting the drift channel)."""
+    import sys
+    sys.path.insert(0, "scripts")
+    import importlib.util
+    from types import SimpleNamespace
+    spec = importlib.util.spec_from_file_location(
+        "lvr", "scripts/live_eval_realworld.py")
+    _ = importlib.util  # noqa: F841 — lvr import unused; guard path below
+    orch = Orchestrator(Config(), repo=str(tmp_repo := (None or __import__('pathlib').Path("."))),
+                        out=lambda *_a, **_k: None)
+    orch._test_continuity_baseline = {"test_a.py::test_one"}
+    # empty postmerge parse (bare pytest output, no -v lines) -> skip
+    assert orch._test_continuity_regressions("3 passed in 0.1s", "pytest") == []
+    # populated parse -> genuine diff
+    reg = orch._test_continuity_regressions(
+        "test_a.py::test_one PASSED\ntest_a.py::test_two FAILED\n", "pytest -v")
+    # baseline has only test_one; it's still passing -> no regression
+    assert reg == []

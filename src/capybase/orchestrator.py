@@ -17303,6 +17303,18 @@ class Orchestrator:
             return []
         tool = _tool_of_test_cmd(cmd)
         postmerge_passing = parse_passing_node_ids(postmerge_stdout or "", tool)
+        if not postmerge_passing:
+            # s27-76 (tenth pass): an EMPTY parsed passing-set is ambiguous —
+            # bare-`pytest` output (the default gate; baseline capture forces
+            # -v) parses to {} for ANY outcome. Distinguish by per-test node
+            # lines: output WITH node lines but zero passing is a genuine
+            # all-regressed run (compute the diff); output WITHOUT them never
+            # reached the tests or can't be parsed — skip.
+            import re as _re
+            if not _re.search(
+                    r"::\S+\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL)",
+                    postmerge_stdout or ""):
+                return []
         regressed = sorted(baseline - postmerge_passing)
         return regressed
 
@@ -18846,10 +18858,15 @@ class Orchestrator:
         # passing-set, and baseline-minus-empty flags nearly every
         # baseline-passing test as a phantom regression (fed straight into
         # _observe_drift's "0% FPR" channel).
-        _continuity_valid = run.passed or not (
-            getattr(run, "timed_out", False)
-            or (run.verdict.kind in ("compile_error", "lock_contention")
-                if run.verdict else False))
+        # s27-76 (tenth pass): diff ONLY when the run reached AND completed
+        # the tests (kinds passed/failed). The s27-75 list missed no_tests/
+        # unknown — and the shipped default gate is bare `pytest` (no -v)
+        # while baseline capture forces -v, so a failing run's parsed
+        # passing-set is empty and baseline-minus-empty flags the WHOLE
+        # baseline. The empty-postmerge skip inside
+        # _test_continuity_regressions covers that residue.
+        _continuity_valid = run.verdict is not None and run.verdict.kind in (
+            "passed", "failed")
         regressions = (self._test_continuity_regressions(run.stdout, cmd)
                        if _continuity_valid else [])
         # Stash for the drift detector: _observe_drift (run after this gate)
@@ -18902,7 +18919,10 @@ class Orchestrator:
         backoff_seconds = 5.0
         for attempt in range(max_lock_retries + 1):
             run = self.tests.run(cmd, cwd=cwd)
-            if not run.verdict.is_transient or attempt == max_lock_retries:
+            # s27-76: a PASSED run is never retried even if its output
+            # text looks transient (a test named "*lock*" printed under -v)
+            if run.passed or not run.verdict.is_transient \
+                    or attempt == max_lock_retries:
                 return run
             self.journal.emit(
                 "tests_lock_retry",

@@ -2663,6 +2663,9 @@ def apply_search_replace(
             continue
         warnings.append(f"edit {i}: search block not found; skipped")
     return text, warnings
+    # s27-76 note: callers must propagate `warnings` (the ninth pass found
+    # _apply_repair_edits dropping them — a partial application was
+    # indistinguishable from a clean one in the journal).
 
 
 def _denorm_index(raw: str, norm_offset: int) -> int:
@@ -2674,6 +2677,15 @@ def _denorm_index(raw: str, norm_offset: int) -> int:
     onto the original text for replacement.
     """
     raw_i = 0
+    # s27-76: _norm_ws STRIPS leading whitespace (re.sub + .strip()), so
+    # normalized position 0 is the first NON-whitespace raw char — the old
+    # walk counted the leading run as normalized char 0, shifting every
+    # fuzzy index left by the leading run and silently corrupting the
+    # splice (indent eaten, search-tail surviving: "  return  x" + edit
+    # "return x"->"return y" produced "return y x"). Skip the leading run
+    # UNCOUNTED, then walk.
+    while raw_i < len(raw) and raw[raw_i].isspace():
+        raw_i += 1
     norm_i = 0
     in_ws = False
     while raw_i < len(raw) and norm_i < norm_offset:
@@ -2704,6 +2716,12 @@ def _apply_repair_edits(
     if not edits:
         return cand  # full mode (resolved_text already set) or no edits
     applied, warnings = apply_search_replace(prev_candidate.resolved_text, edits)
+    # s27-76: propagate the application warnings onto the candidate — the
+    # ninth pass found a PARTIAL application (some anchors missed) was
+    # indistinguishable from a clean one in the journal/validator feedback.
+    if warnings:
+        cand.parse_warnings = list(
+            getattr(cand, "parse_warnings", []) or []) + warnings
     # No-op detection (CEGIS resilience): if every edit was a no-op (search ==
     # replace), the model is signaling it believes the code is already correct.
     # This is the stuck-loop signature — mark it so the risk engine escalates
@@ -2713,8 +2731,14 @@ def _apply_repair_edits(
         cand.resolved_text = prev_candidate.resolved_text
         return cand
     if warnings and applied == prev_candidate.resolved_text:
-        # All edits missed → fall back to the model's full resolved_text if it
-        # provided one, else keep the previous (no-op retry).
+        # All edits missed → fall back to the model's full resolved_text if
+        # it provided one. If it sent edits ONLY (no full text), the old
+        # fallback returned a success-shaped EMPTY candidate (burning a
+        # NonEmptyResolution failure) — the previous text (a no-op retry,
+        # already routed to the risk engine by the warnings above) is the
+        # honest shape. s27-76.
+        if not (cand.resolved_text or "").strip():
+            cand.resolved_text = prev_candidate.resolved_text
         return cand
     cand.resolved_text = applied
     return cand

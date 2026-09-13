@@ -113,3 +113,33 @@ def test_orchestrator_does_not_retry_non_transient_failure(repo):
         run = orch._run_test_command("cargo test")
     assert mock.call_count == 1  # no retry
     assert run.verdict.kind == "compile_error"
+
+
+def test_lock_verdict_requires_real_transient_phrasing():
+    """s27-76: the ninth pass wired _PYTEST_LOCK_RE with the BROAD form —
+    bare 'lock' matched 'blocked'/'block' in ordinary failing output and
+    burned 3 full-suite retries on non-transient failures. Only real
+    transient-resource phrasing classifies as contention now."""
+    from capybase.test_output import classify_test_output
+    v_fail = classify_test_output(
+        "pytest", "FAILED test_blocked.py::test_block - assert 0\n",
+        "", returncode=1)
+    assert v_fail.kind == "failed"
+    v_lock = classify_test_output(
+        "pytest", "OSError: [Errno 98] address already in use\n",
+        "", returncode=1)
+    assert v_lock.kind == "lock_contention"
+    assert v_lock.is_transient
+
+
+def test_runner_never_retries_a_passed_run(repo):
+    """s27-76: a passing run whose output merely CONTAINS transient-looking
+    text must not burn retries."""
+    from unittest.mock import patch
+    orch = _orch(repo)
+    ok = _Proc(0, "test_blocked_transient.py::test_lock PASSED\n", "")
+    with patch("capybase.adapters.tests.subprocess.Popen",
+               return_value=ok) as mock:
+        run = orch._run_test_command("pytest -q")
+    assert run.passed
+    assert mock.call_count == 1

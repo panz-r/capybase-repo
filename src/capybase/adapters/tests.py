@@ -81,7 +81,14 @@ class TestRunner:
                 os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 proc.kill()
-            out, err = proc.communicate()
+            try:
+                out, err = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                # a grandchild that escaped the session holds the pipes —
+                # close them rather than blocking run() forever
+                proc.stdout.close()
+                proc.stderr.close()
+                out, err = "", ""
             return TestRunResult(
                 passed=False,
                 returncode=-1,

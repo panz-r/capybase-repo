@@ -153,7 +153,14 @@ def parse_cargo(stdout: str, stderr: str, *, returncode: int) -> TestVerdict:
 
 # pytest's summary line: ``===== 2 failed, 5 passed in 0.3s =====`` etc.
 _PYTEST_SUMMARY_RE = re.compile(r"(=+)\s*(.*?)\s*\1\s*$", re.MULTILINE)
-_PYTEST_LOCK_RE = re.compile(r"(?:lock|in use|already being used|EBUSY)", re.IGNORECASE)
+_PYTEST_LOCK_RE = re.compile(
+    # s27-76: the ninth pass wired this regex with the BROAD form
+    # (bare "lock" matched "block"/"blocked"; "in use" matched prose),
+    # misclassifying ordinary failing/passing pytest runs as transient
+    # contention and burning 3 full-suite retries. Match only real
+    # transient-resource phrasing.
+    r"(address already in use|database is locked|error while acquiring|"
+    r"resource temporarily unavailable|EBUSY)", re.IGNORECASE)
 
 
 def parse_pytest(stdout: str, stderr: str, *, returncode: int) -> TestVerdict:
