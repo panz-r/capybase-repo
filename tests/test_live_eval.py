@@ -138,3 +138,14 @@ def test_setup_failed_not_matched_mid_reason():
     """Only the reason PREFIX counts — a resolver outcome that happens to
     mention 'setup' stays classified by its own class."""
     assert _classify("could not resolve after setup phase") != "SETUP_FAILED"
+
+
+def test_harness_crashes_classify_setup_failed():
+    """s27-72: 'orch raised: ...' / 'harness error: ...' are
+    infrastructure, not resolver capability — SETUP_FAILED keeps them out
+    of the real-conflict denominator (the clickhouse-0003 doctrine)."""
+    from scripts.live_eval_realworld import _classify_terminal_reason
+    assert _classify_terminal_reason(
+        "orch raised: RuntimeError: disk full") == "SETUP_FAILED"
+    assert _classify_terminal_reason(
+        "harness error: TimeoutExpired") == "SETUP_FAILED"

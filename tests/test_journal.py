@@ -127,3 +127,17 @@ def test_session_paths_has_comment_artifacts(tmp_path):
     assert p.comment_artifacts.name == "comment_artifacts"
     p.mkdirs()
     assert p.comment_artifacts.exists()
+
+
+def test_shipped_toml_matches_default_supported_modes():
+    """s27-73: B1's defect was the SHIPPED capybase.toml pinning an older
+    supported set — bare Config() (the existing default pin) never loads
+    it, so the regression passed the whole suite. Read the file itself."""
+    import tomllib
+    from pathlib import Path
+    toml = Path(__file__).resolve().parent.parent / "capybase.toml"
+    data = tomllib.loads(toml.read_text())
+    modes = set(data["policy"]["supported_conflict_types"])
+    assert {"UU", "AA", "AU", "UA"} <= modes, (
+        "shipped capybase.toml drops a supported mode — CLI config loads "
+        "would silently skip those conflicts (the s27-68/71 regression)")

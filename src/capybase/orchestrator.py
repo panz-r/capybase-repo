@@ -1252,15 +1252,17 @@ def _whole_file_side_candidates(
             (getattr(getattr(u, side, None), "text", "") or "")
             for u in units
         ]
-        if any(not t.strip() for t in texts):
-            # s27-72 (sixth pass): an empty side anywhere in the file is a
-            # modify/delete DECISION — block-capture, the empty-side rule,
-            # and deletion-respect adjudicate those (with provenance and
-            # churn gates). A side-pick/portfolio candidate with empty text
-            # would pass verify_file VACUOUSLY (empty files carry no
-            # markers and parse clean) and _is_whole_file_delete would
-            # git-rm it — silently converting an adjudicated KEEP into a
-            # confident delete.
+        if all(not t.strip() for t in texts):
+            # s27-72 (sixth pass), narrowed s27-73 (seventh): only a side
+            # whose EVERY unit text is empty resolves the whole file empty —
+            # that splice passes verify_file VACUOUSLY (no markers, parses
+            # clean) and _is_whole_file_delete would git-rm it, converting
+            # an adjudicated KEEP into a confident delete; the deleting
+            # decision belongs to block-capture / the empty-side rule /
+            # deletion-respect. A single empty side within a multi-unit
+            # file is a WITHIN-FILE block deletion: the splice still
+            # compiles, verification is real, and dropping the side would
+            # remove a legitimate rescue candidate.
             continue
         cands: list[tuple] = [
             (unit, CandidateResolution(
@@ -17039,14 +17041,21 @@ class Orchestrator:
             # recording them teaches exact_reuse to splice a whole stale
             # file into a marker region (region/file inversion; the seed
             # re-derives from tips every run, so memory adds nothing).
-            if accepted is not None and (
-                    accepted.provenance == "deterministic_convergence_seed"):
-                continue
             # Collect a conflict-chain observation (#9 step 7) for every outcome,
             # so detect_conflict_chains() can find related conflicts across the
             # replay. Done unconditionally (not just on successful memory append)
             # so an escalated unit still counts toward its chain.
+            # s27-73: precedes the seed skip — the observation's contract is
+            # every-outcome-unconditional.
             self._record_conflict_observation(unit, accepted is None)
+            # s27-72 (sixth pass): convergence-seed candidates carry the
+            # WHOLE FILE as resolved_text on per-unit marker-region units —
+            # recording them teaches exact_reuse to splice a whole stale
+            # file into a marker region (region/file inversion; the seed
+            # re-derives from tips every run, so memory adds nothing).
+            if accepted is not None and (
+                    accepted.provenance == "deterministic_convergence_seed"):
+                continue
             if accepted is not None:
                 resolved = accepted.resolved_text
                 outcome_label = "accepted"

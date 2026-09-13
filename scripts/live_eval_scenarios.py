@@ -142,23 +142,54 @@ def _journal_counters(journal_path) -> dict:
     # s27-72 (sixth pass): a whole-file takeover supersedes earlier per-unit
     # accepts — both journaled candidate_accepted events; subtract the
     # superseded candidate ids or every takeover double-counts.
-    superseded: set[str] = set()
+    # s27-73 (seventh pass): scope the subtraction to the STEP — candidate
+    # ids are deterministic per (path, span, side) and re-fire in later
+    # steps; a journal-global id set would subtract a later step's
+    # legitimate accepts.
+    superseded: set[tuple] = set()
     for e in events:
         if e.get("event_type") == "outcomes_superseded":
-            superseded.update(
-                (e.get("payload") or {}).get("candidate_ids") or [])
+            for cid in (e.get("payload") or {}).get("candidate_ids") or []:
+                superseded.add((e.get("step_index"), cid))
     for e in events:
         t = e.get("event_type")
         if t == "candidate_generated":
             out["llm_calls"] += 1
         elif t == "candidate_accepted":
             payload = e.get("payload") or {}
-            if payload.get("candidate_id") in superseded:
+            if (e.get("step_index"),
+                    payload.get("candidate_id")) in superseded:
                 continue
             via = payload.get("via") or "?"
             out["mechanism_accepts"][via] = (
                 out["mechanism_accepts"].get(via, 0) + 1)
     return out
+
+
+def _stub_path_leaks(cfg, stub_path: str = "scenario.rs") -> list[str]:
+    """The s27-50 armor, extracted for testability (s27-73).
+
+    The raw per-case gate MAY materialize the stub path in
+    tests.pre_continue/final — run_scenario overwrites exactly those two
+    for replays (the s27-50 neutralization). Any OTHER config surface
+    carrying the path would execute unneutralized in replays: that is the
+    leak this reports. Returns a list of "section.field" names.
+    """
+    leaks: list[str] = []
+    for section in ("tests",):
+        obj = getattr(cfg, section, None)
+        if obj is None:
+            continue
+        for fname in getattr(obj, "model_fields", vars(obj)):
+            if fname.startswith("_"):
+                continue
+            try:
+                val = str(getattr(obj, fname, "") or "")
+            except Exception:  # noqa: BLE001
+                continue
+            if stub_path in val and fname not in ("pre_continue", "final"):
+                leaks.append(f"{section}.{fname}")
+    return leaks
 
 
 def _chain_verdict(escalated: bool, holes: bool, scored: list,
@@ -667,22 +698,8 @@ def smoke() -> list[str]:
             cfg = L._config_for(SimpleNamespace(
                 path="scenario.rs", language=lang, marker_original="",
                 id="smoke", dataset="smoke-dataset"), has_crate=True)
-            for section in ("tests",):
-                obj = getattr(cfg, section, None)
-                if obj is None:
-                    continue
-                for fname in getattr(obj, "model_fields", vars(obj)):
-                    if fname.startswith("_"):
-                        continue
-                    try:
-                        val = str(getattr(obj, fname, "") or "")
-                    except Exception:  # noqa: BLE001
-                        continue
-                    if "scenario.rs" in val and fname not in (
-                            "pre_continue", "final"):
-                        failures.append(
-                            f"{lang}: stub path leaked into "
-                            f"{section}.{fname}: {val[:80]!r}")
+            for leak in _stub_path_leaks(cfg):
+                failures.append(f"{lang}: stub path leaked into {leak}")
             # (The s27-71 rewrite's neutralization-mirror assert was
             # removed s27-72: assign-then-assert is a tautology. The
             # confinement loop above is the armor; run_scenario's own

@@ -873,7 +873,6 @@ def test_absorbed_side_requires_line_anchored_match(tmp_path: Path):
     _empty_side_repo(repo, cur_text=E_CUR_DELETED, rep_text=E_REP)
     orch = _orch(repo)
     orch.config.validation.enable_verifier_model = False
-    _absorbed_stages(orch, "return -1\n}\n")
     other = "    total = 0\n    return total\n"
     worktree = ("def run():\n"
                 "    top = 0\n"
@@ -890,5 +889,4 @@ def test_absorbed_side_requires_line_anchored_match(tmp_path: Path):
     assert out is not None
     # NOT suppressed (no contiguous outside line-run matches the block):
     # insertion wins per the unchanged-deleter doctrine.
-    assert out.accepted.resolved_text == other.strip() + "\n" or \
-           out.accepted.resolved_text.strip() == other.strip()
+    assert out.accepted.resolved_text.strip() == other.strip()

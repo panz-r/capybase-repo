@@ -261,3 +261,90 @@ def test_journal_counters_subtract_superseded(tmp_path):
     got = _harness._journal_counters(j)
     assert got["mechanism_accepts"] == {
         "deterministic_source_current_only": 1}
+
+
+def test_reconcile_emits_outcomes_superseded(tmp_path):
+    """s27-73: the counters' superseded subtraction consumes the
+    outcomes_superseded event — pin the EMIT half too (the s27-72 test
+    covered only the subtraction; reader and writer shared an unpinned
+    key)."""
+    from types import SimpleNamespace
+    from capybase.orchestrator import (
+        Orchestrator, UnitOutcome, reconcile_whole_file_outcomes)
+
+    events = []
+
+    class _Journal:
+        def emit(self, *args, **kwargs):
+            events.append(args)
+
+    class _U:
+        unit_id = "f:1:0"
+        path = "f"
+        unit_kind = "text_marker_block"
+
+    class _C1:
+        candidate_id = "f:1:0:c1"
+
+    class _C2:
+        candidate_id = "f:1:0:wf"
+
+    outcome = UnitOutcome(unit=SimpleNamespace(
+        unit_id=_U.unit_id, path=_U.path, unit_kind=_U.unit_kind))
+    outcome.accepted = _C1()
+    result = SimpleNamespace(outcomes=[outcome], step_index=3)
+
+    from capybase.conflict_model import ConflictUnit
+    wf_unit = SimpleNamespace(unit_id="f:wf", path="f",
+                              unit_kind="whole_file")
+    pairs = [(wf_unit, _C2())]
+    # reconcile first (marks superseded), then the orchestrator's
+    # _reconcile_and_record tail emits the journal event.
+    reconcile_whole_file_outcomes(result, {"f": pairs})
+    assert outcome.superseded is True
+
+    stub = SimpleNamespace(journal=_Journal(), step=3,
+                           memory_store=None,
+                           _step_accepted_by_path={"f": pairs},
+                           _record_outcomes_to_memory=lambda r: None)
+    Orchestrator._reconcile_and_record(stub, result)
+    sup = [a for a in events if a[0] == "outcomes_superseded"]
+    assert sup, "outcomes_superseded not emitted"
+    payload = sup[0][1]
+    assert "f:1:0:c1" in payload["candidate_ids"]
+
+
+def test_stub_path_leak_armor():
+    """s27-73: C1's confinement armor, now a testable function. The two
+    neutralized fields MAY carry the stub path (run_scenario overwrites
+    them); any OTHER tests-field surface is a leak."""
+    _harness = _load("live_eval_scenarios_for_batch_tests",
+                     _SCRIPTS / "live_eval_scenarios.py")
+    # instance-attribute objects (vars()-readable), like a real pydantic
+    # config section is via model_fields + getattr.
+    from types import SimpleNamespace
+    tests = SimpleNamespace(
+        pre_continue="python3 -m py_compile scenario.rs",   # allowed
+        final="true",                                        # clean
+        post_continue="cat scenario.rs",                     # LEAK
+    )
+    leaks = _harness._stub_path_leaks(SimpleNamespace(tests=tests))
+    assert leaks == ["tests.post_continue"], leaks
+    assert _harness._stub_path_leaks(SimpleNamespace(
+        tests=SimpleNamespace(pre_continue="true", final="true"))) == []
+
+
+def test_smoke_uses_production_pattern_and_armor():
+    """s27-73: pin the WIRING, not just the content — smoke must reference
+    the hoisted _GEN_OUTPUT (the C2 divergence guard) and the extracted
+    _stub_path_leaks (the C1 armor), not inline copies."""
+    import inspect
+    _harness = _load("live_eval_scenarios_for_batch_tests",
+                     _SCRIPTS / "live_eval_scenarios.py")
+    smoke_src = inspect.getsource(_harness.smoke)
+    assert "_GEN_OUTPUT" in smoke_src, (
+        "smoke no longer asserts the production generator pattern")
+    assert "_stub_path_leaks" in smoke_src, (
+        "smoke no longer drives the stub-path leak armor")
+    assert "re.compile" not in smoke_src, (
+        "smoke re-gained an inline pattern copy (the C2 defect shape)")

@@ -135,6 +135,14 @@ _PROVENANCE_SAFETY: dict[str, SafetyClass] = {
     "deterministic_deletion_respect_prune": SafetyClass.POLICY,
     "deterministic_source_current_only": SafetyClass.POLICY,
     "deterministic_source_replayed_only": SafetyClass.POLICY,
+    # s27-73: the _PROV_MAP family (source-side portfolio variants) — the
+    # sixth pass's drift test could not see dict-valued provenance writers
+    # and these four rode the STRUCTURAL default against the family's
+    # POLICY classification.
+    "deterministic_source_cur_rep": SafetyClass.POLICY,
+    "deterministic_source_rep_cur": SafetyClass.POLICY,
+    "deterministic_source_shared": SafetyClass.POLICY,
+    "deterministic_source_union": SafetyClass.POLICY,
     # the f-string template family resolves to concrete keys at runtime
     # (…{side}… → current/replayed; the matcher accepts exact keys only,
     # so each concrete form is listed)

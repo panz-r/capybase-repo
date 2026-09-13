@@ -43,13 +43,24 @@ def _journal_mechanism(flights_root: Path | None, case_id: str) -> str | None:
     if flights_root is None:
         return None
     import glob
+    import os
     journals = sorted(glob.glob(str(flights_root / "**" / case_id / "**" / "journal.jsonl"), recursive=True))
     if not journals:
         # some layouts nest one level deeper/shallower — try by suffix match
         journals = sorted(glob.glob(str(flights_root / "**" / "journal.jsonl"), recursive=True))
         journals = [j for j in journals if f"/{case_id}/" in j]
-    for jpath in journals:  # newest last; later sessions overwrite the story
-        mix: dict[str, int] = {}
+    # s27-73 (seventh pass): the old loop returned the FIRST match, and the
+    # s27-72 crash-preservation dirs (<session>-crashed) MATCH this glob —
+    # session ids are random hex, so a crashed attempt's journal could beat
+    # the successful retry's by sort order. Prefer non-crashed dirs, then
+    # the NEWEST journal (later sessions overwrite the story).
+    crashed = [j for j in journals if "-crashed" in j]
+    normal = [j for j in journals if "-crashed" not in j]
+    pool = normal or crashed
+    pool = sorted(pool, key=os.path.getmtime, reverse=True)
+    for jpath in pool:
+        accepts: dict[tuple, str] = {}
+        superseded: set[tuple] = set()
         fast_path = portfolio = False
         try:
             for line in open(jpath, encoding="utf-8"):
@@ -62,12 +73,28 @@ def _journal_mechanism(flights_root: Path | None, case_id: str) -> str | None:
                     fast_path = True
                 elif t == "true_side_portfolio":
                     portfolio = True
+                elif t == "outcomes_superseded":
+                    # s27-73: a whole-file takeover supersedes earlier
+                    # per-unit accepts — subtract or the stale mechanism
+                    # wins max(mix) on the fallback path (the same
+                    # double-count the live counters fixed in s27-72).
+                    # Collect-then-count: the superseded event arrives
+                    # AFTER the accepts it kills.
+                    for cid in (ev.get("payload") or {}).get(
+                            "candidate_ids") or []:
+                        superseded.add((ev.get("step_index"), cid))
                 elif t == "candidate_accepted":
-                    prov = (ev.get("payload") or {}).get("provenance") \
-                        or (ev.get("payload") or {}).get("via") or "unknown"
-                    mix[prov] = mix.get(prov, 0) + 1
+                    payload = ev.get("payload") or {}
+                    prov = payload.get("provenance") \
+                        or payload.get("via") or "unknown"
+                    accepts[(ev.get("step_index"),
+                             payload.get("candidate_id"))] = prov
         except OSError:
             continue
+        mix: dict[str, int] = {}
+        for key, prov in accepts.items():
+            if key not in superseded:
+                mix[prov] = mix.get(prov, 0) + 1
         if fast_path:
             return "phase1_fast_path"
         if portfolio:
@@ -75,6 +102,21 @@ def _journal_mechanism(flights_root: Path | None, case_id: str) -> str | None:
         if mix:
             return max(mix.items(), key=lambda kv: kv[1])[0]
     return None
+
+
+def _row_mechanism(rec: dict, flights_root: Path | None) -> str | None:
+    """One row's dominant mechanism: provenance_mix's max, else the journal
+    fallback (phase-1 fast path / other whole-file paths bypass the
+    per-unit candidate loop and leave the mix empty)."""
+    if rec.get("terminal_reason") == "SAFE_SKIP":
+        return None
+    mix = rec.get("provenance_mix") or {}
+    if mix:
+        return max(mix.items(), key=lambda kv: kv[1])[0]
+    m = _journal_mechanism(flights_root, rec["id"])
+    if m is None:
+        return "(unresolved)" if rec.get("escalated") else "(unclassified)"
+    return m
 
 
 def main() -> None:
@@ -118,9 +160,33 @@ def main() -> None:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # s27-73 (seventh pass): the measurement/infrastructure skip classes —
+    # not resolver outcomes, excluded from every denominator (the
+    # live harness's convention). SAFE_SKIP existed; SETUP_FAILED the
+    # live classifier now emits for harness crashes (s27-72); the
+    # scenario harness's verdicts (SAFE_SKIP verdict, ALL_ABSENT,
+    # ORACLE_HOLE) carry no terminal_reason at all.
+    def _is_skip(rec: dict) -> bool:
+        if rec.get("terminal_reason") == "SAFE_SKIP":
+            return True
+        if rec.get("terminal_reason") == "SETUP_FAILED":
+            return True
+        if rec.get("verdict") in ("SAFE_SKIP", "ALL_ABSENT", "ORACLE_HOLE"):
+            return True
+        return False
+
+    # s27-73: derive each row's mechanism ONCE (provenance_mix, else the
+    # journal fallback) and PERSIST it in the extract — the old extracts
+    # left the fallback-derived mechanism implied, so the histogram was
+    # unreproducible once the flights tree aged out.
+    flights_root = Path(args.flights) if args.flights else None
+    for rec in records:
+        rec["mechanism"] = _row_mechanism(rec, flights_root)
+
     by_lang: dict[str, list] = {}
     for rec in records:
         row = {k: rec.get(k) for k in _FIELDS}
+        row["mechanism"] = rec.get("mechanism")
         by_lang.setdefault(rec.get("language") or "?", []).append(row)
 
     for lang, rows in sorted(by_lang.items()):
@@ -129,6 +195,14 @@ def main() -> None:
             for row in rows:
                 f.write(json.dumps(row) + "\n")
         print(f"{path}: {len(rows)} rows")
+    # s27-73 (rerun hygiene): prune stale language extracts a rerun no
+    # longer produces (the old code left them beside the rewritten meta,
+    # and extracts and meta silently disagreed).
+    for stale in out_dir.glob(f"{args.round}-*.jsonl"):
+        lang = stale.stem[len(args.round) + 1:]
+        if lang not in by_lang:
+            stale.unlink()
+            print(f"pruned stale extract: {stale.name}")
 
     # README-table recount from the extracts themselves (single source).
     # SAFE_SKIP (git resolved cleanly on replay; verdict=ESCALATE +
@@ -137,7 +211,7 @@ def main() -> None:
     total = passes = working = era = 0
     for lang, rows in by_lang.items():
         for row in rows:
-            if row.get("terminal_reason") == "SAFE_SKIP":
+            if _is_skip(row):
                 continue
             total += 1
             if row["verdict"] == "PASS":
@@ -155,7 +229,7 @@ def main() -> None:
     for lang, rows in sorted(by_lang.items()):
         lt = lp = lw = le = lllm = 0
         for row in rows:
-            if row.get("terminal_reason") == "SAFE_SKIP":
+            if _is_skip(row):
                 continue
             lt += 1
             v = row["verdict"]
@@ -173,21 +247,13 @@ def main() -> None:
         }
 
     # Mechanism histogram (EXTEND-70: mechanism | cases | PASS | WORKING |
-    # P+W %), from each case's dominant provenance; journal fallback for
-    # empty-mix rows when --flights is given.
-    flights_root = Path(args.flights) if args.flights else None
+    # P+W %), from each row's PERSISTED mechanism (s27-73 — recomputable
+    # from the extract alone).
     mech: dict[str, dict[str, int]] = {}
     for rec in records:
-        if rec.get("terminal_reason") == "SAFE_SKIP":
+        if _is_skip(rec):
             continue
-        mix = rec.get("provenance_mix") or {}
-        if mix:
-            mechanism = max(mix.items(), key=lambda kv: kv[1])[0]
-        else:
-            mechanism = _journal_mechanism(flights_root, rec["id"])
-            if mechanism is None:
-                mechanism = ("(unresolved)" if rec.get("escalated")
-                             else "(unclassified)")
+        mechanism = rec.get("mechanism") or "(unclassified)"
         d = mech.setdefault(mechanism, {"cases": 0, "pass": 0, "working": 0})
         d["cases"] += 1
         v = rec.get("verdict")
@@ -214,7 +280,7 @@ def main() -> None:
     # paths) participate via their journal-derived mechanism.
     part: dict[str, int] = {}
     for rec in records:
-        if rec.get("terminal_reason") == "SAFE_SKIP":
+        if _is_skip(rec):
             continue
         if rec.get("verdict") in ("ESCALATE", "ESCALATE_TOOLCHAIN"):
             continue
@@ -222,8 +288,8 @@ def main() -> None:
         for prov in (rec.get("provenance_mix") or {}):
             mechs.update(m for m in prov.split("+") if m)
         if not mechs:
-            j = _journal_mechanism(flights_root, rec["id"])
-            if j:
+            j = rec.get("mechanism")
+            if j and not j.startswith("("):
                 mechs.add(j)
         for m in mechs:
             part[m] = part.get(m, 0) + 1
@@ -252,7 +318,18 @@ def main() -> None:
         # caller completes: mechanism_commit, state, command_template,
         # ran, verification, outcome_summary
     }
-    (out_dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+    # s27-73 (rerun hygiene): merge with any existing meta — the caller
+    # completes mechanism_commit/state/outcome_summary, and a recount
+    # must not silently erase them.
+    meta_path = out_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            prior = json.loads(meta_path.read_text())
+            for k, v in prior.items():
+                meta.setdefault(k, v)
+        except json.JSONDecodeError:
+            pass
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n")
     print(json.dumps(meta["recount"], indent=1))
 
 
