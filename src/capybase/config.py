@@ -185,8 +185,14 @@ class ModelConfig(BaseModel):
 
 
 class PolicyConfig(BaseModel):
+    # AA (add/add) rides the marker path with an empty base (s27-48's
+    # doctrine; the extractor degrades the missing stage-1 read). Omitting
+    # it re-creates the s27-67b regression: _synthesize_mode relabeled
+    # {2,3}-without-base from "UU" to "AA", so the policy gate dropped
+    # every genuine add/add the extractor was built to resolve (clap-0011
+    # escalated at step 1 in 36s on .gitignore+README.md).
     supported_conflict_types: list[str] = Field(
-        default_factory=lambda: ["UU", "AU", "UA"]
+        default_factory=lambda: ["UU", "AA", "AU", "UA"]
     )
     supported_file_kinds: list[str] = Field(default_factory=lambda: ["text"])
     max_retries_per_unit: int = 2

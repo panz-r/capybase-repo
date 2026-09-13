@@ -120,7 +120,7 @@ class ConflictExtractor:
         try:
             replayed_bytes = self.git.read_stage_blob(path, STAGE_REPLAYED)
         except Exception:  # noqa: BLE001 — missing stage = empty
-            replayed_bytes = b
+            replayed_bytes = b""
         worktree_bytes = self.git.read_worktree_file(path)
 
         base_text = base_bytes.decode("utf-8", errors="replace")

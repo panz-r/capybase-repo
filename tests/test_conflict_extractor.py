@@ -119,3 +119,63 @@ def test_add_add_conflict_extracts_with_empty_base(repo):
         assert u.conflict_type == "AA"
         assert u.base.text == ""  # no stage 1 — empty base, like git's merge
         assert u.current.text.strip() and u.replayed.text.strip()
+
+
+def test_add_add_conflict_supported_by_default_policy(repo):
+    """s27-68: the policy gate must pass genuine add/add through. s27-67b
+    relabeled {2,3}-without-base from "UU" to "AA" in _synthesize_mode, but
+    the policy's supported set never learned "AA" — every add/add was then
+    skipped as 'unsupported conflict mode AA', so a step whose only
+    conflicts are add/add escalated at gather (clap-0011: 36-second
+    ESCALATE at step 1 on .gitignore+README.md), and the extractor's
+    empty-base branch (s27-48) became production-dead code."""
+    from corpus._gitshim import git
+    from capybase.config import Config
+    from capybase.policy import Policy
+
+    # Same true add/add shape as the test above: both sides add the file.
+    git(repo, "commit", "-q", "--allow-empty", "-m", "root")
+    git(repo, "checkout", "-q", "-b", "side")
+    (repo / "added.txt").write_text("side adds a line\n")
+    git(repo, "add", "added.txt")
+    git(repo, "commit", "-q", "-m", "theirs adds")
+    git(repo, "checkout", "-q", "main")
+    (repo / "added.txt").write_text("main adds a line\n")
+    git(repo, "add", "added.txt")
+    git(repo, "commit", "-q", "-m", "ours adds")
+    git(repo, "merge", "side", check=False)
+
+    backend = GitBackend(repo)
+    unmerged = backend.list_unmerged_paths()
+    assert any(e.mode == "AA" for e in unmerged), "fixture must produce AA"
+
+    cfg = Config()
+    policy = Policy(
+        backend,
+        supported_conflict_types=set(cfg.policy.supported_conflict_types),
+        supported_file_kinds=set(cfg.policy.supported_file_kinds),
+    )
+    decision = policy.classify(unmerged)
+    assert decision.skipped == [], (
+        f"AA skipped as unsupported: {[s.reason for s in decision.skipped]}")
+    assert [e.path for e in decision.supported] == ["added.txt"]
+
+
+def test_missing_stage3_read_degrades_to_empty(repo):
+    """The marker path's tolerant stage reads (s27-67b: 'missing stage =
+    empty') must actually degrade. The replayed arm assigned the bare name
+    ``b`` — a NameError the moment the except fired, contradicting the
+    tolerance the comment promises."""
+    git_backend = GitBackend(repo)
+    ex = ConflictExtractor(git_backend)
+
+    class _E:
+        path = "whatever.txt"
+        mode = "UU"
+        stages = {1: "x1", 2: "x2"}  # stage 3 missing — must not raise
+
+    (repo / "whatever.txt").write_text("")
+    units = ex.extract_file_units(
+        "whatever.txt", step_index=1, session_id="s1", unmerged=_E())
+    # No markers in the empty worktree file → no units, but NO raise.
+    assert units == []
