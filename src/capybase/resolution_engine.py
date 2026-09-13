@@ -1096,7 +1096,9 @@ _RESOLVE_CONTRACT_MD = (
     "parts — the RAW merged code first, then a small JSON metadata object:\n\n"
     "1. The merged replacement text as a fenced code block. Write the EXACT code\n"
     "   (verbatim, including leading spaces). Do NOT escape newlines or quotes —\n"
-    "   the raw code goes inside the fence, character for character.\n\n"
+    "   the raw code goes inside the fence, character for character. If the code\n"
+    "   itself contains ``` fences, open YOUR fence with MORE backticks (4+)\n"
+    "   than any fence inside the code, so the block is not split.\n\n"
     "2. Then ONE ```json fenced object with these keys:\n\n"
     "```json\n"
     "{\n"
@@ -3647,7 +3649,13 @@ class ResolutionEngine:
         # produce the new resolved_text (instead of requiring a full rewrite).
         # Graceful: no edits / all-missed → keep the model's resolved_text (full
         # mode). The applied result flows downstream verbatim (verify/splice).
-        if prompt_version == PROMPT_REPAIR and prev_candidate and prev_candidate.resolved_text:
+        # s27-74 (eighth pass): tagged versions (PROMPT_REPAIR#base-first,
+        # #md, #top — build_attempt_prompt appends the active profile tag)
+        # never matched the exact equality, so SEARCH/REPLACE repair edits
+        # were silently dropped under every non-default profile.
+        if (prompt_version == PROMPT_REPAIR
+                or prompt_version.startswith(PROMPT_REPAIR + "#")) \
+                and prev_candidate and prev_candidate.resolved_text:
             candidates = [_apply_repair_edits(c, prev_candidate) for c in candidates]
         return candidates
 
@@ -4086,9 +4094,13 @@ class ResolutionEngine:
         it was drawn. Detects truncation (finish_reason=length) and parse
         failures, mapping them to retryable failure_kinds.
         """
+        # s27-74 (eighth pass): use THIS response's finish_reason — the old
+        # raw["choices"][0] re-derivation applied choice 0's verdict to every
+        # batch sample: a truncated choice 0 discarded the whole valid batch,
+        # and a truncated choice k was mislabeled parse_failed.
         meta = resp.raw or {}
-        finish = ""
-        if isinstance(meta, dict):
+        finish = getattr(resp, "finish_reason", "") or ""
+        if not finish and isinstance(meta, dict):
             acc = meta.get("_accumulated")
             if isinstance(acc, dict):
                 finish = acc.get("finish_reason") or ""

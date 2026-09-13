@@ -57,7 +57,12 @@ def _journal_mechanism(flights_root: Path | None, case_id: str) -> str | None:
     crashed = [j for j in journals if "-crashed" in j]
     normal = [j for j in journals if "-crashed" not in j]
     pool = normal or crashed
-    pool = sorted(pool, key=os.path.getmtime, reverse=True)
+    def _mtime_safe(pth):
+        try:
+            return os.path.getmtime(pth)
+        except OSError:
+            return 0.0
+    pool = sorted(pool, key=_mtime_safe, reverse=True)
     for jpath in pool:
         accepts: dict[tuple, str] = {}
         superseded: set[tuple] = set()
@@ -104,12 +109,22 @@ def _journal_mechanism(flights_root: Path | None, case_id: str) -> str | None:
     return None
 
 
+def _is_skip(rec: dict) -> bool:
+    """The measurement/infrastructure skip classes — not resolver outcomes,
+    excluded from every denominator (s27-73). SAFE_SKIP existed; the live
+    classifier emits SETUP_FAILED for harness crashes (s27-72); the
+    scenario harness's verdicts carry no terminal_reason at all."""
+    if rec.get("terminal_reason") in ("SAFE_SKIP", "SETUP_FAILED"):
+        return True
+    return rec.get("verdict") in ("SAFE_SKIP", "ALL_ABSENT", "ORACLE_HOLE")
+
+
 def _row_mechanism(rec: dict, flights_root: Path | None) -> str | None:
     """One row's dominant mechanism: provenance_mix's max, else the journal
     fallback (phase-1 fast path / other whole-file paths bypass the
     per-unit candidate loop and leave the mix empty)."""
-    if rec.get("terminal_reason") == "SAFE_SKIP":
-        return None
+    if _is_skip(rec):
+        return None  # s27-74: skip rows never touch the journal fallback
     mix = rec.get("provenance_mix") or {}
     if mix:
         return max(mix.items(), key=lambda kv: kv[1])[0]
@@ -159,21 +174,6 @@ def main() -> None:
         print(f"overridden verdicts: {swapped}")
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # s27-73 (seventh pass): the measurement/infrastructure skip classes —
-    # not resolver outcomes, excluded from every denominator (the
-    # live harness's convention). SAFE_SKIP existed; SETUP_FAILED the
-    # live classifier now emits for harness crashes (s27-72); the
-    # scenario harness's verdicts (SAFE_SKIP verdict, ALL_ABSENT,
-    # ORACLE_HOLE) carry no terminal_reason at all.
-    def _is_skip(rec: dict) -> bool:
-        if rec.get("terminal_reason") == "SAFE_SKIP":
-            return True
-        if rec.get("terminal_reason") == "SETUP_FAILED":
-            return True
-        if rec.get("verdict") in ("SAFE_SKIP", "ALL_ABSENT", "ORACLE_HOLE"):
-            return True
-        return False
 
     # s27-73: derive each row's mechanism ONCE (provenance_mix, else the
     # journal fallback) and PERSIST it in the extract — the old extracts

@@ -162,7 +162,22 @@ def build_multistep_rebase(
     # The rebase replays feat commits one at a time. We drive it and record which
     # steps conflict by checking for unmerged paths after each potential stop.
     proc = git_fn(repo, "rebase", "main", check=False)
-    step = 1
+
+    def _current_step() -> int:
+        """The 1-based replay step git is ON: commits already applied + 1
+        (the conflicted commit is not yet committed when stopped). Deriving
+        from HEAD (s27-74) instead of loop iterations — non-interactive
+        rebase applies CLEAN commits automatically before the first stop,
+        so a leading clean commit made every conflicts_at entry wrong by
+        the clean-commit count (and pointed _resolve_conflict_step at the
+        wrong commit's files, committing raw markers as 'resolved')."""
+        out = git_fn(repo, "rev-list", "--count", "main..HEAD",
+                     check=False).stdout.strip()
+        try:
+            return int(out) + 1
+        except ValueError:
+            return 1
+
     while True:
         # Is there a conflict right now? Check for unmerged paths.
         status = git_fn(
@@ -173,6 +188,7 @@ def build_multistep_rebase(
             for line in status.splitlines()
         )
         if has_conflict:
+            step = _current_step()
             conflicts_at.append(step)
             if stop_early:
                 # Leave it stopped at the first conflict — genuine rebase state.
@@ -186,18 +202,15 @@ def build_multistep_rebase(
             # its tree directly post-rebase, but the feat-side content for this
             # step is feat_commits[step-1].files (what the replay intended).
             _resolve_conflict_step(repo, git_fn, feat_commits[step - 1])
-            step += 1
             continue
         # No conflict: the rebase either finished or is mid-clean-replay. Check
         # whether a rebase is still in progress.
         rip = _rebase_in_progress(repo, git_fn)
         if not rip:
             break  # rebase completed
-        # Mid-clean-replay: a feat commit applied cleanly, advance the step count.
-        step += 1
-        # Drive the next step (git rebase continues automatically on clean apply,
-        # but if we're here a rebase IS in progress without a conflict — that's an
-        # unusual state; nudge with --continue to be safe).
+        # Mid-clean-replay: a feat commit applied cleanly. Non-interactive
+        # rebase never parks here (clean commits auto-apply) — nudge and
+        # re-derive the step on the next iteration.
         git_fn(repo, "rebase", "--continue", check=False)
 
     return MultiStepRebase(

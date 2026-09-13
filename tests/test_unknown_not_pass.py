@@ -248,12 +248,11 @@ def test_produced_provenances_explicitly_classified():
     from pathlib import Path
     _repo = Path(__file__).resolve().parent.parent
     src = (_repo / "src" / "capybase" / "orchestrator.py").read_text()
-    produced = set()
     # s27-73: the f-prefix made f-string provenances invisible to the old
     # pattern — the s27-71 drift test's central claim was false.
+    produced = set()
     for m in re.finditer(r'provenance=f?"([a-z_0-9{}:+\-]+)"', src):
         produced.add(m.group(1))
-    produced = set()
 
     # resolve the f-string template families to their concrete keys
     concrete = set()
@@ -267,9 +266,12 @@ def test_produced_provenances_explicitly_classified():
             concrete.add(p)
     # s27-73: dict-valued writers are invisible to ANY regex on
     # `provenance=` — enumerate the known _PROV_MAP family explicitly.
-    produced |= {"deterministic_source_cur_rep", "deterministic_source_rep_cur",
+    # (Templates stay OUT of concrete: the format loop above already added
+    # their resolved forms.)
+    concrete |= {"deterministic_source_cur_rep", "deterministic_source_rep_cur",
                  "deterministic_source_shared", "deterministic_source_union"}
-    concrete |= produced
+    assert len(produced) > 20, (
+        "provenance scan went blind — the drift armor is dead")
     unmapped = sorted(
         p for p in concrete
         if p not in _PROVENANCE_SAFETY

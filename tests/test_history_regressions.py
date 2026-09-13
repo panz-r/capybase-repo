@@ -701,3 +701,31 @@ def test_dryrun_summary_history_from_real_rehearsal(repo: Path):
     # At least one conflict was encountered + resolved (the dry-run replays feat
     # onto main, which conflicts on parse).
     assert "conflict(s) encountered" in summary
+
+
+def test_multistep_builder_counts_clean_leading_commits(tmp_path):
+    """s27-74: a feat commit that applies CLEANLY before the conflicting
+    one must not shift conflicts_at — non-interactive rebase auto-applies
+    clean commits before the first stop, and the old loop counter reported
+    the conflict at step 1 (and pointed _resolve_conflict_step at the
+    wrong commit's files, committing raw markers)."""
+    from corpus._gitshim import git
+    from tests.multistep_builder import (
+        CommitEdit, build_multistep_rebase,
+    )
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    built = build_multistep_rebase(
+        repo,
+        base_files={"a.txt": "a base\n", "b.txt": "b base\n"},
+        feat_commits=[
+            CommitEdit("feat: clean edit", {"a.txt": "a feat\n"}),
+            CommitEdit("feat: conflict edit", {"b.txt": "b feat\n"}),
+        ],
+        main_commits=[CommitEdit("main: conflicting edit",
+                                 {"b.txt": "b main\n"})],
+        stop_early=True,
+    )
+    assert built.conflicts_at == [2], built.conflicts_at
+    assert built.rebase_in_progress is True

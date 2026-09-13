@@ -17000,9 +17000,40 @@ class Orchestrator:
         record to memory — otherwise memory stores the DISCARDED per-unit
         candidates as positive examples and never sees the whole-file
         resolution that actually produced the file (s27-67 review D3)."""
-        reconcile_whole_file_outcomes(result, self._step_accepted_by_path
-                                      if hasattr(self, "_step_accepted_by_path")
-                                      else {})
+        _map = (self._step_accepted_by_path
+                if hasattr(self, "_step_accepted_by_path") else {})
+        _appended = reconcile_whole_file_outcomes(result, _map)
+        # s27-73: the fresh-outcome candidate_accepted emits lived only at
+        # the _resolve_step tail — AFTER this call since reconciliation
+        # moved here — so whole-file takes stopped journaling candidate_
+        # accepted entirely (mechanism_accepts lost their attribution;
+        # found via the libuv-0017 validation: 0 whole-file vias vs
+        # sweep-22's 20x). Emit here, where the append happens.
+        for path, pairs in _map.items():
+            for u, c in pairs:
+                if getattr(u, "unit_kind", "") != "whole_file":
+                    continue
+                if any(
+                    o.accepted is not None
+                    and o.accepted.candidate_id == c.candidate_id
+                    and not o.superseded
+                    for o in result.outcomes
+                ):
+                    continue
+                self.journal.emit(
+                    "candidate_accepted",
+                    {"candidate_id": c.candidate_id,
+                     "via": c.model_name or "whole_file"},
+                    step_index=self.step, path=path,
+                )
+        if _appended:
+            self.journal.emit(
+                "whole_file_outcomes_reconciled",
+                {"outcomes_appended": _appended},
+                step_index=self.step,
+            )
+        # (the s27-73 emit block above replaced the old tail-side reconcile
+        # call — reconcile is idempotent, a second pass would be a no-op)
         # s27-72 (sixth pass): the journal's mechanism counters previously
         # double-counted accepts that a whole-file swap later superseded —
         # emit the superseded candidate ids so readers can subtract.

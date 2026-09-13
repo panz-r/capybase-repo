@@ -270,6 +270,7 @@ def select(
             agreement_score=0.0, cluster_count=0,
         )
     clusters_ = cluster(candidates, language)
+    original_clusters = list(clusters_)
     if not clusters_:
         return ConsensusReport(
             winner=None, clusters=[], n_samples=n,
@@ -279,6 +280,19 @@ def select(
     fc = fact_consistency(candidates)
     # Tie-break among same-size clusters: fact-consistency desc, then confidence
     # desc, then length asc.
+    # s27-74 (eighth pass): a cluster of parse-failed/empty candidates must
+    # never win — its unanimous "default preserve" facts score perfect
+    # consistency and the length tie-break favors the empty text, so the
+    # empty candidate became the consensus winner and corrupted the repair
+    # loop's counterexample. Empty representatives are non-voting.
+    clusters_ = [c for c in clusters_
+                 if (c.representative.resolved_text or "").strip()]
+    if not clusters_:
+        # every sample empty/parse-failed: nothing sensible to elect
+        return ConsensusReport(
+            winner=None, clusters=original_clusters, n_samples=n,
+            agreement_score=0.0, cluster_count=len(original_clusters),
+        )
     top_size = clusters_[0].size
     tied = [c for c in clusters_ if c.size == top_size]
     if len(tied) > 1:

@@ -18,6 +18,12 @@ def git(repo: Path, *args: str, input_text: str | None = None, check: bool = Tru
     env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = "t@example.com"
     env["GIT_AUTHOR_DATE"] = env["GIT_COMMITTER_DATE"] = "2000-01-01T00:00:00"
     env["GIT_PAGER"] = "cat"
+    # s27-74: hermetic against the machine's global git config —
+    # merge.conflictstyle=diff3 changes every fixture's marker shape,
+    # rebase.backend=apply breaks rebase-merge detection, gpgsign
+    # fails every commit.
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
     proc = subprocess.run(
         ["git", "-C", str(repo), *args],
         env=env,

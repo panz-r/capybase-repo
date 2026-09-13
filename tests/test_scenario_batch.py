@@ -348,3 +348,25 @@ def test_smoke_uses_production_pattern_and_armor():
         "smoke no longer drives the stub-path leak armor")
     assert "re.compile" not in smoke_src, (
         "smoke re-gained an inline pattern copy (the C2 defect shape)")
+
+
+def test_wiring_no_dead_generator_alternative():
+    """s27-74: precise version of the wiring guard — the dead pre-s27-67
+    alternative (/generated_ on a basename) must not reappear inside
+    smoke(); unrelated legitimate regexes are fine."""
+    import inspect
+    _harness = _load("live_eval_scenarios_for_batch_tests",
+                     _SCRIPTS / "live_eval_scenarios.py")
+    import ast as _ast
+    tree = _ast.parse(inspect.getsource(_harness.smoke))
+    _ast.Str = getattr(_ast, "Str", _ast.Constant)
+    code_only = _ast.get_source_segment or None
+    # strip docstrings/comments the robust way: compare the AST dump for a
+    # string constant CONTAINING the dead regex fragment (a code literal,
+    # not prose).
+    dead_in_code = any(
+        isinstance(node, _ast.Constant) and isinstance(node.value, str)
+        and "/generated_)" in node.value
+        for node in _ast.walk(tree))
+    assert not dead_in_code, (
+        "smoke re-gained the dead /generated_ inline alternative")

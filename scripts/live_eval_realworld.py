@@ -673,6 +673,10 @@ def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
     env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = "t@example.com"
     env["GIT_AUTHOR_DATE"] = env["GIT_COMMITTER_DATE"] = "2000-01-01T00:00:00"
     env["GIT_PAGER"] = "cat"
+    # s27-74: hermetic against global git config (diff3 marker styles,
+    # rebase.backend, gpgsign) — same rationale as corpus/_gitshim.
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
     p = subprocess.run(["git", "-C", str(repo), *args], env=env,
                        capture_output=True, text=True)
     if check and p.returncode != 0:
